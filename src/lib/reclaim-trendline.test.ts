@@ -145,6 +145,40 @@ describe('buildReclaimTrendline', () => {
     // The reclaim on the input pool is $5 → $1 = $4, independent of coverage.
     expect(out.points[0].reclaim).toBeCloseTo(4, 6);
     expect(out.totalReclaim).toBeCloseTo(4, 6);
+    expect(out.rejections).toEqual([]);
+  });
+
+  it('collects guarded-marginal rejections only from the window-wide cascade run', () => {
+    const td = [
+      session('s1', 'claude-opus-4-7', [
+        entry({ timestamp: '2026-01-06T09:00:00.000Z', inputTokens: 1_000_000 }),
+        entry({ timestamp: '2026-01-13T09:00:00.000Z', inputTokens: 2_000_000 }),
+      ]),
+    ];
+    const recs = [
+      rec(
+        'cost.ghost',
+        claim({
+          leverId: 'cost.ghost',
+          orderKey: 80,
+          ownedPools: ['input'],
+          scopeKeys: [scopeKeyOf('missing-session', 'claude-opus-4-7')],
+          counterfactual: { kind: 'reprice', toModel: 'claude-haiku-4-5-20251001' },
+        })
+      ),
+    ];
+    const rawRejects: string[] = [];
+
+    const out = buildReclaimTrendline(recs, td, (msg) => rawRejects.push(msg));
+
+    expect(out.points).toHaveLength(2);
+    expect(rawRejects).toHaveLength(3);
+    expect(out.rejections).toEqual([
+      {
+        leverId: 'cost.ghost',
+        reason: 'claim resolves to no priced scope (precondition)',
+      },
+    ]);
   });
 
   it('breaks coverage out per detector category', () => {
@@ -258,6 +292,7 @@ describe('buildReclaimTrendline', () => {
     expect(out.gauge.claimedUsd).toBe(0);
     expect(out.gauge.coverage).toBe(0);
     expect(out.byCategory).toEqual([]);
+    expect(out.rejections).toEqual([]);
   });
 
   it('skips entries with an unparseable timestamp without throwing', () => {

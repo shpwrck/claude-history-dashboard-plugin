@@ -60,6 +60,14 @@ export interface LeverMarginal {
   marginalUsd: number;
 }
 
+/** A reclaim claim the guarded cascade could not safely book. */
+export interface ReclaimRejection {
+  /** Stable lever id reported by the cascade diagnostic. */
+  leverId: string;
+  /** Human-readable rejection reason. */
+  reason: string;
+}
+
 /** The independent coverage gauge — never multiplied into the trendline. */
 export interface CoverageGauge {
   /** Priced value of the cell-union every claim addresses (≤ `totalBill`). */
@@ -90,6 +98,8 @@ export interface ReclaimTrendlineData {
   byCategory: CategoryCoverageBreakdown[];
   /** Per-lever marginal, descending by booked USD. */
   levers: LeverMarginal[];
+  /** Window-wide guarded-marginal rejections, deduped by lever + reason. */
+  rejections: ReclaimRejection[];
   /** Window-wide reclaim total (`sum(marginal)` ≡ `billOriginal − billFinal`). */
   totalReclaim: number;
 }
@@ -99,6 +109,21 @@ function claimsOf(recs: Recommendation[]): ReclaimClaim[] {
   const claims: ReclaimClaim[] = [];
   for (const rec of recs) if (rec.reclaim) claims.push(rec.reclaim);
   return claims;
+}
+
+function parseRejection(msg: string): ReclaimRejection {
+  const idx = msg.indexOf(':');
+  if (idx <= 0) {
+    return { leverId: 'unknown', reason: msg.trim() };
+  }
+  return {
+    leverId: msg.slice(0, idx).trim(),
+    reason: msg.slice(idx + 1).trim(),
+  };
+}
+
+function rejectionKey(rejection: ReclaimRejection): string {
+  return `${rejection.leverId}\0${rejection.reason}`;
 }
 
 /** The ISO-week start of a token entry's timestamp, or null when unparseable. */
@@ -163,9 +188,17 @@ export function buildReclaimTrendline(
   onReject: (msg: string) => void = () => {}
 ): ReclaimTrendlineData {
   const claims = claimsOf(recs);
+  const rejectionsByKey = new Map<string, ReclaimRejection>();
+  const collectWindowRejection = (msg: string) => {
+    const rejection = parseRejection(msg);
+    rejectionsByKey.set(rejectionKey(rejection), rejection);
+    onReject(msg);
+  };
 
   // Window-wide cascade → the independent coverage gauge + per-lever marginal.
-  const whole = rollupCascade(runReclaimCascade(claims, tokenData, onReject));
+  const whole = rollupCascade(
+    runReclaimCascade(claims, tokenData, collectWindowRejection)
+  );
   const gauge = coverageGauge(whole.coverageByCategory, whole.totalBill);
   const byCategory = categoryCoverageBreakdown(
     whole.coverageByCategory,
@@ -174,6 +207,7 @@ export function buildReclaimTrendline(
   const levers: LeverMarginal[] = Object.entries(whole.byLever)
     .map(([leverId, marginalUsd]) => ({ leverId, marginalUsd }))
     .sort((a, b) => b.marginalUsd - a.marginalUsd);
+  const rejections = [...rejectionsByKey.values()];
 
   // Per-week cascade → the two trendline series.
   const weeks = sliceByWeek(tokenData);
@@ -189,7 +223,7 @@ export function buildReclaimTrendline(
       };
     });
 
-  return { points, gauge, byCategory, levers, totalReclaim: whole.total };
+  return { points, gauge, byCategory, levers, rejections, totalReclaim: whole.total };
 }
 
 /**
