@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-history-dashboard",
+  "description": "Marketplace for the Claude History Dashboard plugin — a live, browsable view of your ~/.claude session history.",
+  "owner": {
+    "name": "shpwrck"
+  },
+  "plugins": [
+    {
+      "name": "claude-history-dashboard",
+      "description": "Launch and refresh the Claude History Dashboard from within Claude Code. Serves a live, browsable view of your ~/.claude session history at http://localhost:5173.",
+      "author": {
+        "name": "Jason Skrzypek",
+        "email": "jankoszy@gmail.com"
+      },
+      "category": "productivity",
+      "source": ".",
+      "homepage": "https://github.com/shpwrck/claude-history-dashboard"
+    }
+  ]
+}

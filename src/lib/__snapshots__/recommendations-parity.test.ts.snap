@@ -1,0 +1,556 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`recommendations parity snapshot (#507) > byte-identical buildRecommendations output for a broad-spread input 1`] = `
+[
+  {
+    "action": "Reserve bypassPermissions for trusted, reversible work; add an explicit deny-list for destructive patterns.",
+    "affected": 2,
+    "category": "safety",
+    "detail": "2 risky command(s) (e.g. rm -rf, git reset --hard, curl|sh) ran in 1 session(s) that used bypassPermissions.",
+    "evidence": [
+      "automate, rm -rf",
+      "automate, git reset --hard",
+    ],
+    "fix": {
+      "label": "Add destructive-command deny rules",
+      "note": "Merge into the "permissions" object in .claude/settings.json (deep-merge "deny"), and reserve bypassPermissions for trusted, reversible work. curl|sh cannot be prefix-matched, so curl/wget are denied wholesale — drop them if too broad.",
+      "snippet": "{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(rm -fr:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean -fd:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(dd:*)",
+      "Bash(mkfs:*)",
+      "Bash(shred:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)"
+    ]
+  }
+}",
+      "target": "settings.json",
+    },
+    "id": "safety.dangerous-bypass",
+    "severity": "critical",
+    "title": "Dangerous commands ran under bypassed permissions",
+    "unattended": true,
+    "view": "permissions",
+  },
+  {
+    "action": "Use the highest cache-read sessions to target context-slimming work. Treat 1-hour cache writes with no same-session cache reads as concrete cache policy waste.",
+    "affected": 1,
+    "category": "cost",
+    "detail": "No cache-read context spend was recorded. $76.00 was novel context ($36.00 uncached input, $40.00 cache writes). $40.00 was 1-hour cache write spend in session(s) with no cache reads. The deeper dead-token tranche is not claimed here; this v0 uses only deterministic token counters.",
+    "estSavingsUsd": 40,
+    "evidence": [
+      "automate: $40.00 1h cache writes, no cache reads",
+    ],
+    "id": "cost.cache-economics",
+    "provenance": {
+      "inference": "Cache-read spend is observed re-sent context, while 1-hour cache writes with zero cache reads are deterministic cache-write waste. Content-level dead-token attribution is intentionally deferred.",
+      "observations": [
+        {
+          "claim": "$0.00 spent on cache-read input tokens",
+          "field": "TokenEntry.cacheReadTokens",
+          "source": "parse-sessions",
+          "value": 0,
+        },
+        {
+          "claim": "$76.00 spent on novel context tokens",
+          "field": "TokenEntry.inputTokens + TokenEntry.cacheCreationTokens",
+          "source": "parse-sessions",
+          "value": 76,
+        },
+        {
+          "claim": "1 session(s) wrote 1-hour cache tokens and recorded zero cache-read tokens",
+          "field": "TokenEntry.cacheCreation1hTokens + TokenEntry.cacheReadTokens",
+          "source": "parse-sessions",
+          "value": 1,
+        },
+      ],
+    },
+    "severity": "warning",
+    "title": "Audit context cache economics",
+    "view": "tokens",
+  },
+  {
+    "action": "If that context is not reused beyond 5 minutes, prefer the 5-minute cache — up to the amount shown is recoverable.",
+    "affected": 1,
+    "category": "cost",
+    "detail": "4.00M tokens were written to the 1-hour cache across 1 session(s), billed at 2× input vs 1.25× for the default 5-minute cache.",
+    "estSavingsUsd": 15,
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "default 5-minute prompt cache for routine work",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Cach\\(e\\|ing\\)\\\\b/i,
+        ],
+      },
+      "label": "Note the 1h-cache tradeoff",
+      "note": "Paste into CLAUDE.md so sessions avoid the 2× cache write when context is short-lived. No settings key controls cache TTL.",
+      "snippet": "## Caching
+- Prefer the default 5-minute prompt cache for routine work; it is billed at 1.25× input vs 2× for the 1-hour cache.
+- Only rely on the 1-hour cache for context genuinely reused across gaps >5 min. For short, scoped tasks, finish or compact before idle gaps so context is not re-written to the pricier 1h cache.",
+      "target": "CLAUDE.md",
+    },
+    "id": "cost.cache-1h-waste",
+    "reclaim": {
+      "category": "cost",
+      "counterfactual": {
+        "kind": "convertRate",
+        "rateFrom": "cacheWrite1h",
+        "rateTo": "cacheWrite5m",
+      },
+      "evidenceTokens": 4000000,
+      "leverId": "cost.cache-1h-waste",
+      "orderKey": 50,
+      "ownedPools": [
+        "cacheWrite1h",
+      ],
+      "scopeKeys": [
+        "automate|claude-opus-4-8",
+      ],
+    },
+    "severity": "warning",
+    "title": "Reduce 1-hour cache writes",
+    "view": "tokens",
+  },
+  {
+    "action": "Investigate the top offenders — common causes are stale file state, wrong paths, or missing permissions.",
+    "affected": 12,
+    "category": "reliability",
+    "detail": "2 tool(s) failed on 20%+ of calls. Failed calls waste a round-trip and often trigger retries.",
+    "evidence": [
+      "Grep: 100% of 6",
+      "Read: 50% of 12",
+    ],
+    "fix": {
+      "fixKind": "illustrative",
+      "label": "Add a post-edit typecheck hook",
+      "note": "Merge into the "hooks" object in .claude/settings.json. Swap the command for your project’s real typecheck/lint so broken edits surface immediately instead of compounding.",
+      "snippet": "{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "npm run -s typecheck" }
+        ]
+      }
+    ]
+  }
+}",
+      "target": "hook",
+    },
+    "id": "reliability.tool-errors",
+    "severity": "warning",
+    "title": "Tools with high error rates",
+    "view": "errors",
+  },
+  {
+    "action": "Compact earlier or start a fresh session once a task is done — keep working context well under the window.",
+    "affected": 3,
+    "category": "context",
+    "detail": "3 session(s) peaked above 200K tokens, where context is evicted and re-sent at cost.",
+    "evidence": [
+      "automate, peak 10000k",
+      "reader, peak 1000k",
+      "mystery, peak 500k",
+    ],
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "working context well under the model",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Context discipline\\\\b/i,
+        ],
+      },
+      "label": "Compact earlier",
+      "note": "Append to your project (or ~/.claude) CLAUDE.md so Claude trims context before the window fills.",
+      "snippet": "## Context discipline
+
+Keep the working context well under the model's context window.
+- When the conversation grows large (roughly 150K+ tokens) or right after finishing a discrete task, run \`/compact\` to summarise and reclaim space.
+- When starting genuinely unrelated work, run \`/clear\` to begin a fresh session instead of carrying stale context.
+- Avoid pulling large files or command output into context the current task doesn't need.",
+      "target": "CLAUDE.md",
+    },
+    "id": "context.over-window",
+    "severity": "warning",
+    "title": "Sessions spilled past the 200K context window",
+    "view": "context",
+  },
+  {
+    "action": "Run /compact at task boundaries, /clear when switching tasks, and scope Read with offset/limit. Dominant fix for the cohort: Run /clear when switching tasks.",
+    "affected": 3,
+    "category": "context",
+    "detail": "3 session(s) (60% of the fleet) are in the high compaction-risk band; uncontrolled compaction re-sends 10–40K tokens per event.",
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "letting context grow until it auto-compacts",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Context discipline\\\\b/i,
+        ],
+      },
+      "label": "Add context discipline",
+      "note": "Append to CLAUDE.md so sessions trim context before they thrash into repeated compaction.",
+      "snippet": "## Context discipline
+
+- Run \`/compact\` at sub-task boundaries and \`/clear\` when switching tasks, rather than letting context grow until it auto-compacts.
+- Read with \`offset\`/\`limit\` and prefer Grep over reading whole large files.
+- Don't pull large or unrelated files into context the current task doesn't need.",
+      "target": "CLAUDE.md",
+    },
+    "id": "context.compaction-hot-sessions",
+    "reclaim": {
+      "category": "context",
+      "cause": "structural-prefix",
+      "counterfactual": {
+        "kind": "scaleTokens",
+        "poolDeltaFrac": {
+          "cacheWrite1h": 1,
+          "cacheWrite5m": 1,
+        },
+      },
+      "evidenceTokens": 4000000,
+      "leverId": "context.compaction-hot-sessions",
+      "orderKey": 62,
+      "ownedPools": [
+        "cacheWrite5m",
+        "cacheWrite1h",
+      ],
+      "scopeKeys": [
+        "automate|claude-opus-4-8",
+      ],
+    },
+    "severity": "warning",
+    "title": "Multiple sessions at high compaction risk",
+    "view": "context",
+  },
+  {
+    "action": "Remove the dead allow entries (or narrow the deny if the allow was the intent) so settings.json reflects what actually happens.",
+    "affected": 1,
+    "category": "safety",
+    "detail": "1 permission allow rule(s) are fully covered by a deny rule — deny always wins, so the allow never takes effect.",
+    "evidence": [
+      "Bash(npm test:*)  ⊂  deny Bash(npm test:*)",
+    ],
+    "fix": {
+      "label": "Remove shadowed allow rules",
+      "note": "These "permissions.allow" entries are overridden by a broader "deny" (deny wins), so they do nothing. Delete them, or narrow the conflicting deny if the allow was intended.",
+      "snippet": "{
+  "permissions": {
+    "allow": [
+      "Bash(npm test:*)"
+    ]
+  }
+}",
+      "target": "settings.json",
+    },
+    "id": "safety.allow-rule-overlaps-deny",
+    "severity": "warning",
+    "title": "Allow rules shadowed by a deny",
+    "view": "permissions",
+  },
+  {
+    "action": "Pace heavy automated runs, or move them to the priority service tier / off-peak hours.",
+    "affected": 1,
+    "category": "reliability",
+    "detail": "1 API error(s) returned 429/529 (rate limited or overloaded), which stall and retry turns.",
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "Avoid launching many parallel agent runs",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Rate-limit hygiene\\\\b/i,
+        ],
+      },
+      "label": "Add pacing guidance",
+      "note": "Append to your project (or ~/.claude) CLAUDE.md so heavy runs self-throttle. 429/529 are server-side signals with no client retry/tier setting.",
+      "snippet": "## Rate-limit hygiene
+
+Hit 1 rate-limit/overload (429/529) error(s) recently.
+- Avoid launching many parallel agent runs at once; serialize heavy automated batches.
+- Schedule large unattended runs (migrations, bulk refactors) for off-peak hours.
+- Break big jobs into smaller chunks with breaks between them rather than one long burst.",
+      "target": "CLAUDE.md",
+    },
+    "id": "reliability.rate-limits",
+    "severity": "warning",
+    "title": "Hitting rate-limit / overloaded errors",
+    "view": "errors",
+  },
+  {
+    "action": "Review these sessions for runaway context or repeated work that could be scoped down or split.",
+    "affected": 3,
+    "category": "cost",
+    "detail": "The top 3 sessions account for 99% of total estimated spend ($111.00 of $112.00).",
+    "estSavingsUsd": 111,
+    "evidence": [
+      "automate, $100.00, Bash",
+      "reader, $10.00, Read",
+      "extra1, $1.00, no tools",
+    ],
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "start a fresh session when the task changes",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Session scope\\\\b/i,
+        ],
+      },
+      "label": "Add session-scoping guidance",
+      "note": "Paste into CLAUDE.md to curb the runaway-context pattern behind the top sessions.",
+      "snippet": "## Session scope
+- Keep one session to one task; start a fresh session when the task changes so stale context is not re-sent and re-billed each turn.
+- Compact or clear once a sub-task is done rather than letting context grow unbounded.
+- Avoid re-reading large files or directories repeatedly in a single session; reference them once.",
+      "target": "CLAUDE.md",
+    },
+    "id": "cost.expensive-sessions",
+    "severity": "info",
+    "title": "Spend is concentrated in a few sessions",
+    "view": "cost",
+  },
+  {
+    "action": "Confirm automated runs use the cheapest model that meets the quality bar — Haiku/Sonnet often suffice for scripted work.",
+    "affected": 1,
+    "category": "cost",
+    "detail": "Automated (sdk-*) sessions account for $100.00 (89% of total) across 1 session(s). Running those automation turns on Haiku instead would have cost about $80.00 less.",
+    "estSavingsUsd": 80,
+    "fix": {
+      "label": "Default automation to Haiku",
+      "note": "Merge into the settings.json your sdk-* runs use, to right-size the 89% automated spend. Use the cheapest model that holds your quality bar.",
+      "snippet": "{
+  "model": "claude-haiku-4-5"
+}",
+      "target": "settings.json",
+    },
+    "id": "cost.automation-share",
+    "reclaim": {
+      "category": "cost",
+      "counterfactual": {
+        "kind": "reprice",
+        "toModel": "claude-haiku-4-5-20251001",
+      },
+      "evidenceTokens": 11200000,
+      "leverId": "cost.automation-share",
+      "orderKey": 80,
+      "ownedPools": [
+        "input",
+        "output",
+        "cacheWrite5m",
+        "cacheWrite1h",
+        "cacheRead",
+      ],
+      "scopeKeys": [
+        "automate|claude-opus-4-8",
+      ],
+    },
+    "severity": "info",
+    "title": "Automation drives a large share of spend",
+    "view": "cost",
+  },
+  {
+    "action": "Tighten recurring instructions in CLAUDE.md (constraints, file locations, conventions) so the assistant needs fewer corrections.",
+    "affected": 30,
+    "category": "workflow",
+    "detail": "30% of assistant turns (30 of 100) contain a refusal or concession ("I cannot", "I apologize", "you're right") — often a sign the prompt or project context left it guessing.",
+    "id": "workflow.assistant-refusal-rate",
+    "severity": "info",
+    "title": "Assistant frequently course-corrects",
+  },
+  {
+    "action": "Prefer Grep/Glob/Read/Edit over grep/find/cat/sed — they are faster, cheaper, and integrate with permissions.",
+    "affected": 12,
+    "category": "workflow",
+    "detail": "12 Bash commands re-implemented a native tool: grep (5), cat (4), find (3).",
+    "evidence": [
+      "grep → Grep: 5×",
+      "cat → Read: 4×",
+      "find → Glob: 3×",
+    ],
+    "fix": {
+      "label": "Add deny rules",
+      "note": "Merge into the "permissions" object in .claude/settings.json (deep-merge the "deny" array). Use "ask" instead of "deny" if you want a prompt rather than a hard block — both steer Claude onto native Grep/Glob/Read.",
+      "snippet": "{
+  "permissions": {
+    "deny": [
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)"
+    ]
+  }
+}",
+      "target": "settings.json",
+    },
+    "id": "workflow.native-bypass",
+    "severity": "info",
+    "title": "Use native tools instead of shell equivalents",
+    "view": "tools",
+  },
+  {
+    "action": "Pin frequently-needed files in CLAUDE.md or pass their contents once instead of re-reading.",
+    "affected": 2,
+    "category": "workflow",
+    "detail": "2 (session, file) pair(s) re-Read the same file 3+ times. Each re-read re-pays the token cost.",
+    "evidence": [
+      "automate, missing.ts, 8×",
+      "reader, conf.ts, 4×",
+    ],
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "Load these files once into context",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Key files\\\\b/i,
+        ],
+      },
+      "label": "Pin files in CLAUDE.md",
+      "note": "Append to your project CLAUDE.md. The @-prefix imports the file so its contents load once into context instead of being re-Read each time. Replace the basenames with repo-relative paths.",
+      "snippet": "## Key files (kept in context)
+
+Load these files once into context, then reuse that copy instead of re-reading them:
+- @missing.ts
+- @conf.ts",
+      "target": "CLAUDE.md",
+    },
+    "id": "workflow.redundant-reads",
+    "severity": "info",
+    "title": "Files re-read repeatedly within a session",
+    "view": "files",
+  },
+  {
+    "action": "Review whether these are still needed; pruning dead entries keeps settings.json honest. Known dangerous-command guards are deliberately excluded from this check, so anything listed is a non-destructive rule that simply never fired.",
+    "affected": 2,
+    "category": "safety",
+    "detail": "2 permission deny rule(s) never matched a command attempt in your retained history — they may be leftover clutter rather than active guards.",
+    "evidence": [
+      "Bash(npm test:*)",
+      "Bash(yarn install:*)",
+    ],
+    "fix": {
+      "label": "Prune unused deny rules",
+      "note": "Remove these never-matched entries from the "permissions.deny" array in settings.json if they are no longer relevant. (Destructive-command guards are never listed here.)",
+      "snippet": "{
+  "permissions": {
+    "deny": [
+      "Bash(npm test:*)",
+      "Bash(yarn install:*)"
+    ]
+  }
+}",
+      "target": "settings.json",
+    },
+    "id": "safety.deny-rule-never-triggered",
+    "severity": "info",
+    "title": "Unused permission deny rules",
+    "view": "permissions",
+  },
+  {
+    "action": "Treat those sessions’ cost figures as approximate; add the model to the pricing table for accuracy.",
+    "affected": 1,
+    "category": "cost",
+    "detail": "1 session(s) used a model string not in the pricing table and fell back to Sonnet-tier rates.",
+    "fix": {
+      "label": "Pin a known model",
+      "note": "Set an explicit model in settings.json so future sessions are priced from a known rate instead of the Sonnet-tier fallback used for the 1 guessed session(s).",
+      "snippet": "{
+  "model": "claude-sonnet-4-6"
+}",
+      "target": "settings.json",
+    },
+    "id": "cost.unknown-model",
+    "reclaim": {
+      "category": "cost",
+      "counterfactual": {
+        "kind": "flag-only",
+      },
+      "evidenceTokens": 0,
+      "leverId": "cost.unknown-model",
+      "orderKey": 85,
+      "ownedPools": [],
+      "scopeKeys": [],
+    },
+    "severity": "info",
+    "title": "Some cost estimates are guesses",
+    "view": "tokens",
+  },
+  {
+    "action": "Wrap the most-repeated commands in a script or a SessionStart/PostToolUse hook.",
+    "affected": 1,
+    "category": "workflow",
+    "detail": "1 command(s) ran 3+ times within a session — repetitive manual steps that a hook, skill, or Makefile target could absorb.",
+    "evidence": [
+      "4×, npm run build",
+    ],
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "wrap them in a script",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Common commands\\\\b/i,
+        ],
+      },
+      "label": "Document a wrapper",
+      "note": "Append to your project CLAUDE.md. Wrap these in a script or Make target and point the entry here, so future sessions run one command instead of repeating the steps.",
+      "snippet": "## Common commands
+
+These were run repeatedly — wrap them in a script (e.g. \`scripts/dev.sh\`) or a Makefile target and invoke that instead of re-typing the steps:
+
+- \`npm run build\`",
+      "target": "CLAUDE.md",
+    },
+    "id": "workflow.repeated-commands",
+    "severity": "info",
+    "title": "Repeated commands are candidates for automation",
+    "view": "tools",
+  },
+  {
+    "action": "Review whether these files need refactoring or clearer up-front specs to reduce rework.",
+    "affected": 1,
+    "category": "workflow",
+    "detail": "1 file(s) were edited/written 15+ times. Heavy churn can signal an unclear interface or repeated trial-and-error.",
+    "evidence": [
+      "churn.ts, 18 edits / 1 sessions",
+    ],
+    "id": "workflow.file-churn",
+    "severity": "info",
+    "title": "High-churn files",
+    "view": "files",
+  },
+  {
+    "action": "If these are done, archive them; if not, they may be stalled and worth a check-in.",
+    "affected": 1,
+    "category": "activity",
+    "detail": "1 project(s) with 3+ sessions have had no activity in over 4 weeks.",
+    "evidence": [
+      "stale, last 42d ago",
+    ],
+    "fix": {
+      "label": "Auto-clean old transcripts",
+      "note": "Add to ~/.claude/settings.json to age out idle history automatically. WARNING: this permanently deletes local transcripts older than the given days — including the data this dashboard reads. Default is 30; raise the number to keep more.",
+      "snippet": "{
+  "cleanupPeriodDays": 28
+}",
+      "target": "settings.json",
+    },
+    "id": "activity.stale-projects",
+    "severity": "info",
+    "title": "Projects have gone quiet",
+    "view": "activity",
+  },
+]
+`;

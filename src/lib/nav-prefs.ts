@@ -1,0 +1,478 @@
+/**
+ * Per-user navigation preferences (which sidebar tabs are hidden) and the
+ * one-time "you can hide tabs now" banner dismissal flag.
+ *
+ * Persisted in localStorage so the choice survives reloads. The shape is
+ * forward-compatible with a future "persona presets" mechanism — that layer
+ * will live alongside `hiddenViews` rather than replace it.
+ */
+import type { ComponentType } from 'react';
+import type { SVGIconProps } from '@patternfly/react-icons/dist/esm/createIcon';
+import BullseyeIcon from '@patternfly/react-icons/dist/esm/icons/bullseye-icon';
+import StarIcon from '@patternfly/react-icons/dist/esm/icons/star-icon';
+import CommentsIcon from '@patternfly/react-icons/dist/esm/icons/comments-icon';
+import FolderIcon from '@patternfly/react-icons/dist/esm/icons/folder-icon';
+import SearchIcon from '@patternfly/react-icons/dist/esm/icons/search-icon';
+import CoinsIcon from '@patternfly/react-icons/dist/esm/icons/coins-icon';
+import ToolsIcon from '@patternfly/react-icons/dist/esm/icons/tools-icon';
+import FileAltIcon from '@patternfly/react-icons/dist/esm/icons/file-alt-icon';
+import DollarSignIcon from '@patternfly/react-icons/dist/esm/icons/dollar-sign-icon';
+import HistoryIcon from '@patternfly/react-icons/dist/esm/icons/history-icon';
+import RunningIcon from '@patternfly/react-icons/dist/esm/icons/running-icon';
+import RobotIcon from '@patternfly/react-icons/dist/esm/icons/robot-icon';
+import ProjectDiagramIcon from '@patternfly/react-icons/dist/esm/icons/project-diagram-icon';
+import ExclamationTriangleIcon from '@patternfly/react-icons/dist/esm/icons/exclamation-triangle-icon';
+import LockIcon from '@patternfly/react-icons/dist/esm/icons/lock-icon';
+import UsersIcon from '@patternfly/react-icons/dist/esm/icons/users-icon';
+import BrainIcon from '@patternfly/react-icons/dist/esm/icons/brain-icon';
+import HeartbeatIcon from '@patternfly/react-icons/dist/esm/icons/heartbeat-icon';
+import CommentIcon from '@patternfly/react-icons/dist/esm/icons/comment-icon';
+import ThLargeIcon from '@patternfly/react-icons/dist/esm/icons/th-large-icon';
+import TachometerAltIcon from '@patternfly/react-icons/dist/esm/icons/tachometer-alt-icon';
+import ClipboardCheckIcon from '@patternfly/react-icons/dist/esm/icons/clipboard-check-icon';
+import TasksIcon from '@patternfly/react-icons/dist/esm/icons/tasks-icon';
+import SitemapIcon from '@patternfly/react-icons/dist/esm/icons/sitemap-icon';
+import ClipboardListIcon from '@patternfly/react-icons/dist/esm/icons/clipboard-list-icon';
+import ChartLineIcon from '@patternfly/react-icons/dist/esm/icons/chart-line-icon';
+import ChartPieIcon from '@patternfly/react-icons/dist/esm/icons/chart-pie-icon';
+import FlaskIcon from '@patternfly/react-icons/dist/esm/icons/flask-icon';
+import type { View, ActionDomain } from '../types';
+
+const STORAGE_KEY = 'claude-dashboard:nav-prefs';
+
+/**
+ * Sticky entrypoint scope (#132). `all` shows every session's activity;
+ * `unattended` narrows the wired listings to non-interactive runs (see
+ * {@link isUnattendedEntrypoint}). Persisted alongside the other nav prefs.
+ */
+export type EntrypointFilter = 'all' | 'unattended';
+
+export interface NavPrefs {
+  hiddenViews: View[];
+  bannerDismissed: boolean;
+  /**
+   * Last route the user was on (#141), so a reload lands where they left off
+   * instead of the static default. Absent until the first navigation; guarded
+   * on read by {@link resolveInitialView} so a now-hidden view doesn't strand
+   * the user on an invisible tab.
+   */
+  lastView?: View;
+  /** Sticky interactive-vs-unattended scope (#132). Defaults to `'all'`. */
+  entrypointFilter: EntrypointFilter;
+  /**
+   * Which curated-default *generation* this profile last reconciled with (#608).
+   * Stamped to {@link CURRENT_NAV_LAYOUT_VERSION} on every read/migration. A
+   * stored profile whose version predates the current one and that was never
+   * explicitly customized adopts the new {@link CURATED_DEFAULT_HIDDEN_VIEWS};
+   * legacy blobs (no version field) read as `0` so they migrate forward once.
+   */
+  navLayoutVersion: number;
+  /**
+   * Has the user *explicitly* chosen a visible-set (hidden/shown a tab via
+   * Settings)? (#608) This is the opt-in signal that protects an intentional
+   * choice from being clobbered by a curated default. It is deliberately
+   * distinct from "happens to have an empty `hiddenViews`": a fresh profile and
+   * a profile that accepted the curated default both leave it `false`, so a
+   * later curated-default generation can still roll forward for them, while a
+   * real customization (`true`) is preserved untouched.
+   */
+  customized: boolean;
+}
+
+/**
+ * Static landing route used before any sticky value exists. The digest spine
+ * (#491) — the ranked, safety-first cross-domain answer-sequence — is the
+ * default landing; experts re-land on their sticky `lastView` instead (see
+ * {@link resolveInitialView}).
+ */
+export const DEFAULT_VIEW: View = 'home';
+
+/**
+ * Sidebar group order (epic #490). The nav is organized by action-domain, not
+ * data-type: the digest `home` first, then the six action domains with
+ * **safety leading** (so a critical safety finding can't hide behind a cost tab
+ * the user opens first — S1-Priya's siloing failure-mode), then the global
+ * `discovery` Find utility, then the demoted `raw` orientation drawer.
+ */
+export const DOMAIN_ORDER: readonly ActionDomain[] = [
+  'home',
+  'safety',
+  'cost',
+  'success-rate',
+  'speed',
+  'context-health',
+  'workflow-hygiene',
+  'discovery',
+  'raw',
+] as const;
+
+/** Human label per domain group header in the sidebar. */
+export const DOMAIN_LABEL: Record<ActionDomain, string> = {
+  home: 'Overview',
+  safety: 'Stay safe',
+  cost: 'Cut cost',
+  'success-rate': 'Fail less',
+  speed: 'Go faster',
+  'context-health': 'Tame context',
+  'workflow-hygiene': 'Clean workflow',
+  discovery: 'Find',
+  raw: 'Raw data',
+};
+
+/**
+ * Current curated-default generation (#608). Bump this whenever
+ * {@link CURATED_DEFAULT_HIDDEN_VIEWS} changes so never-customized profiles
+ * re-reconcile to the new curated set on their next read. #609 (the recs-driven
+ * default sidebar) is the first consumer that will raise this past `1`.
+ */
+export const CURRENT_NAV_LAYOUT_VERSION = 1;
+
+/**
+ * The curated default hidden-views set (#608). A fresh install and any
+ * never-customized profile adopt exactly this set; an explicitly-customized
+ * profile keeps its own. Empty today (so the default is still "show
+ * everything", a no-op vs. the prior behaviour) — #608 ships the *versioned
+ * opt-in machinery*; #609 populates this with the recs-driven selection and
+ * bumps {@link CURRENT_NAV_LAYOUT_VERSION}, at which point never-customized
+ * users migrate to it without clobbering anyone's explicit choice.
+ */
+export const CURATED_DEFAULT_HIDDEN_VIEWS: readonly View[] = [];
+
+const DEFAULTS: NavPrefs = {
+  hiddenViews: [...CURATED_DEFAULT_HIDDEN_VIEWS],
+  bannerDismissed: false,
+  entrypointFilter: 'all',
+  navLayoutVersion: CURRENT_NAV_LAYOUT_VERSION,
+  customized: false,
+};
+
+/**
+ * A fresh defaults object with its own `hiddenViews` array — never the module
+ * constant's. Cloning the array (not just the object) keeps `DEFAULTS` immune to
+ * a caller mutating the returned set in place; cheap insurance once #609 makes
+ * {@link CURATED_DEFAULT_HIDDEN_VIEWS} non-empty.
+ */
+function freshDefaults(): NavPrefs {
+  return { ...DEFAULTS, hiddenViews: [...DEFAULTS.hiddenViews] };
+}
+
+// Source of truth for the sidebar's view list. Lives here (not Layout.tsx) so
+// Settings can render a checklist of every view without depending on Layout.
+// Icons are monochrome PatternFly components (not glyph characters) so nothing
+// renders with an emoji presentation in the masthead/sidebar (#508).
+// The `domain` field (epic #490) groups each view under an action-domain in the
+// sidebar (see {@link DOMAIN_ORDER}) and lets the digest map findings back to a
+// landing view. Domain assignments for the cross-cutting views are first-pass
+// and refined by the per-domain units (#492–498); the structural invariant
+// #491 fixes is: a `home` group first, the six action domains with safety
+// leading, a `discovery` Find group, and stats/activity demoted to `raw`.
+// The `serverOnly` flag marks views that require the live /api/* backend; they
+// are auto-hidden in the SPA/upload build (SERVER_AVAILABLE === false). Adding
+// a future server-only view is a one-line change: add `serverOnly: true` here.
+export const NAV_ITEMS: readonly {
+  view: View;
+  label: string;
+  icon: ComponentType<SVGIconProps>;
+  domain: ActionDomain;
+  serverOnly?: true;
+}[] = [
+  { view: 'home', label: 'Overview', icon: TachometerAltIcon, domain: 'home' },
+  { view: 'recommendations', label: 'Recommendations', icon: StarIcon, domain: 'home' },
+  { view: 'adoption', label: 'Adoption', icon: ClipboardCheckIcon, domain: 'home', serverOnly: true },
+  { view: 'permissions', label: 'Permissions', icon: LockIcon, domain: 'safety' },
+  { view: 'enterprise', label: 'Enterprise', icon: LockIcon, domain: 'safety', serverOnly: true },
+  { view: 'summary', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
+  { view: 'cost', label: 'Cost', icon: DollarSignIcon, domain: 'cost' },
+  { view: 'tokens', label: 'Tokens', icon: CoinsIcon, domain: 'cost' },
+  { view: 'files', label: 'File Impact', icon: FileAltIcon, domain: 'cost' },
+  { view: 'errors', label: 'Errors', icon: ExclamationTriangleIcon, domain: 'success-rate' },
+  { view: 'report-card', label: 'Report Card', icon: ClipboardCheckIcon, domain: 'success-rate', serverOnly: true },
+  { view: 'review-queue', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', serverOnly: true },
+  { view: 'evaluator', label: 'Speed Check', icon: BullseyeIcon, domain: 'speed' },
+  { view: 'context', label: 'Context Health', icon: HeartbeatIcon, domain: 'context-health' },
+  { view: 'conversation', label: 'Turn Patterns', icon: CommentIcon, domain: 'context-health' },
+  { view: 'tools', label: 'Tool Usage', icon: ToolsIcon, domain: 'workflow-hygiene' },
+  { view: 'agents', label: 'Agents', icon: UsersIcon, domain: 'workflow-hygiene' },
+  { view: 'automation', label: 'Automation', icon: RobotIcon, domain: 'workflow-hygiene' },
+  { view: 'workflows', label: 'Workflows', icon: ProjectDiagramIcon, domain: 'workflow-hygiene' },
+  { view: 'shadow-calls', label: 'Shadow Calls', icon: FlaskIcon, domain: 'workflow-hygiene', serverOnly: true },
+  { view: 'patterns', label: 'Session Patterns', icon: ThLargeIcon, domain: 'workflow-hygiene' },
+  // Not serverOnly: like Workflows, Memories accepts the user's own uploaded
+  // `memory/*.md` in the SPA/upload build (#538) and shows a data-aware
+  // "needs a server" placeholder only when empty (see Memories.tsx).
+  { view: 'memories', label: 'Memories', icon: BrainIcon, domain: 'workflow-hygiene' },
+  { view: 'tasks', label: 'Task Health', icon: TasksIcon, domain: 'workflow-hygiene', serverOnly: true },
+  { view: 'teams', label: 'Team Coordination', icon: SitemapIcon, domain: 'workflow-hygiene', serverOnly: true },
+  { view: 'plans', label: 'Task Plans', icon: ClipboardListIcon, domain: 'workflow-hygiene', serverOnly: true },
+  { view: 'search', label: 'Search', icon: SearchIcon, domain: 'discovery' },
+  { view: 'sessions', label: 'Sessions', icon: CommentsIcon, domain: 'discovery' },
+  { view: 'projects', label: 'Projects', icon: FolderIcon, domain: 'discovery' },
+  { view: 'timeline', label: 'Timeline', icon: HistoryIcon, domain: 'discovery' },
+  // #14: the former standalone "Stats" view (UsageStats) is folded into
+  // "Activity" (the survivor). Its old `#/stats` deep link is preserved via
+  // {@link REDIRECTED_VIEWS} below, which resolves it to `activity`.
+  { view: 'activity', label: 'Activity', icon: RunningIcon, domain: 'raw' },
+  { view: 'pulse', label: 'Pulse', icon: ChartLineIcon, domain: 'raw', serverOnly: true },
+] as const;
+
+/** Views that require the live /api/* backend and must not appear in the SPA/upload build. */
+export const SERVER_ONLY_VIEWS = new Set<View>(
+  NAV_ITEMS.filter((i) => i.serverOnly).map((i) => i.view)
+);
+
+/**
+ * #610: the dense "Clean workflow" (workflow-hygiene) group holds 9 flat peers —
+ * the worst junk drawer in the nav. Surface only the operational triad by
+ * default; the rest sit behind an in-group "+ N more" expander (rendered in
+ * PFLayout). Order here is the surfaced order. Composes with the SPA filter
+ * (server-only members already drop out) and per-user hidden views.
+ */
+export const WORKFLOW_HYGIENE_CORE: readonly View[] = [
+  'tools',
+  'agents',
+  'automation',
+];
+
+/**
+ * #612: the `discovery` ("Find") group exposed four co-equal tabs —
+ * `search`, `sessions`, `projects`, `timeline` — with no scent for which to
+ * click first, so novice first-clicks get consumed browsing the corpus instead
+ * of reading the coaching digest. Surface Search as the primary Find entry; the
+ * three corpus-browsing views sit behind a "Browse" sub-level (an in-group
+ * NavExpandable), mirroring the #610 "+ N more" pattern. Order here is the
+ * surfaced order. Composes with the SPA filter (server-only members already
+ * drop out) and per-user hidden views, and with the recs-driven default (#609):
+ * `search` is in the curated core, the three browse views are not.
+ */
+export const DISCOVERY_CORE: readonly View[] = ['search'];
+
+const VALID_VIEWS = new Set<View>(NAV_ITEMS.map((i) => i.view));
+
+/**
+ * Retired view ids that must keep resolving for old deep links (#14). Each key
+ * is a no-longer-cataloged route that maps to its survivor: `stats` was merged
+ * into `activity`, so `#/stats` resolves as `#/activity`. The router treats a
+ * redirect source as a valid hash ({@link isValidView}) and callers funnel the
+ * parsed view through {@link resolveViewRedirect} so it lands on the survivor.
+ */
+export const REDIRECTED_VIEWS: Readonly<Partial<Record<View, View>>> = {
+  stats: 'activity',
+};
+
+/**
+ * Map a (possibly retired) view to its current survivor (#14). A live catalog
+ * view is returned unchanged; a redirected source resolves to its target. Used
+ * by the hash router and `navigateTo` so `#/stats` lands on `activity` instead
+ * of stranding on a removed view.
+ */
+export function resolveViewRedirect(view: View): View {
+  return REDIRECTED_VIEWS[view] ?? view;
+}
+
+/**
+ * Type-guard: is `v` one of the catalog's view ids? Used by the hash router.
+ * Retired-but-redirected ids ({@link REDIRECTED_VIEWS}) count as valid so an old
+ * deep link still parses and can be funnelled to its survivor.
+ */
+export function isValidView(v: string): v is View {
+  return VALID_VIEWS.has(v as View) || v in REDIRECTED_VIEWS;
+}
+
+/** The action-domain a view belongs to (defaults to `raw` for any unlisted view). */
+export function domainForView(view: View): ActionDomain {
+  return NAV_ITEMS.find((i) => i.view === view)?.domain ?? 'raw';
+}
+
+/**
+ * The always-visible curated core (#609, keystone of epic #604). On a fresh /
+ * never-customized profile the sidebar shows exactly this set PLUS every view
+ * whose action-domain currently has an active digest finding (see
+ * {@link isDefaultVisibleView}) — the digest is the discovery vector, so a view
+ * that produces no finding produces no scent and stays hidden until detectors
+ * surface one. Everything else is one "Show advanced views" toggle away, and
+ * any view remains reachable by deep-link / digest card regardless of the
+ * sidebar (the hash router renders any valid view).
+ */
+export const CURATED_CORE_VIEWS: readonly View[] = [
+  'home',
+  'recommendations',
+  'permissions',
+  'cost',
+  'errors',
+  'search',
+];
+
+const CURATED_CORE_SET = new Set<View>(CURATED_CORE_VIEWS);
+
+/**
+ * Is `view` in the recs-driven default-visible set? (#609) True when the view is
+ * in the curated core, or when its action-domain currently has an active digest
+ * finding. `findingDomains` is the set the DigestSpine computes (reused, not
+ * recomputed); an empty/absent set means "no findings yet" → core only.
+ */
+export function isDefaultVisibleView(
+  view: View,
+  findingDomains: ReadonlySet<ActionDomain> | null | undefined
+): boolean {
+  return CURATED_CORE_SET.has(view) || (findingDomains?.has(domainForView(view)) ?? false);
+}
+
+function sanitize(raw: unknown): NavPrefs {
+  if (!raw || typeof raw !== 'object') return freshDefaults();
+  const obj = raw as Record<string, unknown>;
+  const rawHidden = Array.isArray(obj.hiddenViews) ? obj.hiddenViews : [];
+  const hiddenViews = rawHidden.filter(
+    (v): v is View => typeof v === 'string' && VALID_VIEWS.has(v as View)
+  );
+  const bannerDismissed = obj.bannerDismissed === true;
+  const lastView =
+    typeof obj.lastView === 'string' && VALID_VIEWS.has(obj.lastView as View)
+      ? (obj.lastView as View)
+      : undefined;
+  const entrypointFilter: EntrypointFilter =
+    obj.entrypointFilter === 'unattended' ? 'unattended' : 'all';
+  // Legacy blobs (pre-#608) carry no version → read as 0 so they migrate forward
+  // exactly once. A non-finite/missing value is treated as 0 for the same reason.
+  const navLayoutVersion =
+    typeof obj.navLayoutVersion === 'number' && Number.isFinite(obj.navLayoutVersion)
+      ? obj.navLayoutVersion
+      : 0;
+  // Explicit-customization signal. Honour a stored flag, but also INFER it from a
+  // *legacy* (version-0) profile: before #608 the only way to populate
+  // `hiddenViews` was an explicit Settings toggle, so a non-empty legacy
+  // hidden-set IS a customization and must survive the first migration intact.
+  // The inference is scoped to version 0: once #608+ stamps a version, a
+  // non-empty `hiddenViews` may just be an *adopted* curated default, so a
+  // versioned blob's `customized` field is the sole source of truth — otherwise
+  // a downgrade would mistake a curated default for an explicit choice and
+  // freeze the profile out of future curated generations.
+  const customized =
+    obj.customized === true || (navLayoutVersion === 0 && hiddenViews.length > 0);
+  return {
+    hiddenViews,
+    bannerDismissed,
+    entrypointFilter,
+    navLayoutVersion,
+    customized,
+    ...(lastView ? { lastView } : {}),
+  };
+}
+
+/**
+ * Reconcile a parsed profile with the current curated-default generation (#608).
+ * Pure and idempotent: a profile already at {@link CURRENT_NAV_LAYOUT_VERSION} is
+ * returned untouched. A profile that predates it adopts
+ * {@link CURATED_DEFAULT_HIDDEN_VIEWS} *only* when it was never explicitly
+ * customized; an explicit choice is preserved. Either way the version is stamped
+ * so the reconciliation runs once per generation, not on every read.
+ */
+export function migrateNavPrefs(prefs: NavPrefs): NavPrefs {
+  if (prefs.navLayoutVersion >= CURRENT_NAV_LAYOUT_VERSION) return prefs;
+  return {
+    ...prefs,
+    hiddenViews: prefs.customized
+      ? prefs.hiddenViews
+      : [...CURATED_DEFAULT_HIDDEN_VIEWS],
+    navLayoutVersion: CURRENT_NAV_LAYOUT_VERSION,
+  };
+}
+
+/**
+ * Pick the route to land on at load (#141). Prefers the sticky `lastView`, but
+ * guards it: a stored view that's invalid, now hidden, or server-only in upload
+ * mode falls through to the default. If even the default is unavailable, falls
+ * back to the first still-visible tab.
+ */
+export function resolveInitialView(prefs: NavPrefs, serverAvailable = true): View {
+  const hidden = new Set(prefs.hiddenViews);
+  const isVisible = (v: View) =>
+    VALID_VIEWS.has(v) &&
+    !hidden.has(v) &&
+    (serverAvailable || !SERVER_ONLY_VIEWS.has(v));
+  if (prefs.lastView && isVisible(prefs.lastView)) return prefs.lastView;
+  if (isVisible(DEFAULT_VIEW)) return DEFAULT_VIEW;
+  const firstVisible = NAV_ITEMS.find(
+    (i) => !hidden.has(i.view) && (serverAvailable || !SERVER_ONLY_VIEWS.has(i.view))
+  );
+  return firstVisible ? firstVisible.view : DEFAULT_VIEW;
+}
+
+/** Record the last-viewed route, returning a new prefs object (#141). */
+export function setLastView(prefs: NavPrefs, view: View): NavPrefs {
+  if (prefs.lastView === view) return prefs;
+  return { ...prefs, lastView: view };
+}
+
+export function getNavPrefs(): NavPrefs {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return freshDefaults();
+    const parsed = sanitize(JSON.parse(raw));
+    const migrated = migrateNavPrefs(parsed);
+    // Persist the reconciliation so it runs once per generation, not on every
+    // read: without this the on-disk blob stays stale and a never-customized
+    // profile would re-adopt the curated default on every cold load (#608).
+    // `migrateNavPrefs` returns the same reference when nothing changed.
+    if (migrated !== parsed) setNavPrefs(migrated);
+    return migrated;
+  } catch {
+    return freshDefaults();
+  }
+}
+
+export function setNavPrefs(prefs: NavPrefs): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    /* localStorage may be disabled (private mode etc.) — silently fail */
+  }
+}
+
+export function hideView(prefs: NavPrefs, view: View): NavPrefs {
+  if (prefs.hiddenViews.includes(view)) return prefs;
+  // An explicit hide is a customization (#608): mark it so a curated default
+  // can never roll over this choice.
+  return { ...prefs, hiddenViews: [...prefs.hiddenViews, view], customized: true };
+}
+
+export function showView(prefs: NavPrefs, view: View): NavPrefs {
+  if (!prefs.hiddenViews.includes(view)) return prefs;
+  return {
+    ...prefs,
+    hiddenViews: prefs.hiddenViews.filter((v) => v !== view),
+    customized: true,
+  };
+}
+
+export function showAllViews(prefs: NavPrefs): NavPrefs {
+  if (prefs.hiddenViews.length === 0) return prefs;
+  // Explicitly revealing every tab is itself a customization (#608): the user
+  // wants everything, so a future curated default must not re-hide views.
+  return { ...prefs, hiddenViews: [], customized: true };
+}
+
+export function dismissBanner(prefs: NavPrefs): NavPrefs {
+  if (prefs.bannerDismissed) return prefs;
+  return { ...prefs, bannerDismissed: true };
+}
+
+/**
+ * Flip the recs-driven-sidebar mode (#609): the "Show advanced views" toggle.
+ * Collapse clears `customized` (back to the curated core + finding-domains);
+ * expand sets it (the full advanced list). Both legs PRESERVE the user's
+ * explicit `hiddenViews` — "Show advanced" reveals the advanced nav, it does not
+ * silently discard a Settings hide-choice — so a collapse->expand round-trip can
+ * never lose a customized hidden-set.
+ */
+export function toggleAdvancedNav(prefs: NavPrefs): NavPrefs {
+  return { ...prefs, customized: !prefs.customized };
+}
+
+/** Set the sticky entrypoint scope (#132), returning a new prefs object. */
+export function setEntrypointFilter(
+  prefs: NavPrefs,
+  entrypointFilter: EntrypointFilter
+): NavPrefs {
+  if (prefs.entrypointFilter === entrypointFilter) return prefs;
+  return { ...prefs, entrypointFilter };
+}
