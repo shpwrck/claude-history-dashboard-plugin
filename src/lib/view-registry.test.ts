@@ -144,6 +144,7 @@ function emptyData(overrides: Partial<ViewData> = {}): ViewData {
     agentSettings: [],
     attribution: [],
     runtimeEvents: [],
+    taskSteering: [],
     churnGeometry: [],
     assistantFeatures: [],
     promptAnalysis: [],
@@ -270,6 +271,36 @@ describe('project-scoped view data filtering', () => {
         { sessionId: 'alpha-1', turns: [], stopHooks: [], awaySummaries: [], scheduledFires: [] },
         { sessionId: 'beta-1', turns: [], stopHooks: [], awaySummaries: [], scheduledFires: [] },
       ],
+      taskSteering: [
+        {
+          sessionId: 'alpha-1',
+          taskIndex: 0,
+          startTime: '',
+          endTime: '',
+          wallClockMs: 0,
+          costUsd: 0,
+          humanTurns: 0,
+          corrective: 0,
+          clarifyingAnswer: 0,
+          approving: 0,
+          other: 0,
+          interruptions: 0,
+        },
+        {
+          sessionId: 'beta-1',
+          taskIndex: 0,
+          startTime: '',
+          endTime: '',
+          wallClockMs: 0,
+          costUsd: 0,
+          humanTurns: 0,
+          corrective: 0,
+          clarifyingAnswer: 0,
+          approving: 0,
+          other: 0,
+          interruptions: 0,
+        },
+      ],
       churnGeometry: [
         { sessionId: 'alpha-1', edits: [], files: [] },
         { sessionId: 'beta-1', edits: [], files: [] },
@@ -368,6 +399,7 @@ describe('project-scoped view data filtering', () => {
     expect(filtered.agentSettings.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.attribution.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.runtimeEvents.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    expect(filtered.taskSteering.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.churnGeometry.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.assistantFeatures.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.promptAnalysis.map((item) => item.sessionId)).toEqual(['alpha-1']);

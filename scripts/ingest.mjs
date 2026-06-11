@@ -235,6 +235,7 @@ const { parseHistoryJsonl, groupBySessions, groupByProjects } = await import(
   join(LIB, 'parse-history.ts')
 );
 const { parsePromptAnalysis } = await import(join(LIB, 'parse-prompt-analysis.ts'));
+const { computeTaskSteering } = await import(join(LIB, 'parse-steering.ts'));
 const { safeJsonStringify } = await import(join(LIB, 'json-safe.ts'));
 // Pure recommendation engine (no DOM/React) — server-importable so the
 // /api/recommendations.json route can mirror the UI's recs (#126).
@@ -1762,6 +1763,11 @@ export function assembleDataset() {
     }
   }
   const promptAnalysis = parsePromptAnalysis(entries);
+  const taskSteering = computeTaskSteering({
+    entries,
+    runtimeEvents,
+    tokenData,
+  });
 
   const liveConfig = assembleLiveConfig({
     claudeDir: CLAUDE,
@@ -1837,6 +1843,7 @@ export function assembleDataset() {
       agentSettings,
       attribution,
       runtimeEvents,
+      taskSteering,
       churnGeometry,
       assistantFeatures,
       deceitSignals,
@@ -1927,6 +1934,7 @@ export function assembleDataset() {
     agentSettings,
     attribution,
     runtimeEvents,
+    taskSteering,
     churnGeometry,
     promptAnalysis,
     liveConfig,
@@ -1995,6 +2003,7 @@ function assembleRecommendationContext(options = {}) {
     // is assembled separately, not a per-session SESSION_SIGNAL, so it stays
     // explicit here rather than flowing through `signalInput` (#513).
     shadowCalls: dataset.shadowCalls,
+    taskSteering: dataset.taskSteering,
     // Workflow-tool runs (#661): non-signal aggregate, like shadowCalls — feeds
     // the #635 workflow-health detectors.
     workflows: dataset.workflows,

@@ -457,6 +457,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     const { assembleRecommendationInput } = await import('./recommendations');
     const timelines = [{ sessionId: 's1' }] as unknown as RecommendationInput['timelines'];
     const runtimeEvents = [{ sessionId: 's1' }] as unknown as RecommendationInput['runtimeEvents'];
+    const taskSteering = [{ sessionId: 's1' }] as unknown as RecommendationInput['taskSteering'];
     const churnGeometry = [{ sessionId: 's1' }] as unknown as RecommendationInput['churnGeometry'];
     const toolInventories = [{ sessionId: 's1' }] as unknown as RecommendationInput['toolInventories'];
     const promptAnalysis = [{ sessionId: 's1', promptTurnCount: 1, lowSpecificityTurnCount: 0 }] as unknown as RecommendationInput['promptAnalysis'];
@@ -470,12 +471,14 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       // liveConfig/assistantFeatures intentionally omitted → normalise to null.
       timelines,
       runtimeEvents,
+      taskSteering,
       churnGeometry,
       toolInventories,
       promptAnalysis,
     });
     expect(mapped.timelines).toBe(timelines);
     expect(mapped.runtimeEvents).toBe(runtimeEvents);
+    expect(mapped.taskSteering).toBe(taskSteering);
     expect(mapped.churnGeometry).toBe(churnGeometry);
     expect(mapped.toolInventories).toBe(toolInventories);
     expect(mapped.promptAnalysis).toBe(promptAnalysis);
@@ -542,6 +545,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'liveConfig',
       'modelPinSavings',
       'repoMap',
+      'taskSteering',
     ]);
     const EXPECTED = [
       'tokenData',
@@ -557,6 +561,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'agentSettings',
       'attribution',
       'runtimeEvents',
+      'taskSteering',
       'churnGeometry',
       'toolInventories',
       'modelPinSavings',

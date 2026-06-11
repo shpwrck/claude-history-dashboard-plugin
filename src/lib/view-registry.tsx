@@ -42,6 +42,7 @@ import type { ApiErrorEvent } from './parse-errors';
 import type { PermissionChange } from './parse-permissions';
 import type { AgentSettingEvent, SessionAttribution } from './parse-agents';
 import type { RuntimeEvents } from './parse-runtime-events';
+import type { TaskSteering } from './parse-steering';
 import type { ChurnGeometrySession } from './parse-churn-geometry';
 import type { ProjectMemories } from './parse-memories';
 import type { WorkflowRun } from './parse-workflows';
@@ -232,6 +233,7 @@ export interface ViewData {
   agentSettings: AgentSettingEvent[];
   attribution: SessionAttribution[];
   runtimeEvents: RuntimeEvents[];
+  taskSteering: TaskSteering[];
   churnGeometry: ChurnGeometrySession[];
   assistantFeatures: AssistantFeatures[];
   promptAnalysis: PromptAnalysis[];
@@ -463,6 +465,7 @@ export function filterViewDataByTime(
     agentSettings,
     attribution: filterBySessionId(data.attribution, sessionIds),
     runtimeEvents,
+    taskSteering: filterBySessionId(data.taskSteering, sessionIds),
     churnGeometry: filterBySessionId(data.churnGeometry, sessionIds),
     assistantFeatures: filterBySessionId(data.assistantFeatures, sessionIds),
     promptAnalysis: filterBySessionId(data.promptAnalysis, sessionIds),
@@ -492,6 +495,7 @@ export const VIEW_RENDERERS: Partial<
       attribution={d.attribution}
       agentSettings={d.agentSettings}
       runtimeEvents={d.runtimeEvents}
+      taskSteering={d.taskSteering}
       churnGeometry={d.churnGeometry}
       toolInventories={d.toolInventories}
       liveConfig={d.liveConfig}
@@ -527,6 +531,7 @@ export const VIEW_RENDERERS: Partial<
       attribution={d.attribution}
       agentSettings={d.agentSettings}
       runtimeEvents={d.runtimeEvents}
+      taskSteering={d.taskSteering}
       churnGeometry={d.churnGeometry}
       toolInventories={d.toolInventories}
       liveConfig={d.liveConfig}
@@ -861,6 +866,7 @@ export function filterViewDataByProject(
     agentSettings: keepKnownSession(data.agentSettings, sessionIds),
     attribution: keepKnownSession(data.attribution, sessionIds),
     runtimeEvents: keepKnownSession(data.runtimeEvents, sessionIds),
+    taskSteering: keepKnownSession(data.taskSteering, sessionIds),
     churnGeometry: keepKnownSession(data.churnGeometry, sessionIds),
     assistantFeatures: keepKnownSession(data.assistantFeatures, sessionIds),
     promptAnalysis: keepKnownSession(data.promptAnalysis, sessionIds),

@@ -25,6 +25,7 @@ import type { ApiErrorEvent } from '../parse-errors';
 import type { SessionTimeline } from '../parse-timeline';
 import type { AgentSettingEvent, SessionAttribution } from '../parse-agents';
 import type { RuntimeEvents } from '../parse-runtime-events';
+import type { TaskSteering } from '../parse-steering';
 import type { ChurnGeometrySession } from '../parse-churn-geometry';
 import type { ToolInventory } from '../parse-tool-inventory';
 import type { ShadowCallAggregate } from '../parse-shadow-calls';
@@ -393,6 +394,11 @@ export interface RecommendationInput {
   attribution?: SessionAttribution[];
   /** Runtime/hook lifecycle events (parse-runtime-events). Feeds hook-health detectors. */
   runtimeEvents?: RuntimeEvents[];
+  /**
+   * Per-stop-hook task-span human steering counts (#1288). Optional: later
+   * autonomy detectors consume this; existing fixtures can omit it.
+   */
+  taskSteering?: TaskSteering[] | null;
   /** Line-level edit geometry from toolUseResult.structuredPatch (#597). */
   churnGeometry?: ChurnGeometrySession[];
   /** Per-session tool inventory (parse-tool-inventory). Feeds idle-tool/skill detectors. */
