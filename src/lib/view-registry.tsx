@@ -62,6 +62,7 @@ import type { ShadowCallAggregate } from './parse-shadow-calls';
 import type { EnterpriseSession } from '@api-client';
 import { groupByProjects } from './parse-history';
 import {
+  ALL_PROJECTS,
   presetToRange,
   type DashboardFilter,
   type TimeRange,
@@ -763,12 +764,53 @@ export const VIEW_RENDERERS: Partial<
   ),
 };
 
+function keepKnownSession<T extends { sessionId: string }>(
+  rows: T[],
+  sessionIds: ReadonlySet<string>
+): T[] {
+  return rows.filter((row) => sessionIds.has(row.sessionId));
+}
+
+export function filterViewDataByProject(
+  data: ViewData,
+  filter: DashboardFilter
+): ViewData {
+  if (filter.project === ALL_PROJECTS) return data;
+
+  const project = filter.project;
+  const sessions = data.sessions.filter((session) => session.project === project);
+  const sessionIds = new Set(sessions.map((session) => session.sessionId));
+
+  return {
+    ...data,
+    entries: data.entries.filter((entry) => entry.project === project),
+    sessions,
+    projects: data.projects.filter((item) => item.project === project),
+    tokenData: data.tokenData.filter((item) => item.project === project),
+    toolData: keepKnownSession(data.toolData, sessionIds),
+    toolInventories: keepKnownSession(data.toolInventories, sessionIds),
+    timelines: keepKnownSession(data.timelines, sessionIds),
+    apiErrors: keepKnownSession(data.apiErrors, sessionIds),
+    permissionRows: keepKnownSession(data.permissionRows, sessionIds),
+    permissionChanges: keepKnownSession(data.permissionChanges, sessionIds),
+    agentSettings: keepKnownSession(data.agentSettings, sessionIds),
+    attribution: keepKnownSession(data.attribution, sessionIds),
+    runtimeEvents: keepKnownSession(data.runtimeEvents, sessionIds),
+    churnGeometry: keepKnownSession(data.churnGeometry, sessionIds),
+    assistantFeatures: keepKnownSession(data.assistantFeatures, sessionIds),
+    deceitSignals: keepKnownSession(data.deceitSignals, sessionIds),
+    workflows: keepKnownSession(data.workflows, sessionIds),
+  };
+}
+
 /** Render the active view. Returns null for an unknown view (defensive). */
 export function renderView(view: View, ctx: ViewContext): ReactNode {
   const renderer = VIEW_RENDERERS[view];
   if (!renderer) return null;
-  return renderer({
-    ...ctx,
-    data: filterViewDataByTime(ctx.data, ctx.filter),
-  });
+  // Compose both global filters: narrow by time first, then by project.
+  const data = filterViewDataByProject(
+    filterViewDataByTime(ctx.data, ctx.filter),
+    ctx.filter
+  );
+  return renderer({ ...ctx, data });
 }
