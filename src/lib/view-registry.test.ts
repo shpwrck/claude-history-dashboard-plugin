@@ -15,6 +15,7 @@ import {
 } from './nav-prefs';
 import type {
   HistoryEntry,
+  PromptAnalysis,
   Session,
   SessionTokenData,
   TokenEntry,
@@ -105,6 +106,27 @@ function tokenRow(
     row.projectShort = project.split('/').pop();
   }
   return row;
+}
+
+function promptRow(sessionId: string, project: string): PromptAnalysis {
+  return {
+    sessionId,
+    project,
+    promptTurnCount: 2,
+    totalPromptChars: 120,
+    avgPromptChars: 60,
+    sentenceCount: 2,
+    questionTurnCount: 1,
+    imperativeTurnCount: 1,
+    filePathMentionCount: 1,
+    backtickIdentifierCount: 0,
+    specificityMarkerCount: 1,
+    lowSpecificityTurnCount: 0,
+    hedgingTurnCount: 0,
+    constraintTurnCount: 1,
+    pastedContentTurnCount: 0,
+    pastedContentCount: 0,
+  };
 }
 
 function emptyData(overrides: Partial<ViewData> = {}): ViewData {
@@ -276,6 +298,10 @@ describe('project-scoped view data filtering', () => {
           thinkingByteLen: 0,
         },
       ],
+      promptAnalysis: [
+        promptRow('alpha-1', alphaProject),
+        promptRow('beta-1', betaProject),
+      ],
       deceitSignals: [
         {
           sessionId: 'alpha-1',
@@ -344,6 +370,7 @@ describe('project-scoped view data filtering', () => {
     expect(filtered.runtimeEvents.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.churnGeometry.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.assistantFeatures.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    expect(filtered.promptAnalysis.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.deceitSignals.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.workflows.map((item) => item.sessionId)).toEqual(['alpha-1']);
   });
@@ -515,6 +542,24 @@ describe('filtered empty-state guard', () => {
 
     expect(filtered.tokenData).toEqual([]);
     expect(shouldShowFilteredEmptyState('summary', filter, data, filtered)).toBe(true);
+  });
+
+  it('shows the prompt analyzer filtered empty state when active filters remove all prompt rows', () => {
+    const latest = Date.parse('2026-06-11T12:00:00.000Z');
+    const old = latest - 10 * 24 * HOUR;
+    const filter: DashboardFilter = { time: '24h', project: ALL_PROJECTS };
+    const data = emptyData({
+      entries: [historyEntry('anchor-session', '/repo/anchor', latest)],
+      sessions: [
+        session('old-session', '/repo/old', old),
+        session('anchor-session', '/repo/anchor', latest),
+      ],
+      promptAnalysis: [promptRow('old-session', '/repo/old')],
+    });
+    const filtered = filterViewDataByTime(data, filter);
+
+    expect(filtered.promptAnalysis).toEqual([]);
+    expect(shouldShowFilteredEmptyState('prompts', filter, data, filtered)).toBe(true);
   });
 
   it('does not replace a naturally empty view or an unfiltered view', () => {

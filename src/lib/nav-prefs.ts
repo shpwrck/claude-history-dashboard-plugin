@@ -195,6 +195,7 @@ export const NAV_ITEMS: readonly {
   { view: 'agents', label: 'Agents', icon: UsersIcon, domain: 'workflow-hygiene' },
   { view: 'automation', label: 'Automation', icon: RobotIcon, domain: 'workflow-hygiene' },
   { view: 'workflows', label: 'Workflows', icon: ProjectDiagramIcon, domain: 'workflow-hygiene' },
+  { view: 'prompts', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
   { view: 'shadow-calls', label: 'Shadow Calls', icon: FlaskIcon, domain: 'workflow-hygiene', serverOnly: true },
   { view: 'patterns', label: 'Session Patterns', icon: ThLargeIcon, domain: 'workflow-hygiene' },
   // Not serverOnly: like Workflows, Memories accepts the user's own uploaded

@@ -150,6 +150,11 @@ const Memories = lazy(() =>
 const WorkflowList = lazy(() =>
   import('../components/WorkflowList').then((m) => ({ default: m.WorkflowListPf }))
 );
+const PromptAnalyzer = lazy(() =>
+  import('../components/PromptAnalyzer').then((m) => ({
+    default: m.PromptAnalyzerPf,
+  }))
+);
 const ContextHealth = lazy(() =>
   import('../components/ContextHealth').then((m) => ({
     default: m.ContextHealthPf,
@@ -662,6 +667,13 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
+  prompts: ({ data: d }) => (
+    <PromptAnalyzer
+      promptAnalysis={d.promptAnalysis}
+      timelines={d.timelines}
+      apiErrors={d.apiErrors}
+    />
+  ),
   errors: ({ data: d, nav: n }) => (
     <ErrorRetry
       toolData={d.toolData}
@@ -789,6 +801,7 @@ const VIEW_FILTERABLE_DATA: Partial<Record<View, FilterableViewDataKey[]>> = {
   cost: ['tokenData', 'toolData'],
   activity: ['sessions'],
   automation: ['sessions'],
+  prompts: ['promptAnalysis'],
   patterns: ['timelines'],
 };
 
@@ -850,6 +863,7 @@ export function filterViewDataByProject(
     runtimeEvents: keepKnownSession(data.runtimeEvents, sessionIds),
     churnGeometry: keepKnownSession(data.churnGeometry, sessionIds),
     assistantFeatures: keepKnownSession(data.assistantFeatures, sessionIds),
+    promptAnalysis: keepKnownSession(data.promptAnalysis, sessionIds),
     deceitSignals: keepKnownSession(data.deceitSignals, sessionIds),
     workflows: keepKnownSession(data.workflows, sessionIds),
   };

@@ -320,7 +320,7 @@ export interface RepoGroup {
   worktrees: RepoChild[];
 }
 
-export type View = 'home' | 'evaluator' | 'recommendations' | 'sessions' | 'projects' | 'search' | 'stats' | 'tokens' | 'tools' | 'files' | 'summary' | 'cost' | 'timeline' | 'activity' | 'automation' | 'workflows' | 'errors' | 'permissions' | 'agents' | 'memories' | 'context' | 'conversation' | 'patterns' | 'shadow-calls' | 'report-card' | 'review-queue' | 'tasks' | 'teams' | 'plans' | 'pulse' | 'adoption' | 'enterprise';
+export type View = 'home' | 'evaluator' | 'recommendations' | 'sessions' | 'projects' | 'search' | 'stats' | 'tokens' | 'tools' | 'files' | 'summary' | 'cost' | 'timeline' | 'activity' | 'automation' | 'workflows' | 'errors' | 'permissions' | 'agents' | 'memories' | 'context' | 'conversation' | 'prompts' | 'patterns' | 'shadow-calls' | 'report-card' | 'review-queue' | 'tasks' | 'teams' | 'plans' | 'pulse' | 'adoption' | 'enterprise';
 
 /**
  * Action-domain taxonomy (epic #490). The six genuine "what am I trying to do"
