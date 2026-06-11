@@ -30,8 +30,18 @@ import { readWorkflowsSync } from './read-workflows.mjs';
 import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
-const CLAUDE = process.env.CLAUDE_DIR || join(homedir(), '.claude');
-const CLAUDE_HOME = process.env.CLAUDE_HOME_DIR || dirname(CLAUDE);
+const LIB = join(PROJECT_DIR, 'src', 'lib');
+const { resolveSources } = await import(join(LIB, 'sources.ts'));
+const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
+const DEFAULT_SOURCE = DATA_SOURCES[0];
+const PROJECTS = DEFAULT_SOURCE.historyDir;
+const CLAUDE = dirname(PROJECTS);
+// Top-level Claude Code config — carries mcpServers (global) plus a `projects`
+// map keyed by absolute project path with per-project mcpServers and
+// enabledMcpjsonServers.
+const CLAUDE_JSON =
+  DEFAULT_SOURCE.configFile || join(dirname(CLAUDE), '.claude.json');
+const CLAUDE_HOME = dirname(CLAUDE_JSON);
 // CHD_CACHE_DIR: all install-dir writes land here so a plugin reinstall never
 // clobbers accumulated runtime state. Defaults to ~/.claude/.cache/chd/ — a
 // subdirectory of the data root that is preserved across plugin updates.
@@ -42,7 +52,6 @@ export const CHD_CACHE_DIR =
 const SCOPED_INGEST = /^(1|true|yes|on)$/i.test(
   String(process.env.CHD_SCOPED_INGEST || '')
 );
-const PROJECTS = join(CLAUDE, 'projects');
 function splitPathList(raw) {
   if (!raw) return [];
   return String(raw)
@@ -194,10 +203,6 @@ const AGENTS_DIR = join(CLAUDE, 'agents');
 const COMMANDS_DIR = join(CLAUDE, 'commands');
 const PLUGINS_REGISTRY = join(CLAUDE, 'plugins', 'installed_plugins.json');
 const PLUGINS_CACHE = join(CLAUDE, 'plugins', 'cache');
-// Top-level Claude Code config — carries mcpServers (global) plus a `projects`
-// map keyed by absolute project path with per-project mcpServers and
-// enabledMcpjsonServers.
-const CLAUDE_JSON = join(CLAUDE_HOME, '.claude.json');
 // ── #539 ingest artifacts — top-level ~/.claude files/dirs not derived from
 // transcripts (per-artifact child issues #559–#569, #572). All optional; every
 // reader below degrades to an empty value when the source is missing/malformed.
@@ -216,7 +221,6 @@ const REVIEW_EVENTS_CACHE =
   process.env.DASHBOARD_REVIEW_EVENTS_CACHE_PATH ||
   join(CHD_CACHE_DIR, 'review-events', 'github-review-events.json');
 
-const LIB = join(PROJECT_DIR, 'src', 'lib');
 const { slimSessionTimeline } = await import(
   join(LIB, 'parse-timeline.ts')
 );

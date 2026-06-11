@@ -85,6 +85,13 @@ import {
 import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
 
 const PROJECT_DIR = join(fileURLToPath(import.meta.url), '..', '..');
+const { resolveSources } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'sources.ts')
+);
+const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
+const DEFAULT_SOURCE = DATA_SOURCES[0];
+const PROJECTS = DEFAULT_SOURCE.historyDir;
+const CLAUDE = dirname(PROJECTS);
 // CHD_CACHE_DIR: all install-dir runtime writes land here so a plugin reinstall
 // never clobbers accumulated state. Defaults to ~/.claude/.cache/chd/ — a
 // subdirectory of the Claude data root that survives plugin updates.
@@ -92,8 +99,7 @@ const PROJECT_DIR = join(fileURLToPath(import.meta.url), '..', '..');
 // CHD_CACHE_DIR is only the fallback base for any path not explicitly overridden.
 // Reuses the same env var as ingest.mjs so a single override covers both (#1336).
 const CHD_CACHE_DIR =
-  process.env.CHD_CACHE_DIR ||
-  join(process.env.CLAUDE_DIR || join(homedir(), '.claude'), '.cache', 'chd');
+  process.env.CHD_CACHE_DIR || join(CLAUDE, '.cache', 'chd');
 // The usage-gauge core (#626) lives in src/lib/*.ts so its pure logic
 // (credential walk, header parsing, payload assembly) is unit-testable without
 // booting a server. Imported dynamically (like ingest.mjs's .ts parsers) so it
@@ -184,8 +190,6 @@ const { HIGH_CHURN } = await import(
 // container neither is set, so these resolve to the real bundled dist/ and the
 // bind-mounted ~/.claude exactly as before.
 const DIST = process.env.DIST_DIR || join(PROJECT_DIR, 'dist');
-const CLAUDE = process.env.CLAUDE_DIR || join(homedir(), '.claude');
-const PROJECTS = join(CLAUDE, 'projects');
 function splitPathList(raw) {
   if (!raw) return [];
   return String(raw)
