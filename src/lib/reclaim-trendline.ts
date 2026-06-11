@@ -70,12 +70,24 @@ export interface CoverageGauge {
   coverage: number;
 }
 
+/** One category's independent coverage row for the compass breakdown. */
+export interface CategoryCoverageBreakdown {
+  /** Recommendation category whose claims addressed priced cells. */
+  category: RecCategory;
+  /** Priced value of this category's addressed cell-union. */
+  claimedUsd: number;
+  /** `claimedUsd / totalBill` in [0,1] (0 when the bill is empty). */
+  coverage: number;
+}
+
 /** Everything the CostAttribution reclaim cards need, all from the rollup. */
 export interface ReclaimTrendlineData {
   /** Per-ISO-week trendline points, ascending by week. */
   points: ReclaimWeekPoint[];
   /** The window-wide independent coverage gauge. */
   gauge: CoverageGauge;
+  /** Per-category coverage rows, descending by claimed USD. */
+  byCategory: CategoryCoverageBreakdown[];
   /** Per-lever marginal, descending by booked USD. */
   levers: LeverMarginal[];
   /** Window-wide reclaim total (`sum(marginal)` ≡ `billOriginal − billFinal`). */
@@ -155,6 +167,10 @@ export function buildReclaimTrendline(
   // Window-wide cascade → the independent coverage gauge + per-lever marginal.
   const whole = rollupCascade(runReclaimCascade(claims, tokenData, onReject));
   const gauge = coverageGauge(whole.coverageByCategory, whole.totalBill);
+  const byCategory = categoryCoverageBreakdown(
+    whole.coverageByCategory,
+    whole.totalBill
+  );
   const levers: LeverMarginal[] = Object.entries(whole.byLever)
     .map(([leverId, marginalUsd]) => ({ leverId, marginalUsd }))
     .sort((a, b) => b.marginalUsd - a.marginalUsd);
@@ -173,7 +189,7 @@ export function buildReclaimTrendline(
       };
     });
 
-  return { points, gauge, levers, totalReclaim: whole.total };
+  return { points, gauge, byCategory, levers, totalReclaim: whole.total };
 }
 
 /**
@@ -203,4 +219,23 @@ function coverageGauge(
     totalBill,
     coverage: totalBill > 0 ? claimedUsd / totalBill : 0,
   };
+}
+
+function categoryCoverageBreakdown(
+  coverageByCategory: Partial<Record<RecCategory, CategoryCoverage>>,
+  totalBill: number
+): CategoryCoverageBreakdown[] {
+  return (Object.entries(coverageByCategory) as [RecCategory, CategoryCoverage][])
+    .map(([category, cov]) => {
+      const claimedUsd = Math.max(0, Math.min(cov.claimedUsd, totalBill));
+      return {
+        category,
+        claimedUsd,
+        coverage: totalBill > 0 ? Math.min(1, claimedUsd / totalBill) : 0,
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.claimedUsd - a.claimedUsd || a.category.localeCompare(b.category)
+    );
 }

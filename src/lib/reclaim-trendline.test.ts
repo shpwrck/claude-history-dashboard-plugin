@@ -52,7 +52,7 @@ const claim = (
 const rec = (id: string, reclaim: ReclaimClaim): Recommendation =>
   ({
     id,
-    category: 'cost',
+    category: reclaim.category,
     severity: 'info',
     title: id,
     detail: '',
@@ -147,6 +147,69 @@ describe('buildReclaimTrendline', () => {
     expect(out.totalReclaim).toBeCloseTo(4, 6);
   });
 
+  it('breaks coverage out per detector category', () => {
+    // One session, two disjoint dollar-opinion cells:
+    // - cost owns the output pool ($25)
+    // - context owns the input pool ($5) as a flag-only advisory claim
+    // The category rows should make the coverage gap legible.
+    const td = [
+      session('s1', 'claude-opus-4-7', [
+        entry({ inputTokens: 1_000_000, outputTokens: 1_000_000 }),
+      ]),
+    ];
+    const recs = [
+      rec(
+        'cost.output-swap',
+        claim({
+          leverId: 'cost.output-swap',
+          category: 'cost',
+          orderKey: 80,
+          ownedPools: ['output'],
+          scopeKeys: [scopeKeyOf('s1', 'claude-opus-4-7')],
+          counterfactual: { kind: 'reprice', toModel: 'claude-haiku-4-5-20251001' },
+        })
+      ),
+      rec(
+        'context.input-note',
+        claim({
+          leverId: 'context.input-note',
+          category: 'context',
+          orderKey: 40,
+          ownedPools: ['input'],
+          scopeKeys: [scopeKeyOf('s1', 'claude-opus-4-7')],
+          counterfactual: { kind: 'flag-only' },
+        })
+      ),
+    ];
+
+    const out = buildReclaimTrendline(recs, td);
+    const byCategory = new Map(
+      out.byCategory.map((row) => [row.category, row])
+    );
+    const cost = byCategory.get('cost');
+    const context = byCategory.get('context');
+
+    expect(out.byCategory.map((row) => row.category)).toEqual([
+      'cost',
+      'context',
+    ]);
+    expect(cost).toBeDefined();
+    expect(context).toBeDefined();
+    expect(cost!.claimedUsd).toBeCloseTo(25, 6);
+    expect(context!.claimedUsd).toBeCloseTo(5, 6);
+    expect(cost!.coverage).toBeCloseTo(25 / 30, 6);
+    expect(context!.coverage).toBeCloseTo(5 / 30, 6);
+    expect(context!.coverage).toBeLessThan(cost!.coverage);
+    for (const row of out.byCategory) {
+      expect(row.coverage).toBeGreaterThanOrEqual(0);
+      expect(row.coverage).toBeLessThanOrEqual(1);
+    }
+    expect(out.gauge.claimedUsd).toBeCloseTo(
+      cost!.claimedUsd + context!.claimedUsd,
+      6
+    );
+  });
+
   it('exposes a per-lever marginal breakdown sorted descending', () => {
     // Two disjoint scopes, two levers. Scope 1 input 1M ($5→$1=$4); scope 2
     // input 0.5M ($2.5→$0.5=$2). Levers must appear with their booked marginals.
@@ -194,6 +257,7 @@ describe('buildReclaimTrendline', () => {
     expect(out.gauge.totalBill).toBe(0);
     expect(out.gauge.claimedUsd).toBe(0);
     expect(out.gauge.coverage).toBe(0);
+    expect(out.byCategory).toEqual([]);
   });
 
   it('skips entries with an unparseable timestamp without throwing', () => {
