@@ -459,6 +459,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     const runtimeEvents = [{ sessionId: 's1' }] as unknown as RecommendationInput['runtimeEvents'];
     const taskSteering = [{ sessionId: 's1' }] as unknown as RecommendationInput['taskSteering'];
     const churnGeometry = [{ sessionId: 's1' }] as unknown as RecommendationInput['churnGeometry'];
+    const taskSuccess = [{ sessionId: 's1' }] as unknown as RecommendationInput['taskSuccess'];
     const toolInventories = [{ sessionId: 's1' }] as unknown as RecommendationInput['toolInventories'];
     const promptAnalysis = [{ sessionId: 's1', promptTurnCount: 1, lowSpecificityTurnCount: 0 }] as unknown as RecommendationInput['promptAnalysis'];
     const mapped = assembleRecommendationInput({
@@ -473,6 +474,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       runtimeEvents,
       taskSteering,
       churnGeometry,
+      taskSuccess,
       toolInventories,
       promptAnalysis,
     });
@@ -480,6 +482,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     expect(mapped.runtimeEvents).toBe(runtimeEvents);
     expect(mapped.taskSteering).toBe(taskSteering);
     expect(mapped.churnGeometry).toBe(churnGeometry);
+    expect(mapped.taskSuccess).toBe(taskSuccess);
     expect(mapped.toolInventories).toBe(toolInventories);
     expect(mapped.promptAnalysis).toBe(promptAnalysis);
     expect(mapped.liveConfig).toBeNull();
@@ -531,6 +534,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       parseToolInventory: noop,
       parseAssistantFeatures: noop,
       parseDeceitSignals: noop,
+      parseTaskSuccess: noop,
       deriveEntries: noop,
     } as unknown as Parameters<typeof makeSessionSignals>[0]);
     // The ingest caller builds RecommendationInput from the signal datasetKeys
@@ -563,6 +567,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'runtimeEvents',
       'taskSteering',
       'churnGeometry',
+      'taskSuccess',
       'toolInventories',
       'modelPinSavings',
       'repoMap',

@@ -1696,6 +1696,7 @@ export function assembleDataset() {
   const churnGeometry = [];
   const assistantFeatures = [];
   const deceitSignals = [];
+  const taskSuccess = [];
   const entries = [];
   const transcriptSessionIds = new Set();
 
@@ -1717,6 +1718,7 @@ export function assembleDataset() {
     churnGeometry,
     assistantFeatures,
     deceitSignals,
+    taskSuccess,
   };
   for (const r of rows) {
     transcriptSessionIds.add(r.session_id);
@@ -1847,6 +1849,7 @@ export function assembleDataset() {
       churnGeometry,
       assistantFeatures,
       deceitSignals,
+      taskSuccess,
     }[s.datasetKey];
   }
   const recommendations = buildRecommendations(
@@ -1940,6 +1943,7 @@ export function assembleDataset() {
     liveConfig,
     assistantFeatures,
     deceitSignals,
+    taskSuccess,
     shadowCalls,
     workflows,
     repoMap,

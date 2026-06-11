@@ -89,6 +89,13 @@ export interface SignalParsers {
   parseToolInventory: (merged: string, name: string) => unknown;
   parseAssistantFeatures: (merged: string, name: string) => unknown;
   parseDeceitSignals: (merged: string, name: string) => unknown;
+  parseTaskSuccess: (
+    merged: string,
+    topText: string,
+    name: string,
+    fallbackProject: string | null,
+    title: string | null,
+  ) => unknown;
   /** Derives history-style entries from the top-level transcript. */
   deriveEntries: (
     topText: string,
@@ -214,6 +221,16 @@ export function makeSessionSignals(p: SignalParsers): SessionSignal[] {
       aggregate: 'push-truthy',
       parseGuard: 'guarded',
       datasetKey: 'churnGeometry',
+    },
+    {
+      // Cost-blind per-task success proxy (#1289). Appended so the existing
+      // content_hash part order stays stable.
+      id: 'taskSuccess',
+      column: 'task_success_json',
+      parse: (c) =>
+        p.parseTaskSuccess(c.merged, c.topText, c.name, c.project, c.title) ?? [],
+      aggregate: 'spread',
+      datasetKey: 'taskSuccess',
     },
   ];
 }

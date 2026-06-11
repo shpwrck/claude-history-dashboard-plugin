@@ -126,6 +126,7 @@ function assembleTranscriptDataset(rows, sessionSignals) {
     churnGeometry: [],
     assistantFeatures: [],
     deceitSignals: [],
+    taskSuccess: [],
     entries: [],
   };
   const out = {
@@ -140,6 +141,7 @@ function assembleTranscriptDataset(rows, sessionSignals) {
     churnGeometry: dataset.churnGeometry,
     assistantFeatures: dataset.assistantFeatures,
     deceitSignals: dataset.deceitSignals,
+    taskSuccess: dataset.taskSuccess,
   };
 
   for (const row of sortRows(rows)) {

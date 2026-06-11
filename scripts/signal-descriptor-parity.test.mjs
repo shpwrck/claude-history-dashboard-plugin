@@ -20,7 +20,7 @@
 //       truth) over the identical inputs.
 //
 // We assert (a) === (b) for the SHA-1 content_hash (including the exact part
-// ORDER: project, title, then the 13 signals) and for the assembled dataset
+// ORDER: project, title, then the 14 signals) and for the assembled dataset
 // (with the non-deterministic time fields — generatedAt/windowStart/windowEnd —
 // normalized out, since they derive from Date.now()). Because the inputs are
 // fixed parsed-value maps, the parsers themselves are stubbed to return those
@@ -81,6 +81,7 @@ const FIXTURES = [
         sessionId: 'sess-1',
         files: [{ filePath: 'src/a.ts', grossLines: 42, netLines: 0 }],
       },
+      taskSuccess: [{ sessionId: 'sess-1', taskIndex: 0, successScore: 1 }],
     },
   },
   {
@@ -101,6 +102,7 @@ const FIXTURES = [
       assistantFeatures: null,
       deceit: null,
       churnGeometry: null,
+      taskSuccess: null,
     },
   },
   {
@@ -138,6 +140,7 @@ const FIXTURES = [
       assistantFeatures: { sessionId: 'sess-3', thinkingTurns: 0 },
       deceit: { sessionId: 'sess-3', unbackedClaimCount: 0 },
       churnGeometry: { sessionId: 'sess-3', files: [] },
+      taskSuccess: [{ sessionId: 'sess-3', taskIndex: 0, successScore: 0.5 }],
     },
   },
 ];
@@ -160,6 +163,7 @@ function stubParsersFor(fx) {
     parseAssistantFeatures: () => r.assistantFeatures,
     parseDeceitSignals: () => r.deceit,
     parseChurnGeometry: () => r.churnGeometry,
+    parseTaskSuccess: () => r.taskSuccess,
     deriveEntries: () => r.entries,
   };
 }
@@ -183,6 +187,7 @@ function goldenIngest(fx) {
   const assistantFeatures = r.assistantFeatures;
   const deceit = r.deceit;
   const churnGeometry = r.churnGeometry ?? null;
+  const taskSuccess = r.taskSuccess ?? [];
   const title = fx.title;
   const entries = r.entries;
 
@@ -199,6 +204,7 @@ function goldenIngest(fx) {
   const assistantFeaturesJson = JSON.stringify(assistantFeatures);
   const deceitJson = JSON.stringify(deceit);
   const churnGeometryJson = JSON.stringify(churnGeometry);
+  const taskSuccessJson = JSON.stringify(taskSuccess);
 
   const ch = createHash('sha1');
   ch.update(fx.project ?? '');
@@ -219,6 +225,7 @@ function goldenIngest(fx) {
     assistantFeaturesJson,
     deceitJson,
     churnGeometryJson,
+    taskSuccessJson,
   ]) {
     ch.update(part);
     ch.update('\0');
@@ -247,6 +254,7 @@ function goldenIngest(fx) {
       assistant_features_json: assistantFeaturesJson,
       deceit_signals_json: deceitJson,
       churn_geometry_json: churnGeometryJson,
+      task_success_json: taskSuccessJson,
     },
   };
 }
@@ -297,6 +305,7 @@ function descriptorIngest(fx) {
     assistant_features_json: json.assistantFeatures,
     deceit_signals_json: json.deceitSignals,
     churn_geometry_json: json.churnGeometry,
+    task_success_json: json.taskSuccess,
   };
   return { contentHash, row };
 }
@@ -318,6 +327,7 @@ function goldenAssemble(rows) {
   const assistantFeatures = [];
   const deceitSignals = [];
   const churnGeometry = [];
+  const taskSuccess = [];
   const entries = [];
   for (const r of rows) {
     const token = JSON.parse(r.token_json);
@@ -349,6 +359,7 @@ function goldenAssemble(rows) {
       ? JSON.parse(r.churn_geometry_json)
       : null;
     if (cg) churnGeometry.push(cg);
+    for (const ts of JSON.parse(r.task_success_json) || []) taskSuccess.push(ts);
     for (const en of JSON.parse(r.entries_json) || []) entries.push(en);
   }
   return {
@@ -366,6 +377,7 @@ function goldenAssemble(rows) {
     assistantFeatures,
     deceitSignals,
     churnGeometry,
+    taskSuccess,
   };
 }
 
@@ -387,6 +399,7 @@ function descriptorAssemble(rows) {
   const assistantFeatures = [];
   const deceitSignals = [];
   const churnGeometry = [];
+  const taskSuccess = [];
   const entries = [];
   const out = {
     tokenData,
@@ -400,6 +413,7 @@ function descriptorAssemble(rows) {
     assistantFeatures,
     deceitSignals,
     churnGeometry,
+    taskSuccess,
   };
   for (const r of rows) {
     for (const s of SIGNALS) {
@@ -440,6 +454,7 @@ function descriptorAssemble(rows) {
     assistantFeatures,
     deceitSignals,
     churnGeometry,
+    taskSuccess,
   };
 }
 
@@ -461,7 +476,7 @@ test('content_hash: descriptor === pre-refactor inline, per row', () => {
   }
 });
 
-test('content_hash part order is project, title, then the 13 signals', () => {
+test('content_hash part order is project, title, then the 14 signals', () => {
   const ids = makeSessionSignals(stubParsersFor(FIXTURES[0])).map((s) => s.id);
   assert.deepEqual(ids, [
     'token',
@@ -477,6 +492,7 @@ test('content_hash part order is project, title, then the 13 signals', () => {
     'assistantFeatures',
     'deceitSignals',
     'churnGeometry',
+    'taskSuccess',
   ]);
 });
 
@@ -566,6 +582,10 @@ test('assembleDataset read-back matches frozen golden snapshot', () => {
         files: [{ filePath: 'src/a.ts', grossLines: 42, netLines: 0 }],
       },
       { sessionId: 'sess-3', files: [] },
+    ],
+    taskSuccess: [
+      { sessionId: 'sess-1', taskIndex: 0, successScore: 1 },
+      { sessionId: 'sess-3', taskIndex: 0, successScore: 0.5 },
     ],
   });
 });

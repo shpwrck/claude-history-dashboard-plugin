@@ -20,6 +20,7 @@ const { parseAssistantFeatures } = await import(
 const { parseDeceitSignals } = await import(
   join(LIB, 'parse-deceit-signals.ts')
 );
+const { parseTaskSuccess } = await import(join(LIB, 'parse-task-success.ts'));
 const { parseToolInventory } = await import(join(LIB, 'parse-tool-inventory.ts'));
 const { parseSessionTimeline } = await import(join(LIB, 'parse-timeline.ts'));
 const { parseApiErrors } = await import(join(LIB, 'parse-errors.ts'));
@@ -136,6 +137,8 @@ export const SESSION_SIGNALS = makeSessionSignals({
   parseToolInventory,
   parseAssistantFeatures,
   parseDeceitSignals,
+  parseTaskSuccess: (merged, topText, name, fallbackProject, title) =>
+    parseTaskSuccess(merged, name, { topText, fallbackProject, title }),
   deriveEntries,
 });
 

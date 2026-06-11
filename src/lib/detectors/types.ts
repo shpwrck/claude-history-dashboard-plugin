@@ -27,6 +27,7 @@ import type { AgentSettingEvent, SessionAttribution } from '../parse-agents';
 import type { RuntimeEvents } from '../parse-runtime-events';
 import type { TaskSteering } from '../parse-steering';
 import type { ChurnGeometrySession } from '../parse-churn-geometry';
+import type { TaskSuccessProxy } from '../parse-task-success';
 import type { ToolInventory } from '../parse-tool-inventory';
 import type { ShadowCallAggregate } from '../parse-shadow-calls';
 // ── #539 ingest artifacts (per-artifact child issues #559–#569, #572) ──────
@@ -399,6 +400,12 @@ export interface RecommendationInput {
    * autonomy detectors consume this; existing fixtures can omit it.
    */
   taskSteering?: TaskSteering[] | null;
+  /**
+   * Per-stop-hook task success proxy (#1289). Optional: later autonomy
+   * detectors consume this; existing fixtures and transcript-free datasets can
+   * omit it.
+   */
+  taskSuccess?: TaskSuccessProxy[] | null;
   /** Line-level edit geometry from toolUseResult.structuredPatch (#597). */
   churnGeometry?: ChurnGeometrySession[];
   /** Per-session tool inventory (parse-tool-inventory). Feeds idle-tool/skill detectors. */

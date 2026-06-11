@@ -148,6 +148,7 @@ function emptyData(overrides: Partial<ViewData> = {}): ViewData {
     runtimeEvents: [],
     taskSteering: [],
     churnGeometry: [],
+    taskSuccess: [],
     assistantFeatures: [],
     promptAnalysis: [],
     deceitSignals: [],
@@ -341,6 +342,44 @@ describe('project-scoped view data filtering', () => {
         { sessionId: 'alpha-1', edits: [], files: [] },
         { sessionId: 'beta-1', edits: [], files: [] },
       ],
+      taskSuccess: [
+        {
+          sessionId: 'alpha-1',
+          taskIndex: 0,
+          startTime: '',
+          endTime: '',
+          wallClockMs: 0,
+          verdict: 'none',
+          agentClaim: 'none',
+          confidence: 'unknown',
+          successScore: 0.5,
+          backedByMutation: false,
+          mutatingToolCount: 0,
+          toolCallCount: 0,
+          toolResultCount: 0,
+          toolErrorCount: 0,
+          toolErrorRate: 0,
+          errorPenalty: 0,
+        },
+        {
+          sessionId: 'beta-1',
+          taskIndex: 0,
+          startTime: '',
+          endTime: '',
+          wallClockMs: 0,
+          verdict: 'none',
+          agentClaim: 'none',
+          confidence: 'unknown',
+          successScore: 0.5,
+          backedByMutation: false,
+          mutatingToolCount: 0,
+          toolCallCount: 0,
+          toolResultCount: 0,
+          toolErrorCount: 0,
+          toolErrorRate: 0,
+          errorPenalty: 0,
+        },
+      ],
       assistantFeatures: [
         {
           sessionId: 'alpha-1',
@@ -437,6 +476,7 @@ describe('project-scoped view data filtering', () => {
     expect(filtered.runtimeEvents.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.taskSteering.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.churnGeometry.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    expect(filtered.taskSuccess.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.assistantFeatures.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.promptAnalysis.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.deceitSignals.map((item) => item.sessionId)).toEqual(['alpha-1']);

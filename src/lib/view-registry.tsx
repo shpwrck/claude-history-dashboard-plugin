@@ -44,6 +44,7 @@ import type { AgentSettingEvent, SessionAttribution } from './parse-agents';
 import type { RuntimeEvents } from './parse-runtime-events';
 import type { TaskSteering } from './parse-steering';
 import type { ChurnGeometrySession } from './parse-churn-geometry';
+import type { TaskSuccessProxy } from './parse-task-success';
 import type { ProjectMemories } from './parse-memories';
 import type { WorkflowRun } from './parse-workflows';
 // #539 ingest artifacts (server-only; empty on the SPA/upload dataset).
@@ -235,6 +236,7 @@ export interface ViewData {
   runtimeEvents: RuntimeEvents[];
   taskSteering: TaskSteering[];
   churnGeometry: ChurnGeometrySession[];
+  taskSuccess: TaskSuccessProxy[];
   assistantFeatures: AssistantFeatures[];
   promptAnalysis: PromptAnalysis[];
   deceitSignals: DeceitSignals[];
@@ -478,6 +480,7 @@ export function filterViewDataByTime(
     runtimeEvents,
     taskSteering: filterBySessionId(data.taskSteering, sessionIds),
     churnGeometry: filterBySessionId(data.churnGeometry, sessionIds),
+    taskSuccess: filterBySessionId(data.taskSuccess, sessionIds),
     assistantFeatures: filterBySessionId(data.assistantFeatures, sessionIds),
     promptAnalysis: filterBySessionId(data.promptAnalysis, sessionIds),
     deceitSignals: filterBySessionId(data.deceitSignals, sessionIds),
@@ -525,6 +528,7 @@ export const VIEW_RENDERERS: Partial<
       runtimeEvents={d.runtimeEvents}
       taskSteering={d.taskSteering}
       churnGeometry={d.churnGeometry}
+      taskSuccess={d.taskSuccess}
       toolInventories={d.toolInventories}
       liveConfig={d.liveConfig}
       assistantFeatures={d.assistantFeatures}
@@ -561,6 +565,7 @@ export const VIEW_RENDERERS: Partial<
       runtimeEvents={d.runtimeEvents}
       taskSteering={d.taskSteering}
       churnGeometry={d.churnGeometry}
+      taskSuccess={d.taskSuccess}
       toolInventories={d.toolInventories}
       liveConfig={d.liveConfig}
       assistantFeatures={d.assistantFeatures}
@@ -890,6 +895,7 @@ export function filterViewDataByProject(
     runtimeEvents: keepKnownSession(data.runtimeEvents, sessionIds),
     taskSteering: keepKnownSession(data.taskSteering, sessionIds),
     churnGeometry: keepKnownSession(data.churnGeometry, sessionIds),
+    taskSuccess: keepKnownSession(data.taskSuccess, sessionIds),
     assistantFeatures: keepKnownSession(data.assistantFeatures, sessionIds),
     promptAnalysis: keepKnownSession(data.promptAnalysis, sessionIds),
     deceitSignals: keepKnownSession(data.deceitSignals, sessionIds),
