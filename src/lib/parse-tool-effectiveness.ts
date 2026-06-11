@@ -111,7 +111,7 @@ function isUserPrompt(entry: TimelineEntry): boolean {
   // tool_results get kind === 'tool_result'. Skip empty summaries (often
   // synthetic / continuation entries).
   if (entry.kind !== 'user') return false;
-  return entry.summary.length > 0;
+  return (entry.summaryLen ?? entry.summary?.length ?? 0) > 0;
 }
 
 function hasUserMessageBetween(

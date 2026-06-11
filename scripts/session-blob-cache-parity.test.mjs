@@ -184,6 +184,31 @@ test('(a) ingest()+assembleDataset() round-trips; a second unchanged run is byte
     assert.ok(cold.entries.length > 0, 'entries non-empty (entries signal)');
     assert.ok(cold.tokenData.length > 0, 'tokenData non-empty (token signal)');
     assert.ok(cold.timelines.length > 0, 'timelines non-empty (timeline signal)');
+    const bulkTimelineEntries = cold.timelines.flatMap((timeline) => timeline.entries);
+    assert.equal(
+      bulkTimelineEntries.some((entry) => Object.hasOwn(entry, 'summary')),
+      false,
+      'bulk timelines strip every entries[].summary key'
+    );
+    for (const entry of bulkTimelineEntries) {
+      assert.equal(typeof entry.summaryLen, 'number', 'bulk entry carries summaryLen');
+      assert.equal(typeof entry.hasCode, 'boolean', 'bulk entry carries hasCode');
+      assert.equal(typeof entry.isQuestion, 'boolean', 'bulk entry carries isQuestion');
+    }
+    assert.equal(
+      cold.timelines.find((timeline) => timeline.sessionId === 'sess-alpha')
+        ?.firstPromptPreview,
+      SESSIONS['sess-alpha'].prompt,
+      'bulk timeline carries the first prompt preview'
+    );
+    const alphaDetail = JSON.parse(
+      ingest.getSessionTimelineDetail('sess-alpha')?.json ?? '{}'
+    );
+    assert.equal(
+      alphaDetail.entries?.some((entry) => Object.hasOwn(entry, 'summary')),
+      true,
+      'per-session timeline detail keeps full summaries'
+    );
     assert.deepEqual(
       cold.promptAnalysis.map((row) => row.sessionId).sort(),
       Object.keys(SESSIONS).sort(),

@@ -120,6 +120,32 @@ describe('computeModelRecommendations — bucket classification', () => {
     expect(turn.features.outputTokens).toBe(50)
   })
 
+  it('classifies stripped bulk turns from summaryLen and carries the first prompt preview', () => {
+    const t0 = nextTs()
+    const tl: SessionTimeline = {
+      ...timeline('s-derived', [
+        {
+          timestamp: t0,
+          kind: 'user',
+          summaryLen: 600,
+          hasCode: false,
+          isQuestion: false,
+        },
+      ]),
+      firstPromptPreview: 'first stripped prompt',
+      slim: true,
+    }
+    const tok = tokenData('s-derived', 'claude-opus-4-8', [
+      tokenEntry({ timestamp: t0, inputTokens: 100, outputTokens: 50 }),
+    ])
+
+    const turn = computeModelRecommendations([tok], [], [tl], [])[0].turns[0]
+
+    expect(turn.features.turnLengthChars).toBe(600)
+    expect(turn.promptSummary).toBe('first stripped prompt')
+    expect(turn.bucket).toBe('moderate')
+  })
+
   it('keeps a turn at exactly the 1000 output-token boundary out of trivial (uses < not <=)', () => {
     const t0 = nextTs()
     const tl = timeline('s-out', [userEntry('short prompt', t0)])

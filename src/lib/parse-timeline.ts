@@ -29,7 +29,10 @@ export interface TimelineEntry {
   // No consumer reads a per-entry sessionId.
   timestamp: string; // ISO
   kind: EntryKind;
-  summary: string; // one-line, already truncated to ~200 chars
+  summary?: string; // one-line, already truncated to ~200 chars; stripped from bulk timelines
+  summaryLen?: number;
+  hasCode?: boolean;
+  isQuestion?: boolean;
   toolName?: string; // when kind === 'tool_use'
   isError?: boolean; // when kind === 'tool_result'
 }
@@ -39,34 +42,66 @@ export interface SessionTimeline extends SessionDimensions {
   startTime: string;
   endTime: string;
   entries: TimelineEntry[];
+  firstPromptPreview?: string;
   /**
-   * True when non-user `entries[].summary` text has been stripped from this
-   * timeline for the bulk dataset (#1035 — those summaries were 22.5 MB of a
-   * 79 MB payload and only the SessionTimeline detail view renders them).
-   * `user` summaries are kept: every aggregate consumer (conversation
-   * patterns, tool effectiveness, model recommendation, user-turn counts)
-   * reads summary only on user entries. Full detail is served lazily by
-   * `GET /api/session/<id>/timeline`; client-parsed timelines (uploads, the
-   * SPA sample corpus) are never slim.
+   * True when `entries[].summary` text has been stripped from this timeline for
+   * the bulk dataset (#1035/#1284). Full detail is served lazily by
+   * `GET /api/session/<id>/timeline`; client-parsed timelines (uploads, the SPA
+   * sample corpus) are never slim.
    */
   slim?: boolean;
 }
 
+function summarySignals(summary: string): Pick<TimelineEntry, 'summaryLen' | 'hasCode' | 'isQuestion'> {
+  return {
+    summaryLen: summary.length,
+    hasCode: summary.includes('```'),
+    isQuestion: summary.trimEnd().endsWith('?'),
+  };
+}
+
+function withSummarySignals(entry: TimelineEntry): TimelineEntry {
+  const summary = entry.summary ?? '';
+  return {
+    ...entry,
+    summaryLen: typeof entry.summaryLen === 'number' ? entry.summaryLen : summary.length,
+    hasCode: typeof entry.hasCode === 'boolean' ? entry.hasCode : summary.includes('```'),
+    isQuestion:
+      typeof entry.isQuestion === 'boolean'
+        ? entry.isQuestion
+        : summary.trimEnd().endsWith('?'),
+  };
+}
+
+function timelineEntry(
+  entry: Omit<TimelineEntry, 'summaryLen' | 'hasCode' | 'isQuestion'> & {
+    summary: string;
+  }
+): TimelineEntry {
+  return { ...entry, ...summarySignals(entry.summary) };
+}
+
+function firstPromptPreview(entries: TimelineEntry[]): string | undefined {
+  return entries.find((entry) => entry.kind === 'user' && entry.summary)?.summary;
+}
+
 /**
- * Bulk-dataset slimming (#1035): blank `summary` on every non-user entry,
- * keeping the cheap, aggregate-read user summaries. Returns the input object
- * unchanged when nothing would be stripped (so non-slim timelines carry no
- * `slim` flag and detail consumers skip the lazy fetch).
+ * Bulk-dataset slimming (#1035/#1284): remove `summary` from every entry after
+ * carrying the derived fields aggregate readers need. The session_blob row keeps
+ * the full parse; the Timeline view hydrates it lazily when selected.
  */
 export function slimSessionTimeline(timeline: SessionTimeline): SessionTimeline {
-  let changed = false;
-  const entries = timeline.entries.map((e) => {
-    if (e.kind === 'user' || e.summary === '') return e;
-    changed = true;
-    return { ...e, summary: '' };
+  const entries = timeline.entries.map((entry) => {
+    const rest = { ...withSummarySignals(entry) };
+    delete rest.summary;
+    return rest;
   });
-  if (!changed) return timeline;
-  return { ...timeline, entries, slim: true };
+  return {
+    ...timeline,
+    entries,
+    firstPromptPreview: timeline.firstPromptPreview ?? firstPromptPreview(timeline.entries),
+    slim: true,
+  };
 }
 
 function stringifyToolInput(input: unknown): string {
@@ -134,35 +169,35 @@ export function parseSessionTimeline(
     if (type === 'user') {
       const msg = parseMessage(raw.message);
       if (!msg) {
-        entries.push({
+        entries.push(timelineEntry({
           timestamp,
           kind: 'user',
           summary: '',
-        });
+        }));
         continue;
       }
       if (typeof msg.content === 'string') {
-        entries.push({
+        entries.push(timelineEntry({
           timestamp,
           kind: 'user',
           summary: summarize(msg.content),
-        });
+        }));
       } else if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (!block || typeof block !== 'object') continue;
           if (block.type === 'tool_result') {
-            entries.push({
+            entries.push(timelineEntry({
               timestamp,
               kind: 'tool_result',
               summary: stringifyToolResultContent(block.content),
               isError: block.is_error === true,
-            });
+            }));
           } else if (block.type === 'text') {
-            entries.push({
+            entries.push(timelineEntry({
               timestamp,
               kind: 'user',
               summary: summarize(block.text ?? ''),
-            });
+            }));
           }
         }
       }
@@ -172,32 +207,32 @@ export function parseSessionTimeline(
       for (const block of msg.content) {
         if (!block || typeof block !== 'object') continue;
         if (block.type === 'text') {
-          entries.push({
+          entries.push(timelineEntry({
             timestamp,
             kind: 'assistant',
             summary: summarize(block.text ?? ''),
-          });
+          }));
         } else if (block.type === 'thinking') {
-          entries.push({
+          entries.push(timelineEntry({
             timestamp,
             kind: 'thinking',
             summary: summarize(block.thinking ?? block.text ?? ''),
-          });
+          }));
         } else if (block.type === 'tool_use') {
-          entries.push({
+          entries.push(timelineEntry({
             timestamp,
             kind: 'tool_use',
             summary: stringifyToolInput(block.input),
             toolName: block.name ?? 'unknown',
-          });
+          }));
         }
       }
     } else if (type) {
-      entries.push({
+      entries.push(timelineEntry({
         timestamp,
         kind: 'other',
         summary: type,
-      });
+      }));
     }
   }
 
@@ -213,6 +248,7 @@ export function parseSessionTimeline(
     startTime: entries[0].timestamp,
     endTime: entries[entries.length - 1].timestamp,
     entries,
+    firstPromptPreview: firstPromptPreview(entries),
     version,
     gitBranch,
     entrypoint,

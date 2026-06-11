@@ -407,8 +407,8 @@ export function getTranscript(sessionId) {
   return transcriptCache.getTranscript(sessionId);
 }
 
-// Lazy per-session timeline detail (#1035). The bulk dataset ships slim
-// timelines (non-user summaries stripped — see assembleDataset); the full
+// Lazy per-session timeline detail (#1035/#1284). The bulk dataset ships slim
+// timelines (`summary` stripped — see assembleDataset); the full
 // parse already sits in the session_blob row this ingest pipeline maintains,
 // so the detail read is a single O(1) SELECT + no re-parse. Returns the raw
 // stored JSON string (the server sends it verbatim) plus the row's
@@ -1733,9 +1733,9 @@ export function assembleDataset() {
               ? JSON.parse(r[s.column])
               : null
             : JSON.parse(r[s.column]);
-        // #1035: the bulk dataset ships timelines with non-user entry
-        // summaries stripped (22.5 MB of the 79 MB payload, rendered only by
-        // the per-session detail view). The session_blob row keeps the full
+        // #1035/#1284: the bulk dataset ships timelines with entry summaries
+        // stripped (the largest measured single payload field, rendered only
+        // by the per-session detail view). The session_blob row keeps the full
         // parse; getSessionTimelineDetail() below serves it lazily.
         if (v) out[s.datasetKey].push(s.datasetKey === 'timelines' ? slimSessionTimeline(v) : v);
       } else if (s.aggregate === 'spread') {

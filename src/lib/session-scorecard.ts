@@ -134,7 +134,10 @@ function sessionDurationMs(timeline?: SessionTimeline): number {
 
 function userTurnCount(timeline?: SessionTimeline): number {
   if (!timeline) return 0;
-  return timeline.entries.filter((entry) => entry.kind === 'user' && entry.summary.length > 0).length;
+  return timeline.entries.filter(
+    (entry) =>
+      entry.kind === 'user' && (entry.summaryLen ?? entry.summary?.length ?? 0) > 0
+  ).length;
 }
 
 function toolErrorCount(toolData?: ToolUsageData): number {

@@ -210,13 +210,16 @@ function sliceTimeline(timeline: SessionTimeline): TurnSlice[] {
     lastTs = entry.timestamp || lastTs;
 
     if (entry.kind === 'user') {
+      const promptChars = entry.summaryLen ?? entry.summary?.length ?? 0;
+      const promptSummary =
+        entry.summary ?? (slices.length === 0 ? timeline.firstPromptPreview ?? '' : '');
       // Multi-block user messages can produce several adjacent `user` entries;
       // only the first one of a contiguous run opens a new turn — tool_results
       // arrive under kind 'tool_result', not 'user', so a real prompt is what
       // we key on.
       if (current && current.toolCalls.length === 0 && current.promptChars === 0) {
-        current.promptChars += entry.summary.length;
-        if (!current.promptSummary) current.promptSummary = entry.summary;
+        current.promptChars += promptChars;
+        if (!current.promptSummary) current.promptSummary = promptSummary;
         continue;
       }
       closeCurrent(entry.timestamp || lastTs);
@@ -226,8 +229,8 @@ function sliceTimeline(timeline: SessionTimeline): TurnSlice[] {
         endMs: tsMs(entry.timestamp),
         startTime: entry.timestamp,
         endTime: entry.timestamp,
-        promptChars: entry.summary.length,
-        promptSummary: entry.summary,
+        promptChars,
+        promptSummary,
         toolCalls: [],
         timelineToolCount: 0,
         timelineFileEdits: 0,

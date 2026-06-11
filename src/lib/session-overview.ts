@@ -168,7 +168,7 @@ export function computeSessionOverview(
     overview.durationMs =
       isFinite(start) && isFinite(end) && end >= start ? end - start : 0;
     overview.userTurns = timeline.entries.filter(
-      (e) => e.kind === 'user' && e.summary.length > 0
+      (e) => e.kind === 'user' && (e.summaryLen ?? e.summary?.length ?? 0) > 0
     ).length;
   }
 

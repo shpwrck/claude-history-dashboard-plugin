@@ -57,9 +57,9 @@ function computeSessionStat(timeline: SessionTimeline): ConversationStat | null 
     if (e.kind === 'user') {
       userTurns++;
       const s = e.summary ?? '';
-      userLenSum += s.length;
-      if (containsCodeBlock(s)) codeBlockMessages++;
-      if (isQuestion(s)) questionMessages++;
+      userLenSum += e.summaryLen ?? s.length;
+      if (e.hasCode ?? containsCodeBlock(s)) codeBlockMessages++;
+      if (e.isQuestion ?? isQuestion(s)) questionMessages++;
     } else if (e.kind === 'thinking') {
       thinkingCount++;
     }

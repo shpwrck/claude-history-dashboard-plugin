@@ -18,7 +18,32 @@ describe('parseSessionTimeline', () => {
   it('emits a user entry with a summarized string message', () => {
     const text = line({ type: 'user', timestamp: '2026-01-01', message: { content: 'a\nb' } })
     const tl = parseSessionTimeline(text, 's.jsonl')!
-    expect(tl.entries[0]).toMatchObject({ kind: 'user', summary: 'a b' })
+    expect(tl.entries[0]).toMatchObject({
+      kind: 'user',
+      summary: 'a b',
+      summaryLen: 3,
+      hasCode: false,
+      isQuestion: false,
+    })
+    expect(tl.firstPromptPreview).toBe('a b')
+  })
+
+  it('derives code and question signals from each summarized entry', () => {
+    const text = [
+      line({ type: 'user', timestamp: '2026-01-01', message: { content: 'Can you inspect this?  ' } }),
+      line({ type: 'user', timestamp: '2026-01-02', message: { content: '```ts\nconst x = 1\n```' } }),
+    ].join('\n')
+    const tl = parseSessionTimeline(text, 's.jsonl')!
+
+    expect(tl.entries[0]).toMatchObject({
+      summaryLen: 'Can you inspect this?'.length,
+      hasCode: false,
+      isQuestion: true,
+    })
+    expect(tl.entries[1]).toMatchObject({
+      hasCode: true,
+      isQuestion: false,
+    })
   })
 
   it('emits assistant text, thinking, and tool_use entries', () => {
@@ -93,10 +118,14 @@ describe('slimSessionTimeline (#1035)', () => {
     ],
   }
 
-  it('strips non-user summaries, keeps user summaries, and flags the timeline slim', () => {
+  it('strips every entry summary, carries derived fields, and flags the timeline slim', () => {
     const slim = slimSessionTimeline(base)
     expect(slim.slim).toBe(true)
-    expect(slim.entries.map((e) => e.summary)).toEqual(['fix the bug please', '', '', '', ''])
+    expect(slim.firstPromptPreview).toBe('fix the bug please')
+    expect(slim.entries.every((e) => !('summary' in e))).toBe(true)
+    expect(slim.entries.map((e) => e.summaryLen)).toEqual([18, 23, 23, 18, 0])
+    expect(slim.entries.map((e) => e.hasCode)).toEqual([false, false, false, false, false])
+    expect(slim.entries.map((e) => e.isQuestion)).toEqual([false, false, false, false, false])
     // Everything except summary survives untouched.
     expect(slim.entries.map((e) => e.kind)).toEqual(base.entries.map((e) => e.kind))
     expect(slim.entries[2].toolName).toBe('Read')
@@ -110,7 +139,7 @@ describe('slimSessionTimeline (#1035)', () => {
     expect(JSON.stringify(base)).toBe(before)
   })
 
-  it('returns the input object unchanged (no slim flag) when nothing would be stripped', () => {
+  it('strips user summaries too so bulk entries carry no summary key', () => {
     const allUser: SessionTimeline = {
       ...base,
       entries: [
@@ -119,7 +148,23 @@ describe('slimSessionTimeline (#1035)', () => {
       ],
     }
     const out = slimSessionTimeline(allUser)
-    expect(out).toBe(allUser)
-    expect(out.slim).toBeUndefined()
+    expect(out).not.toBe(allUser)
+    expect(out.slim).toBe(true)
+    expect(out.entries).toEqual([
+      {
+        timestamp: '2026-01-01',
+        kind: 'user',
+        summaryLen: 5,
+        hasCode: false,
+        isQuestion: false,
+      },
+      {
+        timestamp: '2026-01-01',
+        kind: 'assistant',
+        summaryLen: 0,
+        hasCode: false,
+        isQuestion: false,
+      },
+    ])
   })
 })

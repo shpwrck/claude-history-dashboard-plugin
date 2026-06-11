@@ -742,8 +742,8 @@ export async function fetchAdoptionReceipts(): Promise<AdoptionReceipt[]> {
 }
 
 /**
- * Fetch one session's FULL timeline (#1035). The bulk dataset ships slim
- * timelines (non-user entry summaries stripped); the SessionTimeline detail
+ * Fetch one session's FULL timeline (#1035/#1284). The bulk dataset ships slim
+ * timelines (`summary` stripped); the SessionTimeline detail
  * view hydrates the selected session through this lazy endpoint. null = the
  * server has no row for the session (404).
  */
