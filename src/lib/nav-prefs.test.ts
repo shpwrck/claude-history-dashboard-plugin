@@ -223,6 +223,7 @@ describe('isDefaultVisibleView — recs-driven curated default (#609)', () => {
 
   it('hides a non-core view whose domain has no active finding', () => {
     // tokens (cost domain), agents (workflow-hygiene), stats (raw) are not core.
+    expect(isDefaultVisibleView('reclaim-compass', new Set())).toBe(true);
     expect(isDefaultVisibleView('tokens', new Set())).toBe(false);
     expect(isDefaultVisibleView('agents', null)).toBe(false);
     expect(isDefaultVisibleView('stats', new Set())).toBe(false);
@@ -239,7 +240,15 @@ describe('isDefaultVisibleView — recs-driven curated default (#609)', () => {
 
   it('core membership matches the issue-specified set', () => {
     expect([...CURATED_CORE_VIEWS].sort()).toEqual(
-      ['cost', 'errors', 'home', 'permissions', 'recommendations', 'search'].sort()
+      [
+        'cost',
+        'errors',
+        'home',
+        'permissions',
+        'reclaim-compass',
+        'recommendations',
+        'search',
+      ].sort()
     );
   });
 });

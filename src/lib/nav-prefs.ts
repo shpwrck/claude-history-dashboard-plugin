@@ -183,6 +183,7 @@ export const NAV_ITEMS: readonly {
   { view: 'enterprise', label: 'Enterprise', icon: LockIcon, domain: 'safety', serverOnly: true },
   { view: 'summary', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
   { view: 'cost', label: 'Cost', icon: DollarSignIcon, domain: 'cost' },
+  { view: 'reclaim-compass', label: 'Reclaim Compass', icon: BullseyeIcon, domain: 'cost' },
   { view: 'tokens', label: 'Tokens', icon: CoinsIcon, domain: 'cost' },
   { view: 'files', label: 'File Impact', icon: FileAltIcon, domain: 'cost' },
   { view: 'errors', label: 'Errors', icon: ExclamationTriangleIcon, domain: 'success-rate' },
@@ -299,6 +300,7 @@ export const CURATED_CORE_VIEWS: readonly View[] = [
   'recommendations',
   'permissions',
   'cost',
+  'reclaim-compass',
   'errors',
   'search',
 ];

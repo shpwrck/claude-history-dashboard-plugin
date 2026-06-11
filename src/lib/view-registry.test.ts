@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
+import { isValidElement } from 'react';
 import {
   filterViewDataByProject,
   filterViewDataByTime,
   shouldShowFilteredEmptyState,
+  VIEW_ANCHORS,
   VIEW_RENDERERS,
   type ViewData,
 } from './view-registry';
@@ -202,6 +204,40 @@ describe('view registry ↔ nav catalog parity', () => {
     for (const v of Object.keys(VIEW_RENDERERS)) {
       expect(isValidView(v)).toBe(true);
     }
+  });
+
+  it('registers Reclaim Compass as a cost-owned anchor destination (#1279)', () => {
+    expect(VIEW_ANCHORS['reclaim-compass']).toEqual({
+      parentView: 'cost',
+      signalId: 'reclaim-compass',
+    });
+    expect(NAV_ITEMS.find((item) => item.view === 'reclaim-compass')).toMatchObject({
+      label: 'Reclaim Compass',
+      domain: 'cost',
+    });
+
+    const node = VIEW_RENDERERS['reclaim-compass']?.({
+      data: emptyData(),
+      filter: allProjectsFilter,
+      serverAvailable: true,
+      nav: {
+        navigateTo: () => {},
+        openSession: () => {},
+        setActiveSessionId: () => {},
+        setActiveProjectId: () => {},
+        focusSessionId: null,
+        consumeFocus: () => {},
+        reloadFromDisk: () => {},
+        onFilterChange: () => {},
+        onActiveDomains: () => {},
+      },
+    });
+
+    expect(isValidElement(node)).toBe(true);
+    if (!isValidElement<{ focusSignalId?: string }>(node)) {
+      throw new Error('Expected Reclaim Compass renderer to return an element');
+    }
+    expect(node.props.focusSignalId).toBe('reclaim-compass');
   });
 });
 

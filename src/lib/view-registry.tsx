@@ -289,6 +289,17 @@ export interface ViewContext {
   serverAvailable: boolean;
 }
 
+export interface ViewAnchorTarget {
+  /** The parent view that owns the DOM section. */
+  parentView: View;
+  /** The `data-signal-id` that should be scrolled/focused after render. */
+  signalId: string;
+}
+
+export const VIEW_ANCHORS: Partial<Record<View, ViewAnchorTarget>> = {
+  'reclaim-compass': { parentView: 'cost', signalId: 'reclaim-compass' },
+};
+
 function timestampMs(value: number | string | null | undefined): number | null {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (!value) return null;
@@ -479,6 +490,23 @@ export function filterViewDataByTime(
 // `Partial` because a retired view id can still be in the `View` union for
 // deep-link redirects (#14, e.g. `stats` → `activity`) while no longer owning a
 // renderer of its own. `renderView` already null-guards a missing entry.
+function renderCostAttributionView(
+  { data: d, nav: n, filter }: ViewContext,
+  focusSignalId?: string
+): ReactNode {
+  return (
+    <CostAttribution
+      tokenData={d.tokenData}
+      toolData={d.toolData}
+      sessions={d.sessions}
+      activeFilter={filter}
+      focusSignalId={focusSignalId}
+      onOpenSession={n.openSession}
+      onNavigate={n.navigateTo}
+    />
+  );
+}
+
 export const VIEW_RENDERERS: Partial<
   Record<View, (ctx: ViewContext) => ReactNode>
 > = {
@@ -623,16 +651,9 @@ export const VIEW_RENDERERS: Partial<
       activeFilter={filter}
     />
   ),
-  cost: ({ data: d, nav: n, filter }) => (
-    <CostAttribution
-      tokenData={d.tokenData}
-      toolData={d.toolData}
-      sessions={d.sessions}
-      activeFilter={filter}
-      onOpenSession={n.openSession}
-      onNavigate={n.navigateTo}
-    />
-  ),
+  cost: (ctx) => renderCostAttributionView(ctx),
+  'reclaim-compass': (ctx) =>
+    renderCostAttributionView(ctx, VIEW_ANCHORS['reclaim-compass']?.signalId),
   timeline: ({ data: d, nav: n }) => (
     <SessionTimeline
       timelines={d.timelines}
@@ -804,6 +825,7 @@ const VIEW_FILTERABLE_DATA: Partial<Record<View, FilterableViewDataKey[]>> = {
   tokens: ['tokenData'],
   summary: ['tokenData'],
   cost: ['tokenData', 'toolData'],
+  'reclaim-compass': ['tokenData', 'toolData'],
   activity: ['sessions'],
   automation: ['sessions'],
   prompts: ['promptAnalysis'],

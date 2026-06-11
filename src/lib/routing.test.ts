@@ -75,7 +75,7 @@ describe('routeToHash', () => {
   });
 
   it('round-trips with parseRoute', () => {
-    for (const v of ['home', 'cost', 'permissions', 'sessions'] as const) {
+    for (const v of ['home', 'cost', 'reclaim-compass', 'permissions', 'sessions'] as const) {
       expect(parseRoute(routeToHash(v)).view).toBe(v);
     }
   });
