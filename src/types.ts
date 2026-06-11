@@ -180,6 +180,46 @@ export interface AssistantFeatures {
 }
 
 /**
+ * Per-session user-prompt traits aggregated from `HistoryEntry.display` (#1274).
+ *
+ * This is intentionally text-free: the dashboard retains only numeric counts
+ * that later detectors can correlate with outcomes. The original prompt prose
+ * stays in the existing history/session data and is not duplicated here.
+ */
+export interface PromptAnalysis {
+  sessionId: string;
+  project: string;
+  /** User prompt turns represented by this session. */
+  promptTurnCount: number;
+  /** Total characters across user prompt turns. */
+  totalPromptChars: number;
+  /** Average characters per user prompt turn. */
+  avgPromptChars: number;
+  /** Approximate sentence count across user prompt turns. */
+  sentenceCount: number;
+  /** Prompt turns phrased as questions. */
+  questionTurnCount: number;
+  /** Prompt turns starting with a direct action verb. */
+  imperativeTurnCount: number;
+  /** Prompt turns that include a file/path-like reference. */
+  filePathMentionCount: number;
+  /** Backtick-delimited identifiers or snippets mentioned in prompts. */
+  backtickIdentifierCount: number;
+  /** Sum of file/path and backtick specificity markers. */
+  specificityMarkerCount: number;
+  /** Short prompts with no file/path or backtick specificity markers. */
+  lowSpecificityTurnCount: number;
+  /** Prompt turns containing hedging or uncertainty language. */
+  hedgingTurnCount: number;
+  /** Prompt turns containing acceptance, constraint, or guardrail phrasing. */
+  constraintTurnCount: number;
+  /** Prompt turns with at least one pasted-content attachment. */
+  pastedContentTurnCount: number;
+  /** Total pasted-content attachment count across prompt turns. */
+  pastedContentCount: number;
+}
+
+/**
  * Per-session model-deceit signal derived at ingest (#685, epic #683 slice A).
  *
  * The recommendation engine can't tell when an agent claims work it didn't do,

@@ -230,6 +230,7 @@ export const LIVE_SESSION_MAX_BYTES = liveSessionModule.LIVE_SESSION_MAX_BYTES;
 const { parseHistoryJsonl, groupBySessions, groupByProjects } = await import(
   join(LIB, 'parse-history.ts')
 );
+const { parsePromptAnalysis } = await import(join(LIB, 'parse-prompt-analysis.ts'));
 const { safeJsonStringify } = await import(join(LIB, 'json-safe.ts'));
 // Pure recommendation engine (no DOM/React) — server-importable so the
 // /api/recommendations.json route can mirror the UI's recs (#126).
@@ -1756,6 +1757,7 @@ export function assembleDataset() {
       /* ignore malformed history */
     }
   }
+  const promptAnalysis = parsePromptAnalysis(entries);
 
   const liveConfig = assembleLiveConfig({
     claudeDir: CLAUDE,
@@ -1907,6 +1909,8 @@ export function assembleDataset() {
       totalCost: 'usd',
       textLength: 'characters',
       thinkingByteLen: 'bytes',
+      totalPromptChars: 'characters',
+      avgPromptChars: 'characters',
     },
     entries,
     tokenData,
@@ -1920,6 +1924,7 @@ export function assembleDataset() {
     attribution,
     runtimeEvents,
     churnGeometry,
+    promptAnalysis,
     liveConfig,
     assistantFeatures,
     deceitSignals,

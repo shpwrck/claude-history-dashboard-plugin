@@ -184,6 +184,16 @@ test('(a) ingest()+assembleDataset() round-trips; a second unchanged run is byte
     assert.ok(cold.entries.length > 0, 'entries non-empty (entries signal)');
     assert.ok(cold.tokenData.length > 0, 'tokenData non-empty (token signal)');
     assert.ok(cold.timelines.length > 0, 'timelines non-empty (timeline signal)');
+    assert.deepEqual(
+      cold.promptAnalysis.map((row) => row.sessionId).sort(),
+      Object.keys(SESSIONS).sort(),
+      'promptAnalysis has one numeric prompt-trait row per transcript session'
+    );
+    assert.equal(
+      cold.promptAnalysis.some((row) => JSON.stringify(row).includes('alpha thing')),
+      false,
+      'promptAnalysis does not retain prompt prose'
+    );
     const coldStable = stableJson(cold);
     const coldHashes = contentHashes(dbPath);
 

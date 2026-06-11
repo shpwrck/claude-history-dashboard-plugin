@@ -122,6 +122,7 @@ function emptyData(overrides: Partial<ViewData> = {}): ViewData {
     runtimeEvents: [],
     churnGeometry: [],
     assistantFeatures: [],
+    promptAnalysis: [],
     deceitSignals: [],
     liveConfig: null,
     repoMap: null,

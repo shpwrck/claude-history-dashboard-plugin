@@ -30,6 +30,7 @@ import type {
   SessionTokenData,
   LiveConfig,
   AssistantFeatures,
+  PromptAnalysis,
   DeceitSignals,
   ActionDomain,
 } from '../types';
@@ -222,6 +223,7 @@ export interface ViewData {
   runtimeEvents: RuntimeEvents[];
   churnGeometry: ChurnGeometrySession[];
   assistantFeatures: AssistantFeatures[];
+  promptAnalysis: PromptAnalysis[];
   deceitSignals: DeceitSignals[];
   liveConfig: LiveConfig | null;
   repoMap: RepoMapDataset | null;
@@ -452,6 +454,7 @@ export function filterViewDataByTime(
     runtimeEvents,
     churnGeometry: filterBySessionId(data.churnGeometry, sessionIds),
     assistantFeatures: filterBySessionId(data.assistantFeatures, sessionIds),
+    promptAnalysis: filterBySessionId(data.promptAnalysis, sessionIds),
     deceitSignals: filterBySessionId(data.deceitSignals, sessionIds),
   };
 }
