@@ -22,6 +22,7 @@
  */
 import { lazy } from 'react';
 import type { ReactNode } from 'react';
+import { isDashboardFilterActive } from './filtered-empty';
 import type {
   View,
   HistoryEntry,
@@ -72,6 +73,11 @@ import {
 // ── Lazy view components (moved verbatim from App.tsx) ─────────────────────
 const DigestSpine = lazy(() =>
   import('../components/DigestSpine').then((m) => ({ default: m.DigestSpine }))
+);
+const FilteredEmptyState = lazy(() =>
+  import('../components/FilteredEmptyState').then((m) => ({
+    default: m.FilteredEmptyState,
+  }))
 );
 const Recommendations = lazy(() =>
   import('../components/Recommendations').then((m) => ({
@@ -503,7 +509,7 @@ export const VIEW_RENDERERS: Partial<
       onActiveDomains={n.onActiveDomains}
     />
   ),
-  recommendations: ({ data: d, nav: n, serverAvailable }) => (
+  recommendations: ({ data: d, nav: n, filter, serverAvailable }) => (
     <Recommendations
       serverAvailable={serverAvailable}
       tokenData={d.tokenData}
@@ -534,6 +540,7 @@ export const VIEW_RENDERERS: Partial<
       mcpAuth={d.mcpAuth}
       configBackups={d.configBackups}
       repoMap={d.repoMap}
+      activeFilter={filter}
       onNavigate={n.navigateTo}
       onOpenSession={n.openSession}
     />
@@ -571,10 +578,11 @@ export const VIEW_RENDERERS: Partial<
   search: ({ data: d, nav: n }) => (
     <SearchView entries={d.entries} onOpenSession={n.openSession} />
   ),
-  tokens: ({ data: d, nav: n }) => (
+  tokens: ({ data: d, nav: n, filter }) => (
     <TokenUsage
       tokenData={d.tokenData}
       sessions={d.sessions}
+      activeFilter={filter}
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
     />
@@ -598,17 +606,19 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  summary: ({ data: d }) => (
+  summary: ({ data: d, filter }) => (
     <SummaryView
       tokenData={d.tokenData}
       sessions={d.sessions}
+      activeFilter={filter}
     />
   ),
-  cost: ({ data: d, nav: n }) => (
+  cost: ({ data: d, nav: n, filter }) => (
     <CostAttribution
       tokenData={d.tokenData}
       toolData={d.toolData}
       sessions={d.sessions}
+      activeFilter={filter}
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
     />
@@ -624,21 +634,23 @@ export const VIEW_RENDERERS: Partial<
   // Activity, so this one page shows both the activity-pulse panels and the
   // usage-stats panels. `entries` is threaded through for the usage-stats
   // panels (daily activity + hour×day heatmap derive from raw history entries).
-  activity: ({ data: d, nav: n }) => (
+  activity: ({ data: d, nav: n, filter }) => (
     <ProjectActivity
       sessions={d.sessions}
       projects={d.projects}
       entries={d.entries}
+      activeFilter={filter}
       onOpenSession={n.openSession}
     />
   ),
-  automation: ({ data: d, nav: n }) => (
+  automation: ({ data: d, nav: n, filter }) => (
     <AutomationView
       sessions={d.sessions}
       tokenData={d.tokenData}
       toolData={d.toolData}
       timelines={d.timelines}
       apiErrors={d.apiErrors}
+      activeFilter={filter}
       onActiveSessionChange={n.setActiveSessionId}
       onOpenSession={n.openSession}
     />
@@ -699,13 +711,14 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  patterns: ({ data: d, nav: n }) => (
+  patterns: ({ data: d, nav: n, filter }) => (
     <SessionPatterns
       timelines={d.timelines}
       tokenData={d.tokenData}
       toolData={d.toolData}
       apiErrors={d.apiErrors}
       sessions={d.sessions}
+      activeFilter={filter}
       onOpenSession={n.openSession}
     />
   ),
@@ -767,6 +780,42 @@ export const VIEW_RENDERERS: Partial<
   ),
 };
 
+type FilterableViewDataKey = keyof ViewData;
+
+const VIEW_FILTERABLE_DATA: Partial<Record<View, FilterableViewDataKey[]>> = {
+  recommendations: ['sessions', 'tokenData', 'toolData', 'apiErrors'],
+  tokens: ['tokenData'],
+  summary: ['tokenData'],
+  cost: ['tokenData', 'toolData'],
+  activity: ['sessions'],
+  automation: ['sessions'],
+  patterns: ['timelines'],
+};
+
+function hasUsableValue(value: ViewData[FilterableViewDataKey]): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  return value != null;
+}
+
+function viewHasFilterableData(view: View, data: ViewData): boolean {
+  const keys = VIEW_FILTERABLE_DATA[view];
+  if (!keys) return false;
+  return keys.some((key) => hasUsableValue(data[key]));
+}
+
+export function shouldShowFilteredEmptyState(
+  view: View,
+  filter: DashboardFilter,
+  unfiltered: ViewData,
+  filtered: ViewData
+): boolean {
+  return (
+    isDashboardFilterActive(filter) &&
+    viewHasFilterableData(view, unfiltered) &&
+    !viewHasFilterableData(view, filtered)
+  );
+}
+
 function keepKnownSession<T extends { sessionId: string }>(
   rows: T[],
   sessionIds: ReadonlySet<string>
@@ -815,5 +864,8 @@ export function renderView(view: View, ctx: ViewContext): ReactNode {
     filterViewDataByTime(ctx.data, ctx.filter),
     ctx.filter
   );
+  if (shouldShowFilteredEmptyState(view, ctx.filter, ctx.data, data)) {
+    return <FilteredEmptyState filter={ctx.filter} />;
+  }
   return renderer({ ...ctx, data });
 }

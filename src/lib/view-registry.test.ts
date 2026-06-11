@@ -1,7 +1,9 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import {
   filterViewDataByProject,
   filterViewDataByTime,
+  shouldShowFilteredEmptyState,
   VIEW_RENDERERS,
   type ViewData,
 } from './view-registry';
@@ -495,5 +497,33 @@ describe('filterViewDataByTime', () => {
       'mid',
       'recent',
     ]);
+  });
+});
+
+describe('filtered empty-state guard', () => {
+  it('shows a tab-level filtered empty state when the active filter removes all rows for that view', () => {
+    const latest = Date.parse('2026-06-11T12:00:00.000Z');
+    const old = latest - 10 * 24 * HOUR;
+    const filter: DashboardFilter = { time: '24h', project: ALL_PROJECTS };
+    const data = emptyData({
+      entries: [historyEntry('anchor-session', '/repo/anchor', latest)],
+      tokenData: [
+        tokenRow('old-session', '/repo/old', new Date(old).toISOString()),
+      ],
+    });
+    const filtered = filterViewDataByTime(data, filter);
+
+    expect(filtered.tokenData).toEqual([]);
+    expect(shouldShowFilteredEmptyState('summary', filter, data, filtered)).toBe(true);
+  });
+
+  it('does not replace a naturally empty view or an unfiltered view', () => {
+    const empty = emptyData();
+    expect(
+      shouldShowFilteredEmptyState('sessions', allProjectsFilter, empty, empty)
+    ).toBe(false);
+    expect(
+      shouldShowFilteredEmptyState('summary', { time: '24h', project: ALL_PROJECTS }, empty, empty)
+    ).toBe(false);
   });
 });
