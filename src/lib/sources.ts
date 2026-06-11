@@ -1,14 +1,8 @@
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import type { CodingHarness, DataSource } from '../types';
 
-export type CodingHarness = 'claude-code';
-
-export interface DataSource {
-  id: string;
-  harness: CodingHarness;
-  historyDir: string;
-  configFile?: string;
-}
+export type { CodingHarness, DataSource } from '../types';
 
 export interface ResolveSourcesOptions {
   env?: Record<string, string | undefined>;

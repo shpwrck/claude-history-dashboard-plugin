@@ -8,6 +8,8 @@
 //   GET /sessions-manifest.json        -> live list of top-level session files
 //   GET /projects/<proj>/<id>.jsonl    -> session file + merged subagents/*.jsonl
 //   GET /history.jsonl                 -> ~/.claude/history.jsonl
+//   GET /api/sources/<sourceId>/sessions/<proj>/<id>.jsonl
+//   GET /api/sources/<sourceId>/history.jsonl
 //   everything else                    -> static file from dist/ (SPA fallback)
 //
 // Env: HOST (default 127.0.0.1), PORT (default 5173). The mutating policy route
@@ -90,6 +92,7 @@ const { resolveSources } = await import(
 );
 const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
 const DEFAULT_SOURCE = DATA_SOURCES[0];
+const DATA_SOURCE_BY_ID = new Map(DATA_SOURCES.map((source) => [source.id, source]));
 const PROJECTS = DEFAULT_SOURCE.historyDir;
 const CLAUDE = dirname(PROJECTS);
 // CHD_CACHE_DIR: all install-dir runtime writes land here so a plugin reinstall
@@ -6328,6 +6331,31 @@ function enterpriseRequestProjectsRoots(req) {
   return PROJECT_ROOTS;
 }
 
+function enterpriseRequestDataSource(req, sourceId) {
+  const source = DATA_SOURCE_BY_ID.get(sourceId);
+  if (!source) return null;
+  const principal = req.enterprisePrincipal;
+  if (ENTERPRISE_AUTH_ON && principal?.role !== 'admin' && principal?.dataRoot) {
+    if (sourceId !== DEFAULT_SOURCE.id) return null;
+    return {
+      ...DEFAULT_SOURCE,
+      historyDir: join(principal.dataRoot, 'projects'),
+      configFile: join(dirname(principal.dataRoot), '.claude.json'),
+    };
+  }
+  return source;
+}
+
+function enterpriseRequestSourceClaudeRoot(req, sourceId) {
+  const source = enterpriseRequestDataSource(req, sourceId);
+  return source ? dirname(source.historyDir) : null;
+}
+
+function enterpriseRequestSourceProjectsRoot(req, sourceId) {
+  const source = enterpriseRequestDataSource(req, sourceId);
+  return source ? source.historyDir : null;
+}
+
 function isEnterpriseProtectedPath(pathname) {
   if (!ENTERPRISE_AUTH_ON) return false;
   if (pathname === '/api/auth/session') return false;
@@ -7565,6 +7593,69 @@ const server = createServer(async (req, res) => {
       } else {
         res.statusCode = 404;
         res.end('');
+      }
+      return;
+    }
+
+    const sourceHistory = pathname.match(/^\/api\/sources\/([^/]+)\/history\.jsonl$/);
+    if (sourceHistory) {
+      let body;
+      const sourceId = decodeURIComponent(sourceHistory[1]);
+      const sourceRoot = enterpriseRequestSourceClaudeRoot(req, sourceId);
+      if (!sourceRoot) {
+        res.statusCode = 404;
+        res.end('');
+        return;
+      }
+      try {
+        body = await readTextFileInsideRoot(sourceRoot, 'history.jsonl');
+      } catch (err) {
+        if (isRawFileTooLargeError(err)) {
+          return sendRawFileTooLarge(res, err);
+        }
+        throw err;
+      }
+      if (body !== null) {
+        live(res, 'text/plain; charset=utf-8');
+        sendBody(req, res, body);
+      } else {
+        res.statusCode = 404;
+        res.end('');
+      }
+      return;
+    }
+
+    const sourceSession = pathname.match(/^\/api\/sources\/([^/]+)\/sessions\/([^/]+)\/([^/]+)$/);
+    if (sourceSession) {
+      let body;
+      const sourceId = decodeURIComponent(sourceSession[1]);
+      const sourceProjectsRoot = enterpriseRequestSourceProjectsRoot(req, sourceId);
+      if (!sourceProjectsRoot) {
+        res.statusCode = 404;
+        res.end('');
+        return;
+      }
+      try {
+        body = await readMergedSession(
+          decodeURIComponent(sourceSession[2]),
+          decodeURIComponent(sourceSession[3]),
+          sourceProjectsRoot
+        );
+      } catch (err) {
+        if (isRawFileTooLargeError(err)) {
+          return sendRawFileTooLarge(res, err);
+        }
+        if (isRawSessionTooManyPartsError(err)) {
+          return sendRawSessionTooManyParts(res, err);
+        }
+        throw err;
+      }
+      if (body === null) {
+        res.statusCode = 404;
+        res.end('');
+      } else {
+        live(res, 'text/plain; charset=utf-8');
+        sendBody(req, res, body);
       }
       return;
     }

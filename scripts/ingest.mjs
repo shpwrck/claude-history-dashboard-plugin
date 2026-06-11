@@ -36,6 +36,39 @@ const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
 const DEFAULT_SOURCE = DATA_SOURCES[0];
 const PROJECTS = DEFAULT_SOURCE.historyDir;
 const CLAUDE = dirname(PROJECTS);
+const PUBLIC_DATA_SOURCES = DATA_SOURCES.map((source) => ({ ...source }));
+const DEFAULT_SOURCE_PROVENANCE = {
+  sourceId: DEFAULT_SOURCE.id,
+  harness: DEFAULT_SOURCE.harness,
+};
+const SOURCE_DECORATED_SIGNAL_KEYS = new Set([
+  'tokenData',
+  'toolData',
+  'toolInventories',
+  'timelines',
+  'apiErrors',
+  'agentSettings',
+  'attribution',
+  'runtimeEvents',
+  'churnGeometry',
+  'assistantFeatures',
+  'deceitSignals',
+]);
+
+function withDefaultSourceProvenance(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return {
+    ...value,
+    sourceId: value.sourceId || DEFAULT_SOURCE_PROVENANCE.sourceId,
+    harness: value.harness || DEFAULT_SOURCE_PROVENANCE.harness,
+  };
+}
+
+function maybeDecorateSignalValue(datasetKey, value) {
+  return SOURCE_DECORATED_SIGNAL_KEYS.has(datasetKey)
+    ? withDefaultSourceProvenance(value)
+    : value;
+}
 // Top-level Claude Code config — carries mcpServers (global) plus a `projects`
 // map keyed by absolute project path with per-project mcpServers and
 // enabledMcpjsonServers.
@@ -1740,15 +1773,22 @@ export function assembleDataset() {
         // stripped (the largest measured single payload field, rendered only
         // by the per-session detail view). The session_blob row keeps the full
         // parse; getSessionTimelineDetail() below serves it lazily.
-        if (v) out[s.datasetKey].push(s.datasetKey === 'timelines' ? slimSessionTimeline(v) : v);
+        if (v) {
+          const value = s.datasetKey === 'timelines' ? slimSessionTimeline(v) : v;
+          out[s.datasetKey].push(maybeDecorateSignalValue(s.datasetKey, value));
+        }
       } else if (s.aggregate === 'spread') {
-        for (const e of JSON.parse(r[s.column]) || []) out[s.datasetKey].push(e);
+        for (const e of JSON.parse(r[s.column]) || []) {
+          out[s.datasetKey].push(maybeDecorateSignalValue(s.datasetKey, e));
+        }
       } else if (s.id === 'perm') {
         const perm = JSON.parse(r[s.column]) || { perModeEntries: [], changes: [] };
         for (const p of perm.perModeEntries || []) permissionRows.push(p);
         for (const c of perm.changes || []) permissionChanges.push(c);
       } else if (s.id === 'entries') {
-        for (const en of JSON.parse(r[s.column]) || []) entries.push(en);
+        for (const en of JSON.parse(r[s.column]) || []) {
+          entries.push(withDefaultSourceProvenance(en));
+        }
       }
     }
   }
@@ -1758,7 +1798,9 @@ export function assembleDataset() {
     try {
       const hist = parseHistoryJsonl(readArtifactTextCappedSync(HISTORY));
       for (const e of hist) {
-        if (!transcriptSessionIds.has(e.sessionId)) entries.push(e);
+        if (!transcriptSessionIds.has(e.sessionId)) {
+          entries.push(withDefaultSourceProvenance(e));
+        }
       }
     } catch {
       /* ignore malformed history */
@@ -1913,6 +1955,9 @@ export function assembleDataset() {
     generatedAt,
     windowStart,
     windowEnd,
+    sources: PUBLIC_DATA_SOURCES,
+    sourceId: DEFAULT_SOURCE.id,
+    harness: DEFAULT_SOURCE.harness,
     // Units for numeric fields whose name doesn't already encode the unit.
     // Curated + extensible — not an exhaustive catalogue of every numeric leaf.
     units: {

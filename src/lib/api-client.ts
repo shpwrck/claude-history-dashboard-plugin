@@ -784,6 +784,36 @@ export async function fetchTranscriptThinking(
   return (await resp.json()) as unknown[];
 }
 
+/** Fetch a raw source-scoped session JSONL blob (null = missing / 404). */
+export async function fetchSourceSessionJsonl(
+  sourceId: string,
+  project: string,
+  file: string,
+  signal?: AbortSignal
+): Promise<string | null> {
+  const resp = await serverFetch(
+    `/api/sources/${encodeURIComponent(sourceId)}/sessions/${encodeURIComponent(project)}/${encodeURIComponent(file)}`,
+    signal ? { signal } : {}
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.text();
+}
+
+/** Fetch a raw source-scoped history JSONL blob (null = missing / 404). */
+export async function fetchSourceHistoryJsonl(
+  sourceId: string,
+  signal?: AbortSignal
+): Promise<string | null> {
+  const resp = await serverFetch(
+    `/api/sources/${encodeURIComponent(sourceId)}/history.jsonl`,
+    signal ? { signal } : {}
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.text();
+}
+
 /**
  * Write a permissions diff to the global `~/.claude/settings.json`. Fetches the
  * per-process CSRF token (#308) then POSTs the payload with it. Both the

@@ -68,6 +68,19 @@ describe('groupBySessions', () => {
     ]
     expect(groupBySessions(entries).map((s) => s.sessionId)).toEqual(['new', 'old'])
   })
+
+  it('preserves source provenance on grouped sessions', () => {
+    const [session] = groupBySessions([
+      entry({
+        sessionId: 's1',
+        sourceId: 'claude-code',
+        harness: 'claude-code',
+      }),
+    ])
+
+    expect(session.sourceId).toBe('claude-code')
+    expect(session.harness).toBe('claude-code')
+  })
 })
 
 describe('groupByProjects', () => {

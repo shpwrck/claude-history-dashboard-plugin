@@ -435,6 +435,14 @@ export async function fetchTranscriptThinking(): Promise<unknown[] | null> {
   return null;
 }
 
+export async function fetchSourceSessionJsonl(): Promise<string | null> {
+  return null;
+}
+
+export async function fetchSourceHistoryJsonl(): Promise<string | null> {
+  return null;
+}
+
 export async function writePolicy(): Promise<PolicyWriteResult> {
   return { ok: false, error: UNAVAILABLE };
 }

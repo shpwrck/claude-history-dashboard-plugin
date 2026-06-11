@@ -126,6 +126,8 @@ export function groupBySessions(entries: HistoryEntry[]): Session[] {
       );
       return {
         sessionId,
+        sourceId: items[0].sourceId,
+        harness: items[0].harness,
         project: items[0].project,
         projectShort: shortenProject(items[0].project),
         entries: items,

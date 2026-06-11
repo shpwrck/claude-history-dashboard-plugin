@@ -1,9 +1,20 @@
+export type CodingHarness = 'claude-code';
+
+export interface DataSource {
+  id: string;
+  harness: CodingHarness;
+  historyDir: string;
+  configFile?: string;
+}
+
 export interface HistoryEntry {
   display: string;
   pastedContents: Record<string, PastedContent>;
   timestamp: number;
   project: string;
   sessionId: string;
+  sourceId?: string;
+  harness?: CodingHarness;
   /**
    * Human-readable session title (custom-title preferred over ai-title),
    * carried on transcript-derived entries so it survives session grouping
@@ -30,6 +41,8 @@ export interface PastedContent {
  * have them populated.
  */
 export interface SessionDimensions {
+  sourceId?: string;
+  harness?: CodingHarness;
   /** Claude Code version, e.g. "2.1.136". */
   version?: string;
   /** Git branch the session ran on. */
