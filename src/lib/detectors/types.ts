@@ -257,6 +257,20 @@ export interface ModelPinSavingsConfig {
   targetModel?: string;
 }
 
+/**
+ * Per-session prompt-trait rollup consumed by prompt-coaching detectors. This
+ * mirrors the parser slice's public shape closely enough that fixture-backed
+ * detectors can compile before the ingest/parser PR lands on master.
+ */
+export interface PromptAnalysis {
+  sessionId: string;
+  promptTurnCount: number;
+  lowSpecificityTurnCount: number;
+  specificityMarkerCount?: number;
+  questionTurnCount?: number;
+  imperativeTurnCount?: number;
+}
+
 export interface Recommendation {
   /** Stable rule id, e.g. "cost.cache-1h-waste". Used as a React key. */
   id: string;
@@ -348,6 +362,13 @@ export interface RecommendationInput {
    * behaviour rules emit nothing.
    */
   assistantFeatures?: AssistantFeatures[] | null;
+  /**
+   * Per-session prompt-trait features derived at ingest (#1274) — numeric
+   * prompt wording buckets only, with no prompt prose retained. Optional:
+   * `undefined`/`null` (or datasets predating the parser slice) means prompt
+   * coaching detectors emit nothing.
+   */
+  promptAnalysis?: PromptAnalysis[] | null;
   /**
    * Per-session model-deceit signal derived at ingest (#685, epic #683 slice A)
    * — claim↔evidence mismatch counts (`unbackedClaimCount`,

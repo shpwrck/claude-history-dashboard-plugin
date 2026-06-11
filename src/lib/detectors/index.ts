@@ -84,6 +84,7 @@ import { detector as sharedCheckoutRework } from './workflow/shared-checkout-rew
 import { detector as planMissingVerification } from './workflow/plan-missing-verification';
 import { detector as harmfulHabit } from './workflow/harmful-habit';
 import { detector as correctionMining } from './workflow/correction-mining';
+import { detector as promptClarity } from './workflow/prompt-clarity';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -218,6 +219,9 @@ export const DETECTORS: Detector[] = [
 
   // ── #1040 (epic #866) — mine failed→fixed tool pairs into pinnable facts ──
   correctionMining,
+
+  // ── #1275 — prompt trait buckets → correlational coaching pattern ────────
+  promptClarity,
 
   // ── Epic #683 — model-deceit detection (#686, slice B) ────────────────────
   // Reads the Slice-A ingest feature (deceitSignals, #685); dark on the

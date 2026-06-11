@@ -1,0 +1,1 @@
+import{Qt as e}from"./index-CcGbBt7c.js";var t=({prefix:t=`pf-random-id-`,children:n})=>n(e(t));t.displayName=`GenerateId`;export{t};

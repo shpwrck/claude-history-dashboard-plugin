@@ -459,6 +459,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     const runtimeEvents = [{ sessionId: 's1' }] as unknown as RecommendationInput['runtimeEvents'];
     const churnGeometry = [{ sessionId: 's1' }] as unknown as RecommendationInput['churnGeometry'];
     const toolInventories = [{ sessionId: 's1' }] as unknown as RecommendationInput['toolInventories'];
+    const promptAnalysis = [{ sessionId: 's1', promptTurnCount: 1, lowSpecificityTurnCount: 0 }] as unknown as RecommendationInput['promptAnalysis'];
     const mapped = assembleRecommendationInput({
       tokenData: [],
       toolData: [],
@@ -471,11 +472,13 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       runtimeEvents,
       churnGeometry,
       toolInventories,
+      promptAnalysis,
     });
     expect(mapped.timelines).toBe(timelines);
     expect(mapped.runtimeEvents).toBe(runtimeEvents);
     expect(mapped.churnGeometry).toBe(churnGeometry);
     expect(mapped.toolInventories).toBe(toolInventories);
+    expect(mapped.promptAnalysis).toBe(promptAnalysis);
     expect(mapped.liveConfig).toBeNull();
     expect(mapped.assistantFeatures).toBeNull();
     // The engine runs on a clean (well-formed, empty) mapped input without error.
@@ -488,6 +491,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       apiErrors: [],
     });
     expect(Array.isArray(buildRecommendations(clean, 0))).toBe(true);
+    expect(clean.promptAnalysis).toBeNull();
   });
 
   it('(#524 slice 3) flows an arbitrary new field through automatically (spread, not a hand-listed mapper)', async () => {
@@ -559,6 +563,77 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'repoMap',
     ];
     expect([...covered].sort()).toEqual([...EXPECTED].sort());
+  });
+});
+
+describe('workflow.prompt-clarity (#1275)', () => {
+  const promptRow = (
+    sessionId: string,
+    lowSpecificityTurnCount: number
+  ): NonNullable<RecommendationInput['promptAnalysis']>[number] => ({
+    sessionId,
+    promptTurnCount: 1,
+    lowSpecificityTurnCount,
+    specificityMarkerCount: lowSpecificityTurnCount > 0 ? 0 : 2,
+  });
+
+  const timeline = (sessionId: string, userTurns: number): SessionTimeline =>
+    ({
+      sessionId,
+      startTime: '2026-01-01T00:00:00Z',
+      endTime: '2026-01-01T00:01:00Z',
+      entries: Array.from({ length: userTurns }, (_, i) => ({
+        timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`,
+        kind: 'user',
+        summary: `turn ${i}`,
+      })),
+    }) as SessionTimeline;
+
+  const find = (input: RecommendationInput) =>
+    buildRecommendations(input, 0).filter(
+      (rec) => rec.id === 'workflow.prompt-clarity'
+    );
+
+  it('stays silent below the minimum sample size', () => {
+    const sessionIds = ['low-a', 'low-b', 'specific-a', 'specific-b', 'specific-c'];
+    const recs = find(
+      baseInput({
+        promptAnalysis: [
+          promptRow('low-a', 1),
+          promptRow('low-b', 1),
+          promptRow('specific-a', 0),
+          promptRow('specific-b', 0),
+          promptRow('specific-c', 0),
+        ],
+        timelines: sessionIds.map((id) =>
+          timeline(id, id.startsWith('low') ? 5 : 1)
+        ),
+      })
+    );
+    expect(recs).toEqual([]);
+  });
+
+  it('emits one correlational finding when low-specificity prompts co-occur with high follow-up density', () => {
+    const low = ['low-a', 'low-b', 'low-c'];
+    const specific = ['specific-a', 'specific-b', 'specific-c'];
+    const recs = find(
+      baseInput({
+        promptAnalysis: [
+          ...low.map((id) => promptRow(id, 1)),
+          ...specific.map((id) => promptRow(id, 0)),
+        ],
+        timelines: [
+          ...low.map((id) => timeline(id, 5)),
+          ...specific.map((id) => timeline(id, 1)),
+        ],
+      })
+    );
+
+    expect(recs).toHaveLength(1);
+    expect(recs[0].id).toBe('workflow.prompt-clarity');
+    expect(recs[0].severity).toBe('info');
+    expect(recs[0].detail).toMatch(/correlation, not causation/i);
+    expect(recs[0].detail).toContain('patterns worth noticing');
   });
 });
 
@@ -1711,6 +1786,43 @@ function fixtureBank(): Fixture[] {
         tokenData: [...clean.map((id) => tok(id, 0)), ...errored.map((id) => tok(id, 100))],
         toolData: [...clean.map((id) => tls(id, false)), ...errored.map((id) => tls(id, true))],
         timelines: [...clean, ...errored].map(tl),
+      }),
+    });
+  }
+
+  // ── workflow.prompt-clarity (#1275): low-specificity prompts track with ───
+  // more follow-up turns on the local effectiveness proxy.
+  {
+    const low = ['pcl1', 'pcl2', 'pcl3'];
+    const specific = ['pcs1', 'pcs2', 'pcs3'];
+    const promptRow = (sessionId: string, lowSpecificityTurnCount: number) => ({
+      sessionId,
+      promptTurnCount: 1,
+      lowSpecificityTurnCount,
+      specificityMarkerCount: lowSpecificityTurnCount > 0 ? 0 : 2,
+    });
+    const timeline = (sessionId: string, userTurns: number) =>
+      ({
+        sessionId,
+        startTime: '2026-01-01T00:00:00Z',
+        endTime: '2026-01-01T00:01:00Z',
+        entries: Array.from({ length: userTurns }, (_, i) => ({
+          timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`,
+          kind: 'user',
+          summary: `turn ${i}`,
+        })),
+      }) as unknown as SessionTimeline;
+    out.push({
+      now,
+      input: bankBase({
+        promptAnalysis: [
+          ...low.map((id) => promptRow(id, 1)),
+          ...specific.map((id) => promptRow(id, 0)),
+        ] as unknown as RecommendationInput['promptAnalysis'],
+        timelines: [
+          ...low.map((id) => timeline(id, 5)),
+          ...specific.map((id) => timeline(id, 1)),
+        ],
       }),
     });
   }

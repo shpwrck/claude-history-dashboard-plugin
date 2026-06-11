@@ -132,9 +132,9 @@ export type RecommendationViews = RecommendationInput;
 export function assembleRecommendationInput(
   v: RecommendationViews
 ): RecommendationInput {
-  // Pass every field through, normalising only the two optionals the engine
-  // treats "absent" as "filter nothing" (liveConfig #166, assistantFeatures
-  // #206). Spreading rather than re-listing each field means a NEW
+  // Pass every field through, normalising only the optionals the engine treats
+  // "absent" as "filter nothing" (liveConfig #166, assistantFeatures #206,
+  // promptAnalysis #1275). Spreading rather than re-listing each field means a NEW
   // detector-consumed signal added to {@link RecommendationInput} and supplied
   // by the caller flows through here automatically — no edit to this mapper.
   // (#524 slice 3: the ingest caller supplies the signal-derived fields straight
@@ -143,6 +143,7 @@ export function assembleRecommendationInput(
     ...v,
     liveConfig: v.liveConfig ?? null,
     assistantFeatures: v.assistantFeatures ?? null,
+    promptAnalysis: v.promptAnalysis ?? null,
   };
   if ('modelPinSavings' in v) return normalized;
 
