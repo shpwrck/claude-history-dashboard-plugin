@@ -99,10 +99,28 @@ describe('sample-artifacts — every new view gets non-empty demo data', () => {
     );
     expect(card.totalProjects).toBe(4);
     expect(card.tally).toEqual({ KEEP: 1, FLAG: 1, MOVE: 2 });
-    // the committed-but-heavy data-pipeline project must demote to MOVE
+    const acme = card.projects.find((p) => p.cwd.endsWith('acme-web'));
+    expect(acme?.attributionBucket).toBe('committed');
+    expect(acme?.verdict).toBe('KEEP');
+    expect(acme?.sessionsWithSignal).toBeGreaterThan(0);
+
+    const mobile = card.projects.find((p) => p.cwd.endsWith('mobile-app'));
+    expect(mobile?.attributionBucket).toBe('split');
+    expect(mobile?.verdict).toBe('FLAG');
+
+    const spike = card.projects.find((p) => p.cwd.endsWith('spike-llm-eval'));
+    expect(spike?.attributionBucket).toBe('low-signal');
+    expect(spike?.verdict).toBe('MOVE');
+
+    // The committed-but-heavy data-pipeline project must demote to MOVE.
     const dp = card.projects.find((p) => p.cwd.endsWith('data-pipeline'));
     expect(dp?.attributionBucket).toBe('committed');
     expect(dp?.verdict).toBe('MOVE');
+    expect(dp?.dragBucket).toBe('HEAVY');
+    expect(dp?.retryStormPct).toBeGreaterThan(0);
+    expect(dp?.p90TtfbMs).toBeGreaterThanOrEqual(5000);
+    expect(dp?.fastModeLostCount).toBeGreaterThan(0);
+    expect(dp?.sessionsWithSignal).toBe(dp?.sessionCount);
   });
 });
 

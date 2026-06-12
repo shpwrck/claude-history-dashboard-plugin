@@ -444,8 +444,11 @@ function buildFeatureSession(ctx, t0) {
 // B: context-heavy — context ramps past 200K (over-window) then a compaction
 // drop (<70% within 5 min); web search/fetch + 1h-cache usage; mixed models.
 function buildContextHeavySession(ctx, t0) {
+  const paths = READ_PATHS[ctx.project.path];
   let t = t0;
-  const p0 = 'Audit the whole service for N+1 queries and propose fixes across every module.';
+  const p0 =
+    `Audit ${paths[0]} and ${paths[1]} for N+1 queries; keep this to ` +
+    'read-only findings with acceptance checks before proposing edits.';
   ctx.prompt(t, p0);
   ctx.push(userText(t, p0));
   t += 30 * 1000;
@@ -519,6 +522,17 @@ function buildRoughSession(ctx, t0) {
   ctx.push(sysApiError(t, 500, 'api_error', 'Internal server error', { retryAttempt: 1, retryInMs: 1000 }));
   t += 5 * 1000;
 
+  // Vague follow-ups deliberately feed the Prompt Analyzer coaching sample:
+  // high follow-up loops on low-specificity prompts, contrasted with the
+  // context/automation sessions' file-specific one-shot prompts.
+  for (const followUp of ['Try again.', 'Still broken, fix it.']) {
+    ctx.prompt(t, followUp);
+    ctx.push(userText(t, followUp, { permissionMode: 'bypassPermissions' }));
+    t += 5 * 1000;
+    ctx.push(asstContent(t, [{ type: 'text', text: 'Retrying with the same incident playbook.' }], { permissionMode: 'bypassPermissions' }));
+    t += 5 * 1000;
+  }
+
   // Dangerous commands under bypass (drives the dangerous-command + bypass view).
   const d0 = `${ctx.sessionId}-d0`;
   ctx.push(asstContent(t, [toolUseBlock(d0, 'Bash', { command: 'rm -rf /tmp/stuck-queue/*' })], { permissionMode: 'bypassPermissions' }));
@@ -549,7 +563,9 @@ function buildAutomationSession(ctx, t0) {
   ctx.push(sysScheduled(t + 2000, 'Scheduled run: nightly backlog groomer fired at 02:00.'));
   t += 5 * 1000;
 
-  const p0 = 'Groom the backlog: label stale issues and post a summary comment.';
+  const p0 =
+    'Run .claude/workflows/nightly-groom.yml: label stale backlog issues, ' +
+    'update docs/status.md, and keep changes to issue metadata only.';
   ctx.prompt(t, p0);
   ctx.push(userText(t, p0));
   t += 20 * 1000;

@@ -21,8 +21,9 @@ import { parseSessionTimeline } from './parse-timeline';
 import { parseApiErrors, aggregateToolErrors, detectRetryGroups } from './parse-errors';
 import { parsePermissionData, detectDangerousCommands, rankPromptProneTools } from './parse-permissions';
 import { parseAgentSettings, parseAttribution, aggregateAttributionAgents, aggregateAttributionSkills, aggregateMcpUsage } from './parse-agents';
-import { parseRuntimeEvents } from './parse-runtime-events';
+import { aggregatePerTaskCost, parseRuntimeEvents } from './parse-runtime-events';
 import { parseChurnGeometry } from './parse-churn-geometry';
+import { parsePromptAnalysis } from './parse-prompt-analysis';
 import { assembleRecommendationInput, buildRecommendations } from './recommendations';
 import { buildWorkbenchClusters, buildProposedBatchSpec } from './model-evals-workbench';
 import { ingestModelEvalResults } from './model-eval-ingest';
@@ -41,6 +42,28 @@ function flatMap<T>(fn: (text: string, name: string) => T[]): T[] {
 }
 function collect<T>(fn: (text: string, name: string) => T | null): T[] {
   return sessionFiles.map((f) => fn(f.text, f.name)).filter((d): d is T => d !== null);
+}
+
+function mean(values: number[]): number {
+  return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function pearson(xs: number[], ys: number[]): number {
+  if (xs.length !== ys.length || xs.length < 2) return 0;
+  const xMean = mean(xs);
+  const yMean = mean(ys);
+  let numerator = 0;
+  let xSquares = 0;
+  let ySquares = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const dx = xs[i] - xMean;
+    const dy = ys[i] - yMean;
+    numerator += dx * dy;
+    xSquares += dx * dx;
+    ySquares += dy * dy;
+  }
+  const denominator = Math.sqrt(xSquares * ySquares);
+  return denominator === 0 ? 0 : numerator / denominator;
 }
 
 describe('sample corpus — determinism', () => {
@@ -199,6 +222,7 @@ describe('sample corpus — agents / skills / mcp / settings', () => {
 describe('sample corpus — runtime events', () => {
   const runtime = collect(parseRuntimeEvents);
   const timelines = collect(parseSessionTimeline);
+  const tokenData = collect(parseSessionJsonl);
   it('emits all four runtime subtypes', () => {
     expect(runtime.some((r) => r.turns.length > 0)).toBe(true);
     expect(runtime.some((r) => r.stopHooks.length > 0)).toBe(true);
@@ -224,6 +248,69 @@ describe('sample corpus — runtime events', () => {
 
     expect(rec?.detail).toContain('serial Read latency');
     expect(rec?.detail).toContain('idle/AFK');
+  });
+  it('populates the Speed Check per-task cost card with bounded task spans', () => {
+    const perTask = aggregatePerTaskCost(runtime, tokenData);
+
+    expect(perTask.sessions).toBeGreaterThanOrEqual(2);
+    expect(perTask.taskCount).toBeGreaterThanOrEqual(perTask.sessions);
+    expect(perTask.medianCost).toBeGreaterThan(0);
+    expect(perTask.p95Cost).toBeGreaterThanOrEqual(perTask.medianCost);
+  });
+});
+
+describe('sample corpus — prompt analyzer sparse-card coverage (#1444)', () => {
+  const entries = parseHistoryJsonl(corpus.historyJsonl);
+  const promptAnalysis = parsePromptAnalysis(entries);
+  const timelines = collect(parseSessionTimeline);
+  const apiErrors = flatMap(parseApiErrors);
+
+  it('loads prompt turns so Avg Prompt Length has a real denominator', () => {
+    const promptTurns = promptAnalysis.reduce((sum, row) => sum + row.promptTurnCount, 0);
+    const totalChars = promptAnalysis.reduce((sum, row) => sum + row.totalPromptChars, 0);
+
+    expect(promptAnalysis.length).toBeGreaterThanOrEqual(6);
+    expect(promptTurns).toBeGreaterThanOrEqual(12);
+    expect(totalChars).toBeGreaterThan(0);
+    expect(Math.round(totalChars / promptTurns)).toBeGreaterThan(0);
+  });
+
+  it('creates enough low-specificity and comparison sessions for the Coaching signal', () => {
+    const timelinesBySession = new Map(timelines.map((timeline) => [timeline.sessionId, timeline]));
+    const errorsBySession = new Map<string, number>();
+    for (const event of apiErrors) {
+      errorsBySession.set(event.sessionId, (errorsBySession.get(event.sessionId) ?? 0) + 1);
+    }
+    const samples = promptAnalysis.flatMap((analysis) => {
+      if (!analysis.sessionId || analysis.promptTurnCount <= 0) return [];
+      const timeline = timelinesBySession.get(analysis.sessionId);
+      if (!timeline) return [];
+      const followUps = Math.max(0, timeline.entries.filter((entry) => entry.kind === 'user').length - 1);
+      const isLowSpecificity =
+        analysis.lowSpecificityTurnCount / analysis.promptTurnCount >= 0.5;
+      return [
+        {
+          isLowSpecificity,
+          followUps,
+          proxyScore: followUps + (errorsBySession.get(analysis.sessionId) ?? 0),
+        },
+      ];
+    });
+
+    const low = samples.filter((sample) => sample.isLowSpecificity);
+    const comparison = samples.filter((sample) => !sample.isLowSpecificity);
+    const lowFollowUps = mean(low.map((sample) => sample.followUps));
+    const comparisonFollowUps = mean(comparison.map((sample) => sample.followUps));
+    const correlation = pearson(
+      samples.map((sample) => (sample.isLowSpecificity ? 1 : 0)),
+      samples.map((sample) => sample.proxyScore)
+    );
+
+    expect(samples.length).toBeGreaterThanOrEqual(6);
+    expect(low.length).toBeGreaterThanOrEqual(2);
+    expect(comparison.length).toBeGreaterThanOrEqual(2);
+    expect(lowFollowUps - comparisonFollowUps).toBeGreaterThanOrEqual(1);
+    expect(correlation).toBeGreaterThanOrEqual(0.45);
   });
 });
 
