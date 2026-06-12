@@ -12,7 +12,12 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { analyzeTeams, GRACE_MINUTES, parseTeamsDir } from './parse-teams';
+import {
+  analyzeTeams,
+  GRACE_MINUTES,
+  parseTeamsDir,
+  STALE_UNREAD_RUN_MINUTES,
+} from './parse-teams';
 import type { TeamAssignment, TeamSummary } from './parse-teams';
 
 // ─── Fixture helpers ────────────────────────────────────────────────────────
@@ -205,6 +210,73 @@ describe('analyzeTeams — stalled agent detection', () => {
     expect(s.stalledAgents).toHaveLength(0);
     // but task two IS dropped
     expect(s.droppedCount).toBe(1);
+  });
+});
+
+describe('analyzeTeams — stale unread run classification', () => {
+  it('marks an old UUID-only all-unread run as a historical review item', () => {
+    const teamId = '4001eade-dee8-488a-bf28-33457d52004c';
+    const oldTs = msBefore(NOW, STALE_UNREAD_RUN_MINUTES + 60);
+    const map = new Map<string, TeamAssignment[]>([
+      [
+        teamId,
+        [
+          makeAssignment(
+            'wave1-file-reread',
+            '6',
+            'File reread -> load-once heuristic',
+            oldTs,
+            false
+          ),
+          makeAssignment(
+            'wave1-perf-dedup',
+            '9',
+            'App perf + dedup audit + fixes',
+            oldTs,
+            false
+          ),
+        ],
+      ],
+    ]);
+
+    const [summary] = analyzeTeams(map, NOW);
+
+    expect(summary.teamId).toBe(teamId);
+    expect(summary.displayName).toBe(
+      `${oldTs.slice(0, 10)} team run: File reread -> load-once heuristic, App perf + dedup audit + fixes`
+    );
+    expect(summary.firstAssignmentAt).toBe(oldTs);
+    expect(summary.latestAssignmentAt).toBe(oldTs);
+    expect(summary.allAssignmentsUnread).toBe(true);
+    expect(summary.staleUnreadRun).toBe(true);
+    expect(summary.droppedCount).toBe(2);
+    expect(summary.stalledAgents).toHaveLength(2);
+  });
+
+  it('keeps recent all-unread runs actionable instead of stale', () => {
+    const recentTs = msBefore(NOW, GRACE_MINUTES + 1);
+    const map = new Map<string, TeamAssignment[]>([
+      [
+        'team-active-fanout',
+        [
+          makeAssignment(
+            'wave1-worker',
+            'active-1',
+            'Recent active task',
+            recentTs,
+            false
+          ),
+        ],
+      ],
+    ]);
+
+    const [summary] = analyzeTeams(map, NOW);
+
+    expect(summary.displayName).toBe('team-active-fanout');
+    expect(summary.allAssignmentsUnread).toBe(true);
+    expect(summary.staleUnreadRun).toBe(false);
+    expect(summary.droppedCount).toBe(1);
+    expect(summary.stalledAgents).toHaveLength(1);
   });
 });
 

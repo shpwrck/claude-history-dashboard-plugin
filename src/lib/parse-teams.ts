@@ -75,6 +75,16 @@ export interface StalledAgent {
 /** Per-team analysis result surfaced to the recommendations engine. */
 export interface TeamSummary {
   teamId: string;
+  /** Human-readable label for UUID-only or otherwise opaque team ids. */
+  displayName?: string;
+  /** Earliest task-assignment timestamp observed for the team. */
+  firstAssignmentAt?: string;
+  /** Latest task-assignment timestamp observed for the team. */
+  latestAssignmentAt?: string;
+  /** True when every assignment in the team inbox is still unread. */
+  allAssignmentsUnread?: boolean;
+  /** True for old all-unread team runs that should be reviewed as historical artifacts. */
+  staleUnreadRun?: boolean;
   totalAssignments: number;
   droppedCount: number;
   /** 0–100, rounded. */
@@ -88,12 +98,18 @@ export interface TeamSummary {
 /** Minutes after dispatch before an unread assignment is counted as dropped. */
 export const GRACE_MINUTES = 10;
 
+/** All-unread runs older than this are historical review items, not live remediation. */
+export const STALE_UNREAD_RUN_MINUTES = 7 * 24 * 60;
+
 export interface ParseTeamsOptions {
   maxFileBytes?: number;
   maxEntries?: number;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const UUID_TEAM_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function safeParse(text: string): TaskAssignmentPayload | null {
   try {
@@ -160,6 +176,47 @@ function loadAgentAssignments(
         } satisfies TeamAssignment,
       ];
     });
+}
+
+function assignmentTimestampMs(assignment: TeamAssignment): number | null {
+  const timestamp = assignment.timestamp || assignment.payload.timestamp || '';
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isoFromMs(ms: number | null): string | undefined {
+  return ms == null ? undefined : new Date(ms).toISOString();
+}
+
+function deriveDisplayName(
+  teamId: string,
+  assignments: TeamAssignment[],
+  firstAssignmentMs: number | null
+): string {
+  if (!UUID_TEAM_ID_RE.test(teamId)) return teamId;
+
+  const date = firstAssignmentMs == null
+    ? 'Undated'
+    : new Date(firstAssignmentMs).toISOString().slice(0, 10);
+  const orderedAssignments = [...assignments].sort((a, b) => {
+    const aTime = assignmentTimestampMs(a) ?? Number.MAX_SAFE_INTEGER;
+    const bTime = assignmentTimestampMs(b) ?? Number.MAX_SAFE_INTEGER;
+    return aTime - bTime;
+  });
+  const subjects = Array.from(
+    new Set(
+      orderedAssignments
+        .map((assignment) => assignment.payload.subject?.trim())
+        .filter((subject): subject is string => Boolean(subject))
+    )
+  );
+  const visibleSubjects = subjects.slice(0, 2);
+  const remaining = subjects.length - visibleSubjects.length;
+  const suffix = visibleSubjects.length === 0
+    ? ''
+    : `: ${visibleSubjects.join(', ')}${remaining > 0 ? ` + ${remaining} more` : ''}`;
+
+  return `${date} team run${suffix}`;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -232,6 +289,22 @@ export function analyzeTeams(
   for (const [teamId, assignments] of teamAssignments) {
     if (assignments.length === 0) continue;
 
+    const assignmentTimes = assignments
+      .map(assignmentTimestampMs)
+      .filter((timestamp): timestamp is number => timestamp != null);
+    const firstAssignmentMs = assignmentTimes.length > 0
+      ? Math.min(...assignmentTimes)
+      : null;
+    const latestAssignmentMs = assignmentTimes.length > 0
+      ? Math.max(...assignmentTimes)
+      : null;
+    const allAssignmentsUnread = assignments.every((assignment) => !assignment.read);
+    const latestAgeMinutes = latestAssignmentMs == null
+      ? 0
+      : Math.max(0, Math.round((now - latestAssignmentMs) / 60_000));
+    const staleUnreadRun =
+      allAssignmentsUnread && latestAgeMinutes >= STALE_UNREAD_RUN_MINUTES;
+
     // Group by agent so we can detect stalled agents.
     const byAgent = new Map<string, TeamAssignment[]>();
     for (const a of assignments) {
@@ -275,6 +348,11 @@ export function analyzeTeams(
 
     summaries.push({
       teamId,
+      displayName: deriveDisplayName(teamId, assignments, firstAssignmentMs),
+      firstAssignmentAt: isoFromMs(firstAssignmentMs),
+      latestAssignmentAt: isoFromMs(latestAssignmentMs),
+      allAssignmentsUnread,
+      staleUnreadRun,
       totalAssignments,
       droppedCount,
       droppedPct,
