@@ -8,7 +8,9 @@
  * silently dragging a session onto the wrong branch mid-task. The recovery that
  * follows — stash a tree across a branch switch, or reflog + cherry-pick an
  * orphaned commit — is the rework this detector catches, recommending the
- * structural cure (a per-branch `git worktree`).
+ * structural cure (a per-branch `git worktree`). For already-damaged work,
+ * the honest recovery layer is git reflog; Claude Code Rewind only reaches
+ * this session's own checkpoints, not a concurrent session's foreign checkout.
  *
  * DATA SCOPING (important, and why this is command-pattern, not output-text):
  * the dashboard's parsed `toolData` (parse-tools) retains each Bash call's
@@ -33,8 +35,8 @@
  * A session is flagged when it shows S1 or S2 (require >=1 strong signal).
  * Severity scales with the count of flagged sessions. A clean, worktree-isolated
  * session (worktree add + commit + push, no stash/reflog recovery) shows neither
- * signal and never fires. Flag-and-recommend only — no auto-apply, no fix
- * snippet (the cure is a procedural workflow, not a settings/CLAUDE.md paste).
+ * signal and never fires. Flag-and-recommend only — no auto-apply. The fix is
+ * a manual recovery checklist, not a validated config paste.
  */
 
 import type { Detector, RecommendationInput } from '../types';
@@ -45,6 +47,30 @@ import { short } from '../shared';
 const MIN_FLAGGED = 1;
 /** At or above this many flagged sessions the finding is a warning, else info. */
 const WARN_FLAGGED = 3;
+
+const RECOVERY_ACTION =
+  'Use worktree-first prevention for the next branch-scoped task: create a `git worktree` ' +
+  'and work there instead of committing, branching, or stashing in the shared main checkout. ' +
+  'For a current foreign-HEAD-swap incident, use git-reflog-guided recovery: find the ' +
+  'orphaned SHA, recreate a recovery branch, then `merge --ff-only` or cherry-pick it back ' +
+  'onto the intended branch before restoring any dirty tree. Claude Code Rewind only helps ' +
+  "with self-inflicted checkpointed edits in this same session; it does not recover another " +
+  "concurrent session's checkout.";
+
+const RECOVERY_FIX_SNIPPET = `# Manual foreign-HEAD-swap recovery. Replace placeholders before running.
+git reflog --date=iso
+git branch recover/<issue-or-session> <orphaned-sha>
+git switch <intended-branch>
+
+# Choose one after inspecting history:
+git merge --ff-only recover/<issue-or-session>
+# or:
+git cherry-pick <orphaned-sha>
+
+# If dirty work was parked during recovery, inspect and re-apply the right stash:
+git stash list
+git stash show -p stash@{n}
+git stash apply stash@{n}`;
 
 // Command matchers. We test the FULL command string (a single Bash call can
 // chain several git ops with `&&`), so `git stash && git checkout -` is caught.
@@ -197,14 +223,19 @@ export const detector: Detector = {
         `concurrent sessions, so a foreign \`git checkout\` can move HEAD out from under ` +
         `you mid-task — the rework above is the symptom.`,
       action:
-        'Create a `git worktree` for any branch-scoped work and work in it — never ' +
-        'commit, branch, or stash in the shared main checkout. A start-of-task ' +
-        '`git branch --show-current` check cannot catch a foreign HEAD swap that lands ' +
-        'after it; only worktree isolation is immune.',
+        RECOVERY_ACTION,
       affected: flagged.length,
       evidence: flagged
         .slice(0, 5)
         .map((f) => `${short(f.sessionId)}: [${f.signals.join('+')}] ${f.sample.slice(0, 80)}`),
+      fix: {
+        target: 'command',
+        fixKind: 'manual',
+        label: 'Recover via git reflog',
+        note:
+          'Manual recovery for a foreign HEAD swap. Replace placeholders after inspecting reflog/history; use Rewind only for this session\'s own checkpointed edits, not another session\'s checkout.',
+        snippet: RECOVERY_FIX_SNIPPET,
+      },
       provenance: {
         observations: [
           {

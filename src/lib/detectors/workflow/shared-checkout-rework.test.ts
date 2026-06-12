@@ -71,6 +71,24 @@ describe('workflow.shared-checkout-rework (#956)', () => {
     expect(rec.evidence?.[0]).toContain('S2');
   });
 
+  it('prescribes reflog recovery and worktree-first prevention without over-claiming Rewind', () => {
+    const rec = detector.rule(input([session('s2', S2_COMMANDS)]), 0)!;
+
+    expect(rec.action).toMatch(/worktree-first prevention/i);
+    expect(rec.action).toMatch(/git-reflog-guided recovery/i);
+    expect(rec.action).toMatch(/Rewind only helps with self-inflicted checkpointed edits/i);
+    expect(rec.action).toMatch(/does not recover another concurrent session's checkout/i);
+    expect(rec.action).not.toMatch(/Rewind recovers (a )?foreign-HEAD-swap/i);
+
+    expect(rec.fix?.target).toBe('command');
+    expect(rec.fix?.fixKind).toBe('manual');
+    expect(rec.fix?.label).toMatch(/git reflog/i);
+    expect(rec.fix?.snippet).toContain('git reflog --date=iso');
+    expect(rec.fix?.snippet).toContain('git merge --ff-only');
+    expect(rec.fix?.snippet).toContain('git cherry-pick');
+    expect(rec.fix?.note).toMatch(/not another session's checkout/i);
+  });
+
   it('catches an S1 sequence chained in a single Bash call', () => {
     const rec = detector.rule(
       input([session('s3', ['git stash && git checkout master && git stash pop'])]),
