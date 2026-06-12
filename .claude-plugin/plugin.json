@@ -7,17 +7,13 @@
     "email": "jankoszy@gmail.com"
   },
   "homepage": "https://github.com/shpwrck/claude-history-dashboard",
+  "repository": "https://github.com/shpwrck/claude-history-dashboard-plugin",
+  "license": "MIT",
   "keywords": [
     "dashboard",
     "history",
     "sessions",
     "analytics",
     "localhost"
-  ],
-  "engines": {
-    "node": ">=24"
-  },
-  "main": "scripts/server.mjs",
-  "commands": "commands/",
-  "source": "https://github.com/shpwrck/claude-history-dashboard-plugin"
+  ]
 }
