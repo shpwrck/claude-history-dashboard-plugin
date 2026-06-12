@@ -106,7 +106,13 @@ function cleanString(value: unknown, maxLen: number): string | null {
   return trimmed;
 }
 
-function parseGate(raw: unknown): ObjectiveGate | null {
+/**
+ * Parse one raw object into an {@link ObjectiveGate}, or null if it fails
+ * validation. Exported (additively — #1076) so the proof fixture-pair bundle
+ * can validate its per-pair gate manifests against the SAME schema the curated
+ * corpus uses, instead of forking the gate shape.
+ */
+export function parseObjectiveGate(raw: unknown): ObjectiveGate | null {
   if (!raw || typeof raw !== 'object') return null;
   const g = raw as Record<string, unknown>;
   const kind = g.kind;
@@ -146,7 +152,7 @@ export function parseCorpusTask(raw: unknown): CorpusTask | null {
   const id = cleanString(r.id, MAX_ID_LEN);
   const title = cleanString(r.title, MAX_TEXT_LEN);
   const instruction = cleanString(r.instruction, MAX_TEXT_LEN);
-  const gate = parseGate(r.gate);
+  const gate = parseObjectiveGate(r.gate);
   if (!id || !title || !instruction || !gate) return null;
   return { id, title, instruction, gate, tags: parseTags(r.tags) };
 }
