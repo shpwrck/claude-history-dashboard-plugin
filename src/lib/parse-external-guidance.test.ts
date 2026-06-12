@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -72,5 +73,21 @@ describe('parseExternalGuidanceSnapshot (#1300)', () => {
         url: 'https://support.claude.com.evil.example/en/articles/11647753-how-do-usage-and-length-limits-work',
       })
     ).toThrow(ExternalGuidanceParseError);
+  });
+
+  it('reads the committed Anthropic usage-limits snapshot with session and weekly facts', () => {
+    const dir = fileURLToPath(new URL('../../data/external-guidance', import.meta.url));
+    const guidance = readExternalGuidanceSnapshots(dir);
+    const usageLimits = guidance.find((entry) => entry.id === 'anthropic-usage-limits');
+
+    expect(usageLimits).toBeDefined();
+    expect(usageLimits?.url).toBe(
+      'https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work'
+    );
+    expect(usageLimits?.contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(usageLimits?.facts).toMatchObject({
+      rollingWindowHours: 5,
+      hasWeeklyLimit: true,
+    });
   });
 });
