@@ -215,6 +215,9 @@ export const NAV_ITEMS: readonly {
   { view: 'sessions', label: 'Sessions', icon: CommentsIcon, domain: 'discovery' },
   { view: 'projects', label: 'Projects', icon: FolderIcon, domain: 'discovery' },
   { view: 'timeline', label: 'Timeline', icon: HistoryIcon, domain: 'discovery' },
+  // #1307 (epic #807): session-scoped forensic graph of turn -> tool-call ->
+  // value-flow structure, additive to Timeline/SessionTranscript.
+  { view: 'forensics', label: 'Forensic Graph', icon: ProjectDiagramIcon, domain: 'discovery' },
   // #14: the former standalone "Stats" view (UsageStats) is folded into
   // "Activity" (the survivor). Its old `#/stats` deep link is preserved via
   // {@link REDIRECTED_VIEWS} below, which resolves it to `activity`.

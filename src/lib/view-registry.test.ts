@@ -225,6 +225,7 @@ describe('view registry ↔ nav catalog parity', () => {
       nav: {
         navigateTo: () => {},
         openSession: () => {},
+      openEvidence: () => {},
         setActiveSessionId: () => {},
         setActiveProjectId: () => {},
         focusSessionId: null,

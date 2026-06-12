@@ -105,6 +105,11 @@ const ProjectBreakdown = lazy(() =>
 const SearchView = lazy(() =>
   import('../components/SearchView').then((m) => ({ default: m.SearchViewPf }))
 );
+const SessionForensicGraph = lazy(() =>
+  import('../components/SessionForensicGraph').then((m) => ({
+    default: m.SessionForensicGraph,
+  }))
+);
 const TokenUsage = lazy(() =>
   import('../components/TokenUsage').then((m) => ({ default: m.TokenUsagePf }))
 );
@@ -286,6 +291,8 @@ export interface ViewData {
 export interface ViewNav {
   navigateTo: (view: View) => void;
   openSession: (sessionId: string) => void;
+  /** Open the session drill-in focused on a specific timeline entry (#1307). */
+  openEvidence: (ref: EvidenceRef) => void;
   setActiveSessionId: (id: string | null) => void;
   setActiveProjectId: (id: string | null) => void;
   focusSessionId: string | null;
@@ -685,6 +692,15 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
+  forensics: ({ data: d, nav: n }) => (
+    <SessionForensicGraph
+      timelines={d.timelines}
+      tokenData={d.tokenData}
+      valueFlow={d.valueFlow}
+      focusSessionId={n.focusSessionId}
+      onOpenEvidence={n.openEvidence}
+    />
+  ),
   // #14: the former standalone "Stats" view (UsageStats) is folded into
   // Activity, so this one page shows both the activity-pulse panels and the
   // usage-stats panels. `entries` is threaded through for the usage-stats
@@ -867,6 +883,7 @@ const VIEW_FILTERABLE_DATA: Partial<Record<View, FilterableViewDataKey[]>> = {
   automation: ['sessions'],
   prompts: ['promptAnalysis'],
   patterns: ['timelines'],
+  forensics: ['timelines'],
 };
 
 function hasUsableValue(value: ViewData[FilterableViewDataKey]): boolean {
