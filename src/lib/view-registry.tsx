@@ -845,7 +845,13 @@ export const VIEW_RENDERERS: Partial<
     <PlanShapes plans={d.plans} serverAvailable={serverAvailable} />
   ),
   pulse: ({ data: d, serverAvailable }) => (
-    <UsagePulse statsCache={d.statsCache} serverAvailable={serverAvailable} />
+    <UsagePulse
+      statsCache={d.statsCache}
+      serverAvailable={serverAvailable}
+      sessions={d.sessions}
+      tokenData={d.tokenData}
+      toolData={d.toolData}
+    />
   ),
   diary: () => <DiaryView />,
   // Model Evals workbench (#1086, epic #975): ranked runs / clusters / batch

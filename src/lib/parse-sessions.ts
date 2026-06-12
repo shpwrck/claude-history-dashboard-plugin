@@ -263,22 +263,34 @@ export function parseSessionJsonl(
  */
 const costCache: WeakMap<SessionTokenData, number> = new WeakMap();
 
+/**
+ * Cost of a single `TokenEntry` under the same pricing rules as
+ * `estimateCost` (which is exactly the sum of this over `data.entries`).
+ * Exported so per-model attribution (#920 Model -> Project flow) can split a
+ * session's spend by the model each entry actually used without duplicating
+ * the pricing math.
+ */
+export function estimateEntryCost(entry: TokenEntry): number {
+  const { pricing } = resolveModelPricing(entry.model);
+  const cache1h = Math.min(entry.cacheCreation1hTokens, entry.cacheCreationTokens);
+  const cache5m = entry.cacheCreationTokens - cache1h;
+  return (
+    (entry.inputTokens / 1_000_000) * pricing.input +
+    (entry.outputTokens / 1_000_000) * pricing.output +
+    (cache5m / 1_000_000) * pricing.cacheWrite5m +
+    (cache1h / 1_000_000) * pricing.cacheWrite1h +
+    (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
+    entry.webSearchRequests * SERVER_TOOL_PRICING.webSearchRequest +
+    entry.webFetchRequests * SERVER_TOOL_PRICING.webFetchRequest
+  );
+}
+
 export function estimateCost(data: SessionTokenData): number {
   const cached = costCache.get(data);
   if (cached !== undefined) return cached;
   let total = 0;
   for (const entry of data.entries) {
-    const { pricing } = resolveModelPricing(entry.model);
-    const cache1h = Math.min(entry.cacheCreation1hTokens, entry.cacheCreationTokens);
-    const cache5m = entry.cacheCreationTokens - cache1h;
-    total +=
-      (entry.inputTokens / 1_000_000) * pricing.input +
-      (entry.outputTokens / 1_000_000) * pricing.output +
-      (cache5m / 1_000_000) * pricing.cacheWrite5m +
-      (cache1h / 1_000_000) * pricing.cacheWrite1h +
-      (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-      entry.webSearchRequests * SERVER_TOOL_PRICING.webSearchRequest +
-      entry.webFetchRequests * SERVER_TOOL_PRICING.webFetchRequest;
+    total += estimateEntryCost(entry);
   }
   costCache.set(data, total);
   return total;
