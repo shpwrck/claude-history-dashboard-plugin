@@ -76,6 +76,28 @@ describe('detectDangerousCommands', () => {
     expect(detectDangerousCommands(data)).toHaveLength(1)
   })
 
+  it('uses precomputed dangerous-command signals when raw command bodies are stripped', () => {
+    const data = [
+      session('s', [
+        {
+          ...call('Bash'),
+          input: {},
+          commandPreview: 'rm -rf build',
+          commandDangerousPattern: 'rm -rf',
+        },
+      ]),
+    ]
+    expect(detectDangerousCommands(data)).toEqual([
+      {
+        sessionId: 's',
+        timestamp: 't',
+        toolUseId: 'u',
+        command: 'rm -rf build',
+        pattern: 'rm -rf',
+      },
+    ])
+  })
+
   it('ignores non-Bash tools', () => {
     const data = [session('s', [call('Read', undefined)])]
     expect(detectDangerousCommands(data)).toHaveLength(0)

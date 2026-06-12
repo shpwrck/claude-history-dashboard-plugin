@@ -16,6 +16,7 @@ import type { WorkflowsResponse } from './parse-workflows';
 import type { AuditFinding } from './audit/types';
 import type { AdoptionReceipt } from './adoption-receipts';
 import type { SessionTimeline } from './parse-timeline';
+import type { ToolUsageData } from './parse-tools';
 
 /** False in the SPA build — gates all server-only UI off. */
 export const SERVER_AVAILABLE = false;
@@ -431,6 +432,15 @@ export async function fetchSessionTimeline(
   _sessionId?: string,
   _signal?: AbortSignal
 ): Promise<SessionTimeline | null> {
+  void _sessionId;
+  void _signal;
+  return null;
+}
+
+export async function fetchSessionTools(
+  _sessionId?: string,
+  _signal?: AbortSignal
+): Promise<ToolUsageData | null> {
   void _sessionId;
   void _signal;
   return null;

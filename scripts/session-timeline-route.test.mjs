@@ -78,6 +78,36 @@ await writeFile(
         content: [{ type: 'text', text: 'timeline answer' }],
       },
     }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2024-01-01T00:00:02.000Z',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'toolu_1',
+            name: 'Bash',
+            input: { command: 'npm test && rm -rf build' },
+          },
+        ],
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2024-01-01T00:00:03.000Z',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_1',
+            is_error: false,
+            content: 'ok',
+          },
+        ],
+      },
+    }),
   ].join('\n') + '\n'
 );
 
@@ -124,6 +154,17 @@ try {
   if (up) {
     const dataset = await fetch(`${base}/api/dataset.json`);
     await check('dataset primes session_blob', () => assert.equal(dataset.status, 200));
+    const datasetBody = await dataset.json();
+    await check('bulk dataset strips Bash command bodies but keeps command signals', () => {
+      const row = datasetBody.toolData.find((item) => item.sessionId === 'session-1');
+      assert.ok(row, 'toolData row present');
+      const call = row.calls.find((item) => item.toolName === 'Bash');
+      assert.ok(call, 'Bash call present');
+      assert.equal(Object.prototype.hasOwnProperty.call(call.input, 'command'), false);
+      assert.equal(call.commandPreview, 'npm test && rm -rf build');
+      assert.equal(call.commandDangerousPattern, 'rm -rf');
+      assert.ok(call.commandFingerprint, 'command fingerprint present');
+    });
 
     const detail = await fetch(`${base}/api/session/session-1/timeline.json`);
     const etag = detail.headers.get('etag');
@@ -132,10 +173,8 @@ try {
       assert.equal(detail.status, 200);
       assert.equal(body.sessionId, 'session-1');
       assert.ok(etag, 'timeline route set an ETag');
-      assert.deepEqual(
-        body.entries.map((entry) => entry.summary),
-        ['hello timeline', 'timeline answer']
-      );
+      assert.ok(body.entries.some((entry) => entry.summary === 'hello timeline'));
+      assert.ok(body.entries.some((entry) => entry.summary === 'timeline answer'));
     });
 
     const repeat = await fetch(`${base}/api/session/session-1/timeline.json`, {
@@ -146,8 +185,26 @@ try {
     const legacy = await fetch(`${base}/api/session/session-1/timeline`);
     await check('legacy timeline route remains compatible', () => assert.equal(legacy.status, 200));
 
+    const toolsDetail = await fetch(`${base}/api/session/session-1/tools.json`);
+    const toolsEtag = toolsDetail.headers.get('etag');
+    const toolsBody = await toolsDetail.json();
+    await check('known session tool detail includes full command text', () => {
+      assert.equal(toolsDetail.status, 200);
+      assert.ok(toolsEtag, 'tools route set an ETag');
+      assert.equal(toolsBody.sessionId, 'session-1');
+      assert.equal(toolsBody.calls[0].input.command, 'npm test && rm -rf build');
+    });
+
+    const toolsRepeat = await fetch(`${base}/api/session/session-1/tools.json`, {
+      headers: { 'If-None-Match': toolsEtag },
+    });
+    await check('tools matching ETag returns 304', () => assert.equal(toolsRepeat.status, 304));
+
     const missing = await fetch(`${base}/api/session/nope/timeline.json`);
     await check('unknown session returns 404', () => assert.equal(missing.status, 404));
+
+    const missingTools = await fetch(`${base}/api/session/nope/tools.json`);
+    await check('unknown session tools returns 404', () => assert.equal(missingTools.status, 404));
   }
 } finally {
   proc.kill('SIGTERM');

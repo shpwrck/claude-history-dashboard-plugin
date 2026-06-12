@@ -59,6 +59,7 @@ import {
   sourceSignature,
   getTranscript,
   getSessionTimelineDetail,
+  getSessionToolDetail,
   ARTIFACT_FILE_MAX_BYTES,
   ARTIFACT_DIR_MAX_ENTRIES,
   ARTIFACT_CACHE_JSON_MAX_BYTES,
@@ -1042,6 +1043,7 @@ const GLOBAL_INGEST_API = {
   sourceSignature,
   getTranscript,
   getSessionTimelineDetail,
+  getSessionToolDetail,
   computeLiveSession,
   recordSuppressionTransitions,
   refreshReviewEvents,
@@ -1801,13 +1803,12 @@ function buildEnterpriseOrganizationRollup(dataset, principal) {
 //     already-covered capabilities (already-installed is the cost concern, not
 //     adoption).
 //   - usage: coarse, EXPLAINABLE capability signals aggregated from toolData.
-//     Per-call Bash command text IS available (toolData[].calls[].input.command,
-//     kept in full by parse-tools' distillToolInput), so we key BOTH on tool-name
-//     frequencies (WebFetch/WebSearch -> web-fetch; browser/playwright tools ->
-//     browser) AND on Bash command prefixes (`gh ...` -> github; psql/sqlite/
-//     mysql/sqlite3 -> database). Each signal's weight is its match count; signals
-//     below the audit's support floor never fire. Defensive: any failure degrades
-//     to empty input (no usage -> audit skipped), mirroring toBoomerangInput.
+//     Bulk Bash calls strip raw command bodies, so command-prefix signals come
+//     from compact parse-tools fields: commandHead plus a short commandPreview
+//     fallback for chained shell snippets (`git status && gh pr list`).
+//     Each signal's weight is its match count; signals below the audit's support
+//     floor never fire. Defensive: any failure degrades to empty input (no usage
+//     -> audit skipped), mirroring toBoomerangInput.
 function toMcpAdoptionInput(ds) {
   try {
     const toolData = auditRows(ds?.toolData);
@@ -1829,11 +1830,23 @@ function toMcpAdoptionInput(ds) {
         if (name.includes('browser') || name.includes('playwright')) {
           browserCalls += 1;
         }
-        // Per-call Bash command text -> command-prefix signals.
+        // Compact Bash command text -> command-prefix signals.
         if ((call?.toolName || '') === 'Bash') {
-          const cmd = (call?.input?.command || '').trim();
-          if (/(^|[\s;&|(])gh\s/.test(' ' + cmd)) ghCalls += 1;
-          if (/(^|[\s;&|(])(psql|sqlite3?|mysql)\b/.test(' ' + cmd)) dbCalls += 1;
+          const head = typeof call?.commandHead === 'string' ? call.commandHead : '';
+          const cmd = (
+            typeof call?.input?.command === 'string'
+              ? call.input.command
+              : typeof call?.commandPreview === 'string'
+                ? call.commandPreview
+                : ''
+          ).trim();
+          if (head === 'gh' || /(^|[\s;&|(])gh\s/.test(' ' + cmd)) ghCalls += 1;
+          if (
+            ['psql', 'sqlite', 'sqlite3', 'mysql'].includes(head) ||
+            /(^|[\s;&|(])(psql|sqlite3?|mysql)\b/.test(' ' + cmd)
+          ) {
+            dbCalls += 1;
+          }
         }
       }
     }
@@ -6581,6 +6594,7 @@ function enterpriseScopedDataPath(pathname) {
     pathname === '/api/memories' ||
     pathname === '/api/workflows' ||
     /^\/api\/session\/[^/]+\/timeline$/.test(pathname) ||
+    /^\/api\/session\/[^/]+\/tools$/.test(pathname) ||
     pathname.startsWith('/projects/')
   );
 }
@@ -7685,6 +7699,35 @@ const server = createServer(async (req, res) => {
         return;
       }
       const etag = `"${detail.contentHash}-timeline"`;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Cache-Control', revalidatingLiveCacheControl());
+      if (etagMatches(req, etag)) {
+        res.setHeader('ETag', etag);
+        appendVary(res, 'Accept-Encoding');
+        res.statusCode = 304;
+        res.end();
+        return;
+      }
+      sendBody(req, res, detail.json, { etag });
+      return;
+    }
+
+    // Lazy per-session tool-call detail (#1287). The bulk dataset ships Bash
+    // calls with raw `input.command` stripped; this endpoint returns the full
+    // session_blob tool row on demand for detail views that need the command
+    // body. Same freshness and ETag model as the timeline detail route.
+    const tTools = pathname.match(/^\/api\/session\/([^/]+)\/tools(?:\.json)?$/);
+    if (tTools) {
+      const ingestApi = await enterpriseRequestIngestApi(req);
+      const detail = ingestApi.getSessionToolDetail(
+        decodeURIComponent(tTools[1])
+      );
+      if (!detail) {
+        res.statusCode = 404;
+        res.end('');
+        return;
+      }
+      const etag = `"${detail.contentHash}-tools"`;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Cache-Control', revalidatingLiveCacheControl());
       if (etagMatches(req, etag)) {

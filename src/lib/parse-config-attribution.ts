@@ -238,7 +238,10 @@ function findSignature(
 function bashCommand(call: ToolUsageData['calls'][number]): string | null {
   if (call.toolName !== 'Bash') return null;
   const cmd = call.input.command;
-  return typeof cmd === 'string' && cmd.length > 0 ? cmd : null;
+  if (typeof cmd === 'string' && cmd.length > 0) return cmd;
+  return typeof call.commandPreview === 'string' && call.commandPreview.length > 0
+    ? call.commandPreview
+    : null;
 }
 
 // ── Per-class evaluators ──────────────────────────────────────────────────────

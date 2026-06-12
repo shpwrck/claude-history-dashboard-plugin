@@ -21,6 +21,7 @@ import type { WorkflowsResponse } from './parse-workflows';
 import type { AuditFinding } from './audit/types';
 import type { AdoptionReceipt } from './adoption-receipts';
 import type { SessionTimeline } from './parse-timeline';
+import type { ToolUsageData } from './parse-tools';
 import { parseHistoryJsonl } from './parse-history';
 
 /** True in the server build; the SPA stub exports `false`. */
@@ -758,6 +759,20 @@ export async function fetchSessionTimeline(
   if (resp.status === 404) return null;
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return (await resp.json()) as SessionTimeline;
+}
+
+/** Fetch one session's FULL tool calls, including Bash `input.command`. */
+export async function fetchSessionTools(
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<ToolUsageData | null> {
+  const resp = await serverFetch(
+    `/api/session/${encodeURIComponent(sessionId)}/tools.json`,
+    signal ? { signal } : {}
+  );
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return (await resp.json()) as ToolUsageData;
 }
 
 /** Fetch the stored assistant transcript content blocks (null = none / 404). */

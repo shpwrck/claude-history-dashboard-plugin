@@ -80,6 +80,31 @@ describe('workflow.shared-checkout-rework (#956)', () => {
     expect(rec).not.toBeNull();
   });
 
+  it('fires from compact git segments after raw command bodies are stripped', () => {
+    const rec = detector.rule(
+      input([
+        {
+          sessionId: 'stripped',
+          calls: [
+            {
+              timestamp: '2026-06-09T00:00:00Z',
+              toolName: 'Bash',
+              input: {},
+              toolUseId: 'u1',
+              isError: null,
+              resultBytes: 0,
+              commandPreview: 'echo setup '.repeat(20).slice(0, 200),
+              commandGitSegments: ['git stash', 'git checkout master', 'git stash pop'],
+            },
+          ],
+        },
+      ]),
+      0,
+    );
+    expect(rec).not.toBeNull();
+    expect(rec?.evidence?.[0]).toContain('S1');
+  });
+
   it('does NOT fire on a clean worktree-based session (negative fixture)', () => {
     const rec = detector.rule(input([session('clean', CLEAN_WORKTREE_COMMANDS)]), 0);
     expect(rec).toBeNull();
@@ -124,7 +149,7 @@ describe('workflow.shared-checkout-rework (#956)', () => {
   it('carries auditable provenance citing the command artifact/field', () => {
     const rec = detector.rule(input([session('s2', S2_COMMANDS)]), 0)!;
     expect(rec.provenance?.observations[0].source).toBe('parse-tools');
-    expect(rec.provenance?.observations[0].field).toBe('toolData[].calls[].input.command');
+    expect(rec.provenance?.observations[0].field).toBe('toolData[].calls[].commandPreview');
     expect(rec.provenance?.observations[0].value).toBe(1);
     expect(rec.provenance?.asOf).toBe('2026-06-09');
   });

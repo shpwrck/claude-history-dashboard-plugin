@@ -9,6 +9,7 @@ import {
   nativeBypassByScope,
   mineCorrections,
   aggregateCorrections,
+  stripToolCommandBodies,
 } from './parse-tools'
 import type { ToolCall, ToolUsageData } from './parse-tools'
 
@@ -51,6 +52,9 @@ describe('parseToolUsage', () => {
     expect(out.calls).toHaveLength(1)
     expect(out.calls[0]).toMatchObject({ toolName: 'Bash', isError: false, resultBytes: 5 })
     expect(out.calls[0].input.command).toBe('ls')
+    expect(out.calls[0].commandFingerprint).toBeTruthy()
+    expect(out.calls[0].commandPreview).toBe('ls')
+    expect(out.calls[0].commandHead).toBe('ls')
   })
 
   it('marks isError true for an error result', () => {
@@ -76,6 +80,36 @@ describe('parseToolUsage', () => {
       toolResult('u1', { content: [{ type: 'text', text: 'ab' }, { type: 'text', text: 'cde' }] }),
     ].join('\n')
     expect(parseToolUsage(text, 's.jsonl')!.calls[0].resultBytes).toBe(5)
+  })
+
+  it('precomputes command signals and strips raw Bash command bodies for bulk payloads', () => {
+    const text = [
+      toolUse('u1', 'Bash', { command: 'grep foo src && rm -rf build' }),
+      toolResult('u1', { content: 'files' }),
+      toolUse('u2', 'Read', { file_path: 'README.md' }),
+      toolUse('u3', 'Bash', {
+        command: `${'echo setup '.repeat(30)} && git stash && git checkout master && git stash pop`,
+      }),
+      toolUse('u4', 'mcp__runner__run', { command: 'remote command body' }),
+    ].join('\n')
+    const parsed = parseToolUsage(text, 's.jsonl')!
+    const stripped = stripToolCommandBodies(parsed)
+    const bashCall = stripped.calls[0]
+
+    expect(Object.prototype.hasOwnProperty.call(bashCall.input, 'command')).toBe(false)
+    expect(bashCall.commandFingerprint).toBe(parsed.calls[0].commandFingerprint)
+    expect(bashCall.commandPreview).toBe('grep foo src && rm -rf build')
+    expect(bashCall.commandHead).toBe('grep')
+    expect(bashCall.commandBypassCategories).toContain('grep')
+    expect(bashCall.commandDangerousPattern).toBe('rm -rf')
+    expect(stripped.calls[1].input.file_path).toBe('README.md')
+    expect(stripped.calls[2].commandPreview?.length).toBe(200)
+    expect(stripped.calls[2].commandGitSegments).toEqual([
+      'git stash',
+      'git checkout master',
+      'git stash pop',
+    ])
+    expect(Object.prototype.hasOwnProperty.call(stripped.calls[3].input, 'command')).toBe(false)
   })
 })
 
@@ -128,6 +162,19 @@ describe('repeatedCommands', () => {
       session('s2', [bash('make'), bash('make'), bash('make'), bash('make')]),
     ]
     expect(repeatedCommands(data)[0]).toMatchObject({ command: 'make', sessions: 2, totalCount: 7, maxPerSession: 4 })
+  })
+
+  it('uses command fingerprints after raw command bodies are stripped', () => {
+    const parsed = parseToolUsage(
+      [
+        toolUse('u1', 'Bash', { command: 'npm test' }),
+        toolUse('u2', 'Bash', { command: 'npm test' }),
+        toolUse('u3', 'Bash', { command: 'npm test' }),
+      ].join('\n'),
+      's.jsonl'
+    )!
+    const rep = repeatedCommands([stripToolCommandBodies(parsed)])
+    expect(rep[0]).toMatchObject({ command: 'npm test', totalCount: 3 })
   })
 })
 

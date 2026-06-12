@@ -196,6 +196,11 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   },
   {
     kind: 'regex',
+    value: '^\\/api\\/session\\/([^/]+)\\/tools(?:\\.json)?$',
+    access: 'scoped-session-detail',
+  },
+  {
+    kind: 'regex',
     value: '^\\/api\\/transcript\\/([^/]+)\\/thinking$',
     access: 'raw-transcript',
   },

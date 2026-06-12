@@ -4,9 +4,9 @@ import { parseJsonl, parseMessage } from './parse-utils';
  * Distilled tool-call `input`. The raw `call.input` blob is the single largest
  * contributor to the dataset payload (file contents, full command bodies, MCP
  * argument blobs), but only a handful of small sub-fields are ever read
- * client-side. We ship just those, keyed under the same names so consumers keep
- * reading `call.input.command` / `.file_path` / `.subagent_type` / `.skill`
- * unchanged. Any field not listed here is intentionally dropped on the wire.
+ * client-side. Session-detail rows keep those fields under the same names, but
+ * the bulk dataset strips `input.command` after deriving compact Bash command
+ * signals. Any field not listed here is intentionally dropped on the wire.
  *
  * Consumers (audited):
  *  - Bash `command`       → parse-tools (topBashCommands / bypass / subcommand /
@@ -22,6 +22,13 @@ export interface DistilledToolInput {
   skill?: string;
 }
 
+/**
+ * Categories of shell command that re-implement a first-class Claude tool.
+ * Using the native tool is cheaper (no shell spin-up / output streaming) and
+ * goes through permission integration, so each detected use is a nudge.
+ */
+export type BypassCategory = 'grep' | 'find' | 'cat' | 'sed' | 'awk' | 'cd';
+
 export interface ToolCall {
   timestamp: string;
   toolName: string;
@@ -35,6 +42,20 @@ export interface ToolCall {
    * Additive field — see cost-attribution's token-weighted attribution.
    */
   resultBytes: number;
+  /** Compact fingerprint for repeat grouping after raw Bash text is stripped. */
+  commandFingerprint?: string;
+  /** Small redacted-ish display preview; raw command bodies stay out of bulk JSON. */
+  commandPreview?: string;
+  /** First executable token after leading env assignments. */
+  commandHead?: string;
+  /** Git-related command segments needed by workflow detectors after stripping. */
+  commandGitSegments?: string[];
+  /** Precomputed native-tool-bypass categories for Bash commands. */
+  commandBypassCategories?: BypassCategory[];
+  /** First dangerous-command pattern matched by the Bash command, if any. */
+  commandDangerousPattern?: string;
+  /** Whether the command references Claude-specific paths such as `.claude`. */
+  commandMentionsClaudePath?: boolean;
 }
 
 export interface ToolUsageData {
@@ -53,6 +74,9 @@ export interface BashCommandStat {
   command: string;
   count: number;
 }
+
+const MAX_COMMAND_PREVIEW_LEN = 200;
+const MAX_COMMAND_GIT_SEGMENTS = 12;
 
 /**
  * Character length of a tool_result `content` value, used as a cheap proxy for
@@ -86,8 +110,10 @@ function resultContentSize(content: unknown): number {
  * Reduce a raw tool_use `input` to the small set of sub-fields consumed
  * client-side (see DistilledToolInput). Only string values are kept, and large
  * free-text bodies (Write/Edit contents, MCP arg blobs, etc.) are dropped by
- * virtue of not being on the allowlist. The `command` string is kept in FULL —
- * the bypass/subcommand/repeated/dangerous detectors all parse it.
+ * virtue of not being on the allowlist. The `command` string is kept in FULL
+ * for the per-session session_blob row, while parseToolUsage also emits compact
+ * command-derived fields on the ToolCall. assembleDataset() strips the raw
+ * command from the bulk dataset after those fields are available.
  */
 export function distillToolInput(input: unknown): DistilledToolInput {
   if (!input || typeof input !== 'object') return {};
@@ -123,13 +149,17 @@ export function parseToolUsage(text: string, fileName: string): ToolUsageData | 
         const toolUseId = block.id ?? '';
         if (!toolUseId) continue;
         const pending = pendingResults.get(toolUseId);
+        const input = distillToolInput(block.input);
         const call: ToolCall = {
           timestamp: entry.timestamp ?? '',
           toolName: block.name ?? 'unknown',
-          input: distillToolInput(block.input),
+          input,
           toolUseId,
           isError: pending !== undefined ? pending.isError : null,
           resultBytes: pending !== undefined ? pending.resultBytes : 0,
+          ...(block.name === 'Bash' && input.command
+            ? deriveBashCommandSignals(input.command)
+            : {}),
         };
         callsById.set(toolUseId, call);
         if (pending !== undefined) pendingResults.delete(toolUseId);
@@ -159,6 +189,20 @@ export function parseToolUsage(text: string, fileName: string): ToolUsageData | 
   return { sessionId, calls };
 }
 
+export function stripToolCommandBodies(data: ToolUsageData): ToolUsageData {
+  return {
+    ...data,
+    calls: data.calls.map((call) => {
+      if (typeof call.input.command !== 'string') {
+        return call;
+      }
+      const { command: _command, ...input } = call.input;
+      void _command;
+      return { ...call, input };
+    }),
+  };
+}
+
 export function aggregateTools(data: ToolUsageData[]): ToolAggregate[] {
   const map = new Map<string, { count: number; errorCount: number }>();
 
@@ -185,21 +229,21 @@ export function topBashCommands(
   data: ToolUsageData[],
   limit = 10
 ): BashCommandStat[] {
-  const counts = new Map<string, number>();
+  const counts = new Map<string, { command: string; count: number }>();
 
   for (const session of data) {
     for (const call of session.calls) {
       if (call.toolName !== 'Bash') continue;
-      const input = call.input;
-      if (!input || typeof input !== 'object') continue;
-      const command = (input as { command?: unknown }).command;
-      if (typeof command !== 'string' || command.length === 0) continue;
-      counts.set(command, (counts.get(command) ?? 0) + 1);
+      const command = bashCommandPreview(call);
+      if (command === null) continue;
+      const key = call.commandFingerprint ?? command;
+      const current = counts.get(key) ?? { command, count: 0 };
+      current.count += 1;
+      counts.set(key, current);
     }
   }
 
-  return Array.from(counts.entries())
-    .map(([command, count]) => ({ command, count }))
+  return Array.from(counts.values())
     .sort((a, b) => b.count - a.count)
     .slice(0, limit);
 }
@@ -217,16 +261,28 @@ function bashCommand(call: ToolCall): string | null {
   return command;
 }
 
+function bashCommandPreview(call: ToolCall): string | null {
+  const command = bashCommand(call);
+  if (command !== null) return command;
+  return typeof call.commandPreview === 'string' && call.commandPreview.length > 0
+    ? call.commandPreview
+    : null;
+}
+
+function bashBypassCategories(call: ToolCall): BypassCategory[] {
+  if (call.toolName !== 'Bash') return [];
+  if (Array.isArray(call.commandBypassCategories)) {
+    return call.commandBypassCategories;
+  }
+  const command = bashCommand(call);
+  if (command === null) return [];
+  const trimmed = command.trim();
+  return BYPASS_DEFS.filter((def) => def.test(trimmed)).map((def) => def.category);
+}
+
 // ---------------------------------------------------------------------------
 // Native-tool-bypass detector
 // ---------------------------------------------------------------------------
-
-/**
- * Categories of shell command that re-implement a first-class Claude tool.
- * Using the native tool is cheaper (no shell spin-up / output streaming) and
- * goes through permission integration, so each detected use is a nudge.
- */
-export type BypassCategory = 'grep' | 'find' | 'cat' | 'sed' | 'awk' | 'cd';
 
 export interface BypassStat {
   category: BypassCategory;
@@ -330,6 +386,111 @@ const BYPASS_DEFS: Array<{
   },
 ];
 
+function commandFingerprint(command: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < command.length; i += 1) {
+    hash ^= command.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${(hash >>> 0).toString(36)}:${command.length}`;
+}
+
+function commandPreview(command: string): string {
+  const flat = command.replace(/\r?\n/g, ' ');
+  return flat.length > MAX_COMMAND_PREVIEW_LEN
+    ? flat.slice(0, MAX_COMMAND_PREVIEW_LEN)
+    : flat;
+}
+
+function commandHead(command: string): string | undefined {
+  const tokens = command.trim().split(/\s+/);
+  let token = tokens[0] ?? '';
+  let i = 0;
+  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) && i < tokens.length - 1) {
+    i += 1;
+    token = tokens[i];
+  }
+  return token || undefined;
+}
+
+const WORKFLOW_GIT_SEGMENT_RE =
+  /\bgit\s+(?:stash\b|switch\b|checkout\b|reflog\b|cherry-pick\b|merge\s+--ff-only\b)/;
+
+function compactGitSegment(part: string): string {
+  if (part.length <= MAX_COMMAND_PREVIEW_LEN) return part;
+  const matchIndex = part.search(WORKFLOW_GIT_SEGMENT_RE);
+  if (matchIndex < 0) return part.slice(0, MAX_COMMAND_PREVIEW_LEN);
+  const start = Math.max(0, matchIndex - 80);
+  return part.slice(start, start + MAX_COMMAND_PREVIEW_LEN);
+}
+
+function commandGitSegments(command: string): string[] {
+  return command
+    .split(/&&|\|\||;|\|/)
+    .map((part) => part.trim())
+    .filter((part) => WORKFLOW_GIT_SEGMENT_RE.test(part))
+    .map(compactGitSegment)
+    .slice(0, MAX_COMMAND_GIT_SEGMENTS);
+}
+
+// Kept in sync with parse-permissions.ts so the bulk toolData payload can drop
+// raw command bodies while dangerous-command consumers keep their exact signal.
+function hasDangerousRmRfFlags(cmd: string): boolean {
+  const m = cmd.match(/\brm\s+-([a-zA-Z]+)\b/);
+  if (!m) return false;
+  const flags = m[1];
+  if (!/^[rRfviIdP]+$/.test(flags)) return false;
+  return /[rR]/.test(flags) && flags.includes('f');
+}
+
+const COMMAND_DANGEROUS_PATTERNS: Array<{
+  name: string;
+  test: (cmd: string) => boolean;
+}> = [
+  { name: 'rm -rf', test: hasDangerousRmRfFlags },
+  { name: 'git reset --hard', test: (c) => /\bgit\s+reset\s+--hard/i.test(c) },
+  {
+    name: 'git push --force',
+    test: (c) => /\bgit\s+push\s+(-f\b|--force\b)/i.test(c),
+  },
+  { name: 'chmod 777', test: (c) => /\bchmod\s+(-R\s+)?[0-7]*777\b/i.test(c) },
+  { name: 'dd if=', test: (c) => /\bdd\s+if=/i.test(c) },
+  {
+    name: 'fork bomb',
+    test: (c) => /:\(\)\s*\{\s*:\s*\|\s*:&\s*\}\s*;:/.test(c),
+  },
+  { name: 'mkfs', test: (c) => /\bmkfs\.\w+|\bmkfs\b/i.test(c) },
+  { name: 'disk overwrite', test: (c) => />\s*\/dev\/sd[a-z]/i.test(c) },
+  {
+    name: 'curl pipe shell',
+    test: (c) => /\b(curl|wget)\b[^|]*\|\s*(sh|bash|zsh)\b/i.test(c),
+  },
+  { name: 'npm publish', test: (c) => /\bnpm\s+publish\b/.test(c) },
+];
+
+export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
+  const trimmed = command.trim();
+  const bypassCategories = BYPASS_DEFS.filter((def) => def.test(trimmed)).map(
+    (def) => def.category
+  );
+  const dangerous = COMMAND_DANGEROUS_PATTERNS.find((pattern) =>
+    pattern.test(command)
+  );
+  const head = commandHead(command);
+  const gitSegments = commandGitSegments(command);
+  return {
+    commandFingerprint: commandFingerprint(command),
+    commandPreview: commandPreview(command),
+    ...(head ? { commandHead: head } : {}),
+    ...(gitSegments.length > 0 ? { commandGitSegments: gitSegments } : {}),
+    ...(bypassCategories.length > 0
+      ? { commandBypassCategories: bypassCategories }
+      : {}),
+    ...(dangerous ? { commandDangerousPattern: dangerous.name } : {}),
+    ...(command.includes('.claude') ? { commandMentionsClaudePath: true } : {}),
+  };
+}
+
 /**
  * Classify every Bash command against the bypass categories above. A single
  * command can count toward multiple categories (e.g. `find … -name … && grep …`).
@@ -352,13 +513,8 @@ export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
         nativeGlob += 1;
         continue;
       }
-      const cmd = bashCommand(call);
-      if (cmd === null) continue;
-      const trimmed = cmd.trim();
-      for (const def of BYPASS_DEFS) {
-        if (def.test(trimmed)) {
-          counts.set(def.category, (counts.get(def.category) ?? 0) + 1);
-        }
+      for (const category of bashBypassCategories(call)) {
+        counts.set(category, (counts.get(category) ?? 0) + 1);
       }
     }
   }
@@ -410,12 +566,8 @@ export function nativeBypassByScope(data: ToolUsageData[]): NativeBypassScope[] 
     let count = 0;
     let resultBytes = 0;
     for (const call of session.calls) {
-      const cmd = bashCommand(call);
-      if (cmd === null) continue;
-      const trimmed = cmd.trim();
       // A single command can satisfy multiple BYPASS_DEFS; count it once.
-      const isBypass = BYPASS_DEFS.some((def) => def.test(trimmed));
-      if (!isBypass) continue;
+      if (bashBypassCategories(call).length === 0) continue;
       count += 1;
       if (call.resultBytes > 0) resultBytes += call.resultBytes;
     }
@@ -447,16 +599,10 @@ export function bashSubcommandStats(
   for (const session of data) {
     for (const call of session.calls) {
       const cmd = bashCommand(call);
-      if (cmd === null) continue;
       // First whitespace-delimited token of the trimmed command. Strip a
       // leading env-var assignment prefix (FOO=bar cmd) if present.
-      const tokens = cmd.trim().split(/\s+/);
-      let token = tokens[0] ?? '';
-      let i = 0;
-      while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) && i < tokens.length - 1) {
-        i += 1;
-        token = tokens[i];
-      }
+      let token = call.commandHead;
+      if (!token && cmd !== null) token = commandHead(cmd);
       if (!token) continue;
       counts.set(token, (counts.get(token) ?? 0) + 1);
     }
@@ -498,13 +644,16 @@ export function repeatedCommands(
   >();
 
   for (const session of data) {
-    const perSession = new Map<string, number>();
+    const perSession = new Map<string, { command: string; count: number }>();
     for (const call of session.calls) {
-      const cmd = bashCommand(call);
+      const cmd = bashCommandPreview(call);
       if (cmd === null) continue;
-      perSession.set(cmd, (perSession.get(cmd) ?? 0) + 1);
+      const key = call.commandFingerprint ?? cmd;
+      const current = perSession.get(key) ?? { command: cmd, count: 0 };
+      current.count += 1;
+      perSession.set(key, current);
     }
-    for (const [command, count] of perSession) {
+    for (const { command, count } of perSession.values()) {
       if (count < minPerSession) continue;
       const entry = agg.get(command) ?? {
         sessions: 0,
@@ -656,7 +805,7 @@ export interface AggregatedCorrection extends CorrectionFact {
 export function aggregateCorrections(facts: CorrectionFact[]): AggregatedCorrection[] {
   const agg = new Map<string, AggregatedCorrection>();
   for (const f of facts) {
-    const key = `${f.category} ${f.failed} ${f.succeeded}`;
+    const key = `${f.category}\0${f.failed}\0${f.succeeded}`;
     const prev = agg.get(key);
     if (prev) prev.occurrences += 1;
     else agg.set(key, { ...f, occurrences: 1 });

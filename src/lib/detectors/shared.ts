@@ -104,14 +104,16 @@ function bashSpec(specifier: string): { literal: string; prefix: boolean } {
  */
 export function permRuleMatchesCall(
   rule: string,
-  call: { toolName: string; input: { command?: string } }
+  call: { toolName: string; input: { command?: string }; commandPreview?: string }
 ): boolean | null {
   const { tool, specifier } = parsePermRule(rule);
   if (call.toolName !== tool) return false;
   if (specifier === null) return true; // bare tool rule matches any use
   if (tool === 'Bash') {
     const cmd =
-      typeof call.input?.command === 'string' ? call.input.command.trim() : '';
+      typeof call.input?.command === 'string'
+        ? call.input.command.trim()
+        : call.commandPreview?.trim() ?? '';
     if (!cmd) return false;
     const { literal, prefix } = bashSpec(specifier);
     return prefix ? cmd === literal || cmd.startsWith(literal + ' ') : cmd === literal;

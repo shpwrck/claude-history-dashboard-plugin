@@ -41,7 +41,10 @@ const UNDO_BASH_RE = /^(git\s+(checkout|restore|revert|reset)\b)/;
 
 function targetKey(call: ToolCall): string {
   if (call.toolName === 'Bash') {
-    const cmd = typeof call.input?.command === 'string' ? call.input.command : '';
+    const cmd =
+      typeof call.input?.command === 'string'
+        ? call.input.command
+        : call.commandFingerprint ?? call.commandPreview ?? '';
     return `Bash::${cmd.trim()}`;
   }
   const path = typeof call.input?.file_path === 'string' ? call.input.file_path : '';
@@ -59,7 +62,10 @@ function isFileEditTool(name: string): boolean {
 
 function isUndoBash(call: ToolCall): boolean {
   if (call.toolName !== 'Bash') return false;
-  const cmd = typeof call.input?.command === 'string' ? call.input.command : '';
+  const cmd =
+    typeof call.input?.command === 'string'
+      ? call.input.command
+      : call.commandPreview ?? '';
   return UNDO_BASH_RE.test(cmd.trim());
 }
 

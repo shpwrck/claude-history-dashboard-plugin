@@ -127,16 +127,20 @@ export function detectDiscoveryFailures(
     // Skills actually invoked in this session — never flag these.
     const invoked = new Set<string>();
     // Identical Bash commands and their per-session repeat counts.
-    const cmdCounts = new Map<string, number>();
+    const cmdCounts = new Map<string, { command: string; count: number }>();
     for (const call of session.calls) {
       if (call.input.skill) invoked.add(call.input.skill);
-      if (call.toolName === 'Bash' && call.input.command) {
-        const cmd = call.input.command;
-        cmdCounts.set(cmd, (cmdCounts.get(cmd) ?? 0) + 1);
+      if (call.toolName === 'Bash') {
+        const cmd = call.input.command ?? call.commandPreview;
+        if (!cmd) continue;
+        const key = call.commandFingerprint ?? cmd;
+        const current = cmdCounts.get(key) ?? { command: cmd, count: 0 };
+        current.count += 1;
+        cmdCounts.set(key, current);
       }
     }
 
-    for (const [command, count] of cmdCounts) {
+    for (const { command, count } of cmdCounts.values()) {
       if (count < MIN_REPEAT) continue;
       const cmdTokens = new Set(tokenize(command));
       if (cmdTokens.size === 0) continue;

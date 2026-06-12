@@ -161,8 +161,10 @@ function toolReuseRate(tools: ToolUsageData | undefined): number {
   const seen = new Map<string, number>();
   for (const call of tools.calls) {
     const cmd =
-      call.toolName === 'Bash' && typeof call.input?.command === 'string'
-        ? call.input.command.trim().split('\n')[0].trim()
+      call.toolName === 'Bash'
+        ? (call.commandFingerprint ??
+          call.input.command?.trim().split('\n')[0].trim() ??
+          call.commandPreview?.trim().split('\n')[0].trim())
         : null;
     const key = cmd ? `Bash::${cmd}` : `${call.toolName}::${call.input?.file_path ?? ''}`;
     seen.set(key, (seen.get(key) ?? 0) + 1);

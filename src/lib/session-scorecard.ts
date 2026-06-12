@@ -160,7 +160,7 @@ function repeatedCommandCount(toolData?: ToolUsageData): number {
   const counts = new Map<string, number>();
   for (const call of toolData.calls) {
     if (call.toolName !== 'Bash') continue;
-    const command = call.input.command;
+    const command = call.commandFingerprint ?? call.input.command ?? call.commandPreview;
     if (!command) continue;
     counts.set(command, (counts.get(command) ?? 0) + 1);
   }
@@ -367,7 +367,9 @@ function scorePortability(input: SessionScorecardInput): SessionScorecardAxis {
     if (call.toolName.startsWith('mcp__')) mcpCalls += 1;
     const command = call.input.command ?? '';
     const file = call.input.file_path ?? '';
-    if (command.includes('.claude') || file.includes('.claude')) claudePathRefs += 1;
+    if (call.commandMentionsClaudePath || command.includes('.claude') || file.includes('.claude')) {
+      claudePathRefs += 1;
+    }
   }
 
   if (claudeSpecific > 0) {

@@ -12,8 +12,10 @@
  *
  * DATA SCOPING (important, and why this is command-pattern, not output-text):
  * the dashboard's parsed `toolData` (parse-tools) retains each Bash call's
- * `input.command` IN FULL, plus an `isError` flag and the result BYTE SIZE — but
- * NOT the result text and NOT the call's cwd. So the issue's output-string
+ * compact command preview/signals, plus git-related command segments for this
+ * detector, an `isError` flag, and the result BYTE SIZE — but NOT the full
+ * command body in bulk, NOT the result text, and NOT the call's cwd. So the
+ * issue's output-string
  * signals — (a) git's "checkout: moving from X to Y" reflog line and (b) a
  * "CONFLICT"/"Aborting" stash error — and the cwd-based signal (c) have no data
  * source here. This detector therefore keys on the two command-sequence signals
@@ -77,8 +79,22 @@ interface FlaggedSession {
  */
 function bashSegments(sd: ToolUsageData): { command: string; ts: string }[] {
   const calls = sd.calls
-    .filter((c) => c.toolName === 'Bash' && typeof c.input.command === 'string')
-    .map((c) => ({ command: c.input.command as string, ts: c.timestamp }))
+    .filter(
+      (c) =>
+        c.toolName === 'Bash' &&
+        (typeof c.input.command === 'string' ||
+          Array.isArray(c.commandGitSegments) ||
+          typeof c.commandPreview === 'string')
+    )
+    .flatMap((c) => {
+      if (typeof c.input.command === 'string') {
+        return [{ command: c.input.command, ts: c.timestamp }];
+      }
+      if (Array.isArray(c.commandGitSegments) && c.commandGitSegments.length > 0) {
+        return c.commandGitSegments.map((command) => ({ command, ts: c.timestamp }));
+      }
+      return [{ command: c.commandPreview as string, ts: c.timestamp }];
+    })
     .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
   const segments: { command: string; ts: string }[] = [];
   for (const { command, ts } of calls) {
@@ -194,7 +210,7 @@ export const detector: Detector = {
           {
             claim: `${flagged.length} session(s) ran the shared-checkout rework command signature (stash-transport or reflog-recovery)`,
             source: 'parse-tools',
-            field: 'toolData[].calls[].input.command',
+            field: 'toolData[].calls[].commandPreview',
             value: flagged.length,
           },
         ],

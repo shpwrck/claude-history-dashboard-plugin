@@ -305,19 +305,39 @@ export function detectDangerousCommands(
       const input = call.input;
       if (!input || typeof input !== 'object') continue;
       const command = (input as { command?: unknown }).command;
-      if (typeof command !== 'string' || command.length === 0) continue;
+      const commandText =
+        typeof command === 'string' && command.length > 0 ? command : null;
+      const precomputedPattern =
+        typeof call.commandDangerousPattern === 'string'
+          ? call.commandDangerousPattern
+          : null;
+      const preview =
+        typeof call.commandPreview === 'string' && call.commandPreview.length > 0
+          ? call.commandPreview
+          : null;
 
+      if (precomputedPattern) {
+        out.push({
+          sessionId: session.sessionId,
+          timestamp: call.timestamp,
+          toolUseId: call.toolUseId,
+          command: truncateCommand(commandText ?? preview ?? ''),
+          pattern: precomputedPattern,
+        });
+        continue;
+      }
+
+      if (commandText === null) continue;
       for (const { name, test } of DANGEROUS_PATTERNS) {
-        if (test(command)) {
-          out.push({
-            sessionId: session.sessionId,
-            timestamp: call.timestamp,
-            toolUseId: call.toolUseId,
-            command: truncateCommand(command),
-            pattern: name,
-          });
-          break; // only record first matching pattern per command
-        }
+        if (!test(commandText)) continue;
+        out.push({
+          sessionId: session.sessionId,
+          timestamp: call.timestamp,
+          toolUseId: call.toolUseId,
+          command: truncateCommand(commandText),
+          pattern: name,
+        });
+        break; // only record first matching pattern per command
       }
     }
   }

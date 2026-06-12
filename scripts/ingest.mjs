@@ -360,6 +360,7 @@ const { initTranscriptCache, initSessionBlobCache } = await import(
 // Transcript secret-scrubber (#204) — distinct from config-hygiene.ts; redacts
 // credential-shaped substrings out of assistant prose before it is persisted.
 const { scrubValue } = await import(join(LIB, 'transcript-hygiene.ts'));
+const { stripToolCommandBodies } = await import(join(LIB, 'parse-tools.ts'));
 // Session-signal descriptor (#524, slice 1) + pure row parser (#855 prototype).
 // `session-blob-row.mjs` owns the read/parse/stringify/content_hash row builder
 // without opening SQLite, so the worker prototype can reuse the exact parser
@@ -459,6 +460,14 @@ export function getSessionTimelineDetail(sessionId) {
   const timeline = row.timeline_json;
   if (timeline === 'null' || timeline === '') return null;
   return { json: timeline, contentHash: row.content_hash };
+}
+
+export function getSessionToolDetail(sessionId) {
+  const row = blobCache.readRow(sessionId);
+  if (!row || !row.tool_json) return null;
+  const tools = row.tool_json;
+  if (tools === 'null' || tools === '') return null;
+  return { json: tools, contentHash: row.content_hash };
 }
 
 // Persistent compressed-dataset cache. The server's in-memory `datasetCache`
@@ -1831,7 +1840,12 @@ export function assembleDataset() {
         // by the per-session detail view). The session_blob row keeps the full
         // parse; getSessionTimelineDetail() below serves it lazily.
         if (v) {
-          const value = s.datasetKey === 'timelines' ? slimSessionTimeline(v) : v;
+          const value =
+            s.datasetKey === 'timelines'
+              ? slimSessionTimeline(v)
+              : s.datasetKey === 'toolData'
+                ? stripToolCommandBodies(v)
+                : v;
           out[s.datasetKey].push(maybeDecorateSignalValue(s.datasetKey, value));
         }
       } else if (s.aggregate === 'spread') {
