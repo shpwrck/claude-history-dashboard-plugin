@@ -114,6 +114,16 @@ export type {
   PullRequestReviewRequestState,
   PullRequestState,
 } from './organization-review-events';
+export type {
+  ExternalGuidance,
+  ExternalGuidanceFacts,
+  ExternalGuidanceFactValue,
+  ExternalGuidanceRef,
+  ExternalGuidanceSource,
+  ExternalGuidanceTarget,
+  ExternalGuidanceTrustTier,
+  ParseExternalGuidanceOptions,
+} from './parse-external-guidance';
 
 // Note: `automationCostShare` is re-exported above from ./detectors/shared so
 // existing `from '../lib/recommendations'` importers (AutomationView, tests)

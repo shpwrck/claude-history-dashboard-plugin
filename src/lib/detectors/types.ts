@@ -47,6 +47,10 @@ import type { ReclaimClaim } from '../reclaim';
 import type { RepoMapDataset } from '../parse-repo-map-join';
 import type { OrganizationIdentityDataset } from '../organization-identity';
 import type { OrganizationReviewEventsDataset } from '../organization-review-events';
+import type {
+  ExternalGuidance,
+  ExternalGuidanceRef,
+} from '../parse-external-guidance';
 
 export type RecCategory =
   | 'cost'
@@ -330,6 +334,12 @@ export interface Recommendation {
    */
   source?: 'judge-audit';
   /**
+   * Static, externally-authored guidance references attached only after a
+   * deterministic recommendation has fired. These are reference-only "Learn
+   * More" links, never standalone recommendations.
+   */
+  references?: ExternalGuidanceRef[];
+  /**
    * True when the finding's severity was scaled up because a contributing
    * signal ran under an unattended (`sdk-*`) entrypoint — e.g. a destructive
    * command executed by automation, where nobody is watching to abort it
@@ -377,6 +387,12 @@ export interface RecommendationInput {
    * coaching detectors emit nothing.
    */
   promptAnalysis?: PromptAnalysis[] | null;
+  /**
+   * Trust-tiered static guidance snapshots (#1300). These are reference-only
+   * documents that later wiring may attach to already-fired built-in
+   * recommendations by detector id or category.
+   */
+  externalGuidance?: ExternalGuidance[] | null;
   /**
    * Per-session model-deceit signal derived at ingest (#685, epic #683 slice A)
    * — claim↔evidence mismatch counts (`unbackedClaimCount`,

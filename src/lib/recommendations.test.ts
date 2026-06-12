@@ -492,6 +492,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     const taskSuccess = [{ sessionId: 's1' }] as unknown as RecommendationInput['taskSuccess'];
     const toolInventories = [{ sessionId: 's1' }] as unknown as RecommendationInput['toolInventories'];
     const promptAnalysis = [{ sessionId: 's1', promptTurnCount: 1, lowSpecificityTurnCount: 0 }] as unknown as RecommendationInput['promptAnalysis'];
+    const externalGuidance = [{ id: 'g1' }] as unknown as RecommendationInput['externalGuidance'];
     const mapped = assembleRecommendationInput({
       tokenData: [],
       toolData: [],
@@ -507,6 +508,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       taskSuccess,
       toolInventories,
       promptAnalysis,
+      externalGuidance,
     });
     expect(mapped.timelines).toBe(timelines);
     expect(mapped.runtimeEvents).toBe(runtimeEvents);
@@ -515,6 +517,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     expect(mapped.taskSuccess).toBe(taskSuccess);
     expect(mapped.toolInventories).toBe(toolInventories);
     expect(mapped.promptAnalysis).toBe(promptAnalysis);
+    expect(mapped.externalGuidance).toBe(externalGuidance);
     expect(mapped.liveConfig).toBeNull();
     expect(mapped.assistantFeatures).toBeNull();
     // The engine runs on a clean (well-formed, empty) mapped input without error.
@@ -580,6 +583,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'modelPinSavings',
       'repoMap',
       'taskSteering',
+      'externalGuidance',
     ]);
     const EXPECTED = [
       'tokenData',
@@ -601,6 +605,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'toolInventories',
       'modelPinSavings',
       'repoMap',
+      'externalGuidance',
     ];
     expect([...covered].sort()).toEqual([...EXPECTED].sort());
   });
