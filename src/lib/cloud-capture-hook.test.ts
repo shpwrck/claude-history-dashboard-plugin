@@ -58,10 +58,16 @@ function initBareHub(tempDir: string): string {
   return hub;
 }
 
-function writeTranscript(source: string, body: string): string {
-  const sessionDir = join(source, '.claude/projects/acme-app');
-  const transcript = join(sessionDir, 'session-1.jsonl');
-  const subagents = join(sessionDir, 'session-1/subagents');
+function writeTranscript(
+  source: string,
+  body: string,
+  options: { projectSlug?: string; sessionId?: string } = {}
+): string {
+  const projectSlug = options.projectSlug ?? 'acme-app';
+  const sessionId = options.sessionId ?? 'session-1';
+  const sessionDir = join(source, '.claude/projects', projectSlug);
+  const transcript = join(sessionDir, `${sessionId}.jsonl`);
+  const subagents = join(sessionDir, `${sessionId}/subagents`);
 
   mkdirSync(subagents, { recursive: true });
   writeFileSync(transcript, `${body}\n`);
@@ -73,12 +79,13 @@ function writeTranscript(source: string, body: string): string {
 function runHook(options: {
   cwd: string;
   transcript: string;
+  sessionId?: string;
   env?: HookEnv;
 }): ReturnType<typeof spawnSync<string>> {
   return spawnSync('bash', [hookScript], {
     cwd: options.cwd,
     input: JSON.stringify({
-      session_id: 'session-1',
+      session_id: options.sessionId ?? 'session-1',
       transcript_path: options.transcript,
       hook_event_name: 'Stop',
     }),
@@ -181,6 +188,86 @@ describe('cloud-capture hook (#689)', () => {
       expect(second.status, second.stderr).toBe(0);
       expect(second.stderr).toContain('no transcript changes to publish');
       expect(hubCommitCount(hub)).toBe(1);
+    });
+  });
+
+  it('converges multiple writers by session id without duplicate files', () => {
+    withTemp('cloud-capture-converge-', (dir) => {
+      const sourceA = join(dir, 'source-a');
+      const sourceB = join(dir, 'source-b');
+      const sourceC = join(dir, 'source-c');
+      initSourceRepo(sourceA);
+      initSourceRepo(sourceB);
+      initSourceRepo(sourceC, 'https://github.com/acme/api.git');
+      const hub = initBareHub(dir);
+      const sharedShort = writeTranscript(sourceA, 'shared first turn', {
+        sessionId: 'session-shared',
+      });
+      const sharedLong = writeTranscript(
+        sourceB,
+        'shared first turn\nshared second turn with more content',
+        { sessionId: 'session-shared' }
+      );
+      const disjoint = writeTranscript(sourceC, 'api session turn', {
+        projectSlug: 'acme-api',
+        sessionId: 'session-api',
+      });
+
+      for (const [cwd, transcript, sessionId] of [
+        [sourceA, sharedShort, 'session-shared'],
+        [sourceB, sharedLong, 'session-shared'],
+        [sourceC, disjoint, 'session-api'],
+      ] as const) {
+        const result = runHook({
+          cwd,
+          transcript,
+          sessionId,
+          env: {
+            CLAUDE_CODE_REMOTE: 'true',
+            CLAUDE_HUB_REMOTE: `file://${hub}`,
+            CLAUDE_HUB_BRANCH: 'main',
+            CLAUDE_PROJECT_DIR: cwd,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+      }
+
+      expect(hubFile(hub, 'projects/acme-app/session-shared.jsonl')).toContain(
+        'shared second turn'
+      );
+      expect(hubFile(hub, 'projects/acme-api/session-api.jsonl')).toContain(
+        'api session turn'
+      );
+
+      const shorterRepublish = runHook({
+        cwd: sourceA,
+        transcript: sharedShort,
+        sessionId: 'session-shared',
+        env: {
+          CLAUDE_CODE_REMOTE: 'true',
+          CLAUDE_HUB_REMOTE: `file://${hub}`,
+          CLAUDE_HUB_BRANCH: 'main',
+          CLAUDE_PROJECT_DIR: sourceA,
+        },
+      });
+      expect(shorterRepublish.status, shorterRepublish.stderr).toBe(0);
+      expect(shorterRepublish.stderr).toContain(
+        'kept larger existing acme-app/session-shared.jsonl'
+      );
+      expect(hubFile(hub, 'projects/acme-app/session-shared.jsonl')).toContain(
+        'shared second turn'
+      );
+
+      const files = git(
+        ['--git-dir', hub, 'ls-tree', '-r', '--name-only', 'main'],
+        dir
+      )
+        .split('\n')
+        .filter(Boolean);
+      expect(
+        files.filter((file) => file === 'projects/acme-app/session-shared.jsonl')
+      ).toHaveLength(1);
+      expect(files).toContain('projects/acme-api/session-api.jsonl');
     });
   });
 
