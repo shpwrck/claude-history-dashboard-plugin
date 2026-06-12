@@ -100,7 +100,26 @@ describe('parsePromptAnalysis', () => {
     });
   });
 
-  it('ignores empty prompt text', () => {
-    expect(parsePromptAnalysis([entry('empty', '   ')])).toEqual([]);
+  it('ignores empty and synthetic non-prompt turns', () => {
+    expect(
+      parsePromptAnalysis([
+        entry('empty', '   '),
+        entry('init', 'init'),
+        entry('exit', 'exit'),
+        entry('system', '<system-reminder>Use the todo list.</system-reminder>'),
+        entry('task', '<task-notification>Task done.</task-notification>'),
+      ])
+    ).toEqual([]);
+  });
+
+  it('computes average length across varied prompt lengths', () => {
+    const [analysis] = parsePromptAnalysis([
+      entry('s4', '12345'),
+      entry('s4', '123456789012345'),
+    ]);
+
+    expect(analysis.promptTurnCount).toBe(2);
+    expect(analysis.totalPromptChars).toBe(20);
+    expect(analysis.avgPromptChars).toBe(10);
   });
 });

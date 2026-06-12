@@ -1,4 +1,5 @@
 import type { HistoryEntry, PromptAnalysis } from '../types';
+import { isRealHumanTurn } from './parse-history';
 
 const SENTENCE_RE = /[^.!?\n]+[.!?]+|[^.!?\n]+$/g;
 const FILE_PATH_RE =
@@ -64,7 +65,10 @@ function finalize(record: MutablePromptAnalysis): PromptAnalysis {
 
 /**
  * Reduce user prompts to per-session numeric traits. No prompt prose is
- * retained in the returned records.
+ * retained in the returned records. Length metrics use the retained
+ * HistoryEntry.display text; transcript-derived entries may already be capped
+ * upstream for browser payload size, so this is a display-text character
+ * average rather than raw transcript byte length.
  */
 export function parsePromptAnalysis(
   entries: readonly HistoryEntry[]
@@ -72,8 +76,8 @@ export function parsePromptAnalysis(
   const bySession = new Map<string, MutablePromptAnalysis>();
 
   for (const entry of entries) {
+    if (!isRealHumanTurn(entry)) continue;
     const text = entry.display.trim();
-    if (!text) continue;
 
     let record = bySession.get(entry.sessionId);
     if (!record) {
