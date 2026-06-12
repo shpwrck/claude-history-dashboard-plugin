@@ -108,6 +108,23 @@ export function unionEntries(
   ];
 }
 
+const SYNTHETIC_TURN_RE =
+  /^\s*<\s*(task-notification|system-reminder)\b[\s\S]*<\/\s*\1\s*>\s*$/i;
+
+export function isRealHumanTurn(entry: HistoryEntry): boolean {
+  const display = entry.display.trim();
+  return (
+    display.length > 0 &&
+    display !== 'init' &&
+    display !== 'exit' &&
+    !SYNTHETIC_TURN_RE.test(display)
+  );
+}
+
+export function realHumanTurns(entries: readonly HistoryEntry[]): HistoryEntry[] {
+  return entries.filter(isRealHumanTurn);
+}
+
 export function groupBySessions(entries: HistoryEntry[]): Session[] {
   const groups = new Map<string, HistoryEntry[]>();
   for (const entry of entries) {
