@@ -46,7 +46,7 @@ export interface SessionTimeline extends SessionDimensions {
   /**
    * True when `entries[].summary` text has been stripped from this timeline for
    * the bulk dataset (#1035/#1284). Full detail is served lazily by
-   * `GET /api/session/<id>/timeline`; client-parsed timelines (uploads, the SPA
+   * `GET /api/session/<id>/timeline.json`; client-parsed timelines (uploads, the SPA
    * sample corpus) are never slim.
    */
   slim?: boolean;

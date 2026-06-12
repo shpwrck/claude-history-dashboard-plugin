@@ -191,7 +191,7 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'exact', value: '/history.jsonl', access: 'scoped-history' },
   {
     kind: 'regex',
-    value: '^\\/api\\/session\\/([^/]+)\\/timeline$',
+    value: '^\\/api\\/session\\/([^/]+)\\/timeline(?:\\.json)?$',
     access: 'scoped-session-detail',
   },
   {

@@ -31,14 +31,14 @@ check('collector finds exact, prefix, and regex enterprise data routes', () => {
     "if (pathname === '/sessions-manifest.json') return;",
     "if (pathname.startsWith('/projects/')) return;",
     "if (pathname.startsWith('/api/')) return false;",
-    "const t = pathname.match(/^\\/api\\/session\\/([^/]+)\\/timeline$/);",
+    "const t = pathname.match(/^\\/api\\/session\\/([^/]+)\\/timeline(?:\\.json)?$/);",
   ].join('\n');
 
   assert.deepEqual(collectEnterpriseRouteKeys(source).map(routeKey), [
     'exact:/api/dataset.json',
     'exact:/sessions-manifest.json',
     'prefix:/projects/',
-    'regex:^\\/api\\/session\\/([^/]+)\\/timeline$',
+    'regex:^\\/api\\/session\\/([^/]+)\\/timeline(?:\\.json)?$',
   ]);
 });
 

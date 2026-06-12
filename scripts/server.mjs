@@ -7668,12 +7668,12 @@ const server = createServer(async (req, res) => {
     // over the content + thinking JSON), so any change to either invalidates
     // both endpoints' caches; the thinking ETag carries a `-thinking` suffix so
     // a client can't cross-match a 304 between the two routes.
-    // Lazy per-session timeline detail (#1035/#1284). The bulk dataset ships
+    // Lazy per-session timeline detail (#1035/#1285). The bulk dataset ships
     // slim timelines (`summary` stripped); this endpoint returns the
     // session's FULL timeline straight from its session_blob row — one SELECT,
     // no re-parse. ETag is the row's content_hash with a `-timeline` suffix so
     // a 304 can't cross-match the transcript endpoints sharing that hash.
-    const tTimeline = pathname.match(/^\/api\/session\/([^/]+)\/timeline$/);
+    const tTimeline = pathname.match(/^\/api\/session\/([^/]+)\/timeline(?:\.json)?$/);
     if (tTimeline) {
       const ingestApi = await enterpriseRequestIngestApi(req);
       const detail = ingestApi.getSessionTimelineDetail(

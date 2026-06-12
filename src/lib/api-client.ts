@@ -748,10 +748,12 @@ export async function fetchAdoptionReceipts(): Promise<AdoptionReceipt[]> {
  * server has no row for the session (404).
  */
 export async function fetchSessionTimeline(
-  sessionId: string
+  sessionId: string,
+  signal?: AbortSignal
 ): Promise<SessionTimeline | null> {
   const resp = await serverFetch(
-    `/api/session/${encodeURIComponent(sessionId)}/timeline`
+    `/api/session/${encodeURIComponent(sessionId)}/timeline.json`,
+    signal ? { signal } : {}
   );
   if (resp.status === 404) return null;
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

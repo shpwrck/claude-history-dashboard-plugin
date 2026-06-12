@@ -427,7 +427,12 @@ export async function fetchTranscriptContent(): Promise<unknown[] | null> {
 
 // Never called on the live SPA path: client-parsed timelines (uploads, the
 // sample corpus) are never slim, so SessionTimeline skips the lazy hydrate.
-export async function fetchSessionTimeline(): Promise<SessionTimeline | null> {
+export async function fetchSessionTimeline(
+  _sessionId?: string,
+  _signal?: AbortSignal
+): Promise<SessionTimeline | null> {
+  void _sessionId;
+  void _signal;
   return null;
 }
 
