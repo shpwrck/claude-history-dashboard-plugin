@@ -246,6 +246,7 @@ const TELEMETRY_DIR = join(CLAUDE, 'telemetry');
 const DEBUG_DIR = join(CLAUDE, 'debug');
 const FILE_HISTORY_DIR = join(CLAUDE, 'file-history');
 const PLANS_DIR = join(CLAUDE, 'plans');
+const MODEL_EVAL_RESULTS_DIR = join(CLAUDE, 'model-evals', 'results');
 const STATS_CACHE = join(CLAUDE, 'stats-cache.json');
 const LAST_UPDATE = join(CLAUDE, '.last-update-result.json');
 const MCP_AUTH = join(CLAUDE, 'mcp-needs-auth-cache.json');
@@ -300,6 +301,9 @@ const { parseDebugDir } = await import(join(LIB, 'parse-debug.ts'));
 const { parseStatsCache } = await import(join(LIB, 'parse-stats-cache.ts'));
 const { parseFileHistoryDir } = await import(join(LIB, 'parse-file-history.ts'));
 const { parsePlansDir } = await import(join(LIB, 'parse-plans.ts'));
+const { ingestModelEvalResults } = await import(
+  join(LIB, 'model-eval-ingest.ts')
+);
 const { parseLastUpdate } = await import(join(LIB, 'parse-last-update.ts'));
 const { parseMcpAuthCache } = await import(join(LIB, 'parse-mcp-auth.ts'));
 const { parseBackupsDir, diffConfigDrift } = await import(
@@ -1412,6 +1416,13 @@ export function sourceSignature() {
     }
   }
   try {
+    parts.push(
+      `${MODEL_EVAL_RESULTS_DIR}:${Math.floor(statSync(MODEL_EVAL_RESULTS_DIR).mtimeMs)}`
+    );
+  } catch {
+    parts.push(`${MODEL_EVAL_RESULTS_DIR}:0`);
+  }
+  try {
     parts.push(`${REPO_MAP_DIR}:${Math.floor(statSync(REPO_MAP_DIR).mtimeMs)}`);
   } catch {
     parts.push(`${REPO_MAP_DIR}:0`);
@@ -1552,6 +1563,14 @@ export function ingest() {
     hash.update('repo-map-config\n');
     hashRepoConfigFiles(repoMapArtifactRoots(), hash);
   }
+  // Completed model-eval result artifacts (#1242): a new/changed artifact must
+  // invalidate the compressed dataset cache or the summary is served stale
+  // until an unrelated input moves. Guarded so the absent-dir case contributes
+  // nothing and the hash input stays byte-identical to before this feature.
+  if (existsSync(MODEL_EVAL_RESULTS_DIR)) {
+    hash.update('model-evals\n');
+    hashTree(MODEL_EVAL_RESULTS_DIR, '', hash);
+  }
   hash.update('review-events\n');
   hash.update(reviewEventsSourceSignature());
   hash.update('\n');
@@ -1591,6 +1610,7 @@ export function assembleArtifacts() {
   let statsCache = null;
   let fileHistory = [];
   let plans = [];
+  let modelEvalSummary = null;
   let updateResults = [];
   let mcpAuth = null;
   let configBackups = [];
@@ -1677,6 +1697,42 @@ export function assembleArtifacts() {
     }
   } catch { /* ignore */ }
   try {
+    if (existsSync(MODEL_EVAL_RESULTS_DIR)) {
+      modelEvalSummary = cachedArtifact(
+        'model-eval-results',
+        MODEL_EVAL_RESULTS_DIR,
+        () => {
+          // Name-sorted, entry-capped *.json artifacts, each JSON-parsed under
+          // its own guard, folded through the pure #1085 summarizer (which
+          // sanitizes per artifact, so a malformed file is dropped, not fatal).
+          const names = [];
+          const dir = opendirSync(MODEL_EVAL_RESULTS_DIR);
+          try {
+            let ent;
+            while ((ent = dir.readSync()) !== null) {
+              if (names.length >= ARTIFACT_DIR_MAX_ENTRIES) break;
+              if (ent.isFile() && ent.name.endsWith('.json')) names.push(ent.name);
+            }
+          } finally {
+            dir.closeSync();
+          }
+          names.sort();
+          const raws = [];
+          for (const name of names.slice(0, ARTIFACT_DIR_MAX_ENTRIES)) {
+            try {
+              raws.push(
+                JSON.parse(
+                  readArtifactTextCappedSync(join(MODEL_EVAL_RESULTS_DIR, name))
+                )
+              );
+            } catch { /* malformed artifact file — skip */ }
+          }
+          return ingestModelEvalResults(raws);
+        }
+      );
+    }
+  } catch { /* ignore */ }
+  try {
     if (existsSync(LAST_UPDATE)) {
       const u = parseLastUpdate(readArtifactTextCappedSync(LAST_UPDATE));
       updateResults = u ? [u] : [];
@@ -1706,6 +1762,7 @@ export function assembleArtifacts() {
     statsCache,
     fileHistory,
     plans,
+    modelEvalSummary,
     updateResults,
     mcpAuth,
     configBackups,
@@ -1859,6 +1916,7 @@ export function assembleDataset() {
     statsCache,
     fileHistory,
     plans,
+    modelEvalSummary,
     updateResults,
     mcpAuth,
     configBackups,
@@ -2002,6 +2060,7 @@ export function assembleDataset() {
     statsCache,
     fileHistory,
     plans,
+    modelEvalSummary,
     updateResults,
     mcpAuth,
     configBackups,

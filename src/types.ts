@@ -506,3 +506,11 @@ export interface LiveConfig {
   /** Locally-installed slash commands under `~/.claude/commands/<id>.md`. */
   commands: LiveResource[];
 }
+
+/**
+ * Rollup of completed model-eval result artifacts (#1242, epic #975). Server
+ * dataset key `modelEvalSummary`; null when `~/.claude/model-evals/results`
+ * is absent (and always null in the SPA/upload dataset). Type-only re-export —
+ * erased at compile time, so the server boot graph is unaffected.
+ */
+export type { ModelEvalSummary } from './lib/model-eval-ingest';
