@@ -374,6 +374,13 @@ function filterBySessionId<T extends { sessionId: string }>(
   return rows.filter((row) => sessionIds.has(row.sessionId));
 }
 
+function filterTelemetryBySessionId(
+  rows: readonly TelemetryEvent[],
+  sessionIds: ReadonlySet<string>
+): TelemetryEvent[] {
+  return rows.filter((row) => sessionIds.has(row.session_id));
+}
+
 function filterTokenDataByTime(
   rows: readonly SessionTokenData[],
   range: TimeRange
@@ -474,8 +481,15 @@ export function filterViewDataByTime(
   const sessions = data.sessions.filter((session) =>
     timestampInRange(session.startTime, range)
   );
-  const sessionIds = new Set(sessions.map((session) => session.sessionId));
   const tokenData = filterTokenDataByTime(data.tokenData, range);
+  const sessionRegistry = data.sessionRegistry.filter((entry) =>
+    timestampInRange(entry.startedAt, range)
+  );
+  const sessionIds = new Set([
+    ...sessions.map((session) => session.sessionId),
+    ...tokenData.map((row) => row.sessionId),
+    ...sessionRegistry.map((entry) => entry.sessionId),
+  ]);
   const toolData = filterToolDataByTime(data.toolData, range);
   const timelines = filterTimelinesByTime(data.timelines, range);
   const apiErrors = data.apiErrors.filter((event) =>
@@ -511,6 +525,11 @@ export function filterViewDataByTime(
     assistantFeatures: filterBySessionId(data.assistantFeatures, sessionIds),
     promptAnalysis: filterBySessionId(data.promptAnalysis, sessionIds),
     deceitSignals: filterBySessionId(data.deceitSignals, sessionIds),
+    sessionRegistry,
+    telemetry: data.telemetry.filter((event) =>
+      timestampInRange(event.client_timestamp, range)
+    ),
+    debugLogs: filterBySessionId(data.debugLogs, sessionIds),
   };
 }
 
@@ -937,14 +956,20 @@ export function filterViewDataByProject(
 
   const project = filter.project;
   const sessions = data.sessions.filter((session) => session.project === project);
-  const sessionIds = new Set(sessions.map((session) => session.sessionId));
+  const tokenData = data.tokenData.filter((item) => item.project === project);
+  const sessionRegistry = data.sessionRegistry.filter((entry) => entry.cwd === project);
+  const sessionIds = new Set([
+    ...sessions.map((session) => session.sessionId),
+    ...tokenData.map((row) => row.sessionId),
+    ...sessionRegistry.map((entry) => entry.sessionId),
+  ]);
 
   return {
     ...data,
     entries: data.entries.filter((entry) => entry.project === project),
     sessions,
     projects: data.projects.filter((item) => item.project === project),
-    tokenData: data.tokenData.filter((item) => item.project === project),
+    tokenData,
     toolData: keepKnownSession(data.toolData, sessionIds),
     toolInventories: keepKnownSession(data.toolInventories, sessionIds),
     timelines: keepKnownSession(data.timelines, sessionIds),
@@ -962,6 +987,9 @@ export function filterViewDataByProject(
     promptAnalysis: keepKnownSession(data.promptAnalysis, sessionIds),
     deceitSignals: keepKnownSession(data.deceitSignals, sessionIds),
     workflows: keepKnownSession(data.workflows, sessionIds),
+    sessionRegistry,
+    telemetry: filterTelemetryBySessionId(data.telemetry, sessionIds),
+    debugLogs: keepKnownSession(data.debugLogs, sessionIds),
   };
 }
 

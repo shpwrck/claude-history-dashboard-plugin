@@ -110,6 +110,55 @@ function tokenRow(
   return row;
 }
 
+const telemetryEnv = {
+  node_version: 'v24',
+  terminal: 'tmux',
+  wsl_version: '',
+  linux_distro_id: 'ubuntu',
+  arch: 'x64',
+  build_time: '2026-06-01',
+};
+
+function telemetryRow(sessionId: string, timestamp: string) {
+  return {
+    event_name: 'tengu_api_slow_first_byte',
+    client_timestamp: timestamp,
+    model: 'claude-sonnet-4-5',
+    betas: '',
+    session_id: sessionId,
+    attempt: 1,
+    elapsed_ms: 0,
+    env: telemetryEnv,
+  };
+}
+
+function debugRow(sessionId: string) {
+  return {
+    sessionId,
+    ttfbP50: 100,
+    ttfbP90: 200,
+    ttfbMax: 200,
+    ttfbSampleCount: 1,
+    maxRetryAttempt: 0,
+    slowFirstByteCount: 0,
+    fastModeLostCount: 0,
+  };
+}
+
+function registryRow(sessionId: string, cwd: string, startedAt: number) {
+  return {
+    pid: Math.abs(sessionId.split('').reduce((sum, c) => sum + c.charCodeAt(0), 0)),
+    sessionId,
+    cwd,
+    startedAt,
+    procStart: '1',
+    version: '2.1.180',
+    peerProtocol: 1,
+    kind: 'interactive',
+    entrypoint: 'cli',
+  };
+}
+
 function promptRow(sessionId: string, project: string): PromptAnalysis {
   return {
     sessionId,
@@ -266,8 +315,26 @@ describe('project-scoped view data filtering', () => {
       projects: groupByProjects(sessions),
       tokenData: [
         tokenRow('alpha-1', alphaProject, '2026-01-01T00:00:00.000Z'),
+        tokenRow('alpha-token-only', alphaProject, '2026-01-01T01:00:00.000Z'),
         tokenRow('beta-1', betaProject, '2026-01-02T00:00:00.000Z'),
         tokenRow('missing-project', undefined, '2026-01-03T00:00:00.000Z'),
+      ],
+      sessionRegistry: [
+        registryRow('alpha-1', alphaProject, 1000),
+        registryRow('alpha-token-only', alphaProject, 1500),
+        registryRow('alpha-registry-only', alphaProject, 1750),
+        registryRow('beta-1', betaProject, 2000),
+      ],
+      telemetry: [
+        telemetryRow('alpha-1', '2026-01-01T00:00:00.000Z'),
+        telemetryRow('alpha-token-only', '2026-01-01T01:00:00.000Z'),
+        telemetryRow('alpha-registry-only', '2026-01-01T01:30:00.000Z'),
+        telemetryRow('beta-1', '2026-01-02T00:00:00.000Z'),
+      ],
+      debugLogs: [
+        debugRow('alpha-token-only'),
+        debugRow('alpha-registry-only'),
+        debugRow('beta-1'),
       ],
       toolData: [
         { sessionId: 'alpha-1', calls: [] },
@@ -471,7 +538,24 @@ describe('project-scoped view data filtering', () => {
     expect(filtered.entries.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.sessions.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.projects.map((item) => item.project)).toEqual([alphaProject]);
-    expect(filtered.tokenData.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    expect(filtered.tokenData.map((item) => item.sessionId)).toEqual([
+      'alpha-1',
+      'alpha-token-only',
+    ]);
+    expect(filtered.sessionRegistry.map((item) => item.sessionId)).toEqual([
+      'alpha-1',
+      'alpha-token-only',
+      'alpha-registry-only',
+    ]);
+    expect(filtered.telemetry.map((item) => item.session_id)).toEqual([
+      'alpha-1',
+      'alpha-token-only',
+      'alpha-registry-only',
+    ]);
+    expect(filtered.debugLogs.map((item) => item.sessionId)).toEqual([
+      'alpha-token-only',
+      'alpha-registry-only',
+    ]);
     expect(filtered.toolData.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.toolInventories.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.timelines.map((item) => item.sessionId)).toEqual(['alpha-1']);
@@ -557,6 +641,23 @@ describe('filterViewDataByTime', () => {
         hasUnknownModel: false,
       },
     ],
+    sessionRegistry: [
+      registryRow('old', '/repo/old', older),
+      registryRow('recent', '/repo/recent', within24h),
+      registryRow('registry-recent', '/repo/recent', within24h + 1000),
+    ],
+    telemetry: [
+      telemetryRow('old', new Date(older).toISOString()),
+      telemetryRow('mixed', new Date(within24h).toISOString()),
+      telemetryRow('recent', new Date(within24h).toISOString()),
+      telemetryRow('registry-recent', new Date(within24h + 1000).toISOString()),
+    ],
+    debugLogs: [
+      debugRow('old'),
+      debugRow('mixed'),
+      debugRow('recent'),
+      debugRow('registry-recent'),
+    ],
     toolData: [
       {
         sessionId: 'mixed',
@@ -623,6 +724,20 @@ describe('filterViewDataByTime', () => {
     ]);
     expect(filtered.timelines[0].entries.map((entry) => entry.summary)).toEqual([
       'recent',
+    ]);
+    expect(filtered.sessionRegistry.map((row) => row.sessionId)).toEqual([
+      'recent',
+      'registry-recent',
+    ]);
+    expect(filtered.telemetry.map((row) => row.session_id)).toEqual([
+      'mixed',
+      'recent',
+      'registry-recent',
+    ]);
+    expect(filtered.debugLogs.map((row) => row.sessionId)).toEqual([
+      'mixed',
+      'recent',
+      'registry-recent',
     ]);
   });
 
