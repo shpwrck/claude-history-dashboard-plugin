@@ -9,7 +9,7 @@
  * upload-only: `SERVER_AVAILABLE === false` makes every consumer gate its
  * server-only UI off, and these functions are never called on the live path.
  */
-import type { HistoryEntry } from '../types';
+import type { DailyDigest, HistoryEntry } from '../types';
 import type { Usage } from './usage';
 import type { MemoriesResponse } from './parse-memories';
 import type { WorkflowsResponse } from './parse-workflows';
@@ -412,6 +412,22 @@ export async function fetchMemories(): Promise<MemoriesResponse> {
 
 export async function fetchWorkflows(): Promise<WorkflowsResponse> {
   return { runs: [] };
+}
+
+export async function fetchDigest(date: string): Promise<DailyDigest> {
+  return {
+    schemaVersion: '1',
+    date,
+    generatedAt: '',
+    total: {
+      date,
+      sessionCount: 0,
+      messageCount: 0,
+      toolCallCount: 0,
+      categories: [],
+    },
+    projects: [],
+  };
 }
 
 export async function fetchAuditFindings(): Promise<AuditFinding[]> {

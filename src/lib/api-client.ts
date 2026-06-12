@@ -14,7 +14,7 @@
  * UI (Live widget, Policy write-back, Insights regenerate, transcript drill-in,
  * the "Reload from disk" control). It is `true` here and `false` in the stub.
  */
-import type { HistoryEntry } from '../types';
+import type { DailyDigest, HistoryEntry } from '../types';
 import type { Usage } from './usage';
 import type { MemoriesResponse } from './parse-memories';
 import type { WorkflowsResponse } from './parse-workflows';
@@ -712,6 +712,16 @@ export async function fetchWorkflows(): Promise<WorkflowsResponse> {
   } catch {
     return { runs: [] };
   }
+}
+
+/** Fetch the server-projected daily digest for one local date. */
+export async function fetchDigest(date: string): Promise<DailyDigest> {
+  const query = new URLSearchParams({ date });
+  const res = await serverFetch(`/api/digest?${query.toString()}`, {
+    headers: { Accept: 'application/json' },
+  });
+  if (!res.ok) throw new Error(`Digest request failed (HTTP ${res.status})`);
+  return (await res.json()) as DailyDigest;
 }
 
 /** Fetch opt-in tier-3 judge/audit findings. Never called on dataset load. */

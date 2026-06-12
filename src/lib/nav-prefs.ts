@@ -35,6 +35,7 @@ import SitemapIcon from '@patternfly/react-icons/dist/esm/icons/sitemap-icon';
 import ClipboardListIcon from '@patternfly/react-icons/dist/esm/icons/clipboard-list-icon';
 import ChartLineIcon from '@patternfly/react-icons/dist/esm/icons/chart-line-icon';
 import ChartPieIcon from '@patternfly/react-icons/dist/esm/icons/chart-pie-icon';
+import CalendarAltIcon from '@patternfly/react-icons/dist/esm/icons/calendar-alt-icon';
 import FlaskIcon from '@patternfly/react-icons/dist/esm/icons/flask-icon';
 import type { View, ActionDomain } from '../types';
 
@@ -179,6 +180,7 @@ export const NAV_ITEMS: readonly {
   { view: 'home', label: 'Overview', icon: TachometerAltIcon, domain: 'home' },
   { view: 'recommendations', label: 'Recommendations', icon: StarIcon, domain: 'home' },
   { view: 'adoption', label: 'Adoption', icon: ClipboardCheckIcon, domain: 'home', serverOnly: true },
+  { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', serverOnly: true },
   { view: 'permissions', label: 'Permissions', icon: LockIcon, domain: 'safety' },
   { view: 'enterprise', label: 'Enterprise', icon: LockIcon, domain: 'safety', serverOnly: true },
   { view: 'summary', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },

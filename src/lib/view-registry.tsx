@@ -197,6 +197,9 @@ const PlanShapes = lazy(() =>
 const UsagePulse = lazy(() =>
   import('../components/UsagePulsePf').then((m) => ({ default: m.UsagePulsePf }))
 );
+const DiaryView = lazy(() =>
+  import('../components/DiaryView').then((m) => ({ default: m.DiaryView }))
+);
 const ShadowCalls = lazy(() =>
   import('../components/ShadowCallsPf').then((m) => ({ default: m.ShadowCallsPf }))
 );
@@ -808,6 +811,7 @@ export const VIEW_RENDERERS: Partial<
   pulse: ({ data: d, serverAvailable }) => (
     <UsagePulse statsCache={d.statsCache} serverAvailable={serverAvailable} />
   ),
+  diary: () => <DiaryView />,
   adoption: ({ data: d, serverAvailable }) => (
     <AdoptionScorecard
       liveConfig={d.liveConfig}
