@@ -12,7 +12,7 @@ const MARKERS_RATE_LIMITS: AppliedMarkers = {
  *
  * DUAL-EMIT: this detector's `id` is `reliability.api-errors`, but its rule body
  * emits `reliability.rate-limits` on its rate-limited branch. Both branches
- * share one detector; see the DUAL_EMIT allowlist in the registry self-test.
+ * share one detector; see the shared DUAL_EMIT allowlist in ../dual-emit.
  */
 export const detector: Detector = {
   id: 'reliability.api-errors',

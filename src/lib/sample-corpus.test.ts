@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error - plain ESM build helper, no .d.ts
-import { buildSampleCorpus } from '../../scripts/sample-data/build-corpus.mjs';
+import { buildSampleCorpus, buildSampleModelEvalResults } from '../../scripts/sample-data/build-corpus.mjs';
 
 import { parseHistoryJsonl, groupBySessions, groupByProjects } from './parse-history';
 import { parseSessionJsonl } from './parse-sessions';
@@ -24,6 +24,9 @@ import { parseAgentSettings, parseAttribution, aggregateAttributionAgents, aggre
 import { parseRuntimeEvents } from './parse-runtime-events';
 import { parseChurnGeometry } from './parse-churn-geometry';
 import { assembleRecommendationInput, buildRecommendations } from './recommendations';
+import { buildWorkbenchClusters, buildProposedBatchSpec } from './model-evals-workbench';
+import { ingestModelEvalResults } from './model-eval-ingest';
+import { actNowRoutingGaps } from './detectors/cost/model-eval-routing-gap';
 
 const corpus = buildSampleCorpus();
 const sessionFiles: { name: string; text: string }[] = corpus.sessions.map(
@@ -249,5 +252,58 @@ describe('sample corpus — churn geometry', () => {
     );
 
     expect(rec).toBeDefined();
+  });
+});
+
+describe('sample corpus — model evals workbench (#1388)', () => {
+  const tokenData = collect(parseSessionJsonl);
+  const timelines = collect(parseSessionTimeline);
+  const toolData = collect(parseToolUsage);
+  const apiErrors = flatMap(parseApiErrors);
+
+  it('mines non-empty gap clusters from the parsed corpus (upload-mode exposure)', () => {
+    // App.tsx exposes the model-evals view in upload mode exactly when this
+    // derivation is non-empty, so the demo SPA (and any comparable upload)
+    // must mine at least one cluster — and therefore a proposed batch spec.
+    const clusters = buildWorkbenchClusters({ tokenData, timelines, toolData, apiErrors });
+    expect(clusters.length).toBeGreaterThan(0);
+    expect(
+      buildProposedBatchSpec(clusters, '2026-06-04T12:00:00.000Z')
+    ).not.toBeNull();
+  });
+
+  it('the seeded eval-result artifacts survive the real ingest into a populated summary', () => {
+    const summary = ingestModelEvalResults(
+      buildSampleModelEvalResults(),
+      () => new Date(Date.UTC(2026, 5, 4, 12, 0, 0))
+    );
+    // Every workbench face the demo SPA renders must be non-empty: ranked
+    // model runs across >=3 models, a fired veto per direction, both
+    // exclusion dispositions, and routing recommendations.
+    expect(summary.artifactCount).toBe(2);
+    expect(summary.runCount).toBeGreaterThanOrEqual(5);
+    expect(summary.models.length).toBeGreaterThanOrEqual(3);
+    expect(summary.models.some((m) => m.vetoes.length > 0)).toBe(true);
+    expect(summary.models.some((m) => m.vetoes.length === 0)).toBe(true);
+    expect(summary.exclusions.kept).toBeGreaterThan(0);
+    expect(summary.exclusions.filtered).toBeGreaterThan(0);
+    expect(summary.recommendations.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('seeds exactly one act-now routing gap (and at least one discovery row)', () => {
+    const summary = ingestModelEvalResults(
+      buildSampleModelEvalResults(),
+      () => new Date(Date.UTC(2026, 5, 4, 12, 0, 0))
+    );
+    const actNow = actNowRoutingGaps(summary);
+    expect(actNow.length).toBe(1);
+    expect(actNow[0].strongestEvidence).toBe('objective-task-history');
+    expect(summary.recommendations.length).toBeGreaterThan(actNow.length);
+  });
+
+  it('is deterministic (fixed timestamps, no PRNG)', () => {
+    expect(JSON.stringify(buildSampleModelEvalResults())).toEqual(
+      JSON.stringify(buildSampleModelEvalResults())
+    );
   });
 });

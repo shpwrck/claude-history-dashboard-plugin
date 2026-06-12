@@ -19,7 +19,7 @@ import {
  * DUAL-EMIT: this detector's `id` is `safety.dangerous-bypass`, but its rule
  * body emits `safety.dangerous-commands` on its second branch (dangerous
  * commands present but not under bypass). Both branches share one detector; see
- * the DUAL_EMIT allowlist in the registry self-test.
+ * the shared DUAL_EMIT allowlist in ../dual-emit.
  */
 export const detector: Detector = {
   id: 'safety.dangerous-bypass',

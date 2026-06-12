@@ -1,3 +1,4 @@
+import { componentSubtree, ruleTopicSlug } from '../../config-rule-naming';
 import type { ConfigSection } from '../../parse-config-sections';
 import type {
   RepoMapFileJoin,
@@ -44,28 +45,9 @@ function isRootConfigSection(section: ConfigSection, projectRoot: string): boole
   return scope === 'AGENTS.md' || scope === 'CLAUDE.md';
 }
 
-function slugify(text: string): string {
-  const slug = text
-    .toLowerCase()
-    .replace(/`/g, '')
-    .replace(/[^\w\s/-]/g, '')
-    .trim()
-    .replace(/[/\s_]+/g, '-')
-    .replace(/-+/g, '-');
-  return slug || 'section';
-}
-
-function componentSubtree(path: string): string | null {
-  const parts = normalizePath(path).split('/').filter(Boolean);
-  if (parts.length < 2) return null;
-  if (parts[0] === 'src') {
-    if (parts.length === 2) return 'src';
-    return `src/${parts[1]}`;
-  }
-  if (parts[0] === 'tools' && parts.length >= 2) return `tools/${parts[1]}`;
-  if (parts[0] === '.github' && parts[1] === 'workflows') return '.github/workflows';
-  return parts[0];
-}
+// Rule-file naming (topic slug, component subtree) is shared with the atomizer
+// codemod via ../../config-rule-naming so the prescribed rulePath and the file
+// the codemod writes can never diverge (#1427).
 
 function governedFiles(
   project: RepoMapProjectJoin,
@@ -100,7 +82,7 @@ function overScopedCandidates(input: Parameters<Detector['rule']>[0]): Candidate
 
       const subtree = [...subtrees][0];
       const pathsGlob = `${subtree}/**`;
-      const topic = slugify(section.heading);
+      const topic = ruleTopicSlug(section.heading);
       out.push({
         project,
         section,
@@ -108,7 +90,7 @@ function overScopedCandidates(input: Parameters<Detector['rule']>[0]): Candidate
         subtree,
         pathsGlob,
         rulePath: `.claude/rules/${topic}.md`,
-        idSuffix: slugify(`${project.root}-${section.id}`),
+        idSuffix: ruleTopicSlug(`${project.root}-${section.id}`),
       });
     }
   }

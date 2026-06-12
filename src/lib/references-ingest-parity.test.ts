@@ -74,6 +74,9 @@ const ALLOWLIST: Record<string, string> = {
   workflows:
     'shipped via scripts/read-workflows.mjs (readWorkflowsSync), not a parse-*.ts ' +
     'parser — documented in the workflows artifact-map rows, not the parser table',
+  externalGuidance:
+    'repo-committed guidance snapshots (data/external-guidance/, #1302), not a ' +
+    '~/.claude artifact — documented in the repository-bundled artifacts table',
 };
 
 describe('REFERENCES.md ingest-time parser-table parity (#541)', () => {

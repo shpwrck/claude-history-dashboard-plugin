@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ingestModelEvalResults } from './model-eval-ingest';
+import { ARTIFACT_LEDGER_CAP, ingestModelEvalResults } from './model-eval-ingest';
 import { EVAL_VETOES } from './model-eval-result';
 
 const fixedNow = () => new Date('2026-06-11T00:00:00.000Z');
@@ -42,6 +42,7 @@ describe('ingestModelEvalResults', () => {
       generatedAt: '2026-06-11T00:00:00.000Z',
       artifactCount: 0,
       runCount: 0,
+      artifacts: [],
       models: [],
       vetoTotals: Object.fromEntries(EVAL_VETOES.map((v) => [v, 0])),
       exclusions: { kept: 0, filtered: 0 },
@@ -222,6 +223,84 @@ describe('ingestModelEvalResults', () => {
       fixedNow
     );
     expect(s.exclusions).toEqual({ kept: 1, filtered: 2 });
+  });
+
+  it('records one result-history ledger entry per ingested artifact (#1387)', () => {
+    const s = ingestModelEvalResults(
+      [
+        artifact({
+          batchPath: '/tmp/evals/older.json',
+          createdAt: '2026-06-08T10:00:00.000Z',
+          runs: [
+            run({ runId: 'r1', vetoes: ['failed-required-gate'] }),
+            run({ runId: 'r2' }),
+            run({ runId: 'r3' }),
+          ],
+        }),
+        artifact({
+          batchPath: '/tmp/evals/newer.json',
+          createdAt: '2026-06-10T10:00:00.000Z',
+          runs: [run({ runId: 'r4' })],
+        }),
+        { kind: 'not-an-eval' }, // dropped by the sanitizer: no ledger entry
+      ],
+      fixedNow
+    );
+    // Newest first, regardless of input order.
+    expect(s.artifacts).toEqual([
+      {
+        batchPath: '/tmp/evals/newer.json',
+        createdAt: '2026-06-10T10:00:00.000Z',
+        runCount: 1,
+        vetoedRuns: 0,
+      },
+      {
+        batchPath: '/tmp/evals/older.json',
+        createdAt: '2026-06-08T10:00:00.000Z',
+        runCount: 3,
+        vetoedRuns: 1,
+      },
+    ]);
+    expect(s.artifacts).toHaveLength(s.artifactCount);
+  });
+
+  it('orders ledger ties on createdAt by batchPath asc (#1387)', () => {
+    const s = ingestModelEvalResults(
+      [
+        artifact({ batchPath: '/tmp/evals/b.json' }),
+        artifact({ batchPath: '/tmp/evals/a.json' }),
+      ],
+      fixedNow
+    );
+    expect(s.artifacts.map((a) => a.batchPath)).toEqual([
+      '/tmp/evals/a.json',
+      '/tmp/evals/b.json',
+    ]);
+  });
+
+  it('bounds the ledger to the most-recent ARTIFACT_LEDGER_CAP artifacts (#1387)', () => {
+    const total = ARTIFACT_LEDGER_CAP + 5;
+    const dayMs = 24 * 60 * 60 * 1000;
+    const base = Date.UTC(2026, 0, 1); // one artifact per day from 2026-01-01
+    const inputs = [];
+    for (let i = 0; i < total; i++) {
+      const tag = String(i).padStart(2, '0');
+      inputs.push(
+        artifact({
+          batchPath: `/tmp/evals/batch-${tag}.json`,
+          createdAt: new Date(base + i * dayMs).toISOString(),
+        })
+      );
+    }
+    const s = ingestModelEvalResults(inputs, fixedNow);
+    // The uncapped total survives on artifactCount; the ledger is bounded...
+    expect(s.artifactCount).toBe(total);
+    expect(s.artifacts).toHaveLength(ARTIFACT_LEDGER_CAP);
+    // ...and deterministically keeps the newest entries (the 5 oldest drop).
+    expect(s.artifacts[0].batchPath).toBe(`/tmp/evals/batch-${total - 1}.json`);
+    expect(s.artifacts[ARTIFACT_LEDGER_CAP - 1].batchPath).toBe(
+      '/tmp/evals/batch-05.json'
+    );
   });
 
   it('is deterministic: identical input and clock yield byte-identical output', () => {

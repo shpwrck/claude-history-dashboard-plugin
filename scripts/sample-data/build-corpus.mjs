@@ -749,3 +749,191 @@ export function buildSampleAdoptionReceipts() {
     },
   ];
 }
+
+// --- model-eval result seed (issue #1388, epic #975) -------------------------
+// The Model Evals workbench (#1086) renders two faces. Its mined-cluster /
+// batch-spec face derives from the parsed corpus above, but its eval-results
+// face needs `modelEvalSummary` — a server-only rollup of artifacts an external
+// meta-runner drops into `~/.claude/model-evals/results`, which by design never
+// rides the upload zip (#1242). Without a seed the marketing SPA could never
+// showcase the ranked-runs / veto / routing-recommendation tables. This emits
+// TWO completed-batch artifacts in the exact `model-eval-result` shape the
+// committed schema sanitizer (`src/lib/model-eval-result.ts`) accepts;
+// `sample-artifacts.ts` runs them through the real `ingestModelEvalResults`
+// pipeline so the demo summary is produced by the same code path the live
+// server uses. Deterministic (fixed timestamps off BASE_MS, no PRNG) so the
+// coverage test in src/lib/sample-corpus.test.ts can assert the derived shape.
+//
+// The spread is intentional:
+// - the sonnet candidate carries objective-task-history evidence and a clean
+//   (veto-free) rollup, and its recommendation scores above the 0.6 act-now
+//   floor — so exactly ONE row lights the "act now" gate (and the demo fires
+//   cost.model-eval-routing-gap);
+// - the opus recommendation stays discovery-only (token-cost evidence, score
+//   below the floor) and one run per baseline/candidate family carries a hard
+//   veto, so the veto totals and red row labels render populated;
+// - exclusions include both dispositions so the kept/filtered stat is non-zero.
+// Cluster ids/scopes use the stable `gap:<direction>:<signal>:<band>` slugs the
+// clustering module (`model-gap-clustering.ts`) commits to.
+export function buildSampleModelEvalResults() {
+  const batch1Ms = BASE_MS + 6 * DAY + 10 * HOUR;
+  const batch2Ms = BASE_MS + 13 * DAY + 9 * HOUR;
+  return [
+    {
+      schemaVersion: 1,
+      kind: 'model-eval-result',
+      createdAt: iso(batch1Ms),
+      batchPath: '.claude/model-evals/batches/2026-05-18-haiku-sonnet-failure.json',
+      runs: [
+        {
+          runId: 'replay-failure-small-cand-1',
+          modelId: MODELS.sonnet,
+          role: 'candidate',
+          clusterId: 'gap:haiku-sonnet:failure:small',
+          scores: { quality: 0.86, cost: 0.55, latency: 0.7, reliability: 0.9 },
+          evidence: [
+            {
+              strength: 'objective-task-history',
+              detail:
+                'Replayed 12 small tool-heavy tasks: 11/12 completed without a retry vs 7/12 on the baseline.',
+              delta: 4,
+            },
+            {
+              strength: 'token-cost-discovery',
+              detail: 'Candidate run cost proxy ~$0.42 vs ~$0.18 baseline over the replay set.',
+              delta: 0.24,
+            },
+          ],
+          vetoes: [],
+        },
+        {
+          runId: 'replay-failure-small-base-1',
+          modelId: MODELS.haiku,
+          role: 'baseline',
+          clusterId: 'gap:haiku-sonnet:failure:small',
+          scores: { quality: 0.52, cost: 0.88, latency: 0.82, reliability: 0.62 },
+          evidence: [
+            {
+              strength: 'proxy-detector-signal',
+              detail: '5 tool errors + 2 API retries across the replayed baseline runs.',
+              delta: 7,
+            },
+          ],
+          vetoes: [],
+        },
+        {
+          runId: 'replay-ineff-medium-base-1',
+          modelId: MODELS.haiku,
+          role: 'baseline',
+          clusterId: 'gap:haiku-sonnet:inefficiency:medium',
+          scores: { quality: 0.41, cost: 0.9, latency: 0.8, reliability: 0.55 },
+          evidence: [
+            {
+              strength: 'proxy-detector-signal',
+              detail: 'Baseline diverged from the accepted diff on 4/10 medium replay tasks.',
+              delta: -4,
+            },
+          ],
+          vetoes: ['materially-worse-correctness'],
+        },
+      ],
+      exclusions: [
+        {
+          runId: 'replay-20260514-0917',
+          disposition: 'kept',
+          reason: 'Compaction mid-run; context rebuilt deterministically before replay.',
+        },
+        {
+          runId: 'replay-20260514-1144',
+          disposition: 'filtered',
+          reason: 'Transcript carries credentials; excluded from the replay corpus.',
+        },
+      ],
+      recommendations: [
+        {
+          modelId: MODELS.sonnet,
+          scope: 'gap:haiku-sonnet:failure:small',
+          weightedScore: 0.76,
+          strongestEvidence: 'objective-task-history',
+          rationale:
+            'Replayed small tool-heavy tasks complete reliably on the candidate where the baseline retries; the quality gap holds across both batches.',
+        },
+      ],
+    },
+    {
+      schemaVersion: 1,
+      kind: 'model-eval-result',
+      createdAt: iso(batch2Ms),
+      batchPath: '.claude/model-evals/batches/2026-05-25-sonnet-opus-cost.json',
+      runs: [
+        {
+          runId: 'replay-cost-medium-cand-1',
+          modelId: MODELS.opus,
+          role: 'candidate',
+          clusterId: 'gap:sonnet-opus:cost:medium',
+          scores: { quality: 0.92, cost: 0.3, latency: 0.55, reliability: 0.88 },
+          evidence: [
+            {
+              strength: 'shadow-replay-verdict',
+              detail: 'Shadow run matched the accepted final diff on 9/10 long-context tasks.',
+              delta: 2,
+            },
+            {
+              strength: 'token-cost-discovery',
+              detail: 'Candidate run cost proxy ~$3.10 vs ~$1.20 baseline (discovery only).',
+              delta: 1.9,
+            },
+          ],
+          vetoes: [],
+        },
+        {
+          runId: 'replay-cost-medium-base-1',
+          modelId: MODELS.sonnet,
+          role: 'baseline',
+          clusterId: 'gap:sonnet-opus:cost:medium',
+          scores: { quality: 0.84, cost: 0.6, latency: 0.72, reliability: 0.86 },
+          evidence: [
+            {
+              strength: 'token-cost-discovery',
+              detail: 'Baseline finished the medium replay set at ~40% of the candidate cost.',
+              delta: -1.9,
+            },
+          ],
+          vetoes: [],
+        },
+        {
+          runId: 'replay-duration-large-cand-1',
+          modelId: MODELS.opus,
+          role: 'candidate',
+          clusterId: 'gap:sonnet-opus:duration:large',
+          scores: { quality: 0.5, cost: 0.2, latency: 0.4, reliability: 0.6 },
+          evidence: [
+            {
+              strength: 'token-cost-discovery',
+              detail: 'Only 2 large-band replays available; bucket never reached evidence strength.',
+              delta: 0.4,
+            },
+          ],
+          vetoes: ['insufficient-evidence'],
+        },
+      ],
+      exclusions: [
+        {
+          runId: 'replay-20260521-0830',
+          disposition: 'kept',
+          reason: 'Retry storm was environmental (registry outage), not model behaviour.',
+        },
+      ],
+      recommendations: [
+        {
+          modelId: MODELS.opus,
+          scope: 'gap:sonnet-opus:cost:medium',
+          weightedScore: 0.58,
+          strongestEvidence: 'token-cost-discovery',
+          rationale:
+            'Quality edge exists but the cost dimension drags the weighted score below the act-now floor; keep as discovery until a cheaper batch confirms.',
+        },
+      ],
+    },
+  ];
+}

@@ -289,6 +289,28 @@ const { appendAdoptionReceipt, readAdoptionReceiptIndex } = await import(
 // workflow.shadow-axis-wins detector (#518/#523).
 const { parseShadowCalls } = await import(join(LIB, 'parse-shadow-calls.ts'));
 const { parseWorkflows } = await import(join(LIB, 'parse-workflows.ts'));
+// External guidance snapshots (#1302, epic #656) — repo-committed, static
+// reference docs the engine attaches to fired recs as "Learn More" links.
+// Read from the repo's data dir (NOT ~/.claude); never fetched at runtime.
+const { readExternalGuidanceSnapshots } = await import(
+  join(LIB, 'parse-external-guidance.ts')
+);
+const EXTERNAL_GUIDANCE_DIR = join(PROJECT_DIR, 'data', 'external-guidance');
+// Read fresh on every assemble — NOT memoized. The ingest() content-hash gate
+// hashes this dir so a refreshed snapshot (git pull / drift-PR merge under a
+// standing dev server) invalidates the persisted dataset cache; a process-
+// lifetime memo here would let the stale array be re-persisted under the NEW
+// hash, poisoning the cache across restarts. The dir holds a handful of small
+// JSON files, so the per-call cost is negligible.
+function readExternalGuidance() {
+  try {
+    return readExternalGuidanceSnapshots(EXTERNAL_GUIDANCE_DIR);
+  } catch {
+    // Missing/malformed snapshot store degrades to "no references", never
+    // sinks the dataset endpoint.
+    return [];
+  }
+}
 // #539 artifact parsers (server-only; each uses node:fs to walk a top-level
 // ~/.claude path). Imported here so assembleDataset can fold them into the
 // dataset like liveConfig/shadowCalls.
@@ -1584,6 +1606,12 @@ export function ingest() {
   hash.update('review-events\n');
   hash.update(reviewEventsSourceSignature());
   hash.update('\n');
+  // Repo-committed external guidance snapshots (#1302) feed the dataset's
+  // `externalGuidance` key. They only change with a checkout/image rebuild,
+  // but the dataset cache persists in SQLite across restarts, so they must be
+  // in the gate or a refreshed snapshot would be served stale.
+  hash.update('external-guidance\n');
+  hashTree(EXTERNAL_GUIDANCE_DIR, '', hash);
   const contentHash = hash.digest('hex');
   return {
     total: sessions.length,
@@ -1738,7 +1766,17 @@ export function assembleArtifacts() {
             } catch { /* malformed artifact file — skip */ }
           }
           return ingestModelEvalResults(raws);
-        }
+        },
+        undefined,
+        // Backfill for rows cached by a pre-#1387 build: the artifact cache
+        // replays stored JSON verbatim on a signature hit, and those rows
+        // predate the required `artifacts` ledger field — without this, a
+        // warm-cache upgraded deploy serves a summary that contradicts the
+        // declared ModelEvalSummary type.
+        (stored) =>
+          stored && stored.artifacts == null
+            ? { ...stored, artifacts: [] }
+            : stored
       );
     }
   } catch { /* ignore */ }
@@ -1938,6 +1976,7 @@ export function assembleDataset() {
     mcpAuth,
     configBackups,
   } = assembleArtifacts();
+  const externalGuidance = readExternalGuidance();
 
   const roots = projectRootsFrom(entries, tokenData);
   const maps = roots.map(readRepoMapArtifact).filter(Boolean);
@@ -1992,6 +2031,7 @@ export function assembleDataset() {
       updateResults,
       mcpAuth,
       configBackups,
+      externalGuidance,
     })
   );
   const repoMap = buildRepoMapDataset({
@@ -2084,6 +2124,7 @@ export function assembleDataset() {
     updateResults,
     mcpAuth,
     configBackups,
+    externalGuidance,
   };
 }
 
@@ -2154,6 +2195,9 @@ function assembleRecommendationContext(options = {}) {
     mcpAuth: dataset.mcpAuth,
     configBackups: dataset.configBackups,
     repoMap: dataset.repoMap,
+    // Repo-committed guidance snapshots (#1302): non-signal aggregate; the
+    // engine's attach pass turns them into "Learn More" references.
+    externalGuidance: dataset.externalGuidance,
   });
   return { input, sessions };
 }

@@ -13,6 +13,7 @@ import {
   buildSampleConfigBackups,
   buildSampleLiveConfig,
   buildSampleDeceitSignals,
+  buildSampleModelEvalSummary,
 } from './sample-artifacts';
 import { buildSampleWorkflows } from './sample-workflows';
 import { parseWorkflows } from './parse-workflows';
@@ -198,5 +199,40 @@ describe('sample data — security.model-deceit fires in the SPA demo (#688)', (
 
   it('stays dark with no session ids (the transcript-free upload)', () => {
     expect(buildSampleDeceitSignals([])).toEqual([]);
+  });
+});
+
+describe('sample data — model-eval summary seeds the workbench demo (#1388)', () => {
+  const NOW_1388 = Date.UTC(2026, 5, 4, 12, 0, 0);
+
+  it('derives a populated summary pinned to the injected clock', () => {
+    const summary = buildSampleModelEvalSummary(NOW_1388);
+    expect(summary.kind).toBe('model-eval-summary');
+    expect(summary.generatedAt).toBe(new Date(NOW_1388).toISOString());
+    // ModelEvalsPf only renders the results face for runCount > 0, and the
+    // summary's presence is what gates the view in App's summary branch.
+    expect(summary.runCount).toBeGreaterThan(0);
+    expect(summary.models.length).toBeGreaterThanOrEqual(3);
+    expect(summary.recommendations.length).toBeGreaterThan(0);
+  });
+
+  it('fires cost.model-eval-routing-gap on the demo dataset (fresh, not stale)', () => {
+    const input: RecommendationInput = {
+      tokenData: [],
+      toolData: [],
+      sessions: [],
+      projects: [],
+      permissionRows: [],
+      apiErrors: [],
+      modelEvalSummary: buildSampleModelEvalSummary(NOW_1388),
+    };
+    const rec = buildRecommendations(input, NOW_1388).find(
+      (r) => r.id === 'cost.model-eval-routing-gap'
+    );
+    expect(rec).toBeDefined();
+    expect(rec?.view).toBe('model-evals');
+    // generatedAt is pinned to "now", so the demo never reads as a stale
+    // "as of <date>" claim (#1102 demotion stays off).
+    expect(rec?.title).not.toContain('as of');
   });
 });

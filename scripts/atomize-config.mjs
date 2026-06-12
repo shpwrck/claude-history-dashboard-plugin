@@ -6,9 +6,9 @@
 // split was manual. This CLI performs it:
 //
 //   node scripts/atomize-config.mjs --dry-run <file>              # plan only
-//   node scripts/atomize-config.mjs <file>                        # apply
 //   node scripts/atomize-config.mjs --map mapping.json <file>     # detector-fed
 //   node scripts/atomize-config.mjs --section "Build=src/lib" <file>
+//   node scripts/atomize-config.mjs --infer <file>                # accept inference
 //   node scripts/atomize-config.mjs --revert <file>               # undo
 //
 // Section -> subtree mapping comes from one of two places:
@@ -16,14 +16,17 @@
 //      detector's section->subtree mapping. Keys may be a full section id
 //      (`CLAUDE.md#build-deploy`), a bare slug (`build-deploy`), or the exact
 //      heading text (`Build & deploy`).
-//   2. Inferred (default when no mapping is given): mirror of the detector's
+//   2. Inferred (when no mapping is given): mirror of the detector's
 //      single-subtree rule, but over the section's OWN path-like references
 //      (the CLI has no repo-map join): a section whose file references all live
-//      under one component subtree is proposed for that subtree.
+//      under one component subtree is proposed for that subtree. Because that
+//      is WEAKER evidence than the detector's repo-map join, inference is
+//      preview-only by default: `--dry-run` shows the inferred plan, but
+//      WRITING inferred moves requires an explicit `--infer` (#1427).
 //
-// Each moved section becomes `.claude/rules/<slug>.md` with
+// Each moved section becomes `.claude/rules/<topic>.md` with
 // `paths: ["<subtree>/**"]` frontmatter; the monolith keeps a one-line marker
-// comment (`<!-- atomized: .claude/rules/<slug>.md -->`) at the cut point so
+// comment (`<!-- atomized: .claude/rules/<topic>.md -->`) at the cut point so
 // the split is exactly reversible (`--revert` round-trips byte-identical).
 //
 // @import semantics are preserved: relative `@path` imports in a moved body are
@@ -31,13 +34,21 @@
 // fence-aware (example imports inside code fences are left verbatim), and the
 // rewrite is inverted on revert.
 //
-// Zero-dependency Node by repo convention for runtime scripts. The section
-// model (fence-aware heading splitting, frontmatter stripping, slug/id
-// assignment) deliberately MIRRORS src/lib/parse-config-sections.ts rather than
-// importing it: that parser is privacy-scoped to never return section BODIES,
-// which is exactly what a codemod needs, and importing TS would force the
-// register-ts loader onto the acceptance command. A vitest parity test pins the
-// two against drift.
+// Naming and ids are NOT mirrored (#1427):
+//   - Section ids/slugs come from the REAL parser: splitSections() zips
+//     parse-config-sections.ts ids onto its own byte-preserving sections, so a
+//     detector-emitted --map key always resolves. The codemod keeps only the
+//     byte-level splitter the parser deliberately omits (it is privacy-scoped
+//     to never return section BODIES — that scoping covers bodies, not slug/id
+//     logic). A vitest parity test pins the split boundaries (CRLF/BOM/fence)
+//     against drift.
+//   - Rule FILENAMES come from the same config-rule-naming helpers the
+//     detector uses for its prescribed rulePath, so adoption tracking keyed on
+//     that path sees the codemod's output.
+// Both imports are dependency-free modules with no further imports, so plain
+// `node scripts/atomize-config.mjs` resolves them via Node's native type
+// stripping — the same substrate the repo's register-ts loader rides on — with
+// no loader hook needed (and none registered when vitest imports this module).
 
 import {
   existsSync,
@@ -49,37 +60,36 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseConfigSections } from '../src/lib/parse-config-sections.ts';
+import { componentSubtree, ruleTopicSlug } from '../src/lib/config-rule-naming.ts';
 
-// -- Section model (mirrors src/lib/parse-config-sections.ts) ----------------
+export { componentSubtree, ruleTopicSlug };
+
+// -- Section model (byte-preserving splitter; ids delegated to the parser) ----
 
 const FRONTMATTER_RE = /^\uFEFF?---\s*\n[\s\S]*?\n---\s*\n?/;
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
 
-/** FNV-1a 32-bit hash -> 8-char hex (mirror of the parser's hash). */
-export function fnv1a(text) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
-  }
-  return h.toString(16).padStart(8, '0');
-}
-
-/** Heading slug (mirror of the parser's slugify). */
-export function slugify(heading) {
-  const slug = heading
-    .toLowerCase()
-    .replace(/`/g, '')
-    .replace(/[^\w\s-]/g, '')
-    .trim()
-    .replace(/\s+/g, '-');
-  return slug || 'section';
-}
-
-/** True for a ``` / ~~~ code-fence toggle line; returns the fence char. */
-function fenceToggle(line) {
-  const m = line.match(/^\s*(`{3,}|~{3,})/);
-  return m ? m[1][0] : null;
+/**
+ * Stateful ``` / ~~~ code-fence tracker (the one fence state machine — used by
+ * the splitter, the reference scanner, and the import rewriter).
+ */
+function createFenceTracker() {
+  let open = null;
+  return {
+    /** Returns true when the line is a fence toggle (and consumes it). */
+    feed(line) {
+      const m = line.match(/^\s*(`{3,}|~{3,})/);
+      if (!m) return false;
+      const char = m[1][0];
+      if (open === null) open = char;
+      else if (open === char) open = null;
+      return true;
+    },
+    get inFence() {
+      return open !== null;
+    },
+  };
 }
 
 /**
@@ -89,8 +99,15 @@ function fenceToggle(line) {
  *
  * Differences from the parser's splitSections are reconstruction-driven only:
  * the leading frontmatter is KEPT (as preamble lines, never movable) instead of
- * stripped, and an all-blank preamble is kept (marked `empty`) instead of
- * dropped, because the codemod must be able to write the file back.
+ * stripped, and an all-blank preamble is kept (slugless) instead of dropped,
+ * because the codemod must be able to write the file back.
+ *
+ * Slug/id assignment is NOT re-implemented here: the same content goes through
+ * the real parseConfigSections and its ids are zipped onto the sections, so
+ * `sec.slug` is by construction the slug the detector emits in --map keys. A
+ * count/heading mismatch between the two splitters means the byte-preserving
+ * boundary model drifted from the parser — that fails loudly rather than
+ * silently mis-keying sections.
  */
 export function splitSections(content) {
   const lines = content.split('\n');
@@ -106,21 +123,18 @@ export function splitSections(content) {
 
   const sections = [];
   let current = { heading: '', level: 0, lines: [] };
-  let fence = null;
+  const fence = createFenceTracker();
 
   lines.forEach((line, i) => {
     if (i < fmLines) {
       current.lines.push(line);
       return;
     }
-    const toggle = fenceToggle(line);
-    if (toggle) {
-      if (fence === null) fence = toggle;
-      else if (fence === toggle) fence = null;
+    if (fence.feed(line)) {
       current.lines.push(line);
       return;
     }
-    const headingMatch = fence === null ? line.match(HEADING_RE) : null;
+    const headingMatch = fence.inFence ? null : line.match(HEADING_RE);
     if (headingMatch) {
       sections.push(current);
       current = {
@@ -134,29 +148,30 @@ export function splitSections(content) {
   });
   sections.push(current);
 
-  // Mirror the parser's two-pass stable-id assignment: colliding DISTINCT
-  // headings disambiguate by a heading-text hash; identical headings take a
-  // positional -N suffix.
-  const withContent = sections.filter(
-    (sec) => sec.level > 0 || sec.lines.some((l) => l.trim() !== '')
-  );
-  const baseOf = (sec) => (sec.level === 0 ? '__preamble__' : slugify(sec.heading));
-  const distinctByBase = new Map();
-  for (const sec of withContent) {
-    const base = baseOf(sec);
-    const set = distinctByBase.get(base) ?? new Set();
-    set.add(sec.heading);
-    distinctByBase.set(base, set);
+  // The parser drops a content-less preamble (after stripping frontmatter);
+  // those sections stay here for reconstruction but carry no slug. Everything
+  // else aligns 1:1, in order, with the parser's records.
+  const hasParserRecord = (sec, idx) => {
+    if (sec.level > 0) return true;
+    const bodyLines = idx === 0 ? sec.lines.slice(fmLines) : sec.lines;
+    return bodyLines.some((l) => l.trim() !== '');
+  };
+  const withContent = sections.filter(hasParserRecord);
+  const parsed = parseConfigSections({ scope: '', content });
+  if (parsed.length !== withContent.length) {
+    throw new Error(
+      `section model drift: parse-config-sections found ${parsed.length} section(s), ` +
+        `the codemod splitter found ${withContent.length}`
+    );
   }
-  const usedCounts = new Map();
-  for (const sec of withContent) {
-    const base = baseOf(sec);
-    const collides = (distinctByBase.get(base)?.size ?? 0) > 1;
-    const candidate = collides ? `${base}-${fnv1a(sec.heading).slice(0, 4)}` : base;
-    const n = (usedCounts.get(candidate) ?? 0) + 1;
-    usedCounts.set(candidate, n);
-    sec.slug = n === 1 ? candidate : `${candidate}-${n}`;
-  }
+  withContent.forEach((sec, i) => {
+    if (parsed[i].heading !== sec.heading || parsed[i].level !== sec.level) {
+      throw new Error(
+        `section model drift at "${sec.heading}" (parser saw "${parsed[i].heading}")`
+      );
+    }
+    sec.slug = parsed[i].id.slice(1); // ids are `#<slug>` under the '' scope
+  });
   return sections;
 }
 
@@ -177,35 +192,13 @@ export function listSections(content, scope) {
 // Path-like token (mirror of the parser's RE_PATH).
 const RE_PATH = /(?:^|[\s(`'"])([\w@.-]+(?:\/[\w@.-]+)+\.[\w]+)/g;
 
-/** Component subtree of a repo-relative path (mirror of the detector's rule). */
-export function componentSubtree(path) {
-  const parts = path
-    .replace(/\\/g, '/')
-    .replace(/\/+$/, '')
-    .split('/')
-    .filter(Boolean);
-  if (parts.length < 2) return null;
-  if (parts[0] === 'src') {
-    if (parts.length === 2) return 'src';
-    return `src/${parts[1]}`;
-  }
-  if (parts[0] === 'tools' && parts.length >= 2) return `tools/${parts[1]}`;
-  if (parts[0] === '.github' && parts[1] === 'workflows') return '.github/workflows';
-  return parts[0];
-}
-
 /** Remove fenced code blocks before reference scanning (mirror of the parser). */
 function stripFences(lines) {
   const kept = [];
-  let fence = null;
+  const fence = createFenceTracker();
   for (const line of lines) {
-    const toggle = fenceToggle(line);
-    if (toggle) {
-      if (fence === null) fence = toggle;
-      else if (fence === toggle) fence = null;
-      continue;
-    }
-    if (fence === null) kept.push(line);
+    if (fence.feed(line)) continue;
+    if (!fence.inFence) kept.push(line);
   }
   return kept.join('\n');
 }
@@ -213,7 +206,10 @@ function stripFences(lines) {
 /**
  * Infer a section -> subtree mapping: a section whose path-like references all
  * live under ONE component subtree is proposed for that subtree (the CLI-side
- * mirror of the detector's repo-map governed-files rule).
+ * mirror of the detector's repo-map governed-files rule). This needs section
+ * BODIES, which the privacy-scoped parser never returns, so it stays CLI-side.
+ * It is weaker evidence than the detector's repo-map join — see atomizeFile's
+ * `infer` gate.
  */
 export function inferMapping(sections) {
   const mapping = new Map();
@@ -243,17 +239,12 @@ function escapeRegex(text) {
 }
 
 function mapUnfencedLines(text, fn) {
-  let fence = null;
+  const fence = createFenceTracker();
   return text
     .split('\n')
     .map((line) => {
-      const toggle = fenceToggle(line);
-      if (toggle) {
-        if (fence === null) fence = toggle;
-        else if (fence === toggle) fence = null;
-        return line;
-      }
-      return fence === null ? fn(line) : line;
+      if (fence.feed(line)) return line;
+      return fence.inFence ? line : fn(line);
     })
     .join('\n');
 }
@@ -297,6 +288,12 @@ function pathsGlobFor(subtree) {
   return clean.includes('*') ? clean : `${clean}/**`;
 }
 
+/** Relative `@import` prefix for a body moving into `rulesDirRel` (`../../` etc). */
+function importPrefixFor(rulesDirRel) {
+  const clean = rulesDirRel.replace(/\\/g, '/').replace(/\/+$/, '');
+  return `${clean.split('/').map(() => '..').join('/')}/`;
+}
+
 /**
  * Resolve a user/detector mapping ({key -> subtree}) against the parsed
  * sections. Keys may be a full id (`<scope>#<slug>`), a bare slug, or the
@@ -321,16 +318,29 @@ export function resolveMapping(sections, scope, rawMapping) {
 
 /**
  * Build the atomization plan: which sections move, the rule files to write
- * (frontmatter + import-rewritten body), and the trimmed monolith.
+ * (frontmatter + import-rewritten body), and the trimmed monolith. Callers
+ * that already split the content can pass `sections` to avoid re-parsing.
  */
-export function buildPlan({ content, scope, mapping, rulesDirRel = '.claude/rules' }) {
-  const sections = splitSections(content);
-  const importPrefix = `${rulesDirRel.replace(/\/+$/, '').split('/').map(() => '..').join('/')}/`;
+export function buildPlan({
+  content,
+  scope,
+  mapping,
+  rulesDirRel = '.claude/rules',
+  sections = null,
+}) {
+  const secs = sections ?? splitSections(content);
+  const importPrefix = importPrefixFor(rulesDirRel);
 
   const moves = [];
   const skipped = [];
   const trimmedParts = [];
-  for (const sec of sections) {
+  // Rule FILENAMES use the detector's topic slug (config-rule-naming), NOT the
+  // section-id slug, so the file written here is exactly the rulePath the
+  // detector's recommendation prescribes (#1427). Distinct headings can
+  // collide on the topic slug ("Build/Deploy" vs "Build Deploy"); a -N suffix
+  // keeps the files distinct (the marker carries the real path either way).
+  const usedTopics = new Map();
+  for (const sec of secs) {
     const subtree = sec.slug !== undefined && sec.level > 0 ? mapping.get(sec.slug) : undefined;
     if (subtree === undefined) {
       trimmedParts.push(...sec.lines);
@@ -344,7 +354,11 @@ export function buildPlan({ content, scope, mapping, rulesDirRel = '.claude/rule
       trimmedParts.push(...sec.lines);
       continue;
     }
-    const rulePathRel = `${rulesDirRel}/${sec.slug}.md`;
+    const base = ruleTopicSlug(sec.heading);
+    const n = (usedTopics.get(base) ?? 0) + 1;
+    usedTopics.set(base, n);
+    const topic = n === 1 ? base : `${base}-${n}`;
+    const rulePathRel = `${rulesDirRel}/${topic}.md`;
     const glob = pathsGlobFor(subtree);
     const body = rewriteImports(sec.lines.join('\n'), importPrefix);
     const ruleContent = `---\npaths: ["${glob}"]\natomized-from: ${scope}\n---\n${body}`;
@@ -375,11 +389,20 @@ export function buildPlan({ content, scope, mapping, rulesDirRel = '.claude/rule
 /**
  * Atomize one monolith on disk. Options:
  *   mapping  Map<key, subtree> | null  (null -> infer)
+ *   infer    allow WRITING inferred moves (without it, a null mapping is
+ *            preview-only: dry-run works, apply throws) (#1427)
  *   dryRun   plan + print, write nothing
  *   rulesDirRel  where rule files go, relative to the monolith's directory
  * Returns { plan, unresolved, written }.
  */
-export function atomizeFile(filePath, { mapping = null, dryRun = false, rulesDirRel = '.claude/rules', log = console.log, warn = console.error } = {}) {
+export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = false, rulesDirRel = '.claude/rules', log = console.log, warn = console.error } = {}) {
+  if (mapping === null && !infer && !dryRun) {
+    throw new Error(
+      'no section mapping given: pass --map/--section (detector mapping), or --infer to ' +
+        'accept CLI-inferred moves; --dry-run previews inference without writing'
+    );
+  }
+
   const abs = resolve(filePath);
   const dir = dirname(abs);
   const scope = basename(abs);
@@ -399,7 +422,7 @@ export function atomizeFile(filePath, { mapping = null, dryRun = false, rulesDir
     warn(`warn: mapping key "${key}" matched no section in ${scope} (already atomized?) - skipped`);
   }
 
-  const plan = buildPlan({ content, scope, mapping: resolvedMapping, rulesDirRel });
+  const plan = buildPlan({ content, scope, mapping: resolvedMapping, rulesDirRel, sections });
   for (const skip of plan.skipped) {
     warn(`warn: section "${skip.heading}" contains an atomized marker - left in place`);
   }
@@ -419,6 +442,9 @@ export function atomizeFile(filePath, { mapping = null, dryRun = false, rulesDir
     log(`-- trimmed ${scope} --`);
     log(plan.trimmedContent);
     log('\n(dry-run: nothing written)');
+    if (mapping === null) {
+      log('(inferred mapping: re-run with --infer to apply, or --map/--section for the detector mapping)');
+    }
     return { plan, unresolved, written: false };
   }
 
@@ -490,8 +516,7 @@ export function revertFile(filePath, { dryRun = false, log = console.log, warn =
       restoredLines.push(line);
       continue;
     }
-    const rulesDirRel = dirname(rulePathRel).replace(/\\/g, '/');
-    const importPrefix = `${rulesDirRel.split('/').map(() => '..').join('/')}/`;
+    const importPrefix = importPrefixFor(dirname(rulePathRel));
     const body = unrewriteImports(ruleText.slice(header[0].length), importPrefix);
     restoredLines.push(...body.split('\n'));
     consumedRuleFiles.push(rulePath);
@@ -513,9 +538,11 @@ export function revertFile(filePath, { dryRun = false, log = console.log, warn =
   writeFileSync(abs, restored);
   for (const rulePath of consumedRuleFiles) {
     unlinkSync(rulePath);
-    // Prune now-empty rule directories (best effort).
+    // Prune now-empty rule directories (best effort) for ANY --rules-dir
+    // depth: walk parents up to, but never including, the monolith's own
+    // directory; stop at the first non-empty one.
     let parent = dirname(rulePath);
-    for (let i = 0; i < 2; i++) {
+    while (parent !== dir && parent.startsWith(`${dir}${sep}`)) {
       try {
         rmdirSync(parent);
       } catch {
@@ -540,19 +567,24 @@ Options:
   --map <file.json>     Section->subtree mapping (JSON object). Keys: section id
                         ("CLAUDE.md#build-deploy"), slug, or exact heading text.
   --section <key=tree>  Single mapping entry (repeatable). Same keys as --map.
+  --infer               Write CLI-inferred moves when no --map/--section is given.
   --rules-dir <dir>     Rule-file dir relative to the monolith (default .claude/rules).
   --help                Show this help.
 
 With no --map/--section, sections whose file references all live under one
-component subtree are inferred (mirror of the over-scoped-config detector).`;
+component subtree are inferred (mirror of the over-scoped-config detector, but
+WITHOUT its repo-map join — weaker evidence). Inference is therefore
+preview-only: --dry-run shows the inferred plan, while applying it requires an
+explicit --infer.`;
 
 function parseArgs(argv) {
-  const opts = { dryRun: false, revert: false, mapping: null, rulesDirRel: '.claude/rules', file: null };
+  const opts = { dryRun: false, revert: false, infer: false, mapping: null, rulesDirRel: '.claude/rules', file: null };
   const entries = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--dry-run') opts.dryRun = true;
     else if (arg === '--revert') opts.revert = true;
+    else if (arg === '--infer') opts.infer = true;
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg === '--map') {
       const file = argv[++i];
@@ -596,6 +628,7 @@ export function main(argv) {
   }
   atomizeFile(opts.file, {
     mapping: opts.mapping,
+    infer: opts.infer,
     dryRun: opts.dryRun,
     rulesDirRel: opts.rulesDirRel,
   });

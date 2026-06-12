@@ -53,6 +53,20 @@ function summary(over: Partial<ModelEvalSummary> = {}): ModelEvalSummary {
     generatedAt: '2026-06-10T00:00:00.000Z',
     artifactCount: 2,
     runCount: 6,
+    artifacts: [
+      {
+        batchPath: '/tmp/evals/batch-2.json',
+        createdAt: '2026-06-09T00:00:00.000Z',
+        runCount: 4,
+        vetoedRuns: 0,
+      },
+      {
+        batchPath: '/tmp/evals/batch-1.json',
+        createdAt: '2026-06-08T00:00:00.000Z',
+        runCount: 2,
+        vetoedRuns: 1,
+      },
+    ],
     models: [rollup()],
     vetoTotals: {
       'failed-required-gate': 0,

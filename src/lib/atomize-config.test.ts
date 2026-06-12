@@ -9,9 +9,12 @@
 //   - generated rule files carry valid `paths:` frontmatter scoped to the
 //     section's subtree;
 // plus the load-bearing internals: fence-aware section boundaries that stay in
-// parity with parse-config-sections.ts (the codemod mirrors, not imports, that
-// parser - it is privacy-scoped to never return bodies), invertible @import
-// rewriting, idempotent re-apply, and detector-shaped mapping keys.
+// parity with parse-config-sections.ts (since #1427 the codemod IMPORTS the
+// real parser for slug/id assignment and only keeps its own byte-preserving
+// splitter - the parser is privacy-scoped to never return bodies), rule
+// filenames that match the detector's prescribed rulePath (config-rule-naming),
+// invertible @import rewriting, idempotent re-apply, detector-shaped mapping
+// keys, and the #1427 inference gate (writing inferred moves requires --infer).
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -28,6 +31,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfigSections } from './parse-config-sections';
+import { ruleTopicSlug } from './config-rule-naming';
 import {
   atomizeFile,
   buildPlan,
@@ -78,6 +82,8 @@ function makeTempMonolith(content: string = MONOLITH): { dir: string; file: stri
 }
 
 const quiet = { log: () => {}, warn: () => {} };
+// Writing inferred (mapping-less) moves needs the explicit opt-in (#1427).
+const inferQuiet = { infer: true, ...quiet };
 
 afterEach(() => {
   while (tempDirs.length > 0) {
@@ -113,7 +119,7 @@ describe('apply -> revert round trip', () => {
   it('restores the byte-identical original (including @import rewrites)', () => {
     const { dir, file } = makeTempMonolith();
 
-    const applied = atomizeFile(file, quiet);
+    const applied = atomizeFile(file, inferQuiet);
     expect(applied.written).toBe(true);
     expect(applied.plan.moves.map((m: { slug: string }) => m.slug)).toEqual([
       'build-deploy',
@@ -135,7 +141,7 @@ describe('apply -> revert round trip', () => {
 
   it('rewrites relative @imports for rule-file depth and inverts them on revert', () => {
     const { dir, file } = makeTempMonolith();
-    atomizeFile(file, quiet);
+    atomizeFile(file, inferQuiet);
 
     const rule = readFileSync(join(dir, '.claude', 'rules', 'build-deploy.md'), 'utf8');
     // Unfenced import is re-anchored two levels up; the fenced example is not.
@@ -148,11 +154,11 @@ describe('apply -> revert round trip', () => {
 
   it('is idempotent: re-apply is a no-op and a mapped re-run warn-skips', () => {
     const { file } = makeTempMonolith();
-    atomizeFile(file, quiet);
+    atomizeFile(file, inferQuiet);
     const afterFirst = readFileSync(file, 'utf8');
 
     // Inferred re-apply finds nothing (markers are not path references).
-    const second = atomizeFile(file, quiet);
+    const second = atomizeFile(file, inferQuiet);
     expect(second.written).toBe(false);
     expect(second.plan.moves).toEqual([]);
     expect(readFileSync(file, 'utf8')).toBe(afterFirst);
@@ -173,9 +179,24 @@ describe('apply -> revert round trip', () => {
     expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
   });
 
+  it('prunes a --rules-dir of arbitrary depth on revert (#1427)', () => {
+    const { dir, file } = makeTempMonolith();
+    atomizeFile(file, {
+      mapping: new Map([['Build & deploy', 'src/lib']]),
+      rulesDirRel: 'deep/nest/of/rules',
+      ...quiet,
+    });
+    expect(existsSync(join(dir, 'deep', 'nest', 'of', 'rules', 'build-deploy.md'))).toBe(true);
+
+    revertFile(file, quiet);
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    // The whole now-empty dir chain is pruned, not just the bottom two levels.
+    expect(existsSync(join(dir, 'deep'))).toBe(false);
+  });
+
   it('never moves a section that contains an atomized marker (revert anchor)', () => {
     const { file } = makeTempMonolith();
-    atomizeFile(file, quiet);
+    atomizeFile(file, inferQuiet);
 
     // "Project conventions" now holds the two markers in its body; an explicit
     // mapping for it must be refused or --revert could never find the markers.
@@ -248,7 +269,7 @@ describe('revert marker containment', () => {
 describe('paths: frontmatter', () => {
   it('scopes each generated rule file to its section subtree', () => {
     const { dir, file } = makeTempMonolith();
-    atomizeFile(file, quiet);
+    atomizeFile(file, inferQuiet);
 
     const buildRule = readFileSync(join(dir, '.claude', 'rules', 'build-deploy.md'), 'utf8');
     const wfRule = readFileSync(join(dir, '.claude', 'rules', 'workflows.md'), 'utf8');
@@ -271,6 +292,132 @@ describe('paths: frontmatter', () => {
       // Explicit mapping moves only the mapped section.
       expect(readFileSync(file, 'utf8')).toContain('## Workflows');
     }
+  });
+});
+
+describe('rule filename parity with the detector rulePath (#1427)', () => {
+  // The over-scoped detector prescribes `.claude/rules/<ruleTopicSlug>.md` and
+  // adoption tracking joins on that exact path, so the codemod must name the
+  // file with the SAME slug - not with the parser's section-id slug (which
+  // drops `/`, keeps `_`, and never collapses runs).
+  const SLASHY = `# Conventions
+
+## Build/Deploy Notes
+
+Entry points are src/lib/foo.ts and src/lib/bar.ts.
+
+## snake_case helpers
+
+See src/lib/snake.ts for naming.
+`;
+
+  it('names rule files with the detector topic slug, keyed by the parser section id', () => {
+    const { dir, file } = makeTempMonolith(SLASHY);
+    // Detector-emitted --map keys are parser section ids: "Build/Deploy Notes"
+    // slugs to `builddeploy-notes`, "snake_case helpers" to `snake_case-helpers`.
+    const result = atomizeFile(file, {
+      mapping: new Map([
+        ['CLAUDE.md#builddeploy-notes', 'src/lib'],
+        ['CLAUDE.md#snake_case-helpers', 'src/lib'],
+      ]),
+      ...quiet,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.plan.moves.map((m: { rulePathRel: string }) => m.rulePathRel)).toEqual([
+      `.claude/rules/${ruleTopicSlug('Build/Deploy Notes')}.md`,
+      `.claude/rules/${ruleTopicSlug('snake_case helpers')}.md`,
+    ]);
+
+    // The written filenames are the detector's rulePath, literally.
+    expect(existsSync(join(dir, '.claude', 'rules', 'build-deploy-notes.md'))).toBe(true);
+    expect(existsSync(join(dir, '.claude', 'rules', 'snake-case-helpers.md'))).toBe(true);
+    // ... and NOT the parser-slug names the pre-#1427 codemod produced.
+    expect(existsSync(join(dir, '.claude', 'rules', 'builddeploy-notes.md'))).toBe(false);
+    expect(existsSync(join(dir, '.claude', 'rules', 'snake_case-helpers.md'))).toBe(false);
+
+    // Round trip still holds with the diverging filename.
+    revertFile(file, quiet);
+    expect(readFileSync(file, 'utf8')).toBe(SLASHY);
+  });
+
+  it('disambiguates topic-slug collisions between distinct sections', () => {
+    // Distinct headings (distinct parser ids) can collide on the TOPIC slug.
+    const doc = `# Conventions
+
+## Build/Deploy
+
+src/lib/a.ts
+
+## Build Deploy
+
+src/lib/b.ts
+`;
+    const { dir, file } = makeTempMonolith(doc);
+    const result = atomizeFile(file, {
+      mapping: new Map([
+        ['Build/Deploy', 'src/lib'],
+        ['Build Deploy', 'src/lib'],
+      ]),
+      ...quiet,
+    });
+    expect(result.plan.moves.map((m: { rulePathRel: string }) => m.rulePathRel)).toEqual([
+      '.claude/rules/build-deploy.md',
+      '.claude/rules/build-deploy-2.md',
+    ]);
+    expect(readFileSync(join(dir, '.claude', 'rules', 'build-deploy.md'), 'utf8')).toContain(
+      '## Build/Deploy'
+    );
+    expect(readFileSync(join(dir, '.claude', 'rules', 'build-deploy-2.md'), 'utf8')).toContain(
+      '## Build Deploy'
+    );
+    revertFile(file, quiet);
+    expect(readFileSync(file, 'utf8')).toBe(doc);
+  });
+});
+
+describe('inference requires an explicit opt-in (#1427)', () => {
+  it('refuses to write inferred moves without infer (API)', () => {
+    const { dir, file } = makeTempMonolith();
+    expect(() => atomizeFile(file, quiet)).toThrow(/--infer/);
+    // Nothing was written.
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    expect(existsSync(join(dir, '.claude'))).toBe(false);
+  });
+
+  it('refuses bare CLI apply without --map/--section/--infer', () => {
+    const { dir, file } = makeTempMonolith();
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync('node', [SCRIPT, file], { encoding: 'utf8' });
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain('no section mapping given');
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    expect(existsSync(join(dir, '.claude'))).toBe(false);
+  });
+
+  it('still previews inference under --dry-run and writes under --infer', () => {
+    const { dir, file } = makeTempMonolith();
+    const preview = execFileSync('node', [SCRIPT, '--dry-run', file], { encoding: 'utf8' });
+    expect(preview).toContain('would write .claude/rules/build-deploy.md');
+    expect(preview).toContain('re-run with --infer to apply');
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+
+    execFileSync('node', [SCRIPT, '--infer', file], { encoding: 'utf8' });
+    expect(existsSync(join(dir, '.claude', 'rules', 'build-deploy.md'))).toBe(true);
+    expect(readFileSync(file, 'utf8')).toContain('<!-- atomized:');
+  });
+
+  it('explicit --map/--section writes without --infer (detector-fed path)', () => {
+    const { dir, file } = makeTempMonolith();
+    execFileSync('node', [SCRIPT, '--section', 'Build & deploy=src/lib', file], {
+      encoding: 'utf8',
+    });
+    expect(existsSync(join(dir, '.claude', 'rules', 'build-deploy.md'))).toBe(true);
   });
 });
 
@@ -307,6 +454,32 @@ describe('section model parity with parse-config-sections', () => {
     expect(mirrored.map((s: { level: number }) => s.level)).toEqual(
       parsed.map((s) => s.level)
     );
+  });
+
+  it('stays id-aligned on CRLF / BOM / fence / frontmatter edge cases (#1427)', () => {
+    // The codemod imports the real parser for slug/id assignment and zips its
+    // ids onto the byte-preserving sections, so a detector-emitted --map key
+    // resolves iff the two splitters agree on section boundaries. Pin the
+    // edge cases where they could drift.
+    const docs: Record<string, string> = {
+      crlf: '# Top\r\n\r\n## Build & deploy\r\nsrc/lib/foo.ts\r\n',
+      bomNoFrontmatter: '\uFEFF# Heading\n\n## Sub\nbody\n',
+      bomFrontmatter: '\uFEFF---\na: b\n---\n\n# Top\nbody\n',
+      frontmatterOnlyPreamble: '---\na: b\n---\n# Top\nbody\n\n## Sub\nmore\n',
+      unbalancedFence: '# Top\n```\n# swallowed by the open fence\n## also swallowed\n',
+      fencedHeadingsAndTildes: '# Top\n~~~\n# not a heading\n~~~\n## Real\nbody\n',
+    };
+    for (const [name, doc] of Object.entries(docs)) {
+      const parsed = parseConfigSections({ scope: 'CLAUDE.md', content: doc });
+      const mirrored = listSections(doc, 'CLAUDE.md');
+      expect(mirrored.map((s: { id: string }) => s.id), name).toEqual(parsed.map((s) => s.id));
+      expect(mirrored.map((s: { heading: string }) => s.heading), name).toEqual(
+        parsed.map((s) => s.heading)
+      );
+      // ... while the byte partition still reconstructs the document exactly.
+      const sections = splitSections(doc) as Array<{ lines: string[] }>;
+      expect(sections.flatMap((s) => s.lines).join('\n'), name).toBe(doc);
+    }
   });
 
   it('splits losslessly: sections partition the document bytes exactly', () => {

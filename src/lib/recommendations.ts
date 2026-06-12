@@ -82,6 +82,8 @@ export {
 // Static, hand-written barrel of per-file detectors (ADR 0002). As of #507 this
 // is the complete set of recommendations — there are no more in-file rules.
 import { DETECTORS } from './detectors';
+import { externalGuidanceRef } from './external-guidance';
+import type { ExternalGuidance, ExternalGuidanceRef } from './external-guidance';
 import { deriveModelPinSavingsConfig } from './model-pin-savings';
 import {
   computeSuppressionTransitions as computeSuppressionTransitionsOver,
@@ -167,6 +169,40 @@ export function assembleRecommendationInput(
 
 const buildCache: WeakMap<RecommendationInput, Recommendation[]> = new WeakMap();
 
+// ── External guidance attach pass (#1302, epic #656) ─────────────────────
+/**
+ * Attach externally-authored guidance snapshots to already-fired
+ * recommendations as reference-only "Learn More" links.
+ *
+ * Relevance-gating is structural: a guidance document targets exactly one
+ * EMITTED rec id (`target.detectorId`) or one category (`target.category`),
+ * and its reference appears ONLY on recs the deterministic engine actually
+ * emitted this run. Guidance never becomes a standalone recommendation, never
+ * adds a category, and never affects ranking — the post-pass runs after the
+ * detector loop and only decorates.
+ */
+export function attachExternalGuidanceReferences(
+  recs: Recommendation[],
+  guidance: ExternalGuidance[] | null | undefined
+): Recommendation[] {
+  if (!guidance || guidance.length === 0) return recs;
+  return recs.map((rec) => {
+    const seenUrls = new Set<string>();
+    const references: ExternalGuidanceRef[] = [];
+    for (const g of guidance) {
+      const matches = g.target.detectorId
+        ? g.target.detectorId === rec.id
+        : g.target.category === rec.category;
+      if (!matches) continue;
+      const ref = externalGuidanceRef(g);
+      if (seenUrls.has(ref.url)) continue;
+      seenUrls.add(ref.url);
+      references.push(ref);
+    }
+    return references.length > 0 ? { ...rec, references } : rec;
+  });
+}
+
 /**
  * Rank recommendations by severity, dollar impact, reclaimed time, then affected
  * count. Dollar-bearing recs keep priority over time-only recs when the dollar
@@ -230,7 +266,9 @@ export function buildRecommendations(
     const r = d.rule(input, t);
     if (r) recs.push(r);
   }
-  const sorted = rankRecommendations(recs);
+  const sorted = rankRecommendations(
+    attachExternalGuidanceReferences(recs, input.externalGuidance)
+  );
   if (useCache) buildCache.set(input, sorted);
   return sorted;
 }

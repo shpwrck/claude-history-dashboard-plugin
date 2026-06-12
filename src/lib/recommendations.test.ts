@@ -482,6 +482,106 @@ describe('per-project recommendation attribution (#330)', () => {
   });
 });
 
+describe('external guidance "Learn More" references (#1302, epic #656)', () => {
+  const guidance = (
+    target: NonNullable<RecommendationInput['externalGuidance']>[number]['target'],
+    overrides: Partial<
+      NonNullable<RecommendationInput['externalGuidance']>[number]
+    > = {}
+  ): NonNullable<RecommendationInput['externalGuidance']>[number] => ({
+    id: 'anthropic-usage-limits',
+    source: 'anthropic-support',
+    trustTier: 'first-party',
+    url: 'https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work',
+    fetchedAt: '2026-06-12T00:00:00.000Z',
+    contentHash: 'sha256:abc123',
+    suggestion: 'Review first-party Claude usage and length limit guidance.',
+    title: 'How do usage and length limits work?',
+    target,
+    ...overrides,
+  });
+
+  /** 429 errors make the api-errors detector emit `reliability.rate-limits`. */
+  const rateLimitedErrors = [
+    {
+      sessionId: 's1',
+      timestamp: '2026-06-12T00:00:00Z',
+      summary: 'rate limited',
+      status: 429,
+    },
+  ];
+
+  it('attaches a reference when the targeted rec fires', () => {
+    const recs = buildRecommendations(
+      baseInput({
+        apiErrors: rateLimitedErrors,
+        externalGuidance: [guidance({ detectorId: 'reliability.rate-limits' })],
+      }),
+      0
+    );
+    const rateLimits = recs.find((r) => r.id === 'reliability.rate-limits');
+    expect(rateLimits).toBeDefined();
+    expect(rateLimits?.references).toEqual([
+      {
+        label: 'How do usage and length limits work?',
+        url: 'https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work',
+        source: 'Anthropic Support',
+        trustTier: 'first-party',
+      },
+    ]);
+    // Relevance-gating: ONLY the targeted rec carries the reference.
+    for (const rec of recs) {
+      if (rec.id !== 'reliability.rate-limits') {
+        expect(rec.references).toBeUndefined();
+      }
+    }
+  });
+
+  it('surfaces no reference when the targeted rec does not fire', () => {
+    const recs = buildRecommendations(
+      baseInput({
+        // No apiErrors — the rate-limits rec cannot fire.
+        externalGuidance: [guidance({ detectorId: 'reliability.rate-limits' })],
+      }),
+      0
+    );
+    expect(recs.find((r) => r.id === 'reliability.rate-limits')).toBeUndefined();
+    expect(recs.every((r) => r.references === undefined)).toBe(true);
+  });
+
+  it('never emits a standalone guidance rec', () => {
+    const withGuidance = buildRecommendations(
+      baseInput({
+        externalGuidance: [guidance({ detectorId: 'reliability.rate-limits' })],
+      }),
+      0
+    );
+    const without = buildRecommendations(baseInput(), 0);
+    expect(withGuidance.map((r) => r.id)).toEqual(without.map((r) => r.id));
+  });
+
+  it('attaches by category and dedupes repeated urls', () => {
+    const recs = buildRecommendations(
+      baseInput({
+        apiErrors: rateLimitedErrors,
+        externalGuidance: [
+          guidance({ category: 'reliability' }),
+          guidance({ category: 'reliability' }, { id: 'duplicate-url' }),
+        ],
+      }),
+      0
+    );
+    const reliability = recs.filter((r) => r.category === 'reliability');
+    expect(reliability.length).toBeGreaterThan(0);
+    for (const rec of reliability) {
+      expect(rec.references).toHaveLength(1);
+    }
+    for (const rec of recs.filter((r) => r.category !== 'reliability')) {
+      expect(rec.references).toBeUndefined();
+    }
+  });
+});
+
 describe('assembleRecommendationInput (#411/#468 — single data-source seam)', () => {
   it('passes through the additional parsed signals and normalises optional config', async () => {
     const { assembleRecommendationInput } = await import('./recommendations');
@@ -2082,16 +2182,11 @@ describe('detector registry (#411/#468/#507 — static barrel)', () => {
     expect(NEW_DETECTORS).toBe(DETECTORS);
   });
 
-  // Detectors that legitimately emit a DIFFERENT id than their registry `id`
-  // because the single rule body has multiple branches (#507 dual-emit). Every
-  // other detector MUST emit `rec.id === d.id`.
-  const DUAL_EMIT: Record<string, string[]> = {
-    'safety.dangerous-bypass': ['safety.dangerous-bypass', 'safety.dangerous-commands'],
-    'reliability.api-errors': ['reliability.api-errors', 'reliability.rate-limits'],
-  };
-
   it('each detector emits its own id (except documented dual-emit), and every detector fires on the bank', async () => {
     const { DETECTORS } = await import('./detectors');
+    // The dual-emit allowlist is shared with the guidance target-resolution
+    // test — single source of truth in ./detectors/dual-emit.
+    const { emittableIdsFor } = await import('./detectors/dual-emit');
     const bank = fixtureBank();
 
     const firedIds = new Set<string>();
@@ -2100,7 +2195,7 @@ describe('detector registry (#411/#468/#507 — static barrel)', () => {
         const rec = d.rule(fixture.input, fixture.now);
         if (!rec) continue;
         firedIds.add(d.id);
-        const allowed = DUAL_EMIT[d.id] ?? [d.id];
+        const allowed = emittableIdsFor(d.id);
         // The emitted id must be the detector's own id, or — for an allowlisted
         // dual-emit detector — one of its documented alternates.
         expect(allowed).toContain(rec.id);

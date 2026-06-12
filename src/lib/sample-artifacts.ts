@@ -31,8 +31,9 @@ import type { McpAuthState } from './parse-mcp-auth';
 import type { DriftEvent } from './parse-backups';
 import type { LiveConfig, LiveResource, DeceitSignals } from '../types';
 import type { AdoptionReceipt } from './adoption-receipts';
+import { ingestModelEvalResults, type ModelEvalSummary } from './model-eval-ingest';
 // @ts-expect-error - plain ESM build helper, no .d.ts
-import { buildSampleAdoptionReceipts as buildRawSampleAdoptionReceipts, SAMPLE_ADOPTION_CLAUDE_MD_HUNK } from '../../scripts/sample-data/build-corpus.mjs';
+import { buildSampleAdoptionReceipts as buildRawSampleAdoptionReceipts, buildSampleModelEvalResults, SAMPLE_ADOPTION_CLAUDE_MD_HUNK } from '../../scripts/sample-data/build-corpus.mjs';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -409,6 +410,26 @@ export function buildSampleLiveConfig(): LiveConfig {
  */
 export function buildSampleAdoptionReceipts(): AdoptionReceipt[] {
   return buildRawSampleAdoptionReceipts() as AdoptionReceipt[];
+}
+
+/**
+ * Model-eval summary for the marketing SPA's Model Evals workbench (#1388,
+ * epic #975). The real `modelEvalSummary` is server-only: the live build rolls
+ * up artifacts an external meta-runner drops into
+ * `~/.claude/model-evals/results`, and uploads carry `null` by design (#1242)
+ * — so without a seed the demo SPA could never showcase the workbench's
+ * eval-results face. The raw completed-batch artifacts are authored in
+ * `build-corpus.mjs` (the sample-data source of truth) and folded here through
+ * the REAL ingest pipeline (`ingestModelEvalResults`, fail-closed sanitizer
+ * included), so the demo summary is exactly what the live server would derive
+ * from the same artifacts. `nowMs` pins `generatedAt` (tests inject a fixed
+ * clock; App uses the default so the demo summary reads fresh, mirroring
+ * buildSampleStatsCache).
+ */
+export function buildSampleModelEvalSummary(
+  nowMs: number = Date.now()
+): ModelEvalSummary {
+  return ingestModelEvalResults(buildSampleModelEvalResults() as unknown[], () => new Date(nowMs));
 }
 
 /**

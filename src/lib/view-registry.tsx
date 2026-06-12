@@ -62,6 +62,7 @@ import type { McpAuthState } from './parse-mcp-auth';
 import type { DriftEvent } from './parse-backups';
 import type { AdoptionReceipt } from './adoption-receipts';
 import type { ModelEvalSummary } from './model-eval-ingest';
+import type { ExternalGuidance } from './external-guidance';
 import type { RepoMapDataset } from './parse-repo-map-join';
 import type { OrganizationReviewEventsDataset } from './organization-review-events';
 import type { ShadowCallAggregate } from './parse-shadow-calls';
@@ -278,6 +279,8 @@ export interface ViewData {
   updateResults: UpdateResult[];
   mcpAuth: McpAuthState | null;
   configBackups: DriftEvent[];
+  /** Committed external guidance snapshots (#1302); empty on the SPA dataset. */
+  externalGuidance: ExternalGuidance[];
   enterpriseSession: EnterpriseSession | null;
   /**
    * Synthetic adoption-lifecycle receipts injected by the marketing SPA's
@@ -608,6 +611,7 @@ export const VIEW_RENDERERS: Partial<
       mcpAuth={d.mcpAuth}
       configBackups={d.configBackups}
       repoMap={d.repoMap}
+      externalGuidance={d.externalGuidance}
       activeFilter={filter}
       onNavigate={n.navigateTo}
       onOpenSession={n.openSession}

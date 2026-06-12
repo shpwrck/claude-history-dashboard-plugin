@@ -2,58 +2,93 @@
 // Fetch registered external guidance sources into committed, static snapshots.
 // No dashboard runtime path calls this script; recommendation rendering only
 // reads the JSON files produced under data/external-guidance/.
+//
+// The article registry (which urls, which rec they attach to, which fact
+// extractor runs) lives in src/lib/external-guidance-registry.ts (#1407) so
+// the dashboard, the tests, and this script share one source of truth. The
+// allowlist predicate is the lib's isAllowedUrl — a lib-side tightening
+// reaches this write path.
+//
+// Provenance is per-page (#1407): every fetched page records its own url,
+// contentHash, conditional-fetch metadata, and extracted text, so drift
+// localizes to the page that changed and a 304 on the primary article can
+// never mask drift on a fact-bearing supporting page (#1303).
 
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 await import('./register-ts.mjs');
 
 const {
+  isAllowedUrl,
   parseExternalGuidanceSnapshot,
+  renderExternalGuidanceContent,
   sourceForExternalGuidance,
-} = await import('../src/lib/parse-external-guidance.ts');
+} = await import('../src/lib/external-guidance.ts');
+const { GUIDANCE_ARTICLES } = await import(
+  '../src/lib/external-guidance-registry.ts'
+);
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SNAPSHOT_DIR = join(ROOT, 'data', 'external-guidance');
 
-export const GUIDANCE_ARTICLES = [
-  {
-    id: 'anthropic-usage-limits',
-    source: 'anthropic-support',
-    url: 'https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work',
-    // The primary article links to this best-practices page for usage-limit
-    // strategy; Anthropic currently states the concrete five-hour/weekly facts
-    // there, so the snapshot records it as supporting content for fact extraction.
-    factUrls: [
-      'https://support.claude.com/en/articles/9797557-usage-limit-best-practices',
-    ],
-    target: { detectorId: 'cost.session-usage-limits' },
-    suggestion: 'Review first-party Claude usage and length limit guidance.',
-  },
-];
+// A snapshot whose CONTENT has not changed in this long is flagged in the run
+// report. fetchedAt records the last content change (a clean revalidation
+// does not advance it), so "stale" means "long-unchanged: worth a manual
+// glance that the article still exists and the registry still points at the
+// right place" — informational only, never fails the run.
+export const STALE_AFTER_DAYS = 45;
 
 function sha256(text) {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
 }
 
+const NAMED_ENTITIES = {
+  nbsp: ' ',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  amp: '&',
+};
+
+// SINGLE pass: each source-text entity decodes exactly once, so escaped text
+// like "&amp;lt;" or its numeric twin "&#38;lt;" can never double-decode into
+// a real "<" (sequential replace chains re-scan their own output).
 function decodeHtmlEntities(text) {
-  return text
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
+  return text.replace(
+    /&(nbsp|lt|gt|quot|amp|#\d+|#x[0-9a-f]+);/gi,
+    (match, entity) => {
+      const lower = entity.toLowerCase();
+      if (lower.startsWith('#x')) {
+        return safeCodePoint(match, parseInt(lower.slice(2), 16));
+      }
+      if (lower.startsWith('#')) {
+        return safeCodePoint(match, Number(lower.slice(1)));
+      }
+      return NAMED_ENTITIES[lower] ?? match;
+    }
+  );
+}
+
+// A single malformed numeric entity (e.g. "&#1114112;") must not abort the
+// whole ingest run with a RangeError — keep the original text instead.
+function safeCodePoint(original, codePoint) {
+  try {
+    return String.fromCodePoint(codePoint);
+  } catch {
+    return original;
+  }
 }
 
 export function htmlToText(html) {
   return decodeHtmlEntities(
     String(html ?? '')
+      // Comments first: a comment containing ">" would otherwise leak its
+      // tail into the text when the generic tag-strip eats up to the first ">".
+      .replace(/<!--[\s\S]*?-->/g, ' ')
       .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
       .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
       .replace(/<noscript\b[\s\S]*?<\/noscript>/gi, ' ')
@@ -63,7 +98,7 @@ export function htmlToText(html) {
     .trim();
 }
 
-function extractTitle(html, fallback) {
+export function extractTitle(html, fallback) {
   const h1 = String(html ?? '').match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
   if (h1) return htmlToText(h1[1]);
   const title = String(html ?? '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -71,119 +106,117 @@ function extractTitle(html, fallback) {
   return fallback;
 }
 
-export function extractUsageLimitFacts(text) {
-  const normalized = String(text ?? '').toLowerCase();
-  const facts = {};
-  if (/\b(?:five-hour|5-hour)\b/.test(normalized) || /every five hours/.test(normalized)) {
-    facts.rollingWindowHours = 5;
-  }
-  if (/\bweekly usage limit\b/.test(normalized) || /\bweekly limits\b/.test(normalized)) {
-    facts.hasWeeklyLimit = true;
-  }
-  if (
-    normalized.includes('claude.ai') &&
-    normalized.includes('claude code') &&
-    normalized.includes('claude desktop') &&
-    normalized.includes('same usage limit')
-  ) {
-    facts.sharedAcrossSurfaces = true;
-  }
-  if (/\b200k tokens\b/.test(normalized) || /\b200,000 tokens\b/.test(normalized)) {
-    facts.contextWindowTokens = 200000;
-  }
-  return facts;
+function snapshotPath(snapshotDir, article) {
+  return join(snapshotDir, `${article.id}.json`);
 }
 
-function snapshotPath(article) {
-  return join(SNAPSHOT_DIR, `${article.id}.json`);
-}
-
-async function readExistingSnapshot(article) {
+async function readExistingSnapshot(snapshotDir, article) {
   try {
-    return JSON.parse(await readFile(snapshotPath(article), 'utf8'));
+    return JSON.parse(await readFile(snapshotPath(snapshotDir, article), 'utf8'));
   } catch (err) {
     if (err?.code === 'ENOENT') return null;
     throw err;
   }
 }
 
-function assertAllowedUrl(sourceId, url) {
+function assertAllowedUrl(sourceId, url, context) {
   const source = sourceForExternalGuidance(sourceId);
   if (!source) throw new Error(`Unknown guidance source: ${sourceId}`);
-  const parsed = new URL(url);
-  const allowed = source.allowedUrlPrefixes.some((prefix) => {
-    const p = new URL(prefix);
-    return (
-      parsed.protocol === p.protocol &&
-      parsed.hostname === p.hostname &&
-      parsed.port === p.port &&
-      parsed.pathname.startsWith(p.pathname)
-    );
-  });
-  if (!allowed) throw new Error(`${url} is outside ${sourceId}'s allowlist`);
+  if (!isAllowedUrl(url, source)) {
+    throw new Error(`${url} is outside ${sourceId}'s allowlist (${context})`);
+  }
 }
 
-async function fetchText(url, existing) {
+/**
+ * Conditionally fetch one page. `existingPage` supplies the prior etag /
+ * last-modified / content so a 304 (or unchanged content) reuses the page
+ * verbatim WITHOUT masking the other pages — every page is revalidated on
+ * every run (#1303: the old top-level 304 short-circuit skipped factUrls
+ * entirely, making fact-page drift structurally invisible once an etag
+ * persisted).
+ */
+async function fetchPage(article, url, existingPage, now, fetchImpl) {
+  assertAllowedUrl(article.source, url, 'registry');
   const headers = {
     accept: 'text/html,application/xhtml+xml',
-    'user-agent': 'claude-history-dashboard-guidance-ingest/0.1',
+    'user-agent': 'claude-history-dashboard-guidance-ingest/0.2',
   };
-  if (existing?.etag) headers['if-none-match'] = existing.etag;
-  if (existing?.lastModified) headers['if-modified-since'] = existing.lastModified;
+  if (existingPage?.etag) headers['if-none-match'] = existingPage.etag;
+  if (existingPage?.lastModified) {
+    headers['if-modified-since'] = existingPage.lastModified;
+  }
 
-  const response = await fetch(url, { headers });
-  if (response.status === 304) {
-    return { status: 304, text: null, etag: existing?.etag, lastModified: existing?.lastModified };
+  const response = await fetchImpl(url, { headers });
+  if (response.status === 304 && existingPage) {
+    return { changed: false, page: existingPage };
   }
   if (!response.ok) {
     throw new Error(`Fetch failed for ${url}: ${response.status} ${response.statusText}`);
   }
+  // fetch follows redirects; the allowlist must hold for the FINAL url too,
+  // or off-allowlist content could land stamped as first-party.
+  if (response.url) {
+    assertAllowedUrl(article.source, response.url, `redirect target of ${url}`);
+  }
+
+  const html = await response.text();
+  const content = htmlToText(html);
+  const contentHash = sha256(content);
+  const etag = response.headers.get('etag') ?? undefined;
+  const lastModified = response.headers.get('last-modified') ?? undefined;
+  if (existingPage?.contentHash === contentHash) {
+    // Same bytes, possibly fresher validators — carry them without flagging drift.
+    return {
+      changed: false,
+      page: {
+        ...existingPage,
+        ...(etag ? { etag } : {}),
+        ...(lastModified ? { lastModified } : {}),
+      },
+    };
+  }
   return {
-    status: response.status,
-    text: await response.text(),
-    etag: response.headers.get('etag') ?? undefined,
-    lastModified: response.headers.get('last-modified') ?? undefined,
+    changed: true,
+    page: {
+      url,
+      title: extractTitle(html, url),
+      fetchedAt: now.toISOString(),
+      ...(etag ? { etag } : {}),
+      ...(lastModified ? { lastModified } : {}),
+      contentHash,
+      content,
+    },
   };
 }
 
-function renderSnapshotContent(pages) {
-  return `${pages
-    .map(
-      (page) =>
-        `# Source: ${page.url}\n\nTitle: ${page.title}\n\n${page.text.trim()}`
-    )
-    .join('\n\n---\n\n')}\n`;
-}
+export async function buildSnapshot(article, existing, now, fetchImpl) {
+  const urls = [article.url, ...(article.factUrls ?? [])];
+  const existingPages = new Map(
+    (existing?.pages ?? []).map((page) => [page.url, page])
+  );
 
-async function buildSnapshot(article, existing, now = new Date()) {
-  assertAllowedUrl(article.source, article.url);
-  for (const url of article.factUrls ?? []) assertAllowedUrl(article.source, url);
-
-  const primary = await fetchText(article.url, existing);
-  if (primary.status === 304 && existing) return { changed: false, snapshot: existing };
-
-  const primaryText = htmlToText(primary.text);
-  const pages = [
-    {
-      url: article.url,
-      title: extractTitle(primary.text, article.id),
-      text: primaryText,
-    },
-  ];
-
-  for (const url of article.factUrls ?? []) {
-    const fetched = await fetchText(url, null);
-    pages.push({
+  const pages = [];
+  const changedPages = [];
+  for (const url of urls) {
+    const result = await fetchPage(
+      article,
       url,
-      title: extractTitle(fetched.text, url),
-      text: htmlToText(fetched.text),
-    });
+      existingPages.get(url) ?? null,
+      now,
+      fetchImpl
+    );
+    pages.push(result.page);
+    if (result.changed) changedPages.push(url);
   }
+  // A page dropped from the registry is drift too (the combined hash moves).
+  const pageSetChanged =
+    (existing?.pages ?? []).length !== pages.length ||
+    pages.some((page, i) => existing?.pages?.[i]?.url !== page.url);
 
-  const content = renderSnapshotContent(pages);
+  const content = renderExternalGuidanceContent(pages);
   const contentHash = sha256(content);
-  if (existing?.contentHash === contentHash) {
-    return { changed: false, snapshot: existing };
+  if (existing?.contentHash === contentHash && !pageSetChanged) {
+    return { changed: false, changedPages: [], snapshot: existing };
   }
 
   const snapshot = {
@@ -191,44 +224,94 @@ async function buildSnapshot(article, existing, now = new Date()) {
     source: article.source,
     url: article.url,
     fetchedAt: now.toISOString(),
-    ...(primary.etag ? { etag: primary.etag } : {}),
-    ...(primary.lastModified ? { lastModified: primary.lastModified } : {}),
     contentHash,
     title: pages[0].title,
     suggestion: article.suggestion,
     target: article.target,
-    facts: extractUsageLimitFacts(content),
-    content,
+    // Per-article fact extraction (#1407): only an article that registered an
+    // extractor gets facts stamped — never a global pass over boilerplate.
+    ...(article.extractFacts ? { facts: article.extractFacts(content) } : {}),
+    pages,
   };
   parseExternalGuidanceSnapshot(snapshot);
-  return { changed: true, snapshot };
+  return { changed: true, changedPages, snapshot };
 }
 
-async function writeSnapshot(article, snapshot) {
-  const path = snapshotPath(article);
+async function writeSnapshot(snapshotDir, article, snapshot) {
+  const path = snapshotPath(snapshotDir, article);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
 }
 
-export async function ingestGuidance({ now = new Date() } = {}) {
+function ageDays(isoTimestamp, now) {
+  const ms = now.getTime() - Date.parse(isoTimestamp);
+  return Number.isFinite(ms) ? Math.floor(ms / 86_400_000) : null;
+}
+
+export async function ingestGuidance({
+  now = new Date(),
+  fetchImpl = fetch,
+  snapshotDir = SNAPSHOT_DIR,
+  articles = GUIDANCE_ARTICLES,
+} = {}) {
   const results = [];
-  for (const article of GUIDANCE_ARTICLES) {
-    const existing = await readExistingSnapshot(article);
-    const result = await buildSnapshot(article, existing, now);
-    if (result.changed) await writeSnapshot(article, result.snapshot);
-    results.push({ id: article.id, changed: result.changed, contentHash: result.snapshot.contentHash });
+  for (const article of articles) {
+    const existing = await readExistingSnapshot(snapshotDir, article);
+    const result = await buildSnapshot(article, existing, now, fetchImpl);
+    if (result.changed) await writeSnapshot(snapshotDir, article, result.snapshot);
+    const days = ageDays(result.snapshot.fetchedAt, now);
+    results.push({
+      id: article.id,
+      changed: result.changed,
+      changedPages: result.changedPages,
+      contentHash: result.snapshot.contentHash,
+      fetchedAt: result.snapshot.fetchedAt,
+      ageDays: days,
+      stale: days != null && days > STALE_AFTER_DAYS,
+    });
   }
   return results;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const results = await ingestGuidance();
-  const changed = results.filter((result) => result.changed);
-  if (changed.length === 0) {
-    console.log('No guidance drift.');
-  } else {
-    for (const result of changed) {
-      console.log(`Updated ${result.id} (${result.contentHash}).`);
+/**
+ * Drift/staleness report (#1303): which snapshots changed (and which pages
+ * localized the drift), and which have not changed in over STALE_AFTER_DAYS.
+ * Plain characters only — this lands in Actions logs and PR bodies.
+ */
+export function formatGuidanceReport(results) {
+  const lines = [];
+  const changed = results.filter((r) => r.changed);
+  const stale = results.filter((r) => !r.changed && r.stale);
+  lines.push(
+    changed.length === 0
+      ? 'No guidance drift.'
+      : `Drift detected in ${changed.length} snapshot(s):`
+  );
+  for (const r of changed) {
+    lines.push(`  ${r.id} (${r.contentHash})`);
+    for (const url of r.changedPages) lines.push(`    changed page: ${url}`);
+  }
+  if (stale.length > 0) {
+    lines.push(`Stale snapshots (unchanged for over ${STALE_AFTER_DAYS} days):`);
+    for (const r of stale) {
+      lines.push(`  ${r.id} (last refreshed ${r.fetchedAt}, ${r.ageDays} days ago)`);
     }
   }
+  return lines.join('\n');
+}
+
+function isRunAsMain() {
+  // pathToFileURL(realpathSync(...)) survives symlinks, percent-encoded paths,
+  // and Windows separators where a bare string compare silently no-ops.
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isRunAsMain()) {
+  const results = await ingestGuidance();
+  console.log(formatGuidanceReport(results));
 }
