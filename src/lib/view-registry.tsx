@@ -64,6 +64,7 @@ import type { ModelEvalSummary } from './model-eval-ingest';
 import type { RepoMapDataset } from './parse-repo-map-join';
 import type { OrganizationReviewEventsDataset } from './organization-review-events';
 import type { ShadowCallAggregate } from './parse-shadow-calls';
+import type { EvidenceRef } from './evidence';
 import type { EnterpriseSession } from '@api-client';
 import { groupByProjects } from './parse-history';
 import {
@@ -286,6 +287,7 @@ export interface ViewNav {
   setActiveSessionId: (id: string | null) => void;
   setActiveProjectId: (id: string | null) => void;
   focusSessionId: string | null;
+  focusEvidenceRef: EvidenceRef | null;
   consumeFocus: () => void;
   reloadFromDisk: () => void;
   /** Update the URL-backed global dashboard filter (#832). */
@@ -619,6 +621,7 @@ export const VIEW_RENDERERS: Partial<
       timelines={d.timelines}
       apiErrors={d.apiErrors}
       focusSessionId={n.focusSessionId}
+      focusEvidenceRef={n.focusEvidenceRef}
       onFocusConsumed={n.consumeFocus}
       onActiveSessionChange={n.setActiveSessionId}
       onNavigate={n.navigateTo}

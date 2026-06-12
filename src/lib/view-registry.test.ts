@@ -227,6 +227,7 @@ describe('view registry ↔ nav catalog parity', () => {
         setActiveSessionId: () => {},
         setActiveProjectId: () => {},
         focusSessionId: null,
+        focusEvidenceRef: null,
         consumeFocus: () => {},
         reloadFromDisk: () => {},
         onFilterChange: () => {},
