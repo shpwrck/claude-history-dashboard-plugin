@@ -52,6 +52,23 @@ export const RETRY_STORM_MAX_ATTEMPT = 8;
 export const TTFB_P90_HEAVY_MS = 5000;
 export const DEAD_WALLCLOCK_MS = 60000;
 
+/**
+ * Durable transcript-derived context used only when telemetry/debug has a
+ * session id that is no longer present in the live `~/.claude/sessions`
+ * registry. Live registry entries always win.
+ */
+export interface ReportCardSessionContext {
+  sessionId: string;
+  /** Project/cwd from grouped transcript entries. */
+  project?: string;
+  /** Alias accepted for tests and future server-side callers. */
+  cwd?: string;
+  startTime?: number;
+  /** Transcript/token parser entrypoint dimension, when present. */
+  entrypoint?: string;
+  version?: string;
+}
+
 /** One joined project row: attribution + reliability + blended verdict. */
 export interface ReportCardProject {
   /** Absolute working directory — the project key. */
@@ -78,6 +95,20 @@ export interface ReportCardProject {
   fastModeLostCount: number;
   /** Number of the project's sessions that had any telemetry/debug signal. */
   sessionsWithSignal: number;
+  /** Alias for export/debug readability. */
+  reliabilitySessionCount: number;
+  /** Number of signal-bearing sessions recovered through transcript context. */
+  recoveredFromTranscriptCount: number;
+  /** Telemetry event rows contributing to retry-storm/wasted-clock fields. */
+  telemetryEventCount: number;
+  /** Distinct sessions with telemetry signal. */
+  telemetrySessionCount: number;
+  /** Distinct sessions with parsed debug-log signal. */
+  debugSessionCount: number;
+  /** TTFB samples contributing to the p90 TTFB field. */
+  ttfbSampleCount: number;
+  /** Raw samples that make maxAttempt an observed value instead of unavailable. */
+  maxAttemptSourceCount: number;
   // ── Blend ──────────────────────────────────────────────────────────────
   dragScore: number;
   dragBucket: DragBucket;
@@ -98,6 +129,11 @@ export interface ReportCard {
   /** Fleet-wide retry-storm rate (%) and total wasted wall-clock (ms). */
   fleetRetryStormPct: number;
   fleetWastedMs: number;
+  /** Fleet-wide coverage counts for auditability and not-measured rendering. */
+  fleetTelemetryEventCount: number;
+  fleetDebugSessionCount: number;
+  fleetTtfbSampleCount: number;
+  recoveredFromTranscriptCount: number;
 }
 
 /**
@@ -138,7 +174,8 @@ function scoreDrag(args: {
  */
 function blend(
   attribution: AttributionBucket,
-  drag: DragBucket
+  drag: DragBucket,
+  sessionsWithSignal: number
 ): { verdict: ReportCardVerdict; reason: string } {
   if (attribution === 'low-signal') {
     return { verdict: 'MOVE', reason: 'Insufficient evidence (<=2 sessions); pilot elsewhere.' };
@@ -147,6 +184,12 @@ function blend(
     return {
       verdict: 'FLAG',
       reason: 'Split across entrypoints; cost is untrustworthy until you pick one CLI.',
+    };
+  }
+  if (sessionsWithSignal === 0) {
+    return {
+      verdict: 'FLAG',
+      reason: 'Attribution is committed, but reliability is not measured for these sessions.',
     };
   }
   // committed
@@ -162,6 +205,66 @@ function blend(
   return { verdict: 'MOVE', reason: 'This CLI is actively expensive here (heavy reliability drag).' };
 }
 
+function normalizeContext(
+  sessionContext: ReportCardSessionContext[] | null | undefined
+): Map<string, ReportCardSessionContext> {
+  const bySession = new Map<string, ReportCardSessionContext>();
+  for (const row of sessionContext ?? []) {
+    if (!row.sessionId) continue;
+    const previous = bySession.get(row.sessionId);
+    const incomingCwd = usableProject(row.cwd) || usableProject(row.project);
+    const previousCwd = usableProject(previous?.cwd) || usableProject(previous?.project);
+    const cwd = previousCwd || incomingCwd || '';
+    bySession.set(row.sessionId, {
+      sessionId: row.sessionId,
+      cwd,
+      project: usableProject(previous?.project) || usableProject(row.project),
+      startTime: previous?.startTime ?? row.startTime,
+      entrypoint: previous?.entrypoint ?? row.entrypoint,
+      version: previous?.version ?? row.version,
+    });
+  }
+  return bySession;
+}
+
+function usableProject(value: string | undefined): string | undefined {
+  if (!value || value === '_unknown') return undefined;
+  return value;
+}
+
+function syntheticRegistryEntry(
+  sessionId: string,
+  context: ReportCardSessionContext,
+  index: number
+): SessionRegistryEntry | null {
+  const cwd = context.cwd || context.project || '';
+  if (!cwd) return null;
+  const entrypoint = context.entrypoint || 'unknown';
+  return {
+    pid: -1 - index,
+    sessionId,
+    cwd,
+    startedAt: context.startTime ?? 0,
+    procStart: 'transcript-context',
+    version: context.version ?? '',
+    peerProtocol: 0,
+    kind: entrypoint,
+    entrypoint,
+  };
+}
+
+/**
+ * Merge grouped-session project context with token-data dimensions. Callers pass
+ * the result to buildReportCard so unregistered reliability session ids can
+ * still be attributed without redesigning the parsers.
+ */
+export function buildReportCardSessionContext(
+  sessions: ReportCardSessionContext[] | null | undefined,
+  tokenData: ReportCardSessionContext[] | null | undefined = []
+): ReportCardSessionContext[] {
+  return Array.from(normalizeContext([...(sessions ?? []), ...(tokenData ?? [])]).values());
+}
+
 /**
  * Build the consolidated Agent Report Card from the three raw artifact arrays.
  * Joins telemetry + debug onto each project's sessions by sessionId.
@@ -169,15 +272,38 @@ function blend(
 export function buildReportCard(
   sessionRegistry: SessionRegistryEntry[] | null | undefined,
   telemetry: TelemetryEvent[] | null | undefined,
-  debugLogs: DebugSessionMetrics[] | null | undefined
+  debugLogs: DebugSessionMetrics[] | null | undefined,
+  sessionContext?: ReportCardSessionContext[] | null | undefined
 ): ReportCard {
-  const attribution = analyzeAttribution(sessionRegistry ?? []);
+  const registry = sessionRegistry ?? [];
   const reliability = analyzeReliability(telemetry ?? []);
 
   const relBySession = new Map<string, SessionReliability>();
   for (const s of reliability.bySession) relBySession.set(s.session_id, s);
   const debugBySession = new Map<string, DebugSessionMetrics>();
   for (const d of debugLogs ?? []) debugBySession.set(d.sessionId, d);
+
+  const registrySessionIds = new Set(registry.map((entry) => entry.sessionId));
+  const contextBySession = normalizeContext(sessionContext);
+  const recoveredSessionIds = new Set<string>();
+  const attributionEntries = [...registry];
+  const reliabilitySessionIds = new Set<string>([
+    ...relBySession.keys(),
+    ...debugBySession.keys(),
+  ]);
+  let syntheticIndex = 0;
+  for (const sessionId of reliabilitySessionIds) {
+    if (!sessionId || registrySessionIds.has(sessionId)) continue;
+    const context = contextBySession.get(sessionId);
+    if (!context) continue;
+    const synthetic = syntheticRegistryEntry(sessionId, context, syntheticIndex);
+    if (!synthetic) continue;
+    syntheticIndex += 1;
+    recoveredSessionIds.add(sessionId);
+    attributionEntries.push(synthetic);
+  }
+
+  const attribution = analyzeAttribution(attributionEntries);
 
   const projects: ReportCardProject[] = attribution.projects.map((p: ProjectAttribution) => {
     // Join telemetry + debug onto this project's sessions.
@@ -188,17 +314,30 @@ export function buildReportCard(
     let p90TtfbMs = 0;
     let fastModeLostCount = 0;
     let sessionsWithSignal = 0;
+    let recoveredFromTranscriptCount = 0;
+    let telemetrySessionCount = 0;
+    let debugSessionCount = 0;
+    let ttfbSampleCount = 0;
+    let maxAttemptSourceCount = 0;
     for (const entry of p.rawEntries) {
       const rel = relBySession.get(entry.sessionId);
       const dbg = debugBySession.get(entry.sessionId);
       if (rel || dbg) sessionsWithSignal += 1;
+      if (rel || dbg) {
+        if (recoveredSessionIds.has(entry.sessionId)) recoveredFromTranscriptCount += 1;
+      }
       if (rel) {
         stormEvents += rel.stormEvents;
         totalEvents += rel.totalEvents;
+        telemetrySessionCount += 1;
+        maxAttemptSourceCount += rel.totalEvents;
         if (rel.maxAttempt > maxAttempt) maxAttempt = rel.maxAttempt;
         wastedMs += rel.totalWastedMs;
       }
       if (dbg) {
+        debugSessionCount += 1;
+        ttfbSampleCount += dbg.ttfbSampleCount;
+        if (dbg.maxRetryAttempt > 0) maxAttemptSourceCount += 1;
         if (dbg.maxRetryAttempt > maxAttempt) maxAttempt = dbg.maxRetryAttempt;
         if (dbg.ttfbP90 > p90TtfbMs) p90TtfbMs = dbg.ttfbP90;
         fastModeLostCount += dbg.fastModeLostCount;
@@ -215,7 +354,11 @@ export function buildReportCard(
       fastModeLostCount,
       dominantEntrypoint: p.dominantEntrypoint,
     });
-    const { verdict, reason } = blend(p.attributionBucket, dragBucket);
+    const { verdict, reason } = blend(
+      p.attributionBucket,
+      dragBucket,
+      sessionsWithSignal
+    );
 
     return {
       cwd: p.cwd,
@@ -232,6 +375,13 @@ export function buildReportCard(
       wastedMs,
       fastModeLostCount,
       sessionsWithSignal,
+      reliabilitySessionCount: sessionsWithSignal,
+      recoveredFromTranscriptCount,
+      telemetryEventCount: totalEvents,
+      telemetrySessionCount,
+      debugSessionCount,
+      ttfbSampleCount,
+      maxAttemptSourceCount,
       dragScore,
       dragBucket,
       verdict,
@@ -251,5 +401,12 @@ export function buildReportCard(
     tally,
     fleetRetryStormPct: reliability.retryStormPct,
     fleetWastedMs: reliability.totalWastedMs,
+    fleetTelemetryEventCount: reliability.totalEvents,
+    fleetDebugSessionCount: debugBySession.size,
+    fleetTtfbSampleCount: Array.from(debugBySession.values()).reduce(
+      (sum, row) => sum + row.ttfbSampleCount,
+      0
+    ),
+    recoveredFromTranscriptCount: recoveredSessionIds.size,
   };
 }

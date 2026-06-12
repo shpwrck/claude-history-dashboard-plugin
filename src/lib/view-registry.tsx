@@ -810,6 +810,8 @@ export const VIEW_RENDERERS: Partial<
   // ── #539 artifact views ────────────────────────────────────────────────
   'report-card': ({ data: d, serverAvailable }) => (
     <AgentReportCard
+      sessions={d.sessions}
+      tokenData={d.tokenData}
       sessionRegistry={d.sessionRegistry}
       telemetry={d.telemetry}
       debugLogs={d.debugLogs}

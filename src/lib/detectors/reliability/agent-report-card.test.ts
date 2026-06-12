@@ -40,10 +40,11 @@ const dbg = (sessionId: string, p90: number, fastModeLost = 0): DebugSessionMetr
 const input = (
   sessionRegistry: SessionRegistryEntry[],
   telemetry: TelemetryEvent[] = [],
-  debugLogs: DebugSessionMetrics[] = []
+  debugLogs: DebugSessionMetrics[] = [],
+  overrides: Partial<RecommendationInput> = {}
 ): RecommendationInput => ({
   tokenData: [], toolData: [], sessions: [], projects: [], permissionRows: [], apiErrors: [],
-  liveConfig: null, sessionRegistry, telemetry, debugLogs,
+  liveConfig: null, sessionRegistry, telemetry, debugLogs, ...overrides,
 });
 
 // A committed project with HEAVY drag (retry storms + slow TTFB + waste) → MOVE.
@@ -75,5 +76,50 @@ describe('reliability.agent-report-card MOVE wording (#1103)', () => {
     const rec = detector.rule(input([...heavyReg, ...tinyReg], heavyTele, heavyDebug), 0)!;
     expect(rec.detail).toContain('heavy reliability drag');
     expect(rec.detail).toContain('too little evidence');
+  });
+
+  it('does not treat committed projects with no joined reliability signal as clean', () => {
+    const ids = ['c1', 'c2', 'c3', 'c4'];
+    const reg = ids.map((id) => sess('/repo/no-signal', id, 'cli'));
+    const rec = detector.rule(input(reg), 0)!;
+    expect(rec.severity).toBe('info');
+    expect(rec.detail).toContain('no joined reliability samples');
+    expect(rec.evidence!.find((row) => row.includes('no-signal'))).toContain(
+      'reliability 0/4 sessions'
+    );
+  });
+
+  it('uses transcript token context to recover telemetry-only sessions absent from the live registry', () => {
+    const ids = ['r1', 'r2', 'r3', 'r4'];
+    const rec = detector.rule(
+      input(
+        [],
+        ids.map((id) => tele(id, 9, 30000)),
+        [],
+        {
+          tokenData: ids.map((sessionId) => ({
+            sessionId,
+            project: '/repo/recovered',
+            projectShort: 'recovered',
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCacheCreationTokens: 0,
+            totalCacheReadTokens: 0,
+            model: 'claude-opus-4-8',
+            messageCount: 1,
+            entries: [],
+            compactionEvents: [],
+            hasUnknownModel: false,
+            entrypoint: 'sdk-cli',
+            version: '2.1.200',
+          })),
+        }
+      ),
+      0
+    )!;
+    expect(rec.detail).toContain('heavy reliability drag');
+    expect(rec.evidence!.find((row) => row.includes('recovered'))).toContain(
+      'reliability 4/4 sessions'
+    );
   });
 });

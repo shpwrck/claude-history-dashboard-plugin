@@ -12,14 +12,22 @@
  */
 import type { Detector } from '../types';
 import { basename } from '../shared';
-import { buildReportCard } from '../../report-card';
+import {
+  buildReportCard,
+  buildReportCardSessionContext,
+} from '../../report-card';
 
 export const detector: Detector = {
   id: 'reliability.agent-report-card',
   category: 'reliability',
-  dataDeps: ['sessionRegistry', 'telemetry', 'debugLogs'],
+  dataDeps: ['sessionRegistry', 'telemetry', 'debugLogs', 'sessions', 'tokenData'],
   rule(input) {
-    const card = buildReportCard(input.sessionRegistry, input.telemetry, input.debugLogs);
+    const card = buildReportCard(
+      input.sessionRegistry,
+      input.telemetry,
+      input.debugLogs,
+      buildReportCardSessionContext(input.sessions, input.tokenData)
+    );
     if (!card.projects.length) return null;
 
     const move = card.projects.filter((p) => p.verdict === 'MOVE');
@@ -34,6 +42,7 @@ export const detector: Detector = {
     // the rest are the committed-HEAVY ones blend() routes to MOVE.
     const moveLowSignal = move.filter((p) => p.attributionBucket === 'low-signal');
     const moveHeavy = move.filter((p) => p.attributionBucket !== 'low-signal');
+    const flagNoSignal = flag.filter((p) => p.sessionsWithSignal === 0);
 
     const severity = move.length ? 'warning' : 'info';
     const flagged = [...move, ...flag];
@@ -41,7 +50,7 @@ export const detector: Detector = {
       .slice(0, 6)
       .map(
         (p) =>
-          `${basename(p.cwd) || p.cwd}: ${p.verdict} — ${p.dominantEntrypoint} ${p.dominantShare}% / drag ${p.dragScore} (${p.dragBucket})`
+          `${basename(p.cwd) || p.cwd}: ${p.verdict} — ${p.dominantEntrypoint} ${p.dominantShare}% / drag ${p.dragScore} (${p.dragBucket}); reliability ${p.sessionsWithSignal}/${p.sessionCount} sessions`
       );
 
     return {
@@ -64,7 +73,16 @@ export const detector: Detector = {
             ]
               .filter(Boolean)
               .join('; ') + '.'
-          : `${flag.length} project(s) need a reliability fix or a CLI decision before trusting their cost.`),
+          : [
+              flagNoSignal.length
+                ? `${flagNoSignal.length} project(s) have committed attribution but no joined reliability samples`
+                : '',
+              flag.length - flagNoSignal.length > 0
+                ? `${flag.length - flagNoSignal.length} project(s) need a reliability fix or a CLI decision before trusting their cost`
+                : '',
+            ]
+              .filter(Boolean)
+              .join('; ') + '.'),
       action:
         'Open the Agent Report Card. For MOVE projects the CLI is actively expensive here; for FLAG, fix the reliability tax (or pick one entrypoint) before trusting per-task cost.',
       affected: flagged.length,
