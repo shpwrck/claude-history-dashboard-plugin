@@ -287,6 +287,12 @@ export interface Recommendation {
   /** Estimated USD impact, when the rule can quantify one. Drives ranking. */
   estSavingsUsd?: number;
   /**
+   * Estimated human time reclaimed, in minutes, when a finding has no honest
+   * dollar unit. Used only as a secondary ranking unit; UI surfacing is handled
+   * separately.
+   */
+  estTimeReclaimedMin?: number;
+  /**
    * Optional calibration metadata for the dollar impact. This does not affect
    * ranking; `estSavingsUsd` remains the stable ordering field until a later
    * slice intentionally changes ranking semantics.

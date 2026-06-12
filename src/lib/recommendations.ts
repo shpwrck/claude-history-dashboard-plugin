@@ -158,8 +158,32 @@ export function assembleRecommendationInput(
 const buildCache: WeakMap<RecommendationInput, Recommendation[]> = new WeakMap();
 
 /**
- * Run every detector and return the surviving recommendations, ranked by
- * severity, then by estimated dollar impact, then by affected count.
+ * Rank recommendations by severity, dollar impact, reclaimed time, then affected
+ * count. Dollar-bearing recs keep priority over time-only recs when the dollar
+ * values tie, so the new time unit only orders findings that have no stronger
+ * dollar signal.
+ */
+export function rankRecommendations(
+  recs: Recommendation[]
+): Recommendation[] {
+  return recs.sort((a, b) => {
+    const sev = SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity];
+    if (sev !== 0) return sev;
+    const savings = (b.estSavingsUsd ?? 0) - (a.estSavingsUsd ?? 0);
+    if (savings !== 0) return savings;
+    const aHasUsd = a.estSavingsUsd !== undefined;
+    const bHasUsd = b.estSavingsUsd !== undefined;
+    if (aHasUsd !== bHasUsd) return bHasUsd ? 1 : -1;
+    const reclaimed =
+      (b.estTimeReclaimedMin ?? 0) - (a.estTimeReclaimedMin ?? 0);
+    if (reclaimed !== 0) return reclaimed;
+    return (b.affected ?? 0) - (a.affected ?? 0);
+  });
+}
+
+/**
+ * Run every detector and return the surviving recommendations, ranked by the
+ * shared severity / impact / affected-count comparator.
  *
  * This is the convergence point for the **UI-data → Recommendation actionability
  * contract** (epic #866, keystone #851): any visible UI signal that implies an
@@ -192,13 +216,7 @@ export function buildRecommendations(
     const r = d.rule(input, t);
     if (r) recs.push(r);
   }
-  const sorted = recs.sort((a, b) => {
-    const sev = SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity];
-    if (sev !== 0) return sev;
-    const savings = (b.estSavingsUsd ?? 0) - (a.estSavingsUsd ?? 0);
-    if (savings !== 0) return savings;
-    return (b.affected ?? 0) - (a.affected ?? 0);
-  });
+  const sorted = rankRecommendations(recs);
   if (useCache) buildCache.set(input, sorted);
   return sorted;
 }

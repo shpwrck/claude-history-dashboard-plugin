@@ -12,6 +12,7 @@ import {
   rollupReclaimCascade,
   reclaimCascade,
   backfillReclaimSavings,
+  rankRecommendations,
   scopeKeyOf,
   type Recommendation,
   type AppliedMarkers,
@@ -74,6 +75,35 @@ function baseInput(overrides: Partial<RecommendationInput> = {}): Recommendation
 const bypassRow = (sessionId: string) => ({
   mode: 'bypassPermissions',
   sessionId,
+});
+
+describe('rankRecommendations time fallback (#1290)', () => {
+  const rec = (
+    id: string,
+    extra: Partial<Recommendation> = {}
+  ): Recommendation => ({
+    id,
+    category: 'workflow',
+    severity: 'info',
+    title: id,
+    detail: 'detail',
+    action: 'action',
+    ...extra,
+  });
+
+  it('sorts time-only recs by reclaimed minutes while dollar recs stay ahead', () => {
+    const ranked = rankRecommendations([
+      rec('time-low', { estTimeReclaimedMin: 15 }),
+      rec('dollar', { estSavingsUsd: 1 }),
+      rec('time-high', { estTimeReclaimedMin: 45 }),
+    ]);
+
+    expect(ranked.map((r) => r.id)).toEqual([
+      'dollar',
+      'time-high',
+      'time-low',
+    ]);
+  });
 });
 
 describe('bumpSeverity', () => {
