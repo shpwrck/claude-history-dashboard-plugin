@@ -162,6 +162,11 @@ const { topExpensiveSessions } = await import(
 const { groupBySessions, groupByProjects } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-history.ts')
 );
+const {
+  buildDailyDigest,
+  isDailyDigestDate,
+  todayDigestDate,
+} = await import(join(PROJECT_DIR, 'src', 'lib', 'build-daily-digest.ts'));
 const { estimateCost, isUnattendedEntrypoint } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-sessions.ts')
 );
@@ -6588,6 +6593,7 @@ function enterpriseScopedDataPath(pathname) {
   return (
     pathname === '/api/dataset.json' ||
     pathname === '/api/recommendations.json' ||
+    pathname === '/api/digest' ||
     pathname === '/api/live' ||
     pathname === '/sessions-manifest.json' ||
     pathname === '/history.jsonl' ||
@@ -7352,6 +7358,41 @@ const server = createServer(async (req, res) => {
         precompressed: { br: brBuf, gz: gzBuf },
       });
       return;
+    }
+
+    if (pathname === '/api/digest') {
+      if (req.method !== 'GET') {
+        return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
+      }
+      const url = new URL(req.url, 'http://localhost');
+      const rawDate = url.searchParams.get('date');
+      const date = rawDate || todayDigestDate();
+      if (!isDailyDigestDate(date)) {
+        return sendJson(res, 400, {
+          ok: false,
+          error: 'Invalid date; expected YYYY-MM-DD',
+        });
+      }
+      const ingestState = enterpriseRequestDatasetState(req);
+      const ingestApi = await ingestState.apiPromise;
+      await refreshReviewEventsForIngest(ingestApi);
+      ingestApi.ingest();
+      const ds = ingestApi.assembleDataset();
+      const digest = buildDailyDigest(
+        {
+          sessions: groupBySessions(ds.entries || []),
+          tokenData: ds.tokenData || [],
+          toolData: ds.toolData || [],
+          timelines: ds.timelines || [],
+          apiErrors: ds.apiErrors || [],
+          taskSuccess: ds.taskSuccess || [],
+          statsCache: ds.statsCache || null,
+        },
+        date
+      );
+      res.setHeader('X-Source', 'live');
+      res.setHeader('Cache-Control', 'no-store');
+      return sendJson(res, 200, digest);
     }
 
     if (pathname === '/api/recommendations.json') {

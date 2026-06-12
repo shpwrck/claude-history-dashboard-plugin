@@ -123,6 +123,76 @@ export const TASK_CATEGORY_TAXONOMY = [
 export type TaskCategory = (typeof TASK_CATEGORY_TAXONOMY)[number]['id'];
 export const DEFAULT_TASK_CATEGORY: TaskCategory = 'other';
 
+export interface DailyDigestActivity {
+  /** ISO date string `YYYY-MM-DD` from `stats-cache.json`, when available. */
+  date: string;
+  messageCount: number;
+  sessionCount: number;
+  toolCallCount: number;
+}
+
+export type DailyDigestOutcome =
+  | 'accepted'
+  | 'corrected'
+  | 'blocked'
+  | 'likely_success'
+  | 'needs_attention'
+  | 'neutral'
+  | 'positive_proxy'
+  | 'negative_proxy';
+
+export interface DailyDigestSession {
+  sessionId: string;
+  project: string;
+  projectShort: string;
+  title: string;
+  startTime: string;
+  endTime: string;
+  durationMs: number;
+  messageCount: number;
+  toolCallCount: number;
+  taskCategory: TaskCategory;
+  fileImpact: string[];
+  outcome?: DailyDigestOutcome;
+}
+
+export interface DailyDigestCategoryGroup {
+  category: TaskCategory;
+  label: string;
+  sessionCount: number;
+  messageCount: number;
+  toolCallCount: number;
+  sessions: DailyDigestSession[];
+}
+
+export interface DailyDigestTotal {
+  date: string;
+  sessionCount: number;
+  messageCount: number;
+  toolCallCount: number;
+  categories: DailyDigestCategoryGroup[];
+  /** Optional CLI-precomputed volume row for the same server-local date. */
+  activity?: DailyDigestActivity;
+}
+
+export interface ProjectDigest {
+  project: string;
+  projectShort: string;
+  sessionCount: number;
+  messageCount: number;
+  toolCallCount: number;
+  categories: DailyDigestCategoryGroup[];
+}
+
+export interface DailyDigest {
+  schemaVersion: '1';
+  date: string;
+  timeZone?: string;
+  generatedAt: string;
+  total: DailyDigestTotal;
+  projects: ProjectDigest[];
+}
+
 export interface CompactionEvent {
   timestamp: string;
   beforeContext: number;

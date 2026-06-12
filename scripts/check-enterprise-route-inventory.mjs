@@ -168,6 +168,7 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
     value: '/api/recommendations.json',
     access: 'scoped-or-admin-data',
   },
+  { kind: 'exact', value: '/api/digest', access: 'scoped-or-admin-data' },
   {
     kind: 'regex',
     value: '^\\/api\\/sources\\/([^/]+)\\/history\\.jsonl$',
