@@ -54,7 +54,7 @@ describe('parseSessionTimeline', () => {
         content: [
           { type: 'text', text: 'answer' },
           { type: 'thinking', thinking: 'hmm' },
-          { type: 'tool_use', name: 'Bash', input: { command: 'ls' } },
+          { type: 'tool_use', id: 'toolu_bash_1', name: 'Bash', input: { command: 'ls' } },
         ],
       },
     })
@@ -62,6 +62,7 @@ describe('parseSessionTimeline', () => {
     expect(kinds).toEqual(['assistant', 'thinking', 'tool_use'])
     const toolUse = parseSessionTimeline(text, 's.jsonl')!.entries.find((e) => e.kind === 'tool_use')!
     expect(toolUse.toolName).toBe('Bash')
+    expect(toolUse.toolUseId).toBe('toolu_bash_1')
   })
 
   it('emits a tool_result entry from a user message, carrying the error flag', () => {
@@ -71,7 +72,7 @@ describe('parseSessionTimeline', () => {
       message: { content: [{ type: 'tool_result', tool_use_id: 'u1', is_error: true, content: 'failed' }] },
     })
     const entry = parseSessionTimeline(text, 's.jsonl')!.entries[0]
-    expect(entry).toMatchObject({ kind: 'tool_result', isError: true })
+    expect(entry).toMatchObject({ kind: 'tool_result', toolUseId: 'u1', isError: true })
   })
 
   it('records an unknown line type as an "other" entry summarized by its type', () => {
@@ -112,8 +113,8 @@ describe('slimSessionTimeline (#1035)', () => {
     entries: [
       { timestamp: '2026-01-01', kind: 'user', summary: 'fix the bug please' },
       { timestamp: '2026-01-01', kind: 'assistant', summary: 'Looking at the file now' },
-      { timestamp: '2026-01-01', kind: 'tool_use', summary: '{"file_path":"/a/b.ts"}', toolName: 'Read' },
-      { timestamp: '2026-01-01', kind: 'tool_result', summary: 'export const x = 1', isError: false },
+      { timestamp: '2026-01-01', kind: 'tool_use', summary: '{"file_path":"/a/b.ts"}', toolName: 'Read', toolUseId: 'read-1' },
+      { timestamp: '2026-01-01', kind: 'tool_result', summary: 'export const x = 1', toolUseId: 'read-1', isError: false },
       { timestamp: '2026-01-02', kind: 'thinking', summary: '' },
     ],
   }
@@ -129,6 +130,8 @@ describe('slimSessionTimeline (#1035)', () => {
     // Everything except summary survives untouched.
     expect(slim.entries.map((e) => e.kind)).toEqual(base.entries.map((e) => e.kind))
     expect(slim.entries[2].toolName).toBe('Read')
+    expect(slim.entries[2].toolUseId).toBe('read-1')
+    expect(slim.entries[3].toolUseId).toBe('read-1')
     expect(slim.entries[3].isError).toBe(false)
     expect(slim.sessionId).toBe('s1')
   })

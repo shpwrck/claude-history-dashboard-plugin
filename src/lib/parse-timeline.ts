@@ -34,6 +34,7 @@ export interface TimelineEntry {
   hasCode?: boolean;
   isQuestion?: boolean;
   toolName?: string; // when kind === 'tool_use'
+  toolUseId?: string; // stable tool_use id, also copied onto matching tool_result entries
   isError?: boolean; // when kind === 'tool_result'
 }
 
@@ -190,6 +191,7 @@ export function parseSessionTimeline(
               timestamp,
               kind: 'tool_result',
               summary: stringifyToolResultContent(block.content),
+              toolUseId: typeof block.tool_use_id === 'string' ? block.tool_use_id : undefined,
               isError: block.is_error === true,
             }));
           } else if (block.type === 'text') {
@@ -223,6 +225,7 @@ export function parseSessionTimeline(
             timestamp,
             kind: 'tool_use',
             summary: stringifyToolInput(block.input),
+            toolUseId: typeof block.id === 'string' ? block.id : undefined,
             toolName: block.name ?? 'unknown',
           }));
         }
