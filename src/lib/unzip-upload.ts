@@ -390,7 +390,7 @@ export async function unzipBundleFromChunks(
       rejectWithOverflow(
         new UploadTooLargeError(
           `"${file.name}" is ${formatBytes(originalSize)}, over the ${formatBytes(maxEntryBytes)} per-file limit. ` +
-            `That file looks corrupt or not a Claude transcript — remove it and try again.`
+            `That file looks corrupt or not a supported agent transcript - remove it and try again.`
         )
       );
       return;
@@ -454,7 +454,7 @@ export async function unzipBundleFromChunks(
               if (observedBytes > maxEntryBytes) {
                 const tooLarge = new UploadTooLargeError(
                   `"${path}" is over the ${formatBytes(maxEntryBytes)} per-file limit. ` +
-                    `That file looks corrupt or not a Claude transcript — remove it and try again.`
+                    `That file looks corrupt or not a supported agent transcript - remove it and try again.`
                 );
                 rejectWithOverflow(tooLarge);
                 file.terminate();
