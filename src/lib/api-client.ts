@@ -27,6 +27,14 @@ import { parseHistoryJsonl } from './parse-history';
 /** True in the server build; the SPA stub exports `false`. */
 export const SERVER_AVAILABLE = true;
 
+export type AuditRunStatus = 'ran' | 'skipped' | 'failed';
+
+export interface AuditRunResponse {
+  status: AuditRunStatus;
+  reason?: string;
+  findings: AuditFinding[];
+}
+
 const ENTERPRISE_AUTH_TOKEN_KEY =
   'claude-history-dashboard:enterprise-auth-token';
 
@@ -724,14 +732,39 @@ export async function fetchDigest(date: string): Promise<DailyDigest> {
   return (await res.json()) as DailyDigest;
 }
 
-/** Fetch opt-in tier-3 judge/audit findings. Never called on dataset load. */
-export async function fetchAuditFindings(): Promise<AuditFinding[]> {
+/** Run opt-in tier-3 judge/audit checks. Never called on dataset load. */
+export async function fetchAuditRun(): Promise<AuditRunResponse> {
   const res = await serverFetch('/api/audit.json', {
     headers: { Accept: 'application/json' },
   });
   if (!res.ok) throw new Error(`Audit request failed (HTTP ${res.status})`);
-  const body = (await res.json()) as { findings?: unknown };
-  return Array.isArray(body.findings) ? (body.findings as AuditFinding[]) : [];
+  const body = (await res.json()) as {
+    status?: unknown;
+    reason?: unknown;
+    disabled?: unknown;
+    findings?: unknown;
+  };
+  const findings = Array.isArray(body.findings)
+    ? (body.findings as AuditFinding[])
+    : [];
+  const status =
+    body.status === 'ran' ||
+    body.status === 'skipped' ||
+    body.status === 'failed'
+      ? body.status
+      : body.disabled === true
+        ? 'skipped'
+        : 'ran';
+  return {
+    status,
+    ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+    findings,
+  };
+}
+
+/** Fetch opt-in tier-3 judge/audit findings. Never called on dataset load. */
+export async function fetchAuditFindings(): Promise<AuditFinding[]> {
+  return (await fetchAuditRun()).findings;
 }
 
 /**

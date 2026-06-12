@@ -21,6 +21,14 @@ import type { ToolUsageData } from './parse-tools';
 /** False in the SPA build — gates all server-only UI off. */
 export const SERVER_AVAILABLE = false;
 
+export type AuditRunStatus = 'ran' | 'skipped' | 'failed';
+
+export interface AuditRunResponse {
+  status: AuditRunStatus;
+  reason?: string;
+  findings: AuditFinding[];
+}
+
 export type EnterpriseRole = 'admin' | 'member' | 'viewer';
 
 export interface EnterprisePrincipal {
@@ -430,8 +438,16 @@ export async function fetchDigest(date: string): Promise<DailyDigest> {
   };
 }
 
+export async function fetchAuditRun(): Promise<AuditRunResponse> {
+  return {
+    status: 'skipped',
+    reason: 'spa_unsupported',
+    findings: [],
+  };
+}
+
 export async function fetchAuditFindings(): Promise<AuditFinding[]> {
-  return [];
+  return (await fetchAuditRun()).findings;
 }
 
 export async function fetchAdoptionReceipts(): Promise<AdoptionReceipt[]> {

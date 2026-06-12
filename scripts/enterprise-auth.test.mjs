@@ -1084,6 +1084,7 @@ try {
   });
   const body = await json(r);
   check('enterprise server LLM audit zero budget -> 200', r.status === 200, `got ${r.status}`);
+  check('enterprise server LLM audit zero budget reports ran status', body?.status === 'ran');
   check('enterprise server LLM audit zero budget returns findings array', Array.isArray(body?.findings));
   check('enterprise server LLM audit zero budget is enabled path', body?.disabled !== true);
 } finally {
@@ -4999,6 +5000,7 @@ try {
   });
   let body = await json(r);
   check('enterprise server LLM audit key alone -> 200', r.status === 200, `got ${r.status}`);
+  check('enterprise server LLM audit disabled reports skipped status', body?.status === 'skipped');
   check('enterprise server LLM audit disabled without opt-in', body?.disabled === true);
   check('enterprise server LLM audit reports disabled reason', body?.reason === 'server_llm_audits_disabled');
 
@@ -5346,6 +5348,7 @@ try {
   });
   let body = await json(r);
   check('enterprise server LLM audit enabled without key -> 200', r.status === 200, `got ${r.status}`);
+  check('enterprise server LLM audit missing key reports skipped status', body?.status === 'skipped');
   check('enterprise server LLM audit reports missing key', body?.reason === 'missing_anthropic_api_key');
 
   r = await fetch(`${server.base}/api/enterprise/organization`, {

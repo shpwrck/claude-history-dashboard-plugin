@@ -7499,8 +7499,8 @@ const server = createServer(async (req, res) => {
     if (pathname === '/api/audit.json') {
       // Tier-3 judge-audit harness (#605/#738), SERVER-ONLY. Degrades exactly
       // like /api/usage: unless explicitly enabled, with no ANTHROPIC_API_KEY,
-      // or on ANY error (dataset assembly, judge call), it returns
-      // { findings: [] } at 200, NEVER 500.
+      // or on ANY error (dataset assembly, judge call), it returns an explicit
+      // status with findings at 200, NEVER 500.
       let findings = [];
       const apiKey = process.env.ANTHROPIC_API_KEY || null;
       const disabledReason = !DASHBOARD_ENABLE_SERVER_LLM_AUDITS
@@ -7518,6 +7518,7 @@ const server = createServer(async (req, res) => {
           principal: req.enterprisePrincipal,
         });
         sendAuditResponse(req, res, {
+          status: 'skipped',
           findings,
           disabled: true,
           reason: disabledReason,
@@ -7532,6 +7533,8 @@ const server = createServer(async (req, res) => {
         reason: 'server_llm_audits_enabled',
         principal: req.enterprisePrincipal,
       });
+      let auditStatus = 'ran';
+      let auditReason;
       try {
         const auditChat = ({ model, system, maxTokens, messages }) => {
           const boundedMaxTokens = auditMaxOutputTokens(maxTokens);
@@ -7594,8 +7597,22 @@ const server = createServer(async (req, res) => {
       } catch (err) {
         console.error('audit compute failed:', err?.message ?? err);
         findings = [];
+        auditStatus = 'failed';
+        auditReason = 'audit_compute_failed';
+        appendEnterpriseAuditEvent(req, {
+          type: 'enterprise.llm_audit',
+          outcome: 'failed',
+          status: 200,
+          path: pathname,
+          reason: auditReason,
+          principal: req.enterprisePrincipal,
+        });
       }
-      sendAuditResponse(req, res, { findings });
+      sendAuditResponse(req, res, {
+        status: auditStatus,
+        ...(auditReason ? { reason: auditReason } : {}),
+        findings,
+      });
       return;
     }
 

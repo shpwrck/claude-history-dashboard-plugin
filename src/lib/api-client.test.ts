@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  fetchAuditRun,
   fetchAuthSession,
   fetchEnterpriseAuditExport,
   fetchEnterpriseOrganization,
   fetchEnterpriseReadinessReceipt,
 } from './api-client';
+import { fetchAuditRun as fetchSpaAuditRun } from './api-client.spa';
 
 describe('fetchAuthSession', () => {
   afterEach(() => {
@@ -163,5 +165,93 @@ describe('fetchEnterpriseAuditExport', () => {
         headers: expect.any(Headers),
       })
     );
+  });
+});
+
+function mockJsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+describe('fetchAuditRun', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('parses explicit ran audit responses', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse({
+          status: 'ran',
+          findings: [
+            {
+              id: 'a1',
+              domain: 'security',
+              summary: 'Finding',
+              judgeRationale: 'Rationale',
+              confidence: 'high',
+              evidenceRefs: ['session:s1'],
+            },
+          ],
+        })
+      )
+    );
+
+    await expect(fetchAuditRun()).resolves.toMatchObject({
+      status: 'ran',
+      findings: [{ id: 'a1' }],
+    });
+  });
+
+  it('maps legacy disabled responses to skipped', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse({
+          disabled: true,
+          reason: 'missing_anthropic_api_key',
+          findings: [],
+        })
+      )
+    );
+
+    await expect(fetchAuditRun()).resolves.toEqual({
+      status: 'skipped',
+      reason: 'missing_anthropic_api_key',
+      findings: [],
+    });
+  });
+
+  it('keeps legacy findings-only responses as ran', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(mockJsonResponse({ findings: [] }))
+    );
+
+    await expect(fetchAuditRun()).resolves.toEqual({
+      status: 'ran',
+      findings: [],
+    });
+  });
+
+  it('rejects non-ok audit responses', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockJsonResponse({}, 413)));
+
+    await expect(fetchAuditRun()).rejects.toThrow(
+      'Audit request failed (HTTP 413)'
+    );
+  });
+});
+
+describe('fetchSpaAuditRun', () => {
+  it('returns an explicit skipped response for upload-only mode', async () => {
+    await expect(fetchSpaAuditRun()).resolves.toEqual({
+      status: 'skipped',
+      reason: 'spa_unsupported',
+      findings: [],
+    });
   });
 });
