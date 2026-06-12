@@ -39,7 +39,7 @@ describe('model eval batch spec', () => {
         id: 'claude-fable-1-20260609',
         role: 'candidate',
         registered: false,
-        inferredFamily: null,
+        inferredFamily: 'fable',
       },
       {
         id: 'claude-opus-4-8',

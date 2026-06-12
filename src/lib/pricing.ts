@@ -2,7 +2,7 @@
  * Official Anthropic model pricing.
  *
  * Source: https://platform.claude.com/docs/en/about-claude/pricing
- * Last verified: 2026-05-21
+ * Last verified: 2026-06-12
  *
  * All rates are USD per million tokens (MTok).
  *
@@ -82,6 +82,8 @@ export interface ModelPricingResult {
    * exact/family matches are never flagged.
    */
   isUnknownModel: boolean;
+  /** True when the transcript did not provide a concrete model id. */
+  isMissingModel: boolean;
   /** True when the entry is a non-billable `<synthetic>` turn. */
   isSynthetic: boolean;
 }
@@ -99,25 +101,53 @@ export interface ModelPricingResult {
  *    entry is excluded from cost rather than mispriced under a default tier.
  */
 export function resolveModelPricing(model: string): ModelPricingResult {
-  if (model === SYNTHETIC_MODEL) {
-    return { pricing: ZERO_PRICING, isUnknownModel: false, isSynthetic: true };
+  const normalized = model.trim();
+  if (!normalized || normalized.toLowerCase() === 'unknown') {
+    return {
+      pricing: ZERO_PRICING,
+      isUnknownModel: false,
+      isMissingModel: true,
+      isSynthetic: false,
+    };
   }
 
-  const exact = MODEL_PRICING[model];
-  if (exact) return { pricing: exact, isUnknownModel: false, isSynthetic: false };
+  if (normalized === SYNTHETIC_MODEL) {
+    return {
+      pricing: ZERO_PRICING,
+      isUnknownModel: false,
+      isMissingModel: false,
+      isSynthetic: true,
+    };
+  }
 
-  const family = resolveModelFamily(model);
+  const exact = MODEL_PRICING[normalized];
+  if (exact) {
+    return {
+      pricing: exact,
+      isUnknownModel: false,
+      isMissingModel: false,
+      isSynthetic: false,
+    };
+  }
+
+  const family = resolveModelFamily(normalized);
   if (family) {
     return {
       pricing: CURRENT_FAMILY_PRICING[family],
       isUnknownModel: false,
+      isMissingModel: false,
       isSynthetic: false,
     };
   }
 
   // Truly unrecognized: exclude from cost (zero pricing) and flag it, so its
   // spend is dropped rather than estimated under an arbitrary default tier.
-  return { pricing: ZERO_PRICING, isUnknownModel: true, isSynthetic: false };
+  return {
+    pricing: ZERO_PRICING,
+    isUnknownModel: true,
+    isMissingModel: false,
+    isSynthetic: false,
+  };
 }
 
 /**

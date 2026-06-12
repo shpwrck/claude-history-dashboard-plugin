@@ -21,6 +21,7 @@ import {
 } from './cost-attribution';
 import { entryCost, dayKey } from './cost-trend';
 import { SYNTHETIC_MODEL } from './pricing';
+import { resolveModelFamily, type ModelFamily } from './model-registry';
 
 /** Total billable tokens for a session — all four token types summed. */
 export function sessionTotalTokens(t: SessionTokenData): number {
@@ -292,17 +293,24 @@ export function spendByDay(tokenData: SessionTokenData[]): DaySpendRow[] {
  * string.
  */
 export function modelFamily(model: string): string {
-  if (model === SYNTHETIC_MODEL) return 'Synthetic';
-  const l = model.toLowerCase();
-  if (l.includes('opus')) return 'Opus';
-  if (l.includes('sonnet')) return 'Sonnet';
-  if (l.includes('haiku')) return 'Haiku';
-  return 'Unknown';
+  const normalized = model.trim();
+  if (normalized === SYNTHETIC_MODEL) return 'Synthetic';
+  const family = resolveModelFamily(normalized);
+  if (!family) return 'Unknown';
+  return MODEL_FAMILY_LABELS[family];
 }
+
+const MODEL_FAMILY_LABELS: Record<ModelFamily, string> = {
+  fable: 'Fable',
+  mythos: 'Mythos',
+  opus: 'Opus',
+  sonnet: 'Sonnet',
+  haiku: 'Haiku',
+};
 
 /** One model family's token + cost spend. */
 export interface ModelSpendRow {
-  /** Opus | Sonnet | Haiku | Synthetic | Unknown. */
+  /** Fable | Mythos | Opus | Sonnet | Haiku | Synthetic | Unknown. */
   family: string;
   totalTokens: number;
   cost: number;

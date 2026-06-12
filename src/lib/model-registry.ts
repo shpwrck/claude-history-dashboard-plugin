@@ -1,4 +1,5 @@
-export type ModelFamily = 'opus' | 'sonnet' | 'haiku';
+export type RoutingModelFamily = 'opus' | 'sonnet' | 'haiku';
+export type ModelFamily = RoutingModelFamily | 'fable' | 'mythos';
 
 export interface ModelPricing {
   input: number;
@@ -38,7 +39,7 @@ export const CURRENT_MODEL_IDS = {
   opus: 'claude-opus-4-8',
   sonnet: 'claude-sonnet-4-6',
   haiku: 'claude-haiku-4-5-20251001',
-} as const satisfies Record<ModelFamily, string>;
+} as const satisfies Record<RoutingModelFamily, string>;
 
 export const CURRENT_RECOMMENDATION_MODEL_IDS = CURRENT_MODEL_IDS;
 
@@ -47,6 +48,8 @@ export const CHEAPEST_CURRENT_MODEL_ID = CURRENT_MODEL_IDS.haiku;
 const OPUS_CURRENT = tier(5);
 const SONNET_CURRENT = tier(3);
 const HAIKU_CURRENT = tier(1);
+const FABLE_CURRENT = tier(10);
+const MYTHOS_CURRENT = tier(10);
 const OPUS_LEGACY = tier(15);
 const SONNET_LEGACY = tier(3);
 const HAIKU_35 = tier(0.8);
@@ -55,12 +58,28 @@ const SONNET_3 = tier(3);
 const HAIKU_3 = tier(0.25);
 
 export const CURRENT_FAMILY_PRICING = {
+  fable: FABLE_CURRENT,
+  mythos: MYTHOS_CURRENT,
   opus: OPUS_CURRENT,
   sonnet: SONNET_CURRENT,
   haiku: HAIKU_CURRENT,
 } as const satisfies Record<ModelFamily, ModelPricing>;
 
 const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
+  {
+    id: 'claude-fable-5',
+    family: 'fable',
+    pricing: FABLE_CURRENT,
+    label: 'Claude Fable 5',
+    description: 'Most capable widely released model for long-horizon agentic work.',
+  },
+  {
+    id: 'claude-mythos-5',
+    family: 'mythos',
+    pricing: MYTHOS_CURRENT,
+    label: 'Claude Mythos 5',
+    description: 'Limited-availability Mythos-class model.',
+  },
   {
     id: CURRENT_MODEL_IDS.opus,
     family: 'opus',
@@ -148,6 +167,8 @@ export function resolveModelFamily(model: string): ModelFamily | null {
   if (exact) return exact.family;
 
   const lower = model.toLowerCase();
+  if (lower.includes('fable')) return 'fable';
+  if (lower.includes('mythos')) return 'mythos';
   if (lower.includes('opus')) return 'opus';
   if (lower.includes('sonnet')) return 'sonnet';
   if (lower.includes('haiku')) return 'haiku';

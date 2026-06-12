@@ -239,6 +239,8 @@ function tokModels(
 
 describe('modelFamily', () => {
   it('maps model strings to families', () => {
+    expect(modelFamily('claude-fable-5')).toBe('Fable');
+    expect(modelFamily('claude-mythos-5')).toBe('Mythos');
     expect(modelFamily('claude-opus-4-8')).toBe('Opus');
     expect(modelFamily('claude-3-5-sonnet-20241022')).toBe('Sonnet');
     expect(modelFamily('claude-haiku-4-5-20251001')).toBe('Haiku');
@@ -284,6 +286,17 @@ describe('spendByModel', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].family).toBe('Unknown');
     expect(rows[0].totalTokens).toBe(11);
+  });
+
+  it('prices real Fable traffic in its own model bucket', () => {
+    const rows = spendByModel([
+      tokModels('s1', [
+        { model: 'claude-fable-5', input: 1_000_000, output: 1_000_000 },
+      ]),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].family).toBe('Fable');
+    expect(rows[0].cost).toBeCloseTo(60, 9);
   });
 
   it('returns an empty array for no token data', () => {

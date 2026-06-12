@@ -6,13 +6,17 @@ import { parseSessionJsonl, estimateCost } from './parse-sessions'
 // test below, which exercises that string branch directly).
 const assistant = (
   usage: Record<string, unknown>,
-  opts: { id?: string; model?: string; timestamp?: string; top?: Record<string, unknown> } = {}
+  opts: { id?: string; model?: string | null; timestamp?: string; top?: Record<string, unknown> } = {}
 ) =>
   JSON.stringify({
     type: 'assistant',
     timestamp: opts.timestamp ?? '2026-01-01T00:00:00.000Z',
     ...opts.top,
-    message: { id: opts.id ?? 'm1', model: opts.model ?? 'claude-opus-4-8', usage },
+    message: {
+      id: opts.id ?? 'm1',
+      ...(opts.model === null ? {} : { model: opts.model ?? 'claude-opus-4-8' }),
+      usage,
+    },
   })
 
 describe('parseSessionJsonl', () => {
@@ -95,6 +99,25 @@ describe('parseSessionJsonl', () => {
   it('flags an unknown model', () => {
     const text = assistant({ input_tokens: 1, output_tokens: 1 }, { model: 'gpt-9' })
     expect(parseSessionJsonl(text, 'f.jsonl')!.hasUnknownModel).toBe(true)
+  })
+
+  it('prices the real Fable model id without flagging it unknown', () => {
+    const text = assistant(
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      { model: 'claude-fable-5' }
+    )
+    const out = parseSessionJsonl(text, 'f.jsonl')!
+    expect(out.hasUnknownModel).toBe(false)
+    expect(estimateCost(out)).toBeCloseTo(60, 9)
+  })
+
+  it('keeps missing model values in the Unknown bucket without treating them as unrecognized strings', () => {
+    const text = assistant({ input_tokens: 1, output_tokens: 1 }, { model: null })
+    const out = parseSessionJsonl(text, 'f.jsonl')!
+    expect(out.model).toBe('unknown')
+    expect(out.entries[0].model).toBe('unknown')
+    expect(out.hasUnknownModel).toBe(false)
+    expect(estimateCost(out)).toBe(0)
   })
 
   it('parses a string-encoded message containing single quotes without corruption (#234)', () => {

@@ -66,8 +66,10 @@ export interface MineModelGapsOptions {
 }
 
 /** Direction implied by the observed model family. */
-function directionFor(family: ModelFamily): GapDirection {
-  return family === 'haiku' ? 'haiku->sonnet' : 'sonnet->opus';
+function directionFor(family: ModelFamily): GapDirection | null {
+  if (family === 'haiku') return 'haiku->sonnet';
+  if (family === 'sonnet' || family === 'opus') return 'sonnet->opus';
+  return null;
 }
 
 /** Share-of-max normaliser: v/max in [0, 1], 0 when max is 0. Keeps a single
@@ -119,6 +121,7 @@ export function mineModelGaps(
     }
 
     const direction = directionFor(run.family);
+    if (!direction) continue;
     const discoveryScore =
       direction === 'haiku->sonnet'
         ? 0.5 * failure + 0.3 * ineff + 0.2 * cost
