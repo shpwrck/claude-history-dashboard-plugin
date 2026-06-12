@@ -1984,6 +1984,7 @@ export function assembleDataset() {
       statsCache,
       fileHistory,
       plans,
+      modelEvalSummary,
       updateResults,
       mcpAuth,
       configBackups,
@@ -2141,6 +2142,9 @@ function assembleRecommendationContext(options = {}) {
     statsCache: dataset.statsCache,
     fileHistory: dataset.fileHistory,
     plans: dataset.plans,
+    // Model-eval results rollup (#1085/#1242): non-signal aggregate, like the
+    // other server artifacts — feeds the #1086 act-now routing-gap detector.
+    modelEvalSummary: dataset.modelEvalSummary,
     updateResults: dataset.updateResults,
     mcpAuth: dataset.mcpAuth,
     configBackups: dataset.configBackups,

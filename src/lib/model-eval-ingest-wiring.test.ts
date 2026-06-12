@@ -58,6 +58,26 @@ describe('model-eval ingest boot wiring (#1242)', () => {
     expect(dataset.slice(retIdx)).toContain('modelEvalSummary,');
   });
 
+  it('threads modelEvalSummary into the recommendation input (#1086)', () => {
+    // The act-now routing-gap detector reads `input.modelEvalSummary`, so the
+    // recs route's input assembly must pass the dataset key through — same
+    // source-level pin as the dataset threading above.
+    const idx = src.indexOf('function assembleRecommendationContext');
+    expect(idx, 'assembleRecommendationContext() found in ingest.mjs').toBeGreaterThan(-1);
+    const section = src.slice(idx, idx + 8000);
+    expect(section).toContain('modelEvalSummary: dataset.modelEvalSummary,');
+    // BOTH RecommendationInput build sites must thread the key: the enterprise
+    // context above AND the inline assembleRecommendationInput(...) call inside
+    // assembleDataset() that drives the live /api/recommendations.json route —
+    // missing the latter leaves the detector permanently dark there (#1086
+    // review finding).
+    const dataset = assembleSection('assembleDataset');
+    const recsCall = dataset.indexOf('assembleRecommendationInput({');
+    expect(recsCall, 'inline recs input call found in assembleDataset()').toBeGreaterThan(-1);
+    const callEnd = dataset.indexOf('})', recsCall);
+    expect(dataset.slice(recsCall, callEnd)).toContain('modelEvalSummary,');
+  });
+
   it('caps and guards the artifact read like its sibling readers', () => {
     const section = assembleSection('assembleArtifacts');
     // Entry cap (early break in the listing loop, so memory stays O(cap)) +

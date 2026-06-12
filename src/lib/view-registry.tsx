@@ -60,6 +60,7 @@ import type { UpdateResult } from './parse-last-update';
 import type { McpAuthState } from './parse-mcp-auth';
 import type { DriftEvent } from './parse-backups';
 import type { AdoptionReceipt } from './adoption-receipts';
+import type { ModelEvalSummary } from './model-eval-ingest';
 import type { RepoMapDataset } from './parse-repo-map-join';
 import type { OrganizationReviewEventsDataset } from './organization-review-events';
 import type { ShadowCallAggregate } from './parse-shadow-calls';
@@ -203,6 +204,12 @@ const DiaryView = lazy(() =>
 const ShadowCalls = lazy(() =>
   import('../components/ShadowCallsPf').then((m) => ({ default: m.ShadowCallsPf }))
 );
+// Model Evals workbench (#1086, epic #975). The eval-results face is
+// server-only (`modelEvalSummary` is null on the SPA dataset); the mined
+// gap-cluster face derives from the already-fetched parsed dataset.
+const ModelEvals = lazy(() =>
+  import('../components/ModelEvalsPf').then((m) => ({ default: m.ModelEvalsPf }))
+);
 // Recs Adoption Scorecard (#577, ADR 0005 "Demo artifact"). Server-only: it
 // self-fetches the dashboard-owned receipt store; the SPA stub returns [].
 const AdoptionScorecard = lazy(() =>
@@ -258,6 +265,8 @@ export interface ViewData {
   statsCache: StatsCache | null;
   fileHistory: FileHistorySession[];
   plans: PlanSignature[];
+  /** Model-eval results rollup (#1085/#1242, epic #975); null on the SPA dataset. */
+  modelEvalSummary: ModelEvalSummary | null;
   updateResults: UpdateResult[];
   mcpAuth: McpAuthState | null;
   configBackups: DriftEvent[];
@@ -582,6 +591,7 @@ export const VIEW_RENDERERS: Partial<
       statsCache={d.statsCache}
       fileHistory={d.fileHistory}
       plans={d.plans}
+      modelEvalSummary={d.modelEvalSummary}
       updateResults={d.updateResults}
       mcpAuth={d.mcpAuth}
       configBackups={d.configBackups}
@@ -812,6 +822,18 @@ export const VIEW_RENDERERS: Partial<
     <UsagePulse statsCache={d.statsCache} serverAvailable={serverAvailable} />
   ),
   diary: () => <DiaryView />,
+  // Model Evals workbench (#1086, epic #975): ranked runs / clusters / batch
+  // specs / result history / scoped routing recommendations.
+  'model-evals': ({ data: d, serverAvailable }) => (
+    <ModelEvals
+      modelEvalSummary={d.modelEvalSummary}
+      tokenData={d.tokenData}
+      timelines={d.timelines}
+      toolData={d.toolData}
+      apiErrors={d.apiErrors}
+      serverAvailable={serverAvailable}
+    />
+  ),
   adoption: ({ data: d, serverAvailable }) => (
     <AdoptionScorecard
       liveConfig={d.liveConfig}

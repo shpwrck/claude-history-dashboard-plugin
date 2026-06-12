@@ -1968,6 +1968,52 @@ function fixtureBank(): Fixture[] {
     }),
   });
 
+  // cost.model-eval-routing-gap (#1086): a fresh eval-results rollup carrying a
+  // non-vetoed scoped routing recommendation backed by shadow/replay evidence
+  // above the act-now score floor → act-now routing-gap finding.
+  out.push({
+    now,
+    input: bankBase({
+      modelEvalSummary: {
+        schemaVersion: 1,
+        kind: 'model-eval-summary',
+        generatedAt: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+        artifactCount: 1,
+        runCount: 3,
+        models: [
+          {
+            modelId: 'claude-sonnet-4-5',
+            runCount: 3,
+            candidateRuns: 2,
+            baselineRuns: 1,
+            vetoedRuns: 0,
+            meanWeightedScore: 0.7,
+            bestWeightedScore: 0.85,
+            vetoes: [],
+            strongestEvidence: 'shadow-replay-verdict',
+            evidenceCount: 4,
+          },
+        ],
+        vetoTotals: {
+          'failed-required-gate': 0,
+          'materially-worse-correctness': 0,
+          'unknown-pricing-or-api': 0,
+          'insufficient-evidence': 0,
+        },
+        exclusions: { kept: 2, filtered: 1 },
+        recommendations: [
+          {
+            modelId: 'claude-sonnet-4-5',
+            scope: 'gap:haiku-sonnet:failure:small',
+            weightedScore: 0.82,
+            strongestEvidence: 'shadow-replay-verdict',
+            rationale: 'Candidate beat the baseline on the failure cluster.',
+          },
+        ],
+      } as unknown as RecommendationInput['modelEvalSummary'],
+    }),
+  });
+
   return out;
 }
 

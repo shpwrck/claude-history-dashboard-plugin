@@ -48,6 +48,7 @@ import { detector as webSearchSpend } from './cost/web-search-spend';
 import { detector as priorityTierSpend } from './cost/priority-tier-spend';
 import { detector as idleMcpTools } from './cost/idle-mcp-tools';
 import { detector as expensiveAgentType } from './cost/expensive-agent-type';
+import { detector as modelEvalRoutingGap } from './cost/model-eval-routing-gap';
 
 // ── CONTEXT ─────────────────────────────────────────────────────────────
 import { detector as overWindow } from './context/over-window';
@@ -237,6 +238,13 @@ export const DETECTORS: Detector[] = [
   // wall-clock to every turn. Fills the "Go faster" card.
   hookOverhead,
   timeMotion,
+
+  // ── Epic #975 — model-evals act-now routing gap (#1086) ───────────────────
+  // Reads the server-only `modelEvalSummary` rollup (#1085/#1242): fires only on
+  // a non-vetoed, strongly-evidenced scoped routing recommendation. Rule 6:
+  // promotion requires explicit user approval — never an automatic change.
+  // Dark on the SPA dataset (summary is always null there).
+  modelEvalRoutingGap,
 
   // ── Epic #871 (+ #944) — repo-map-aware structural context waste (#890) ────
   // Reads the server-only `repoMap` join (#889): replaces generic pin guidance

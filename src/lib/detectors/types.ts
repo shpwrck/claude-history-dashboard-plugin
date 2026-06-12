@@ -51,6 +51,7 @@ import type {
   ExternalGuidance,
   ExternalGuidanceRef,
 } from '../parse-external-guidance';
+import type { ModelEvalSummary } from '../model-eval-ingest';
 
 export type RecCategory =
   | 'cost'
@@ -502,6 +503,13 @@ export interface RecommendationInput {
    * estimate-only finding.
    */
   modelPinSavings?: ModelPinSavingsConfig | null;
+  /**
+   * Rollup of completed model-eval result artifacts (#1085/#1242, epic #975),
+   * dataset key `modelEvalSummary`. Server-only: `undefined`/`null` on the
+   * SPA/upload dataset and when `~/.claude/model-evals/results` is absent —
+   * the routing-gap detector (#1086) emits nothing then.
+   */
+  modelEvalSummary?: ModelEvalSummary | null;
 }
 
 /**

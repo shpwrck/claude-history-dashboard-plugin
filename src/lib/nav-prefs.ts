@@ -188,6 +188,9 @@ export const NAV_ITEMS: readonly {
   { view: 'reclaim-compass', label: 'Reclaim Compass', icon: BullseyeIcon, domain: 'cost' },
   { view: 'tokens', label: 'Tokens', icon: CoinsIcon, domain: 'cost' },
   { view: 'files', label: 'File Impact', icon: FileAltIcon, domain: 'cost' },
+  // Model Evals workbench (#1086, epic #975): routing-eval evidence + scoped
+  // routing recommendations live under the cost lever (model routing).
+  { view: 'model-evals', label: 'Model Evals', icon: FlaskIcon, domain: 'cost', serverOnly: true },
   { view: 'errors', label: 'Errors', icon: ExclamationTriangleIcon, domain: 'success-rate' },
   { view: 'report-card', label: 'Report Card', icon: ClipboardCheckIcon, domain: 'success-rate', serverOnly: true },
   { view: 'review-queue', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', serverOnly: true },
