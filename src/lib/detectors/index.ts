@@ -85,6 +85,7 @@ import { detector as planMissingVerification } from './workflow/plan-missing-ver
 import { detector as harmfulHabit } from './workflow/harmful-habit';
 import { detector as correctionMining } from './workflow/correction-mining';
 import { detector as promptClarity } from './workflow/prompt-clarity';
+import { detector as autonomyOverSteered } from './workflow/autonomy-over-steered';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -222,6 +223,9 @@ export const DETECTORS: Detector[] = [
 
   // ── #1275 — prompt trait buckets → correlational coaching pattern ────────
   promptClarity,
+
+  // ── Epic #1266 — quality-gated autonomy level, over-steered cohort ───────
+  autonomyOverSteered,
 
   // ── Epic #683 — model-deceit detection (#686, slice B) ────────────────────
   // Reads the Slice-A ingest feature (deceitSignals, #685); dark on the

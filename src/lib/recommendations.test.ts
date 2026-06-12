@@ -1867,6 +1867,52 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // workflow.autonomy-over-steered (#1297): a high-confidence successful task
+  // with high normalized steering load should produce an autonomy recommendation.
+  out.push({
+    now,
+    input: bankBase({
+      taskSteering: [
+        {
+          sessionId: 'auto-os-1',
+          project: '/repo/app',
+          taskIndex: 0,
+          startTime: '2026-06-12T10:00:00.000Z',
+          endTime: '2026-06-12T10:20:00.000Z',
+          wallClockMs: 20 * 60 * 1000,
+          costUsd: 25,
+          humanTurns: 4,
+          corrective: 2,
+          clarifyingAnswer: 1,
+          approving: 1,
+          other: 0,
+          interruptions: 0,
+        },
+      ] as unknown as RecommendationInput['taskSteering'],
+      taskSuccess: [
+        {
+          sessionId: 'auto-os-1',
+          project: '/repo/app',
+          taskIndex: 0,
+          startTime: '2026-06-12T10:00:00.000Z',
+          endTime: '2026-06-12T10:20:00.000Z',
+          wallClockMs: 20 * 60 * 1000,
+          verdict: 'accept',
+          agentClaim: 'completed',
+          confidence: 'high',
+          successScore: 0.95,
+          backedByMutation: true,
+          mutatingToolCount: 1,
+          toolCallCount: 2,
+          toolResultCount: 2,
+          toolErrorCount: 0,
+          toolErrorRate: 0,
+          errorPenalty: 0,
+        },
+      ] as unknown as RecommendationInput['taskSuccess'],
+    }),
+  });
+
   // security.model-deceit (#686): a session with a contradicted success claim
   // and an unbacked action claim → the detector fires.
   out.push({
