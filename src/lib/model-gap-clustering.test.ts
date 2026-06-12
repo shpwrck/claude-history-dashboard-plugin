@@ -4,6 +4,8 @@ import {
   assignClusterIds,
   clusterIdFor,
   unprofiledClusterIdFor,
+  parseTaskShapeCluster,
+  parseTaskShapeClusters,
   SIZE_BAND_MEDIUM_MIN_TOKENS,
   SIZE_BAND_LARGE_MIN_TOKENS,
 } from './model-gap-clustering';
@@ -230,5 +232,73 @@ describe('cluster IDs and the eval-result schema', () => {
     expect(result).not.toBeNull();
     expect(result!.runs).toHaveLength(1);
     expect(result!.runs[0].clusterId).toBe(clusterId);
+  });
+});
+
+describe('parseTaskShapeClusters', () => {
+  const valid = {
+    clusterId: 'gap:haiku-sonnet:failure:small',
+    direction: 'haiku->sonnet',
+    dominantSignal: 'failure',
+    sizeBand: 'small',
+    runIds: ['r1', 'r2'],
+    runCount: 2,
+  };
+
+  it('round-trips the clusterKeptRuns output unchanged', () => {
+    const runs = [run({ runId: 'a', toolErrors: 5, totalTokens: 1_000 })];
+    const clusters = clusterKeptRuns([candidate({ runId: 'a' })], runs);
+    expect(parseTaskShapeClusters(clusters)).toEqual(clusters);
+  });
+
+  it('parses a valid raw cluster and accepts the unprofiled shape', () => {
+    expect(parseTaskShapeCluster(valid)).toEqual(valid);
+    const unprofiled = {
+      clusterId: 'gap:sonnet-opus:unprofiled',
+      direction: 'sonnet->opus',
+      dominantSignal: null,
+      sizeBand: null,
+      runIds: ['x'],
+      runCount: 1,
+    };
+    expect(parseTaskShapeCluster(unprofiled)).toEqual(unprofiled);
+  });
+
+  it('fails closed on malformed input', () => {
+    expect(parseTaskShapeCluster(null)).toBeNull();
+    expect(parseTaskShapeCluster([])).toBeNull();
+    expect(parseTaskShapeCluster({ ...valid, clusterId: '  ' })).toBeNull();
+    expect(parseTaskShapeCluster({ ...valid, direction: 'haiku->opus' })).toBeNull();
+    expect(parseTaskShapeCluster({ ...valid, dominantSignal: 'vibes' })).toBeNull();
+    expect(parseTaskShapeCluster({ ...valid, sizeBand: 'huge' })).toBeNull();
+    expect(parseTaskShapeCluster({ ...valid, runIds: [] })).toBeNull();
+    expect(parseTaskShapeCluster({ ...valid, runIds: 'r1' })).toBeNull();
+    // Profile halves must be consistent: both set or both null.
+    expect(parseTaskShapeCluster({ ...valid, dominantSignal: null })).toBeNull();
+    expect(parseTaskShapeCluster({ ...valid, sizeBand: null })).toBeNull();
+  });
+
+  it('dedupes run ids and recomputes runCount instead of trusting it', () => {
+    const parsed = parseTaskShapeCluster({
+      ...valid,
+      runIds: ['r1', 'r1', ' r2 ', ''],
+      runCount: 99,
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.runIds).toEqual(['r1', 'r2']);
+    expect(parsed!.runCount).toBe(2);
+  });
+
+  it('drops malformed entries and dedupes by clusterId (first wins)', () => {
+    const second = { ...valid, runIds: ['other'] };
+    const clusters = parseTaskShapeClusters([
+      valid,
+      'junk',
+      { ...valid, direction: 'nope' },
+      second,
+    ]);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].runIds).toEqual(['r1', 'r2']);
+    expect(parseTaskShapeClusters('not-an-array')).toEqual([]);
   });
 });

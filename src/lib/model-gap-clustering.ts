@@ -27,7 +27,12 @@
  * (auditable, mirrors Unit 5's no-signals kept rule).
  */
 
-import type { GapMiningRun, ModelGapCandidate, GapDirection } from './model-gap-mining';
+import {
+  GAP_DIRECTIONS,
+  type GapMiningRun,
+  type ModelGapCandidate,
+  type GapDirection,
+} from './model-gap-mining';
 
 export const GAP_DOMINANT_SIGNALS = [
   'failure',
@@ -200,6 +205,88 @@ export function clusterKeptRuns(
       runCount: b.members.length,
     }))
     .sort((a, z) => (a.clusterId < z.clusterId ? -1 : 1));
+}
+
+const MAX_CLUSTER_ID_LEN = 160;
+const MAX_RUN_ID_LEN = 160;
+const MAX_CLUSTER_RUNS = 500;
+
+function cleanId(value: unknown, maxLen: number): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLen) return null;
+  return trimmed;
+}
+
+function isEnumMember<T extends string>(
+  value: unknown,
+  members: readonly T[]
+): value is T {
+  return typeof value === 'string' && (members as readonly string[]).includes(value);
+}
+
+/**
+ * Parse one raw object into a {@link TaskShapeCluster}, or null when it fails
+ * validation. Fail-closed and total — never throws on malformed input.
+ * `runCount` is recomputed from the validated `runIds` (an untrusted count is
+ * never carried), run ids are deduped in order, and the profile halves must be
+ * consistent: `dominantSignal` and `sizeBand` are either both set (profiled
+ * bucket) or both null (the unprofiled fallback bucket).
+ */
+export function parseTaskShapeCluster(raw: unknown): TaskShapeCluster | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const clusterId = cleanId(r.clusterId, MAX_CLUSTER_ID_LEN);
+  if (!clusterId) return null;
+  if (!isEnumMember(r.direction, GAP_DIRECTIONS)) return null;
+  const dominantSignal =
+    r.dominantSignal === null || r.dominantSignal === undefined
+      ? null
+      : isEnumMember(r.dominantSignal, GAP_DOMINANT_SIGNALS)
+        ? r.dominantSignal
+        : undefined;
+  const sizeBand =
+    r.sizeBand === null || r.sizeBand === undefined
+      ? null
+      : isEnumMember(r.sizeBand, GAP_SIZE_BANDS)
+        ? r.sizeBand
+        : undefined;
+  if (dominantSignal === undefined || sizeBand === undefined) return null;
+  if ((dominantSignal === null) !== (sizeBand === null)) return null;
+  if (!Array.isArray(r.runIds)) return null;
+  const runIds: string[] = [];
+  for (const id of r.runIds) {
+    const clean = cleanId(id, MAX_RUN_ID_LEN);
+    if (clean && !runIds.includes(clean)) runIds.push(clean);
+    if (runIds.length >= MAX_CLUSTER_RUNS) break;
+  }
+  if (runIds.length === 0) return null;
+  return {
+    clusterId,
+    direction: r.direction,
+    dominantSignal,
+    sizeBand,
+    runIds,
+    runCount: runIds.length,
+  };
+}
+
+/**
+ * Parse + validate a raw cluster list (e.g. a JSON artifact handed to the batch
+ * CLI), dropping malformed clusters and de-duplicating by clusterId (first
+ * wins). Deterministic: same input → same output, in input order.
+ */
+export function parseTaskShapeClusters(raw: unknown): TaskShapeCluster[] {
+  if (!Array.isArray(raw)) return [];
+  const out: TaskShapeCluster[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const cluster = parseTaskShapeCluster(item);
+    if (!cluster || seen.has(cluster.clusterId)) continue;
+    seen.add(cluster.clusterId);
+    out.push(cluster);
+  }
+  return out;
 }
 
 /** Flatten clusters into per-run assignments for stamping eval results. */

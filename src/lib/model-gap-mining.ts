@@ -27,7 +27,8 @@ import { resolveModelFamily, type ModelFamily } from './model-registry';
 import { entryCostAtModel } from './pricing';
 import type { EvalGapEvidence } from './model-eval-result';
 
-export type GapDirection = 'haiku->sonnet' | 'sonnet->opus';
+export const GAP_DIRECTIONS = ['haiku->sonnet', 'sonnet->opus'] as const;
+export type GapDirection = (typeof GAP_DIRECTIONS)[number];
 
 /** One run reduced to the hindsight signals the miner ranks on. */
 export interface GapMiningRun {
