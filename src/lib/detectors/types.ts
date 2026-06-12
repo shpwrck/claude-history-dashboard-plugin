@@ -535,4 +535,12 @@ export interface Detector {
   dataDeps?: (keyof RecommendationInput)[];
   /** The pure detector function. Returns `null` when there's nothing to say. */
   rule: (input: RecommendationInput, now: number) => Recommendation | null;
+  /**
+   * Optional multi-emit path for detectors whose natural unit is one
+   * recommendation per observed entity (for example, one root config section).
+   * `rule` remains the single-rec compatibility path used by direct detector
+   * tests and registry invariants; `buildRecommendations` prefers this hook
+   * when present.
+   */
+  emitAll?: (input: RecommendationInput, now: number) => Recommendation[];
 }

@@ -58,6 +58,7 @@ import { detector as bloatedClaudeMd } from './context/bloated-claude-md';
 import { detector as compactionHotSessions } from './context/compaction-hot-sessions';
 import { detector as repeatedCompactions } from './context/repeated-compactions';
 import { detector as compactionLargeToolOutputs } from './context/compaction-large-tool-outputs';
+import { detector as overScopedConfigSection } from './context/over-scoped-config-section';
 import { detector as repoMapContextWaste } from './context/repo-map-context-waste';
 
 // ── WORKFLOW ────────────────────────────────────────────────────────────
@@ -247,6 +248,9 @@ export const DETECTORS: Detector[] = [
   modelEvalRoutingGap,
 
   // ── Epic #871 (+ #944) — repo-map-aware structural context waste (#890) ────
+  // #1267 — root AGENTS.md/CLAUDE.md sections whose repo-map-governed files all
+  // sit under one component subtree should move to path-scoped .claude/rules.
+  overScopedConfigSection,
   // Reads the server-only `repoMap` join (#889): replaces generic pin guidance
   // with structural candidates (stable API/config + high-centrality read-only
   // files re-read across sessions), naming specific files/symbols and emitting a

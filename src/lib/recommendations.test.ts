@@ -1937,6 +1937,8 @@ function fixtureBank(): Fixture[] {
 
   // context.repo-map-context-waste (#890): a stable, exported-API, read-only
   // file in the repo map that is re-read across sessions → structural pin candidate.
+  // It also gives context.over-scoped-config-section (#1267) a root config
+  // section whose governed files all sit under one component subtree.
   out.push({
     now,
     input: bankBase({
@@ -1955,12 +1957,22 @@ function fixtureBank(): Fixture[] {
                   { name: 'runReclaimCascade', kind: 'function', exported: true, signature: 'function runReclaimCascade()', line: 1 },
                 ],
                 imports: [],
-                configSections: [],
+                configSections: ['AGENTS.md#stable-reference-files'],
                 recommendations: [],
                 reread: { sessions: 3, totalReads: 9, totalEstimatedTokenWaste: 5000, maxPerSession: 3 },
               },
             ],
-            configSections: [],
+            configSections: [
+              {
+                id: 'AGENTS.md#stable-reference-files',
+                sourceScope: 'AGENTS.md',
+                heading: 'Stable reference files',
+                level: 2,
+                mtime: null,
+                hash: 'hash',
+                references: [],
+              },
+            ],
             configAttribution: [],
           },
         ],

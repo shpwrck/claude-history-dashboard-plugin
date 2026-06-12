@@ -223,6 +223,10 @@ export function buildRecommendations(
   const t = now ?? Date.now();
   const recs: Recommendation[] = [];
   for (const d of DETECTORS) {
+    if (d.emitAll) {
+      recs.push(...d.emitAll(input, t));
+      continue;
+    }
     const r = d.rule(input, t);
     if (r) recs.push(r);
   }
