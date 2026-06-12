@@ -2393,6 +2393,7 @@ const COMPRESSIBLE_STATIC = new Set([
 ]);
 
 async function serveStatic(req, pathname, res) {
+  const assetRequest = pathname === '/assets' || pathname.startsWith('/assets/');
   let rel = pathname === '/' ? '/index.html' : pathname;
   let filePath = normalize(join(DIST, rel));
   if (filePath !== DIST && !filePath.startsWith(DIST + sep)) {
@@ -2415,6 +2416,13 @@ async function serveStatic(req, pathname, res) {
     }
   }
   if (!info) {
+    if (assetRequest) {
+      res.statusCode = 404;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end('not found');
+      return;
+    }
     // SPA fallback: unknown non-file route -> index.html
     filePath = join(DIST, 'index.html');
     try {
@@ -2437,8 +2445,10 @@ async function serveStatic(req, pathname, res) {
   filePath = realFile;
   const ext = extname(filePath);
   res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream');
-  if (pathname.startsWith('/assets/')) {
+  if (assetRequest) {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  } else if (ext === '.html') {
+    res.setHeader('Cache-Control', 'no-store');
   }
   // Compress text assets (JS/CSS/SVG/JSON/maps/HTML) per-request through the
   // same brotli/gzip negotiation the dataset uses, honoring Accept-Encoding +
