@@ -52,6 +52,7 @@ import type {
   ExternalGuidanceRef,
 } from '../parse-external-guidance';
 import type { ModelEvalSummary } from '../model-eval-ingest';
+import type { EvidenceRef } from '../evidence';
 
 export type RecCategory =
   | 'cost'
@@ -317,6 +318,12 @@ export interface Recommendation {
   view?: View;
   /** Up to a handful of supporting rows (session ids, files, commands). */
   evidence?: string[];
+  /**
+   * Structured timeline anchors for the same finding. These let views resolve a
+   * recommendation to the exact session turn/tool call without parsing the
+   * human-readable evidence strings.
+   */
+  evidenceRefs?: EvidenceRef[];
   /** A copy-pasteable, ready-to-apply fix, when one genuinely exists. */
   fix?: RecFix;
   /**

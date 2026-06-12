@@ -928,6 +928,7 @@ function fixtureBank(): Fixture[] {
       call('npm run build'),
       call('npm run build'),
       call('npm run build'),
+      call('kubectl apply -f k8s/deployment.yaml'),
       call('rm -rf /tmp/scratch'),
       call('git reset --hard HEAD'),
       ...editChurn,

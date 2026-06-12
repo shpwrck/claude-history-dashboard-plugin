@@ -1,4 +1,5 @@
 import { parseJsonl, parseMessage } from './parse-utils';
+import { detectRiskyActionPatternName } from './parse-permissions';
 
 /**
  * Distilled tool-call `input`. The raw `call.input` blob is the single largest
@@ -54,6 +55,8 @@ export interface ToolCall {
   commandBypassCategories?: BypassCategory[];
   /** First dangerous-command pattern matched by the Bash command, if any. */
   commandDangerousPattern?: string;
+  /** First high-impact action pattern matched by the Bash command, if any. */
+  commandRiskyActionPattern?: string;
   /** Whether the command references Claude-specific paths such as `.claude`. */
   commandMentionsClaudePath?: boolean;
 }
@@ -476,6 +479,7 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
   const dangerous = COMMAND_DANGEROUS_PATTERNS.find((pattern) =>
     pattern.test(command)
   );
+  const riskyAction = detectRiskyActionPatternName(command);
   const head = commandHead(command);
   const gitSegments = commandGitSegments(command);
   return {
@@ -487,6 +491,7 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
       ? { commandBypassCategories: bypassCategories }
       : {}),
     ...(dangerous ? { commandDangerousPattern: dangerous.name } : {}),
+    ...(riskyAction ? { commandRiskyActionPattern: riskyAction } : {}),
     ...(command.includes('.claude') ? { commandMentionsClaudePath: true } : {}),
   };
 }

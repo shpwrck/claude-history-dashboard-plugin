@@ -91,6 +91,7 @@ import { detector as autonomyOverSteered } from './workflow/autonomy-over-steere
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
+import { detector as riskyActions } from './safety/risky-actions';
 import { detector as promptFriction } from './safety/prompt-friction';
 import { detector as denyRuleNeverTriggered } from './safety/deny-rule-never-triggered';
 import { detector as allowRuleOverlapsDeny } from './safety/allow-rule-overlaps-deny';
@@ -152,6 +153,7 @@ export const DETECTORS: Detector[] = [
   assistantRefusalRate,
   // safety
   dangerousBypass,
+  riskyActions,
   configHygieneRollup, // #1164 — unused mcpServer/plugin hygiene rollup
   promptFriction,
   denyRuleNeverTriggered,

@@ -1,4 +1,6 @@
 import type { ToolUsageData } from './parse-tools';
+import { evidenceRefForEntry, type EvidenceRef } from './evidence';
+import type { SessionTimeline } from './parse-timeline';
 import { parseJsonl, type RawSessionEntry } from './parse-utils';
 
 export interface PermissionModeStat {
@@ -13,6 +15,26 @@ export interface DangerousCommand {
   toolUseId: string;
   command: string; // truncated to 200 chars, newlines → " "
   pattern: string; // which pattern matched
+}
+
+export type RiskyActionCategory =
+  | 'deploy'
+  | 'production-config'
+  | 'database'
+  | 'secret-sensitive'
+  | 'other-high-impact';
+
+export type RiskyActionSeverity = 'critical' | 'warning';
+
+export interface RiskyAction {
+  sessionId: string;
+  timestamp: string;
+  toolUseId: string;
+  command: string; // truncated to 200 chars, newlines → " "
+  pattern: string;
+  category: RiskyActionCategory;
+  severity: RiskyActionSeverity;
+  evidenceRef?: EvidenceRef;
 }
 
 export interface SessionSafetyScore {
@@ -95,9 +117,340 @@ export const DANGEROUS_PATTERN_RULES: Record<string, string[]> = {
   'npm publish': ['Bash(npm publish:*)'],
 };
 
+interface RiskyActionPattern {
+  name: string;
+  category: RiskyActionCategory;
+  severity: RiskyActionSeverity;
+  test: (cmd: string) => boolean;
+}
+
+function splitShellSegments(command: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let quote: "'" | '"' | '`' | null = null;
+  let escaped = false;
+
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    const next = command[i + 1];
+    const isDouble = (ch === '&' && next === '&') || (ch === '|' && next === '|');
+    const isSeparator = isDouble || ch === ';' || ch === '\n' || ch === '|';
+    if (!isSeparator) continue;
+    const segment = command.slice(start, i).trim();
+    if (segment) out.push(segment);
+    start = i + (isDouble ? 2 : 1);
+    if (isDouble) i += 1;
+  }
+
+  const tail = command.slice(start).trim();
+  if (tail) out.push(tail);
+  return out;
+}
+
+function tokenizeShellSegment(segment: string): string[] {
+  const out: string[] = [];
+  let token = '';
+  let quote: "'" | '"' | '`' | null = null;
+  let escaped = false;
+
+  const push = () => {
+    if (token.length > 0) out.push(token);
+    token = '';
+  };
+
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i];
+    if (escaped) {
+      token += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else token += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      push();
+      continue;
+    }
+    token += ch;
+  }
+  push();
+  return out;
+}
+
+function isEnvAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*$/.test(token);
+}
+
+function executableTokens(tokens: string[]): string[] {
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (isEnvAssignment(t)) {
+      i += 1;
+      continue;
+    }
+    if (t === 'sudo' || t === 'time' || t === 'command') {
+      i += 1;
+      while (i < tokens.length && tokens[i].startsWith('-')) i += 1;
+      continue;
+    }
+    if (t === 'env') {
+      i += 1;
+      while (i < tokens.length && (tokens[i].startsWith('-') || isEnvAssignment(tokens[i]))) {
+        i += 1;
+      }
+      continue;
+    }
+    break;
+  }
+  return tokens.slice(i);
+}
+
+function commandSegments(command: string): string[][] {
+  return splitShellSegments(command)
+    .map(tokenizeShellSegment)
+    .map(executableTokens)
+    .filter((tokens) => tokens.length > 0);
+}
+
+function hasHelpArg(tokens: string[]): boolean {
+  return tokens.some((t) => t === '--help' || t === '-h' || t === 'help');
+}
+
+function hasDryRunArg(tokens: string[]): boolean {
+  return tokens.some((t) => t === '--dry-run' || t.startsWith('--dry-run='));
+}
+
+function isKubectlMutation(tokens: string[]): boolean {
+  const [head, verb, subverb] = tokens;
+  if (head !== 'kubectl' && head !== 'k') return false;
+  if (hasHelpArg(tokens) || hasDryRunArg(tokens)) return false;
+  if (verb === 'rollout') return ['restart', 'undo', 'pause', 'resume'].includes(subverb);
+  return ['apply', 'delete', 'patch', 'replace', 'scale', 'cordon', 'drain'].includes(verb);
+}
+
+function isHelmMutation(tokens: string[]): boolean {
+  const [head, verb] = tokens;
+  return (
+    head === 'helm' &&
+    !hasHelpArg(tokens) &&
+    ['upgrade', 'install', 'rollback', 'uninstall'].includes(verb)
+  );
+}
+
+function isComposeDeploy(tokens: string[]): boolean {
+  const [head, sub, verb] = tokens;
+  if (head !== 'docker' && head !== 'podman') return false;
+  if (hasHelpArg(tokens) || hasDryRunArg(tokens)) return false;
+  return sub === 'compose' && ['up', 'restart'].includes(verb);
+}
+
+function isNamedDeploy(tokens: string[]): boolean {
+  const [head, verb] = tokens;
+  if (hasHelpArg(tokens) || hasDryRunArg(tokens)) return false;
+  if (head === 'vercel' || head === 'flyctl' || head === 'fly') return verb === 'deploy';
+  if (head === 'netlify') return verb === 'deploy' && tokens.includes('--prod');
+  return false;
+}
+
+function isTerraformMutation(tokens: string[]): boolean {
+  const [head, verb] = tokens;
+  return (
+    (head === 'terraform' || head === 'tofu') &&
+    !hasHelpArg(tokens) &&
+    ['apply', 'destroy', 'import', 'taint'].includes(verb)
+  );
+}
+
+function isInfraMutation(tokens: string[]): boolean {
+  const [head, verb, subverb] = tokens;
+  if (hasHelpArg(tokens) || hasDryRunArg(tokens)) return false;
+  if (head === 'pulumi') return ['up', 'destroy', 'import'].includes(verb);
+  if (head === 'cdk') return verb === 'deploy';
+  if (head === 'aws') {
+    return (
+      (verb === 'cloudformation' && subverb === 'deploy') ||
+      (verb === 'ecs' && subverb === 'update-service') ||
+      (verb === 'ssm' && subverb === 'put-parameter')
+    );
+  }
+  return false;
+}
+
+function isDatabaseMutation(tokens: string[], command: string): boolean {
+  const [head, verb, subverb] = tokens;
+  if (hasHelpArg(tokens) || hasDryRunArg(tokens)) return false;
+  if (
+    head === 'prisma' &&
+    verb === 'migrate' &&
+    ['deploy', 'reset'].includes(subverb)
+  ) {
+    return true;
+  }
+  if (head === 'supabase' && verb === 'db' && ['push', 'reset'].includes(subverb)) {
+    return true;
+  }
+  if (head === 'rails' && /^db:(migrate|drop|reset|seed)$/.test(verb ?? '')) {
+    return true;
+  }
+  if (!['psql', 'mysql', 'mariadb', 'sqlcmd', 'mongosh', 'redis-cli'].includes(head)) {
+    return false;
+  }
+  return /\b(drop|truncate|delete\s+from|alter\s+table|update\s+\w+|flushall)\b/i.test(
+    command
+  );
+}
+
+const SECRET_ENV_RE =
+  /\$(?:\{)?[A-Z_][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*(?:\})?/i;
+
+function isSecretSensitive(tokens: string[], command: string): boolean {
+  const [head, verb, subverb] = tokens;
+  if (hasHelpArg(tokens)) return false;
+  if ((head === 'echo' || head === 'printf') && SECRET_ENV_RE.test(command)) {
+    return true;
+  }
+  if (head === 'gh' && verb === 'secret' && subverb === 'set') return true;
+  if (head === 'kubectl' && verb === 'create' && subverb === 'secret') return true;
+  if (head === 'aws' && verb === 'secretsmanager' && subverb === 'put-secret-value') {
+    return true;
+  }
+  return false;
+}
+
+function isOtherHighImpact(tokens: string[]): boolean {
+  const [head, verb, subverb] = tokens;
+  if (hasHelpArg(tokens) || hasDryRunArg(tokens)) return false;
+  if (head === 'gh' && verb === 'pr' && subverb === 'merge') return true;
+  if (head === 'git' && verb === 'push') {
+    return (
+      tokens.includes('--tags') ||
+      tokens.includes('master') ||
+      tokens.includes('main')
+    );
+  }
+  return false;
+}
+
+export const RISKY_ACTION_PATTERNS: RiskyActionPattern[] = [
+  {
+    name: 'kubectl mutation',
+    category: 'deploy',
+    severity: 'warning',
+    test: (cmd) => commandSegments(cmd).some(isKubectlMutation),
+  },
+  {
+    name: 'helm release mutation',
+    category: 'deploy',
+    severity: 'warning',
+    test: (cmd) => commandSegments(cmd).some(isHelmMutation),
+  },
+  {
+    name: 'compose deployment',
+    category: 'deploy',
+    severity: 'warning',
+    test: (cmd) => commandSegments(cmd).some(isComposeDeploy),
+  },
+  {
+    name: 'platform deploy',
+    category: 'deploy',
+    severity: 'warning',
+    test: (cmd) => commandSegments(cmd).some(isNamedDeploy),
+  },
+  {
+    name: 'terraform mutation',
+    category: 'production-config',
+    severity: 'warning',
+    test: (cmd) => commandSegments(cmd).some(isTerraformMutation),
+  },
+  {
+    name: 'infra config mutation',
+    category: 'production-config',
+    severity: 'warning',
+    test: (cmd) => commandSegments(cmd).some(isInfraMutation),
+  },
+  {
+    name: 'database mutation',
+    category: 'database',
+    severity: 'critical',
+    test: (cmd) =>
+      commandSegments(cmd).some((tokens) => isDatabaseMutation(tokens, cmd)),
+  },
+  {
+    name: 'secret exposure or mutation',
+    category: 'secret-sensitive',
+    severity: 'critical',
+    test: (cmd) => commandSegments(cmd).some((tokens) => isSecretSensitive(tokens, cmd)),
+  },
+  {
+    name: 'repository publication',
+    category: 'other-high-impact',
+    severity: 'warning',
+    test: (cmd) => commandSegments(cmd).some(isOtherHighImpact),
+  },
+];
+
+const RISKY_ACTION_BY_NAME = new Map(
+  RISKY_ACTION_PATTERNS.map((pattern) => [pattern.name, pattern])
+);
+
+export function detectRiskyActionPatternName(command: string): string | null {
+  return RISKY_ACTION_PATTERNS.find((pattern) => pattern.test(command))?.name ?? null;
+}
+
 function truncateCommand(s: string): string {
   const flat = s.replace(/\r?\n/g, ' ');
   return flat.length > MAX_COMMAND_LEN ? flat.slice(0, MAX_COMMAND_LEN) : flat;
+}
+
+function evidenceRefForToolCall(
+  timelines: readonly SessionTimeline[] | undefined,
+  sessionId: string,
+  call: { timestamp: string; toolUseId: string; toolName: string }
+): EvidenceRef | undefined {
+  const timeline = timelines?.find((candidate) => candidate.sessionId === sessionId);
+  if (!timeline) return undefined;
+  const byToolId = timeline.entries.findIndex(
+    (entry) => entry.kind === 'tool_use' && entry.toolUseId === call.toolUseId
+  );
+  const index =
+    byToolId >= 0
+      ? byToolId
+      : timeline.entries.findIndex(
+          (entry) =>
+            entry.kind === 'tool_use' &&
+            entry.timestamp === call.timestamp &&
+            entry.toolName === call.toolName
+        );
+  if (index < 0) return undefined;
+  return evidenceRefForEntry(timeline, index) ?? undefined;
 }
 
 export function parsePermissionData(
@@ -339,6 +692,58 @@ export function detectDangerousCommands(
         });
         break; // only record first matching pattern per command
       }
+    }
+  }
+
+  return out.sort((a, b) => {
+    if (a.sessionId !== b.sessionId) return a.sessionId < b.sessionId ? -1 : 1;
+    if (a.timestamp === b.timestamp) return 0;
+    return a.timestamp < b.timestamp ? -1 : 1;
+  });
+}
+
+export function detectRiskyActions(
+  data: ToolUsageData[],
+  timelines?: readonly SessionTimeline[]
+): RiskyAction[] {
+  const out: RiskyAction[] = [];
+
+  for (const session of data) {
+    for (const call of session.calls) {
+      if (call.toolName !== 'Bash') continue;
+      const input = call.input;
+      if (!input || typeof input !== 'object') continue;
+      const command = (input as { command?: unknown }).command;
+      const commandText =
+        typeof command === 'string' && command.length > 0 ? command : null;
+      const precomputedPattern =
+        typeof call.commandRiskyActionPattern === 'string'
+          ? RISKY_ACTION_BY_NAME.get(call.commandRiskyActionPattern) ?? null
+          : null;
+      const preview =
+        typeof call.commandPreview === 'string' && call.commandPreview.length > 0
+          ? call.commandPreview
+          : null;
+
+      const pattern =
+        precomputedPattern ??
+        (commandText === null
+          ? null
+          : RISKY_ACTION_PATTERNS.find((candidate) =>
+              candidate.test(commandText)
+            ) ?? null);
+      if (!pattern) continue;
+
+      out.push({
+        sessionId: session.sessionId,
+        timestamp: call.timestamp,
+        toolUseId: call.toolUseId,
+        command: truncateCommand(commandText ?? preview ?? ''),
+        pattern: pattern.name,
+        category: pattern.category,
+        severity: pattern.severity,
+        evidenceRef: evidenceRefForToolCall(timelines, session.sessionId, call),
+      });
     }
   }
 
