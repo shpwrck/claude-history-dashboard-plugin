@@ -7,7 +7,7 @@
  *  - HIGH severity when stalled agent present
  *  - HIGH severity when >= 50% dropped
  *  - INFO severity when < 50% dropped and no stalled agents
- *  - evidence and fix snippet populated correctly
+ *  - evidence populated correctly
  *
  * Issue: #560
  */
@@ -154,7 +154,7 @@ describe('reliability.dropped-assignments — evidence and fix', () => {
     expect(rec?.evidence?.[0]).toContain('3325m');
   });
 
-  it('includes a redispatch fix snippet with the team id', () => {
+  it('does not fabricate a redispatch command for dropped assignments', () => {
     const teams = [
       makeTeamSummary(
         'team-billing-pipeline',
@@ -164,10 +164,9 @@ describe('reliability.dropped-assignments — evidence and fix', () => {
       ),
     ];
     const rec = detector.rule(input(teams), 0);
-    expect(rec?.fix).toBeDefined();
-    expect(rec?.fix?.target).toBe('command');
-    expect(rec?.fix?.snippet).toContain('team-billing-pipeline');
-    expect(rec?.fix?.snippet).toContain('--only-unread');
+    expect(rec?.action).toMatch(/Re-dispatch the unread tasks/);
+    expect(rec?.fix).toBeUndefined();
+    expect(JSON.stringify(rec)).not.toContain('claude-team');
   });
 
   it('aggregates counts across multiple affected teams', () => {

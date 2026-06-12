@@ -9,7 +9,7 @@
  * Severity: HIGH when any agent stalled (all assignments unread) OR >= 50% of
  * assignments across the team are dropped. INFO otherwise.
  *
- * Fix: copy-paste `claude-team redispatch --only-unread` invocation.
+ * Fix: manual redispatch through the team's real workflow.
  *
  * Issue: #560 / prototype: proto/539-teams
  */
@@ -71,12 +71,6 @@ export const detector: Detector = {
       )
       .slice(0, 5);
 
-    // Fix: one copy-pasteable redispatch command per affected team (up to 3).
-    const teams = withDropped
-      .slice(0, 3)
-      .map((t) => `claude-team redispatch --team ${t.teamId} --only-unread`)
-      .join('\n');
-
     return {
       id: 'reliability.dropped-assignments',
       category: 'reliability',
@@ -87,16 +81,6 @@ export const detector: Detector = {
         'Re-dispatch the unread tasks or split a stalled agent\'s queue across fresh workers.',
       affected: totalDropped,
       evidence,
-      fix: {
-        target: 'command',
-        // Manual (#1101): `claude-team` is not a standard on-PATH binary, so this
-        // is not copy-paste-safe in every environment — shown as a by-hand
-        // example for users who have the team-dispatch CLI installed.
-        fixKind: 'manual',
-        label: 'Redispatch unread tasks',
-        note: 'If you have the claude-team CLI, run this for each affected team to re-queue the unacknowledged assignments. Otherwise re-dispatch them from your team tooling by hand.',
-        snippet: teams,
-      },
     };
   },
 };
