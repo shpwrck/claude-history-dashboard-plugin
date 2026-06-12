@@ -1,8 +1,8 @@
 // Shared upload-parse pipeline (#1015, relates #855/#868; #1069).
 //
-// The 10 parse passes a user upload runs (sessions, tools, tool inventory,
+// The 11 parse passes a user upload runs (sessions, tools, tool inventory,
 // timeline, api errors, permissions, agent settings, attribution, runtime,
-// churn geometry) used
+// churn geometry, value flow) used
 // to live inline in App.tsx's handleSessionFiles, on the main thread. This
 // module is the single source of truth for that pipeline so it runs identically
 // wherever it is driven:
@@ -28,6 +28,7 @@ import type { PermissionChange } from './parse-permissions';
 import type { AgentSettingEvent, SessionAttribution } from './parse-agents';
 import type { RuntimeEvents } from './parse-runtime-events';
 import type { ChurnGeometrySession } from './parse-churn-geometry';
+import type { ValueFlowSession } from './parse-value-flow';
 
 export interface UploadFile {
   name: string;
@@ -52,7 +53,8 @@ export type UploadParseEmit =
   | { type: 'agentSettings'; data: AgentSettingEvent[] }
   | { type: 'attribution'; data: SessionAttribution[] }
   | { type: 'runtime'; data: RuntimeEvents[] }
-  | { type: 'churnGeometry'; data: ChurnGeometrySession[] };
+  | { type: 'churnGeometry'; data: ChurnGeometrySession[] }
+  | { type: 'valueFlow'; data: ValueFlowSession[] };
 
 export interface RunUploadParseOptions {
   /**
@@ -82,6 +84,7 @@ export async function runUploadParse(
     { parseAgentSettings, parseAttribution },
     { parseRuntimeEvents },
     { parseChurnGeometry },
+    { parseValueFlow },
   ] = await Promise.all([
     import('./parse-sessions'),
     import('./parse-tools'),
@@ -92,6 +95,7 @@ export async function runUploadParse(
     import('./parse-agents'),
     import('./parse-runtime-events'),
     import('./parse-churn-geometry'),
+    import('./parse-value-flow'),
   ]);
 
   const runMap = async <R>(fn: (f: UploadFile) => R): Promise<R[]> =>
@@ -144,4 +148,11 @@ export async function runUploadParse(
     await runMap((f) => parseChurnGeometry(f.text, f.name))
   ).filter((d): d is ChurnGeometrySession => d !== null);
   emit({ type: 'churnGeometry', data: churnGeometry });
+
+  const valueFlow = (
+    await runMap((f) =>
+      parseValueFlow(f.text, f.name, { includeHypotheses: false })
+    )
+  ).filter((d): d is ValueFlowSession => d !== null);
+  emit({ type: 'valueFlow', data: valueFlow });
 }

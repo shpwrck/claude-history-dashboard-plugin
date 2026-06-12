@@ -1,1 +1,0 @@
-function e(e){return e.tokenDeltaCount>0?e.tokenDeltaSum/e.tokenDeltaCount:null}function t(e){return e.costDeltaCount>0?e.costDeltaSum/e.costDeltaCount:null}function n(n){let r=t(n);if(r!==null)return r<0;let i=e(n);return i===null?null:i<0}function r(e){return e.shadowWins+e.mainWins}export{n as i,e as n,r,t};

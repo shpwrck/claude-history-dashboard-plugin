@@ -44,6 +44,7 @@ import type { AgentSettingEvent, SessionAttribution } from './parse-agents';
 import type { RuntimeEvents } from './parse-runtime-events';
 import type { TaskSteering } from './parse-steering';
 import type { ChurnGeometrySession } from './parse-churn-geometry';
+import type { ValueFlowSession } from './parse-value-flow';
 import type { TaskSuccessProxy } from './parse-task-success';
 import type { ProjectMemories } from './parse-memories';
 import type { WorkflowRun } from './parse-workflows';
@@ -247,6 +248,7 @@ export interface ViewData {
   runtimeEvents: RuntimeEvents[];
   taskSteering: TaskSteering[];
   churnGeometry: ChurnGeometrySession[];
+  valueFlow: ValueFlowSession[];
   taskSuccess: TaskSuccessProxy[];
   assistantFeatures: AssistantFeatures[];
   promptAnalysis: PromptAnalysis[];
@@ -494,6 +496,7 @@ export function filterViewDataByTime(
     runtimeEvents,
     taskSteering: filterBySessionId(data.taskSteering, sessionIds),
     churnGeometry: filterBySessionId(data.churnGeometry, sessionIds),
+    valueFlow: filterBySessionId(data.valueFlow, sessionIds),
     taskSuccess: filterBySessionId(data.taskSuccess, sessionIds),
     assistantFeatures: filterBySessionId(data.assistantFeatures, sessionIds),
     promptAnalysis: filterBySessionId(data.promptAnalysis, sessionIds),
@@ -924,6 +927,7 @@ export function filterViewDataByProject(
     runtimeEvents: keepKnownSession(data.runtimeEvents, sessionIds),
     taskSteering: keepKnownSession(data.taskSteering, sessionIds),
     churnGeometry: keepKnownSession(data.churnGeometry, sessionIds),
+    valueFlow: keepKnownSession(data.valueFlow, sessionIds),
     taskSuccess: keepKnownSession(data.taskSuccess, sessionIds),
     assistantFeatures: keepKnownSession(data.assistantFeatures, sessionIds),
     promptAnalysis: keepKnownSession(data.promptAnalysis, sessionIds),

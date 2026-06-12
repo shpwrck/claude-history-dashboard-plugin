@@ -53,6 +53,7 @@ const SOURCE_DECORATED_SIGNAL_KEYS = new Set([
   'churnGeometry',
   'assistantFeatures',
   'deceitSignals',
+  'valueFlow',
 ]);
 
 function withDefaultSourceProvenance(value) {
@@ -1796,6 +1797,7 @@ export function assembleDataset() {
   const assistantFeatures = [];
   const deceitSignals = [];
   const taskSuccess = [];
+  const valueFlow = [];
   const entries = [];
   const transcriptSessionIds = new Set();
 
@@ -1818,6 +1820,7 @@ export function assembleDataset() {
     assistantFeatures,
     deceitSignals,
     taskSuccess,
+    valueFlow,
   };
   for (const r of rows) {
     transcriptSessionIds.add(r.session_id);
@@ -1964,6 +1967,7 @@ export function assembleDataset() {
       assistantFeatures,
       deceitSignals,
       taskSuccess,
+      valueFlow,
     }[s.datasetKey];
   }
   const recommendations = buildRecommendations(
@@ -2062,6 +2066,7 @@ export function assembleDataset() {
     assistantFeatures,
     deceitSignals,
     taskSuccess,
+    valueFlow,
     shadowCalls,
     workflows,
     repoMap,

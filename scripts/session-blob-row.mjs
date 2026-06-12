@@ -11,7 +11,7 @@ const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIB = join(PROJECT_DIR, 'src', 'lib');
 const READ_CHUNK_BYTES = 65_536;
 const DEFAULT_MAX_BYTES = 67_108_864;
-const SESSION_BLOB_PARSER_VERSION = 'tool-command-signals-v3';
+const SESSION_BLOB_PARSER_VERSION = 'value-flow-v1';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
@@ -31,6 +31,7 @@ const { parseAgentSettings, parseAttribution } = await import(
 );
 const { parseRuntimeEvents } = await import(join(LIB, 'parse-runtime-events.ts'));
 const { parseChurnGeometry } = await import(join(LIB, 'parse-churn-geometry.ts'));
+const { parseValueFlow } = await import(join(LIB, 'parse-value-flow.ts'));
 const { parseJsonl } = await import(join(LIB, 'parse-utils.ts'));
 const { safeJsonStringify } = await import(join(LIB, 'json-safe.ts'));
 const { parseSessionTitles } = await import(join(LIB, 'parse-titles.ts'));
@@ -135,6 +136,7 @@ export const SESSION_SIGNALS = makeSessionSignals({
   parseAttribution,
   parseRuntimeEvents,
   parseChurnGeometry,
+  parseValueFlow,
   parseToolInventory,
   parseAssistantFeatures,
   parseDeceitSignals,

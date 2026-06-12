@@ -487,6 +487,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     const { assembleRecommendationInput } = await import('./recommendations');
     const timelines = [{ sessionId: 's1' }] as unknown as RecommendationInput['timelines'];
     const runtimeEvents = [{ sessionId: 's1' }] as unknown as RecommendationInput['runtimeEvents'];
+    const valueFlow = [{ sessionId: 's1' }] as unknown as RecommendationInput['valueFlow'];
     const taskSteering = [{ sessionId: 's1' }] as unknown as RecommendationInput['taskSteering'];
     const churnGeometry = [{ sessionId: 's1' }] as unknown as RecommendationInput['churnGeometry'];
     const taskSuccess = [{ sessionId: 's1' }] as unknown as RecommendationInput['taskSuccess'];
@@ -503,6 +504,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       // liveConfig/assistantFeatures intentionally omitted → normalise to null.
       timelines,
       runtimeEvents,
+      valueFlow,
       taskSteering,
       churnGeometry,
       taskSuccess,
@@ -512,6 +514,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
     });
     expect(mapped.timelines).toBe(timelines);
     expect(mapped.runtimeEvents).toBe(runtimeEvents);
+    expect(mapped.valueFlow).toBe(valueFlow);
     expect(mapped.taskSteering).toBe(taskSteering);
     expect(mapped.churnGeometry).toBe(churnGeometry);
     expect(mapped.taskSuccess).toBe(taskSuccess);
@@ -568,6 +571,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       parseAssistantFeatures: noop,
       parseDeceitSignals: noop,
       parseTaskSuccess: noop,
+      parseValueFlow: noop,
       deriveEntries: noop,
     } as unknown as Parameters<typeof makeSessionSignals>[0]);
     // The ingest caller builds RecommendationInput from the signal datasetKeys
@@ -602,6 +606,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'taskSteering',
       'churnGeometry',
       'taskSuccess',
+      'valueFlow',
       'toolInventories',
       'modelPinSavings',
       'repoMap',

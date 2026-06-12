@@ -86,6 +86,11 @@ export interface SignalParsers {
   parseAttribution: (merged: string, name: string) => unknown;
   parseRuntimeEvents: (merged: string, name: string) => unknown;
   parseChurnGeometry: (merged: string, name: string) => unknown;
+  parseValueFlow: (
+    merged: string,
+    name: string,
+    options?: { includeHypotheses?: boolean }
+  ) => unknown;
   parseToolInventory: (merged: string, name: string) => unknown;
   parseAssistantFeatures: (merged: string, name: string) => unknown;
   parseDeceitSignals: (merged: string, name: string) => unknown;
@@ -231,6 +236,18 @@ export function makeSessionSignals(p: SignalParsers): SessionSignal[] {
         p.parseTaskSuccess(c.merged, c.topText, c.name, c.project, c.title) ?? [],
       aggregate: 'spread',
       datasetKey: 'taskSuccess',
+    },
+    {
+      // High-confidence value-flow edges from earlier tool_result content into
+      // later tool_use input (#1306). Appended so existing hash parts stay stable.
+      id: 'valueFlow',
+      column: 'value_flow_json',
+      parse: (c) =>
+        p.parseValueFlow(c.merged, c.name, { includeHypotheses: false }) ??
+        null,
+      aggregate: 'push-truthy',
+      parseGuard: 'guarded',
+      datasetKey: 'valueFlow',
     },
   ];
 }

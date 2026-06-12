@@ -30,6 +30,7 @@ import type { ChurnGeometrySession } from '../parse-churn-geometry';
 import type { TaskSuccessProxy } from '../parse-task-success';
 import type { ToolInventory } from '../parse-tool-inventory';
 import type { ShadowCallAggregate } from '../parse-shadow-calls';
+import type { ValueFlowSession } from '../parse-value-flow';
 // ── #539 ingest artifacts (per-artifact child issues #559–#569, #572) ──────
 import type { TaskRecord } from '../parse-tasks';
 import type { TeamSummary } from '../parse-teams';
@@ -419,6 +420,11 @@ export interface RecommendationInput {
   // which keeps existing test fixtures and call sites compiling unchanged.
   /** Per-session timeline rows (parse-timeline). Feeds tool/compaction signals. */
   timelines?: SessionTimeline[];
+  /**
+   * High-confidence value-flow edges from earlier tool results into later tool
+   * inputs (#1306). Optional: later provenance/forensic detectors consume this.
+   */
+  valueFlow?: ValueFlowSession[] | null;
   /** Agent-setting events (parse-agents). Feeds agent-effectiveness detectors. */
   agentSettings?: AgentSettingEvent[];
   /** Per-session cost/agent attribution (parse-agents). */

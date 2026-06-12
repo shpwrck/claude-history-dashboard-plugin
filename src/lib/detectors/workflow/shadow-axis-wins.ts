@@ -17,9 +17,9 @@ import type { AxisAggregate, RecsFindingAggregate } from '../../parse-shadow-cal
  * minimum-DECIDED threshold (below it we report adoption only and withhold any causal
  * claim).
  */
-const MIN_SAMPLES = 5; // per axis, before we trust a win rate
-const MIN_DECIDED = 3; // need ≥3 NON-tie comparisons, not just 5 samples (#545)
-const MIN_SHADOW_WIN_RATE = 0.6; // shadow wins ≥60% of decided experiments
+export const MIN_SAMPLES = 5; // per axis, before we trust a win rate
+export const MIN_DECIDED = 3; // need ≥3 NON-tie comparisons, not just 5 samples (#545)
+export const MIN_SHADOW_WIN_RATE = 0.6; // shadow wins ≥60% of decided experiments
 const MIN_LIVE_WINS_FOR_WARNING = 3; // live confirmation lifts info → warning
 
 interface AxisMeta {
@@ -39,6 +39,7 @@ const AXIS_META: Record<string, AxisMeta> = {
   tools: { label: 'a different tool strategy', adopt: 'switch the default tool strategy for these tasks' },
   mode: { label: 'plan-first mode', adopt: 'plan before acting on these tasks' },
   context: { label: 'fresh context', adopt: 'attempt these from a clean context rather than carrying full session state' },
+  'config-scoping': { label: 'path-scoped (atomized) config', adopt: 'split always-loaded root CLAUDE.md/AGENTS.md sections into path-scoped .claude/rules files so each rule loads only where it governs' },
 };
 
 function meta(axis: string): AxisMeta {
@@ -47,6 +48,19 @@ function meta(axis: string): AxisMeta {
 
 function decided(a: AxisAggregate): number {
   return a.shadowWins + a.mainWins; // ties don't count toward a win rate
+}
+
+/**
+ * The single evidence bar an axis must clear before its shadow variation counts as a
+ * win: ≥{@link MIN_SAMPLES} samples, ≥{@link MIN_DECIDED} decided (non-tie) comparisons
+ * (#545), and a ≥{@link MIN_SHADOW_WIN_RATE} win rate over those decided comparisons.
+ * Shared with the #1270 graduation gate so the thresholds cannot drift apart.
+ */
+export function clearsShadowWinThresholds(a: AxisAggregate): boolean {
+  if (a.samples < MIN_SAMPLES) return false;
+  const d = decided(a);
+  if (d < MIN_DECIDED) return false;
+  return a.shadowWins / d >= MIN_SHADOW_WIN_RATE;
 }
 
 type Cand = { a: AxisAggregate; winRate: number; cheaper: boolean; costDelta: number | null; tokenDelta: number | null; score: number };
@@ -231,11 +245,8 @@ export const detector: Detector = {
     const candidates: Cand[] = [];
     for (const a of agg.byAxis) {
       if (a.axis === 'recs') continue; // handled by the per-finding verdict above
-      if (a.samples < MIN_SAMPLES) continue;
-      const d = decided(a);
-      if (d < MIN_DECIDED) continue; // thin evidence — too many ties (#545)
-      const winRate = a.shadowWins / d;
-      if (winRate < MIN_SHADOW_WIN_RATE) continue;
+      if (!clearsShadowWinThresholds(a)) continue; // samples + decided (#545) + win-rate bar
+      const winRate = a.shadowWins / decided(a);
       // Price-aware "cheaper" ($ when available, else raw tokens) — #536.
       const cheaper = shadowCheaper(a) === true;
       const costDelta = avgCostDelta(a);

@@ -7,6 +7,8 @@ import type {
   RepoMapFileJoin,
   RepoMapProjectJoin,
 } from '../../parse-repo-map-join';
+import { parseShadowCalls } from '../../parse-shadow-calls';
+import type { ShadowCallAggregate } from '../../parse-shadow-calls';
 import { validateRecommendationProvenance } from '../provenance';
 import { detector } from './over-scoped-config-section';
 
@@ -46,7 +48,10 @@ const project = (
 
 const dataset = (...projects: RepoMapProjectJoin[]): RepoMapDataset => ({ projects });
 
-const input = (repoMap: RepoMapDataset | null | undefined): RecommendationInput => ({
+const input = (
+  repoMap: RepoMapDataset | null | undefined,
+  shadowCalls?: ShadowCallAggregate
+): RecommendationInput => ({
   tokenData: [],
   toolData: [],
   sessions: [],
@@ -55,6 +60,7 @@ const input = (repoMap: RepoMapDataset | null | undefined): RecommendationInput 
   apiErrors: [],
   liveConfig: null,
   repoMap,
+  shadowCalls,
 });
 
 const overScopedRecs = (i: RecommendationInput) =>
@@ -162,5 +168,105 @@ describe('context.over-scoped-config-section (#1267)', () => {
 
     expect(detector.rule(input(null), 0)).toBeNull();
     expect(detector.rule(input(dataset(project([lonely], []))), 0)).toBeNull();
+  });
+});
+
+describe('context.over-scoped-config-section — adherence-gated graduation (#1270)', () => {
+  /** One config-scoping ledger line; omit `adherence` to drop the judged dimension. */
+  const scopingLine = (
+    winner: 'main' | 'shadow' | 'tie',
+    adherence?: number,
+    mode: 'live' | 'replay' = 'live'
+  ): string =>
+    JSON.stringify({
+      mode,
+      axis: 'config-scoping',
+      judge: { winner, ...(adherence === undefined ? {} : { adherenceRegressions: adherence }) },
+    });
+
+  const ledger = (...lines: string[]) => parseShadowCalls(lines.join('\n'));
+
+  const overScopedInput = (shadowCalls?: ShadowCallAggregate): RecommendationInput => {
+    const api = section({
+      id: 'AGENTS.md#spa-server-boundary',
+      heading: 'SPA server boundary',
+    });
+    return input(
+      dataset(project([api], [file('src/lib/api-client.ts', [api.id])])),
+      shadowCalls
+    );
+  };
+
+  const rec = (shadowCalls?: ShadowCallAggregate) => {
+    const found = overScopedRecs(overScopedInput(shadowCalls));
+    expect(found).toHaveLength(1);
+    return found[0];
+  };
+
+  /** 6 samples, 5 shadow wins / 1 main — clears MIN_SAMPLES, MIN_DECIDED, 60% win rate. */
+  const winningLines = (adherence: () => number | undefined) => [
+    scopingLine('shadow', adherence()),
+    scopingLine('shadow', adherence()),
+    scopingLine('shadow', adherence()),
+    scopingLine('shadow', adherence()),
+    scopingLine('shadow', adherence(), 'replay'),
+    scopingLine('main', adherence()),
+  ];
+
+  it('graduates to recommended / tier-1-before-after when thresholds clear with ZERO regression', () => {
+    const graduated = rec(ledger(...winningLines(() => 0)));
+    expect(graduated.savingsAttribution?.tier).toBe('tier-1-before-after');
+    expect(graduated.savingsAttribution?.confidence).toBe('high');
+    expect(graduated.severity).toBe('warning');
+    expect(graduated.detail).toMatch(/zero adherence regressions/i);
+    expect(graduated.evidence?.some((e) => e.includes('config-scoping axis'))).toBe(true);
+    expect(validateRecommendationProvenance(graduated)).toEqual([]);
+  });
+
+  it('stays advisory when thresholds clear but ANY adherence regression exists (hard gate)', () => {
+    // Identical cost/speed win, but one judged record dropped a rule.
+    let i = 0;
+    const blocked = rec(ledger(...winningLines(() => (i++ === 1 ? 1 : 0))));
+    expect(blocked.savingsAttribution?.tier).toBe('tier-0-estimate');
+    expect(blocked.savingsAttribution?.confidence).toBe('medium');
+    expect(blocked.severity).toBe('info');
+    expect(blocked.detail).not.toMatch(/proved/i);
+  });
+
+  it('stays advisory below the evidence thresholds, even with zero regressions', () => {
+    // Only 2 samples (< MIN_SAMPLES) — a clean adherence record cannot rescue thin evidence.
+    const thin = rec(ledger(scopingLine('shadow', 0), scopingLine('shadow', 0)));
+    expect(thin.savingsAttribution?.tier).toBe('tier-0-estimate');
+    expect(thin.severity).toBe('info');
+  });
+
+  it('fails closed when adherence data is absent or partial', () => {
+    // Same winning verdicts but NO adherence dimension on any record.
+    const absent = rec(ledger(...winningLines(() => undefined)));
+    expect(absent.savingsAttribution?.tier).toBe('tier-0-estimate');
+    expect(absent.severity).toBe('info');
+
+    // Partial coverage: one judged record missing the dimension blocks certification.
+    let i = 0;
+    const partial = rec(ledger(...winningLines(() => (i++ === 2 ? undefined : 0))));
+    expect(partial.savingsAttribution?.tier).toBe('tier-0-estimate');
+    expect(partial.severity).toBe('info');
+  });
+
+  it('ignores wins on OTHER axes — only config-scoping evidence graduates this rec', () => {
+    const otherAxis = parseShadowCalls(
+      Array.from({ length: 6 }, () =>
+        JSON.stringify({ mode: 'live', axis: 'model', judge: { winner: 'shadow', adherenceRegressions: 0 } })
+      ).join('\n')
+    );
+    const unaffected = rec(otherAxis);
+    expect(unaffected.savingsAttribution?.tier).toBe('tier-0-estimate');
+    expect(unaffected.severity).toBe('info');
+  });
+
+  it('stays advisory with no shadow-calls data at all', () => {
+    const noData = rec(undefined);
+    expect(noData.savingsAttribution?.tier).toBe('tier-0-estimate');
+    expect(noData.severity).toBe('info');
   });
 });

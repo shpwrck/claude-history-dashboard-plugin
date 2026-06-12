@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseShadowCalls, avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding } from './parse-shadow-calls';
+import { parseShadowCalls, avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding, adherenceClean } from './parse-shadow-calls';
 import { buildRecommendations } from './recommendations';
 import type { RecommendationInput } from './recommendations';
 
@@ -301,6 +301,83 @@ describe('workflow.shadow-axis-wins detector', () => {
     const rec = find(buildRecommendations(inputWith(jsonl)));
     expect(rec).toBeDefined();
     expect(rec!.severity).toBe('info');
+  });
+
+  it('surfaces a meaningful adopt string for the config-scoping axis (#1270)', () => {
+    // 6 samples, 5 shadow wins (live) — clears the bar, so the adopt-axis rec fires
+    // with the AXIS_META['config-scoping'] label + adopt string, not the generic fallback.
+    const jsonl = [
+      line('config-scoping', 'live', 'shadow', 1000, 400),
+      line('config-scoping', 'live', 'shadow', 1000, 420),
+      line('config-scoping', 'live', 'shadow', 1000, 380),
+      line('config-scoping', 'live', 'shadow', 1000, 410),
+      line('config-scoping', 'replay', 'shadow', 900, 350),
+      line('config-scoping', 'live', 'main', 800, 900),
+    ].join('\n');
+    const rec = find(buildRecommendations(inputWith(jsonl)));
+    expect(rec).toBeDefined();
+    expect(rec!.title).toMatch(/path-scoped \(atomized\) config/);
+    // Not the generic `adopt the "config-scoping" variation` fallback — a concrete action.
+    expect(rec!.action).toMatch(/path-scoped \.claude\/rules/);
+    expect(rec!.action).toMatch(/CLAUDE\.md\/AGENTS\.md/);
+    expect(rec!.action).not.toMatch(/adopt the "config-scoping" variation/);
+  });
+});
+
+describe('parseShadowCalls — config-scoping adherence-regression dimension (#1270)', () => {
+  /** A config-scoping ledger line; `adherence` omitted ⇒ the judge carried no dimension. */
+  const scopingLine = (
+    winner: 'main' | 'shadow' | 'tie',
+    adherence?: number,
+    mode: 'live' | 'replay' = 'live'
+  ): string =>
+    JSON.stringify({
+      mode,
+      axis: 'config-scoping',
+      judge: { winner, ...(adherence === undefined ? {} : { adherenceRegressions: adherence }) },
+    });
+  const axisOf = (jsonl: string) =>
+    parseShadowCalls(jsonl).byAxis.find((a) => a.axis === 'config-scoping')!;
+
+  it('aggregates the adherence-regression sum + coverage count', () => {
+    const a = axisOf([
+      scopingLine('shadow', 0),
+      scopingLine('shadow', 0),
+      scopingLine('main', 2),
+      scopingLine('tie'), // no adherence dimension on this record
+    ].join('\n'));
+    expect(a.samples).toBe(4);
+    expect(a.adherenceRegressionSum).toBe(2);
+    expect(a.adherenceRegressionCount).toBe(3); // only records carrying the dimension
+  });
+
+  it('ignores non-numeric and negative adherence values', () => {
+    const a = axisOf([
+      JSON.stringify({ mode: 'live', axis: 'config-scoping', judge: { winner: 'shadow', adherenceRegressions: 'none' } }),
+      JSON.stringify({ mode: 'live', axis: 'config-scoping', judge: { winner: 'shadow', adherenceRegressions: -1 } }),
+      scopingLine('shadow', 0),
+    ].join('\n'));
+    expect(a.adherenceRegressionSum).toBe(0);
+    expect(a.adherenceRegressionCount).toBe(1);
+  });
+
+  it('adherenceClean certifies zero regression only at FULL coverage', () => {
+    // Full coverage, all zero -> true.
+    expect(adherenceClean(axisOf([
+      scopingLine('shadow', 0), scopingLine('shadow', 0), scopingLine('main', 0),
+    ].join('\n')))).toBe(true);
+    // Any nonzero regression -> false.
+    expect(adherenceClean(axisOf([
+      scopingLine('shadow', 0), scopingLine('shadow', 1), scopingLine('shadow', 0),
+    ].join('\n')))).toBe(false);
+    // No adherence data at all -> null (fail closed).
+    expect(adherenceClean(axisOf([
+      scopingLine('shadow'), scopingLine('shadow'),
+    ].join('\n')))).toBeNull();
+    // PARTIAL coverage (one record missing the dimension) -> null (fail closed).
+    expect(adherenceClean(axisOf([
+      scopingLine('shadow', 0), scopingLine('shadow', 0), scopingLine('main'),
+    ].join('\n')))).toBeNull();
   });
 });
 

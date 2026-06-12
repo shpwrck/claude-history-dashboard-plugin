@@ -43,6 +43,19 @@ export interface AxisAggregate {
   costDeltaSum: number;
   costDeltaCount: number;
   /**
+   * Σ of the judge's per-task adherence-regression counts over records that carried the
+   * dimension (#1269/#1270, epic #1264). Written by the `config-scoping` judge: how many
+   * rules that demonstrably applied under the monolith control failed to fire under the
+   * atomized variation. 0 across full coverage ⇒ the variation dropped nothing.
+   */
+  adherenceRegressionSum: number;
+  /**
+   * How many of this axis's records carried the adherence-regression dimension. The
+   * graduation gate (#1270) requires FULL coverage (`count === samples`) before it will
+   * certify "zero regression" — absent/partial adherence data fails closed.
+   */
+  adherenceRegressionCount: number;
+  /**
    * Per-finding sub-aggregate, populated ONLY for the `recs` axis (#579, ADR 0005 Tier 2).
    * Keyed by `record.recs.findingId`; undefined for every other axis. Mirrors the per-axis
    * verdict counters so a single finding can be evaluated in isolation ("finding F changed
@@ -75,7 +88,7 @@ interface ShadowRecord {
   mode?: unknown;
   axis?: unknown;
   synthetic?: unknown;
-  judge?: { winner?: unknown } | null;
+  judge?: { winner?: unknown; adherenceRegressions?: unknown } | null;
   main?: { tokens?: unknown; costUsd?: unknown } | null;
   shadow?: { tokens?: unknown; costUsd?: unknown } | null;
   /** Recs-axis-only block written by the replay runner (`recsRecordFields()`). */
@@ -113,6 +126,8 @@ function emptyAxis(axis: string): AxisAggregate {
     tokenDeltaCount: 0,
     costDeltaSum: 0,
     costDeltaCount: 0,
+    adherenceRegressionSum: 0,
+    adherenceRegressionCount: 0,
   };
 }
 
@@ -156,6 +171,15 @@ export function parseShadowCalls(
       a.mainWins++;
     } else if (winner === 'tie') {
       a.ties++;
+    }
+
+    // Per-task adherence-regression dimension (#1269/#1270): a distinct judged count the
+    // `config-scoping` judge emits alongside the cost/speed verdict (NOT folded into it).
+    // Aggregated wherever it appears so the graduation gate can require full coverage.
+    const adherence = rec.judge?.adherenceRegressions;
+    if (typeof adherence === 'number' && Number.isFinite(adherence) && adherence >= 0) {
+      a.adherenceRegressionSum += adherence;
+      a.adherenceRegressionCount++;
     }
 
     // Per-finding sub-aggregate, recs axis only (#579). Additive: reuses the same `winner`
@@ -218,6 +242,21 @@ export function shadowCheaper(a: AxisAggregate): boolean | null {
   if (cost !== null) return cost < 0;
   const tok = avgTokenDelta(a);
   return tok !== null ? tok < 0 : null;
+}
+
+/**
+ * Did this axis's variation provably drop NO instruction (#1270 hard gate)?
+ *
+ * - `true`  — every record carried the adherence-regression dimension AND all were 0.
+ * - `false` — at least one judged regression (any nonzero count).
+ * - `null`  — no adherence data, or only partial coverage: "zero regression" cannot be
+ *   certified, so callers must treat this exactly like a failure (fail closed).
+ */
+export function adherenceClean(a: AxisAggregate): boolean | null {
+  if (a.adherenceRegressionCount === 0) return null;
+  if (a.adherenceRegressionSum > 0) return false;
+  if (a.adherenceRegressionCount < a.samples) return null; // partial coverage — fail closed
+  return true;
 }
 
 /**

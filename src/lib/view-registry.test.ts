@@ -148,6 +148,7 @@ function emptyData(overrides: Partial<ViewData> = {}): ViewData {
     runtimeEvents: [],
     taskSteering: [],
     churnGeometry: [],
+    valueFlow: [],
     taskSuccess: [],
     assistantFeatures: [],
     promptAnalysis: [],
@@ -343,6 +344,10 @@ describe('project-scoped view data filtering', () => {
         { sessionId: 'alpha-1', edits: [], files: [] },
         { sessionId: 'beta-1', edits: [], files: [] },
       ],
+      valueFlow: [
+        { sessionId: 'alpha-1', edges: [], hypotheses: [] },
+        { sessionId: 'beta-1', edges: [], hypotheses: [] },
+      ],
       taskSuccess: [
         {
           sessionId: 'alpha-1',
@@ -477,6 +482,7 @@ describe('project-scoped view data filtering', () => {
     expect(filtered.runtimeEvents.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.taskSteering.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.churnGeometry.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    expect(filtered.valueFlow.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.taskSuccess.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.assistantFeatures.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.promptAnalysis.map((item) => item.sessionId)).toEqual(['alpha-1']);

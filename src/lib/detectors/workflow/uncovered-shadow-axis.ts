@@ -29,6 +29,7 @@ const AXIS_COVERAGE: Record<string, string[]> = {
   model: ['cost.legacy-model-overpay', 'cost.unknown-model'], // already nudge model choice
   tools: ['workflow.native-bypass'], // already nudge tool strategy
   context: ['context.over-window', 'context.repeated-compactions'], // already nudge context mgmt
+  'config-scoping': ['context.over-scoped-config-section'], // #1270 graduation gate consumes this axis
   // Uncovered — no rule recommends adopting these per task class:
   reasoning: [],
   prompt: [],

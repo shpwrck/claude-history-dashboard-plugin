@@ -13,7 +13,7 @@
 //   (1) Fresh-DB column-set equivalence: OLD literal DDL vs generated DDL reach
 //       the same {name,type,notnull,pk} SET (order-independent).
 //   (2) Old-era additive migration: a DB created with only the OLDEST base
-//       schema + a row upgrades to the full 19 columns via generated
+//       schema + a row upgrades to the full 20 columns via generated
 //       CREATE-IF-NOT-EXISTS + ALTER, without throwing and without data loss.
 //   (3) Round-trip col<->arg alignment: a distinct sentinel per column survives
 //       the generated upsert + SELECT * unchanged (catches any col-list / arg /
@@ -75,6 +75,7 @@ const OLD_ALTER_COLUMNS = [
   'deceit_signals_json TEXT',
   'churn_geometry_json TEXT',
   'task_success_json TEXT',
+  'value_flow_json TEXT',
 ];
 
 const OLD_UPSERT_SQL = `
@@ -83,8 +84,8 @@ const OLD_UPSERT_SQL = `
      apierrors_json, perm_json, agents_json, entries_json,
      attribution_json, runtime_json, title, inventory_json, content_hash,
      assistant_features_json, deceit_signals_json, churn_geometry_json,
-     task_success_json)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     task_success_json, value_flow_json)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(session_id) DO UPDATE SET
     sig=excluded.sig, project=excluded.project, token_json=excluded.token_json,
     tool_json=excluded.tool_json, timeline_json=excluded.timeline_json,
@@ -96,7 +97,8 @@ const OLD_UPSERT_SQL = `
     assistant_features_json=excluded.assistant_features_json,
     deceit_signals_json=excluded.deceit_signals_json,
     churn_geometry_json=excluded.churn_geometry_json,
-    task_success_json=excluded.task_success_json
+    task_success_json=excluded.task_success_json,
+    value_flow_json=excluded.value_flow_json
 `;
 
 // The OLD positional arg order matching OLD_UPSERT_SQL's col list, in terms of
@@ -106,15 +108,15 @@ const OLD_UPSERT_COL_ORDER = [
   'apierrors_json', 'perm_json', 'agents_json', 'entries_json',
   'attribution_json', 'runtime_json', 'title', 'inventory_json', 'content_hash',
   'assistant_features_json', 'deceit_signals_json', 'churn_geometry_json',
-  'task_success_json',
+  'task_success_json', 'value_flow_json',
 ];
 
-const FULL_19 = [
+const FULL_20 = [
   'session_id', 'sig', 'project', 'token_json', 'tool_json', 'timeline_json',
   'apierrors_json', 'perm_json', 'agents_json', 'entries_json',
   'attribution_json', 'runtime_json', 'title', 'inventory_json', 'content_hash',
   'assistant_features_json', 'deceit_signals_json', 'churn_geometry_json',
-  'task_success_json',
+  'task_success_json', 'value_flow_json',
 ];
 
 // ---------------------------------------------------------------------------
@@ -186,10 +188,10 @@ test('(1) fresh DB: generated DDL reaches the SAME column SET as the old literal
     const setB = columnSet(b.db);
     assert.deepEqual(setB, setA, 'generated column set must equal old literal set');
 
-    // And both must be exactly the frozen 19 columns by name.
+    // And both must be exactly the frozen 20 columns by name.
     const names = setA.map((s) => s.split('|')[0]).sort();
-    assert.deepEqual(names, [...FULL_19].sort());
-    assert.equal(names.length, 19);
+    assert.deepEqual(names, [...FULL_20].sort());
+    assert.equal(names.length, 20);
 
     // Spot-check the load-bearing constraints survived: session_id is the PK,
     // sig is NOT NULL, in BOTH.
@@ -206,9 +208,9 @@ test('(1) fresh DB: generated DDL reaches the SAME column SET as the old literal
 });
 
 // ---------------------------------------------------------------------------
-// (2) Old-era additive migration: oldest base schema + row -> full 19, no loss.
+// (2) Old-era additive migration: oldest base schema + row -> full 20, no loss.
 // ---------------------------------------------------------------------------
-test('(2) old-era DB: additive migration upgrades to full 19 without data loss', () => {
+test('(2) old-era DB: additive migration upgrades to full 20 without data loss', () => {
   const { db, path } = freshDb();
   try {
     // OLDEST base schema: session_id/sig/project + token..entries only. NO
@@ -249,11 +251,11 @@ test('(2) old-era DB: additive migration upgrades to full 19 without data loss',
     // Generated CREATE-IF-NOT-EXISTS + ALTER migration must not throw.
     assert.doesNotThrow(() => applyGeneratedSchema(db));
 
-    // (ii) column set now equals the full 19.
+    // (ii) column set now equals the full 20.
     const names = columnSet(db)
       .map((s) => s.split('|')[0])
       .sort();
-    assert.deepEqual(names, [...FULL_19].sort());
+    assert.deepEqual(names, [...FULL_20].sort());
 
     // (iii) the pre-existing row's data is intact; new columns are NULL.
     const row = db
@@ -279,6 +281,7 @@ test('(2) old-era DB: additive migration upgrades to full 19 without data loss',
     assert.equal(row.deceit_signals_json, null);
     assert.equal(row.churn_geometry_json, null);
     assert.equal(row.task_success_json, null);
+    assert.equal(row.value_flow_json, null);
   } finally {
     db.close();
     cleanup(path);
@@ -305,16 +308,16 @@ test('(2b) migrationColumns are strictly additive ADD COLUMN defs (no NOT NULL /
 });
 
 // (2c) Divergent-affinity middle column + an unexpected extra column not in the
-// frozen 19. A real-world DB could carry a column with a different declared
+// frozen 20. A real-world DB could carry a column with a different declared
 // affinity (e.g. an old/foreign build that wrote `project INTEGER`) and/or an
 // extra column the current schema doesn't know about. The additive migration
-// must converge to the full 19, leave the row's data intact, and TOLERATE the
+// must converge to the full 20, leave the row's data intact, and TOLERATE the
 // extra column (additive never drops).
-test('(2c) divergent-affinity + extra-column DB: migration converges to full 19, tolerates extras, no data loss', () => {
+test('(2c) divergent-affinity + extra-column DB: migration converges to full 20, tolerates extras, no data loss', () => {
   const { db, path } = freshDb();
   try {
     // Middle base column `project` declared INTEGER (divergent affinity), plus
-    // an `extra_legacy_col` not in the frozen 19.
+    // an `extra_legacy_col` not in the frozen 20.
     db.exec(`
       CREATE TABLE session_blob (
         session_id    TEXT PRIMARY KEY,
@@ -356,8 +359,8 @@ test('(2c) divergent-affinity + extra-column DB: migration converges to full 19,
     const present = new Set(
       columnSet(db).map((s) => s.split('|')[0])
     );
-    // All 18 frozen columns present.
-    for (const c of FULL_19) {
+    // All 20 frozen columns present.
+    for (const c of FULL_20) {
       assert.ok(present.has(c), `frozen column present: ${c}`);
     }
     // Extra column tolerated, not dropped.
@@ -383,6 +386,7 @@ test('(2c) divergent-affinity + extra-column DB: migration converges to full 19,
     assert.equal(row.deceit_signals_json, null);
     assert.equal(row.churn_geometry_json, null);
     assert.equal(row.task_success_json, null);
+    assert.equal(row.value_flow_json, null);
   } finally {
     db.close();
     cleanup(path);
@@ -391,7 +395,7 @@ test('(2c) divergent-affinity + extra-column DB: migration converges to full 19,
 
 // (2d) Partially-migrated DB (a prior migration run crashed midway). Applying
 // only a subset of the ALTER list first, then the FULL list, must idempotently
-// converge to the full 19 without throwing (the duplicate columns are skipped)
+// converge to the full 20 without throwing (the duplicate columns are skipped)
 // and leave the row intact.
 test('(2d) partially-migrated DB: re-applying the full migration converges idempotently, no throw, row intact', () => {
   const { db, path } = freshDb();
@@ -440,20 +444,20 @@ test('(2d) partially-migrated DB: re-applying the full migration converges idemp
         if (!/duplicate column name/i.test(e?.message ?? '')) throw e;
       }
     }
-    // Mid-state: strictly fewer than 19 columns so far (a partial migration).
+    // Mid-state: strictly fewer than 20 columns so far (a partial migration).
     assert.ok(
-      columnSet(db).length < 19,
-      'partial migration left fewer than 19 columns'
+      columnSet(db).length < 20,
+      'partial migration left fewer than 20 columns'
     );
 
     // Now re-run the FULL migration — must skip the already-added columns via
-    // the narrowed catch and add the rest, converging to 19 without throwing.
+    // the narrowed catch and add the rest, converging to 20 without throwing.
     assert.doesNotThrow(() => applyGeneratedMigration(db));
 
     const names = columnSet(db)
       .map((s) => s.split('|')[0])
       .sort();
-    assert.deepEqual(names, [...FULL_19].sort());
+    assert.deepEqual(names, [...FULL_20].sort());
 
     // Row intact through the two-phase migration.
     const row = db
@@ -466,7 +470,7 @@ test('(2d) partially-migrated DB: re-applying the full migration converges idemp
 
     // Fully idempotent: a THIRD application is still a no-op (all duplicates).
     assert.doesNotThrow(() => applyGeneratedMigration(db));
-    assert.equal(columnSet(db).length, 19, 'still exactly 19 after re-run');
+    assert.equal(columnSet(db).length, 20, 'still exactly 20 after re-run');
   } finally {
     db.close();
     cleanup(path);
@@ -482,7 +486,7 @@ test('(3) round-trip: every column reads back the distinct sentinel passed FOR T
     applyGeneratedSchema(db);
 
     const cols = upsertColumns(SIGNALS);
-    assert.equal(cols.length, 19, 'upsert drives all 19 columns');
+    assert.equal(cols.length, 20, 'upsert drives all 20 columns');
 
     // Distinct sentinel per column.
     const sentinel = {};
