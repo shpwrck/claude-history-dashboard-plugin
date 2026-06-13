@@ -58,7 +58,7 @@ export function truncateMiddle(s: string, max: number): string {
 }
 
 /**
- * Build a Victory `tickFormat` callback that middle-truncates category-axis
+ * Build a chart tick-label formatter that middle-truncates category-axis
  * labels so long strings (file paths, tool names, project names, agent types)
  * fit the chart's reserved label gutter instead of clipping at the edge. Size
  * `max` to the chart's left padding (~1 char per 5 px at fontSize 9). #457.
