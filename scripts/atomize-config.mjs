@@ -61,9 +61,13 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfigSections } from '../src/lib/parse-config-sections.ts';
-import { componentSubtree, ruleTopicSlug } from '../src/lib/config-rule-naming.ts';
+import {
+  componentSubtree,
+  createRuleTopicDisambiguator,
+  ruleTopicSlug,
+} from '../src/lib/config-rule-naming.ts';
 
-export { componentSubtree, ruleTopicSlug };
+export { componentSubtree, createRuleTopicDisambiguator, ruleTopicSlug };
 
 // -- Section model (byte-preserving splitter; ids delegated to the parser) ----
 
@@ -334,12 +338,10 @@ export function buildPlan({
   const moves = [];
   const skipped = [];
   const trimmedParts = [];
-  // Rule FILENAMES use the detector's topic slug (config-rule-naming), NOT the
-  // section-id slug, so the file written here is exactly the rulePath the
-  // detector's recommendation prescribes (#1427). Distinct headings can
-  // collide on the topic slug ("Build/Deploy" vs "Build Deploy"); a -N suffix
-  // keeps the files distinct (the marker carries the real path either way).
-  const usedTopics = new Map();
+  // Rule FILENAMES use the detector's topic disambiguator
+  // (config-rule-naming), NOT the section-id slug, so the file written here is
+  // exactly the rulePath the detector's recommendation prescribes (#1427).
+  const nextRuleTopic = createRuleTopicDisambiguator();
   for (const sec of secs) {
     const subtree = sec.slug !== undefined && sec.level > 0 ? mapping.get(sec.slug) : undefined;
     if (subtree === undefined) {
@@ -354,10 +356,7 @@ export function buildPlan({
       trimmedParts.push(...sec.lines);
       continue;
     }
-    const base = ruleTopicSlug(sec.heading);
-    const n = (usedTopics.get(base) ?? 0) + 1;
-    usedTopics.set(base, n);
-    const topic = n === 1 ? base : `${base}-${n}`;
+    const topic = nextRuleTopic(sec.heading);
     const rulePathRel = `${rulesDirRel}/${topic}.md`;
     const glob = pathsGlobFor(subtree);
     const body = rewriteImports(sec.lines.join('\n'), importPrefix);

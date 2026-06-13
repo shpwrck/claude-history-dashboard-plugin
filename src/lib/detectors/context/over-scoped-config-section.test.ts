@@ -125,6 +125,39 @@ describe('context.over-scoped-config-section (#1267)', () => {
     expect(rec?.id).toBe('context.over-scoped-config-section');
   });
 
+  it('disambiguates colliding rulePath values in root document order', () => {
+    const slash = section({
+      id: 'AGENTS.md#builddeploy',
+      heading: 'Build/Deploy',
+    });
+    const spaced = section({
+      id: 'AGENTS.md#build-deploy',
+      heading: 'Build Deploy',
+    });
+    const recs = overScopedRecs(
+      input(
+        dataset(
+          project(
+            [slash, spaced],
+            [
+              file('src/lib/a.ts', [slash.id]),
+              file('src/lib/b.ts', [spaced.id]),
+            ]
+          )
+        )
+      )
+    );
+
+    expect(recs).toHaveLength(2);
+    const slashRec = recs.find((rec) => rec.title.includes('Build/Deploy'))!;
+    const spacedRec = recs.find((rec) => rec.title.includes('Build Deploy'))!;
+
+    expect(slashRec.action).toContain('.claude/rules/build-deploy.md');
+    expect(slashRec.fix?.snippet).toContain('.claude/rules/build-deploy.md');
+    expect(spacedRec.action).toContain('.claude/rules/build-deploy-2.md');
+    expect(spacedRec.fix?.snippet).toContain('.claude/rules/build-deploy-2.md');
+  });
+
   it('does not fire for a genuinely cross-cutting root section', () => {
     const crossCutting = section({
       id: 'AGENTS.md#shared-discipline',

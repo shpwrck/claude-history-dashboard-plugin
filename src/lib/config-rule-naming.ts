@@ -34,6 +34,22 @@ export function ruleTopicSlug(text: string): string {
 }
 
 /**
+ * Document-order rule-topic disambiguator. Distinct headings can collapse to
+ * the same file topic (`Build/Deploy` and `Build Deploy` -> `build-deploy`).
+ * The first occurrence keeps the plain topic; later occurrences receive a
+ * stable numeric suffix.
+ */
+export function createRuleTopicDisambiguator(): (heading: string) => string {
+  const usedTopics = new Map<string, number>();
+  return (heading: string): string => {
+    const base = ruleTopicSlug(heading);
+    const n = (usedTopics.get(base) ?? 0) + 1;
+    usedTopics.set(base, n);
+    return n === 1 ? base : `${base}-${n}`;
+  };
+}
+
+/**
  * Component subtree of a repo-relative path — the detector's single-subtree
  * rule: all of a section's governed/referenced files sharing one subtree is
  * what makes the section a candidate for a path-scoped rule.

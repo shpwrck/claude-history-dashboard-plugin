@@ -1,4 +1,8 @@
-import { componentSubtree, ruleTopicSlug } from '../../config-rule-naming';
+import {
+  componentSubtree,
+  createRuleTopicDisambiguator,
+  ruleTopicSlug,
+} from '../../config-rule-naming';
 import type { ConfigSection } from '../../parse-config-sections';
 import type {
   RepoMapFileJoin,
@@ -62,6 +66,7 @@ function overScopedCandidates(input: Parameters<Detector['rule']>[0]): Candidate
 
   const out: Candidate[] = [];
   for (const project of repoMap.projects) {
+    const topicForSource = new Map<string, (heading: string) => string>();
     for (const section of project.configSections) {
       if (section.level === 0 || section.heading.trim().length === 0) continue;
       if (!isRootConfigSection(section, project.root)) continue;
@@ -82,7 +87,12 @@ function overScopedCandidates(input: Parameters<Detector['rule']>[0]): Candidate
 
       const subtree = [...subtrees][0];
       const pathsGlob = `${subtree}/**`;
-      const topic = ruleTopicSlug(section.heading);
+      let nextTopic = topicForSource.get(section.sourceScope);
+      if (!nextTopic) {
+        nextTopic = createRuleTopicDisambiguator();
+        topicForSource.set(section.sourceScope, nextTopic);
+      }
+      const topic = nextTopic(section.heading);
       out.push({
         project,
         section,
