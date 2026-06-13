@@ -16,24 +16,47 @@ function changedFiles() {
   const baseRef = process.env.GITHUB_BASE_REF;
   const baseSha = process.env.GITHUB_EVENT_PULL_REQUEST_BASE_SHA;
   const headSha = process.env.GITHUB_EVENT_PULL_REQUEST_HEAD_SHA;
+  const isPullRequest = Boolean(baseRef || baseSha || headSha);
 
   const attempts = [];
-  if (baseRef) attempts.push(['diff', '--name-only', `origin/${baseRef}...HEAD`]);
-  if (baseSha && headSha) attempts.push(['diff', '--name-only', baseSha, headSha]);
-  attempts.push(['diff', '--name-only', 'HEAD^', 'HEAD']);
+  if (baseSha && headSha) {
+    attempts.push({
+      name: 'pull_request_base_head_sha',
+      args: ['diff', '--name-only', baseSha, headSha],
+    });
+  }
+  if (baseRef) {
+    attempts.push({
+      name: 'pull_request_origin_base_ref',
+      args: ['diff', '--name-only', `origin/${baseRef}...HEAD`],
+    });
+  }
+  if (!isPullRequest) {
+    attempts.push({
+      name: 'previous_commit',
+      args: ['diff', '--name-only', 'HEAD^', 'HEAD'],
+    });
+  }
 
-  let lastErr = null;
-  for (const args of attempts) {
+  const errors = [];
+  for (const attempt of attempts) {
     try {
-      return git(args)
-        .split(/\r?\n/)
-        .map((s) => s.trim())
-        .filter(Boolean);
+      return {
+        strategy: attempt.name,
+        files: git(attempt.args)
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      };
     } catch (err) {
-      lastErr = err;
+      errors.push(`${attempt.name}: ${err.message}`);
     }
   }
-  throw lastErr ?? new Error('could not determine changed files');
+  const detail = errors.length > 0 ? ` Attempts: ${errors.join(' | ')}` : '';
+  if (isPullRequest) {
+    throw new Error(`could not determine pull request changed files.${detail}`);
+  }
+  throw new Error(`could not determine changed files.${detail}`);
 }
 
 function isDocsPath(file) {
@@ -45,9 +68,10 @@ function isDocsPath(file) {
     || /^(LICENSE|NOTICE)$/.test(file);
 }
 
-const files = changedFiles();
+const { strategy, files } = changedFiles();
 const docsOnly = files.length > 0 && files.every(isDocsPath);
 
+console.log(`Diff strategy: ${strategy}`);
 console.log('Changed files:');
 for (const file of files) console.log(`- ${file}`);
 console.log(`docs_only=${docsOnly}`);
