@@ -79,12 +79,18 @@ await check('buildStatusline truncates long statusline output', () => {
 });
 
 await check('parseArgs accepts env default and explicit overrides', () => {
-  const options = parseArgs(['--json', '--max-chars', '180'], {
+  const options = parseArgs(['--json', '--max-chars', '180', '--timeout-ms', '12000'], {
     CODING_AGENT_DASHBOARD_URL: 'http://localhost:6000',
   });
   assert.equal(options.url, 'http://localhost:6000');
   assert.equal(options.json, true);
   assert.equal(options.maxChars, 180);
+  assert.equal(options.timeoutMs, 12000);
+});
+
+await check('parseArgs validates timeout bounds', () => {
+  assert.throws(() => parseArgs(['--timeout-ms', '999']), /Invalid --timeout-ms/);
+  assert.throws(() => parseArgs(['--timeout-ms', '60001']), /Invalid --timeout-ms/);
 });
 
 await check('recommendationApiUrl allows only local dashboard URLs', () => {

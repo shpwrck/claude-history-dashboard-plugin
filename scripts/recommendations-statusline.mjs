@@ -4,12 +4,13 @@ import { pathToFileURL } from 'node:url';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:5173';
 const DEFAULT_MAX_CHARS = 220;
+const DEFAULT_TIMEOUT_MS = 15000;
 
 export function helpText(command = 'node scripts/recommendations-statusline.mjs') {
   return `Recommendations statusline
 
 Usage:
-  ${command} [--url http://127.0.0.1:5173] [--max-chars 220]
+  ${command} [--url http://127.0.0.1:5173] [--max-chars 220] [--timeout-ms 15000]
   ${command} --input recommendations.json [--json]
   ${command} --help
 
@@ -19,6 +20,7 @@ Options:
   --input       Read recommendations from a JSON file instead of HTTP.
   --json        Emit a structured JSON summary instead of one statusline.
   --max-chars   Maximum statusline length. Defaults to ${DEFAULT_MAX_CHARS}.
+  --timeout-ms  HTTP timeout for local dashboard reads. Defaults to ${DEFAULT_TIMEOUT_MS}.
   -h, --help    Show this help.
 `;
 }
@@ -42,6 +44,7 @@ export function parseArgs(args, env = process.env) {
     input: null,
     json: false,
     maxChars: DEFAULT_MAX_CHARS,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
     help: false,
   };
 
@@ -77,6 +80,16 @@ export function parseArgs(args, env = process.env) {
         throw new Error(`Invalid --max-chars value: ${parsed.value}`);
       }
       options.maxChars = maxChars;
+      index = parsed.nextIndex;
+      continue;
+    }
+    if (arg === '--timeout-ms' || arg.startsWith('--timeout-ms=')) {
+      const parsed = parseValue(args, index, '--timeout-ms');
+      const timeoutMs = Number(parsed.value);
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
+        throw new Error(`Invalid --timeout-ms value: ${parsed.value}`);
+      }
+      options.timeoutMs = timeoutMs;
       index = parsed.nextIndex;
       continue;
     }
@@ -170,7 +183,7 @@ async function readRecommendations(options) {
 
   const url = recommendationApiUrl(options.url);
   const response = await fetch(url, {
-    signal: AbortSignal.timeout(3000),
+    signal: AbortSignal.timeout(options.timeoutMs),
     headers: { accept: 'application/json' },
   });
   if (!response.ok) {
