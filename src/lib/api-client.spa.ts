@@ -17,6 +17,7 @@ import type { AuditFinding } from './audit/types';
 import type { AdoptionReceipt } from './adoption-receipts';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
+import type { HybridSearchResponse } from './hybrid-search';
 
 /** False in the SPA build — gates all server-only UI off. */
 export const SERVER_AVAILABLE = false;
@@ -436,6 +437,10 @@ export async function fetchDigest(date: string): Promise<DailyDigest> {
     },
     projects: [],
   };
+}
+
+export async function fetchHybridSearch(): Promise<HybridSearchResponse> {
+  return { mode: 'fts', semanticAvailable: false, results: [] };
 }
 
 export async function fetchAuditRun(): Promise<AuditRunResponse> {

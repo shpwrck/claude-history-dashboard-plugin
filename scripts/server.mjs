@@ -111,6 +111,9 @@ const CHD_CACHE_DIR =
 const { findAccessToken, buildUsagePayload } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'usage-gauge.ts')
 );
+const { hybridSearchEntries } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'hybrid-search.ts')
+);
 // Policy write-back core (#625) lives in src/lib/policy-writer.ts — the pure
 // validate/merge/dedupe steps + the backup/write contract for the one route
 // that mutates ~/.claude/settings.json. Imported dynamically (like the .ts
@@ -6603,6 +6606,7 @@ function enterpriseScopedDataPath(pathname) {
   return (
     pathname === '/api/dataset.json' ||
     pathname === '/api/recommendations.json' ||
+    pathname === '/api/search' ||
     pathname === '/api/digest' ||
     pathname === '/api/live' ||
     pathname === '/sessions-manifest.json' ||
@@ -7403,6 +7407,44 @@ const server = createServer(async (req, res) => {
       res.setHeader('X-Source', 'live');
       res.setHeader('Cache-Control', 'no-store');
       return sendJson(res, 200, digest);
+    }
+
+    if (pathname === '/api/search') {
+      if (req.method !== 'GET') {
+        return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
+      }
+      const url = new URL(req.url, 'http://localhost');
+      const q = url.searchParams.get('q') || '';
+      const project = url.searchParams.get('project') || undefined;
+      const limit = parseBoundedSearchInt(url.searchParams, 'limit', 100, 1, 100);
+      if (!q.trim()) {
+        res.setHeader('Cache-Control', 'no-store');
+        return sendJson(res, 200, {
+          mode: 'hybrid',
+          semanticAvailable: true,
+          results: [],
+        });
+      }
+      const ingestState = enterpriseRequestDatasetState(req);
+      const ingestApi = await ingestState.apiPromise;
+      await refreshReviewEventsForIngest(ingestApi);
+      ingestApi.ingest();
+      const ds = ingestApi.assembleDataset();
+      const results = hybridSearchEntries(ds.entries || [], q, {
+        project,
+        limit,
+        semanticEnabled: true,
+      }).map((result) => ({
+        ...result,
+        entry: { ...result.entry, pastedContents: {} },
+      }));
+      res.setHeader('X-Source', 'live');
+      res.setHeader('Cache-Control', 'no-store');
+      return sendJson(res, 200, {
+        mode: 'hybrid',
+        semanticAvailable: true,
+        results,
+      });
     }
 
     if (pathname === '/api/recommendations.json') {

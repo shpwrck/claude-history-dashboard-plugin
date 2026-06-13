@@ -22,6 +22,7 @@ import type { AuditFinding } from './audit/types';
 import type { AdoptionReceipt } from './adoption-receipts';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
+import type { HybridSearchResponse } from './hybrid-search';
 import { parseHistoryJsonl } from './parse-history';
 
 /** True in the server build; the SPA stub exports `false`. */
@@ -730,6 +731,21 @@ export async function fetchDigest(date: string): Promise<DailyDigest> {
   });
   if (!res.ok) throw new Error(`Digest request failed (HTTP ${res.status})`);
   return (await res.json()) as DailyDigest;
+}
+
+export async function fetchHybridSearch(
+  searchQuery: string,
+  options: { project?: string; limit?: number; signal?: AbortSignal } = {}
+): Promise<HybridSearchResponse> {
+  const params = new URLSearchParams({ q: searchQuery });
+  if (options.project) params.set('project', options.project);
+  if (options.limit) params.set('limit', String(options.limit));
+  const res = await serverFetch(`/api/search?${params.toString()}`, {
+    headers: { Accept: 'application/json' },
+    signal: options.signal,
+  });
+  if (!res.ok) throw new Error(`Search request failed (HTTP ${res.status})`);
+  return (await res.json()) as HybridSearchResponse;
 }
 
 /** Run opt-in tier-3 judge/audit checks. Never called on dataset load. */
