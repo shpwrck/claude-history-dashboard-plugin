@@ -105,6 +105,22 @@ describe('computeSessionScorecard', () => {
     expect(scorecard.axes.every((axis) => axis.score >= 70)).toBe(true);
     expect(scorecard.axes.every((axis) => axis.evidence.length > 0)).toBe(true);
     expect(scorecard.axes.some((axis) => axis.confidence === 'high')).toBe(true);
+    expect(scorecardAxis(scorecard, 'security')).toMatchObject({
+      score: 100,
+      confidence: 'high',
+    });
+    expect(scorecardAxis(scorecard, 'portability')).toMatchObject({
+      score: 100,
+      confidence: 'high',
+    });
+    expect(scorecardAxis(scorecard, 'reliability')).toMatchObject({
+      score: 100,
+      confidence: 'high',
+    });
+    expect(scorecardAxis(scorecard, 'focus')).toMatchObject({
+      score: 100,
+      confidence: 'high',
+    });
   });
 
   it('scores proxy-anchored Outcome from deterministic session signals', () => {
@@ -232,12 +248,42 @@ describe('computeSessionScorecard', () => {
     );
   });
 
+  it('pulls medium-confidence floor-at-100 axes toward neutral', () => {
+    const toolsOnly = computeSessionScorecard({
+      sessionId: 'sess-1',
+      toolData: toolData([toolCall('Read')]),
+    });
+    const apiOnly = computeSessionScorecard({
+      sessionId: 'sess-1',
+      apiErrors: [
+        { sessionId: 'sess-1', timestamp: baseTime, summary: 'overloaded' },
+      ],
+    });
+
+    expect(scorecardAxis(toolsOnly, 'security')).toMatchObject({
+      score: 70,
+      confidence: 'medium',
+    });
+    expect(scorecardAxis(toolsOnly, 'portability')).toMatchObject({
+      score: 70,
+      confidence: 'medium',
+    });
+    expect(scorecardAxis(toolsOnly, 'focus')).toMatchObject({
+      score: 70,
+      confidence: 'medium',
+    });
+    expect(scorecardAxis(apiOnly, 'reliability')).toMatchObject({
+      score: 66,
+      confidence: 'medium',
+    });
+  });
+
   it('keeps partial-data sessions renderable with low-confidence evidence', () => {
     const scorecard = computeSessionScorecard({ sessionId: 'partial' });
 
     expect(scorecard.axes).toHaveLength(SCORECARD_AXIS_IDS.length);
     expect(scorecard.axes.every((axis) => axis.confidence === 'low')).toBe(true);
     expect(scorecard.axes.every((axis) => axis.evidence[0].includes('No '))).toBe(true);
-    expect(scorecard.axes.every((axis) => axis.score >= 0 && axis.score <= 100)).toBe(true);
+    expect(scorecard.axes.every((axis) => axis.score === 50)).toBe(true);
   });
 });

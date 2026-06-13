@@ -65,6 +65,9 @@ const AXIS_LABELS: Record<ScorecardAxisId, string> = {
 };
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+const NEUTRAL_SCORE = 50;
+const MEDIUM_CONFIDENCE_SCORE_FACTOR = 0.4;
+const PORTABILITY_HIGH_CONFIDENCE_MIN_CALLS = 2;
 const CLAUDE_SPECIFIC_TOOLS = new Set([
   'Skill',
   'Task',
@@ -80,6 +83,13 @@ const CLAUDE_SPECIFIC_TOOLS = new Set([
 function clampScore(n: number): number {
   if (!isFinite(n)) return 0;
   return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function applyConfidenceFloor(score: number, confidence: ScoreConfidence): number {
+  const clamped = clampScore(score);
+  if (confidence === 'high' || clamped <= NEUTRAL_SCORE) return clamped;
+  const factor = confidence === 'medium' ? MEDIUM_CONFIDENCE_SCORE_FACTOR : 0;
+  return NEUTRAL_SCORE + (clamped - NEUTRAL_SCORE) * factor;
 }
 
 function axis(
@@ -347,7 +357,8 @@ function scoreSecurity(input: SessionScorecardInput): SessionScorecardAxis {
     evidence.push('No dangerous Bash command patterns detected.');
   }
 
-  return axis('security', score, permissionRows.length > 0 ? 'high' : 'medium', evidence);
+  const confidence = permissionRows.length > 0 ? 'high' : 'medium';
+  return axis('security', applyConfidenceFloor(score, confidence), confidence, evidence);
 }
 
 function scorePortability(input: SessionScorecardInput): SessionScorecardAxis {
@@ -388,7 +399,9 @@ function scorePortability(input: SessionScorecardInput): SessionScorecardAxis {
     evidence.push('Tool use stayed within common shell/file/search operations.');
   }
 
-  return axis('portability', score, 'medium', evidence);
+  const confidence =
+    toolData.calls.length >= PORTABILITY_HIGH_CONFIDENCE_MIN_CALLS ? 'high' : 'medium';
+  return axis('portability', applyConfidenceFloor(score, confidence), confidence, evidence);
 }
 
 function scoreReliability(input: SessionScorecardInput): SessionScorecardAxis {
@@ -422,7 +435,8 @@ function scoreReliability(input: SessionScorecardInput): SessionScorecardAxis {
     evidence.push('No tool or API errors observed.');
   }
 
-  return axis('reliability', score, toolData ? 'high' : 'medium', evidence);
+  const confidence = toolData ? 'high' : 'medium';
+  return axis('reliability', applyConfidenceFloor(score, confidence), confidence, evidence);
 }
 
 function scoreFocus(input: SessionScorecardInput): SessionScorecardAxis {
@@ -479,7 +493,8 @@ function scoreFocus(input: SessionScorecardInput): SessionScorecardAxis {
     evidence.push('No high-context, high-churn, or repeated-command scope signal observed.');
   }
 
-  return axis('focus', score, tokenData && toolData ? 'high' : 'medium', evidence);
+  const confidence = tokenData && toolData ? 'high' : 'medium';
+  return axis('focus', applyConfidenceFloor(score, confidence), confidence, evidence);
 }
 
 export function computeSessionScorecard(input: SessionScorecardInput): SessionScorecard {
