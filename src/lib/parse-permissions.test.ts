@@ -61,6 +61,7 @@ describe('detectDangerousCommands', () => {
     ]
     const found = detectDangerousCommands(data)
     expect(found.map((d) => d.pattern).sort()).toEqual(['curl pipe shell', 'git reset --hard', 'rm -rf'])
+    expect(found.every((d) => d.certainty === 'high')).toBe(true)
   })
 
   it('matches rm flag clusters (-fr) but rejects non-flag lookalikes (-frob)', () => {
@@ -68,6 +69,14 @@ describe('detectDangerousCommands', () => {
     const found = detectDangerousCommands(data)
     expect(found).toHaveLength(1)
     expect(found[0].command).toBe('rm -fr build')
+    expect(found[0].certainty).toBe('high')
+  })
+
+  it('marks ambiguous heuristic matches with medium certainty', () => {
+    const data = [session('s', [call('Bash', 'dd if=input.img of=copy.img bs=1m')])]
+    const found = detectDangerousCommands(data)
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatchObject({ pattern: 'dd if=', certainty: 'medium' })
   })
 
   it('records only the first matching pattern per command', () => {
@@ -94,6 +103,7 @@ describe('detectDangerousCommands', () => {
         toolUseId: 'u',
         command: 'rm -rf build',
         pattern: 'rm -rf',
+        certainty: 'high',
       },
     ])
   })
@@ -107,8 +117,8 @@ describe('detectDangerousCommands', () => {
 describe('computeSafetyScores', () => {
   it('tallies dangerous counts per session and flags bypass mode', () => {
     const dangerous = [
-      { sessionId: 's1', timestamp: 't', toolUseId: 'u', command: 'rm -rf x', pattern: 'rm -rf' },
-      { sessionId: 's1', timestamp: 't', toolUseId: 'u2', command: 'dd if=/dev/zero', pattern: 'dd if=' },
+      { sessionId: 's1', timestamp: 't', toolUseId: 'u', command: 'rm -rf x', pattern: 'rm -rf', certainty: 'high' },
+      { sessionId: 's1', timestamp: 't', toolUseId: 'u2', command: 'dd if=/dev/zero', pattern: 'dd if=', certainty: 'medium' },
     ]
     const rows = [
       { mode: 'bypassPermissions', sessionId: 's1' },

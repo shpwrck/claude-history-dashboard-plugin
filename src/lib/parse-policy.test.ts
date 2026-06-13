@@ -12,6 +12,7 @@ const danger = (pattern: string, sessionId = 's1'): DangerousCommand => ({
   toolUseId: 'u',
   command: 'x',
   pattern,
+  certainty: 'high',
 });
 
 const bashFriction: ToolPromptFriction = {

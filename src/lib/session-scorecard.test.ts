@@ -7,6 +7,7 @@ import type {
 import type { ApiErrorEvent } from './parse-errors';
 import type { ToolCall, ToolUsageData } from './parse-tools';
 import type { SessionTimeline } from './parse-timeline';
+import type { RuntimeEvents } from './parse-runtime-events';
 import {
   SCORECARD_AXIS_IDS,
   computeSessionScorecard,
@@ -72,6 +73,23 @@ function timeline(partial: Partial<SessionTimeline> = {}): SessionTimeline {
       { timestamp: '2026-01-01T00:06:00.000Z', kind: 'assistant', summary: 'done' },
     ],
     ...partial,
+  };
+}
+
+function runtimeEvents(stopTimestamps: string[]): RuntimeEvents {
+  return {
+    sessionId: 'sess-1',
+    turns: [],
+    stopHooks: stopTimestamps.map((timestamp) => ({
+      sessionId: 'sess-1',
+      timestamp,
+      hookCount: 1,
+      totalDurationMs: 0,
+      hadErrors: false,
+      preventedContinuation: false,
+    })),
+    awaySummaries: [],
+    scheduledFires: [],
   };
 }
 
@@ -246,6 +264,76 @@ describe('computeSessionScorecard', () => {
     expect(scorecardAxis(scorecard, 'security').evidence.join(' ')).toContain(
       'dangerous command'
     );
+  });
+
+  it('keeps explicit dangerous-command penalties high confidence with permission data', () => {
+    const scorecard = computeSessionScorecard({
+      sessionId: 'sess-1',
+      tokenData: tokenData(),
+      toolData: toolData([
+        toolCall('Bash', {
+          input: { command: 'rm -rf build' },
+        }),
+      ]),
+      permissionRows: [{ sessionId: 'sess-1', mode: 'default' }],
+    });
+
+    expect(scorecardAxis(scorecard, 'security')).toMatchObject({
+      score: 70,
+      confidence: 'high',
+    });
+  });
+
+  it('lowers security confidence for ambiguous dangerous-command matches', () => {
+    const scorecard = computeSessionScorecard({
+      sessionId: 'sess-1',
+      tokenData: tokenData(),
+      toolData: toolData([
+        toolCall('Bash', {
+          input: { command: 'dd if=input.img of=copy.img bs=1m' },
+        }),
+      ]),
+      permissionRows: [{ sessionId: 'sess-1', mode: 'default' }],
+    });
+    const security = scorecardAxis(scorecard, 'security');
+
+    expect(security.confidence).toBe('medium');
+    expect(security.score).toBe(66);
+    expect(security.evidence.join(' ')).toContain('ambiguous dangerous command');
+  });
+
+  it('scores multi-task stop-hook sessions lower on focus than single-task sessions', () => {
+    const sameContext = tokenData({
+      messageCount: 3,
+      entries: [
+        tokenEntry({ timestamp: '2026-01-01T00:00:00.000Z' }),
+        tokenEntry({ timestamp: '2026-01-01T00:10:00.000Z' }),
+        tokenEntry({ timestamp: '2026-01-01T00:20:00.000Z' }),
+      ],
+    });
+    const baseInput = {
+      sessionId: 'sess-1',
+      tokenData: sameContext,
+      toolData: toolData(),
+      timeline: timeline(),
+    };
+    const singleTask = computeSessionScorecard({
+      ...baseInput,
+      runtimeEvents: runtimeEvents(['2026-01-01T00:30:00.000Z']),
+    });
+    const multiTask = computeSessionScorecard({
+      ...baseInput,
+      runtimeEvents: runtimeEvents([
+        '2026-01-01T00:05:00.000Z',
+        '2026-01-01T00:15:00.000Z',
+        '2026-01-01T00:25:00.000Z',
+      ]),
+    });
+    const singleFocus = scorecardAxis(singleTask, 'focus');
+    const multiFocus = scorecardAxis(multiTask, 'focus');
+
+    expect(multiFocus.score).toBeLessThan(singleFocus.score);
+    expect(multiFocus.evidence.join(' ')).toContain('task span');
   });
 
   it('pulls medium-confidence floor-at-100 axes toward neutral', () => {

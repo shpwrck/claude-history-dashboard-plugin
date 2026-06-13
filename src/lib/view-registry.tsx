@@ -647,6 +647,7 @@ export const VIEW_RENDERERS: Partial<
       tokenData={d.tokenData}
       toolData={d.toolData}
       timelines={d.timelines}
+      runtimeEvents={d.runtimeEvents}
       apiErrors={d.apiErrors}
       focusSessionId={n.focusSessionId}
       focusEvidenceRef={n.focusEvidenceRef}
@@ -808,6 +809,7 @@ export const VIEW_RENDERERS: Partial<
       timelines={d.timelines}
       tokenData={d.tokenData}
       toolData={d.toolData}
+      runtimeEvents={d.runtimeEvents}
       apiErrors={d.apiErrors}
       sessions={d.sessions}
       activeFilter={filter}

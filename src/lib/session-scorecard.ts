@@ -2,6 +2,10 @@ import type { AssistantFeatures, SessionTokenData } from '../types';
 import type { ApiErrorEvent } from './parse-errors';
 import type { ToolUsageData } from './parse-tools';
 import type { SessionTimeline } from './parse-timeline';
+import {
+  aggregatePerTaskCost,
+  type RuntimeEvents,
+} from './parse-runtime-events';
 import { estimateCost } from './parse-sessions';
 import {
   computeSessionOutcomes,
@@ -45,6 +49,7 @@ export interface SessionScorecardInput {
   tokenData?: SessionTokenData;
   toolData?: ToolUsageData;
   timeline?: SessionTimeline;
+  runtimeEvents?: RuntimeEvents;
   apiErrors?: ApiErrorEvent[];
   permissionRows?: { mode: string; sessionId: string }[];
   assistantFeatures?: AssistantFeatures;
@@ -179,6 +184,11 @@ function repeatedCommandCount(toolData?: ToolUsageData): number {
     if (count > 1) repeats += count - 1;
   }
   return repeats;
+}
+
+function taskSpanCount(input: SessionScorecardInput): number {
+  if (!input.runtimeEvents || !input.tokenData) return 0;
+  return aggregatePerTaskCost([input.runtimeEvents], [input.tokenData]).taskCount;
 }
 
 function scoreCost(input: SessionScorecardInput): SessionScorecardAxis {
@@ -334,6 +344,8 @@ function scoreSpeed(input: SessionScorecardInput): SessionScorecardAxis {
 function scoreSecurity(input: SessionScorecardInput): SessionScorecardAxis {
   const permissionRows = input.permissionRows?.filter((row) => row.sessionId === input.sessionId) ?? [];
   const dangerous = input.toolData ? detectDangerousCommands([input.toolData]) : [];
+  const highCertaintyDangerous = dangerous.filter((d) => d.certainty === 'high');
+  const ambiguousDangerous = dangerous.filter((d) => d.certainty === 'medium');
 
   if (!input.toolData && permissionRows.length === 0) {
     return axis('security', 50, 'low', ['No tool or permission data for this session.']);
@@ -350,14 +362,28 @@ function scoreSecurity(input: SessionScorecardInput): SessionScorecardAxis {
     evidence.push(`Permission modes observed: ${Array.from(modes).sort().join(', ')}.`);
   }
 
-  if (dangerous.length > 0) {
-    score -= Math.min(60, dangerous.length * 30);
-    evidence.push(`${dangerous.length} dangerous command pattern(s) detected.`);
-  } else if (input.toolData) {
+  if (highCertaintyDangerous.length > 0) {
+    score -= Math.min(60, highCertaintyDangerous.length * 30);
+    evidence.push(
+      `${highCertaintyDangerous.length} high-certainty dangerous command pattern(s) detected.`
+    );
+  }
+  if (ambiguousDangerous.length > 0) {
+    score -= Math.min(30, ambiguousDangerous.length * 10);
+    evidence.push(
+      `${ambiguousDangerous.length} ambiguous dangerous command pattern(s) detected.`
+    );
+  }
+  if (dangerous.length === 0 && input.toolData) {
     evidence.push('No dangerous Bash command patterns detected.');
   }
 
-  const confidence = permissionRows.length > 0 ? 'high' : 'medium';
+  const confidence: ScoreConfidence =
+    ambiguousDangerous.length > 0
+      ? 'medium'
+      : permissionRows.length > 0
+        ? 'high'
+        : 'medium';
   return axis('security', applyConfidenceFloor(score, confidence), confidence, evidence);
 }
 
@@ -452,6 +478,7 @@ function scoreFocus(input: SessionScorecardInput): SessionScorecardAxis {
   const toolCalls = toolData?.calls.length ?? 0;
   const files = uniqueFileCount(toolData);
   const repeats = repeatedCommandCount(toolData);
+  const taskSpans = taskSpanCount(input);
 
   if (tokenData) {
     const peak = peakContextSize(tokenData);
@@ -488,6 +515,12 @@ function scoreFocus(input: SessionScorecardInput): SessionScorecardAxis {
   if (repeats > 0) {
     score -= Math.min(20, repeats * 4);
     evidence.push(`${repeats} repeated Bash command(s).`);
+  }
+  if (taskSpans > 1) {
+    score -= Math.min(24, (taskSpans - 1) * 6);
+    evidence.push(`${taskSpans} Stop-hook task span(s) split this session.`);
+  } else if (taskSpans === 1) {
+    evidence.push('1 Stop-hook task span observed.');
   }
   if (evidence.length === 0) {
     evidence.push('No high-context, high-churn, or repeated-command scope signal observed.');

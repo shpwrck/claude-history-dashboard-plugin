@@ -9,12 +9,15 @@ export interface PermissionModeStat {
   sessionCount: number;
 }
 
+export type DangerousCommandCertainty = 'high' | 'medium';
+
 export interface DangerousCommand {
   sessionId: string;
   timestamp: string;
   toolUseId: string;
   command: string; // truncated to 200 chars, newlines → " "
   pattern: string; // which pattern matched
+  certainty: DangerousCommandCertainty;
 }
 
 export type RiskyActionCategory =
@@ -74,6 +77,7 @@ function hasRmRfFlags(cmd: string): boolean {
 export const DANGEROUS_PATTERNS: {
   name: string;
   test: (cmd: string) => boolean;
+  certainty?: DangerousCommandCertainty;
 }[] = [
   { name: 'rm -rf', test: hasRmRfFlags },
   { name: 'git reset --hard', test: (c) => /\bgit\s+reset\s+--hard/i.test(c) },
@@ -82,7 +86,7 @@ export const DANGEROUS_PATTERNS: {
     test: (c) => /\bgit\s+push\s+(-f\b|--force\b)/i.test(c),
   },
   { name: 'chmod 777', test: (c) => /\bchmod\s+(-R\s+)?[0-7]*777\b/i.test(c) },
-  { name: 'dd if=', test: (c) => /\bdd\s+if=/i.test(c) },
+  { name: 'dd if=', test: (c) => /\bdd\s+if=/i.test(c), certainty: 'medium' },
   {
     name: 'fork bomb',
     test: (c) => /:\(\)\s*\{\s*:\s*\|\s*:&\s*\}\s*;:/.test(c),
@@ -95,6 +99,10 @@ export const DANGEROUS_PATTERNS: {
   },
   { name: 'npm publish', test: (c) => /\bnpm\s+publish\b/.test(c) },
 ];
+
+function dangerousPatternCertainty(pattern: string): DangerousCommandCertainty {
+  return DANGEROUS_PATTERNS.find((p) => p.name === pattern)?.certainty ?? 'high';
+}
 
 /**
  * Maps a detected dangerous-command pattern name (see DANGEROUS_PATTERNS) to the
@@ -676,12 +684,13 @@ export function detectDangerousCommands(
           toolUseId: call.toolUseId,
           command: truncateCommand(commandText ?? preview ?? ''),
           pattern: precomputedPattern,
+          certainty: dangerousPatternCertainty(precomputedPattern),
         });
         continue;
       }
 
       if (commandText === null) continue;
-      for (const { name, test } of DANGEROUS_PATTERNS) {
+      for (const { name, test, certainty } of DANGEROUS_PATTERNS) {
         if (!test(commandText)) continue;
         out.push({
           sessionId: session.sessionId,
@@ -689,6 +698,7 @@ export function detectDangerousCommands(
           toolUseId: call.toolUseId,
           command: truncateCommand(commandText),
           pattern: name,
+          certainty: certainty ?? 'high',
         });
         break; // only record first matching pattern per command
       }
