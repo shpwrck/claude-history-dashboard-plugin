@@ -76,7 +76,11 @@ function timeline(partial: Partial<SessionTimeline> = {}): SessionTimeline {
   };
 }
 
-function runtimeEvents(stopTimestamps: string[]): RuntimeEvents {
+function runtimeEvents(
+  stopTimestamps: string[],
+  errorTimestamps: string[] = []
+): RuntimeEvents {
+  const errored = new Set(errorTimestamps);
   return {
     sessionId: 'sess-1',
     turns: [],
@@ -85,7 +89,7 @@ function runtimeEvents(stopTimestamps: string[]): RuntimeEvents {
       timestamp,
       hookCount: 1,
       totalDurationMs: 0,
-      hadErrors: false,
+      hadErrors: errored.has(timestamp),
       preventedContinuation: false,
     })),
     awaySummaries: [],
@@ -239,6 +243,37 @@ describe('computeSessionScorecard', () => {
     expect(scorecardAxis(scorecard, 'cost').evidence.join(' ')).toContain('Peak context');
   });
 
+  it('applies a graduated cache-hit cost curve without a cliff at 50%', () => {
+    const costScoreForCache = (read: number, created: number) =>
+      scorecardAxis(
+        computeSessionScorecard({
+          sessionId: 'sess-1',
+          tokenData: tokenData({
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCacheReadTokens: read,
+            totalCacheCreationTokens: created,
+            entries: [
+              tokenEntry({
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadTokens: read,
+                cacheCreationTokens: created,
+              }),
+            ],
+          }),
+        }),
+        'cost'
+      ).score;
+
+    expect(costScoreForCache(0, 100)).toBeLessThan(costScoreForCache(25, 75));
+    expect(costScoreForCache(25, 75)).toBeLessThan(costScoreForCache(50, 50));
+    expect(costScoreForCache(50, 50)).toBeLessThan(costScoreForCache(75, 25));
+    expect(costScoreForCache(75, 25)).toBeLessThan(costScoreForCache(100, 0));
+    expect(costScoreForCache(49, 51)).toBe(costScoreForCache(50, 50));
+    expect(costScoreForCache(50, 50)).toBe(costScoreForCache(51, 49));
+  });
+
   it('penalizes error-heavy and dangerous sessions on reliability and security', () => {
     const apiErrors: ApiErrorEvent[] = [
       { sessionId: 'sess-1', timestamp: baseTime, summary: 'overloaded', retryAttempt: 2 },
@@ -264,6 +299,64 @@ describe('computeSessionScorecard', () => {
     expect(scorecardAxis(scorecard, 'security').evidence.join(' ')).toContain(
       'dangerous command'
     );
+  });
+
+  it('weights recovered API errors lighter than unrecovered API errors', () => {
+    const recovered = computeSessionScorecard({
+      sessionId: 'sess-1',
+      apiErrors: [
+        { sessionId: 'sess-1', timestamp: baseTime, summary: 'overloaded' },
+        {
+          sessionId: 'sess-1',
+          timestamp: '2026-01-01T00:01:00.000Z',
+          summary: 'overloaded',
+          retryAttempt: 2,
+          maxRetries: 3,
+        },
+      ],
+      timeline: timeline({
+        entries: [
+          { timestamp: baseTime, kind: 'user', summary: 'start' },
+          { timestamp: '2026-01-01T00:03:00.000Z', kind: 'assistant', summary: 'continued' },
+        ],
+      }),
+    });
+    const unrecovered = computeSessionScorecard({
+      sessionId: 'sess-1',
+      apiErrors: [
+        { sessionId: 'sess-1', timestamp: baseTime, summary: 'overloaded' },
+        {
+          sessionId: 'sess-1',
+          timestamp: '2026-01-01T00:01:00.000Z',
+          summary: 'overloaded',
+        },
+      ],
+    });
+    const recoveredReliability = scorecardAxis(recovered, 'reliability');
+    const unrecoveredReliability = scorecardAxis(unrecovered, 'reliability');
+
+    expect(recoveredReliability.score).toBeGreaterThan(unrecoveredReliability.score);
+    expect(recoveredReliability.evidence.join(' ')).toContain('recovered API error');
+    expect(unrecoveredReliability.evidence.join(' ')).toContain('unrecovered API error');
+  });
+
+  it('folds stop-hook errors into reliability', () => {
+    const cleanHooks = computeSessionScorecard({
+      sessionId: 'sess-1',
+      runtimeEvents: runtimeEvents(['2026-01-01T00:05:00.000Z']),
+    });
+    const erroredHooks = computeSessionScorecard({
+      sessionId: 'sess-1',
+      runtimeEvents: runtimeEvents(
+        ['2026-01-01T00:05:00.000Z'],
+        ['2026-01-01T00:05:00.000Z']
+      ),
+    });
+    const cleanReliability = scorecardAxis(cleanHooks, 'reliability');
+    const erroredReliability = scorecardAxis(erroredHooks, 'reliability');
+
+    expect(erroredReliability.score).toBeLessThan(cleanReliability.score);
+    expect(erroredReliability.evidence.join(' ')).toContain('stop-hook error');
   });
 
   it('keeps explicit dangerous-command penalties high confidence with permission data', () => {

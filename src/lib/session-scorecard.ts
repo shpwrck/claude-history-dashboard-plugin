@@ -72,6 +72,7 @@ const AXIS_LABELS: Record<ScorecardAxisId, string> = {
 const FILE_TOOLS = new Set(['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 const NEUTRAL_SCORE = 50;
 const MEDIUM_CONFIDENCE_SCORE_FACTOR = 0.4;
+const MAX_CACHE_HIT_PENALTY = 12;
 const PORTABILITY_HIGH_CONFIDENCE_MIN_CALLS = 2;
 const CLAUDE_SPECIFIC_TOOLS = new Set([
   'Skill',
@@ -191,6 +192,44 @@ function taskSpanCount(input: SessionScorecardInput): number {
   return aggregatePerTaskCost([input.runtimeEvents], [input.tokenData]).taskCount;
 }
 
+function cacheHitPenalty(hitRate: number): number {
+  if (!isFinite(hitRate)) return 0;
+  return Math.max(0, Math.min(MAX_CACHE_HIT_PENALTY, (1 - hitRate) * MAX_CACHE_HIT_PENALTY));
+}
+
+function eventAfter(timestamp: string, afterMs: number): boolean {
+  const t = Date.parse(timestamp);
+  return isFinite(t) && t > afterMs;
+}
+
+function hasSessionSignalAfter(input: SessionScorecardInput, timestamp: string): boolean {
+  const afterMs = Date.parse(timestamp);
+  if (!isFinite(afterMs)) return false;
+  if (input.timeline?.endTime && eventAfter(input.timeline.endTime, afterMs)) return true;
+  if (input.timeline?.entries.some((entry) => eventAfter(entry.timestamp, afterMs))) return true;
+  if (input.tokenData?.entries.some((entry) => eventAfter(entry.timestamp, afterMs))) return true;
+  if (input.toolData?.calls.some((call) => eventAfter(call.timestamp, afterMs))) return true;
+  const runtime = input.runtimeEvents;
+  if (!runtime) return false;
+  return (
+    runtime.turns.some((event) => eventAfter(event.timestamp, afterMs)) ||
+    runtime.stopHooks.some((event) => eventAfter(event.timestamp, afterMs)) ||
+    runtime.awaySummaries.some((event) => eventAfter(event.timestamp, afterMs)) ||
+    runtime.scheduledFires.some((event) => eventAfter(event.timestamp, afterMs))
+  );
+}
+
+function recoveredApiError(input: SessionScorecardInput, event: ApiErrorEvent): boolean {
+  if (
+    typeof event.retryAttempt === 'number' &&
+    typeof event.maxRetries === 'number' &&
+    event.retryAttempt < event.maxRetries
+  ) {
+    return true;
+  }
+  return hasSessionSignalAfter(input, event.timestamp);
+}
+
 function scoreCost(input: SessionScorecardInput): SessionScorecardAxis {
   const data = input.tokenData;
   if (!data || data.entries.length === 0) {
@@ -229,8 +268,9 @@ function scoreCost(input: SessionScorecardInput): SessionScorecardAxis {
   }
 
   if (cacheTotal > 0) {
+    const penalty = cacheHitPenalty(hitRate);
     evidence.push(`Cache hit rate ${(hitRate * 100).toFixed(0)}%.`);
-    if (hitRate < 0.5) score -= 10;
+    score -= penalty;
   }
 
   if (data.hasUnknownModel) {
@@ -433,8 +473,10 @@ function scorePortability(input: SessionScorecardInput): SessionScorecardAxis {
 function scoreReliability(input: SessionScorecardInput): SessionScorecardAxis {
   const toolData = input.toolData;
   const apiErrors = input.apiErrors ?? [];
+  const hookEvents = input.runtimeEvents?.stopHooks.length ?? 0;
+  const hookErrors = input.runtimeEvents?.stopHooks.filter((hook) => hook.hadErrors).length ?? 0;
 
-  if (!toolData && apiErrors.length === 0) {
+  if (!toolData && apiErrors.length === 0 && hookEvents === 0) {
     return axis('reliability', 50, 'low', ['No tool or API error data for this session.']);
   }
 
@@ -444,24 +486,35 @@ function scoreReliability(input: SessionScorecardInput): SessionScorecardAxis {
   const calls = toolData?.calls.length ?? 0;
   const errorRate = calls > 0 ? errors / calls : 0;
   const retryEvents = apiErrors.filter((event) => (event.retryAttempt ?? 0) > 1).length;
+  const recoveredErrors = apiErrors.filter((event) => recoveredApiError(input, event)).length;
+  const unrecoveredErrors = apiErrors.length - recoveredErrors;
 
   if (errors > 0) {
     score -= Math.min(45, Math.round(errorRate * 100));
     evidence.push(`${errors}/${calls} tool call(s) errored.`);
   }
-  if (apiErrors.length > 0) {
-    score -= Math.min(40, apiErrors.length * 10);
-    evidence.push(`${apiErrors.length} API error event(s).`);
+  if (unrecoveredErrors > 0) {
+    score -= Math.min(40, unrecoveredErrors * 10);
+    evidence.push(`${unrecoveredErrors} unrecovered API error event(s).`);
+  }
+  if (recoveredErrors > 0) {
+    score -= Math.min(20, recoveredErrors * 4);
+    evidence.push(`${recoveredErrors} recovered API error event(s).`);
   }
   if (retryEvents > 0) {
-    score -= Math.min(15, retryEvents * 5);
-    evidence.push(`${retryEvents} retry/backoff event(s).`);
+    evidence.push(`${retryEvents} retry/backoff event(s) observed.`);
+  }
+  if (hookErrors > 0) {
+    score -= Math.min(24, hookErrors * 8);
+    evidence.push(`${hookErrors} stop-hook error event(s).`);
+  } else if (hookEvents > 0) {
+    evidence.push('No stop-hook errors observed.');
   }
   if (evidence.length === 0) {
     evidence.push('No tool or API errors observed.');
   }
 
-  const confidence = toolData ? 'high' : 'medium';
+  const confidence = toolData || input.runtimeEvents ? 'high' : 'medium';
   return axis('reliability', applyConfidenceFloor(score, confidence), confidence, evidence);
 }
 
