@@ -99,6 +99,12 @@ export function parseJsonl(text: string): RawSessionEntry[] {
   return out;
 }
 
+export function parseDateMs(value: string | null | undefined): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 /**
  * Coerce a raw `message` value into a `ParsedMessage`.
  *

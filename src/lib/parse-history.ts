@@ -6,16 +6,22 @@ import type {
   RepoGroup,
 } from '../types';
 import { shortenProject } from './format';
+import { parseDateMs } from './parse-utils';
 
 // Re-exported for backward compatibility; the canonical home is `./format`.
 export { shortenProject };
 
 export function parseHistoryJsonl(text: string): HistoryEntry[] {
-  return text
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as HistoryEntry);
+  const out: HistoryEntry[] = [];
+  for (const line of text.trim().split('\n')) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as HistoryEntry);
+    } catch {
+      /* skip unparseable lines */
+    }
+  }
+  return out;
 }
 
 /** Flatten a transcript `message.content` (string or text-block array) to text. */
@@ -80,7 +86,7 @@ export function deriveEntriesFromTranscript(
     entries.push({
       display: display.length > 2000 ? display.slice(0, 2000) : display,
       pastedContents: {},
-      timestamp: o.timestamp ? Date.parse(o.timestamp) : 0,
+      timestamp: parseDateMs(o.timestamp),
       project: o.cwd || fallbackProject || '',
       sessionId,
       ...(title ? { title } : {}),

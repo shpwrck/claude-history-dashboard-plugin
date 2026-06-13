@@ -270,7 +270,7 @@ const REVIEW_EVENTS_CACHE =
 // a per-process CSRF token, and optionally exact public origins configured in
 // DASHBOARD_ALLOWED_ORIGINS.
 const HOST = process.env.HOST || '127.0.0.1';
-const PORT = Number(process.env.PORT || 5173);
+const PORT = parsePortEnv('PORT', 5173);
 const DASHBOARD_REQUEST_TIMEOUT_MS = parseBoundedTimeoutMs(
   'DASHBOARD_REQUEST_TIMEOUT_MS',
   120_000,
@@ -735,6 +735,23 @@ function parseNonNegativeIntEnv(name, fallback) {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(0, Math.floor(parsed));
+}
+
+function parsePortEnv(name, fallback) {
+  const raw = String(process.env[name] || '').trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > 65_535
+  ) {
+    throw new Error(
+      `${name} must be an integer between 1 and 65535; got ${JSON.stringify(raw)}`
+    );
+  }
+  return parsed;
 }
 
 function parseBoundedTimeoutMs(name, fallback, min, max) {
@@ -1965,6 +1982,27 @@ function pruneRecommendationsCache(state) {
   }
 }
 
+function pruneRecommendationsBuilds(state) {
+  if (
+    state.recommendationsBuilds.size <=
+    DASHBOARD_RECOMMENDATIONS_CACHE_MAX_ENTRIES
+  ) {
+    return;
+  }
+  const entries = [...state.recommendationsBuilds.entries()].sort(
+    (a, b) => (a[1].lastAccess || 0) - (b[1].lastAccess || 0)
+  );
+  for (const [key] of entries) {
+    if (
+      state.recommendationsBuilds.size <=
+      DASHBOARD_RECOMMENDATIONS_CACHE_MAX_ENTRIES
+    ) {
+      return;
+    }
+    state.recommendationsBuilds.delete(key);
+  }
+}
+
 async function buildRecommendationsCacheEntry(
   state,
   api,
@@ -2042,8 +2080,11 @@ async function recommendationsResponseCache(
         state.recommendationsBuilds.delete(key);
       }
     });
-    build = { sourceSig, promise };
+    build = { sourceSig, promise, lastAccess: Date.now() };
     state.recommendationsBuilds.set(key, build);
+    pruneRecommendationsBuilds(state);
+  } else {
+    build.lastAccess = Date.now();
   }
   const entry = await build.promise;
   return { entry, cache: cached ? 'refresh' : 'miss' };
@@ -4520,13 +4561,23 @@ const {
   error: ENTERPRISE_JWT_CONFIG_ERROR,
   weakKeyCount: ENTERPRISE_JWT_WEAK_KEY_COUNT,
 } = loadEnterpriseJwtConfig();
+const ENTERPRISE_JWT_SIGNING_CONFIGURED =
+  ENTERPRISE_JWT_KEYS.length > 0 || Boolean(ENTERPRISE_JWKS_URL);
+const ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR =
+  ENTERPRISE_JWT_SIGNING_CONFIGURED &&
+  !ENTERPRISE_JWT_ISSUER &&
+  !ENTERPRISE_JWT_ISSUER_CONFIG_ERROR
+    ? 'DASHBOARD_AUTH_JWT_ISSUER is required when enterprise JWT auth is configured'
+    : null;
 const ENTERPRISE_JWT_CONFIGURED =
-  (ENTERPRISE_JWT_KEYS.length > 0 || Boolean(ENTERPRISE_JWKS_URL)) &&
-  !ENTERPRISE_JWT_CONFIG_ERROR;
+  ENTERPRISE_JWT_SIGNING_CONFIGURED &&
+  !ENTERPRISE_JWT_CONFIG_ERROR &&
+  !ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR;
 const ENTERPRISE_AUTH_CONFIG_ERROR =
   [
     ENTERPRISE_TOKEN_CONFIG_ERROR,
     ENTERPRISE_JWT_CONFIG_ERROR,
+    ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR,
     ENTERPRISE_SESSION_EPOCH_CONFIG.error,
     ENTERPRISE_SESSION_SECRET_CONFIG.error,
   ]
@@ -4544,6 +4595,9 @@ const ENTERPRISE_AUTH_ON =
 const ENTERPRISE_AUTH_CONFIGURED =
   (ENTERPRISE_PRINCIPALS.length > 0 || ENTERPRISE_JWT_CONFIGURED) &&
   !ENTERPRISE_AUTH_CONFIG_ERROR;
+if (ENTERPRISE_AUTH_ON && ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR) {
+  throw new Error(`[enterprise-auth] ${ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR}`);
+}
 let enterpriseAuditWriteQueue = Promise.resolve();
 const enterpriseRateLimitBuckets = new Map();
 let enterpriseRateLimitNextPruneAt = 0;

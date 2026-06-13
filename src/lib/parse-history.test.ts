@@ -34,6 +34,18 @@ describe('parseHistoryJsonl', () => {
     const text = `\n${JSON.stringify(entry({}))}\n`
     expect(parseHistoryJsonl(text)).toHaveLength(1)
   })
+
+  it('skips malformed lines instead of aborting history ingest', () => {
+    const text = [
+      JSON.stringify(entry({ sessionId: 'before' })),
+      '{"sessionId":',
+      JSON.stringify(entry({ sessionId: 'after' })),
+    ].join('\n')
+    expect(parseHistoryJsonl(text).map((e) => e.sessionId)).toEqual([
+      'before',
+      'after',
+    ])
+  })
 })
 
 describe('groupBySessions', () => {
@@ -169,6 +181,17 @@ describe('deriveEntriesFromTranscript', () => {
     const entries = deriveEntriesFromTranscript(text, 'sdk-sess', '/home/u/proj')
     expect(entries).toHaveLength(1)
     expect(entries[0].project).toBe('/home/u/proj')
+  })
+
+  it('degrades malformed transcript timestamps to zero', () => {
+    const text = line({
+      type: 'user',
+      timestamp: 'not-an-iso-date',
+      message: { role: 'user', content: 'bad clock' },
+    })
+    const entries = deriveEntriesFromTranscript(text, 's', '/p')
+    expect(entries).toHaveLength(1)
+    expect(entries[0].timestamp).toBe(0)
   })
 
   it('flattens text-block array content and attaches the title when given', () => {

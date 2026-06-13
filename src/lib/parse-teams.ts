@@ -21,6 +21,7 @@ import {
   readDirentsBoundedSync,
   remainingEntryCapacity,
 } from './bounded-fs';
+import { parseDateMs } from './parse-utils';
 
 // ─── Wire shapes ────────────────────────────────────────────────────────────
 
@@ -321,7 +322,7 @@ export function analyzeTeams(
 
       const dropped = agentAssigns.filter((a) => {
         if (a.read) return false;
-        const ts = Date.parse(a.timestamp) || 0;
+        const ts = parseDateMs(a.timestamp);
         const ageMin = (now - ts) / 60_000;
         return ageMin >= graceMinutes;
       });
@@ -332,7 +333,7 @@ export function analyzeTeams(
       }
 
       for (const d of dropped) {
-        const ts = Date.parse(d.timestamp) || 0;
+        const ts = parseDateMs(d.timestamp);
         droppedAssignments.push({
           agent,
           taskId: d.payload.taskId,
