@@ -120,6 +120,13 @@ function uniqueProjectsRoots(roots) {
   return out;
 }
 
+const PROJECT_CONFIG_ROOTS = splitPathList(
+  process.env.DASHBOARD_PROJECT_CONFIG_ROOTS
+)
+  .filter((root) => root.startsWith('/'))
+  .map((root) => resolve(root))
+  .sort();
+
 export const PROJECT_ROOTS = uniqueProjectsRoots([
   PROJECTS,
   ...(
@@ -1315,6 +1322,32 @@ function projectRootsFrom(entries, tokenData) {
   return [...roots].sort();
 }
 
+function claudeJsonProjectRoots() {
+  let raw;
+  try {
+    raw = readArtifactJsonCappedSync(CLAUDE_JSON);
+  } catch {
+    return [];
+  }
+  const projects = raw?.projects && typeof raw.projects === 'object'
+    ? raw.projects
+    : {};
+  return Object.keys(projects)
+    .filter((root) => typeof root === 'string' && root.startsWith('/'))
+    .sort();
+}
+
+function liveConfigProjectRoots(extraRoots = []) {
+  if (SCOPED_INGEST) return [];
+  return [
+    ...new Set([
+      ...PROJECT_CONFIG_ROOTS,
+      ...extraRoots,
+      ...claudeJsonProjectRoots(),
+    ]),
+  ].sort();
+}
+
 function readConfigSource(scope, path) {
   try {
     const content = readTextFileCappedSync(path, CONFIG_FILE_MAX_BYTES);
@@ -1352,6 +1385,19 @@ function hashRepoConfigFiles(roots, hash) {
     }
     for (const name of ['settings.json', 'settings.local.json']) {
       hashFileSig(join(root, '.claude', name), hash);
+    }
+  }
+}
+
+function hashProjectLiveConfigFiles(roots, hash) {
+  for (const root of roots) {
+    hashFileSig(join(root, 'CLAUDE.md'), hash);
+    for (const name of ['settings.json', 'settings.local.json']) {
+      hashFileSig(join(root, '.claude', name), hash);
+    }
+    for (const name of ['skills', 'agents', 'commands']) {
+      hash.update(`${root}/.claude/${name}\n`);
+      hashTree(join(root, '.claude', name), '', hash);
     }
   }
 }
@@ -1461,7 +1507,7 @@ export function sourceSignature() {
   }
   parts.push(`review-events:${reviewEventsSourceSignature()}`);
   if (!SCOPED_INGEST) {
-    for (const root of repoMapArtifactRoots()) {
+    for (const root of liveConfigProjectRoots(repoMapArtifactRoots())) {
       for (const name of ['AGENTS.md', 'CLAUDE.md', 'REFERENCES.md']) {
         const f = join(root, name);
         try {
@@ -1478,6 +1524,14 @@ export function sourceSignature() {
           parts.push(`${f}:${Math.floor(s.mtimeMs)}:${s.size}`);
         } catch {
           parts.push(`${f}:0:0`);
+        }
+      }
+      for (const name of ['skills', 'agents', 'commands']) {
+        const d = join(root, '.claude', name);
+        try {
+          parts.push(`${d}:${Math.floor(statSync(d).mtimeMs)}`);
+        } catch {
+          parts.push(`${d}:0`);
         }
       }
     }
@@ -1594,6 +1648,8 @@ export function ingest() {
   if (!SCOPED_INGEST) {
     hash.update('repo-map-config\n');
     hashRepoConfigFiles(repoMapArtifactRoots(), hash);
+    hash.update('project-live-config\n');
+    hashProjectLiveConfigFiles(liveConfigProjectRoots(repoMapArtifactRoots()), hash);
   }
   // Completed model-eval result artifacts (#1242): a new/changed artifact must
   // invalidate the compressed dataset cache or the summary is served stale
@@ -1924,11 +1980,14 @@ export function assembleDataset() {
     runtimeEvents,
     tokenData,
   });
+  const repoMapRoots = repoMapArtifactRoots();
+  const liveConfigRoots = liveConfigProjectRoots(repoMapRoots);
 
   const liveConfig = assembleLiveConfig({
     claudeDir: CLAUDE,
     homeDir: CLAUDE_HOME,
     scoped: SCOPED_INGEST,
+    projectRoots: liveConfigRoots,
   });
 
   // Shadow-calls experiment ledger (epic #513). Optional file; absent/malformed

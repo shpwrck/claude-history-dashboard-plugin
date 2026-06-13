@@ -468,9 +468,10 @@ export interface LiveResource {
    *  directory name (e.g. `diagnose`); for plugins it's the registry id. */
   id: string;
   /** Where the resource lives: `user` = `~/.claude/*`; `project` = inside a
-   *  project's `.claude/*`. Phase 1 ships `user` scope only (the container
-   *  cannot reach project roots). */
+   *  project's `.claude/*`. */
   scope: 'user' | 'project';
+  /** Project root when `scope === 'project'`. */
+  projectPath?: string;
   /** Absolute path the resource was discovered at — useful for tracing in the
    *  UI ("global skill" vs "project skill"). */
   path: string;
@@ -562,18 +563,22 @@ export interface LiveConfig {
   claudeMd: {
     /** `~/.claude/CLAUDE.md` text when present. */
     global: string | null;
-    /** Per-project CLAUDE.md keyed by project path. Phase 1 ships `{}` — the
-     *  container cannot reach project roots without a mount change. Reserved
-     *  here so consumers don't have to re-shape when phase 2 fills it. */
+    /** Per-project `CLAUDE.md` keyed by project path. Populated only for
+     *  project roots readable by the server. */
     perProject: Record<string, string>;
   };
+  /** Merged project `.claude/settings*.json`, keyed by readable project root. */
+  projectSettings?: Record<string, LiveSettings>;
   plugins: LivePlugin[];
   mcpServers: LiveMcpServer[];
-  /** Locally-installed skills under `~/.claude/skills/<id>/SKILL.md`. */
+  /** Locally-installed skills under `~/.claude/skills/<id>/SKILL.md` and
+   *  readable project `<root>/.claude/skills/<id>/SKILL.md`. */
   skills: LiveResource[];
-  /** Locally-installed subagents under `~/.claude/agents/<id>.md`. */
+  /** Locally-installed subagents under `~/.claude/agents/<id>.md` and readable
+   *  project `<root>/.claude/agents/<id>.md`. */
   subagents: LiveResource[];
-  /** Locally-installed slash commands under `~/.claude/commands/<id>.md`. */
+  /** Locally-installed slash commands under `~/.claude/commands/<id>.md` and
+   *  readable project `<root>/.claude/commands/<id>.md`. */
   commands: LiveResource[];
 }
 

@@ -120,12 +120,13 @@ export interface HygieneInput {
   attribution: SessionAttribution[];
   /** Lightweight session metadata — we only need `sessionId` and a
    *  timestamp to anchor each attribution row in time. */
-  sessions: Array<{ sessionId: string; startTime: number }>;
+  sessions: Array<{ sessionId: string; startTime: number; project?: string }>;
   /** Override the clock (testability). Defaults to `Date.now()`. */
   now?: number;
 }
 
 interface SessionUsage {
+  project?: string;
   /** Session's anchoring timestamp, used to bucket invocations into the
    *  recency window. */
   startTime: number;
@@ -147,13 +148,14 @@ function buildSessionUsage(
   attribution: SessionAttribution[],
   sessions: HygieneInput['sessions']
 ): SessionUsage[] {
-  const sessionIndex = new Map(sessions.map((s) => [s.sessionId, s.startTime]));
+  const sessionIndex = new Map(sessions.map((s) => [s.sessionId, s]));
   const out: SessionUsage[] = [];
   for (const a of attribution) {
-    const start = sessionIndex.get(a.sessionId);
-    if (start == null) continue;
+    const session = sessionIndex.get(a.sessionId);
+    if (!session) continue;
     out.push({
-      startTime: start,
+      project: session.project,
+      startTime: session.startTime,
       agents: countMap(a.agents),
       skills: countMap(a.skills),
       // `?? {}`: attribution rows cached before #634 added this field won't carry
@@ -183,12 +185,14 @@ function summariseUsage(
   resourceId: string,
   usages: SessionUsage[],
   windowStart: number,
-  getCount: (u: SessionUsage, id: string) => number
+  getCount: (u: SessionUsage, id: string) => number,
+  project?: string
 ): { lastSeen: number | null; lifetimeCount: number; windowCount: number } {
   let lastSeen: number | null = null;
   let lifetimeCount = 0;
   let windowCount = 0;
   for (const u of usages) {
+    if (project && u.project !== project) continue;
     const n = getCount(u, resourceId);
     if (n <= 0) continue;
     lifetimeCount += n;
@@ -196,6 +200,12 @@ function summariseUsage(
     if (lastSeen == null || u.startTime > lastSeen) lastSeen = u.startTime;
   }
   return { lastSeen, lifetimeCount, windowCount };
+}
+
+function resourceScope(resource: { scope?: string; projectPath?: string }): HygieneScope {
+  return resource.scope === 'project'
+    ? { kind: 'project', project: resource.projectPath ?? '(unknown)' }
+    : { kind: 'global' };
 }
 
 /**
@@ -365,21 +375,21 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
 
   const out: HygieneFinding[] = [];
 
-  // Skills (global only in v1 — project skills under <project>/.claude/skills/
-  // aren't reachable from the container; phase-2 follow-up).
   for (const skill of lc.skills) {
+    const scope = resourceScope(skill);
     const summary = summariseUsage(
       skill.id,
       usages,
       windowStart,
-      (u, id) => u.skills[id] ?? 0
+      (u, id) => u.skills[id] ?? 0,
+      scope.kind === 'project' ? scope.project : undefined
     );
     if (summary.windowCount > 0) continue;
     out.push(
       emitUnusedFinding({
         resourceType: 'skill',
         resourceId: skill.id,
-        scope: { kind: 'global' },
+        scope,
         summary,
         hedge,
       })
@@ -388,18 +398,20 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
 
   // Subagents — same logic as skills, different attribution map.
   for (const agent of lc.subagents) {
+    const scope = resourceScope(agent);
     const summary = summariseUsage(
       agent.id,
       usages,
       windowStart,
-      (u, id) => u.agents[id] ?? 0
+      (u, id) => u.agents[id] ?? 0,
+      scope.kind === 'project' ? scope.project : undefined
     );
     if (summary.windowCount > 0) continue;
     out.push(
       emitUnusedFinding({
         resourceType: 'subagent',
         resourceId: agent.id,
-        scope: { kind: 'global' },
+        scope,
         summary,
         hedge,
       })
@@ -410,18 +422,20 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
   // from the parsed `<command-name>` markers (parse-agents commands map), not a
   // native attribution field (#634). Lifts the v1 deferral noted above.
   for (const cmd of lc.commands) {
+    const scope = resourceScope(cmd);
     const summary = summariseUsage(
       cmd.id,
       usages,
       windowStart,
-      (u, id) => u.commands[id] ?? 0
+      (u, id) => u.commands[id] ?? 0,
+      scope.kind === 'project' ? scope.project : undefined
     );
     if (summary.windowCount > 0) continue;
     out.push(
       emitUnusedFinding({
         resourceType: 'command',
         resourceId: cmd.id,
-        scope: { kind: 'global' },
+        scope,
         summary,
         hedge,
       })

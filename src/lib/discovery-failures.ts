@@ -85,6 +85,8 @@ export interface DiscoveryFailure {
 /** Per-skill keyword set built from id + description. */
 interface SkillKeywords {
   id: string;
+  scope: LiveResource['scope'];
+  projectPath?: string;
   keywords: Set<string>;
 }
 
@@ -97,9 +99,34 @@ function buildSkillKeywords(skills: LiveResource[]): SkillKeywords[] {
     ]);
     // A skill with no usable keywords (e.g. an all-stopword id and no
     // description) can never match — skip it so it never produces noise.
-    if (keywords.size > 0) out.push({ id: s.id, keywords });
+    if (keywords.size > 0) {
+      out.push({
+        id: s.id,
+        scope: s.scope,
+        projectPath: s.projectPath,
+        keywords,
+      });
+    }
   }
   return out;
+}
+
+function sessionProjects(
+  sessions: Array<{ sessionId: string; project?: string }> | undefined
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const s of sessions ?? []) {
+    if (typeof s.project === 'string' && s.project) out.set(s.sessionId, s.project);
+  }
+  return out;
+}
+
+function skillAvailableInSession(
+  skill: SkillKeywords,
+  sessionProject: string | undefined
+): boolean {
+  if (skill.scope !== 'project') return true;
+  return Boolean(skill.projectPath && sessionProject === skill.projectPath);
 }
 
 /**
@@ -109,13 +136,17 @@ function buildSkillKeywords(skills: LiveResource[]): SkillKeywords[] {
  *   consumes).
  * @param skills installed custom skills (`liveConfig.skills`) carrying `id` and
  *   the optional `description` surfaced from SKILL.md frontmatter.
+ * @param sessions optional session metadata. Project-scoped skills are only
+ *   compared against sessions from the same project path.
  */
 export function detectDiscoveryFailures(
   toolData: ToolUsageData[],
-  skills: LiveResource[]
+  skills: LiveResource[],
+  sessions?: Array<{ sessionId: string; project?: string }>
 ): DiscoveryFailure[] {
   const skillKeywords = buildSkillKeywords(skills);
   if (skillKeywords.length === 0) return [];
+  const projectBySession = sessionProjects(sessions);
 
   // Aggregate per skill across sessions.
   const bySkill = new Map<
@@ -124,6 +155,7 @@ export function detectDiscoveryFailures(
   >();
 
   for (const session of toolData) {
+    const sessionProject = projectBySession.get(session.sessionId);
     // Skills actually invoked in this session — never flag these.
     const invoked = new Set<string>();
     // Identical Bash commands and their per-session repeat counts.
@@ -146,6 +178,7 @@ export function detectDiscoveryFailures(
       if (cmdTokens.size === 0) continue;
 
       for (const skill of skillKeywords) {
+        if (!skillAvailableInSession(skill, sessionProject)) continue;
         if (invoked.has(skill.id)) continue;
         const overlap: string[] = [];
         for (const t of cmdTokens) {

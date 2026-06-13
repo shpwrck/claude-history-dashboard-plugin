@@ -202,4 +202,83 @@ describe('assembleLiveConfig', () => {
       },
     ]);
   });
+
+  it('reads project-scoped Claude resources from configured project roots (#1063)', () => {
+    const projectRoot = join(root, 'repo-a');
+    mkdirSync(join(projectRoot, '.claude', 'skills', 'project-skill'), {
+      recursive: true,
+    });
+    mkdirSync(join(projectRoot, '.claude', 'agents'), { recursive: true });
+    mkdirSync(join(projectRoot, '.claude', 'commands'), { recursive: true });
+    writeFileSync(
+      join(root, '.claude.json'),
+      JSON.stringify({ projects: { [projectRoot]: {} } })
+    );
+    writeFileSync(join(projectRoot, 'CLAUDE.md'), '# Repo guidance\n');
+    writeFileSync(
+      join(projectRoot, '.claude', 'settings.json'),
+      JSON.stringify({ permissions: { allow: ['Bash(npm test:*)'] } })
+    );
+    writeFileSync(
+      join(projectRoot, '.claude', 'skills', 'project-skill', 'SKILL.md'),
+      '---\ndescription: Project-only test skill\n---\n'
+    );
+    writeFileSync(
+      join(projectRoot, '.claude', 'agents', 'project-agent.md'),
+      '# Project agent\n'
+    );
+    writeFileSync(
+      join(projectRoot, '.claude', 'commands', 'project-command.md'),
+      '# Project command\n'
+    );
+
+    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+
+    expect(liveConfig.claudeMd.perProject[projectRoot]).toBe('# Repo guidance\n');
+    expect(liveConfig.projectSettings?.[projectRoot]?.permissions).toEqual({
+      allow: ['Bash(npm test:*)'],
+    });
+    expect(liveConfig.skills).toContainEqual({
+      id: 'project-skill',
+      scope: 'project',
+      projectPath: projectRoot,
+      path: join(projectRoot, '.claude', 'skills', 'project-skill'),
+      description: 'Project-only test skill',
+    });
+    expect(liveConfig.subagents).toContainEqual({
+      id: 'project-agent',
+      scope: 'project',
+      projectPath: projectRoot,
+      path: join(projectRoot, '.claude', 'agents', 'project-agent.md'),
+    });
+    expect(liveConfig.commands).toContainEqual({
+      id: 'project-command',
+      scope: 'project',
+      projectPath: projectRoot,
+      path: join(projectRoot, '.claude', 'commands', 'project-command.md'),
+    });
+  });
+
+  it('does not read project roots while scoped ingest is active (#1063)', () => {
+    const projectRoot = join(root, 'repo-scoped');
+    mkdirSync(join(projectRoot, '.claude', 'commands'), { recursive: true });
+    writeFileSync(
+      join(root, '.claude.json'),
+      JSON.stringify({ projects: { [projectRoot]: {} } })
+    );
+    writeFileSync(
+      join(projectRoot, '.claude', 'commands', 'project-command.md'),
+      '# Project command\n'
+    );
+
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      scoped: true,
+    });
+
+    expect(liveConfig.commands).toEqual([]);
+    expect(liveConfig.claudeMd.perProject).toEqual({});
+    expect(liveConfig.projectSettings).toEqual({});
+  });
 });

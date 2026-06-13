@@ -15,7 +15,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { validateSettingsJson } from './config-hygiene';
 import { readDirentsBoundedSync } from './bounded-fs';
 
@@ -29,6 +29,7 @@ export interface LiveConfigPathOptions {
   claudeDir?: string;
   homeDir?: string;
   scoped?: boolean;
+  projectRoots?: string[];
   configFileMaxBytes?: number;
   configResourceMaxEntries?: number;
 }
@@ -44,6 +45,7 @@ interface LiveConfigPaths {
   pluginsRegistry: string;
   claudeJson: string;
   scoped: boolean;
+  projectRoots: string[];
   configFileMaxBytes: number;
   configResourceMaxEntries: number;
 }
@@ -133,11 +135,33 @@ function liveConfigPaths(opts: LiveConfigPathOptions = {}): LiveConfigPaths {
     // and enabledMcpjsonServers.
     claudeJson: join(homeDir, '.claude.json'),
     scoped: opts.scoped === true,
+    projectRoots: normalizeProjectRoots(opts.projectRoots ?? []),
     configFileMaxBytes: normalizedConfigFileMaxBytes(opts.configFileMaxBytes),
     configResourceMaxEntries: normalizedConfigResourceMaxEntries(
       opts.configResourceMaxEntries
     ),
   };
+}
+
+function normalizeProjectRoots(roots: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const root of roots) {
+    if (typeof root !== 'string' || !isAbsolute(root)) continue;
+    const normalized = resolve(root);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out.sort();
+}
+
+function projectRootsFromClaudeJson(claudeJson: Obj): string[] {
+  const projects =
+    claudeJson && typeof claudeJson.projects === 'object'
+      ? (claudeJson.projects as Obj)
+      : {};
+  return normalizeProjectRoots(Object.keys(projects));
 }
 
 function withinClaudeDir(paths: LiveConfigPaths, path: string): boolean {
@@ -281,8 +305,9 @@ function readSkillDescription(dirPath: string, maxBytes: number): string {
 
 interface Resource {
   id: string;
-  scope: 'user';
+  scope: 'user' | 'project';
   path: string;
+  projectPath?: string;
   description?: string;
 }
 
@@ -290,7 +315,9 @@ function listResources(
   root: string,
   kind: 'directory' | 'file',
   maxBytes: number,
-  maxEntries: number
+  maxEntries: number,
+  scope: Resource['scope'] = 'user',
+  projectPath?: string
 ): Resource[] {
   if (!existsSync(root)) return [];
   const entries = readDirentsBoundedSync(root, maxEntries)
@@ -310,16 +337,42 @@ function listResources(
       const description = readSkillDescription(p, maxBytes);
       out.push(
         description
-          ? { id: name, scope: 'user', path: p, description }
-          : { id: name, scope: 'user', path: p }
+          ? { id: name, scope, path: p, ...(projectPath ? { projectPath } : {}), description }
+          : { id: name, scope, path: p, ...(projectPath ? { projectPath } : {}) }
       );
     } else if (kind === 'file' && st.isFile() && name.endsWith('.md')) {
       out.push({
         id: name.replace(/\.md$/, ''),
-        scope: 'user',
+        scope,
         path: p,
+        ...(projectPath ? { projectPath } : {}),
       });
     }
+  }
+  return out;
+}
+
+function listProjectResources(
+  projectRoots: string[],
+  dirName: 'skills' | 'agents' | 'commands',
+  kind: 'directory' | 'file',
+  maxBytes: number,
+  maxEntries: number
+): Resource[] {
+  const out: Resource[] = [];
+  for (const projectRoot of projectRoots) {
+    if (out.length >= maxEntries) break;
+    const remaining = maxEntries - out.length;
+    out.push(
+      ...listResources(
+        join(projectRoot, '.claude', dirName),
+        kind,
+        maxBytes,
+        remaining,
+        'project',
+        projectRoot
+      )
+    );
   }
   return out;
 }
@@ -415,8 +468,7 @@ interface McpServerEntry {
   enabledByProjects: string[];
 }
 
-function readMcpServers(paths: LiveConfigPaths): McpServerEntry[] {
-  const claudeJson = asObj(readJsonOrNull(paths.claudeJson, paths.configFileMaxBytes));
+function readMcpServers(paths: LiveConfigPaths, claudeJson: Obj): McpServerEntry[] {
   const out: McpServerEntry[] = [];
   const globalServers =
     claudeJson && typeof claudeJson.mcpServers === 'object'
@@ -467,11 +519,48 @@ function readMcpServers(paths: LiveConfigPaths): McpServerEntry[] {
   return out;
 }
 
+function readableProjectRoots(paths: LiveConfigPaths, claudeJson: Obj): string[] {
+  if (paths.scoped) return [];
+  return normalizeProjectRoots([
+    ...paths.projectRoots,
+    ...projectRootsFromClaudeJson(claudeJson),
+  ]).slice(0, paths.configResourceMaxEntries);
+}
+
+function readPerProjectClaudeMd(
+  projectRoots: string[],
+  maxBytes: number
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const projectRoot of projectRoots) {
+    const text = readTextOrNull(join(projectRoot, 'CLAUDE.md'), maxBytes);
+    if (text !== null) out[projectRoot] = text;
+  }
+  return out;
+}
+
+function readProjectSettings(
+  projectRoots: string[],
+  maxBytes: number
+): Record<string, Obj> {
+  const out: Record<string, Obj> = {};
+  for (const projectRoot of projectRoots) {
+    const merged = mergeLiveSettings(
+      readJsonOrNull(join(projectRoot, '.claude', 'settings.json'), maxBytes),
+      readJsonOrNull(join(projectRoot, '.claude', 'settings.local.json'), maxBytes)
+    );
+    if (merged) out[projectRoot] = merged;
+  }
+  return out;
+}
+
 // Build the full liveConfig bundle. Every section degrades to empty/null on
 // missing source so the dataset endpoint stays alive even when ~/.claude is
 // partially configured.
 export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
   const paths = liveConfigPaths(opts);
+  const claudeJson = asObj(readJsonOrNull(paths.claudeJson, paths.configFileMaxBytes));
+  const projectRoots = readableProjectRoots(paths, claudeJson);
   const settings = readLiveSettings(paths);
   // Validate the raw ~/.claude/settings.json bytes (#167). Display path uses
   // ~ so the UI shows the canonical location rather than the container path.
@@ -483,30 +572,56 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
     settings,
     settingsHealth,
     claudeMd: {
-      // Phase 1 ships global only — the container can't reach project roots.
-      // perProject is reserved so consumers don't reshape when phase 2 fills it.
       global: readTextOrNull(paths.claudeMdGlobal, paths.configFileMaxBytes),
-      perProject: {},
+      perProject: readPerProjectClaudeMd(projectRoots, paths.configFileMaxBytes),
     },
+    projectSettings: readProjectSettings(projectRoots, paths.configFileMaxBytes),
     plugins: readPlugins(paths, asObj(settings.enabledPlugins)),
-    mcpServers: readMcpServers(paths),
-    skills: listResources(
-      paths.skillsDir,
-      'directory',
-      paths.configFileMaxBytes,
-      paths.configResourceMaxEntries
-    ),
-    subagents: listResources(
-      paths.agentsDir,
-      'file',
-      paths.configFileMaxBytes,
-      paths.configResourceMaxEntries
-    ),
-    commands: listResources(
-      paths.commandsDir,
-      'file',
-      paths.configFileMaxBytes,
-      paths.configResourceMaxEntries
-    ),
+    mcpServers: readMcpServers(paths, claudeJson),
+    skills: [
+      ...listResources(
+        paths.skillsDir,
+        'directory',
+        paths.configFileMaxBytes,
+        paths.configResourceMaxEntries
+      ),
+      ...listProjectResources(
+        projectRoots,
+        'skills',
+        'directory',
+        paths.configFileMaxBytes,
+        paths.configResourceMaxEntries
+      ),
+    ].slice(0, paths.configResourceMaxEntries),
+    subagents: [
+      ...listResources(
+        paths.agentsDir,
+        'file',
+        paths.configFileMaxBytes,
+        paths.configResourceMaxEntries
+      ),
+      ...listProjectResources(
+        projectRoots,
+        'agents',
+        'file',
+        paths.configFileMaxBytes,
+        paths.configResourceMaxEntries
+      ),
+    ].slice(0, paths.configResourceMaxEntries),
+    commands: [
+      ...listResources(
+        paths.commandsDir,
+        'file',
+        paths.configFileMaxBytes,
+        paths.configResourceMaxEntries
+      ),
+      ...listProjectResources(
+        projectRoots,
+        'commands',
+        'file',
+        paths.configFileMaxBytes,
+        paths.configResourceMaxEntries
+      ),
+    ].slice(0, paths.configResourceMaxEntries),
   };
 }

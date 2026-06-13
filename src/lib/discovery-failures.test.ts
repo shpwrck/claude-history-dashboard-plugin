@@ -28,6 +28,14 @@ const SKILLS: LiveResource[] = [
   },
 ];
 
+const PROJECT_SKILL: LiveResource = {
+  id: 'build-helper',
+  scope: 'project',
+  projectPath: '/repo/a',
+  path: '/repo/a/.claude/skills/build-helper',
+  description: 'Runs project build helper commands for generated assets.',
+};
+
 describe('detectDiscoveryFailures', () => {
   it('flags a session with 3+ repeated Bash calls matching an un-invoked skill', () => {
     const data = [
@@ -85,5 +93,50 @@ describe('detectDiscoveryFailures', () => {
       ]),
     ];
     expect(detectDiscoveryFailures(data, [])).toHaveLength(0);
+  });
+
+  it('does not flag a project skill from another project (#1063)', () => {
+    const data = [
+      session('s-b', [
+        bash('node build-helper generated assets'),
+        bash('node build-helper generated assets'),
+        bash('node build-helper generated assets'),
+      ]),
+    ];
+
+    expect(
+      detectDiscoveryFailures(data, [PROJECT_SKILL], [
+        { sessionId: 's-b', project: '/repo/b' },
+      ])
+    ).toHaveLength(0);
+  });
+
+  it('flags a project skill when the matching session is in that project (#1063)', () => {
+    const data = [
+      session('s-a', [
+        bash('node build-helper generated assets'),
+        bash('node build-helper generated assets'),
+        bash('node build-helper generated assets'),
+      ]),
+    ];
+
+    const out = detectDiscoveryFailures(data, [PROJECT_SKILL], [
+      { sessionId: 's-a', project: '/repo/a' },
+    ]);
+
+    expect(out).toHaveLength(1);
+    expect(out[0].skillId).toBe('build-helper');
+  });
+
+  it('does not treat project skills as global when session metadata is absent (#1063)', () => {
+    const data = [
+      session('s-a', [
+        bash('node build-helper generated assets'),
+        bash('node build-helper generated assets'),
+        bash('node build-helper generated assets'),
+      ]),
+    ];
+
+    expect(detectDiscoveryFailures(data, [PROJECT_SKILL])).toHaveLength(0);
   });
 });
