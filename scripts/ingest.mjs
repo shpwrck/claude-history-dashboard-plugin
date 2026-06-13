@@ -524,6 +524,16 @@ db.exec(`
 // row is the compressed dataset (~2–3 MB), so a handful costs single-digit MB.
 const DATASET_CACHE_KEEP = 3;
 
+// Bump when assembleDataset() or downstream serialized dataset shape changes
+// without necessarily changing any ~/.claude source artifact. The compressed
+// dataset cache is persisted across deploys, so source-content hashes alone can
+// otherwise reuse JSON assembled by older code.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 2;
+
+export function datasetAssemblySchemaKey() {
+  return `dataset-schema:v${DATASET_ASSEMBLY_SCHEMA_VERSION}`;
+}
+
 const selDatasetCache = db.prepare(
   'SELECT etag, json_br, json_gz FROM dataset_cache WHERE content_hash = ?'
 );
@@ -1421,6 +1431,7 @@ function hashProjectLiveConfigFiles(roots, hash) {
 // proxy (history.jsonl was observed ~9h stale while transcripts were written).
 export function sourceSignature() {
   const parts = [];
+  parts.push(datasetAssemblySchemaKey());
   for (const projectsRoot of PROJECT_ROOTS) {
     let maxDirMtime = 0;
     const note = (ms) => {
@@ -1592,6 +1603,11 @@ export function ingest() {
   }
 
   const hash = createHash('sha1');
+  // Section 0: dataset assembly schema. Source artifacts can stay byte-identical
+  // while code changes add/remove serialized fields, so persisted compressed
+  // dataset rows must be keyed by a schema/version salt as well as source bytes.
+  hash.update(datasetAssemblySchemaKey());
+  hash.update('\n');
   // Section 1: aggregate per-row content_hash values. Rows ingested before
   // the content_hash column was added may be NULL — that's fine, identical
   // NULL sets still hash identically on subsequent calls. They'll get a real
