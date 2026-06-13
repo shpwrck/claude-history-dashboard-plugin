@@ -133,6 +133,18 @@ function telemetryRow(sessionId: string, timestamp: string) {
   };
 }
 
+function modelLatencyRow(sessionId: string, timestamp: string) {
+  return {
+    session_id: sessionId,
+    model: 'claude-sonnet-4-5',
+    apiDurationMs: 10_000,
+    toolDurationMs: 0,
+    inputTokens: 1_000,
+    outputTokens: 500,
+    client_timestamp: timestamp,
+  };
+}
+
 function debugRow(sessionId: string) {
   return {
     sessionId,
@@ -213,6 +225,7 @@ function emptyData(overrides: Partial<ViewData> = {}): ViewData {
     reviewEvents: null,
     sessionRegistry: [],
     telemetry: [],
+    modelLatency: [],
     debugLogs: [],
     statsCache: null,
     fileHistory: [],
@@ -338,6 +351,12 @@ describe('project-scoped view data filtering', () => {
         telemetryRow('alpha-token-only', '2026-01-01T01:00:00.000Z'),
         telemetryRow('alpha-registry-only', '2026-01-01T01:30:00.000Z'),
         telemetryRow('beta-1', '2026-01-02T00:00:00.000Z'),
+      ],
+      modelLatency: [
+        modelLatencyRow('alpha-1', '2026-01-01T00:00:00.000Z'),
+        modelLatencyRow('alpha-token-only', '2026-01-01T01:00:00.000Z'),
+        modelLatencyRow('alpha-registry-only', '2026-01-01T01:30:00.000Z'),
+        modelLatencyRow('beta-1', '2026-01-02T00:00:00.000Z'),
       ],
       debugLogs: [
         debugRow('alpha-token-only'),
@@ -560,6 +579,11 @@ describe('project-scoped view data filtering', () => {
       'alpha-token-only',
       'alpha-registry-only',
     ]);
+    expect(filtered.modelLatency.map((item) => item.session_id)).toEqual([
+      'alpha-1',
+      'alpha-token-only',
+      'alpha-registry-only',
+    ]);
     expect(filtered.debugLogs.map((item) => item.sessionId)).toEqual([
       'alpha-token-only',
       'alpha-registry-only',
@@ -660,6 +684,12 @@ describe('filterViewDataByTime', () => {
       telemetryRow('recent', new Date(within24h).toISOString()),
       telemetryRow('registry-recent', new Date(within24h + 1000).toISOString()),
     ],
+    modelLatency: [
+      modelLatencyRow('old', new Date(older).toISOString()),
+      modelLatencyRow('mixed', new Date(within24h).toISOString()),
+      modelLatencyRow('recent', new Date(within24h).toISOString()),
+      modelLatencyRow('registry-recent', new Date(within24h + 1000).toISOString()),
+    ],
     debugLogs: [
       debugRow('old'),
       debugRow('mixed'),
@@ -738,6 +768,11 @@ describe('filterViewDataByTime', () => {
       'registry-recent',
     ]);
     expect(filtered.telemetry.map((row) => row.session_id)).toEqual([
+      'mixed',
+      'recent',
+      'registry-recent',
+    ]);
+    expect(filtered.modelLatency.map((row) => row.session_id)).toEqual([
       'mixed',
       'recent',
       'registry-recent',

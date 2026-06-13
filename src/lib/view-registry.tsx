@@ -52,7 +52,7 @@ import type { WorkflowRun } from './parse-workflows';
 import type { TaskRecord } from './parse-tasks';
 import type { TeamSummary } from './parse-teams';
 import type { SessionRegistryEntry } from './parse-session-registry';
-import type { TelemetryEvent } from './parse-telemetry';
+import type { ModelLatencySample, TelemetryEvent } from './parse-telemetry';
 import type { DebugSessionMetrics } from './parse-debug';
 import type { StatsCache } from './parse-stats-cache';
 import type { FileHistorySession } from './parse-file-history';
@@ -265,6 +265,7 @@ export interface ViewData {
   reviewEvents: OrganizationReviewEventsDataset | null;
   sessionRegistry: SessionRegistryEntry[];
   telemetry: TelemetryEvent[];
+  modelLatency: ModelLatencySample[];
   debugLogs: DebugSessionMetrics[];
   statsCache: StatsCache | null;
   fileHistory: FileHistorySession[];
@@ -373,6 +374,13 @@ function filterTelemetryBySessionId(
   rows: readonly TelemetryEvent[],
   sessionIds: ReadonlySet<string>
 ): TelemetryEvent[] {
+  return rows.filter((row) => sessionIds.has(row.session_id));
+}
+
+function filterModelLatencyBySessionId(
+  rows: readonly ModelLatencySample[],
+  sessionIds: ReadonlySet<string>
+): ModelLatencySample[] {
   return rows.filter((row) => sessionIds.has(row.session_id));
 }
 
@@ -524,6 +532,9 @@ export function filterViewDataByTime(
     telemetry: data.telemetry.filter((event) =>
       timestampInRange(event.client_timestamp, range)
     ),
+    modelLatency: data.modelLatency.filter((event) =>
+      timestampInRange(event.client_timestamp, range)
+    ),
     debugLogs: filterBySessionId(data.debugLogs, sessionIds),
   };
 }
@@ -579,6 +590,7 @@ export const VIEW_RENDERERS: Partial<
       reviewEvents={d.reviewEvents}
       sessionRegistry={d.sessionRegistry}
       telemetry={d.telemetry}
+      modelLatency={d.modelLatency}
       debugLogs={d.debugLogs}
       statsCache={d.statsCache}
       fileHistory={d.fileHistory}
@@ -616,6 +628,7 @@ export const VIEW_RENDERERS: Partial<
       reviewEvents={d.reviewEvents}
       sessionRegistry={d.sessionRegistry}
       telemetry={d.telemetry}
+      modelLatency={d.modelLatency}
       debugLogs={d.debugLogs}
       statsCache={d.statsCache}
       fileHistory={d.fileHistory}
@@ -981,6 +994,7 @@ export function filterViewDataByProject(
     workflows: keepKnownSession(data.workflows, sessionIds),
     sessionRegistry,
     telemetry: filterTelemetryBySessionId(data.telemetry, sessionIds),
+    modelLatency: filterModelLatencyBySessionId(data.modelLatency, sessionIds),
     debugLogs: keepKnownSession(data.debugLogs, sessionIds),
   };
 }

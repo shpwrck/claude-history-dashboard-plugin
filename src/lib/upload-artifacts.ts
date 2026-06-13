@@ -100,6 +100,16 @@ interface TelemetryEvent {
   env: TelemetryEnvFingerprint;
 }
 
+interface ModelLatencySample {
+  session_id: string;
+  model: string;
+  apiDurationMs: number;
+  toolDurationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  client_timestamp: string;
+}
+
 interface DebugSessionMetrics {
   sessionId: string;
   ttfbP50: number;
@@ -155,6 +165,7 @@ export interface UploadedArtifacts {
   teams: TeamSummary[];
   sessionRegistry: SessionRegistryEntry[];
   telemetry: TelemetryEvent[];
+  modelLatency: ModelLatencySample[];
   debugLogs: DebugSessionMetrics[];
   statsCache: StatsCache | null;
   fileHistory: FileHistorySession[];
@@ -174,6 +185,7 @@ const EMPTY: UploadedArtifacts = {
   teams: [],
   sessionRegistry: [],
   telemetry: [],
+  modelLatency: [],
   debugLogs: [],
   statsCache: null,
   fileHistory: [],
@@ -394,6 +406,33 @@ function parseTelemetry(file: LoadedFile): TelemetryEvent[] {
   });
 }
 
+function parseTelemetryLatencyLine(line: string): ModelLatencySample | null {
+  if (!line.trim()) return null;
+  const raw = obj(json(line));
+  const data = obj(raw?.event_data);
+  if (!data || str(data.event_name) !== 'tengu_exit') return null;
+  const metadata = decodeBase64Json(data.additional_metadata);
+  const apiDurationMs = num(metadata.last_session_api_duration);
+  if (apiDurationMs <= 0) return null;
+  return {
+    session_id: str(data.session_id),
+    model: str(data.model),
+    apiDurationMs,
+    toolDurationMs: Math.max(0, num(metadata.last_session_tool_duration)),
+    inputTokens: Math.max(0, num(metadata.last_session_total_input_tokens)),
+    outputTokens: Math.max(0, num(metadata.last_session_total_output_tokens)),
+    client_timestamp: str(data.client_timestamp),
+  };
+}
+
+function parseTelemetryLatency(file: LoadedFile): ModelLatencySample[] {
+  if (!/(^|\/)telemetry\/1p_failed_events[^/]*\.json$/.test(normalizePath(file))) return [];
+  return file.text.split('\n').flatMap((line) => {
+    const sample = parseTelemetryLatencyLine(line);
+    return sample ? [sample] : [];
+  });
+}
+
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
@@ -536,6 +575,7 @@ export function collectUploadArtifacts(
       return entry ? [entry] : [];
     }),
     telemetry: files.flatMap(parseTelemetry),
+    modelLatency: files.flatMap(parseTelemetryLatency),
     debugLogs: files.flatMap((file) => {
       const metrics = parseDebugLog(file);
       return metrics ? [metrics] : [];

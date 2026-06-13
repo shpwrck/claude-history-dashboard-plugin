@@ -119,6 +119,7 @@ import { detector as overloadReretry } from './reliability/overload-reretry';
 // The clock (ADR 0006) — wall-clock/latency levers.
 import { detector as hookOverhead } from './speed/hook-overhead';
 import { detector as timeMotion } from './speed/time-motion';
+import { detector as modelLatency } from './speed/model-latency';
 
 // ── ACTIVITY ────────────────────────────────────────────────────────────
 import { detector as staleProjects } from './activity/stale-projects';
@@ -241,6 +242,7 @@ export const DETECTORS: Detector[] = [
   // wall-clock to every turn. Fills the "Go faster" card.
   hookOverhead,
   timeMotion,
+  modelLatency,
 
   // ── Epic #975 — model-evals act-now routing gap (#1086) ───────────────────
   // Reads the server-only `modelEvalSummary` rollup (#1085/#1242): fires only on

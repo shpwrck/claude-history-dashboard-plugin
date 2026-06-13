@@ -326,7 +326,9 @@ const { parseTeamsDir, analyzeTeams } = await import(join(LIB, 'parse-teams.ts')
 const { parseSessionRegistryDir } = await import(
   join(LIB, 'parse-session-registry.ts')
 );
-const { parseTelemetryDir } = await import(join(LIB, 'parse-telemetry.ts'));
+const { parseTelemetryDir, parseTelemetryLatencyDir } = await import(
+  join(LIB, 'parse-telemetry.ts')
+);
 const { parseDebugDir } = await import(join(LIB, 'parse-debug.ts'));
 const { parseStatsCache } = await import(join(LIB, 'parse-stats-cache.ts'));
 const { parseFileHistoryDir } = await import(join(LIB, 'parse-file-history.ts'));
@@ -1716,6 +1718,7 @@ export function assembleArtifacts() {
   let reviewEvents = null;
   let sessionRegistry = [];
   let telemetry = [];
+  let modelLatency = [];
   let debugLogs = [];
   let statsCache = null;
   let fileHistory = [];
@@ -1770,6 +1773,12 @@ export function assembleArtifacts() {
     if (existsSync(TELEMETRY_DIR)) {
       telemetry = cachedArtifact('telemetry', TELEMETRY_DIR, () =>
         parseTelemetryDir(TELEMETRY_DIR, {
+          maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
+          maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
+        })
+      );
+      modelLatency = cachedArtifact('model-latency', TELEMETRY_DIR, () =>
+        parseTelemetryLatencyDir(TELEMETRY_DIR, {
           maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
           maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
         })
@@ -1878,6 +1887,7 @@ export function assembleArtifacts() {
     reviewEvents,
     sessionRegistry,
     telemetry,
+    modelLatency,
     debugLogs,
     statsCache,
     fileHistory,
@@ -2042,6 +2052,7 @@ export function assembleDataset() {
     reviewEvents,
     sessionRegistry,
     telemetry,
+    modelLatency,
     debugLogs,
     statsCache,
     fileHistory,
@@ -2098,6 +2109,7 @@ export function assembleDataset() {
       reviewEvents,
       sessionRegistry,
       telemetry,
+      modelLatency,
       debugLogs,
       statsCache,
       fileHistory,
@@ -2191,6 +2203,7 @@ export function assembleDataset() {
     reviewEvents,
     sessionRegistry,
     telemetry,
+    modelLatency,
     debugLogs,
     statsCache,
     fileHistory,
@@ -2259,6 +2272,7 @@ function assembleRecommendationContext(options = {}) {
     reviewEvents: dataset.reviewEvents,
     sessionRegistry: dataset.sessionRegistry,
     telemetry: dataset.telemetry,
+    modelLatency: dataset.modelLatency,
     debugLogs: dataset.debugLogs,
     statsCache: dataset.statsCache,
     fileHistory: dataset.fileHistory,

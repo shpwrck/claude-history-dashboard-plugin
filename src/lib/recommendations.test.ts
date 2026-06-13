@@ -687,6 +687,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'modelPinSavings',
       'repoMap',
       'taskSteering',
+      'modelLatency',
       'externalGuidance',
     ]);
     const EXPECTED = [
@@ -710,6 +711,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'toolInventories',
       'modelPinSavings',
       'repoMap',
+      'modelLatency',
       'externalGuidance',
     ];
     expect([...covered].sort()).toEqual([...EXPECTED].sort());
@@ -1473,6 +1475,37 @@ function fixtureBank(): Fixture[] {
             ],
           },
         ] as unknown as RecommendationInput['timelines'],
+      }),
+    });
+  }
+
+  // ── speed.model-latency (#915): measured slow model vs faster baseline ───
+  {
+    const latencySample = (
+      session_id: string,
+      model: string,
+      apiDurationMs: number,
+      outputTokens: number
+    ): NonNullable<RecommendationInput['modelLatency']>[number] => ({
+      session_id,
+      model,
+      apiDurationMs,
+      toolDurationMs: 0,
+      inputTokens: 0,
+      outputTokens,
+      client_timestamp: '2026-06-13T12:00:00Z',
+    });
+    out.push({
+      now,
+      input: bankBase({
+        modelLatency: [
+          latencySample('slow-a', 'claude-opus-4-8[1m]', 70_000, 1_000),
+          latencySample('slow-b', 'claude-opus-4-8[1m]', 70_000, 1_000),
+          latencySample('slow-c', 'claude-opus-4-8[1m]', 70_000, 1_000),
+          latencySample('fast-a', 'claude-haiku-4-5-20251001', 15_000, 1_000),
+          latencySample('fast-b', 'claude-haiku-4-5-20251001', 15_000, 1_000),
+          latencySample('fast-c', 'claude-haiku-4-5-20251001', 15_000, 1_000),
+        ],
       }),
     });
   }

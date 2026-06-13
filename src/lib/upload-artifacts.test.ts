@@ -6,6 +6,12 @@ describe('collectUploadArtifacts (#1051)', () => {
   it('parses current upload artifacts into the App dataset slices', () => {
     const now = Date.parse('2026-06-10T12:00:00Z');
     const metadata = Buffer.from(JSON.stringify({ attempt: 3, elapsed_ms: 30001 })).toString('base64');
+    const latencyMetadata = Buffer.from(JSON.stringify({
+      last_session_api_duration: 17_906,
+      last_session_tool_duration: 2_417,
+      last_session_total_input_tokens: 4_002,
+      last_session_total_output_tokens: 931,
+    })).toString('base64');
     const files: LoadedFile[] = [
       {
         name: '1.json',
@@ -54,6 +60,15 @@ describe('collectUploadArtifacts (#1051)', () => {
             additional_metadata: metadata,
             env: { node_version: 'v24', terminal: 'xterm', arch: 'x64' },
             email: 'secret@example.com',
+          },
+        }) + '\n' + JSON.stringify({
+          event_data: {
+            event_name: 'tengu_exit',
+            client_timestamp: '2026-06-10T11:02:00Z',
+            model: 'claude-opus-4-8[1m]',
+            betas: '',
+            session_id: 'sess-1',
+            additional_metadata: latencyMetadata,
           },
         }) + '\n',
       },
@@ -105,6 +120,11 @@ describe('collectUploadArtifacts (#1051)', () => {
     expect(artifacts.teams[0].droppedCount).toBe(1);
     expect(artifacts.sessionRegistry[0].entrypoint).toBe('sdk-cli');
     expect(artifacts.telemetry[0]).toMatchObject({ attempt: 3, elapsed_ms: 30001 });
+    expect(artifacts.modelLatency[0]).toMatchObject({
+      apiDurationMs: 17_906,
+      outputTokens: 931,
+      model: 'claude-opus-4-8[1m]',
+    });
     expect(JSON.stringify(artifacts.telemetry)).not.toContain('secret@example.com');
     expect(artifacts.debugLogs[0].ttfbP50).toBe(1000);
     expect(artifacts.statsCache?.dailyActivity[0].toolCallCount).toBe(2);

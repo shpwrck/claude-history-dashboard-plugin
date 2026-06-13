@@ -41,7 +41,7 @@ import type { UpdateResult } from '../parse-last-update';
 import type { McpAuthState } from '../parse-mcp-auth';
 import type { DriftEvent } from '../parse-backups';
 import type { SessionRegistryEntry } from '../parse-session-registry';
-import type { TelemetryEvent } from '../parse-telemetry';
+import type { ModelLatencySample, TelemetryEvent } from '../parse-telemetry';
 import type { DebugSessionMetrics } from '../parse-debug';
 import type { WorkflowRun } from '../parse-workflows';
 import type { ReclaimClaim } from '../reclaim';
@@ -485,6 +485,11 @@ export interface RecommendationInput {
   sessionRegistry?: SessionRegistryEntry[];
   /** Failed-event telemetry from `telemetry/` (#562). Feeds the #572 report card. */
   telemetry?: TelemetryEvent[];
+  /**
+   * Successful-path per-model latency samples from `telemetry/` (#1166).
+   * Feeds the #915 speed.model-latency detector; absent/empty means emit nothing.
+   */
+  modelLatency?: ModelLatencySample[];
   /** Per-session debug-log latency metrics from `debug/` (#569). Feeds #572. */
   debugLogs?: DebugSessionMetrics[];
   /** CLI daily-activity rollup from `stats-cache.json` (#563). */
