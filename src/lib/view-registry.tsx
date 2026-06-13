@@ -106,11 +106,6 @@ const ProjectBreakdown = lazy(() =>
 const SearchView = lazy(() =>
   import('../components/SearchView').then((m) => ({ default: m.SearchViewPf }))
 );
-const SessionForensicGraph = lazy(() =>
-  import('../components/SessionForensicGraph').then((m) => ({
-    default: m.SessionForensicGraph,
-  }))
-);
 const TokenUsage = lazy(() =>
   import('../components/TokenUsage').then((m) => ({ default: m.TokenUsagePf }))
 );
@@ -712,15 +707,11 @@ export const VIEW_RENDERERS: Partial<
     <SessionTimeline
       timelines={d.timelines}
       sessions={d.sessions}
-      onOpenSession={n.openSession}
-    />
-  ),
-  forensics: ({ data: d, nav: n }) => (
-    <SessionForensicGraph
-      timelines={d.timelines}
       tokenData={d.tokenData}
       valueFlow={d.valueFlow}
       focusSessionId={n.focusSessionId}
+      focusEvidenceRef={n.focusEvidenceRef}
+      onOpenSession={n.openSession}
       onOpenEvidence={n.openEvidence}
     />
   ),
@@ -914,7 +905,6 @@ const VIEW_FILTERABLE_DATA: Partial<Record<View, FilterableViewDataKey[]>> = {
   automation: ['sessions'],
   prompts: ['promptAnalysis'],
   patterns: ['timelines'],
-  forensics: ['timelines'],
 };
 
 function hasUsableValue(value: ViewData[FilterableViewDataKey]): boolean {

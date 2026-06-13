@@ -300,6 +300,7 @@ function makeSession(project, sessionId, startMs, build) {
 function buildFeatureSession(ctx, t0) {
   const paths = READ_PATHS[ctx.project.path];
   const timeMotionSample = ctx.sessionId === '20260512-1000-feat-sample';
+  const evidenceTarget = 'deploy-target-9f83a1c7';
   let t = t0;
   const churnGeometrySample = ctx.sessionId === '20260512-1000-feat-sample';
   ctx.push(attachmentTools(t, ['mcp__github__list_pull_requests', 'mcp__github__get_file_contents', 'mcp__playwright__browser_navigate']));
@@ -324,7 +325,11 @@ function buildFeatureSession(ctx, t0) {
     const id = `${ctx.sessionId}-r${i}`;
     const resultDelay = timeMotionSample ? [9, 8, 7][i] * MIN : 1000;
     ctx.push(asstContent(t, [toolUseBlock(id, 'Read', { file_path: hotFile })]));
-    ctx.push(userToolResult(t + resultDelay, id, false, 'x'.repeat(int(1800, 4200))));
+    const content =
+      timeMotionSample && i === 0
+        ? `generated target ${evidenceTarget}\n${'x'.repeat(int(1800, 4200))}`
+        : 'x'.repeat(int(1800, 4200));
+    ctx.push(userToolResult(t + resultDelay, id, false, content));
     t += timeMotionSample ? resultDelay + 30 * 1000 : 30 * 1000;
   }
   for (const fp of paths.slice(1)) {
@@ -376,7 +381,7 @@ function buildFeatureSession(ctx, t0) {
   }
 
   const bid = `${ctx.sessionId}-b0`;
-  ctx.push(asstContent(t, [toolUseBlock(bid, 'Bash', { command: 'npm test -- orders' })]));
+  ctx.push(asstContent(t, [toolUseBlock(bid, 'Bash', { command: timeMotionSample ? `npm test -- orders --target ${evidenceTarget}` : 'npm test -- orders' })]));
   ctx.push(userToolResult(t + 4000, bid, true, 'FAIL src/server/orders.test.ts\n  expected 200 received 500'));
   t += 30 * 1000;
 

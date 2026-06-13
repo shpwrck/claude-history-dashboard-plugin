@@ -1,7 +1,7 @@
 // Forensic-graph model (#1307, epic #807): folds a session timeline into
 // turn -> tool-call structure and re-anchors proven value-flow edges (#1306)
-// on their tool_use nodes. Pure data shaping for SessionForensicGraph.tsx,
-// kept out of the component file so react-refresh sees components only.
+// on their tool_use nodes. Pure data shaping for the Session Timeline evidence
+// overlay, kept out of the component file so react-refresh sees components only.
 import type { SessionTokenData } from '../types';
 import type { SessionTimeline } from './parse-timeline';
 import type { ValueFlowSession } from './parse-value-flow';
@@ -129,4 +129,3 @@ export function buildForensicModel(
 
   return { turns, edges, toolUseIndexByEntry };
 }
-

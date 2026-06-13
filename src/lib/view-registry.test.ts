@@ -13,6 +13,7 @@ import {
   NAV_ITEMS,
   DOMAIN_ORDER,
   isValidView,
+  resolveViewRedirect,
   domainForView,
 } from './nav-prefs';
 import type {
@@ -249,6 +250,13 @@ describe('view registry ↔ nav catalog parity', () => {
   it('lists each view exactly once in the catalog', () => {
     const views = NAV_ITEMS.map((i) => i.view);
     expect(new Set(views).size).toBe(views.length);
+  });
+
+  it('retires Forensic Graph from nav while redirecting old deep links to Timeline', () => {
+    expect(NAV_ITEMS.some((item) => item.view === 'forensics')).toBe(false);
+    expect(isValidView('forensics')).toBe(true);
+    expect(resolveViewRedirect('forensics')).toBe('timeline');
+    expect(VIEW_RENDERERS.forensics).toBeUndefined();
   });
 
   it('every renderer key is a valid view', () => {

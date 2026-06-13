@@ -18,6 +18,7 @@ import { parseSessionJsonl } from './parse-sessions';
 import { parseToolUsage } from './parse-tools';
 import { parseToolInventory } from './parse-tool-inventory';
 import { parseSessionTimeline } from './parse-timeline';
+import { parseValueFlow } from './parse-value-flow';
 import { parseApiErrors, aggregateToolErrors, detectRetryGroups } from './parse-errors';
 import { parsePermissionData, detectDangerousCommands, rankPromptProneTools } from './parse-permissions';
 import { parseAgentSettings, parseAttribution, aggregateAttributionAgents, aggregateAttributionSkills, aggregateMcpUsage } from './parse-agents';
@@ -176,12 +177,21 @@ describe('sample corpus — tool inventory', () => {
 
 describe('sample corpus — timeline', () => {
   const timelines = collect(parseSessionTimeline);
+  const valueFlow = collect((text, name) =>
+    parseValueFlow(text, name, { includeHypotheses: false })
+  );
   it('builds timelines covering every entry kind', () => {
     expect(timelines.length).toBeGreaterThan(5);
     const kinds = new Set(timelines.flatMap((t) => t.entries.map((e) => e.kind)));
     for (const k of ['user', 'assistant', 'tool_use', 'tool_result', 'thinking']) {
       expect(kinds.has(k as never)).toBe(true);
     }
+  });
+  it('includes a proven value-flow edge for the Timeline evidence overlay', () => {
+    const edges = valueFlow.flatMap((row) => row.edges);
+
+    expect(edges.length).toBeGreaterThan(0);
+    expect(edges.some((edge) => edge.value === 'deploy-target-9f83a1c7')).toBe(true);
   });
 });
 
