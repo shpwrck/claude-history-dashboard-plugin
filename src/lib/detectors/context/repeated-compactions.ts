@@ -38,6 +38,7 @@ export const detector: Detector = {
       view: 'context',
       fix: {
         target: 'CLAUDE.md',
+        fixKind: 'illustrative',
         label: 'Add session-reset guidance',
         note: 'Append to CLAUDE.md so a second compaction triggers a clean reset instead of carrying the summary forward.',
         snippet: `## Session resets

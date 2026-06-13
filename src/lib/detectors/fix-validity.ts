@@ -3,11 +3,11 @@
  *
  * A recommendation's `fix` snippet is a product surface: the UI offers a
  * one-click "Copy fix". The 2026-06-10 audit found snippets that are NOT
- * copy-paste-safe — a `claude-team` CLI not on PATH, a `/fewer-permission-prompts`
- * skill that may not be installed, a `npm run -s typecheck` hook for a repo with
- * no such script. The {@link FixKind} field lets a detector declare how safe its
- * snippet is; this module is the single source of validation truth so the
- * detectors, the gate test, and any future CI step judge it identically.
+ * copy-paste-safe: a `claude-team` CLI not on PATH, a slash command that only
+ * exists in one harness, a host-local path, or a `npm run -s typecheck` hook for
+ * a repo with no such script. The {@link FixKind} field lets a detector declare
+ * how safe its snippet is; this module is the single source of validation truth
+ * so the detectors, the gate test, and any future CI step judge it identically.
  *
  * Validity of a hook *command* is relative to the USER's environment, not this
  * repo, so the gate does NOT try to run commands or resolve PATH. Instead it
@@ -25,21 +25,40 @@ export function effectiveFixKind(fix: Pick<RecFix, 'fixKind'>): FixKind {
 }
 
 /**
- * External CLI binaries that must NOT appear in a `'validated'` snippet because
- * they are not guaranteed to resolve on PATH in an arbitrary user environment.
- * Each must instead be presented as a `'manual'` (apply-by-hand) fix. Extend
- * deliberately — the source-scan gate test keys on this list.
+ * References that must NOT appear in a `'validated'` snippet because they are
+ * not guaranteed to resolve in an arbitrary user environment. Each must instead
+ * be presented as a `'manual'` (apply-by-hand) or `'illustrative'` fix. Extend
+ * deliberately - the source-scan gate test keys on this list.
  *
- * Scope note: this polices the copy-paste SNIPPET only. A *skill* reference
- * (e.g. `/fewer-permission-prompts`) is legitimate in a recommendation's
- * `action` prose ("if installed, the /… skill can …") and is an action-wording
- * concern, not a snippet-portability one — so skills are intentionally not here.
+ * Scope note: this polices the copy-paste SNIPPET only. A slash command or
+ * skill reference can still appear in action prose when it is explicitly framed
+ * as optional; it cannot live in a default-validated snippet.
  */
 export const NON_PORTABLE_SNIPPET_PATTERNS: { id: string; pattern: RegExp; why: string }[] = [
   {
     id: 'claude-team-cli',
     pattern: /\bclaude-team\b/,
     why: 'claude-team is not a standard on-PATH binary',
+  },
+  {
+    id: 'posix-user-path',
+    pattern: /\/(?:home|Users)\/[A-Za-z0-9._-]+(?:\/|$)/,
+    why: 'absolute user paths only exist on one host',
+  },
+  {
+    id: 'windows-user-path',
+    pattern: /\b[A-Za-z]:\\Users\\[^\\\s]+(?:\\|$)/,
+    why: 'absolute Windows user paths only exist on one host',
+  },
+  {
+    id: 'slash-command',
+    pattern: /(?:^|[\s`'"])(?:\/[a-z][\w-]*)(?=$|[\s`'",.;:)])/m,
+    why: 'slash commands are harness-specific, not portable snippet content',
+  },
+  {
+    id: 'host-tool-reference',
+    pattern: /\b(?:nodeRepl|mcp__[A-Za-z0-9_-]+|functions\.exec_command)\b/,
+    why: 'host-specific tool references only work in the authoring harness',
   },
 ];
 

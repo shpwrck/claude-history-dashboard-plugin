@@ -171,6 +171,7 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
           /\\^##\\\\s\\+Context discipline\\\\b/i,
         ],
       },
+      "fixKind": "illustrative",
       "label": "Compact earlier",
       "note": "Append to your project (or ~/.claude) CLAUDE.md so Claude trims context before the window fills.",
       "snippet": "## Context discipline
@@ -200,6 +201,7 @@ Keep the working context well under the model's context window.
           /\\^##\\\\s\\+Context discipline\\\\b/i,
         ],
       },
+      "fixKind": "illustrative",
       "label": "Add context discipline",
       "note": "Append to CLAUDE.md so sessions trim context before they thrash into repeated compaction.",
       "snippet": "## Context discipline

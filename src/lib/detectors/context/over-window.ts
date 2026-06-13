@@ -33,6 +33,7 @@ export const detector: Detector = {
       view: 'context',
       fix: {
         target: 'CLAUDE.md',
+        fixKind: 'illustrative',
         label: 'Compact earlier',
         note: 'Append to your project (or ~/.claude) CLAUDE.md so Claude trims context before the window fills.',
         snippet: `## Context discipline\n\nKeep the working context well under the model's context window.\n- When the conversation grows large (roughly 150K+ tokens) or right after finishing a discrete task, run \`/compact\` to summarise and reclaim space.\n- When starting genuinely unrelated work, run \`/clear\` to begin a fresh session instead of carrying stale context.\n- Avoid pulling large files or command output into context the current task doesn't need.`,

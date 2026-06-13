@@ -104,6 +104,7 @@ export const detector: Detector = {
       view: 'context',
       fix: {
         target: 'CLAUDE.md',
+        fixKind: 'illustrative',
         label: 'Add context discipline',
         note: 'Append to CLAUDE.md so sessions trim context before they thrash into repeated compaction.',
         snippet: `## Context discipline

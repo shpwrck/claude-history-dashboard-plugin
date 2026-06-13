@@ -32,6 +32,7 @@ export const detector: Detector = {
       view: 'context',
       fix: {
         target: 'CLAUDE.md',
+        fixKind: 'illustrative',
         label: 'Keep context healthy',
         note: 'Append to CLAUDE.md to curb the growth/churn that drags the health score down.',
         snippet: `## Keep the session healthy\n\n- Read a file once and work from that context; don't re-Read unchanged files.\n- Don't load large or unrelated files "just in case" — pull only what the current task needs.\n- After completing a task, \`/compact\` (to keep going) or \`/clear\` (for unrelated next work) rather than letting context grow unbounded.\n- Avoid switching permission modes mid-session; it churns context and hurts cache reuse.`,

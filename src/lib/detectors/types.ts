@@ -77,11 +77,14 @@ export type FixTarget = 'settings.json' | 'CLAUDE.md' | 'hook' | 'command';
 /**
  * How safe a {@link RecFix} snippet is to apply as-is (#1101, epic #866).
  *  - `'validated'`    — self-contained config (a settings.json / CLAUDE.md
- *                       fragment), safe to paste verbatim.
+ *                       fragment), safe to paste verbatim. It must not include
+ *                       host-local paths, one-harness slash commands, or
+ *                       host-specific tool references.
  *  - `'illustrative'` — a TEMPLATE whose command must be swapped for the user's
  *                       own check (e.g. a PostToolUse hook running
- *                       `npm run -s typecheck`); not guaranteed runnable as
- *                       written, since validity is relative to the user's repo.
+ *                       `npm run -s typecheck`) or whose prose names a
+ *                       harness-specific command such as `/compact`; not
+ *                       guaranteed runnable as written.
  *  - `'manual'`       — depends on an external tool or per-environment state
  *                       (e.g. a `claude-team` CLI invocation); apply by hand
  *                       where that tool exists.

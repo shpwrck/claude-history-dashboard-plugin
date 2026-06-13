@@ -106,6 +106,7 @@ function adoptAxisRec(candidates: Cand[]): Recommendation {
     ],
     fix: {
       target: 'CLAUDE.md',
+      fixKind: 'illustrative',
       label: 'Adopt the winning variation',
       note: `Shadow-calls evidence (epic #513). Add a standing note so this becomes the default for this kind of task; keep shadowing to catch regressions.`,
       snippet: `## Default approach (from shadow-calls #513)\n\nFor this class of task, ${m.adopt} — shadow experiments on the "${a.axis}" axis won ${pct}% of ${a.samples} comparisons${best.cheaper ? ' at lower token cost' : ''}. Revisit if live shadows stop favouring it.`,
