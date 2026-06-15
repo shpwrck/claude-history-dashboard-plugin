@@ -265,6 +265,15 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(new Set(views).size).toBe(views.length);
   });
 
+  it('carries PageHeader descriptions for the reference migrations', () => {
+    expect(NAV_ITEMS.find((item) => item.view === 'cost')?.description).toMatch(
+      /Per-tool costs use proportional attribution/
+    );
+    expect(NAV_ITEMS.find((item) => item.view === 'tokens')?.description).toMatch(
+      /Track token volume/
+    );
+  });
+
   it('retires Forensic Graph from nav while redirecting old deep links to Timeline', () => {
     expect(NAV_ITEMS.some((item) => item.view === 'forensics')).toBe(false);
     expect(isValidView('forensics')).toBe(true);

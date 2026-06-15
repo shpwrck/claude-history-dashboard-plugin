@@ -171,13 +171,17 @@ function freshDefaults(): NavPrefs {
 // The `serverOnly` flag marks views that require the live /api/* backend; they
 // are auto-hidden in the SPA/upload build (SERVER_AVAILABLE === false). Adding
 // a future server-only view is a one-line change: add `serverOnly: true` here.
-export const NAV_ITEMS: readonly {
+export interface NavItem {
   view: View;
   label: string;
   icon: ComponentType<SVGIconProps>;
   domain: ActionDomain;
+  /** Optional one-line explainer used by PageHeader; source of truth for views. */
+  description?: string;
   serverOnly?: true;
-}[] = [
+}
+
+export const NAV_ITEMS: readonly NavItem[] = [
   { view: 'home', label: 'Overview', icon: TachometerAltIcon, domain: 'home' },
   { view: 'recommendations', label: 'Recommendations', icon: StarIcon, domain: 'home' },
   { view: 'adoption', label: 'Adoption', icon: ClipboardCheckIcon, domain: 'home', serverOnly: true },
@@ -186,9 +190,23 @@ export const NAV_ITEMS: readonly {
   { view: 'permissions', label: 'Permissions', icon: LockIcon, domain: 'safety' },
   { view: 'enterprise', label: 'Enterprise', icon: LockIcon, domain: 'safety', serverOnly: true },
   { view: 'summary', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
-  { view: 'cost', label: 'Cost', icon: DollarSignIcon, domain: 'cost' },
+  {
+    view: 'cost',
+    label: 'Cost',
+    icon: DollarSignIcon,
+    domain: 'cost',
+    description:
+      "Per-tool costs use proportional attribution: each session's total cost is split across tool types by result size, falling back to call count when result sizes are unavailable.",
+  },
   { view: 'reclaim-compass', label: 'Reclaim Compass', icon: BullseyeIcon, domain: 'cost' },
-  { view: 'tokens', label: 'Tokens', icon: CoinsIcon, domain: 'cost' },
+  {
+    view: 'tokens',
+    label: 'Tokens',
+    icon: CoinsIcon,
+    domain: 'cost',
+    description:
+      'Track token volume, cache behavior, model mix, and estimated spend across loaded sessions.',
+  },
   { view: 'files', label: 'File Impact', icon: FileAltIcon, domain: 'cost' },
   // Model Evals workbench (#1086, epic #975): routing-eval evidence + scoped
   // routing recommendations live under the cost lever (model routing).
@@ -223,6 +241,10 @@ export const NAV_ITEMS: readonly {
   { view: 'activity', label: 'Activity', icon: RunningIcon, domain: 'raw' },
   { view: 'pulse', label: 'Pulse', icon: ChartLineIcon, domain: 'raw', serverOnly: true },
 ] as const;
+
+export function getNavItem(view: View): NavItem | undefined {
+  return NAV_ITEMS.find((item) => item.view === view);
+}
 
 /** Views that require the live /api/* backend and must not appear in the SPA/upload build. */
 export const SERVER_ONLY_VIEWS = new Set<View>(
