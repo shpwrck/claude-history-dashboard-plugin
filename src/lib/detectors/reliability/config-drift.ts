@@ -28,6 +28,13 @@ const RECENCY_MS = 7 * 24 * 60 * 60 * 1000;
 /** Minimum number of drift events before we surface a finding. */
 const MIN_EVENTS = 1;
 
+export function formatConfigDriftEvidence(e: DriftEvent): string {
+  const ts = new Date(e.timestamp).toISOString().slice(0, 16) + 'Z';
+  const proj = e.project ? ` [${e.project}]` : '';
+  const srv = e.server ? ` server=${e.server}` : '';
+  return `${ts}${proj}${srv} ${e.kind} ${e.from ?? '?'} -> ${e.to ?? '?'}`;
+}
+
 export const detector: Detector = {
   id: 'reliability.config-drift',
   category: 'reliability',
@@ -72,12 +79,7 @@ export const detector: Detector = {
     const evidence = warnings
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, 5)
-      .map((e) => {
-        const ts = new Date(e.timestamp).toISOString().slice(0, 16) + 'Z';
-        const proj = e.project ? ` [${e.project}]` : '';
-        const srv = e.server ? ` server=${e.server}` : '';
-        return `${ts}${proj}${srv} ${e.kind} ${e.from ?? '?'} -> ${e.to ?? '?'}`;
-      });
+      .map(formatConfigDriftEvidence);
 
     return {
       id: 'reliability.config-drift',
@@ -98,6 +100,7 @@ export const detector: Detector = {
           : `Review the flagged config changes in ~/.claude/backups/ to confirm they were intentional.`,
       affected: projectEvents.length,
       evidence,
+      view: 'permissions',
       ...(projects.length ? { projects } : {}),
     };
   },

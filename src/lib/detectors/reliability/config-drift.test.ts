@@ -86,6 +86,7 @@ describe('reliability.config-drift', () => {
       expect(rec!.id).toBe('reliability.config-drift');
       expect(rec!.category).toBe('reliability');
       expect(rec!.severity).toBe('warning');
+      expect(rec!.view).toBe('permissions');
       expect(rec!.title).toMatch(/disabled/i);
       expect(rec!.evidence).toEqual(
         expect.arrayContaining([expect.stringContaining('postgres')])

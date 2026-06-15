@@ -797,6 +797,7 @@ export const VIEW_RENDERERS: Partial<
       permissionChanges={d.permissionChanges}
       tokenData={d.tokenData}
       liveConfig={d.liveConfig}
+      configBackups={d.configBackups}
       sessions={d.sessions}
       onOpenSession={n.openSession}
     />
