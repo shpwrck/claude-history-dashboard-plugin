@@ -283,6 +283,7 @@ const { safeJsonStringify } = await import(join(LIB, 'json-safe.ts'));
 // /api/recommendations.json route can mirror the UI's recs (#126).
 const {
   buildRecommendations,
+  buildRecommendationResult,
   assembleRecommendationInput,
   filterRecommendationsByProject,
   backfillReclaimSavings,
@@ -2293,16 +2294,27 @@ function assembleRecommendationContext(options = {}) {
 }
 
 export function assembleRecommendations(project, options = {}) {
+  return assembleRecommendationResult(project, options).recommendations;
+}
+
+export function assembleRecommendationResult(project, options = {}) {
   const { input, sessions } = assembleRecommendationContext(options);
   // Back-fill each rec's `estSavingsUsd` from its booked cascade marginal so the
   // served per-card dollar figure is the deduped, residual-guarded slice of the
   // bill (#944) — NOT the raw, possibly-overlapping detector estimate. Run on
   // the global recs before any project slice so the cascade dedup is computed
   // over the full lever set (dc-reclaim-1).
-  const recs = backfillReclaimSavings(buildRecommendations(input), input.tokenData);
-  return project
-    ? filterRecommendationsByProject(recs, project, sessions)
-    : recs;
+  const result = buildRecommendationResult(input);
+  const recs = backfillReclaimSavings(
+    result.recommendations,
+    input.tokenData
+  );
+  return {
+    ...result,
+    recommendations: project
+      ? filterRecommendationsByProject(recs, project, sessions)
+      : recs,
+  };
 }
 
 /**

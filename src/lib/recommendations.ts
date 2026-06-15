@@ -29,6 +29,10 @@ import type { Session } from '../types';
 import type { Recommendation, RecommendationInput } from './detectors/types';
 import type { SessionTokenData } from '../types';
 import {
+  computeDomainCoverage,
+  type DomainCoverage,
+} from './coverage';
+import {
   runReclaimCascade,
   rollupCascade,
   type ReclaimClaim,
@@ -65,6 +69,8 @@ export type {
   RecommendationInput,
   Detector,
 } from './detectors/types';
+export type { DomainCoverage, DomainCoverageStatus } from './coverage';
+export { computeDomainCoverage } from './coverage';
 
 // ── Shared detector helpers ──────────────────────────────────────────────
 // Defined in ./detectors/shared (below types, above detectors in the import
@@ -169,6 +175,11 @@ export function assembleRecommendationInput(
 
 const buildCache: WeakMap<RecommendationInput, Recommendation[]> = new WeakMap();
 
+export interface RecommendationResult {
+  recommendations: Recommendation[];
+  domainCoverage: DomainCoverage[];
+}
+
 // ── External guidance attach pass (#1302, epic #656) ─────────────────────
 /**
  * Attach externally-authored guidance snapshots to already-fired
@@ -271,6 +282,16 @@ export function buildRecommendations(
   );
   if (useCache) buildCache.set(input, sorted);
   return sorted;
+}
+
+export function buildRecommendationResult(
+  input: RecommendationInput,
+  now?: number
+): RecommendationResult {
+  return {
+    recommendations: buildRecommendations(input, now),
+    domainCoverage: computeDomainCoverage(input),
+  };
 }
 
 /**
