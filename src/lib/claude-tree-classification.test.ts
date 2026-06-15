@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { classifyClaudePath, isSessionData } from './claude-tree-classification';
+// The shipper (a zero-dep .mjs in the dispatch image) mirrors the classifier byte-for-byte; this is
+// the load-bearing DRIFT GUARD that the two copies never diverge.
+import { classifyClaudePath as shipperClassify } from '../../operator/dispatch/artifact-ship.mjs';
 
 describe('claude-tree-classification', () => {
   it('classifies session-data (the shipper allowlist)', () => {
@@ -35,5 +38,27 @@ describe('claude-tree-classification', () => {
   it('normalizes leading ./, backslashes, trailing slash', () => {
     expect(classifyClaudePath('./projects/p/')).toBe('session-data');
     expect(classifyClaudePath('projects\\p\\s.jsonl')).toBe('session-data');
+  });
+
+  it('the shipper mirror never drifts from the TS canonical', () => {
+    const fixtures = [
+      'projects/-workspace/abc.jsonl',
+      'history.jsonl',
+      'history.d/x.jsonl',
+      'telemetry/t.jsonl',
+      'stats-cache.json',
+      'todos/t.json',
+      '.credentials.json',
+      'paste-cache/blob',
+      '.ssh/id_rsa',
+      'keys/x.pem',
+      'settings.json',
+      '.claude.json',
+      'agents/a.md',
+      './projects/p/',
+    ];
+    for (const f of fixtures) {
+      expect(shipperClassify(f)).toBe(classifyClaudePath(f));
+    }
   });
 });
