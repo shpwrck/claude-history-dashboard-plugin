@@ -5,8 +5,11 @@ import { computeConfigHygiene } from '../../config-hygiene';
 // ambiguity when Claude picks which skill to invoke. (#421)
 const MIN_UNUSED = 3;
 
-/** Flag installed-but-unused skills. No fix snippet — removal is `rm` under
- *  ~/.claude/skills/; no settings key controls installed skills. (#421) */
+function pruneSnippet(ids: string[]): string {
+  return ids.map((id) => `rm ~/.claude/skills/${id}`).join('\n');
+}
+
+/** Flag installed-but-unused skills with a copy-only prune command. (#421) */
 export const detector: Detector = {
   id: 'workflow.unused-installed-skills',
   category: 'workflow',
@@ -23,6 +26,7 @@ export const detector: Detector = {
       now,
     }).filter((f) => f.resourceType === 'skill' && f.windowCount === 0);
     if (unused.length < MIN_UNUSED) return null;
+    const ids = unused.map((f) => f.resourceId);
     return {
       id: 'workflow.unused-installed-skills',
       category: 'workflow',
@@ -31,7 +35,13 @@ export const detector: Detector = {
       detail: `${unused.length} installed skill(s) had zero invocations in the last 30 days; unused skills add selection ambiguity when Claude picks which to invoke.`,
       action: 'Remove unused skills from ~/.claude/skills/ to keep skill-selection clean.',
       affected: unused.length,
-      evidence: unused.slice(0, 5).map((f) => f.resourceId),
+      evidence: ids.slice(0, 5),
+      fix: {
+        target: 'command',
+        label: 'Prune unused skills',
+        note: 'Copy and run after confirming each skill is no longer needed.',
+        snippet: pruneSnippet(ids),
+      },
     };
   },
 };

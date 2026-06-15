@@ -27,6 +27,10 @@ describe('workflow.unused-installed-skills (#421)', () => {
     const rec = detector.rule(input(['a', 'b', 'c', 'd']), 1_780_100_000_000);
     expect(rec?.id).toBe('workflow.unused-installed-skills');
     expect(rec?.affected).toBeGreaterThanOrEqual(3);
+    expect(rec?.fix?.target).toBe('command');
+    expect(rec?.fix?.snippet).toBe(
+      'rm ~/.claude/skills/a\nrm ~/.claude/skills/b\nrm ~/.claude/skills/c\nrm ~/.claude/skills/d'
+    );
   });
   it('stays silent below threshold', () => {
     expect(detector.rule(input(['a', 'b']), 1_780_100_000_000)).toBeNull();

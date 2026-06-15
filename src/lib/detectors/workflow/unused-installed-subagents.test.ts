@@ -27,6 +27,10 @@ describe('workflow.unused-installed-subagents (#633)', () => {
     const rec = detector.rule(input(['a', 'b', 'c', 'd']), 1_780_100_000_000);
     expect(rec?.id).toBe('workflow.unused-installed-subagents');
     expect(rec?.affected).toBeGreaterThanOrEqual(3);
+    expect(rec?.fix?.target).toBe('command');
+    expect(rec?.fix?.snippet).toBe(
+      'rm ~/.claude/agents/a\nrm ~/.claude/agents/b\nrm ~/.claude/agents/c\nrm ~/.claude/agents/d'
+    );
   });
   it('stays silent below threshold', () => {
     expect(detector.rule(input(['a', 'b']), 1_780_100_000_000)).toBeNull();

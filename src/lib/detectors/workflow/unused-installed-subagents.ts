@@ -7,8 +7,11 @@ import { computeConfigHygiene } from '../../config-hygiene';
 // 'subagent') — this mirrors workflow.unused-installed-skills to surface it. (#633)
 const MIN_UNUSED = 3;
 
-/** Flag installed-but-unused subagents. No fix snippet — removal is `rm` under
- *  ~/.claude/agents/; no settings key controls installed subagents. (#633) */
+function pruneSnippet(ids: string[]): string {
+  return ids.map((id) => `rm ~/.claude/agents/${id}`).join('\n');
+}
+
+/** Flag installed-but-unused subagents with a copy-only prune command. (#633) */
 export const detector: Detector = {
   id: 'workflow.unused-installed-subagents',
   category: 'workflow',
@@ -25,6 +28,7 @@ export const detector: Detector = {
       now,
     }).filter((f) => f.resourceType === 'subagent' && f.windowCount === 0);
     if (unused.length < MIN_UNUSED) return null;
+    const ids = unused.map((f) => f.resourceId);
     return {
       id: 'workflow.unused-installed-subagents',
       category: 'workflow',
@@ -33,7 +37,13 @@ export const detector: Detector = {
       detail: `${unused.length} installed subagent(s) had zero invocations in the last 30 days; unused subagents add selection ambiguity when Claude picks which to invoke.`,
       action: 'Remove unused subagents from ~/.claude/agents/ to keep agent-selection clean.',
       affected: unused.length,
-      evidence: unused.slice(0, 5).map((f) => f.resourceId),
+      evidence: ids.slice(0, 5),
+      fix: {
+        target: 'command',
+        label: 'Prune unused subagents',
+        note: 'Copy and run after confirming each subagent is no longer needed.',
+        snippet: pruneSnippet(ids),
+      },
     };
   },
 };
