@@ -287,6 +287,15 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(
       NAV_ITEMS.find((item) => item.view === 'workflows')?.description
     ).toMatch(/Workflow-tool runs/);
+    expect(NAV_ITEMS.find((item) => item.view === 'errors')?.description).toMatch(
+      /Error and retry/
+    );
+    expect(
+      NAV_ITEMS.find((item) => item.view === 'report-card')?.description
+    ).toMatch(/Automation reliability/);
+    expect(
+      NAV_ITEMS.find((item) => item.view === 'evaluator')?.description
+    ).toMatch(/Speed signals/);
     expect(
       NAV_ITEMS.find((item) => item.view === 'memories')?.description
     ).toMatch(/Memory files/);

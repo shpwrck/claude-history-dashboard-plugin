@@ -225,10 +225,29 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // Model Evals workbench (#1086, epic #975): routing-eval evidence + scoped
   // routing recommendations live under the cost lever (model routing).
   { view: 'model-evals', label: 'Model Evals', icon: FlaskIcon, domain: 'cost', serverOnly: true },
-  { view: 'errors', label: 'Errors', icon: ExclamationTriangleIcon, domain: 'success-rate' },
-  { view: 'report-card', label: 'Report Card', icon: ClipboardCheckIcon, domain: 'success-rate', serverOnly: true },
+  {
+    view: 'errors',
+    label: 'Errors',
+    icon: ExclamationTriangleIcon,
+    domain: 'success-rate',
+    description: 'Error and retry signals.',
+  },
+  {
+    view: 'report-card',
+    label: 'Report Card',
+    icon: ClipboardCheckIcon,
+    domain: 'success-rate',
+    description: 'Automation reliability.',
+    serverOnly: true,
+  },
   { view: 'review-queue', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', serverOnly: true },
-  { view: 'evaluator', label: 'Speed Check', icon: BullseyeIcon, domain: 'speed' },
+  {
+    view: 'evaluator',
+    label: 'Speed Check',
+    icon: BullseyeIcon,
+    domain: 'speed',
+    description: 'Speed signals.',
+  },
   { view: 'context', label: 'Context Health', icon: HeartbeatIcon, domain: 'context-health' },
   { view: 'conversation', label: 'Turn Patterns', icon: CommentIcon, domain: 'context-health' },
   { view: 'tools', label: 'Tool Usage', icon: ToolsIcon, domain: 'workflow-hygiene' },
