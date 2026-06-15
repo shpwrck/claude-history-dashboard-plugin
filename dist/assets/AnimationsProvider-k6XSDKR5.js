@@ -1,0 +1,1 @@
+import{On as e,Sn as t,Tn as n}from"./index-ttoKtXdo.js";var r=t(),i=e(n()),a=(0,i.createContext)({hasAnimations:!1}),o=({config:e,children:t})=>(0,r.jsx)(a.Provider,{value:e,children:t}),s=()=>{let e=(0,i.useContext)(a);return e===void 0?{hasAnimations:!1}:e},c=e=>{let{hasAnimations:t}=s();return e??t??!1};o.displayName=`AnimationsProvider`;export{c as t};
