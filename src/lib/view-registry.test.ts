@@ -265,13 +265,19 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(new Set(views).size).toBe(views.length);
   });
 
-  it('carries PageHeader descriptions for the reference migrations', () => {
+  it('carries PageHeader descriptions for the reference and rollout migrations', () => {
     expect(NAV_ITEMS.find((item) => item.view === 'cost')?.description).toMatch(
       /Per-tool costs use proportional attribution/
     );
     expect(NAV_ITEMS.find((item) => item.view === 'tokens')?.description).toMatch(
       /Track token volume/
     );
+    expect(NAV_ITEMS.find((item) => item.view === 'files')?.description).toMatch(
+      /files and directories dominate reads/
+    );
+    expect(
+      NAV_ITEMS.find((item) => item.view === 'permissions')?.description
+    ).toMatch(/permission modes/);
   });
 
   it('retires Forensic Graph from nav while redirecting old deep links to Timeline', () => {

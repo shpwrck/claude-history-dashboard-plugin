@@ -187,7 +187,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { view: 'adoption', label: 'Adoption', icon: ClipboardCheckIcon, domain: 'home', serverOnly: true },
   { view: 'provisioning', label: 'Provision', icon: ServerIcon, domain: 'home', serverOnly: true },
   { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', serverOnly: true },
-  { view: 'permissions', label: 'Permissions', icon: LockIcon, domain: 'safety' },
+  {
+    view: 'permissions',
+    label: 'Permissions',
+    icon: LockIcon,
+    domain: 'safety',
+    description:
+      'Track permission modes, dangerous commands, prompt-prone tools, and policy candidates that shape safety posture.',
+  },
   { view: 'enterprise', label: 'Enterprise', icon: LockIcon, domain: 'safety', serverOnly: true },
   { view: 'summary', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
   {
@@ -207,7 +214,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'Track token volume, cache behavior, model mix, and estimated spend across loaded sessions.',
   },
-  { view: 'files', label: 'File Impact', icon: FileAltIcon, domain: 'cost' },
+  {
+    view: 'files',
+    label: 'File Impact',
+    icon: FileAltIcon,
+    domain: 'cost',
+    description:
+      'See which files and directories dominate reads, edits, writes, and repeated re-reads so you can reduce avoidable context churn.',
+  },
   // Model Evals workbench (#1086, epic #975): routing-eval evidence + scoped
   // routing recommendations live under the cost lever (model routing).
   { view: 'model-evals', label: 'Model Evals', icon: FlaskIcon, domain: 'cost', serverOnly: true },
