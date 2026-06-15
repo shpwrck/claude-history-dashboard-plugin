@@ -287,6 +287,12 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(
       NAV_ITEMS.find((item) => item.view === 'workflows')?.description
     ).toMatch(/Workflow-tool runs/);
+    expect(
+      NAV_ITEMS.find((item) => item.view === 'memories')?.description
+    ).toMatch(/Memory files/);
+    expect(NAV_ITEMS.find((item) => item.view === 'tasks')?.description).toMatch(
+      /Task completion/
+    );
   });
 
   it('retires Forensic Graph from nav while redirecting old deep links to Timeline', () => {

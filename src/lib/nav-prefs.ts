@@ -259,8 +259,21 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // Not serverOnly: like Workflows, Memories accepts the user's own uploaded
   // `memory/*.md` in the SPA/upload build (#538) and shows a data-aware
   // "needs a server" placeholder only when empty (see Memories.tsx).
-  { view: 'memories', label: 'Memories', icon: BrainIcon, domain: 'workflow-hygiene' },
-  { view: 'tasks', label: 'Task Health', icon: TasksIcon, domain: 'workflow-hygiene', serverOnly: true },
+  {
+    view: 'memories',
+    label: 'Memories',
+    icon: BrainIcon,
+    domain: 'workflow-hygiene',
+    description: 'Memory files by project.',
+  },
+  {
+    view: 'tasks',
+    label: 'Task Health',
+    icon: TasksIcon,
+    domain: 'workflow-hygiene',
+    description: 'Task completion and cold-session risk.',
+    serverOnly: true,
+  },
   { view: 'teams', label: 'Team Coordination', icon: SitemapIcon, domain: 'workflow-hygiene', serverOnly: true },
   { view: 'plans', label: 'Task Plans', icon: ClipboardListIcon, domain: 'workflow-hygiene', serverOnly: true },
   { view: 'search', label: 'Search', icon: SearchIcon, domain: 'discovery' },
