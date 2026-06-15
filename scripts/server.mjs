@@ -37,6 +37,7 @@ import {
   brotliCompress,
   brotliCompressSync,
   brotliDecompressSync,
+  gunzipSync,
   gzip,
   gzipSync,
   constants as zconstants,
@@ -2710,7 +2711,7 @@ async function readMemories(projectsRoot = PROJECTS) {
 
 // Read a request body with a hard size cap. Mutating JSON payloads are small, so
 // 1 MiB is a generous default that still stops a runaway client.
-function readRequestBody(req, maxBytes = DASHBOARD_MUTATING_BODY_MAX_BYTES) {
+function readRequestBody(req, maxBytes = DASHBOARD_MUTATING_BODY_MAX_BYTES, { raw = false } = {}) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -2751,7 +2752,8 @@ function readRequestBody(req, maxBytes = DASHBOARD_MUTATING_BODY_MAX_BYTES) {
     req.on('end', () => {
       if (settled) return;
       settled = true;
-      resolve(Buffer.concat(chunks).toString('utf8'));
+      const buf = Buffer.concat(chunks);
+      resolve(raw ? buf : buf.toString('utf8'));
     });
   });
 }
@@ -3663,17 +3665,21 @@ async function handleIngestArtifacts(req, res, sourceId) {
   if (!safeSourceId(sourceId)) {
     return sendJson(res, 400, { ok: false, error: 'invalid source id' });
   }
-  let raw;
+  let bodyBuf;
   try {
-    raw = await readRequestBody(req, INGEST_MAX_BYTES + 1024 * 1024);
+    bodyBuf = await readRequestBody(req, INGEST_MAX_BYTES + 1024 * 1024, { raw: true });
   } catch (err) {
     return sendJson(res, 413, { ok: false, error: err.message || 'Failed to read request body' });
   }
   let body;
   try {
-    body = JSON.parse(raw);
+    // The shipper may gzip the body (it compresses ~3x; the base64 transcript payload is bulky).
+    // Bound the inflated size to guard against a gzip bomb.
+    const gz = String(req.headers['content-encoding'] || '').toLowerCase().includes('gzip');
+    const json = (gz ? gunzipSync(bodyBuf, { maxOutputLength: 4 * INGEST_MAX_BYTES }) : bodyBuf).toString('utf8');
+    body = JSON.parse(json);
   } catch {
-    return sendJson(res, 400, { ok: false, error: 'Body is not valid JSON' });
+    return sendJson(res, 400, { ok: false, error: 'Body is not valid JSON (or gunzip failed)' });
   }
   const artifacts = Array.isArray(body?.artifacts) ? body.artifacts : null;
   if (!artifacts) return sendJson(res, 400, { ok: false, error: 'artifacts[] required' });
