@@ -130,6 +130,14 @@ describe('reliability.self-update-health (#566)', () => {
     it('action recommends pinning a version', () => {
       expect(rec?.action).toMatch(/[Pp]in/);
     });
+
+    it('emits a copyable update-health command snippet', () => {
+      expect(rec?.fix?.target).toBe('command');
+      expect(rec?.fix?.snippet).toContain('claude --version');
+      expect(rec?.fix?.snippet).toContain(
+        'cat ~/.claude/.last-update-result.json'
+      );
+    });
   });
 
   describe('single-record series (today\'s typical ingest)', () => {

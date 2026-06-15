@@ -102,7 +102,8 @@ describe('reliability.mcp-needs-auth', () => {
     expect(result?.id).toBe('reliability.mcp-needs-auth');
     expect(result?.severity).toBe('warning');
     expect(result?.unattended).toBeFalsy();
-    expect(result?.fix).toBeUndefined();
+    expect(result?.fix?.target).toBe('command');
+    expect(result?.fix?.snippet).toBe('claude mcp auth notion');
   });
 
   // ---------------------------------------------------------------------------
@@ -139,7 +140,7 @@ describe('reliability.mcp-needs-auth', () => {
     expect(result?.title).toMatch(/2/);
   });
 
-  it('emits a gate snippet fix when blocking servers exist', () => {
+  it('emits re-auth commands plus a gate snippet fix when blocking servers exist', () => {
     const s1 = sdkSession('sess-1');
     const input = baseInput({
       mcpAuth: PROTOTYPE_AUTH_STATE,
@@ -150,6 +151,7 @@ describe('reliability.mcp-needs-auth', () => {
     expect(result?.fix).toBeDefined();
     expect(result?.fix?.snippet).toContain('claude mcp auth');
     expect(result?.fix?.snippet).toContain('github');
+    expect(result?.fix?.snippet).toContain('cloudflare-api');
     expect(result?.fix?.snippet).toContain('exit 1');
   });
 

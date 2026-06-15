@@ -27,6 +27,10 @@ describe('workflow.unused-installed-commands (#634)', () => {
     const rec = detector.rule(input(['a', 'b', 'c', 'd']), 1_780_100_000_000);
     expect(rec?.id).toBe('workflow.unused-installed-commands');
     expect(rec?.affected).toBeGreaterThanOrEqual(3);
+    expect(rec?.fix?.target).toBe('command');
+    expect(rec?.fix?.snippet).toBe(
+      'rm ~/.claude/commands/a.md\nrm ~/.claude/commands/b.md\nrm ~/.claude/commands/c.md\nrm ~/.claude/commands/d.md'
+    );
   });
   it('stays silent below threshold', () => {
     expect(detector.rule(input(['a', 'b']), 1_780_100_000_000)).toBeNull();

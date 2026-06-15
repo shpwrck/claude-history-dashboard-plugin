@@ -3,6 +3,10 @@ import type { RecommendationInput } from '../types';
 import type { UpdateResult } from '../../parse-last-update';
 import { analyzeUpdateHealth } from '../../parse-last-update';
 
+function updateHealthSnippet(): string {
+  return ['claude --version', 'cat ~/.claude/.last-update-result.json'].join('\n');
+}
+
 /**
  * Flags a low CLI self-update success rate so users know to pin a known-good
  * version rather than trusting auto-update blindly (#566, persona P7 Owen).
@@ -66,6 +70,12 @@ export const detector: Detector = {
           : `Some update attempts failed (${codeStr}). Monitor for recurrence; pin a version if failures become frequent.`,
       affected: report.failedCount,
       view: 'recommendations' as const,
+      fix: {
+        target: 'command',
+        label: 'Check update health',
+        note: 'Copy and run to inspect the installed CLI version and last self-update result before pinning or repairing updates.',
+        snippet: updateHealthSnippet(),
+      },
     };
   },
 };

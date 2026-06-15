@@ -15,6 +15,10 @@ describe('reliability.settings-json-invalid (#417)', () => {
     }), 0);
     expect(rec?.id).toBe('reliability.settings-json-invalid');
     expect(rec?.affected).toBe(1);
+    expect(rec?.fix?.target).toBe('command');
+    expect(rec?.fix?.snippet).toBe(
+      'python3 -m json.tool ~/.claude/settings.json'
+    );
   });
   it('stays silent when absent, ok, or only warnings', () => {
     expect(detector.rule(input({ present: false, ok: true, findings: [] }), 0)).toBeNull();

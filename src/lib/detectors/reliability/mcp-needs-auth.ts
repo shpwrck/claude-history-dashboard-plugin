@@ -12,8 +12,8 @@
  * Strategy: classify each needs-auth server as **blocking** (unattended sessions
  * actively call it, call count > 0 from attribution data) or **advisory** (no
  * unattended call history). HIGH when any blocking server needs auth; WARNING when
- * advisory-only. Emits a copy-pasteable pre-flight GATE snippet + claude mcp auth
- * re-auth commands.
+ * advisory-only. Emits copy-pasteable claude mcp auth re-auth commands; blocking
+ * findings also include a pre-flight GATE snippet.
  *
  * Data sources:
  *  - `mcpAuth`     — parsed ~/.claude/mcp-needs-auth-cache.json (new optional field)
@@ -91,6 +91,7 @@ export const detector: Detector = {
 
     const blockerNames = blocking.map((b) => b.name);
     const advisoryNames = advisory.map((a) => a.name);
+    const allNames = [...blockerNames, ...advisoryNames];
     const totalServers = blocking.length + advisory.length;
 
     const severity = blocking.length > 0 ? 'critical' : 'warning';
@@ -119,16 +120,10 @@ export const detector: Detector = {
         ? `Run the re-auth commands interactively BEFORE your next automated run, then add the pre-flight GATE to your CI/cron entrypoint to fail fast on future expired tokens.\n\nRe-auth:\n${buildReauthCommands(blockerNames)}`
         : `Run \`claude mcp auth <server>\` interactively for each flagged server: ${advisoryNames.join(', ')}.`;
 
-    // Only emit the gate fix when there are load-bearing blockers
-    const fix =
+    const fixSnippet =
       blocking.length > 0
-        ? {
-            target: 'command' as const,
-            label: 'Copy pre-flight GATE',
-            note: 'Add to the top of your CI/cron entrypoint before launching claude.',
-            snippet: buildGateSnippet(blockerNames),
-          }
-        : undefined;
+        ? `${buildReauthCommands(allNames)}\n\n${buildGateSnippet(blockerNames)}`
+        : buildReauthCommands(allNames);
 
     return {
       id: 'reliability.mcp-needs-auth',
@@ -143,7 +138,15 @@ export const detector: Detector = {
       affected: totalServers,
       unattended: blocking.length > 0,
       evidence: [...blockerNames, ...advisoryNames].map((n) => `claude mcp auth ${n}`),
-      fix,
+      fix: {
+        target: 'command',
+        label: blocking.length > 0 ? 'Copy re-auth + gate' : 'Copy re-auth commands',
+        note:
+          blocking.length > 0
+            ? 'Run re-auth interactively, then add the gate to CI/cron before launching claude.'
+            : 'Run interactively for each flagged MCP server.',
+        snippet: fixSnippet,
+      },
     };
   },
 };

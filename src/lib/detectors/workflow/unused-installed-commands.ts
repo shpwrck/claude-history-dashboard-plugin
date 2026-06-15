@@ -8,8 +8,11 @@ import { computeConfigHygiene } from '../../config-hygiene';
 // Mirrors unused-installed-skills / -subagents. (#634)
 const MIN_UNUSED = 3;
 
-/** Flag installed-but-unused slash commands. No fix snippet — removal is `rm`
- *  under ~/.claude/commands/; no settings key controls installed commands. (#634) */
+function pruneSnippet(ids: string[]): string {
+  return ids.map((id) => `rm ~/.claude/commands/${id}.md`).join('\n');
+}
+
+/** Flag installed-but-unused slash commands with a copy-only prune command. (#634) */
 export const detector: Detector = {
   id: 'workflow.unused-installed-commands',
   category: 'workflow',
@@ -26,6 +29,7 @@ export const detector: Detector = {
       now,
     }).filter((f) => f.resourceType === 'command' && f.windowCount === 0);
     if (unused.length < MIN_UNUSED) return null;
+    const ids = unused.map((f) => f.resourceId);
     return {
       id: 'workflow.unused-installed-commands',
       category: 'workflow',
@@ -34,7 +38,13 @@ export const detector: Detector = {
       detail: `${unused.length} installed slash-command(s) had zero invocations in the last 30 days; unused commands clutter the slash menu and add selection ambiguity.`,
       action: 'Remove unused commands from ~/.claude/commands/ to keep the slash menu clean.',
       affected: unused.length,
-      evidence: unused.slice(0, 5).map((f) => f.resourceId),
+      evidence: ids.slice(0, 5),
+      fix: {
+        target: 'command',
+        label: 'Prune unused commands',
+        note: 'Copy and run after confirming each slash command is no longer needed.',
+        snippet: pruneSnippet(ids),
+      },
     };
   },
 };
