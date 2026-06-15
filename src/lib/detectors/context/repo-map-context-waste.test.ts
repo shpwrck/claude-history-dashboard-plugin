@@ -280,6 +280,26 @@ describe('context.repo-map-context-waste (#890, epic #871 + #944)', () => {
       expect([0, 0.1, 0.25, 0.5, 1]).not.toContain(frac);
     });
 
+    it('clamps the deletion fraction to [0,1] when reread waste exceeds the cache-read pool (dc-reclaim-3)', () => {
+      // Re-read CONTENT tokens (3000 waste from 4 reads) and the cacheRead PREFIX
+      // pool (1000) are different token populations, so the raw ratio is 3.0.
+      // Unclamped, scaleTokens(keep=max(0,1-3)=0) would delete the ENTIRE pool.
+      const path = 'src/lib/reclaim.ts';
+      const map = dataset(
+        project([file({ path, symbols: [sym('runReclaimCascade')], reread: reread(1, 3000) })])
+      );
+      const toolData = [reads('s1', `/repo/${path}`, 4)]; // waste = (4-1)*4000/4 = 3000 tokens
+      const tokenData = [token('s1', 'claude-opus-4-8', 1000)]; // pool = 1000 cacheRead < waste
+      const rec = find(input({ repoMap: map, toolData, tokenData }));
+      const frac = (
+        rec!.reclaim!.counterfactual as { poolDeltaFrac: Record<string, number> }
+      ).poolDeltaFrac.cacheRead;
+      expect(frac).toBe(1); // clamped; raw ratio would be 3.0
+      // The cascade can never delete more than the owned pool: residual stays >= 0.
+      const result = runReclaimCascade([rec!.reclaim!], tokenData);
+      expect(result.billFinal).toBeGreaterThanOrEqual(0);
+    });
+
     it('carries the reread-token estimate in the detail and evidence', () => {
       const map = dataset(
         project([file({ path: 'src/lib/reclaim.ts', symbols: [sym('x')], reread: reread(3, 5000) })])

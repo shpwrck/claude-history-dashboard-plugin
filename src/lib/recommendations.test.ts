@@ -2465,6 +2465,31 @@ describe('guarded-marginal cascade rollup (#947, epic #944)', () => {
     expect(rec.estSavingsUsd).toBe(999);
   });
 
+  it('served per-card marginals reconcile with the cascade headline total (dc-reclaim-1/2 alignment)', () => {
+    // The served path (assembleRecommendations) now back-fills per-card
+    // estSavingsUsd from the cascade marginal, and the UI headline now uses the
+    // cross-category cascade total. They must reconcile: sum(cards) == headline.
+    const td = [opusInputSession('s1', 1_000_000)];
+    const rec = recWithClaim(
+      'cost.swap',
+      {
+        leverId: 'cost.swap',
+        category: 'cost',
+        orderKey: 80,
+        ownedPools: ['input'],
+        scopeKeys: [scopeKeyOf('s1', 'claude-opus-4-7')],
+        counterfactual: { kind: 'reprice', toModel: CHEAPEST_MODEL },
+        evidenceTokens: 1_000_000,
+      },
+      999
+    );
+    const cardSum = backfillReclaimSavings([rec], td).reduce(
+      (s, r) => s + (r.estSavingsUsd ?? 0),
+      0
+    );
+    expect(cardSum).toBeCloseTo(rollupReclaimCascade([rec], td).total, 9);
+  });
+
   it('legacy recs WITHOUT a claim pass through back-fill unchanged', () => {
     const legacy: Recommendation = {
       id: 'cost.legacy',

@@ -7,7 +7,7 @@
 // minor cut (bare `x.y` or `x.y.0`) is gated; a patch (`x.y.z`, z>0) is exempt.
 
 import assert from 'node:assert/strict';
-import { classifyTarget, expectsSecurityGate } from './check-release-gate.mjs';
+import { classifyTarget, expectsSecurityGate, candidateMilestones } from './check-release-gate.mjs';
 
 const cases = [
   ['v0.2', { milestone: 'v0.2', patch: null, isPatch: false }],
@@ -56,6 +56,27 @@ for (const [input, expected] of securityCases) {
   } catch (err) {
     failures += 1;
     console.error(`  FAIL expectsSecurityGate(${input}): ${err.message}`);
+  }
+}
+
+// Milestone resolution must try the three-part `vX.Y.Z` form (current
+// convention, #1045) before the two-part `vX.Y` (#722), so the gate matches
+// whichever the repo actually created. This is the bug that blocked v0.4.0:
+// classifyTarget normalizes to `v0.4` but the milestone is named `v0.4.0`.
+const milestoneCases = [
+  ['v0.4.0', ['v0.4.0', 'v0.4']],
+  ['v0.4', ['v0.4.0', 'v0.4']],
+  ['0.4', ['v0.4.0', 'v0.4']],
+  ['v0.2', ['v0.2.0', 'v0.2']],
+  ['v1.2', ['v1.2.0', 'v1.2']],
+];
+for (const [input, expected] of milestoneCases) {
+  try {
+    assert.deepEqual(candidateMilestones(classifyTarget(input)), expected);
+    console.log(`  ok  candidateMilestones(${input}) -> ${expected.join(', ')}`);
+  } catch (err) {
+    failures += 1;
+    console.error(`  FAIL candidateMilestones(${input}): ${err.message}`);
   }
 }
 

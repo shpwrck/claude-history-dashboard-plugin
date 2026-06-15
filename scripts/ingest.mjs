@@ -285,6 +285,7 @@ const {
   buildRecommendations,
   assembleRecommendationInput,
   filterRecommendationsByProject,
+  backfillReclaimSavings,
   computeSuppressionTransitions,
 } = await import(join(LIB, 'recommendations.ts'));
 // Recs adoption-receipt store (#575/#576): reader for the prior SURFACED/
@@ -2293,7 +2294,12 @@ function assembleRecommendationContext(options = {}) {
 
 export function assembleRecommendations(project, options = {}) {
   const { input, sessions } = assembleRecommendationContext(options);
-  const recs = buildRecommendations(input);
+  // Back-fill each rec's `estSavingsUsd` from its booked cascade marginal so the
+  // served per-card dollar figure is the deduped, residual-guarded slice of the
+  // bill (#944) — NOT the raw, possibly-overlapping detector estimate. Run on
+  // the global recs before any project slice so the cascade dedup is computed
+  // over the full lever set (dc-reclaim-1).
+  const recs = backfillReclaimSavings(buildRecommendations(input), input.tokenData);
   return project
     ? filterRecommendationsByProject(recs, project, sessions)
     : recs;

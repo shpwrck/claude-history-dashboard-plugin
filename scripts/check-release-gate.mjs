@@ -79,6 +79,20 @@ function expectedSet(milestone) {
     : 'a performance epic AND an architecture-review epic';
 }
 
+// The milestone naming convention standardized on the three-part `vX.Y.Z` form
+// (#1045, ensure-milestone), but earlier milestones used the two-part `vX.Y`
+// (#722). classifyTarget normalizes to the two-part `milestone`; resolve the
+// actual milestone title by trying the three-part name first (current
+// convention), then the two-part, so the gate matches whichever the repo
+// actually created.
+//   { milestone: 'v0.4', patch: 0 }    -> ['v0.4.0', 'v0.4']
+//   { milestone: 'v0.2', patch: null } -> ['v0.2.0', 'v0.2']
+export function candidateMilestones(target) {
+  const patch = target.patch == null ? 0 : target.patch;
+  const threePart = `${target.milestone}.${patch}`;
+  return [...new Set([threePart, target.milestone])];
+}
+
 function versionFromPackageJson() {
   const here = dirname(fileURLToPath(import.meta.url));
   const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
@@ -111,27 +125,43 @@ function main() {
     process.exit(0);
   }
 
-  let gateIssues;
-  try {
-    const out = gh([
-      'issue', 'list',
-      '--milestone', milestone,
-      '--label', GATE_LABEL,
-      '--state', 'all',
-      '--limit', '200',
-      '--json', 'number,title,state',
-    ]);
-    gateIssues = JSON.parse(out);
-  } catch (err) {
-    fail(`could not query milestone "${milestone}" via gh (${(err.stderr || err.message || '').toString().trim()}).`);
+  // Resolve the actual milestone title (three-part `vX.Y.Z` or two-part `vX.Y`).
+  // `gh issue list` exits non-zero when the milestone title doesn't exist, so
+  // try each candidate and use the first that resolves.
+  const candidates = candidateMilestones(target);
+  let gateIssues = null;
+  let resolved = null;
+  let lastErr = null;
+  for (const name of candidates) {
+    try {
+      const out = gh([
+        'issue', 'list',
+        '--milestone', name,
+        '--label', GATE_LABEL,
+        '--state', 'all',
+        '--limit', '200',
+        '--json', 'number,title,state',
+      ]);
+      gateIssues = JSON.parse(out);
+      resolved = name;
+      break;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (resolved === null) {
+    fail(
+      `could not find a milestone for "${milestone}" (tried ${candidates.join(', ')}) via gh ` +
+      `(${(lastErr?.stderr || lastErr?.message || '').toString().trim()}).`,
+    );
     return;
   }
 
   if (gateIssues.length === 0) {
     fail(
-      `milestone "${milestone}" has no ${GATE_LABEL} epics seeded.\n` +
-      `  Every release must carry ${expectedSet(milestone)}\n` +
-      `  (labelled "${GATE_LABEL}", assigned to ${milestone}). Seed them before cutting —\n` +
+      `milestone "${resolved}" has no ${GATE_LABEL} epics seeded.\n` +
+      `  Every release must carry ${expectedSet(resolved)}\n` +
+      `  (labelled "${GATE_LABEL}", assigned to ${resolved}). Seed them before cutting —\n` +
       `  see docs/RELEASING.md -> "Release-gating epics".`,
     );
   }
@@ -139,26 +169,26 @@ function main() {
   const open = gateIssues.filter((i) => i.state.toLowerCase() === 'open');
   const closed = gateIssues.filter((i) => i.state.toLowerCase() === 'closed');
 
-  const expectedCount = expectsSecurityGate(milestone) ? 3 : 2;
+  const expectedCount = expectsSecurityGate(resolved) ? 3 : 2;
   if (gateIssues.length < expectedCount) {
     // Fewer gating epics than the standing set for this milestone. Warn loudly;
     // the open check below still governs pass/fail.
     console.error(
-      `! Warning: ${milestone} has only ${gateIssues.length} ${GATE_LABEL} epic(s) — ` +
-      `expected ${expectedCount} (${expectedSet(milestone)}).`,
+      `! Warning: ${resolved} has only ${gateIssues.length} ${GATE_LABEL} epic(s) — ` +
+      `expected ${expectedCount} (${expectedSet(resolved)}).`,
     );
   }
 
   if (open.length > 0) {
     const list = open.map((i) => `    #${i.number}  ${i.title}`).join('\n');
     fail(
-      `${open.length} of ${gateIssues.length} ${GATE_LABEL} epic(s) for ${milestone} still OPEN:\n${list}\n\n` +
-      `  Close them (or move them to a later milestone) before cutting ${milestone}.`,
+      `${open.length} of ${gateIssues.length} ${GATE_LABEL} epic(s) for ${resolved} still OPEN:\n${list}\n\n` +
+      `  Close them (or move them to a later milestone) before cutting ${resolved}.`,
     );
   }
 
   const list = closed.map((i) => `    #${i.number}  ${i.title}`).join('\n');
-  console.log(`\n✓ Release gate OPEN for ${milestone} — all ${closed.length} ${GATE_LABEL} epic(s) closed:\n${list}\n`);
+  console.log(`\n✓ Release gate OPEN for ${resolved} — all ${closed.length} ${GATE_LABEL} epic(s) closed:\n${list}\n`);
   process.exit(0);
 }
 

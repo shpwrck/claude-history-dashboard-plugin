@@ -218,7 +218,12 @@ export const detector: Detector = {
 
     let reclaim: ReclaimClaim | undefined;
     if (directWasteTokens > 0 && scopeKeys.size > 0 && inScopeCacheReadTokens > 0) {
-      const cacheReadFrac = directWasteTokens / inScopeCacheReadTokens;
+      // `directWasteTokens` (re-read content) and `inScopeCacheReadTokens` (the
+      // cache-read prefix pool) are different token populations, so the ratio
+      // can exceed 1. Clamp to [0,1]: the counterfactual reclaims a fraction of
+      // the owned cacheRead pool, and `scaleTokens` deletes `1-keep` of it — an
+      // unclamped frac>1 would silently delete the ENTIRE pool (dc-reclaim-3).
+      const cacheReadFrac = Math.min(1, directWasteTokens / inScopeCacheReadTokens);
       reclaim = {
         leverId: 'context.repo-map-context-waste',
         category: 'context',
