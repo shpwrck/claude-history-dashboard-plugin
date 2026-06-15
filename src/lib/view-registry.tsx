@@ -709,6 +709,7 @@ export const VIEW_RENDERERS: Partial<
       sessions={d.sessions}
       liveConfig={d.liveConfig}
       onOpenSession={n.openSession}
+      onNavigateWithFilter={n.navigateWithFilter}
     />
   ),
   files: ({ data: d, nav: n }) => (
