@@ -3627,6 +3627,136 @@ async function handleSessionsDelete(req, res, name) {
   }
 }
 
+// --- Session-history push-ingest (#1563 Slice 1, ADR 0009 §3) ------------------------------------
+// The session-data shipper (a sidecar in each remote-control pod) POSTs its session artifacts here;
+// the dashboard writes them collision-free under a per-source namespace it later aggregates. Auth is
+// a shared bearer token (the shipper is cross-origin from a pod, so the same-origin CSRF gate does
+// not apply); endpoint is DISABLED (no token / no ingest dir configured) to fail safe.
+const PROBAITIO_INGEST_DIR = process.env.PROBAITIO_INGEST_DIR || '';
+const PROBAITIO_INGEST_TOKEN = process.env.PROBAITIO_INGEST_TOKEN || '';
+const INGEST_MAX_ARTIFACTS = 2000; // per batch
+const INGEST_MAX_BYTES = 64 * 1024 * 1024; // per artifact (decoded)
+
+function ingestEnabled() {
+  return Boolean(PROBAITIO_INGEST_DIR && PROBAITIO_INGEST_TOKEN);
+}
+
+function passesIngestAuth(req, res) {
+  if (!tokensMatch(extractToken(req), PROBAITIO_INGEST_TOKEN)) {
+    sendJson(res, 401, { ok: false, error: 'Unauthorized: missing or invalid ingest token' });
+    return false;
+  }
+  return true;
+}
+
+// A source id is one shipper's stream (one session pod) — must be a safe single path segment so it
+// can never escape the ingest dir. The member/displayName is provenance metadata, not the id.
+function safeSourceId(id) {
+  return typeof id === 'string' && /^[a-z0-9][a-z0-9._-]{0,126}$/.test(id) && id !== '.' && id !== '..';
+}
+
+async function handleIngestArtifacts(req, res, sourceId) {
+  if (!ingestEnabled()) {
+    return sendJson(res, 503, { ok: false, error: 'ingest not configured on this dashboard' });
+  }
+  if (!passesIngestAuth(req, res)) return;
+  if (!safeSourceId(sourceId)) {
+    return sendJson(res, 400, { ok: false, error: 'invalid source id' });
+  }
+  let raw;
+  try {
+    raw = await readRequestBody(req, INGEST_MAX_BYTES + 1024 * 1024);
+  } catch (err) {
+    return sendJson(res, 413, { ok: false, error: err.message || 'Failed to read request body' });
+  }
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return sendJson(res, 400, { ok: false, error: 'Body is not valid JSON' });
+  }
+  const artifacts = Array.isArray(body?.artifacts) ? body.artifacts : null;
+  if (!artifacts) return sendJson(res, 400, { ok: false, error: 'artifacts[] required' });
+  if (artifacts.length > INGEST_MAX_ARTIFACTS) {
+    return sendJson(res, 413, { ok: false, error: `too many artifacts (max ${INGEST_MAX_ARTIFACTS})` });
+  }
+
+  const { classifyClaudePath } = await import('../src/lib/claude-tree-classification.ts');
+  const sourceRoot = join(PROBAITIO_INGEST_DIR, sourceId);
+  const realIngest = await realpathOrNull(PROBAITIO_INGEST_DIR);
+  if (!realIngest) {
+    try {
+      await mkdir(PROBAITIO_INGEST_DIR, { recursive: true });
+    } catch (e) {
+      return sendJson(res, 500, { ok: false, error: 'ingest dir unavailable' });
+    }
+  }
+  await mkdir(sourceRoot, { recursive: true });
+
+  // Per-source idempotency ledger (single writer per source => no concurrent-write race). Maps
+  // relPath -> last signature; a re-shipped artifact with the same signature is skipped.
+  const ledgerPath = join(sourceRoot, '.signatures.json');
+  let ledger = {};
+  try {
+    ledger = JSON.parse(await readFile(ledgerPath, 'utf8')) || {};
+  } catch {
+    ledger = {};
+  }
+
+  let written = 0;
+  let skipped = 0;
+  const refused = [];
+  for (const a of artifacts) {
+    const relPath = typeof a?.relPath === 'string' ? a.relPath.replace(/\\/g, '/').replace(/^\.?\//, '') : '';
+    const signature = typeof a?.signature === 'string' ? a.signature : '';
+    if (!relPath || relPath.includes('..')) {
+      refused.push({ relPath, reason: 'bad-path' });
+      continue;
+    }
+    if (classifyClaudePath(relPath) !== 'session-data') {
+      refused.push({ relPath, reason: 'not-session-data' }); // refuse config + secret (ADR 0009)
+      continue;
+    }
+    if (signature && ledger[relPath] === signature) {
+      skipped += 1; // idempotent: already have this exact content
+      continue;
+    }
+    const dest = join(sourceRoot, relPath);
+    // Resolve the destination's parent to confirm it stays inside the source root (no traversal).
+    const realSourceRoot = await realpathOrNull(sourceRoot);
+    if (!realSourceRoot || !pathInside(realSourceRoot, normalize(dest))) {
+      refused.push({ relPath, reason: 'escapes-root' });
+      continue;
+    }
+    const buf = a?.contentB64
+      ? Buffer.from(String(a.contentB64), 'base64')
+      : Buffer.from(String(a?.content ?? ''), 'utf8');
+    if (buf.length > INGEST_MAX_BYTES) {
+      refused.push({ relPath, reason: 'too-large' });
+      continue;
+    }
+    await mkdir(dirname(dest), { recursive: true });
+    await writeFile(dest, buf);
+    if (signature) ledger[relPath] = signature;
+    written += 1;
+  }
+
+  // Provenance: stamp the member/displayName/repo so the aggregating ingest can attribute by member.
+  if (body?.meta && typeof body.meta === 'object') {
+    try {
+      await writeFile(join(sourceRoot, '_source.json'), JSON.stringify({ sourceId, ...body.meta }));
+    } catch {
+      /* best-effort provenance */
+    }
+  }
+  try {
+    await writeFile(ledgerPath, JSON.stringify(ledger));
+  } catch {
+    /* ledger persistence is best-effort; a lost ledger just re-writes identical content next time */
+  }
+  return sendJson(res, 200, { ok: true, sourceId, written, skipped, refused });
+}
+
 // GET /api/adoption/receipts — read-only replay of the append-only receipt log
 // (#577). Each line is re-sanitized through the SAME allowlist-drop writer used
 // on write, so a hand-edited or legacy line can never surface a field outside
@@ -6840,6 +6970,12 @@ function enterpriseRouteAllowed(principal, pathname, method = 'GET') {
   if (pathname === '/api/sessions' || pathname.startsWith('/api/sessions/')) {
     return caps.canWritePolicy;
   }
+  // Session-history push-ingest (#1563): machine-to-machine, gated by its OWN bearer token
+  // (passesIngestAuth), not a browser principal. Classified canWritePolicy here so it isn't an
+  // anonymous hole under enterprise auth; the shipper presents the ingest token regardless of mode.
+  if (/^\/api\/ingest\/[^/]+\/artifacts$/.test(pathname)) {
+    return caps.canWritePolicy;
+  }
   if (!enterpriseReadMethod(method)) {
     return caps.canWritePolicy;
   }
@@ -7495,6 +7631,13 @@ const server = createServer(async (req, res) => {
       const name = decodeURIComponent(pathname.slice('/api/sessions/'.length));
       if (req.method === 'DELETE') return handleSessionsDelete(req, res, name);
       return sendJson(res, 405, { ok: false, error: 'Method not allowed; use DELETE' });
+    }
+
+    // Session-history push-ingest (#1563): the shipper POSTs session artifacts here.
+    const ingestMatch = pathname.match(/^\/api\/ingest\/([^/]+)\/artifacts$/);
+    if (ingestMatch) {
+      if (req.method === 'POST') return handleIngestArtifacts(req, res, decodeURIComponent(ingestMatch[1]));
+      return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
     }
 
     if (pathname === '/api/dataset.json') {

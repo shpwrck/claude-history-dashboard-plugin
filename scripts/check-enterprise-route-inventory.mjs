@@ -78,6 +78,14 @@ export const ENTERPRISE_ROUTE_ACCESS_POLICIES = {
     transcriptExposure: 'none',
     mutating: true,
   },
+  'session-ingest': {
+    allowedPrincipals: ADMIN_PRINCIPALS,
+    requiredCapability: 'canWritePolicy',
+    scopePosture: 'sessions:ingest (bearer-token, machine-to-machine)',
+    dataBoundary: 'session-data artifacts pushed by the shipper (session-data only; config/secret refused)',
+    transcriptExposure: 'writes raw transcripts into the per-source ingest store',
+    mutating: true,
+  },
   'organization-data': {
     allowedPrincipals: ADMIN_PRINCIPALS,
     requiredCapability: 'canReadOrganizationData',
@@ -172,6 +180,7 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'exact', value: '/api/adoption/receipts', access: 'organization-data' },
   { kind: 'exact', value: '/api/sessions', access: 'session-dispatch' },
   { kind: 'prefix', value: '/api/sessions/', access: 'session-dispatch' },
+  { kind: 'regex', value: '^\\/api\\/ingest\\/([^/]+)\\/artifacts$', access: 'session-ingest' },
   { kind: 'exact', value: '/api/dataset.json', access: 'scoped-or-admin-data' },
   {
     kind: 'exact',
