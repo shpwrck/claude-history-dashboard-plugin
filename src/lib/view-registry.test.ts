@@ -291,11 +291,14 @@ describe('view registry ↔ nav catalog parity', () => {
     const node = VIEW_RENDERERS['reclaim-compass']?.({
       data: emptyData(),
       filter: allProjectsFilter,
+      routeFilter: {},
       serverAvailable: true,
       nav: {
         navigateTo: () => {},
+        navigateWithFilter: () => {},
+        scrollToAnchor: () => false,
         openSession: () => {},
-      openEvidence: () => {},
+        openEvidence: () => {},
         setActiveSessionId: () => {},
         setActiveProjectId: () => {},
         focusSessionId: null,

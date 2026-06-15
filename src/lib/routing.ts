@@ -37,6 +37,10 @@ export interface DashboardFilter {
   project: string;
 }
 
+export const ROUTE_FILTER_KEYS = ['project', 'date', 'tool', 'file', 'mode'] as const;
+export type RouteFilterKey = (typeof ROUTE_FILTER_KEYS)[number];
+export type RouteFilter = Partial<Record<RouteFilterKey, string>>;
+
 export interface TimeRange {
   from: number | null;
   to: number | null;
@@ -47,6 +51,8 @@ export interface ParsedRoute {
   view?: View;
   /** A `?session=<id>` deep-link target, if present. */
   session?: string;
+  /** Per-view evidence filters carried in the hash. */
+  viewFilter: RouteFilter;
   /** The global dashboard filter, normalized to predictable defaults. */
   filter: DashboardFilter;
 }
@@ -61,6 +67,8 @@ export interface RouteToHashOptions {
   session?: string | undefined;
   /** Optional global filter query. Omitted only by legacy/test callers. */
   filter?: DashboardFilter | undefined;
+  /** Optional per-view evidence filters. */
+  viewFilter?: RouteFilter | undefined;
 }
 
 export function isTimePreset(value: string | null | undefined): value is TimePreset {
@@ -133,6 +141,49 @@ export function serializeDashboardFilter(
   return params;
 }
 
+function routeFilterValue(
+  key: RouteFilterKey,
+  value: string | null | undefined
+): string | undefined {
+  const normalized = value?.trim();
+  return normalized && !(key === 'project' && normalized === ALL_PROJECTS)
+    ? normalized
+    : undefined;
+}
+
+function parseRouteFilter(query: string | URLSearchParams): RouteFilter {
+  const params =
+    typeof query === 'string'
+      ? new URLSearchParams(query.replace(/^\?/, ''))
+      : query;
+  const filter: RouteFilter = {};
+  for (const key of ROUTE_FILTER_KEYS) {
+    const value = routeFilterValue(key, params.get(key));
+    if (value) filter[key] = value;
+  }
+  return filter;
+}
+
+function serializeRouteFilter(
+  filter: RouteFilter | null | undefined,
+  params = new URLSearchParams()
+): URLSearchParams {
+  for (const key of ROUTE_FILTER_KEYS) {
+    const value = routeFilterValue(key, filter?.[key]);
+    if (value) params.set(key, value);
+  }
+  return params;
+}
+
+function routeFiltersEqual(
+  a: RouteFilter | null | undefined,
+  b: RouteFilter | null | undefined
+): boolean {
+  return ROUTE_FILTER_KEYS.every(
+    (key) => routeFilterValue(key, a?.[key]) === routeFilterValue(key, b?.[key])
+  );
+}
+
 export function dashboardFiltersEqual(
   a: DashboardFilter,
   b: DashboardFilter
@@ -148,11 +199,15 @@ export function parseRoute(
   // Strip a leading '#', then a leading '/', leaving "<view>[?query]".
   const body = hash.replace(/^#/, '').replace(/^\//, '');
   if (!body) {
-    return { filter: normalizeDashboardFilter(null, options.validProjects) };
+    return {
+      viewFilter: {},
+      filter: normalizeDashboardFilter(null, options.validProjects),
+    };
   }
   const [path, query = ''] = body.split('?');
   const params = new URLSearchParams(query);
   const out: ParsedRoute = {
+    viewFilter: parseRouteFilter(params),
     filter: parseDashboardFilter(params, options),
   };
   if (path && isValidView(path)) out.view = path;
@@ -171,14 +226,74 @@ export function routeToHash(
   const params = new URLSearchParams();
   if (options.session) params.set('session', options.session);
   if (options.filter) serializeDashboardFilter(options.filter, params);
+  if (options.viewFilter) serializeRouteFilter(options.viewFilter, params);
   const query = params.toString();
   return query ? `#/${view}?${query}` : `#/${view}`;
+}
+
+export interface NavigateWithFilterOptions {
+  dashboardFilter?: DashboardFilter | undefined;
+  session?: string | undefined;
+}
+
+export function navigateWithFilter(
+  view: View,
+  viewFilter: RouteFilter,
+  options: NavigateWithFilterOptions = {}
+): string {
+  const nextHash = routeToHash(view, {
+    session: options.session,
+    filter: options.dashboardFilter,
+    viewFilter,
+  });
+  if (typeof window !== 'undefined' && window.location.hash !== nextHash) {
+    window.location.hash = nextHash;
+  }
+  return nextHash;
+}
+
+function cssEscape(value: string): string {
+  const maybeCss = globalThis as typeof globalThis & {
+    CSS?: { escape?: (value: string) => string };
+  };
+  if (maybeCss.CSS?.escape) return maybeCss.CSS.escape(value);
+  return value.replace(/["\\]/g, '\\$&');
+}
+
+export interface ScrollToSignalAnchorOptions {
+  block?: ScrollLogicalPosition;
+  behavior?: ScrollBehavior;
+  focus?: boolean;
+}
+
+export function scrollToSignalAnchor(
+  signalId: string | null | undefined,
+  options: ScrollToSignalAnchorOptions = {}
+): boolean {
+  const normalized = signalId?.trim();
+  if (!normalized || typeof document === 'undefined') return false;
+  const target = document.querySelector<HTMLElement>(
+    `[data-signal-id="${cssEscape(normalized)}"]`
+  );
+  if (!target) return false;
+  target.scrollIntoView({
+    block: options.block ?? 'start',
+    behavior: options.behavior ?? 'smooth',
+  });
+  if (options.focus) {
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+  }
+  return true;
 }
 
 /** Parse the current `window.location.hash` (empty in non-browser/test envs). */
 export function initialRoute(options: ParseRouteOptions = {}): ParsedRoute {
   if (typeof window === 'undefined') {
-    return { filter: normalizeDashboardFilter(null, options.validProjects) };
+    return {
+      viewFilter: {},
+      filter: normalizeDashboardFilter(null, options.validProjects),
+    };
   }
   return parseRoute(window.location.hash, options);
 }
@@ -199,17 +314,27 @@ export function initialDashboardFilterFromHash(
   return initialRoute(options).filter;
 }
 
+export function initialRouteFilterFromHash(
+  options: ParseRouteOptions = {}
+): RouteFilter {
+  return initialRoute(options).viewFilter;
+}
+
 export interface HashRouteHandlers {
   /** The currently-rendered view (the write side reads this). */
   currentView: View;
   /** The currently-resolved global dashboard filter. */
   dashboardFilter: DashboardFilter;
+  /** The current per-view evidence filter. */
+  viewFilter: RouteFilter;
   /** Navigate to a view (App's `navigateTo`). */
   onNavigate: (view: View) => void;
   /** Open a session by id (App's `openSession`; itself navigates to Sessions). */
   onOpenSession: (sessionId: string, filter?: DashboardFilter) => void;
   /** Update the URL-backed dashboard filter. */
   onFilterChange: (filter: DashboardFilter) => void;
+  /** Update the URL-backed per-view evidence filter. */
+  onViewFilterChange: (filter: RouteFilter) => void;
   /** Known project ids for stale-project fallback. */
   validProjects?: readonly string[] | undefined;
 }
@@ -228,9 +353,11 @@ export interface HashRouteHandlers {
 export function useHashRoute({
   currentView,
   dashboardFilter,
+  viewFilter,
   onNavigate,
   onOpenSession,
   onFilterChange,
+  onViewFilterChange,
   validProjects,
 }: HashRouteHandlers): void {
   // Latest handlers/state, read inside the stable hashchange listener without
@@ -238,18 +365,22 @@ export function useHashRoute({
   const ref = useRef({
     currentView,
     dashboardFilter,
+    viewFilter,
     onNavigate,
     onOpenSession,
     onFilterChange,
+    onViewFilterChange,
     validProjects,
   });
   useEffect(() => {
     ref.current = {
       currentView,
       dashboardFilter,
+      viewFilter,
       onNavigate,
       onOpenSession,
       onFilterChange,
+      onViewFilterChange,
       validProjects,
     };
   });
@@ -257,11 +388,14 @@ export function useHashRoute({
   // Read side: apply the hash on mount and on every hashchange.
   useEffect(() => {
     const apply = () => {
-      const { view, session, filter } = parseRoute(window.location.hash, {
+      const { view, session, filter, viewFilter } = parseRoute(window.location.hash, {
         validProjects: ref.current.validProjects,
       });
       if (!dashboardFiltersEqual(filter, ref.current.dashboardFilter)) {
         ref.current.onFilterChange(filter);
+      }
+      if (!routeFiltersEqual(viewFilter, ref.current.viewFilter)) {
+        ref.current.onViewFilterChange(viewFilter);
       }
       if (session) {
         ref.current.onOpenSession(session, filter);
@@ -283,9 +417,11 @@ export function useHashRoute({
     const nextHash = routeToHash(currentView, {
       session: currentRoute.view === currentView ? currentRoute.session : undefined,
       filter: dashboardFilter,
+      viewFilter:
+        currentRoute.view === currentView ? currentRoute.viewFilter : undefined,
     });
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
-  }, [currentView, dashboardFilter, validProjects]);
+  }, [currentView, dashboardFilter, viewFilter, validProjects]);
 }

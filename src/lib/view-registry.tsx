@@ -73,6 +73,7 @@ import {
   ALL_PROJECTS,
   presetToRange,
   type DashboardFilter,
+  type RouteFilter,
   type TimeRange,
 } from './routing';
 
@@ -295,6 +296,8 @@ export interface ViewData {
 /** Navigation + session-focus callbacks every view wires its affordances to. */
 export interface ViewNav {
   navigateTo: (view: View) => void;
+  navigateWithFilter: (view: View, filter: RouteFilter) => void;
+  scrollToAnchor: (signalId: string) => boolean;
   openSession: (sessionId: string) => void;
   /** Open the session drill-in focused on a specific timeline entry (#1307). */
   openEvidence: (ref: EvidenceRef) => void;
@@ -313,6 +316,8 @@ export interface ViewNav {
 export interface ViewContext {
   /** URL-backed global time + project filter (#832). */
   filter: DashboardFilter;
+  /** URL-backed per-view evidence filter (#1614). */
+  routeFilter: RouteFilter;
   data: ViewData;
   nav: ViewNav;
   /** Whether a backend is present (server build) vs. the read-only SPA. */
@@ -685,11 +690,12 @@ export const VIEW_RENDERERS: Partial<
   search: ({ data: d, nav: n }) => (
     <SearchView entries={d.entries} onOpenSession={n.openSession} />
   ),
-  tokens: ({ data: d, nav: n, filter }) => (
+  tokens: ({ data: d, nav: n, filter, routeFilter }) => (
     <TokenUsage
       tokenData={d.tokenData}
       sessions={d.sessions}
       activeFilter={filter}
+      routeFilter={routeFilter}
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
     />
@@ -748,7 +754,7 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  automation: ({ data: d, nav: n, filter }) => (
+  automation: ({ data: d, nav: n, filter, routeFilter }) => (
     <AutomationView
       sessions={d.sessions}
       tokenData={d.tokenData}
@@ -756,6 +762,7 @@ export const VIEW_RENDERERS: Partial<
       timelines={d.timelines}
       apiErrors={d.apiErrors}
       activeFilter={filter}
+      routeFilter={routeFilter}
       onActiveSessionChange={n.setActiveSessionId}
       onOpenSession={n.openSession}
     />
@@ -774,11 +781,12 @@ export const VIEW_RENDERERS: Partial<
       apiErrors={d.apiErrors}
     />
   ),
-  errors: ({ data: d, nav: n }) => (
+  errors: ({ data: d, nav: n, routeFilter }) => (
     <ErrorRetry
       toolData={d.toolData}
       apiErrors={d.apiErrors}
       sessions={d.sessions}
+      routeFilter={routeFilter}
       onOpenSession={n.openSession}
     />
   ),
@@ -793,7 +801,7 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  agents: ({ data: d, nav: n }) => (
+  agents: ({ data: d, nav: n, routeFilter }) => (
     <AgentSkill
       toolData={d.toolData}
       agentSettings={d.agentSettings}
@@ -801,6 +809,7 @@ export const VIEW_RENDERERS: Partial<
       runtimeEvents={d.runtimeEvents}
       tokenData={d.tokenData}
       sessions={d.sessions}
+      routeFilter={routeFilter}
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
     />
@@ -823,7 +832,7 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  patterns: ({ data: d, nav: n, filter }) => (
+  patterns: ({ data: d, nav: n, filter, routeFilter }) => (
     <SessionPatterns
       timelines={d.timelines}
       tokenData={d.tokenData}
@@ -832,6 +841,7 @@ export const VIEW_RENDERERS: Partial<
       apiErrors={d.apiErrors}
       sessions={d.sessions}
       activeFilter={filter}
+      routeFilter={routeFilter}
       onOpenSession={n.openSession}
     />
   ),

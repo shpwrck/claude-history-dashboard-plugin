@@ -1,16 +1,20 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_DASHBOARD_FILTER,
+  navigateWithFilter,
   parseDashboardFilter,
   parseRoute,
   presetToRange,
   routeToHash,
+  scrollToSignalAnchor,
 } from './routing';
 
 describe('parseRoute', () => {
   it('parses a bare view hash', () => {
     expect(parseRoute('#/cost')).toEqual({
       view: 'cost',
+      viewFilter: {},
       filter: DEFAULT_DASHBOARD_FILTER,
     });
   });
@@ -19,6 +23,7 @@ describe('parseRoute', () => {
     expect(parseRoute('#/sessions?session=abc123')).toEqual({
       view: 'sessions',
       session: 'abc123',
+      viewFilter: {},
       filter: DEFAULT_DASHBOARD_FILTER,
     });
   });
@@ -26,25 +31,37 @@ describe('parseRoute', () => {
   it('tolerates a missing leading slash', () => {
     expect(parseRoute('#cost')).toEqual({
       view: 'cost',
+      viewFilter: {},
       filter: DEFAULT_DASHBOARD_FILTER,
     });
   });
 
   it('drops an unknown view', () => {
     expect(parseRoute('#/not-a-view')).toEqual({
+      viewFilter: {},
       filter: DEFAULT_DASHBOARD_FILTER,
     });
   });
 
   it('returns empty for an empty hash', () => {
-    expect(parseRoute('')).toEqual({ filter: DEFAULT_DASHBOARD_FILTER });
-    expect(parseRoute('#')).toEqual({ filter: DEFAULT_DASHBOARD_FILTER });
-    expect(parseRoute('#/')).toEqual({ filter: DEFAULT_DASHBOARD_FILTER });
+    expect(parseRoute('')).toEqual({
+      viewFilter: {},
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+    expect(parseRoute('#')).toEqual({
+      viewFilter: {},
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+    expect(parseRoute('#/')).toEqual({
+      viewFilter: {},
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
   });
 
   it('keeps a session param even when the view is the home digest', () => {
     expect(parseRoute('#/home')).toEqual({
       view: 'home',
+      viewFilter: {},
       filter: DEFAULT_DASHBOARD_FILTER,
     });
   });
@@ -52,7 +69,31 @@ describe('parseRoute', () => {
   it('parses the URL-backed dashboard filter', () => {
     expect(parseRoute('#/cost?time=7d&project=%2Frepo%2Falpha')).toEqual({
       view: 'cost',
+      viewFilter: { project: '/repo/alpha' },
       filter: { time: '7d', project: '/repo/alpha' },
+    });
+  });
+
+  it('parses per-view evidence filters alongside dashboard filters', () => {
+    expect(
+      parseRoute('#/errors?tool=Bash&file=src%2FApp.tsx&date=2026-06-15&mode=sdk-cli')
+    ).toEqual({
+      view: 'errors',
+      viewFilter: {
+        tool: 'Bash',
+        file: 'src/App.tsx',
+        date: '2026-06-15',
+        mode: 'sdk-cli',
+      },
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+  });
+
+  it('does not treat the default dashboard project as a per-view filter', () => {
+    expect(parseRoute('#/automation?time=24h&project=All+projects&mode=sdk-cli')).toEqual({
+      view: 'automation',
+      viewFilter: { mode: 'sdk-cli' },
+      filter: DEFAULT_DASHBOARD_FILTER,
     });
   });
 
@@ -63,6 +104,7 @@ describe('parseRoute', () => {
       })
     ).toEqual({
       view: 'cost',
+      viewFilter: { project: '/repo/missing' },
       filter: { time: '30d', project: 'All projects' },
     });
   });
@@ -87,6 +129,45 @@ describe('routeToHash', () => {
         filter: { time: 'all', project: '/repo/alpha' },
       })
     ).toBe('#/sessions?session=abc123&time=all&project=%2Frepo%2Falpha');
+  });
+
+  it('serializes per-view evidence filters', () => {
+    expect(
+      routeToHash('errors', {
+        viewFilter: { tool: 'Bash', file: 'src/App.tsx', date: '2026-06-15' },
+      })
+    ).toBe('#/errors?date=2026-06-15&tool=Bash&file=src%2FApp.tsx');
+  });
+});
+
+describe('navigateWithFilter', () => {
+  it('returns and writes a filtered hash', () => {
+    const hash = navigateWithFilter('automation', { mode: 'sdk-cli' }, {
+      dashboardFilter: { time: '7d', project: 'All projects' },
+    });
+    expect(hash).toBe('#/automation?time=7d&project=All+projects&mode=sdk-cli');
+    expect(window.location.hash).toBe('#/automation?time=7d&project=All+projects&mode=sdk-cli');
+  });
+});
+
+describe('scrollToSignalAnchor', () => {
+  it('scrolls and focuses a matching data-signal-id node', () => {
+    document.body.innerHTML = '<section data-signal-id="token-spend-over-time"></section>';
+    const target = document.querySelector('section') as HTMLElement;
+    const scrollIntoView = vi.fn();
+    target.scrollIntoView = scrollIntoView;
+
+    expect(scrollToSignalAnchor('token-spend-over-time', { focus: true })).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: 'start',
+      behavior: 'smooth',
+    });
+    expect(document.activeElement).toBe(target);
+  });
+
+  it('returns false when no anchor matches', () => {
+    document.body.innerHTML = '';
+    expect(scrollToSignalAnchor('missing')).toBe(false);
   });
 });
 
