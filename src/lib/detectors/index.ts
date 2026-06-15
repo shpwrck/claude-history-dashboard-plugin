@@ -70,6 +70,7 @@ import { detector as assistantRefusalRate } from './workflow/assistant-refusal-r
 import { detector as unusedInstalledSkills } from './workflow/unused-installed-skills';
 import { detector as unusedInstalledSubagents } from './workflow/unused-installed-subagents';
 import { detector as unusedInstalledCommands } from './workflow/unused-installed-commands';
+import { detector as unusedInstalledPlugins } from './workflow/unused-installed-plugins';
 import { detector as toolUndoRate } from './workflow/tool-undo-rate';
 import { detector as lowToolEffectiveness } from './workflow/low-tool-effectiveness';
 import { detector as shadowAxisWins } from './workflow/shadow-axis-wins';
@@ -186,6 +187,7 @@ export const DETECTORS: Detector[] = [
   unusedInstalledSkills,
   unusedInstalledSubagents,
   unusedInstalledCommands,
+  unusedInstalledPlugins,
   toolUndoRate,
   lowToolEffectiveness,
 
