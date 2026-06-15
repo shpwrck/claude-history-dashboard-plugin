@@ -950,6 +950,126 @@ export async function writePolicy(payload: unknown): Promise<PolicyWriteResult> 
   }
 }
 
+// --- Session provisioning (#1251, Slice 1) -------------------------------------------------------
+// The `/api/sessions` literals are owned ONLY here so the SPA build (aliased to api-client.spa.ts)
+// carries no server strings — the spa-boundary gate depends on it.
+
+export interface RemoteSessionPod {
+  name: string;
+  phase: string;
+  registeredEnvUrl: string;
+  registeredEnvName: string;
+}
+
+export interface RemoteSessionStatus {
+  name: string;
+  displayName: string;
+  repo: string;
+  ref: string;
+  poolSize: number;
+  phase: string;
+  reason: string;
+  warmReady: number;
+  url: string;
+  podName: string;
+  pods: RemoteSessionPod[];
+  creationTimestamp: string;
+}
+
+export interface RemoteSessionsResult {
+  ok: boolean;
+  configured: boolean;
+  cluster?: string;
+  namespace?: string;
+  sessions: RemoteSessionStatus[];
+  error?: string;
+}
+
+export interface CreateRemoteSessionInput {
+  repo: string;
+  ref?: string;
+  displayName?: string;
+  poolSize?: number;
+}
+
+export interface CreateRemoteSessionResult {
+  ok: boolean;
+  alreadyProvisioned?: boolean;
+  name?: string;
+  session?: RemoteSessionStatus;
+  error?: string;
+}
+
+// List dispatched sessions. Never rejects: a down/absent backend resolves to configured:false.
+export async function fetchRemoteSessions(): Promise<RemoteSessionsResult> {
+  try {
+    const res = await serverFetch('/api/sessions', { headers: { Accept: 'application/json' } });
+    const body = (await res.json().catch(() => null)) as RemoteSessionsResult | null;
+    if (!res.ok || !body) {
+      return { ok: false, configured: false, sessions: [], error: `HTTP ${res.status}` };
+    }
+    return { ...body, sessions: body.sessions ?? [], configured: body.configured ?? false };
+  } catch (err) {
+    return {
+      ok: false,
+      configured: false,
+      sessions: [],
+      error: err instanceof Error ? err.message : 'Network error',
+    };
+  }
+}
+
+async function csrfToken(): Promise<string | null> {
+  try {
+    const res = await serverFetch('/api/csrf-token', { headers: { Accept: 'application/json' } });
+    const body = (await res.json().catch(() => null)) as { token?: string } | null;
+    return res.ok && body?.token ? body.token : null;
+  } catch {
+    return null;
+  }
+}
+
+// Create (provision) a session pool. Never rejects.
+export async function createRemoteSession(
+  input: CreateRemoteSessionInput
+): Promise<CreateRemoteSessionResult> {
+  const token = await csrfToken();
+  if (!token) return { ok: false, error: 'Could not obtain auth token' };
+  try {
+    const res = await serverFetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token },
+      body: JSON.stringify(input),
+    });
+    const body = (await res.json().catch(() => null)) as CreateRemoteSessionResult | null;
+    if (!res.ok || !body?.ok) {
+      return { ok: false, error: body?.error || `Provision failed (HTTP ${res.status})` };
+    }
+    return body;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Network error' };
+  }
+}
+
+// Delete a session pool by name. Never rejects.
+export async function deleteRemoteSession(name: string): Promise<{ ok: boolean; error?: string }> {
+  const token = await csrfToken();
+  if (!token) return { ok: false, error: 'Could not obtain auth token' };
+  try {
+    const res = await serverFetch(`/api/sessions/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token },
+    });
+    const body = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+    if (!res.ok || !body?.ok) {
+      return { ok: false, error: body?.error || `Delete failed (HTTP ${res.status})` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Network error' };
+  }
+}
+
 /** Legacy `/history.jsonl` fallback fetch (unused by the live flow; kept here so
  * the literal lives only in the aliased-away module). Resolves [] on failure. */
 export async function loadDefaultHistory(): Promise<HistoryEntry[]> {

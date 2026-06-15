@@ -499,6 +499,65 @@ export async function writePolicy(): Promise<PolicyWriteResult> {
   return { ok: false, error: UNAVAILABLE };
 }
 
+// Session provisioning (#1251) is a server-tier feature; the upload-only SPA cannot reach a cluster.
+export interface RemoteSessionPod {
+  name: string;
+  phase: string;
+  registeredEnvUrl: string;
+  registeredEnvName: string;
+}
+
+export interface RemoteSessionStatus {
+  name: string;
+  displayName: string;
+  repo: string;
+  ref: string;
+  poolSize: number;
+  phase: string;
+  reason: string;
+  warmReady: number;
+  url: string;
+  podName: string;
+  pods: RemoteSessionPod[];
+  creationTimestamp: string;
+}
+
+export interface RemoteSessionsResult {
+  ok: boolean;
+  configured: boolean;
+  cluster?: string;
+  namespace?: string;
+  sessions: RemoteSessionStatus[];
+  error?: string;
+}
+
+export interface CreateRemoteSessionInput {
+  repo: string;
+  ref?: string;
+  displayName?: string;
+  poolSize?: number;
+}
+
+export interface CreateRemoteSessionResult {
+  ok: boolean;
+  alreadyProvisioned?: boolean;
+  name?: string;
+  session?: RemoteSessionStatus;
+  error?: string;
+}
+
+export async function fetchRemoteSessions(): Promise<RemoteSessionsResult> {
+  return { ok: true, configured: false, sessions: [] };
+}
+
+export async function createRemoteSession(): Promise<CreateRemoteSessionResult> {
+  return { ok: false, error: UNAVAILABLE };
+}
+
+export async function deleteRemoteSession(): Promise<{ ok: boolean; error?: string }> {
+  return { ok: false, error: UNAVAILABLE };
+}
+
 export async function loadDefaultHistory(): Promise<HistoryEntry[]> {
   return [];
 }

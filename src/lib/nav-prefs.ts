@@ -37,6 +37,7 @@ import ChartLineIcon from '@patternfly/react-icons/dist/esm/icons/chart-line-ico
 import ChartPieIcon from '@patternfly/react-icons/dist/esm/icons/chart-pie-icon';
 import CalendarAltIcon from '@patternfly/react-icons/dist/esm/icons/calendar-alt-icon';
 import FlaskIcon from '@patternfly/react-icons/dist/esm/icons/flask-icon';
+import ServerIcon from '@patternfly/react-icons/dist/esm/icons/server-icon';
 import type { View, ActionDomain } from '../types';
 
 const STORAGE_KEY = 'claude-dashboard:nav-prefs';
@@ -180,6 +181,7 @@ export const NAV_ITEMS: readonly {
   { view: 'home', label: 'Overview', icon: TachometerAltIcon, domain: 'home' },
   { view: 'recommendations', label: 'Recommendations', icon: StarIcon, domain: 'home' },
   { view: 'adoption', label: 'Adoption', icon: ClipboardCheckIcon, domain: 'home', serverOnly: true },
+  { view: 'provisioning', label: 'Provision', icon: ServerIcon, domain: 'home', serverOnly: true },
   { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', serverOnly: true },
   { view: 'permissions', label: 'Permissions', icon: LockIcon, domain: 'safety' },
   { view: 'enterprise', label: 'Enterprise', icon: LockIcon, domain: 'safety', serverOnly: true },

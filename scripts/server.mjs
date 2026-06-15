@@ -3487,6 +3487,146 @@ async function handleAdoptionReceiptWrite(req, res) {
   return sendJson(res, 200, result);
 }
 
+// --- Session dispatch (#1251, Slice 1) ------------------------------------------------------------
+// Create/list/delete RemoteSession CRs on the cluster so org members provision claude.ai/code
+// sessions from the dashboard. SERVER-TIER only (the static SPA can't reach a cluster). All cluster
+// I/O is lazy-imported inside handlers so the server boots fine with no cluster configured (MEMORY
+// server-runtime-has-no-node-modules). Talking to the kube API is NOT an Anthropic call — ADR 0008
+// governance does not apply.
+const PROBAITIO_CLUSTER_NAME = process.env.PROBAITIO_CLUSTER_NAME || 'hub';
+
+function projectRemoteSession(item) {
+  const spec = item?.spec || {};
+  const status = item?.status || {};
+  return {
+    name: item?.metadata?.name || '',
+    displayName: spec.displayName || '',
+    repo: spec.repo || '',
+    ref: spec.ref || '',
+    poolSize: spec.poolSize ?? 0,
+    phase: status.phase || '',
+    reason: status.reason || '',
+    warmReady: status.warmReady ?? 0,
+    url: status.url || '',
+    podName: status.podName || '',
+    pods: Array.isArray(status.pods)
+      ? status.pods.map((p) => ({
+          name: p.name || '',
+          phase: p.phase || '',
+          registeredEnvUrl: p.registeredEnvUrl || '',
+          registeredEnvName: p.registeredEnvName || '',
+        }))
+      : [],
+    creationTimestamp: item?.metadata?.creationTimestamp || '',
+  };
+}
+
+async function handleSessionsList(_req, res) {
+  let kube;
+  try {
+    kube = await import('./lib/kube-client.mjs');
+  } catch {
+    return sendJson(res, 500, { ok: false, error: 'dispatch module unavailable' });
+  }
+  if (!kube.isConfigured()) {
+    return sendJson(res, 200, { ok: true, configured: false, sessions: [] });
+  }
+  try {
+    const ns = kube.dispatchNamespace();
+    const list = await kube.remoteSessions.list(ns);
+    const sessions = (list.items || []).map(projectRemoteSession);
+    return sendJson(res, 200, {
+      ok: true,
+      configured: true,
+      namespace: ns,
+      cluster: PROBAITIO_CLUSTER_NAME,
+      sessions,
+    });
+  } catch (e) {
+    return sendJson(res, 502, { ok: false, error: e.message || 'cluster list failed' });
+  }
+}
+
+async function handleSessionsCreate(req, res) {
+  if (!passesWriteAuth(req, res)) return;
+  let raw;
+  try {
+    raw = await readRequestBody(req);
+  } catch (err) {
+    return sendJson(res, 413, { ok: false, error: err.message || 'Failed to read request body' });
+  }
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return sendJson(res, 400, { ok: false, error: 'Body is not valid JSON' });
+  }
+  let dispatch;
+  try {
+    dispatch = await import('./lib/remotesession-dispatch.mjs');
+  } catch {
+    return sendJson(res, 500, { ok: false, error: 'dispatch module unavailable' });
+  }
+  const v = dispatch.validateDispatchInput(body);
+  if (!v.ok) return sendJson(res, 400, { ok: false, error: v.errors.join('; ') });
+
+  let kube;
+  try {
+    kube = await import('./lib/kube-client.mjs');
+  } catch {
+    return sendJson(res, 500, { ok: false, error: 'dispatch module unavailable' });
+  }
+  if (!kube.isConfigured()) {
+    return sendJson(res, 503, { ok: false, error: 'no cluster configured for dispatch' });
+  }
+  const manifest = dispatch.buildRemoteSessionManifest({
+    cluster: PROBAITIO_CLUSTER_NAME,
+    repo: v.repo,
+    ref: v.ref,
+    displayName: v.displayName,
+    poolSize: v.poolSize,
+  });
+  const ns = kube.dispatchNamespace();
+  try {
+    const created = await kube.remoteSessions.create(ns, manifest);
+    return sendJson(res, 201, { ok: true, session: projectRemoteSession(created) });
+  } catch (e) {
+    if (e.status === 409) {
+      // Deterministic name => re-provision of the same repo. MVP: surface as already-provisioned;
+      // the existing CR keeps the pool warm and the card refreshes the live list.
+      return sendJson(res, 200, { ok: true, alreadyProvisioned: true, name: manifest.metadata.name });
+    }
+    return sendJson(res, 502, { ok: false, error: e.message || 'cluster create failed' });
+  }
+}
+
+async function handleSessionsDelete(req, res, name) {
+  if (!passesWriteAuth(req, res)) return;
+  // Strict RFC1123-subdomain: MUST start and end alphanumeric. This rejects dot-only segments
+  // (".", "..") that WHATWG URL parsing would normalize into a parent path (.../remotesessions/.. =>
+  // .../namespaces/<ns>/), so a delete can never escape the per-session collection segment.
+  if (!name || name.length > 253 || !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(name)) {
+    return sendJson(res, 400, { ok: false, error: 'invalid session name' });
+  }
+  let kube;
+  try {
+    kube = await import('./lib/kube-client.mjs');
+  } catch {
+    return sendJson(res, 500, { ok: false, error: 'dispatch module unavailable' });
+  }
+  if (!kube.isConfigured()) {
+    return sendJson(res, 503, { ok: false, error: 'no cluster configured for dispatch' });
+  }
+  const ns = kube.dispatchNamespace();
+  try {
+    await kube.remoteSessions.del(ns, name);
+    return sendJson(res, 200, { ok: true, deleted: name });
+  } catch (e) {
+    if (e.status === 404) return sendJson(res, 404, { ok: false, error: 'session not found' });
+    return sendJson(res, 502, { ok: false, error: e.message || 'cluster delete failed' });
+  }
+}
+
 // GET /api/adoption/receipts — read-only replay of the append-only receipt log
 // (#577). Each line is re-sanitized through the SAME allowlist-drop writer used
 // on write, so a hand-edited or legacy line can never surface a field outside
@@ -6693,6 +6833,13 @@ function enterpriseRouteAllowed(principal, pathname, method = 'GET') {
   if (enterpriseWriteCapabilityPath(pathname)) {
     return caps.canWritePolicy;
   }
+  // Session dispatch (#1251): under ENTERPRISE auth this requires admin (canWritePolicy) for ALL
+  // methods. In default (non-enterprise) mode the server is localhost-bound and unauthenticated like
+  // its other read routes; the mutating POST/DELETE are still gated by passesWriteAuth (same-origin +
+  // CSRF) regardless of mode.
+  if (pathname === '/api/sessions' || pathname.startsWith('/api/sessions/')) {
+    return caps.canWritePolicy;
+  }
   if (!enterpriseReadMethod(method)) {
     return caps.canWritePolicy;
   }
@@ -7336,6 +7483,18 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET or POST' });
       }
       return handleAdoptionReceiptWrite(req, res);
+    }
+
+    // Session dispatch (#1251, Slice 1): list/create/delete RemoteSession CRs.
+    if (pathname === '/api/sessions') {
+      if (req.method === 'GET') return handleSessionsList(req, res);
+      if (req.method === 'POST') return handleSessionsCreate(req, res);
+      return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET or POST' });
+    }
+    if (pathname.startsWith('/api/sessions/')) {
+      const name = decodeURIComponent(pathname.slice('/api/sessions/'.length));
+      if (req.method === 'DELETE') return handleSessionsDelete(req, res, name);
+      return sendJson(res, 405, { ok: false, error: 'Method not allowed; use DELETE' });
     }
 
     if (pathname === '/api/dataset.json') {

@@ -70,6 +70,14 @@ export const ENTERPRISE_ROUTE_ACCESS_POLICIES = {
     transcriptExposure: 'none',
     mutating: true,
   },
+  'session-dispatch': {
+    allowedPrincipals: ADMIN_PRINCIPALS,
+    requiredCapability: 'canWritePolicy',
+    scopePosture: 'org:write or sessions:dispatch',
+    dataBoundary: 'remote session dispatch (RemoteSession CR create/list/delete)',
+    transcriptExposure: 'none',
+    mutating: true,
+  },
   'organization-data': {
     allowedPrincipals: ADMIN_PRINCIPALS,
     requiredCapability: 'canReadOrganizationData',
@@ -162,6 +170,8 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'exact', value: '/api/csrf-token', access: 'policy-write' },
   { kind: 'exact', value: '/api/policy/write', access: 'policy-write' },
   { kind: 'exact', value: '/api/adoption/receipts', access: 'organization-data' },
+  { kind: 'exact', value: '/api/sessions', access: 'session-dispatch' },
+  { kind: 'prefix', value: '/api/sessions/', access: 'session-dispatch' },
   { kind: 'exact', value: '/api/dataset.json', access: 'scoped-or-admin-data' },
   {
     kind: 'exact',

@@ -220,6 +220,12 @@ const AdoptionScorecard = lazy(() =>
     default: m.AdoptionScorecardPf,
   }))
 );
+// Server-tier session provisioning (#1251); kept out of the upload-only SPA bundle.
+const SessionProvisioning = lazy(() =>
+  import('../components/SessionProvisioning').then((m) => ({
+    default: m.SessionProvisioningPf,
+  }))
+);
 // Keep the admin-only live-server view out of the upload-only SPA bundle.
 const EnterpriseAdminUnavailable = () => null;
 const EnterpriseAdmin =
@@ -899,6 +905,9 @@ export const VIEW_RENDERERS: Partial<
       serverAvailable={serverAvailable}
       sampleReceipts={d.sampleAdoptionReceipts}
     />
+  ),
+  provisioning: ({ serverAvailable }) => (
+    <SessionProvisioning serverAvailable={serverAvailable} />
   ),
   enterprise: ({ data: d, serverAvailable }) => (
     <EnterpriseAdmin
