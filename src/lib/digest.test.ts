@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Recommendation, RecCategory, RecSeverity } from './recommendations';
 import {
   rankForDigest,
+  safetyLeadForDigest,
   topPerDomain,
   digestVerdict,
   domainForRec,
@@ -68,6 +69,17 @@ describe('rankForDigest', () => {
 
   it('is a no-op for an empty list', () => {
     expect(rankForDigest([])).toEqual([]);
+  });
+});
+
+describe('safetyLeadForDigest', () => {
+  it('selects a warning safety-domain finding ahead of a critical cost finding', () => {
+    const input = [rec('cost', 'critical'), rec('safety', 'warning')];
+    expect(safetyLeadForDigest(input)?.category).toBe('safety');
+  });
+
+  it('does not promote info-only safety findings into the lead card', () => {
+    expect(safetyLeadForDigest([rec('safety', 'info')])).toBeNull();
   });
 });
 

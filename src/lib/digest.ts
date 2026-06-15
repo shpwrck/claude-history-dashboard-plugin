@@ -62,14 +62,23 @@ export function domainForRec(rec: Recommendation): ActionDomain {
 
 /**
  * Re-rank the engine's already-sorted recommendations for the digest: all
- * `safety` findings first (regardless of severity), then everything else in the
- * engine's existing severity → savings → affected order. Stable — relative
- * order within each partition is preserved.
+ * safety-domain findings first (regardless of severity), then everything else
+ * in the engine's existing severity → savings → affected order. Stable —
+ * relative order within each partition is preserved.
  */
 export function rankForDigest(recs: Recommendation[]): Recommendation[] {
-  const safety = recs.filter((r) => r.category === 'safety');
-  const rest = recs.filter((r) => r.category !== 'safety');
+  const safety = recs.filter((r) => domainForRec(r) === 'safety');
+  const rest = recs.filter((r) => domainForRec(r) !== 'safety');
   return [...safety, ...rest];
+}
+
+/** Top warning/critical safety-domain finding for the dedicated digest lead. */
+export function safetyLeadForDigest(recs: Recommendation[]): Recommendation | null {
+  return (
+    rankForDigest(recs).find(
+      (r) => domainForRec(r) === 'safety' && r.severity !== 'info'
+    ) ?? null
+  );
 }
 
 export interface DomainFinding {
