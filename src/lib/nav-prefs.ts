@@ -167,7 +167,7 @@ function freshDefaults(): NavPrefs {
 // landing view. Domain assignments for the cross-cutting views are first-pass
 // and refined by the per-domain units (#492–498); the structural invariant
 // #491 fixes is: a `home` group first, the six action domains with safety
-// leading, a `discovery` Find group, and stats/activity demoted to `raw`.
+// leading, a `discovery` Find group, and orientation/replay views demoted to `raw`.
 // The `serverOnly` flag marks views that require the live /api/* backend; they
 // are auto-hidden in the SPA/upload build (SERVER_AVAILABLE === false). Adding
 // a future server-only view is a one-line change: add `serverOnly: true` here.
@@ -298,7 +298,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { view: 'search', label: 'Search', icon: SearchIcon, domain: 'discovery' },
   { view: 'sessions', label: 'Sessions', icon: CommentsIcon, domain: 'discovery' },
   { view: 'projects', label: 'Projects', icon: FolderIcon, domain: 'discovery' },
-  { view: 'timeline', label: 'Timeline', icon: HistoryIcon, domain: 'discovery' },
+  { view: 'timeline', label: 'Timeline', icon: HistoryIcon, domain: 'raw' },
   // #14: the former standalone "Stats" view (UsageStats) is folded into
   // "Activity" (the survivor). Its old `#/stats` deep link is preserved via
   // {@link REDIRECTED_VIEWS} below, which resolves it to `activity`.
@@ -329,15 +329,14 @@ export const WORKFLOW_HYGIENE_CORE: readonly View[] = [
 ];
 
 /**
- * #612: the `discovery` ("Find") group exposed four co-equal tabs —
- * `search`, `sessions`, `projects`, `timeline` — with no scent for which to
- * click first, so novice first-clicks get consumed browsing the corpus instead
- * of reading the coaching digest. Surface Search as the primary Find entry; the
- * three corpus-browsing views sit behind a "Browse" sub-level (an in-group
- * NavExpandable), mirroring the #610 "+ N more" pattern. Order here is the
- * surfaced order. Composes with the SPA filter (server-only members already
- * drop out) and per-user hidden views, and with the recs-driven default (#609):
- * `search` is in the curated core, the three browse views are not.
+ * #612: the `discovery` ("Find") group exposed multiple co-equal tabs with no
+ * scent for which to click first, so novice first-clicks get consumed browsing
+ * the corpus instead of reading the coaching digest. Surface Search as the
+ * primary Find entry; the remaining discovery views sit behind a "Browse"
+ * sub-level (an in-group NavExpandable), mirroring the #610 "+ N more" pattern.
+ * Order here is the surfaced order. Composes with the SPA filter (server-only
+ * members already drop out) and per-user hidden views, and with the recs-driven
+ * default (#609): `search` is in the curated core, the browse views are not.
  */
 export const DISCOVERY_CORE: readonly View[] = ['search'];
 

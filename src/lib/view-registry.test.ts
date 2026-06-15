@@ -265,6 +265,13 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(new Set(views).size).toBe(views.length);
   });
 
+  it('demotes Timeline into the raw-data drawer domain', () => {
+    expect(NAV_ITEMS.find((item) => item.view === 'timeline')).toMatchObject({
+      label: 'Timeline',
+      domain: 'raw',
+    });
+  });
+
   it('carries PageHeader descriptions for the reference and rollout migrations', () => {
     expect(NAV_ITEMS.find((item) => item.view === 'cost')?.description).toMatch(
       /Per-tool costs use proportional attribution/

@@ -411,8 +411,8 @@ export type View = 'home' | 'evaluator' | 'recommendations' | 'sessions' | 'proj
  * plus three structural buckets the nav needs:
  *  - `home`     — the digest spine + its cross-domain companions (recommendations, insights).
  *  - the six action domains — `safety` leads the nav and the digest (#491).
- *  - `discovery`— the global Find utility (search/sessions/projects/timeline).
- *  - `raw`      — demoted orientation views (stats/activity) in the Raw-data drawer.
+ *  - `discovery`— the global Find utility (search/sessions/projects).
+ *  - `raw`      — demoted orientation/replay views in the Raw-data drawer.
  * Carried per-view in the nav catalog (`src/lib/nav-prefs.ts`) so the sidebar can
  * group by domain and the digest can rank across domains. See
  * `docs/reviews/nav-redesign-funnel.md`.
