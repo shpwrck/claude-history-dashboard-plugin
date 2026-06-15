@@ -3682,20 +3682,24 @@ async function handleIngestArtifacts(req, res, sourceId) {
   }
 
   const { classifyClaudePath } = await import('../src/lib/claude-tree-classification.ts');
-  const sourceRoot = join(PROBAITIO_INGEST_DIR, sourceId);
-  const realIngest = await realpathOrNull(PROBAITIO_INGEST_DIR);
-  if (!realIngest) {
-    try {
-      await mkdir(PROBAITIO_INGEST_DIR, { recursive: true });
-    } catch (e) {
-      return sendJson(res, 500, { ok: false, error: 'ingest dir unavailable' });
-    }
+  // Write into the SHARED tree (#1563 Slice 2): session-data lands at its natural relPath under the
+  // ingest dir, so when PROBAITIO_INGEST_DIR = CLAUDE_DIR the dashboard's existing projects/ root
+  // aggregates ALL members dynamically (transcripts are UUID-named => collision-free; the shipper
+  // already routes the single history.jsonl to a per-session history.d/<sourceId>.jsonl). The
+  // per-source idempotency ledger + member provenance live OUT of band under .sources/<sourceId>/
+  // (a path no session-data artifact can target, since the classifier only admits session-data).
+  try {
+    await mkdir(PROBAITIO_INGEST_DIR, { recursive: true });
+  } catch {
+    return sendJson(res, 500, { ok: false, error: 'ingest dir unavailable' });
   }
-  await mkdir(sourceRoot, { recursive: true });
+  const realIngest = await realpathOrNull(PROBAITIO_INGEST_DIR);
+  if (!realIngest) return sendJson(res, 500, { ok: false, error: 'ingest dir unavailable' });
+  const metaRoot = join(PROBAITIO_INGEST_DIR, '.sources', sourceId);
+  await mkdir(metaRoot, { recursive: true });
 
-  // Per-source idempotency ledger (single writer per source => no concurrent-write race). Maps
-  // relPath -> last signature; a re-shipped artifact with the same signature is skipped.
-  const ledgerPath = join(sourceRoot, '.signatures.json');
+  // Per-source single-writer ledger: relPath -> last signature; a re-shipped artifact is skipped.
+  const ledgerPath = join(metaRoot, '.signatures.json');
   let ledger = {};
   try {
     ledger = JSON.parse(await readFile(ledgerPath, 'utf8')) || {};
@@ -3721,10 +3725,9 @@ async function handleIngestArtifacts(req, res, sourceId) {
       skipped += 1; // idempotent: already have this exact content
       continue;
     }
-    const dest = join(sourceRoot, relPath);
-    // Resolve the destination's parent to confirm it stays inside the source root (no traversal).
-    const realSourceRoot = await realpathOrNull(sourceRoot);
-    if (!realSourceRoot || !pathInside(realSourceRoot, normalize(dest))) {
+    const dest = join(PROBAITIO_INGEST_DIR, relPath);
+    // Confirm the destination stays inside the ingest dir (no traversal).
+    if (!pathInside(realIngest, normalize(dest))) {
       refused.push({ relPath, reason: 'escapes-root' });
       continue;
     }
@@ -3741,10 +3744,10 @@ async function handleIngestArtifacts(req, res, sourceId) {
     written += 1;
   }
 
-  // Provenance: stamp the member/displayName/repo so the aggregating ingest can attribute by member.
+  // Provenance: stamp member/displayName/repo so the dashboard can attribute aggregated sessions.
   if (body?.meta && typeof body.meta === 'object') {
     try {
-      await writeFile(join(sourceRoot, '_source.json'), JSON.stringify({ sourceId, ...body.meta }));
+      await writeFile(join(metaRoot, '_source.json'), JSON.stringify({ sourceId, ...body.meta }));
     } catch {
       /* best-effort provenance */
     }
