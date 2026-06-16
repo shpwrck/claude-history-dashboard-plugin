@@ -6,6 +6,31 @@ import {
   computeDomainCoverage,
   type RecommendationInput,
 } from './recommendations';
+import { timedEventFractionPct } from './coverage';
+
+function runtimeEventsWithStopHooks(
+  timedEvents: number,
+  totalEvents: number
+): NonNullable<RecommendationInput['runtimeEvents']> {
+  const stopHooks = Array.from({ length: totalEvents }, (_, i) => ({
+    sessionId: 's1',
+    timestamp: `2026-06-15T00:00:${String(i % 60).padStart(2, '0')}Z`,
+    hookCount: 1,
+    // Only the first `timedEvents` carry a measured durationMs; the rest are untimed.
+    totalDurationMs: i < timedEvents ? 120 : 0,
+    hadErrors: false,
+    preventedContinuation: false,
+  }));
+  return [
+    {
+      sessionId: 's1',
+      turns: [],
+      stopHooks,
+      awaySummaries: [],
+      scheduledFires: [],
+    },
+  ] as unknown as NonNullable<RecommendationInput['runtimeEvents']>;
+}
 
 function baseInput(overrides: Partial<RecommendationInput> = {}): RecommendationInput {
   return {
@@ -26,9 +51,13 @@ const toolRow = { sessionId: 's1', calls: [{}] } as unknown as
   RecommendationInput['toolData'][number];
 const apiErrorRow = { sessionId: 's1' } as unknown as
   RecommendationInput['apiErrors'][number];
-const runtimeRow = { sessionId: 's1', hookCount: 1 } as unknown as NonNullable<
-  RecommendationInput['runtimeEvents']
->[number];
+const runtimeRow = {
+  sessionId: 's1',
+  turns: [],
+  stopHooks: [],
+  awaySummaries: [],
+  scheduledFires: [],
+} as unknown as NonNullable<RecommendationInput['runtimeEvents']>[number];
 const modelLatencyRow = { model: 'claude', p95Ms: 1200 } as unknown as NonNullable<
   RecommendationInput['modelLatency']
 >[number];
@@ -96,6 +125,30 @@ describe('computeDomainCoverage', () => {
     expect(successRate.staleNote).toContain('Debug logs are absent');
   });
 
+  it('reports the speed timed-event fraction in the staleNote when timing is sparse', () => {
+    const speed = coverageFor(
+      baseInput({
+        runtimeEvents: runtimeEventsWithStopHooks(42, 600),
+        modelLatency: [modelLatencyRow],
+      }),
+      'speed'
+    );
+
+    expect(speed.staleNote).toContain('42 of 600 stop events (7%)');
+  });
+
+  it('omits the speed timed-fraction note when there are no stop events', () => {
+    const speed = coverageFor(
+      baseInput({
+        runtimeEvents: runtimeEventsWithStopHooks(0, 0),
+        modelLatency: [modelLatencyRow],
+      }),
+      'speed'
+    );
+
+    expect(speed.staleNote).toBeUndefined();
+  });
+
   it('marks domains PROVE when their declared coverage inputs are present', () => {
     const input = baseInput({
       tokenData: [tokenRow],
@@ -143,6 +196,20 @@ describe('computeDomainCoverage', () => {
     expect(computeDomainCoverage(input).map((row) => row.status)).toEqual(
       ACTION_DOMAINS.map(() => 'PROVE')
     );
+  });
+});
+
+describe('timedEventFractionPct', () => {
+  it('rounds the timed/total ratio to a whole percent (42/600 -> 7%)', () => {
+    expect(timedEventFractionPct(42, 600)).toBe(7);
+  });
+
+  it('returns 0 when there are no events', () => {
+    expect(timedEventFractionPct(0, 0)).toBe(0);
+  });
+
+  it('returns 100 when every event is timed', () => {
+    expect(timedEventFractionPct(8, 8)).toBe(100);
   });
 });
 
