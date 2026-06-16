@@ -679,7 +679,7 @@ export const VIEW_RENDERERS: Partial<
       focusEvidenceRef={n.focusEvidenceRef}
       onFocusConsumed={n.consumeFocus}
       onActiveSessionChange={n.setActiveSessionId}
-      onNavigate={n.navigateTo}
+      onNavigate={n.navigateWithFilter}
       routeFilter={routeFilter}
     />
   ),
