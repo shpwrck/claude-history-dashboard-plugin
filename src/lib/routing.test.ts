@@ -76,7 +76,9 @@ describe('parseRoute', () => {
 
   it('parses per-view evidence filters alongside dashboard filters', () => {
     expect(
-      parseRoute('#/errors?tool=Bash&file=src%2FApp.tsx&date=2026-06-15&mode=sdk-cli')
+      parseRoute(
+        '#/errors?tool=Bash&file=src%2FApp.tsx&date=2026-06-15&mode=sdk-cli&from=1781550000000&to=1781553600000&sort=cost'
+      )
     ).toEqual({
       view: 'errors',
       viewFilter: {
@@ -84,6 +86,9 @@ describe('parseRoute', () => {
         file: 'src/App.tsx',
         date: '2026-06-15',
         mode: 'sdk-cli',
+        from: '1781550000000',
+        to: '1781553600000',
+        sort: 'cost',
       },
       filter: DEFAULT_DASHBOARD_FILTER,
     });
@@ -150,9 +155,18 @@ describe('routeToHash', () => {
   it('serializes per-view evidence filters', () => {
     expect(
       routeToHash('errors', {
-        viewFilter: { tool: 'Bash', file: 'src/App.tsx', date: '2026-06-15' },
+        viewFilter: {
+          tool: 'Bash',
+          file: 'src/App.tsx',
+          date: '2026-06-15',
+          from: '1781550000000',
+          to: '1781553600000',
+          sort: 'cost',
+        },
       })
-    ).toBe('#/errors?date=2026-06-15&tool=Bash&file=src%2FApp.tsx');
+    ).toBe(
+      '#/errors?date=2026-06-15&tool=Bash&file=src%2FApp.tsx&from=1781550000000&to=1781553600000&sort=cost'
+    );
   });
 
   it('serializes safety drill-through filters', () => {

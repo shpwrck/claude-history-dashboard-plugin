@@ -46,6 +46,9 @@ export const ROUTE_FILTER_KEYS = [
   'entrypoint',
   'pattern',
   'table',
+  'from',
+  'to',
+  'sort',
 ] as const;
 export type RouteFilterKey = (typeof ROUTE_FILTER_KEYS)[number];
 export type RouteFilter = Partial<Record<RouteFilterKey, string>>;

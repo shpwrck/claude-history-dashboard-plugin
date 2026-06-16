@@ -652,6 +652,7 @@ export const VIEW_RENDERERS: Partial<
       externalGuidance={d.externalGuidance}
       activeFilter={filter}
       onNavigate={n.navigateWithFilter}
+      navigateWithFilter={n.navigateWithFilter}
       onOpenSession={n.openSession}
     />
   ),
@@ -665,7 +666,7 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  sessions: ({ data: d, nav: n }) => (
+  sessions: ({ data: d, nav: n, routeFilter }) => (
     <SessionList
       sessions={d.sessions}
       tokenData={d.tokenData}
@@ -678,6 +679,7 @@ export const VIEW_RENDERERS: Partial<
       onFocusConsumed={n.consumeFocus}
       onActiveSessionChange={n.setActiveSessionId}
       onNavigate={n.navigateTo}
+      routeFilter={routeFilter}
     />
   ),
   projects: ({ data: d, nav: n }) => (
