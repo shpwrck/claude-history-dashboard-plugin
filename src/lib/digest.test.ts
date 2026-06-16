@@ -127,4 +127,32 @@ describe('digestVerdict', () => {
   it('flags attention for non-critical findings', () => {
     expect(digestVerdict([rec('cost', 'warning')]).tone).toBe('attention');
   });
+
+  it('attention verdict names the top finding (no critical)', () => {
+    const v = digestVerdict([
+      rec('cost', 'warning', 'c1'),
+      rec('context', 'info', 'x1'),
+    ]);
+    expect(v.tone).toBe('attention');
+    expect(v.text).toContain('cost warning');
+  });
+
+  it('attention verdict names the top finding (critical present)', () => {
+    const v = digestVerdict([
+      rec('cost', 'critical', 'c1'),
+      rec('context', 'info', 'x1'),
+    ]);
+    expect(v.tone).toBe('attention');
+    expect(v.text).toContain('cost critical');
+  });
+
+  it('attention verdict names the top non-safety finding even when a non-critical safety finding ranks first', () => {
+    const v = digestVerdict([
+      rec('cost', 'warning', 'c1'),
+      rec('safety', 'warning', 's1'),
+    ]);
+    expect(v.tone).toBe('attention');
+    // safety ranks first in the digest, but the verdict names the top *non-safety* finding
+    expect(v.text).toContain('cost warning');
+  });
 });

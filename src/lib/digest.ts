@@ -130,18 +130,23 @@ export function digestVerdict(recs: Recommendation[]): DigestVerdict {
   }
   const critical = recs.filter((r) => r.severity === 'critical').length;
   const total = recs.length;
+  // Name the top-ranked non-safety finding that set the verdict, mirroring how
+  // the `critical` branch embeds `criticalSafety.title` (#1609). The title is
+  // already present in the ranked `recs[]` the function receives.
+  const topFinding =
+    rankForDigest(recs).find((r) => domainForRec(r) !== 'safety') ?? recs[0];
   if (critical > 0) {
     return {
       tone: 'attention',
       text: `${critical} critical ${
         critical === 1 ? 'finding' : 'findings'
-      } across ${total} total — start at the top.`,
+      } across ${total} total — start at the top: ${topFinding.title}`,
     };
   }
   return {
     tone: 'attention',
     text: `${total} ${
       total === 1 ? 'finding' : 'findings'
-    } worth a look — nothing critical.`,
+    } worth a look — start with ${topFinding.title}.`,
   };
 }
