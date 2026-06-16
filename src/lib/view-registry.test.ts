@@ -12,6 +12,7 @@ import {
 import {
   NAV_ITEMS,
   DOMAIN_ORDER,
+  getNavItem,
   isValidView,
   resolveViewRedirect,
   domainForView,
@@ -686,6 +687,11 @@ describe('domain structure (#490)', () => {
   it('puts the digest home in the home group and permissions under safety', () => {
     expect(domainForView('home')).toBe('home');
     expect(domainForView('permissions')).toBe('safety');
+  });
+
+  it('keeps home-domain page-header explainers in the nav catalog', () => {
+    expect(getNavItem('recommendations')?.description).toMatch(/cost, context/i);
+    expect(getNavItem('adoption')?.description).toMatch(/marker-confirmed/i);
   });
 });
 

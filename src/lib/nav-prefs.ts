@@ -183,8 +183,23 @@ export interface NavItem {
 
 export const NAV_ITEMS: readonly NavItem[] = [
   { view: 'home', label: 'Overview', icon: TachometerAltIcon, domain: 'home' },
-  { view: 'recommendations', label: 'Recommendations', icon: StarIcon, domain: 'home' },
-  { view: 'adoption', label: 'Adoption', icon: ClipboardCheckIcon, domain: 'home', serverOnly: true },
+  {
+    view: 'recommendations',
+    label: 'Recommendations',
+    icon: StarIcon,
+    domain: 'home',
+    description:
+      'Prioritized fixes and habits from cost, context, workflow, safety, and reliability signals.',
+  },
+  {
+    view: 'adoption',
+    label: 'Adoption',
+    icon: ClipboardCheckIcon,
+    domain: 'home',
+    description:
+      'Tracks surfaced recommendations through marker-confirmed config adoption.',
+    serverOnly: true,
+  },
   { view: 'provisioning', label: 'Provision', icon: ServerIcon, domain: 'home', serverOnly: true },
   { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', serverOnly: true },
   {
