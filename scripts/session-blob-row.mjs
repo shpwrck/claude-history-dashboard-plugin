@@ -11,7 +11,11 @@ const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIB = join(PROJECT_DIR, 'src', 'lib');
 const READ_CHUNK_BYTES = 65_536;
 const DEFAULT_MAX_BYTES = 67_108_864;
-const SESSION_BLOB_PARSER_VERSION = 'value-flow-v1';
+// Bump whenever parse-sessions / the signal parsers change their OUTPUT, so the
+// mtime-keyed ingest cache re-parses already-ingested sessions instead of
+// returning stale blobs. 'project-backstop-v1' (#1765): parseSessionJsonl now
+// backstops tokenData.project from the transcript cwd.
+const SESSION_BLOB_PARSER_VERSION = 'project-backstop-v1';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
