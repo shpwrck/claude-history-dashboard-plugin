@@ -89,6 +89,22 @@ describe('parseRoute', () => {
     });
   });
 
+  it('parses safety drill-through filters', () => {
+    expect(
+      parseRoute(
+        '#/permissions?entrypoint=unattended&pattern=rm+-rf&table=policy'
+      )
+    ).toEqual({
+      view: 'permissions',
+      viewFilter: {
+        entrypoint: 'unattended',
+        pattern: 'rm -rf',
+        table: 'policy',
+      },
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+  });
+
   it('does not treat the default dashboard project as a per-view filter', () => {
     expect(parseRoute('#/automation?time=24h&project=All+projects&mode=sdk-cli')).toEqual({
       view: 'automation',
@@ -137,6 +153,20 @@ describe('routeToHash', () => {
         viewFilter: { tool: 'Bash', file: 'src/App.tsx', date: '2026-06-15' },
       })
     ).toBe('#/errors?date=2026-06-15&tool=Bash&file=src%2FApp.tsx');
+  });
+
+  it('serializes safety drill-through filters', () => {
+    expect(
+      routeToHash('permissions', {
+        viewFilter: {
+          entrypoint: 'unattended',
+          pattern: 'rm -rf',
+          table: 'policy',
+        },
+      })
+    ).toBe(
+      '#/permissions?entrypoint=unattended&pattern=rm+-rf&table=policy'
+    );
   });
 });
 

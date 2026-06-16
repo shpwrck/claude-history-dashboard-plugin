@@ -37,7 +37,16 @@ export interface DashboardFilter {
   project: string;
 }
 
-export const ROUTE_FILTER_KEYS = ['project', 'date', 'tool', 'file', 'mode'] as const;
+export const ROUTE_FILTER_KEYS = [
+  'project',
+  'date',
+  'tool',
+  'file',
+  'mode',
+  'entrypoint',
+  'pattern',
+  'table',
+] as const;
 export type RouteFilterKey = (typeof ROUTE_FILTER_KEYS)[number];
 export type RouteFilter = Partial<Record<RouteFilterKey, string>>;
 

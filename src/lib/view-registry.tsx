@@ -296,7 +296,7 @@ export interface ViewData {
 /** Navigation + session-focus callbacks every view wires its affordances to. */
 export interface ViewNav {
   navigateTo: (view: View) => void;
-  navigateWithFilter: (view: View, filter: RouteFilter) => void;
+  navigateWithFilter: (view: View, filter?: RouteFilter) => void;
   scrollToAnchor: (signalId: string) => boolean;
   openSession: (sessionId: string) => void;
   /** Open the session drill-in focused on a specific timeline entry (#1307). */
@@ -651,7 +651,7 @@ export const VIEW_RENDERERS: Partial<
       repoMap={d.repoMap}
       externalGuidance={d.externalGuidance}
       activeFilter={filter}
-      onNavigate={n.navigateTo}
+      onNavigate={n.navigateWithFilter}
       onOpenSession={n.openSession}
     />
   ),
@@ -791,7 +791,7 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  permissions: ({ data: d, nav: n }) => (
+  permissions: ({ data: d, nav: n, routeFilter }) => (
     <Permissions
       toolData={d.toolData}
       permissionRows={d.permissionRows}
@@ -800,7 +800,9 @@ export const VIEW_RENDERERS: Partial<
       liveConfig={d.liveConfig}
       configBackups={d.configBackups}
       sessions={d.sessions}
+      routeFilter={routeFilter}
       onOpenSession={n.openSession}
+      onNavigate={n.navigateWithFilter}
     />
   ),
   agents: ({ data: d, nav: n, routeFilter }) => (
@@ -813,7 +815,7 @@ export const VIEW_RENDERERS: Partial<
       sessions={d.sessions}
       routeFilter={routeFilter}
       onOpenSession={n.openSession}
-      onNavigate={n.navigateTo}
+      onNavigate={n.navigateWithFilter}
     />
   ),
   memories: ({ data: d, serverAvailable }) => (
