@@ -570,6 +570,7 @@ function renderCostAttributionView(
       focusSignalId={focusSignalId}
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
+      navigateWithFilter={n.navigateWithFilter}
     />
   );
 }
@@ -723,11 +724,12 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  summary: ({ data: d, filter }) => (
+  summary: ({ data: d, nav: n, filter }) => (
     <SummaryView
       tokenData={d.tokenData}
       sessions={d.sessions}
       activeFilter={filter}
+      navigateWithFilter={n.navigateWithFilter}
     />
   ),
   cost: (ctx) => renderCostAttributionView(ctx),
