@@ -11,6 +11,7 @@
  * (S1-Priya's siloing failure-mode; see `docs/reviews/nav-redesign-funnel.md`).
  */
 import type { Recommendation, RecCategory } from './recommendations';
+import type { DomainCoverage, DomainCoverageStatus } from './coverage';
 import type { ActionDomain, View } from '../types';
 
 /** Map a rec engine `category` onto the action-domain taxonomy (#490). */
@@ -81,10 +82,50 @@ export function safetyLeadForDigest(recs: Recommendation[]): Recommendation | nu
   );
 }
 
+/**
+ * How much the dashboard can actually *see* in a domain, in the digest's
+ * vocabulary (#1610). Derived from #1480's per-domain coverage signal
+ * (`computeDomainCoverage` → `PROVE | INFER | CANNOT_SEE`):
+ *
+ *  - `healthy`    (`PROVE`)      — all core inputs present; a quiet domain here
+ *    truly looks healthy.
+ *  - `sparse`     (`INFER`)      — some inputs missing, so a verdict is
+ *    low-confidence; we can infer but not prove.
+ *  - `blind-spot` (`CANNOT_SEE`) — no core inputs at all; a blank card is the
+ *    *absence of data*, not evidence of health.
+ *
+ * Defaults to `healthy` when no coverage signal is threaded in (keeps Slice A's
+ * rendering unchanged for callers that don't yet supply coverage).
+ */
+export type DomainCoverageLevel = 'healthy' | 'sparse' | 'blind-spot';
+
+const COVERAGE_LEVEL_FOR_STATUS: Record<
+  DomainCoverageStatus,
+  DomainCoverageLevel
+> = {
+  PROVE: 'healthy',
+  INFER: 'sparse',
+  CANNOT_SEE: 'blind-spot',
+};
+
+/** Map #1480's coverage status onto the digest's coverage vocabulary. */
+export function coverageLevelForStatus(
+  status: DomainCoverageStatus
+): DomainCoverageLevel {
+  return COVERAGE_LEVEL_FOR_STATUS[status];
+}
+
 export interface DomainFinding {
   domain: ActionDomain;
   /** The top finding for the domain, or null when the domain is quiet. */
   rec: Recommendation | null;
+  /**
+   * How much the dashboard can see in this domain (#1610). A `blind-spot` empty
+   * card means "no data to judge this"; `sparse` carries a low-confidence
+   * caveat; `healthy` is the Slice A rendering. Defaults to `healthy` when no
+   * coverage signal is supplied.
+   */
+  coverage: DomainCoverageLevel;
 }
 
 /**
@@ -92,12 +133,25 @@ export interface DomainFinding {
  * digest order (safety first). Domains with no finding are still listed (with
  * `rec: null`) so the spine shows the full action surface, including the
  * intentionally-sparse `speed` slot.
+ *
+ * When #1480's per-domain `coverage` signal is threaded in, each finding carries
+ * the matching `coverage` level so the empty cards can distinguish a true
+ * blind-spot ("no data to judge this") from a domain that genuinely looks
+ * healthy. Absent that signal, every domain defaults to `healthy` — preserving
+ * Slice A's rendering.
  */
-export function topPerDomain(recs: Recommendation[]): DomainFinding[] {
+export function topPerDomain(
+  recs: Recommendation[],
+  coverage?: readonly DomainCoverage[]
+): DomainFinding[] {
   const ranked = rankForDigest(recs);
+  const levelByDomain = new Map<ActionDomain, DomainCoverageLevel>(
+    (coverage ?? []).map((c) => [c.domain, coverageLevelForStatus(c.status)])
+  );
   return ACTION_DOMAINS.map((domain) => ({
     domain,
     rec: ranked.find((r) => domainForRec(r) === domain) ?? null,
+    coverage: levelByDomain.get(domain) ?? 'healthy',
   }));
 }
 

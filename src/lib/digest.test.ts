@@ -6,8 +6,10 @@ import {
   topPerDomain,
   digestVerdict,
   domainForRec,
+  coverageLevelForStatus,
   DOMAIN_FOR_CATEGORY,
 } from './digest';
+import type { DomainCoverage } from './coverage';
 
 function rec(
   category: RecCategory,
@@ -104,6 +106,35 @@ describe('topPerDomain', () => {
     expect(out[0].rec?.category).toBe('safety');
     // No speed detectors yet — the slot is present but empty by design (ADR 0006).
     expect(out.find((d) => d.domain === 'speed')?.rec).toBeNull();
+  });
+
+  it('defaults every domain to healthy coverage when no coverage signal is supplied', () => {
+    const out = topPerDomain([rec('cost', 'warning')]);
+    expect(out.every((d) => d.coverage === 'healthy')).toBe(true);
+  });
+
+  it('maps the per-domain coverage signal (#1480) onto all three levels', () => {
+    const coverage: DomainCoverage[] = [
+      { domain: 'safety', status: 'PROVE' },
+      { domain: 'cost', status: 'CANNOT_SEE' },
+      { domain: 'success-rate', status: 'INFER' },
+    ];
+    const out = topPerDomain([], coverage);
+    const byDomain = new Map(out.map((d) => [d.domain, d.coverage]));
+    // PROVE -> healthy, INFER -> sparse, CANNOT_SEE -> blind-spot.
+    expect(byDomain.get('safety')).toBe('healthy');
+    expect(byDomain.get('cost')).toBe('blind-spot');
+    expect(byDomain.get('success-rate')).toBe('sparse');
+    // Domains absent from the coverage array fall back to healthy.
+    expect(byDomain.get('speed')).toBe('healthy');
+  });
+});
+
+describe('coverageLevelForStatus', () => {
+  it('maps #1480 coverage statuses onto the digest vocabulary', () => {
+    expect(coverageLevelForStatus('PROVE')).toBe('healthy');
+    expect(coverageLevelForStatus('INFER')).toBe('sparse');
+    expect(coverageLevelForStatus('CANNOT_SEE')).toBe('blind-spot');
   });
 });
 
