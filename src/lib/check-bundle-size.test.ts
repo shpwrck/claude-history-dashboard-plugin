@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 // @ts-expect-error - plain .mjs script, no type declarations.
-import { evaluateBudget, chunkBaseName } from '../../scripts/check-bundle-size.mjs';
+import { evaluateBudget, chunkBaseName, findServerMarkers, SERVER_ONLY_MARKERS } from '../../scripts/check-bundle-size.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..');
@@ -90,6 +90,21 @@ describe('bundle-budget.json — lightweight chart gate (#1400)', () => {
       expect(failures.some((f: string) => f.includes('LightweightCharts'))).toBe(true);
     });
   }
+
+  it('findServerMarkers flags a server dist measured against the spa budget (#1702)', () => {
+    // A real upload-only SPA build carries none of the boundary markers.
+    const spaLike = ['index-DmhzAPGJ.js', 'LightweightCharts-Bos7EVXd.js'];
+    const cleanContent = () => 'const x=1;export{x};';
+    expect(findServerMarkers(spaLike, cleanContent)).toBeNull();
+
+    // A server dist (the stale-dist mismatch from #1702) carries them.
+    const serverLike = ['index-DBubzID8.js'];
+    const serverContent = () => 'fetch("/api/dataset.json")';
+    const hit = findServerMarkers(serverLike, serverContent);
+    expect(hit).not.toBeNull();
+    expect(hit?.file).toBe('index-DBubzID8.js');
+    expect(SERVER_ONLY_MARKERS).toContain(hit?.marker);
+  });
 
   it('a budgeted chunk that is absent from the build is reported as a failure (rename guard)', () => {
     const { files, sizeOf } = fixtureFor('server');
