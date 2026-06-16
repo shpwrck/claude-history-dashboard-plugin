@@ -756,6 +756,7 @@ export const VIEW_RENDERERS: Partial<
       entries={d.entries}
       activeFilter={filter}
       onOpenSession={n.openSession}
+      navigateWithFilter={n.navigateWithFilter}
     />
   ),
   automation: ({ data: d, nav: n, filter, routeFilter }) => (
