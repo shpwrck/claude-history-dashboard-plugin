@@ -557,7 +557,7 @@ export function filterViewDataByTime(
 // deep-link redirects (#14, e.g. `stats` → `activity`) while no longer owning a
 // renderer of its own. `renderView` already null-guards a missing entry.
 function renderCostAttributionView(
-  { data: d, nav: n, filter }: ViewContext,
+  { data: d, nav: n, filter, routeFilter }: ViewContext,
   focusSignalId?: string
 ): ReactNode {
   return (
@@ -566,6 +566,7 @@ function renderCostAttributionView(
       toolData={d.toolData}
       sessions={d.sessions}
       activeFilter={filter}
+      routeFilter={routeFilter}
       focusSignalId={focusSignalId}
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
@@ -768,6 +769,7 @@ export const VIEW_RENDERERS: Partial<
       routeFilter={routeFilter}
       onActiveSessionChange={n.setActiveSessionId}
       onOpenSession={n.openSession}
+      onNavigate={n.navigateWithFilter}
     />
   ),
   workflows: ({ data: d, nav: n, serverAvailable }) => (
