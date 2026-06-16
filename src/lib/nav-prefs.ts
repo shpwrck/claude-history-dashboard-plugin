@@ -210,7 +210,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'Track permission modes, dangerous commands, prompt-prone tools, and policy candidates that shape safety posture.',
   },
-  { view: 'enterprise', label: 'Enterprise', icon: LockIcon, domain: 'safety', serverOnly: true },
+  {
+    view: 'enterprise',
+    label: 'Enterprise',
+    icon: LockIcon,
+    domain: 'safety',
+    serverOnly: true,
+    description:
+      'Configure enterprise authentication and review who has access when the dashboard runs in shared, multi-user mode.',
+  },
   { view: 'summary', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
   {
     view: 'cost',
@@ -220,7 +228,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       "Per-tool costs use proportional attribution: each session's total cost is split across tool types by result size, falling back to call count when result sizes are unavailable.",
   },
-  { view: 'reclaim-compass', label: 'Reclaim Compass', icon: BullseyeIcon, domain: 'cost' },
+  {
+    view: 'reclaim-compass',
+    label: 'Reclaim Compass',
+    icon: BullseyeIcon,
+    domain: 'cost',
+    description:
+      'Track your context-and-cost reclaim trend over time so you can see whether the changes you make are actually paying off.',
+  },
   {
     view: 'tokens',
     label: 'Tokens',
@@ -245,14 +260,16 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: 'Errors',
     icon: ExclamationTriangleIcon,
     domain: 'success-rate',
-    description: 'Error and retry signals.',
+    description:
+      'Spot which tools, commands, and sessions generate the most errors and retries so you can fix the flakiest steps in your workflow.',
   },
   {
     view: 'report-card',
     label: 'Report Card',
     icon: ClipboardCheckIcon,
     domain: 'success-rate',
-    description: 'Automation reliability.',
+    description:
+      'Grade how reliably your unattended automation runs complete so you can tell whether headless agents are finishing their work or failing silently.',
     serverOnly: true,
   },
   { view: 'review-queue', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', serverOnly: true },
@@ -261,7 +278,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: 'Speed Check',
     icon: BullseyeIcon,
     domain: 'speed',
-    description: 'Speed signals.',
+    description:
+      'Compare response speed and throughput across models and sessions so you can see where latency is slowing your work down.',
   },
   { view: 'context', label: 'Context Health', icon: HeartbeatIcon, domain: 'context-health' },
   { view: 'conversation', label: 'Turn Patterns', icon: CommentIcon, domain: 'context-health' },
@@ -271,21 +289,24 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: 'Agents',
     icon: UsersIcon,
     domain: 'workflow-hygiene',
-    description: 'subagent, skill, MCP usage.',
+    description:
+      'See how often subagents, skills, and MCP tools are invoked and how well they perform so you can decide which to lean on and which to retire.',
   },
   {
     view: 'automation',
     label: 'Automation',
     icon: RobotIcon,
     domain: 'workflow-hygiene',
-    description: 'unattended SDK/CLI runs.',
+    description:
+      'Review your unattended SDK and CLI runs so you can confirm scheduled and headless agents are doing what you expect.',
   },
   {
     view: 'workflows',
     label: 'Workflows',
     icon: ProjectDiagramIcon,
     domain: 'workflow-hygiene',
-    description: 'Workflow-tool runs.',
+    description:
+      'Inspect completed Workflow-tool runs so you can see how multi-agent orchestrations fanned out and where they spent time or failed.',
   },
   { view: 'prompts', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
   { view: 'shadow-calls', label: 'Shadow Calls', icon: FlaskIcon, domain: 'workflow-hygiene', serverOnly: true },
@@ -298,14 +319,16 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: 'Memories',
     icon: BrainIcon,
     domain: 'workflow-hygiene',
-    description: 'Memory files by project.',
+    description:
+      'Browse the memory files Claude has saved per project so you can review, prune, or correct what the agent remembers about your work.',
   },
   {
     view: 'tasks',
     label: 'Task Health',
     icon: TasksIcon,
     domain: 'workflow-hygiene',
-    description: 'Task completion and cold-session risk.',
+    description:
+      'Track task completion rates and cold-session risk so you can catch work that stalls or gets dropped between sessions.',
     serverOnly: true,
   },
   { view: 'teams', label: 'Team Coordination', icon: SitemapIcon, domain: 'workflow-hygiene', serverOnly: true },

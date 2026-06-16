@@ -287,28 +287,28 @@ describe('view registry ↔ nav catalog parity', () => {
       NAV_ITEMS.find((item) => item.view === 'permissions')?.description
     ).toMatch(/permission modes/);
     expect(NAV_ITEMS.find((item) => item.view === 'agents')?.description).toMatch(
-      /subagent, skill, MCP/
+      /subagents, skills, and MCP/
     );
     expect(
       NAV_ITEMS.find((item) => item.view === 'automation')?.description
-    ).toMatch(/unattended SDK\/CLI/);
+    ).toMatch(/unattended SDK and CLI/);
     expect(
       NAV_ITEMS.find((item) => item.view === 'workflows')?.description
     ).toMatch(/Workflow-tool runs/);
     expect(NAV_ITEMS.find((item) => item.view === 'errors')?.description).toMatch(
-      /Error and retry/
+      /errors and retries/
     );
     expect(
       NAV_ITEMS.find((item) => item.view === 'report-card')?.description
-    ).toMatch(/Automation reliability/);
+    ).toMatch(/how reliably your unattended automation/);
     expect(
       NAV_ITEMS.find((item) => item.view === 'evaluator')?.description
-    ).toMatch(/Speed signals/);
+    ).toMatch(/response speed and throughput/);
     expect(
       NAV_ITEMS.find((item) => item.view === 'memories')?.description
-    ).toMatch(/Memory files/);
+    ).toMatch(/memory files Claude has saved/);
     expect(NAV_ITEMS.find((item) => item.view === 'tasks')?.description).toMatch(
-      /Task completion/
+      /task completion rates/
     );
     expect(NAV_ITEMS.find((item) => item.view === 'search')?.description).toMatch(
       /Search across loaded sessions/
