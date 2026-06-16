@@ -295,9 +295,30 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   { view: 'teams', label: 'Team Coordination', icon: SitemapIcon, domain: 'workflow-hygiene', serverOnly: true },
   { view: 'plans', label: 'Task Plans', icon: ClipboardListIcon, domain: 'workflow-hygiene', serverOnly: true },
-  { view: 'search', label: 'Search', icon: SearchIcon, domain: 'discovery' },
-  { view: 'sessions', label: 'Sessions', icon: CommentsIcon, domain: 'discovery' },
-  { view: 'projects', label: 'Projects', icon: FolderIcon, domain: 'discovery' },
+  {
+    view: 'search',
+    label: 'Search',
+    icon: SearchIcon,
+    domain: 'discovery',
+    description:
+      'Search across loaded sessions and transcripts to find conversations, tools, and files by keyword.',
+  },
+  {
+    view: 'sessions',
+    label: 'Sessions',
+    icon: CommentsIcon,
+    domain: 'discovery',
+    description:
+      'Browse loaded sessions with their projects, timestamps, message counts, and token totals.',
+  },
+  {
+    view: 'projects',
+    label: 'Projects',
+    icon: FolderIcon,
+    domain: 'discovery',
+    description:
+      'Break activity down by project to see where sessions, messages, and token spend concentrate.',
+  },
   { view: 'timeline', label: 'Timeline', icon: HistoryIcon, domain: 'raw' },
   // #14: the former standalone "Stats" view (UsageStats) is folded into
   // "Activity" (the survivor). Its old `#/stats` deep link is preserved via
