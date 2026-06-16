@@ -252,6 +252,34 @@ export function aggregateTurnLatency(
   };
 }
 
+export function sessionWithActiveTurn(
+  data: RuntimeEvents[],
+  idleThresholdMs: number = IDLE_TURN_THRESHOLD_MS
+): string | undefined {
+  for (const s of data) {
+    for (const t of s.turns) {
+      if (t.durationMs < idleThresholdMs) {
+        return t.sessionId || s.sessionId;
+      }
+    }
+  }
+  return undefined;
+}
+
+export function sessionWithStopHook(
+  data: RuntimeEvents[],
+  timedOnly = false
+): string | undefined {
+  for (const s of data) {
+    for (const h of s.stopHooks) {
+      if (!timedOnly || h.totalDurationMs > 0) {
+        return h.sessionId || s.sessionId;
+      }
+    }
+  }
+  return undefined;
+}
+
 export interface StopHookStats {
   events: number;
   /** Sum of every stop event's `hookCount` — total stop-hook fires across the dataset. */
