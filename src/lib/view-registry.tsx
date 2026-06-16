@@ -791,6 +791,7 @@ export const VIEW_RENDERERS: Partial<
       sessions={d.sessions}
       routeFilter={routeFilter}
       onOpenSession={n.openSession}
+      onNavigateWithFilter={n.navigateWithFilter}
     />
   ),
   permissions: ({ data: d, nav: n, routeFilter }) => (
