@@ -182,7 +182,14 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
-  { view: 'home', label: 'Overview', icon: TachometerAltIcon, domain: 'home' },
+  {
+    view: 'home',
+    label: 'Overview',
+    icon: TachometerAltIcon,
+    domain: 'home',
+    description:
+      'Your highest-priority findings across cost, speed, success, safety, context, and workflow, ranked so you can act on what matters most first.',
+  },
   {
     view: 'recommendations',
     label: 'Recommendations',
@@ -200,7 +207,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
       'Tracks surfaced recommendations through marker-confirmed config adoption.',
     serverOnly: true,
   },
-  { view: 'provisioning', label: 'Provision', icon: ServerIcon, domain: 'home', serverOnly: true },
+  {
+    view: 'provisioning',
+    label: 'Provision',
+    icon: ServerIcon,
+    domain: 'home',
+    serverOnly: true,
+    description:
+      'Launch and manage remote agent sessions on your cluster so you can run work outside your local machine.',
+  },
   { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', serverOnly: true },
   {
     view: 'permissions',
@@ -309,7 +324,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
       'Inspect completed Workflow-tool runs so you can see how multi-agent orchestrations fanned out and where they spent time or failed.',
   },
   { view: 'prompts', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
-  { view: 'shadow-calls', label: 'Shadow Calls', icon: FlaskIcon, domain: 'workflow-hygiene', serverOnly: true },
+  {
+    view: 'shadow-calls',
+    label: 'Shadow Calls',
+    icon: FlaskIcon,
+    domain: 'workflow-hygiene',
+    serverOnly: true,
+    description:
+      'Review the shadow A/B experiments run against your tasks so you can see which alternative approaches beat your default and fed the recommendation engine.',
+  },
   { view: 'patterns', label: 'Session Patterns', icon: ThLargeIcon, domain: 'workflow-hygiene' },
   // Not serverOnly: like Workflows, Memories accepts the user's own uploaded
   // `memory/*.md` in the SPA/upload build (#538) and shows a data-aware
@@ -331,7 +354,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
       'Track task completion rates and cold-session risk so you can catch work that stalls or gets dropped between sessions.',
     serverOnly: true,
   },
-  { view: 'teams', label: 'Team Coordination', icon: SitemapIcon, domain: 'workflow-hygiene', serverOnly: true },
+  {
+    view: 'teams',
+    label: 'Team Coordination',
+    icon: SitemapIcon,
+    domain: 'workflow-hygiene',
+    serverOnly: true,
+    description:
+      'See how your multi-agent teams hand off work so you can spot stalled members and coordination bottlenecks.',
+  },
   { view: 'plans', label: 'Task Plans', icon: ClipboardListIcon, domain: 'workflow-hygiene', serverOnly: true },
   {
     view: 'search',
@@ -357,7 +388,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'Break activity down by project to see where sessions, messages, and token spend concentrate.',
   },
-  { view: 'timeline', label: 'Timeline', icon: HistoryIcon, domain: 'raw' },
+  {
+    view: 'timeline',
+    label: 'Timeline',
+    icon: HistoryIcon,
+    domain: 'raw',
+    description:
+      'Replay your sessions on a time axis so you can see when work happened and how activity clustered over the day.',
+  },
   // #14: the former standalone "Stats" view (UsageStats) is folded into
   // "Activity" (the survivor). Its old `#/stats` deep link is preserved via
   // {@link REDIRECTED_VIEWS} below, which resolves it to `activity`.
