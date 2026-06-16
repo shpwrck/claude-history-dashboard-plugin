@@ -11,8 +11,21 @@
  * `dist/` for these literals and fails if any survive.
  *
  * `SERVER_AVAILABLE` is the build-target flag consumers read to gate server-only
- * UI (Live widget, Policy write-back, Insights regenerate, transcript drill-in,
- * the "Reload from disk" control). It is `true` here and `false` in the stub.
+ * UI (Live widget, Policy write-back, transcript drill-in, the "Reload from
+ * disk" control). It is `true` here and `false` in the stub.
+ *
+ * Completeness signals (#1621): the artifact fetchers below distinguish
+ * "artifact is empty" from "artifact could not be read" so views can render a
+ * cause-and-remedy empty state instead of a bare blank. The conventions are:
+ *   - Collection fetchers (`fetchMemories`, `fetchWorkflows`, `fetchRemoteSessions`)
+ *     never reject; a down/absent backend collapses to an empty collection (and,
+ *     for remote sessions, `configured: false`) — an empty array means "no such
+ *     artifact yet", which the consumer explains and points at how to populate.
+ *   - Per-session fetchers (`fetchSessionTimeline`, `fetchTranscriptContent`, …)
+ *     return `null` on a 404 — the session has no stored transcript/debug log —
+ *     so the caller can name that specific missing artifact.
+ *   - `fetchAuditRun` carries an explicit `status` + `reason`, the completeness
+ *     signal for the opt-in tier-3 audit (ran / skipped / failed).
  */
 import type { DailyDigest, HistoryEntry } from '../types';
 import type { Usage } from './usage';
