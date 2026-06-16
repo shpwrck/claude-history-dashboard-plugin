@@ -36,7 +36,6 @@ const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
 const DEFAULT_SOURCE = DATA_SOURCES[0];
 const PROJECTS = DEFAULT_SOURCE.historyDir;
 const CLAUDE = dirname(PROJECTS);
-const PUBLIC_DATA_SOURCES = DATA_SOURCES.map((source) => ({ ...source }));
 const DEFAULT_SOURCE_PROVENANCE = {
   sourceId: DEFAULT_SOURCE.id,
   harness: DEFAULT_SOURCE.harness,
@@ -56,18 +55,18 @@ const SOURCE_DECORATED_SIGNAL_KEYS = new Set([
   'valueFlow',
 ]);
 
-function withDefaultSourceProvenance(value) {
+function withSourceProvenance(value, provenance = DEFAULT_SOURCE_PROVENANCE) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   return {
     ...value,
-    sourceId: value.sourceId || DEFAULT_SOURCE_PROVENANCE.sourceId,
-    harness: value.harness || DEFAULT_SOURCE_PROVENANCE.harness,
+    sourceId: value.sourceId || provenance.sourceId,
+    harness: value.harness || provenance.harness,
   };
 }
 
-function maybeDecorateSignalValue(datasetKey, value) {
+function maybeDecorateSignalValue(datasetKey, value, provenance = DEFAULT_SOURCE_PROVENANCE) {
   return SOURCE_DECORATED_SIGNAL_KEYS.has(datasetKey)
-    ? withDefaultSourceProvenance(value)
+    ? withSourceProvenance(value, provenance)
     : value;
 }
 // Top-level Claude Code config — carries mcpServers (global) plus a `projects`
@@ -120,6 +119,41 @@ function uniqueProjectsRoots(roots) {
   return out;
 }
 
+function projectSourceFrom(source, projectsRoot) {
+  return {
+    source: {
+      ...source,
+      historyDir: projectsRoot,
+    },
+    projectsRoot,
+  };
+}
+
+function hubSourceFromRoot(projectsRoot, index) {
+  return projectSourceFrom(
+    {
+      id: `claude-code-hub-${index + 1}`,
+      harness: DEFAULT_SOURCE.harness,
+      historyDir: projectsRoot,
+    },
+    projectsRoot
+  );
+}
+
+function uniqueProjectSources(sources) {
+  const seenRoots = new Set();
+  const seenIds = new Set();
+  const out = [];
+  for (const item of sources) {
+    const projectsRoot = resolve(item.projectsRoot);
+    if (seenRoots.has(projectsRoot) || seenIds.has(item.source.id)) continue;
+    seenRoots.add(projectsRoot);
+    seenIds.add(item.source.id);
+    out.push(projectSourceFrom(item.source, projectsRoot));
+  }
+  return out;
+}
+
 const PROJECT_CONFIG_ROOTS = splitPathList(
   process.env.DASHBOARD_PROJECT_CONFIG_ROOTS
 )
@@ -127,19 +161,119 @@ const PROJECT_CONFIG_ROOTS = splitPathList(
   .map((root) => resolve(root))
   .sort();
 
-export const PROJECT_ROOTS = uniqueProjectsRoots([
-  PROJECTS,
-  ...(
-    SCOPED_INGEST
-      ? []
-      : [
-          ...projectsRootsFromEnv('DASHBOARD_HUB_PROJECTS_DIR'),
-          ...projectsRootsFromEnv('CLAUDE_HUB_PROJECTS_DIR'),
-          ...projectsRootsFromEnv('CLAUDE_HUB_DIR', true),
-        ]
-  ),
+const EXTRA_PROJECT_ROOTS = SCOPED_INGEST
+  ? []
+  : uniqueProjectsRoots([
+      ...projectsRootsFromEnv('DASHBOARD_HUB_PROJECTS_DIR'),
+      ...projectsRootsFromEnv('CLAUDE_HUB_PROJECTS_DIR'),
+      ...projectsRootsFromEnv('CLAUDE_HUB_DIR', true),
+    ]);
+const PROJECT_SOURCES = uniqueProjectSources([
+  ...DATA_SOURCES.map((source) => projectSourceFrom(source, resolve(source.historyDir))),
+  ...EXTRA_PROJECT_ROOTS.map((root, index) => hubSourceFromRoot(root, index)),
 ]);
-const HISTORY = join(CLAUDE, 'history.jsonl');
+export const PROJECT_ROOTS = PROJECT_SOURCES.map((item) => item.projectsRoot);
+const PUBLIC_DATA_SOURCES = PROJECT_SOURCES.map((item) => ({ ...item.source }));
+
+function provenanceForSource(source) {
+  return {
+    sourceId: source.id,
+    harness: source.harness,
+  };
+}
+
+function historyFilesForSource(source) {
+  const claudeRoot = dirname(source.historyDir);
+  const files = [
+    {
+      path: join(claudeRoot, 'history.jsonl'),
+      provenance: provenanceForSource(source),
+    },
+  ];
+  const historyPartsDir = join(claudeRoot, 'history.d');
+  let dir;
+  try {
+    dir = opendirSync(historyPartsDir);
+  } catch {
+    return files;
+  }
+  try {
+    const parts = [];
+    for (;;) {
+      const ent = dir.readSync();
+      if (!ent) break;
+      if (ent.isFile() && ent.name.endsWith('.jsonl')) {
+        parts.push(join(historyPartsDir, ent.name));
+      }
+    }
+    parts.sort();
+    for (const path of parts) {
+      files.push({ path, provenance: provenanceForSource(source) });
+    }
+  } finally {
+    dir.closeSync();
+  }
+  return files;
+}
+
+function sourceHistoryFiles() {
+  return PROJECT_SOURCES.flatMap(({ source }) => historyFilesForSource(source));
+}
+
+const SOURCE_AGGREGATE_ARTIFACTS = [
+  { relPath: 'sessions', kind: 'dir' },
+  { relPath: 'telemetry', kind: 'dir' },
+  { relPath: 'debug', kind: 'dir' },
+  { relPath: 'file-history', kind: 'dir' },
+  { relPath: 'stats-cache.json', kind: 'file' },
+];
+
+function sourceArtifactPath(source, relPath) {
+  return join(dirname(source.historyDir), relPath);
+}
+
+function sourceArtifactInputs() {
+  return PROJECT_SOURCES.flatMap(({ source }) =>
+    SOURCE_AGGREGATE_ARTIFACTS.map((artifact) => ({
+      ...artifact,
+      source,
+      path: sourceArtifactPath(source, artifact.relPath),
+    }))
+  );
+}
+
+function mergeStatsCaches(caches) {
+  const valid = caches.filter(Boolean);
+  if (valid.length === 0) return null;
+  if (valid.length === 1) return valid[0];
+  const byDate = new Map();
+  let version = 0;
+  let lastComputedDate = '';
+  for (const cache of valid) {
+    version = Math.max(version, cache.version || 0);
+    if (cache.lastComputedDate && cache.lastComputedDate > lastComputedDate) {
+      lastComputedDate = cache.lastComputedDate;
+    }
+    for (const row of cache.dailyActivity || []) {
+      const existing = byDate.get(row.date) || {
+        date: row.date,
+        messageCount: 0,
+        sessionCount: 0,
+        toolCallCount: 0,
+      };
+      existing.messageCount += row.messageCount || 0;
+      existing.sessionCount += row.sessionCount || 0;
+      existing.toolCallCount += row.toolCallCount || 0;
+      byDate.set(row.date, existing);
+    }
+  }
+  return {
+    version,
+    lastComputedDate,
+    dailyActivity: [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)),
+  };
+}
+
 const SHADOW_CALLS_LEDGER = join(CLAUDE, 'shadow-calls', 'ledger.jsonl');
 // `~/.claude/usage-data` holds the repo-map artifacts we ingest (REPO_MAP_DIR).
 const USAGE_DATA = join(CLAUDE, 'usage-data');
@@ -249,13 +383,8 @@ const PLUGINS_CACHE = join(CLAUDE, 'plugins', 'cache');
 // reader below degrades to an empty value when the source is missing/malformed.
 const TASKS_DIR = join(CLAUDE, 'tasks');
 const TEAMS_DIR = join(CLAUDE, 'teams');
-const SESSIONS_DIR = join(CLAUDE, 'sessions');
-const TELEMETRY_DIR = join(CLAUDE, 'telemetry');
-const DEBUG_DIR = join(CLAUDE, 'debug');
-const FILE_HISTORY_DIR = join(CLAUDE, 'file-history');
 const PLANS_DIR = join(CLAUDE, 'plans');
 const MODEL_EVAL_RESULTS_DIR = join(CLAUDE, 'model-evals', 'results');
-const STATS_CACHE = join(CLAUDE, 'stats-cache.json');
 const LAST_UPDATE = join(CLAUDE, '.last-update-result.json');
 const MCP_AUTH = join(CLAUDE, 'mcp-needs-auth-cache.json');
 const BACKUPS_DIR = join(CLAUDE, 'backups');
@@ -889,7 +1018,7 @@ function listDirectSubagentTranscripts(saDir, maxSubPaths) {
 
 // Discover top-level session files and their subagent files from one
 // dashboard-native projects/ root with bounded streaming directory scans.
-function listSessionsFromProjectsRoot(projectsRoot) {
+function listSessionsFromProjectsRoot(projectsRoot, source) {
   const out = [];
   let projectsDir;
   try {
@@ -955,6 +1084,8 @@ function listSessionsFromProjectsRoot(projectsRoot) {
           out.push({
             sessionId,
             project: proj,
+            sourceId: source.id,
+            harness: source.harness,
             topPath,
             subPaths,
             partLimitExceeded,
@@ -1009,8 +1140,8 @@ function shouldReplaceSessionCandidate(candidate, existing) {
 // wins, with mtime as the deterministic tie-break.
 export function listSessions() {
   const bySessionId = new Map();
-  for (const projectsRoot of PROJECT_ROOTS) {
-    for (const s of listSessionsFromProjectsRoot(projectsRoot)) {
+  for (const { projectsRoot, source } of PROJECT_SOURCES) {
+    for (const s of listSessionsFromProjectsRoot(projectsRoot, source)) {
       const candidate = { session: s, rank: sessionRank(s) };
       const existing = bySessionId.get(s.sessionId);
       if (!existing || shouldReplaceSessionCandidate(candidate, existing)) {
@@ -1483,7 +1614,7 @@ export function sourceSignature() {
   // liveConfig (the config-hygiene engine, #174) until the next structural
   // change — a real correctness regression, not the accepted append-lag.
   for (const f of [
-    HISTORY,
+    ...sourceHistoryFiles().map(({ path }) => path),
     CLAUDE_JSON,
     SETTINGS_GLOBAL,
     SETTINGS_LOCAL,
@@ -1519,6 +1650,11 @@ export function sourceSignature() {
     parts.push(`${REPO_MAP_DIR}:${Math.floor(statSync(REPO_MAP_DIR).mtimeMs)}`);
   } catch {
     parts.push(`${REPO_MAP_DIR}:0`);
+  }
+  for (const artifact of sourceArtifactInputs()) {
+    parts.push(
+      `source-artifact:${artifact.source.id}:${artifact.relPath}:${artifactSignature(artifact.path)}`
+    );
   }
   parts.push(`review-events:${reviewEventsSourceSignature()}`);
   if (!SCOPED_INGEST) {
@@ -1632,7 +1768,9 @@ export function ingest() {
   // Section 3: ~/.claude/history.jsonl (unioned in for transcript-less
   // sessions). Same rationale — read fresh per assemble, must be in the gate.
   hash.update('history\n');
-  hashFileSig(HISTORY, hash);
+  for (const { path } of sourceHistoryFiles()) {
+    hashFileSig(path, hash);
+  }
   // Shadow-calls ledger (epic #513) — read fresh per assemble (like history), so it
   // must be in the gate or new experiments would never invalidate the recs cache.
   hash.update('shadow-calls\n');
@@ -1679,6 +1817,19 @@ export function ingest() {
     hash.update('model-evals\n');
     hashTree(MODEL_EVAL_RESULTS_DIR, '', hash);
   }
+  hash.update('source-artifacts\n');
+  for (const artifact of sourceArtifactInputs()) {
+    hash.update(artifact.source.id);
+    hash.update('\0');
+    hash.update(artifact.relPath);
+    hash.update('\0');
+    if (artifact.kind === 'file') {
+      hashFileSig(artifact.path, hash);
+    } else {
+      hashTree(artifact.path, '', hash);
+    }
+    hash.update('\n');
+  }
   hash.update('review-events\n');
   hash.update(reviewEventsSourceSignature());
   hash.update('\n');
@@ -1704,7 +1855,7 @@ export function ingest() {
 // artifacts, gated on a cheap per-dir stat signature through the artifact cache
 // (#624). For each artifact: keep the original
 // existsSync guard (absent ⇒ the default value, parser never called), route the
-// existsing-source case through cachedArtifact so an unchanged tree is read back
+// existing-source case through cachedArtifact so an unchanged tree is read back
 // from SQLite instead of re-walked, and apply any non-deterministic post-
 // transform OUTSIDE the cache so the result stays byte-identical to today:
 //   - teams: parseTeamsDir returns a Map (not JSON-safe), so it's cached via an
@@ -1712,8 +1863,11 @@ export function ingest() {
 //     fresh per call OUTSIDE the cache, exactly as the old inline code did.
 //   - configBackups: parseBackupsDir is the cached file-read; the pure
 //     diffConfigDrift transform runs each call (cheap, deterministic).
-// Single-file artifacts (statsCache, updateResults, mcpAuth) are cheap single
-// reads, not tree walks, so they stay uncached — same behaviour as before.
+//   - source-root artifacts from push ingest (sessions/telemetry/debug/
+//     file-history/stats-cache.json) are parsed once per registered source and
+//     concatenated/merged without changing the underlying parsers.
+// Single-file artifacts (updateResults, mcpAuth) are cheap single reads, not
+// tree walks, so they stay uncached — same behaviour as before.
 export function assembleArtifacts() {
   let tasks = [];
   let teams = [];
@@ -1761,52 +1915,85 @@ export function assembleArtifacts() {
   try {
     reviewEvents = readReviewEventsArtifact();
   } catch { /* ignore */ }
+  for (const { source } of PROJECT_SOURCES) {
+    const sessionsDir = sourceArtifactPath(source, 'sessions');
+    try {
+      if (existsSync(sessionsDir)) {
+        sessionRegistry.push(
+          ...cachedArtifact(`session-registry:${source.id}`, sessionsDir, () =>
+            parseSessionRegistryDir(sessionsDir, {
+              maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
+              maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
+            })
+          )
+        );
+      }
+    } catch { /* ignore */ }
+  }
+  for (const { source } of PROJECT_SOURCES) {
+    const telemetryDir = sourceArtifactPath(source, 'telemetry');
+    try {
+      if (existsSync(telemetryDir)) {
+        telemetry.push(
+          ...cachedArtifact(`telemetry:${source.id}`, telemetryDir, () =>
+            parseTelemetryDir(telemetryDir, {
+              maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
+              maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
+            })
+          )
+        );
+        modelLatency.push(
+          ...cachedArtifact(`model-latency:${source.id}`, telemetryDir, () =>
+            parseTelemetryLatencyDir(telemetryDir, {
+              maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
+              maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
+            })
+          )
+        );
+      }
+    } catch { /* ignore */ }
+  }
+  for (const { source } of PROJECT_SOURCES) {
+    const debugDir = sourceArtifactPath(source, 'debug');
+    try {
+      if (existsSync(debugDir)) {
+        debugLogs.push(
+          ...cachedArtifact(`debug:${source.id}`, debugDir, () =>
+            parseDebugDir(debugDir, {
+              maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
+              maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
+            })
+          )
+        );
+      }
+    } catch { /* ignore */ }
+  }
   try {
-    if (existsSync(SESSIONS_DIR)) {
-      sessionRegistry = cachedArtifact('session-registry', SESSIONS_DIR, () =>
-        parseSessionRegistryDir(SESSIONS_DIR, {
-          maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
-          maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
-        })
-      );
+    const statsCaches = [];
+    for (const { source } of PROJECT_SOURCES) {
+      const statsPath = sourceArtifactPath(source, 'stats-cache.json');
+      try {
+        if (existsSync(statsPath)) {
+          statsCaches.push(parseStatsCache(readArtifactTextCappedSync(statsPath)));
+        }
+      } catch { /* ignore source stats */ }
     }
+    statsCache = mergeStatsCaches(statsCaches);
   } catch { /* ignore */ }
-  try {
-    if (existsSync(TELEMETRY_DIR)) {
-      telemetry = cachedArtifact('telemetry', TELEMETRY_DIR, () =>
-        parseTelemetryDir(TELEMETRY_DIR, {
-          maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
-          maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
-        })
-      );
-      modelLatency = cachedArtifact('model-latency', TELEMETRY_DIR, () =>
-        parseTelemetryLatencyDir(TELEMETRY_DIR, {
-          maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
-          maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
-        })
-      );
-    }
-  } catch { /* ignore */ }
-  try {
-    if (existsSync(DEBUG_DIR)) {
-      debugLogs = cachedArtifact('debug', DEBUG_DIR, () =>
-        parseDebugDir(DEBUG_DIR, {
-          maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
-          maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
-        })
-      );
-    }
-  } catch { /* ignore */ }
-  try { if (existsSync(STATS_CACHE)) statsCache = parseStatsCache(readArtifactTextCappedSync(STATS_CACHE)); } catch { /* ignore */ }
-  try {
-    if (existsSync(FILE_HISTORY_DIR)) {
-      fileHistory = cachedArtifact('file-history', FILE_HISTORY_DIR, () =>
-        parseFileHistoryDir(FILE_HISTORY_DIR, {
-          maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
-        })
-      );
-    }
-  } catch { /* ignore */ }
+  for (const { source } of PROJECT_SOURCES) {
+    const fileHistoryDir = sourceArtifactPath(source, 'file-history');
+    try {
+      if (existsSync(fileHistoryDir)) {
+        fileHistory.push(
+          ...cachedArtifact(`file-history:${source.id}`, fileHistoryDir, () =>
+            parseFileHistoryDir(fileHistoryDir, {
+              maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
+            })
+          )
+        );
+      }
+    } catch { /* ignore */ }
+  }
   try {
     if (existsSync(PLANS_DIR)) {
       plans = cachedArtifact('plans', PLANS_DIR, () =>
@@ -1905,6 +2092,15 @@ export function assembleArtifacts() {
 // entries are authoritative; history.jsonl-only sessions are unioned in.
 export function assembleDataset() {
   const rows = blobCache.readAllRows();
+  const sessionProvenanceById = new Map(
+    listSessions().map((session) => [
+      session.sessionId,
+      {
+        sourceId: session.sourceId || DEFAULT_SOURCE_PROVENANCE.sourceId,
+        harness: session.harness || DEFAULT_SOURCE_PROVENANCE.harness,
+      },
+    ])
+  );
   const tokenData = [];
   const toolData = [];
   const toolInventories = [];
@@ -1946,6 +2142,8 @@ export function assembleDataset() {
   };
   for (const r of rows) {
     transcriptSessionIds.add(r.session_id);
+    const provenance =
+      sessionProvenanceById.get(r.session_id) || DEFAULT_SOURCE_PROVENANCE;
     // r.title is already inlined into each derived entry (see deriveEntries),
     // so we don't ship a duplicate top-level titles map.
     for (const s of SESSION_SIGNALS) {
@@ -1971,11 +2169,15 @@ export function assembleDataset() {
               : s.datasetKey === 'toolData'
                 ? stripToolCommandBodies(v)
                 : v;
-          out[s.datasetKey].push(maybeDecorateSignalValue(s.datasetKey, value));
+          out[s.datasetKey].push(
+            maybeDecorateSignalValue(s.datasetKey, value, provenance)
+          );
         }
       } else if (s.aggregate === 'spread') {
         for (const e of JSON.parse(r[s.column]) || []) {
-          out[s.datasetKey].push(maybeDecorateSignalValue(s.datasetKey, e));
+          out[s.datasetKey].push(
+            maybeDecorateSignalValue(s.datasetKey, e, provenance)
+          );
         }
       } else if (s.id === 'perm') {
         const perm = JSON.parse(r[s.column]) || { perModeEntries: [], changes: [] };
@@ -1983,19 +2185,20 @@ export function assembleDataset() {
         for (const c of perm.changes || []) permissionChanges.push(c);
       } else if (s.id === 'entries') {
         for (const en of JSON.parse(r[s.column]) || []) {
-          entries.push(withDefaultSourceProvenance(en));
+          entries.push(withSourceProvenance(en, provenance));
         }
       }
     }
   }
 
   // Union: include history.jsonl entries for sessions with no transcript.
-  if (existsSync(HISTORY)) {
+  for (const { path, provenance } of sourceHistoryFiles()) {
+    if (!existsSync(path)) continue;
     try {
-      const hist = parseHistoryJsonl(readArtifactTextCappedSync(HISTORY));
+      const hist = parseHistoryJsonl(readArtifactTextCappedSync(path));
       for (const e of hist) {
         if (!transcriptSessionIds.has(e.sessionId)) {
-          entries.push(withDefaultSourceProvenance(e));
+          entries.push(withSourceProvenance(e, provenance));
         }
       }
     } catch {
@@ -2034,10 +2237,12 @@ export function assembleDataset() {
   // the workflow-health detectors (#635) reconcile against real runs. Server-only
   // — not in the SPA upload bundle, so the SPA dataset simply ships [].
   let workflows = [];
-  try {
-    workflows = parseWorkflows(readWorkflowsSync(PROJECTS));
-  } catch {
-    /* ignore — a malformed walk degrades to no workflow recs, never sinks ingest */
+  for (const projectsRoot of PROJECT_ROOTS) {
+    try {
+      workflows.push(...parseWorkflows(readWorkflowsSync(projectsRoot)));
+    } catch {
+      /* ignore — a malformed walk degrades to no workflow recs, never sinks ingest */
+    }
   }
 
   // ── Server aggregate artifacts (top-level ~/.claude plus enterprise slots) ──

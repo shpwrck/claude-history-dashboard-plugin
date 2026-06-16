@@ -56,6 +56,49 @@ describe('coding-agent data sources', () => {
     ]);
   });
 
+  it('registers a configured push-ingest artifact root as an auxiliary source', () => {
+    const sources = resolveSources({
+      env: {
+        CLAUDE_DIR: '/var/lib/local-claude',
+        PROBAITIO_INGEST_DIR: '/var/lib/pushed-artifacts',
+      },
+      homeDir: '/unused',
+    });
+
+    expect(sources).toEqual([
+      {
+        id: 'claude-code',
+        harness: 'claude-code',
+        historyDir: '/var/lib/local-claude/projects',
+        configFile: '/var/lib/.claude.json',
+      },
+      {
+        id: 'probaitio-ingest',
+        harness: 'claude-code',
+        historyDir: '/var/lib/pushed-artifacts/projects',
+        configFile: '/var/lib/pushed-artifacts/.claude.json',
+      },
+    ]);
+  });
+
+  it('lets push-ingest source descriptors carry an explicit harness label', () => {
+    const sources = resolveSources({
+      env: {
+        PROBAITIO_INGEST_DIR: '/var/lib/codex-artifacts',
+        PROBAITIO_INGEST_SOURCE_ID: 'codex-push',
+        PROBAITIO_INGEST_HARNESS: 'codex',
+      },
+      homeDir: '/home/u',
+    });
+
+    expect(sources[1]).toEqual({
+      id: 'codex-push',
+      harness: 'codex',
+      historyDir: '/var/lib/codex-artifacts/projects',
+      configFile: '/var/lib/codex-artifacts/.claude.json',
+    });
+  });
+
   it('falls back to the default source when CODING_AGENT_SOURCES is malformed', () => {
     const sources = resolveSources({
       env: {

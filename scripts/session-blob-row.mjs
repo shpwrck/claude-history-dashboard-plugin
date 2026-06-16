@@ -180,6 +180,10 @@ export function parseSessionBlobRow({ session, sig, topText, merged }) {
   }
 
   const ch = createHash('sha1');
+  ch.update(session.sourceId ?? '');
+  ch.update('\0');
+  ch.update(session.harness ?? '');
+  ch.update('\0');
   ch.update(session.project ?? '');
   ch.update('\0');
   ch.update(title ?? '');

@@ -1,4 +1,4 @@
-export type CodingHarness = 'claude-code';
+export type CodingHarness = 'claude-code' | 'codex';
 
 export interface DataSource {
   id: string;
