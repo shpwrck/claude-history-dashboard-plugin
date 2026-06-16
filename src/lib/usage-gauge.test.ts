@@ -24,6 +24,28 @@ describe('findAccessToken', () => {
     expect(findAccessToken(null)).toBeNull();
     expect(findAccessToken('nope')).toBeNull();
   });
+
+  it('#1712: prefers the Claude sk-ant-oat token over an earlier mcpOAuth token', () => {
+    // Real-world shape: mcpOAuth sorts before claudeAiOauth, and its nested
+    // accessToken would win a naive first-found DFS — but it 401s against the API.
+    const creds = {
+      mcpOAuth: { 'some-server': { accessToken: 'edfdcb-mcp-token' } },
+      claudeAiOauth: { accessToken: 'sk-ant-oat01-real', refreshToken: 'r' },
+    };
+    expect(findAccessToken(creds)).toBe('sk-ant-oat01-real');
+  });
+
+  it('#1712: falls back to a claude-named block when no sk-ant-oat prefix is present', () => {
+    const creds = {
+      mcpOAuth: { srv: { accessToken: 'mcp-tok' } },
+      claudeAiOauth: { accessToken: 'legacy-claude-tok' },
+    };
+    expect(findAccessToken(creds)).toBe('legacy-claude-tok');
+  });
+
+  it('#1712: legacy single-block files still resolve (first-found fallback)', () => {
+    expect(findAccessToken({ mcpOAuth: { srv: { accessToken: 'only-tok' } } })).toBe('only-tok');
+  });
 });
 
 describe('parseUsageWindow', () => {

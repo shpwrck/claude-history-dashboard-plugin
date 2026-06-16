@@ -7,19 +7,49 @@
 // through the server LLM egress chokepoint. Everything here is pure and
 // byte-identical to the prior inline implementation.
 
+// The Claude subscription OAuth access token carries the `sk-ant-oat` (OAuth
+// Access Token) prefix — distinct from other OAuth blocks now present in
+// ~/.claude/.credentials.json (e.g. `mcpOAuth`, which also nests an
+// `accessToken` but is an MCP-server credential that Anthropic rejects with 401).
+const CLAUDE_OAUTH_PREFIX = 'sk-ant-oat';
+
+// Walk the credential tree collecting every `*accessToken`-ish string along with
+// the key of the block that holds it (e.g. `claudeAiOauth`, `mcpOAuth`), so a
+// caller can rank candidates instead of taking whichever DFS hits first.
+function collectAccessTokens(
+  node: unknown,
+  parentKey = ''
+): { value: string; parentKey: string }[] {
+  if (!node || typeof node !== 'object') return [];
+  const out: { value: string; parentKey: string }[] = [];
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (/access.?token/i.test(key) && typeof value === 'string') {
+      out.push({ value, parentKey });
+    } else if (value && typeof value === 'object') {
+      out.push(...collectAccessTokens(value, key));
+    }
+  }
+  return out;
+}
+
 // The token's exact nesting has shifted across Claude Code versions, so search
 // for any *accessToken-ish key rather than hard-coding a path (mirrors
 // findAccessToken in ~/.claude/skills/session-usage/scripts/check-usage.mjs).
+//
+// #1712: a plain "first accessToken-ish key wins" DFS is wrong once the file
+// holds more than one OAuth block — `mcpOAuth` sorts before `claudeAiOauth`, so
+// the naive walk returned an MCP token and every usage ping 401'd. Rank the
+// candidates: a `sk-ant-oat`-prefixed token (the Claude subscription credential)
+// wins regardless of position; then a token whose enclosing block name mentions
+// "claude"; then the legacy first-found fallback for cross-version resilience.
 export function findAccessToken(node: unknown): string | null {
-  if (!node || typeof node !== 'object') return null;
-  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-    if (/access.?token/i.test(key) && typeof value === 'string') return value;
-    if (value && typeof value === 'object') {
-      const found = findAccessToken(value);
-      if (found) return found;
-    }
-  }
-  return null;
+  const candidates = collectAccessTokens(node);
+  if (!candidates.length) return null;
+  const claudePrefixed = candidates.find((c) => c.value.startsWith(CLAUDE_OAUTH_PREFIX));
+  if (claudePrefixed) return claudePrefixed.value;
+  const claudeBlock = candidates.find((c) => /claude/i.test(c.parentKey));
+  if (claudeBlock) return claudeBlock.value;
+  return candidates[0].value;
 }
 
 export type UsageWindow = {
