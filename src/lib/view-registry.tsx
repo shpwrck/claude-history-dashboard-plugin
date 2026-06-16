@@ -611,7 +611,7 @@ export const VIEW_RENDERERS: Partial<
       updateResults={d.updateResults}
       mcpAuth={d.mcpAuth}
       configBackups={d.configBackups}
-      onNavigate={n.navigateTo}
+      onNavigate={n.navigateWithFilter}
       onOpenSession={n.openSession}
       onActiveDomains={n.onActiveDomains}
     />

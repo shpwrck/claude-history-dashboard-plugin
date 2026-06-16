@@ -342,6 +342,27 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { view: 'pulse', label: 'Pulse', icon: ChartLineIcon, domain: 'raw', serverOnly: true },
 ] as const;
 
+/**
+ * Canonical raw-evidence destinations for duplicated recommendation signals
+ * (#1615). Keep this matrix beside {@link NAV_ITEMS}: when a view moves in the
+ * sidebar, the matching evidence owner is reviewed in the same file. Digest and
+ * recommendation drill-throughs must resolve cross-domain signals through this
+ * table before falling back to a detector's local `view`.
+ *
+ * Matrix:
+ * - token-usage -> Tokens for token volume, cache, model mix, and context-window pressure.
+ * - model-routing -> Model Evals for model/task fit and eval routing gaps.
+ * - agent-usage -> Agents for subagent, skill, and MCP inventory/usage.
+ * - automation-runs -> Automation for SDK/unattended run evidence.
+ * - tool-usage -> Tool Usage for command loops, native-bypass, and effectiveness.
+ * - file-impact -> File Impact for read/edit churn and repeated file evidence.
+ * - permission-safety -> Permissions for modes, bypasses, dangerous commands, and policy.
+ * - error-retry -> Errors for API, hook, retry, and tool-error evidence.
+ * - speed-latency -> Speed Check for wall-clock, model-latency, and evaluator speed.
+ * - workflow-runs -> Workflows for workflow execution failures and runaway cost.
+ * - task-health -> Task Health for blocked, abandoned, and owner-concentrated tasks.
+ * - activity-history -> Activity for historical trends and stale-project evidence.
+ */
 export function getNavItem(view: View): NavItem | undefined {
   return NAV_ITEMS.find((item) => item.view === view);
 }
