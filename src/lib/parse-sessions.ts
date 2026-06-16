@@ -21,6 +21,10 @@ interface RawSessionEntry {
   version?: string;
   gitBranch?: string;
   entrypoint?: string;
+  // The session's working directory (decoded project path). Same value
+  // `deriveEntries` uses for history entries, so it joins cleanly with
+  // `Session.project`.
+  cwd?: string;
 }
 
 interface AssistantMessage {
@@ -114,6 +118,14 @@ export function parseSessionJsonl(
   let gitBranch: string | undefined;
   let entrypoint: string | undefined;
   let serviceTier: string | undefined;
+  // The transcript's working directory (decoded project path). Captured as a
+  // project BACKSTOP (#1765): the server ingest path parses tokens without a
+  // `project` arg, so without this `tok.project` is empty and any consumer that
+  // can't join the session row (e.g. a windowed Cost view that drops a session
+  // started before the window but active within it) falls through to
+  // "(unknown project)". `cwd` is the same value `deriveEntries` writes onto
+  // history entries, so it stays label-consistent with `Session.project`.
+  let cwd: string | undefined;
   // The session OPENER: text of the FIRST user message that carries any prose
   // (#743). Captured once, then frozen — later user turns don't overwrite it.
   let opener: string | undefined;
@@ -124,6 +136,7 @@ export function parseSessionJsonl(
       if (version === undefined && entry.version) version = entry.version;
       if (gitBranch === undefined && entry.gitBranch) gitBranch = entry.gitBranch;
       if (entrypoint === undefined && entry.entrypoint) entrypoint = entry.entrypoint;
+      if (cwd === undefined && entry.cwd) cwd = entry.cwd;
 
       // Opener: first user-role line with non-empty text wins. Tool-result-only
       // user lines (no text block) yield '' and are skipped so we keep looking.
@@ -220,9 +233,17 @@ export function parseSessionJsonl(
     (e) => resolveModelPricing(e.model).isUnknownModel
   );
 
+  // Prefer an explicit caller-supplied project (the upload path passes the
+  // decoded path from the file picker); fall back to the transcript's own `cwd`
+  // so the server ingest path — which supplies no `project` arg — still carries
+  // a project on every token row (#1765).
+  const resolvedProject = project ?? cwd;
+
   return {
     sessionId,
-    ...(project ? { project, projectShort: shortenProject(project) } : {}),
+    ...(resolvedProject
+      ? { project: resolvedProject, projectShort: shortenProject(resolvedProject) }
+      : {}),
     totalInputTokens: tokenEntries.reduce((s, e) => s + e.inputTokens, 0),
     totalOutputTokens: tokenEntries.reduce((s, e) => s + e.outputTokens, 0),
     totalCacheCreationTokens: tokenEntries.reduce((s, e) => s + e.cacheCreationTokens, 0),

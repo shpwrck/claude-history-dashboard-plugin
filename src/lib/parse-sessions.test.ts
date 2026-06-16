@@ -76,6 +76,34 @@ describe('parseSessionJsonl', () => {
     expect(out.projectShort).toBe('~/project-alpha')
   })
 
+  it('falls back to the transcript cwd for project when no arg is supplied (#1765)', () => {
+    // The server ingest path supplies no `project` arg. Without the cwd
+    // backstop, `tok.project` is empty and a windowed Cost view that drops the
+    // session row renders the spend as "(unknown project)".
+    const text = assistant(
+      { input_tokens: 1, output_tokens: 1 },
+      { top: { cwd: '/home/user/project-alpha' } }
+    )
+    const out = parseSessionJsonl(text, 'f.jsonl')!
+    expect(out.project).toBe('/home/user/project-alpha')
+    expect(out.projectShort).toBe('~/project-alpha')
+  })
+
+  it('prefers an explicit project arg over the transcript cwd (#1765)', () => {
+    const text = assistant(
+      { input_tokens: 1, output_tokens: 1 },
+      { top: { cwd: '/home/user/from-cwd' } }
+    )
+    const out = parseSessionJsonl(text, 'f.jsonl', '/home/user/from-arg')!
+    expect(out.project).toBe('/home/user/from-arg')
+  })
+
+  it('leaves project unset when neither an arg nor a cwd is present (#1765)', () => {
+    const text = assistant({ input_tokens: 1, output_tokens: 1 })
+    const out = parseSessionJsonl(text, 'f.jsonl')!
+    expect(out.project).toBeUndefined()
+  })
+
   it('detects a compaction event when context drops below 70% within the gap window', () => {
     const text = [
       assistant({ input_tokens: 1000, output_tokens: 0 }, { id: 'a', timestamp: '2026-01-01T00:00:00.000Z' }),
