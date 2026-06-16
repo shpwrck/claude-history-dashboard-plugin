@@ -840,6 +840,7 @@ export const VIEW_RENDERERS: Partial<
       timelines={d.timelines}
       sessions={d.sessions}
       onOpenSession={n.openSession}
+      onNavigateWithFilter={n.navigateWithFilter}
     />
   ),
   patterns: ({ data: d, nav: n, filter, routeFilter }) => (
