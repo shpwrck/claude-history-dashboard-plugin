@@ -423,6 +423,7 @@ interface PluginEntry {
   id: string;
   scope: 'project' | 'user';
   version: string;
+  sourcePath: string;
   installPath: string;
   installedAt: string;
   bundled: PluginBundle | undefined;
@@ -444,6 +445,7 @@ function readPlugins(paths: LiveConfigPaths, enabled: Obj | undefined): PluginEn
         id,
         scope: inst.scope === 'project' ? 'project' : 'user',
         version: typeof inst.version === 'string' ? inst.version : 'unknown',
+        sourcePath: paths.pluginsRegistry,
         installPath,
         installedAt: typeof inst.installedAt === 'string' ? inst.installedAt : '',
         // Only enumerate bundles when the plugin is enabled — saves IO on
@@ -465,6 +467,7 @@ function readPlugins(paths: LiveConfigPaths, enabled: Obj | undefined): PluginEn
 interface McpServerEntry {
   id: string;
   scope: 'global' | 'project';
+  sourcePath: string;
   enabledByProjects: string[];
 }
 
@@ -499,6 +502,7 @@ function readMcpServers(paths: LiveConfigPaths, claudeJson: Obj): McpServerEntry
     out.push({
       id,
       scope: 'global',
+      sourcePath: paths.claudeJson,
       enabledByProjects: globalEnabledBy.get(id) ?? [],
     });
   }
@@ -513,7 +517,12 @@ function readMcpServers(paths: LiveConfigPaths, claudeJson: Obj): McpServerEntry
         : {};
     for (const id of Object.keys(projServers)) {
       if (out.length >= paths.configResourceMaxEntries) break;
-      out.push({ id, scope: 'project', enabledByProjects: [projPath] });
+      out.push({
+        id,
+        scope: 'project',
+        sourcePath: paths.claudeJson,
+        enabledByProjects: [projPath],
+      });
     }
   }
   return out;

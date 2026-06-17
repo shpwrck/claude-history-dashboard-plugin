@@ -63,6 +63,8 @@ describe('computeConfigHygiene project-scoped resources (#1063)', () => {
         scope: { kind: 'project', project: '/repo/a' },
         lifetimeCount: 0,
         windowCount: 0,
+        sourcePath: '/repo/a/.claude/skills/build-helper/SKILL.md',
+        removalPath: '/repo/a/.claude/skills/build-helper',
       },
     ]);
   });

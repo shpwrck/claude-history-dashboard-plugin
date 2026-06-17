@@ -103,6 +103,16 @@ export interface HygieneFinding {
   windowDays: number;
   /** UI hedge — see {@link HygieneHedge}. Undefined when no hedge applies. */
   hedge?: HygieneHedge;
+  /**
+   * File that owns the resource definition or registry entry. The UI uses this
+   * for "open config" affordances; it is provenance, not detector evidence.
+   */
+  sourcePath?: string;
+  /**
+   * Concrete filesystem path to prune when the resource is file-backed. MCP
+   * servers are JSON keys, so they usually omit this and use sourcePath only.
+   */
+  removalPath?: string;
 }
 
 /** Recency window for the *active* resource types (Q6 in #172). */
@@ -243,8 +253,18 @@ function emitUnusedFinding(args: {
   scope: HygieneScope;
   summary: ReturnType<typeof summariseUsage>;
   hedge?: HygieneHedge;
+  sourcePath?: string;
+  removalPath?: string;
 }): HygieneFinding {
-  const { resourceType, resourceId, scope, summary, hedge } = args;
+  const {
+    resourceType,
+    resourceId,
+    scope,
+    summary,
+    hedge,
+    sourcePath,
+    removalPath,
+  } = args;
   const scopeSuffix = scope.kind === 'project' ? `@${scope.project}` : '';
   return {
     id: `${resourceType}.unused:${resourceId}${scopeSuffix}`,
@@ -257,7 +277,14 @@ function emitUnusedFinding(args: {
     windowCount: summary.windowCount,
     windowDays: ACTIVE_WINDOW_DAYS,
     ...(hedge ? { hedge } : {}),
+    ...(sourcePath ? { sourcePath } : {}),
+    ...(removalPath ? { removalPath } : {}),
   };
+}
+
+function skillManifestPath(resourcePath: string | undefined): string | undefined {
+  if (!resourcePath) return undefined;
+  return resourcePath.endsWith('/') ? `${resourcePath}SKILL.md` : `${resourcePath}/SKILL.md`;
 }
 
 /**
@@ -295,6 +322,7 @@ function findingsForMcpServers(
         scope,
         summary,
         hedge,
+        sourcePath: s.sourcePath,
       })
     );
   }
@@ -350,6 +378,8 @@ function findingsForPlugins(
           : { kind: 'global' },
         summary: { lastSeen, lifetimeCount, windowCount },
         hedge,
+        sourcePath: p.sourcePath,
+        removalPath: p.installPath,
       })
     );
   }
@@ -392,6 +422,8 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
         scope,
         summary,
         hedge,
+        sourcePath: skillManifestPath(skill.path),
+        removalPath: skill.path,
       })
     );
   }
@@ -414,6 +446,8 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
         scope,
         summary,
         hedge,
+        sourcePath: agent.path,
+        removalPath: agent.path,
       })
     );
   }
@@ -438,6 +472,8 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
         scope,
         summary,
         hedge,
+        sourcePath: cmd.path,
+        removalPath: cmd.path,
       })
     );
   }

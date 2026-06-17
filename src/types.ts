@@ -490,6 +490,8 @@ export interface LivePlugin {
   id: string;
   scope: 'user' | 'project';
   version: string;
+  /** Registry/config file that owns this plugin install entry. */
+  sourcePath?: string;
   installPath: string;
   installedAt: string;
   /** Identifiers of bundled skills/commands/agents discovered in the plugin's
@@ -505,6 +507,8 @@ export interface LiveMcpServer {
   /** `global` = lives in the top-level `~/.claude.json` mcpServers map;
    *  `project` = lives in a specific project entry's `mcpServers` map. */
   scope: 'global' | 'project';
+  /** Config file where the server key is declared. */
+  sourcePath?: string;
   /** Project paths whose `enabledMcpjsonServers` lists this server, when the
    *  server is global. Empty for project-scoped servers. */
   enabledByProjects?: string[];
