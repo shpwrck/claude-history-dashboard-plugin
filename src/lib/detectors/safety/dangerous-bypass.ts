@@ -12,6 +12,11 @@ import {
   detectDangerousCommands,
   computeSafetyScores,
 } from '../../parse-permissions';
+import type { DangerousCommand } from '../../parse-permissions';
+
+function dangerousEvidence(d: DangerousCommand): string {
+  return `${short(d.sessionId)}, ${d.pattern}: ${d.command}`;
+}
 
 /**
  * Dangerous commands that ran while permission prompts were bypassed.
@@ -65,7 +70,7 @@ export const detector: Detector = {
         action:
           'Reserve bypassPermissions for trusted, reversible work; add an explicit deny-list for destructive patterns.',
         affected: totalDangerous,
-        evidence: dangerous.slice(0, 5).map((d) => `${short(d.sessionId)}, ${d.pattern}`),
+        evidence: dangerous.slice(0, 5).map(dangerousEvidence),
         view: 'permissions',
         fix: {
           target: 'settings.json',
@@ -112,7 +117,7 @@ export const detector: Detector = {
       detail: `${dangerous.length} command(s) matched a destructive pattern (rm -rf, git push --force, dd, …).`,
       action: 'Spot-check these were intentional; consider a hook that confirms before destructive ops.',
       affected: dangerous.length,
-      evidence: dangerous.slice(0, 5).map((d) => `${short(d.sessionId)}, ${d.pattern}`),
+      evidence: dangerous.slice(0, 5).map(dangerousEvidence),
       view: 'permissions',
       fix: {
         target: 'settings.json',

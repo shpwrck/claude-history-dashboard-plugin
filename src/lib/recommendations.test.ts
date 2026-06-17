@@ -128,6 +128,17 @@ describe('ruleDangerousBypass entrypoint-scaled severity (#197)', () => {
     expect(rec?.unattended).toBeFalsy();
   });
 
+  it('includes the exact dangerous command in evidence rows', () => {
+    const input = baseInput({
+      toolData: [toolSession('s1', ['rm -rf /tmp/x'])],
+      tokenData: [tokenSession('s1', 'cli')],
+    });
+    const rec = buildRecommendations(input).find(
+      (r) => r.id === 'safety.dangerous-commands'
+    );
+    expect(rec?.evidence?.[0]).toContain('rm -rf: rm -rf /tmp/x');
+  });
+
   it('bumps warning → critical when a dangerous command ran under an sdk-* entrypoint', () => {
     const input = baseInput({
       toolData: [toolSession('s1', ['rm -rf /tmp/x'])],
