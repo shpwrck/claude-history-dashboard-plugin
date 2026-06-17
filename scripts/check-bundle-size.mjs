@@ -102,6 +102,11 @@ export function findServerMarkers(files, contentOf) {
   return null;
 }
 
+// LEGACY v1 evaluator — a single gated total + named per-chunk ceilings. Kept
+// only so the function (and any straggling caller/test) still resolves during
+// the v1→v2 migration; the budget file and CLI now use evaluateStructuredBudget
+// below. Do NOT reintroduce a v1 budget block — the single rising total is the
+// exact warp #1852 Phase C exists to retire. Remove once nothing imports it.
 export function evaluateBudget(files, sizeOf, flavorBudget) {
   const failures = [];
   const rows = [];
@@ -127,6 +132,154 @@ export function evaluateBudget(files, sizeOf, flavorBudget) {
   }
 
   return { rows, failures, ok: failures.length === 0 };
+}
+
+// v2 STRUCTURAL evaluator (#1852 Phase C, ADR 0016). Partitions every emitted
+// `.js` chunk into exactly ONE of three independent budget classes and enforces
+// each separately — there is no gated global total, so a new lazy route chunk
+// (the correct way to add a feature) can never inflate a shared number the way
+// the old `totalJsMaxBytes` did. The classes:
+//
+//   shell  — the FROZEN eager first-paint set (`flavorBudget.shell.chunks`,
+//            e.g. ["index"]); their summed size is gated by `shell.maxBytes`.
+//            Rename-guarded: every shell name must match >=1 emitted file.
+//   vendor — FROZEN shared third-party chunks (`flavorBudget.vendor.chunks`,
+//            a {name: maxBytes} map); each is gated and rename-guarded on its
+//            own ceiling. A bump here is a dependency change, never a feature.
+//   route  — everything else. Each route file is gated against its explicit
+//            `flavorBudget.routes[name]` cap, or `defaults.routeMaxBytes` when
+//            unbudgeted (auto-pass while under it, flagged NEW so the author
+//            sees it; it only FAILS when a single route exceeds the default,
+//            whose fix is to add an explicit key — a deliberate, local act).
+//
+// `defaults.totalAdvisoryMaxBytes`, if present, is computed and REPORTED but
+// never added to `failures` (pure observability — keeps the historical total
+// visible without letting it warp anything). A chunk that appears in two classes
+// is a budget-config error and fails loudly (deterministic membership), as does
+// a missing required cap (shell.maxBytes / defaults.routeMaxBytes — fail loud,
+// not fail open). A missing SHELL chunk is fatal (its sum would be 0), but a
+// missing VENDOR/ROUTE key is a non-blocking WARNING (an auto-named split can be
+// renamed by a dep/bundler bump; a heavy renamed chunk is still caught by the
+// route size cap). Returns { rows, failures, warnings, ok }.
+export function evaluateStructuredBudget(files, sizeOf, flavorBudget) {
+  const failures = [];
+  const warnings = [];
+  const rows = [];
+
+  // Strip `//`-prefixed documentation keys: the budget file annotates blocks
+  // with inline `"//": "..."` notes, which are not chunk names.
+  const withoutComments = (obj) =>
+    Object.fromEntries(Object.entries(obj || {}).filter(([k]) => !k.startsWith('//')));
+
+  const shell = flavorBudget.shell || { chunks: [], maxBytes: Infinity };
+  const vendorChunks = withoutComments(flavorBudget.vendor && flavorBudget.vendor.chunks);
+  const routes = withoutComments(flavorBudget.routes);
+  const defaults = flavorBudget.defaults || {};
+  const routeDefault = defaults.routeMaxBytes ?? Infinity;
+
+  const shellNames = new Set(shell.chunks || []);
+  const vendorNames = new Set(Object.keys(vendorChunks));
+
+  // Fail LOUD on a malformed budget rather than fail-open. The `?? Infinity`
+  // fallbacks below would silently disable a gate if a required key were dropped
+  // or mistyped during a re-baseline; these checks turn that into a hard error.
+  if (shell.maxBytes == null) {
+    failures.push('budget config error: shell.maxBytes is required (a missing cap would disable the shell gate)');
+  }
+  if (defaults.routeMaxBytes == null) {
+    failures.push('budget config error: defaults.routeMaxBytes is required (a missing default would let any unbudgeted route pass)');
+  }
+
+  // Deterministic membership: a chunk must live in exactly one class.
+  for (const name of shellNames) {
+    if (vendorNames.has(name)) {
+      failures.push(`budget config error: chunk "${name}" is in BOTH shell and vendor classes — pick one`);
+    }
+    if (Object.prototype.hasOwnProperty.call(routes, name)) {
+      failures.push(`budget config error: chunk "${name}" is in BOTH shell and routes classes — pick one`);
+    }
+  }
+  for (const name of vendorNames) {
+    if (Object.prototype.hasOwnProperty.call(routes, name)) {
+      failures.push(`budget config error: chunk "${name}" is in BOTH vendor and routes classes — pick one`);
+    }
+  }
+
+  // ── shell (FROZEN) ──────────────────────────────────────────────────────
+  const shellFiles = files.filter((f) => shellNames.has(chunkBaseName(f)));
+  for (const name of shellNames) {
+    if (!files.some((f) => chunkBaseName(f) === name)) {
+      failures.push(`shell chunk "${name}" not found (renamed or removed? update bundle-budget.json)`);
+    }
+  }
+  const shellActual = shellFiles.reduce((s, f) => s + sizeOf(f), 0);
+  const shellMax = shell.maxBytes ?? Infinity;
+  const shellOk = shellActual <= shellMax;
+  if (!shellOk) {
+    failures.push(`shell ${fmtBytes(shellActual)} exceeds FROZEN budget ${fmtBytes(shellMax)} — new code landed in the eager first-paint graph; lazy-load it or evict it (do NOT raise the shell cap without an ADR)`);
+  }
+  rows.push({ cls: 'shell', name: shell.chunks.join('+') || 'shell', actual: shellActual, max: shellMax, ok: shellOk });
+
+  // ── vendor (FROZEN, per-chunk) ──────────────────────────────────────────
+  // A missing vendor chunk is a WARNING, not a failure: several vendor chunks
+  // (the auto-named PatternFly splits Td/FlexItem/MenuList, until #1904 gives
+  // them a stable `vendor-pf` name) can be renamed by a dependency or bundler
+  // bump. A hard failure there would turn a benign rename into a red CI run.
+  // Protection is not lost — a renamed HEAVY chunk falls through to the route
+  // class and trips its size cap (default or explicit) anyway; only the stale
+  // budget key needs cleaning up, which the warning flags.
+  for (const [name, max] of Object.entries(vendorChunks)) {
+    const matches = files.filter((f) => chunkBaseName(f) === name);
+    if (matches.length === 0) {
+      warnings.push(`vendor chunk "${name}" not found — auto-named split renamed? it now rides the route class; drop or rename this key in bundle-budget.json`);
+      rows.push({ cls: 'vendor', name, actual: null, max, ok: true, missing: true });
+      continue;
+    }
+    const actual = matches.reduce((s, f) => s + sizeOf(f), 0);
+    const ok = actual <= max;
+    if (!ok) failures.push(`vendor chunk "${name}" ${fmtBytes(actual)} exceeds FROZEN budget ${fmtBytes(max)} — this is a dependency-weight change, not a feature`);
+    rows.push({ cls: 'vendor', name, actual, max, ok });
+  }
+
+  // ── routes (each stands ALONE; never summed) ────────────────────────────
+  // Group remaining files by logical chunk name (one logical chunk can, in
+  // principle, split across files — sum those).
+  const routeSizes = new Map();
+  for (const f of files) {
+    const name = chunkBaseName(f);
+    if (shellNames.has(name) || vendorNames.has(name)) continue;
+    routeSizes.set(name, (routeSizes.get(name) || 0) + sizeOf(f));
+  }
+  // Rename guard for explicit route keys: WARNING, not failure (same rationale
+  // as vendor — a renamed heavy chunk still trips its size cap via the route
+  // default; only the stale key needs cleaning up).
+  for (const name of Object.keys(routes)) {
+    if (!routeSizes.has(name)) {
+      warnings.push(`route chunk "${name}" not found — renamed or removed? drop or rename this key in bundle-budget.json`);
+      rows.push({ cls: 'route', name, actual: null, max: routes[name], ok: true, missing: true });
+    }
+  }
+  for (const [name, actual] of [...routeSizes.entries()].sort((a, b) => b[1] - a[1])) {
+    const explicit = Object.prototype.hasOwnProperty.call(routes, name);
+    const max = explicit ? routes[name] : routeDefault;
+    const ok = actual <= max;
+    if (!ok) {
+      failures.push(
+        explicit
+          ? `route "${name}" ${fmtBytes(actual)} exceeds its cap ${fmtBytes(max)} — trim it or raise this ONE route's cap (it does not affect any other budget)`
+          : `route "${name}" ${fmtBytes(actual)} exceeds the default route cap ${fmtBytes(max)} — add an explicit routes["${name}"] entry sized to it`,
+      );
+    }
+    rows.push({ cls: 'route', name, actual, max, ok, isNew: !explicit });
+  }
+
+  // ── advisory total (REPORTED ONLY — never gates) ────────────────────────
+  if (defaults.totalAdvisoryMaxBytes != null) {
+    const totalJs = files.reduce((s, f) => s + sizeOf(f), 0);
+    rows.push({ cls: 'advisory', name: 'total JS', actual: totalJs, max: defaults.totalAdvisoryMaxBytes, ok: true, advisory: true });
+  }
+
+  return { rows, failures, warnings, ok: failures.length === 0 };
 }
 
 function main() {
@@ -177,30 +330,40 @@ function main() {
   // (filename minus the trailing `-<hash>.js`). Exact-name matching avoids both
   // a prefix over-match (a sibling like `index-worker-*.js` must not fold into
   // the `index` row) and any regex-metachar pitfalls from interpolating the
-  // budget key into a pattern. The evaluation itself is in evaluateBudget so it
-  // can be unit-tested without a real build.
-  const { rows, failures } = evaluateBudget(files, sizeOf, flavorBudget);
+  // budget key into a pattern. The structural evaluation lives in
+  // evaluateStructuredBudget so it can be unit-tested without a real build.
+  const { rows, failures, warnings } = evaluateStructuredBudget(files, sizeOf, flavorBudget);
 
-  // Report.
+  // Report, grouped by class. shell + vendor are FROZEN; routes each stand
+  // alone (no shared total); the advisory total is informational only.
   console.log(`\nBundle-size budget — ${args.flavor} flavor (${assetsDir})`);
+  const CLS_LABEL = { shell: 'SHELL ', vendor: 'VENDOR', route: 'ROUTE ', advisory: 'ADVIS.' };
   for (const r of rows) {
-    const mark = r.ok ? '✓' : '✗';
+    const mark = r.advisory ? '·' : r.ok ? '✓' : '✗';
     const actual = r.actual == null ? 'MISSING' : fmtBytes(r.actual);
-    console.log(`  ${mark} ${r.name.padEnd(10)} ${actual.padStart(24)}  / budget ${fmtBytes(r.max)}`);
+    const tag = r.advisory ? ' (advisory — not gated)' : r.missing ? '  (stale key — not in build)' : r.isNew ? '  NEW (default cap)' : r.cls === 'shell' || r.cls === 'vendor' ? '  (frozen)' : '';
+    console.log(`  ${mark} ${(CLS_LABEL[r.cls] || '').padEnd(6)} ${r.name.padEnd(24)} ${actual.padStart(20)}  / ${fmtBytes(r.max)}${tag}`);
+  }
+
+  if (warnings && warnings.length > 0) {
+    console.warn(`\n! Bundle-size gate WARNINGS (${args.flavor}) — non-blocking, clean these up:`);
+    for (const w of warnings) console.warn(`  - ${w}`);
   }
 
   if (failures.length > 0) {
     console.error(`\n✗ Bundle-size gate BLOCKED (${args.flavor}):`);
     for (const f of failures) console.error(`  - ${f}`);
     console.error(
-      '\nIf the growth is intentional, raise the ceilings in bundle-budget.json ' +
-        'with a note on why. Otherwise, trim the regression (check for an eager ' +
-        'import that should be lazy, or a newly-bundled dependency).\n',
+      '\nThe gate is STRUCTURAL (ADR 0016): there is no global total to raise. ' +
+        'A shell/vendor failure means first-paint or dependency weight grew — fix ' +
+        'the eager import or the dep, do NOT raise a frozen cap without an ADR. A ' +
+        'route failure affects only that one route; add/raise its own routes{} cap ' +
+        'in bundle-budget.json. See docs/bundle-budget-contract.md.\n',
     );
     process.exit(1);
   }
 
-  console.log(`\n✓ Bundle-size gate PASSED (${args.flavor}): all chunks within budget.\n`);
+  console.log(`\n✓ Bundle-size gate PASSED (${args.flavor}): all chunks within their class budgets.\n`);
 }
 
 // Only run the filesystem CLI when invoked directly (e.g. `node
