@@ -230,7 +230,7 @@ const SessionProvisioning = lazy(() =>
 // Keep the admin-only live-server view out of the upload-only SPA bundle.
 const EnterpriseAdminUnavailable = () => null;
 const EnterpriseAdmin =
-  import.meta.env.MODE === 'spa'
+  import.meta.env.MODE === 'spa' || import.meta.env.MODE === 'sample'
     ? EnterpriseAdminUnavailable
     : lazy(() =>
         import('../components/EnterpriseAdmin').then((m) => ({
