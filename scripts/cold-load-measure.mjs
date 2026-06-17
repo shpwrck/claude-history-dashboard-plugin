@@ -14,6 +14,14 @@
 //     longtask TTI needs sustained network/CPU-idle heuristics that are noisy in
 //     a sample-data SPA with no server; domInteractive is the stable, repeatable
 //     proxy the bundle-budget sibling's spirit calls for.
+//   - Content-Painted (CP) — time until #root first has a rendered child element
+//     (a MutationObserver fires the instant React mounts its first node). For
+//     this app the <body> ships as an empty <div id="root">, so FCP fires on a
+//     BLANK page — it cannot see the real "user sees content" moment, which only
+//     arrives after ~430KB of JS plus a fetch/unzip/parse pipeline. CP is the
+//     metric that actually tracks that experience; FCP/TTI are kept alongside it
+//     so a blank-paint regression is still visible. (See #1867 — blank-root FCP
+//     under-measures real cold load.)
 //
 // Each flavor is loaded COLD several times (a fresh browser context per run, so
 // no warm HTTP/disk/module cache carries over) and we take the MEDIAN of each
@@ -27,6 +35,7 @@
 //   node scripts/cold-load-measure.mjs --json out.json # also write JSON results
 //   node scripts/cold-load-measure.mjs --no-build      # reuse existing dist-*/
 //   node scripts/cold-load-measure.mjs --measure-only  # print numbers, no gate
+//   node scripts/cold-load-measure.mjs --cpu-throttle 4 # CDP CPU slowdown ×N (default off)
 //
 // Wired into .github/workflows/cold-load.yml so a PR that regresses past the
 // budget fails CI. Raise a ceiling deliberately — with a note on why — in
@@ -73,6 +82,7 @@ function parseArgs(argv) {
     gate: true,
     json: null,
     budget: join(REPO_ROOT, 'cold-load-budget.json'),
+    cpuThrottle: 1,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -84,7 +94,11 @@ function parseArgs(argv) {
     else if (a === '--measure-only') out.gate = false;
     else if (a === '--json') out.json = argv[++i];
     else if (a === '--budget') out.budget = argv[++i];
-    else die(`Unknown argument: ${a}`);
+    else if (a === '--cpu-throttle') {
+      const n = Number(argv[++i]);
+      if (!Number.isFinite(n) || n < 1) die('--cpu-throttle must be a number >= 1 (CDP slowdown multiplier).');
+      out.cpuThrottle = n;
+    } else die(`Unknown argument: ${a}`);
   }
   return out;
 }
@@ -197,18 +211,35 @@ async function startPreview(flavor) {
   };
 }
 
-// Measure FCP + TTI for one cold load in a brand-new context (no warm cache).
+// Measure FCP + TTI + Content-Painted (+ LCP) for one cold load in a brand-new
+// context (no warm cache).
 //
 // FCP is captured via a buffered PerformanceObserver armed BEFORE navigation
 // (addInitScript). Reading performance.getEntriesByType('paint') after `load`
 // is unreliable in headless chromium — the paint entry is intermittently not yet
 // flushed, yielding a spurious null that would make a gate flaky. The buffered
 // observer resolves as soon as first-contentful-paint is recorded, deterministically.
-async function measureOnce(browser, url) {
+//
+// Content-Painted (CP) is the real "user sees content" signal: a MutationObserver
+// on #root resolves with performance.now() the instant the app mounts its first
+// child element. Because <body> ships as an empty <div id="root">, FCP fires on a
+// blank page and is blind to this moment — CP is what actually tracks the cold
+// experience (#1867). LCP is captured opportunistically from the
+// largest-contentful-paint observer as a cross-check; it is reported but not gated
+// (it can be null on tiny content and is noisier than CP).
+async function measureOnce(browser, url, { cpuThrottle = 1 } = {}) {
   const context = await browser.newContext();
   const page = await context.newPage();
   // Defeat any HTTP/disk cache so every run is genuinely cold.
   await context.route('**/*', (route) => route.continue());
+  // Optional CPU throttling via CDP — a slower CPU makes the JS-bound boot path
+  // (the real cold cost FCP can't see) closer to a mid-tier client. Off by
+  // default (rate 1) to keep the CI baseline stable; opt in with --cpu-throttle.
+  let cdp = null;
+  if (cpuThrottle > 1) {
+    cdp = await context.newCDPSession(page);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpuThrottle });
+  }
   await page.addInitScript(() => {
     window.__coldLoadFcp = new Promise((resolve) => {
       try {
@@ -225,12 +256,52 @@ async function measureOnce(browser, url) {
         resolve(null);
       }
     });
+    // Largest Contentful Paint — keep the latest entry; read after load settles.
+    window.__coldLoadLcp = null;
+    try {
+      const lcpObs = new PerformanceObserver((list) => {
+        const entries = list.getEntries();
+        if (entries.length) window.__coldLoadLcp = entries[entries.length - 1].startTime;
+      });
+      lcpObs.observe({ type: 'largest-contentful-paint', buffered: true });
+    } catch {
+      /* unsupported — stays null */
+    }
+    // Content-Painted: first time #root gets a child element. Arm a
+    // MutationObserver as early as possible (init script runs before the app
+    // bundle), and also check synchronously in case #root already has content.
+    window.__coldLoadCp = new Promise((resolve) => {
+      const check = () => {
+        const root = document.getElementById('root');
+        if (root && root.children.length > 0) {
+          resolve(performance.now());
+          return true;
+        }
+        return false;
+      };
+      const start = () => {
+        if (check()) return;
+        const mo = new MutationObserver(() => {
+          if (check()) mo.disconnect();
+        });
+        // Observe document until #root exists, then it (subtree covers both).
+        mo.observe(document.documentElement, { childList: true, subtree: true });
+      };
+      if (document.documentElement) start();
+      else document.addEventListener('DOMContentLoaded', start, { once: true });
+    });
   });
   await page.goto(url, { waitUntil: 'load' });
   const metrics = await page.evaluate(async () => {
     const fcp = await Promise.race([
       window.__coldLoadFcp,
-      new Promise((r) => setTimeout(() => r(null), 5000)),
+      new Promise((r) => setTimeout(() => r(null), 15000)),
+    ]);
+    // Content-Painted has a longer ceiling than FCP — the JS+parse pipeline it
+    // waits on is exactly the seconds-scale cost the old gate missed.
+    const cp = await Promise.race([
+      window.__coldLoadCp,
+      new Promise((r) => setTimeout(() => r(null), 15000)),
     ]);
     const nav = performance.getEntriesByType('navigation')[0];
     return {
@@ -238,31 +309,51 @@ async function measureOnce(browser, url) {
       // TTI proxy: domInteractive (parser done, document interactive). Falls
       // back to domContentLoadedEventEnd if a browser reports 0.
       tti: nav ? nav.domInteractive || nav.domContentLoadedEventEnd : null,
+      cp: cp == null ? null : cp,
+      lcp: window.__coldLoadLcp,
     };
   });
+  if (cdp) {
+    try {
+      await cdp.detach();
+    } catch {
+      /* context closing anyway */
+    }
+  }
   await context.close();
   return metrics;
 }
 
-async function measureFlavor(browser, flavor, preview) {
+async function measureFlavor(browser, flavor, preview, { cpuThrottle = 1 } = {}) {
+  const opts = { cpuThrottle };
   // One discarded warmup load: the first navigation after a browser launch pays
   // a one-time cost (JIT warm-up, first compositor frame, font load) that is not
   // representative of a steady cold load — it skews FCP by an order of magnitude.
   // Discarding it makes the median stable.
-  await measureOnce(browser, preview.url);
+  await measureOnce(browser, preview.url, opts);
 
   const fcps = [];
   const ttis = [];
+  const cps = [];
+  const lcps = [];
   for (let i = 0; i < RUNS; i++) {
-    const m = await measureOnce(browser, preview.url);
+    const m = await measureOnce(browser, preview.url, opts);
     if (m.fcp == null) die(`${flavor}: no First Contentful Paint recorded — did the app render?`);
     if (m.tti == null) die(`${flavor}: no navigation timing recorded.`);
+    if (m.cp == null) die(`${flavor}: #root never got a child element — did the app mount?`);
     fcps.push(m.fcp);
     ttis.push(m.tti);
+    cps.push(m.cp);
+    if (m.lcp != null) lcps.push(m.lcp);
   }
   return {
     fcp: { runs: fcps.map(Math.round), median: Math.round(median(fcps)) },
     tti: { runs: ttis.map(Math.round), median: Math.round(median(ttis)) },
+    cp: { runs: cps.map(Math.round), median: Math.round(median(cps)) },
+    // LCP is opportunistic — null entries are dropped; report only if we got any.
+    lcp: lcps.length
+      ? { runs: lcps.map(Math.round), median: Math.round(median(lcps)) }
+      : null,
   };
 }
 
@@ -289,8 +380,9 @@ async function main() {
     for (const flavor of args.flavors) {
       const preview = await startPreview(flavor);
       previews.push(preview);
-      console.log(`Measuring ${FLAVORS[flavor].label} (${RUNS} cold loads) at ${preview.url} ...`);
-      results[flavor] = await measureFlavor(browser, flavor, preview);
+      const throttleNote = args.cpuThrottle > 1 ? `, CPU ×${args.cpuThrottle}` : '';
+      console.log(`Measuring ${FLAVORS[flavor].label} (${RUNS} cold loads${throttleNote}) at ${preview.url} ...`);
+      results[flavor] = await measureFlavor(browser, flavor, preview, { cpuThrottle: args.cpuThrottle });
     }
   } finally {
     await browser.close();
@@ -304,6 +396,10 @@ async function main() {
     console.log(`  ${FLAVORS[flavor].label}:`);
     console.log(`    FCP  median ${fmtMs(r.fcp.median).padStart(8)}   runs [${r.fcp.runs.join(', ')}]`);
     console.log(`    TTI  median ${fmtMs(r.tti.median).padStart(8)}   runs [${r.tti.runs.join(', ')}]`);
+    console.log(`    CP   median ${fmtMs(r.cp.median).padStart(8)}   runs [${r.cp.runs.join(', ')}]`);
+    if (r.lcp) {
+      console.log(`    LCP  median ${fmtMs(r.lcp.median).padStart(8)}   runs [${r.lcp.runs.join(', ')}]  (cross-check, not gated)`);
+    }
   }
 
   if (args.json) {
@@ -326,7 +422,7 @@ async function main() {
     const flavorBudget = budget[flavor];
     if (!flavorBudget) die(`budget file has no "${flavor}" block.`);
     const r = results[flavor];
-    for (const metric of ['fcp', 'tti']) {
+    for (const metric of ['fcp', 'tti', 'cp']) {
       const actual = r[metric].median;
       const max = flavorBudget[`${metric}MaxMs`];
       if (max == null) die(`budget["${flavor}"] missing "${metric}MaxMs".`);
