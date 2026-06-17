@@ -29,10 +29,50 @@ describe('workflow.unused-installed-skills (#421)', () => {
     expect(rec?.affected).toBeGreaterThanOrEqual(3);
     expect(rec?.fix?.target).toBe('command');
     expect(rec?.fix?.snippet).toBe(
-      'rm ~/.claude/skills/a\nrm ~/.claude/skills/b\nrm ~/.claude/skills/c\nrm ~/.claude/skills/d'
+      [
+        "rm -rf -- '/home/u/.claude/skills/a'",
+        "rm -rf -- '/home/u/.claude/skills/b'",
+        "rm -rf -- '/home/u/.claude/skills/c'",
+        "rm -rf -- '/home/u/.claude/skills/d'",
+      ].join('\n\n')
     );
   });
   it('stays silent below threshold', () => {
     expect(detector.rule(input(['a', 'b']), 1_780_100_000_000)).toBeNull();
+  });
+
+  it('does not count a project-scoped skill as unused when that project used it', () => {
+    const rec = detector.rule(
+      {
+        ...input(['a', 'b']),
+        sessions: [
+          { sessionId: 's1', project: '/repo/a', startTime: 1_780_000_000_000 },
+        ] as unknown as RecommendationInput['sessions'],
+        attribution: [
+          {
+            sessionId: 's1',
+            agents: {},
+            skills: { 'build-helper': { invocations: 1 } },
+            commands: {},
+            mcpServers: {},
+          },
+        ] as unknown as RecommendationInput['attribution'],
+        liveConfig: {
+          ...liveConfig(['a', 'b']),
+          skills: [
+            ...liveConfig(['a', 'b']).skills,
+            {
+              id: 'build-helper',
+              scope: 'project',
+              projectPath: '/repo/a',
+              path: '/repo/a/.claude/skills/build-helper',
+            },
+          ],
+        } as unknown as RecommendationInput['liveConfig'],
+      },
+      1_780_100_000_000
+    );
+
+    expect(rec).toBeNull();
   });
 });

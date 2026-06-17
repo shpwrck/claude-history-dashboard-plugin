@@ -29,7 +29,12 @@ describe('workflow.unused-installed-subagents (#633)', () => {
     expect(rec?.affected).toBeGreaterThanOrEqual(3);
     expect(rec?.fix?.target).toBe('command');
     expect(rec?.fix?.snippet).toBe(
-      'rm ~/.claude/agents/a\nrm ~/.claude/agents/b\nrm ~/.claude/agents/c\nrm ~/.claude/agents/d'
+      [
+        "rm -- '/home/u/.claude/agents/a'",
+        "rm -- '/home/u/.claude/agents/b'",
+        "rm -- '/home/u/.claude/agents/c'",
+        "rm -- '/home/u/.claude/agents/d'",
+      ].join('\n\n')
     );
   });
   it('stays silent below threshold', () => {

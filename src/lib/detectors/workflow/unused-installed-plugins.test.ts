@@ -6,6 +6,7 @@ const plugin = (id: string) => ({
   id,
   scope: 'user',
   version: '1.0.0',
+  sourcePath: '/home/u/.claude/plugins/installed_plugins.json',
   installPath: `/home/u/.claude/plugins/${id}`,
   installedAt: '2026-01-01T00:00:00.000Z',
   bundled: { skills: [`${id}-skill`], agents: [] },
@@ -50,8 +51,16 @@ describe('workflow.unused-installed-plugins (#1660)', () => {
     expect(rec?.id).toBe('workflow.unused-installed-plugins');
     expect(rec?.affected).toBe(2);
     expect(rec?.fix?.target).toBe('command');
-    expect(rec?.fix?.snippet).toBe(
-      'rm ~/.claude/plugins/plugin-a\nrm ~/.claude/plugins/plugin-b'
+    expect(rec?.fix?.snippet).toContain(
+      'const path = "/home/u/.claude/plugins/installed_plugins.json";'
+    );
+    expect(rec?.fix?.snippet).toContain('const plugin = "plugin-a";');
+    expect(rec?.fix?.snippet).toContain(
+      "rm -rf -- '/home/u/.claude/plugins/plugin-a'"
+    );
+    expect(rec?.fix?.snippet).toContain('const plugin = "plugin-b";');
+    expect(rec?.fix?.snippet).toContain(
+      "rm -rf -- '/home/u/.claude/plugins/plugin-b'"
     );
   });
 

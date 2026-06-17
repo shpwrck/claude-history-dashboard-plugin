@@ -1,5 +1,6 @@
 import type { Detector } from '../types';
 import { computeConfigHygiene } from '../../config-hygiene';
+import { buildConfigRemovalSnippetBlock } from '../../config-hygiene-actions';
 
 // Installed slash-command definitions (~/.claude/commands/*.md) with zero
 // invocations in the 30-day window add menu clutter and selection ambiguity.
@@ -7,10 +8,6 @@ import { computeConfigHygiene } from '../../config-hygiene';
 // (parse-agents commands map), lifting the v1 "no transcript parser" deferral.
 // Mirrors unused-installed-skills / -subagents. (#634)
 const MIN_UNUSED = 3;
-
-function pruneSnippet(ids: string[]): string {
-  return ids.map((id) => `rm ~/.claude/commands/${id}.md`).join('\n');
-}
 
 /** Flag installed-but-unused slash commands with a copy-only prune command. (#634) */
 export const detector: Detector = {
@@ -25,6 +22,7 @@ export const detector: Detector = {
       sessions: input.sessions.map((s) => ({
         sessionId: s.sessionId,
         startTime: s.startTime,
+        project: s.project,
       })),
       now,
     }).filter((f) => f.resourceType === 'command' && f.windowCount === 0);
@@ -43,7 +41,7 @@ export const detector: Detector = {
         target: 'command',
         label: 'Prune unused commands',
         note: 'Copy and run after confirming each slash command is no longer needed.',
-        snippet: pruneSnippet(ids),
+        snippet: buildConfigRemovalSnippetBlock(unused),
       },
     };
   },

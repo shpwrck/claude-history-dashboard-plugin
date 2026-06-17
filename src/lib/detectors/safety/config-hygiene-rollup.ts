@@ -28,6 +28,7 @@
 import type { Detector, RecommendationInput } from '../types';
 import type { HygieneFinding } from '../../config-hygiene';
 import { computeConfigHygiene } from '../../config-hygiene';
+import { buildConfigRemovalSnippetBlock } from '../../config-hygiene-actions';
 
 /** Families WITHOUT an existing detector — the only ones this rollup may emit,
  *  so it can never overlap workflow.unused-installed-{skills,subagents,commands}. */
@@ -62,6 +63,7 @@ export const detector: Detector = {
       sessions: input.sessions.map((s) => ({
         sessionId: s.sessionId,
         startTime: s.startTime,
+        project: s.project,
       })),
       now,
     }).filter((f) => UNCOVERED_FAMILIES.has(f.resourceType) && f.windowCount === 0);
@@ -103,6 +105,12 @@ export const detector: Detector = {
           (f) =>
             `${f.resourceType} ${f.resourceId} (${scopeLabel(f.scope)}): ${f.lifetimeCount} lifetime invocation(s)`
         ),
+      fix: {
+        target: 'command',
+        label: 'Prune unused MCP/plugins',
+        note: 'Copy and run after confirming each MCP server or plugin is no longer needed.',
+        snippet: buildConfigRemovalSnippetBlock(unused),
+      },
       provenance: {
         observations: [
           {

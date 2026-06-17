@@ -1,9 +1,6 @@
 import type { Detector } from '../types';
 import { computeConfigHygiene } from '../../config-hygiene';
-
-function pruneSnippet(ids: string[]): string {
-  return ids.map((id) => `rm ~/.claude/plugins/${id}`).join('\n');
-}
+import { buildConfigRemovalSnippetBlock } from '../../config-hygiene-actions';
 
 /** Flag installed-but-unused plugins and expose a copyable prune command. */
 export const detector: Detector = {
@@ -18,6 +15,7 @@ export const detector: Detector = {
       sessions: input.sessions.map((s) => ({
         sessionId: s.sessionId,
         startTime: s.startTime,
+        project: s.project,
       })),
       now,
     }).filter((f) => f.resourceType === 'plugin' && f.windowCount === 0);
@@ -36,7 +34,7 @@ export const detector: Detector = {
         target: 'command',
         label: 'Prune unused plugins',
         note: 'Copy and run after confirming each plugin is no longer needed.',
-        snippet: pruneSnippet(ids),
+        snippet: buildConfigRemovalSnippetBlock(unused),
       },
     };
   },

@@ -1,13 +1,10 @@
 import type { Detector } from '../types';
 import { computeConfigHygiene } from '../../config-hygiene';
+import { buildConfigRemovalSnippetBlock } from '../../config-hygiene-actions';
 
 // Installed skills with zero invocations in the 30-day window add selection
 // ambiguity when Claude picks which skill to invoke. (#421)
 const MIN_UNUSED = 3;
-
-function pruneSnippet(ids: string[]): string {
-  return ids.map((id) => `rm ~/.claude/skills/${id}`).join('\n');
-}
 
 /** Flag installed-but-unused skills with a copy-only prune command. (#421) */
 export const detector: Detector = {
@@ -22,6 +19,7 @@ export const detector: Detector = {
       sessions: input.sessions.map((s) => ({
         sessionId: s.sessionId,
         startTime: s.startTime,
+        project: s.project,
       })),
       now,
     }).filter((f) => f.resourceType === 'skill' && f.windowCount === 0);
@@ -40,7 +38,7 @@ export const detector: Detector = {
         target: 'command',
         label: 'Prune unused skills',
         note: 'Copy and run after confirming each skill is no longer needed.',
-        snippet: pruneSnippet(ids),
+        snippet: buildConfigRemovalSnippetBlock(unused),
       },
     };
   },

@@ -29,7 +29,12 @@ describe('workflow.unused-installed-commands (#634)', () => {
     expect(rec?.affected).toBeGreaterThanOrEqual(3);
     expect(rec?.fix?.target).toBe('command');
     expect(rec?.fix?.snippet).toBe(
-      'rm ~/.claude/commands/a.md\nrm ~/.claude/commands/b.md\nrm ~/.claude/commands/c.md\nrm ~/.claude/commands/d.md'
+      [
+        "rm -- '/home/u/.claude/commands/a.md'",
+        "rm -- '/home/u/.claude/commands/b.md'",
+        "rm -- '/home/u/.claude/commands/c.md'",
+        "rm -- '/home/u/.claude/commands/d.md'",
+      ].join('\n\n')
     );
   });
   it('stays silent below threshold', () => {

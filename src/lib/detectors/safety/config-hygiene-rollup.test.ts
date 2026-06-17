@@ -38,11 +38,17 @@ function input(over: Partial<RecommendationInput> = {}): RecommendationInput {
     attribution: [],
     liveConfig: liveConfig({
       mcpServers: [
-        { id: 'server-a', scope: 'global' },
-        { id: 'server-b', scope: 'global' },
+        { id: 'server-a', scope: 'global', sourcePath: '/home/u/.claude.json' },
+        { id: 'server-b', scope: 'global', sourcePath: '/home/u/.claude.json' },
       ],
       plugins: [
-        { id: 'plug-a', scope: 'global', bundled: { skills: ['plug-a-skill'], agents: [] } },
+        {
+          id: 'plug-a',
+          scope: 'global',
+          sourcePath: '/home/u/.claude/plugins/installed_plugins.json',
+          installPath: '/home/u/.claude/plugins/plug-a',
+          bundled: { skills: ['plug-a-skill'], agents: [] },
+        },
       ],
     }),
     ...over,
@@ -58,6 +64,9 @@ describe('safety.config-hygiene-rollup (#1164)', () => {
     expect(rollup[0].affected).toBe(3); // 2 mcp + 1 plugin
     expect(rollup[0].detail).toMatch(/2 MCP server\(s\)/);
     expect(rollup[0].detail).toMatch(/1 plugin\(s\)/);
+    expect(rollup[0].fix?.target).toBe('command');
+    expect(rollup[0].fix?.snippet).toContain('delete data.mcpServers[server]');
+    expect(rollup[0].fix?.snippet).toContain('const plugin = "plug-a";');
   });
 
   it('does NOT emit families covered by workflow.unused-installed-* (no double-count)', () => {
