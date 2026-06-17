@@ -840,6 +840,7 @@ export const VIEW_RENDERERS: Partial<
       toolData={d.toolData}
       sessions={d.sessions}
       onOpenSession={n.openSession}
+      onNavigateWithFilter={n.navigateWithFilter}
     />
   ),
   conversation: ({ data: d, nav: n }) => (
