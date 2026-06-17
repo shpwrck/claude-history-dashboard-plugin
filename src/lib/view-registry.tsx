@@ -665,6 +665,7 @@ export const VIEW_RENDERERS: Partial<
       toolData={d.toolData}
       apiErrors={d.apiErrors}
       onNavigate={n.navigateTo}
+      onNavigateWithFilter={n.navigateWithFilter}
       onOpenSession={n.openSession}
     />
   ),
@@ -688,6 +689,7 @@ export const VIEW_RENDERERS: Partial<
     <ProjectBreakdown
       projects={d.projects}
       onOpenSession={n.openSession}
+      navigateWithFilter={n.navigateWithFilter}
       onActiveProjectChange={n.setActiveProjectId}
     />
   ),
@@ -704,7 +706,7 @@ export const VIEW_RENDERERS: Partial<
       onNavigate={n.navigateWithFilter}
     />
   ),
-  tools: ({ data: d, nav: n }) => (
+  tools: ({ data: d, nav: n, routeFilter }) => (
     <ToolUsage
       toolData={d.toolData}
       apiErrors={d.apiErrors}
@@ -713,6 +715,7 @@ export const VIEW_RENDERERS: Partial<
       sessions={d.sessions}
       liveConfig={d.liveConfig}
       onOpenSession={n.openSession}
+      routeFilter={routeFilter}
       onNavigateWithFilter={n.navigateWithFilter}
     />
   ),
@@ -745,6 +748,7 @@ export const VIEW_RENDERERS: Partial<
       focusEvidenceRef={n.focusEvidenceRef}
       onOpenSession={n.openSession}
       onOpenEvidence={n.openEvidence}
+      navigateWithFilter={n.navigateWithFilter}
     />
   ),
   // #14: the former standalone "Stats" view (UsageStats) is folded into
