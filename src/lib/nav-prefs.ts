@@ -39,6 +39,7 @@ import CalendarAltIcon from '@patternfly/react-icons/dist/esm/icons/calendar-alt
 import FlaskIcon from '@patternfly/react-icons/dist/esm/icons/flask-icon';
 import ServerIcon from '@patternfly/react-icons/dist/esm/icons/server-icon';
 import type { View, ActionDomain } from '../types';
+import type { ViewRequirement, VariantCapabilities } from './variant-capabilities';
 
 const STORAGE_KEY = 'claude-dashboard:nav-prefs';
 
@@ -168,9 +169,12 @@ function freshDefaults(): NavPrefs {
 // and refined by the per-domain units (#492–498); the structural invariant
 // #491 fixes is: a `home` group first, the six action domains with safety
 // leading, a `discovery` Find group, and orientation/replay views demoted to `raw`.
-// The `serverOnly` flag marks views that require the live /api/* backend; they
-// are auto-hidden in the SPA/upload build (SERVER_AVAILABLE === false). Adding
-// a future server-only view is a one-line change: add `serverOnly: true` here.
+// The `requires` field marks views that need more than the always-available
+// dataset (epic #1852, ADR 0014). `serverData` views just need a rich dataset —
+// shown on the sample showcase (full corpus) and on a user upload that covers
+// them; `liveServer` views need the live backend control plane and stay out of
+// the public SPA builds entirely (they also carry server-touching code that the
+// `spa-boundary` gate forbids). See {@link variantCapabilities}.
 export interface NavItem {
   view: View;
   label: string;
@@ -178,7 +182,7 @@ export interface NavItem {
   domain: ActionDomain;
   /** Optional one-line explainer used by PageHeader; source of truth for views. */
   description?: string;
-  serverOnly?: true;
+  requires?: ViewRequirement;
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
@@ -205,18 +209,22 @@ export const NAV_ITEMS: readonly NavItem[] = [
     domain: 'home',
     description:
       'Tracks surfaced recommendations through marker-confirmed config adoption.',
-    serverOnly: true,
+    requires: 'serverData',
   },
   {
     view: 'provisioning',
     label: 'Provision',
     icon: ServerIcon,
     domain: 'home',
-    serverOnly: true,
+    requires: 'liveServer',
     description:
       'Launch and manage remote agent sessions on your cluster so you can run work outside your local machine.',
   },
-  { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', serverOnly: true },
+  // liveServer (not serverData): the Diary fetches its daily digest from the
+  // server (`fetchDigest` -> /api/digest) with no client-side fallback, so it has
+  // no data to render on the sample/upload builds — hide it there rather than
+  // ship an empty day (#1889).
+  { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', requires: 'liveServer' },
   {
     view: 'permissions',
     label: 'Permissions',
@@ -230,7 +238,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: 'Enterprise',
     icon: LockIcon,
     domain: 'safety',
-    serverOnly: true,
+    requires: 'liveServer',
     description:
       'Configure enterprise authentication and review who has access when the dashboard runs in shared, multi-user mode.',
   },
@@ -269,7 +277,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   // Model Evals workbench (#1086, epic #975): routing-eval evidence + scoped
   // routing recommendations live under the cost lever (model routing).
-  { view: 'model-evals', label: 'Model Evals', icon: FlaskIcon, domain: 'cost', serverOnly: true },
+  { view: 'model-evals', label: 'Model Evals', icon: FlaskIcon, domain: 'cost', requires: 'serverData' },
   {
     view: 'errors',
     label: 'Errors',
@@ -285,9 +293,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
     domain: 'success-rate',
     description:
       'Grade how reliably your unattended automation runs complete so you can tell whether headless agents are finishing their work or failing silently.',
-    serverOnly: true,
+    requires: 'serverData',
   },
-  { view: 'review-queue', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', serverOnly: true },
+  { view: 'review-queue', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', requires: 'serverData' },
   {
     view: 'evaluator',
     label: 'Speed Check',
@@ -329,7 +337,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: 'Shadow Calls',
     icon: FlaskIcon,
     domain: 'workflow-hygiene',
-    serverOnly: true,
+    requires: 'serverData',
     description:
       'Review the shadow A/B experiments run against your tasks so you can see which alternative approaches beat your default and fed the recommendation engine.',
   },
@@ -352,18 +360,18 @@ export const NAV_ITEMS: readonly NavItem[] = [
     domain: 'workflow-hygiene',
     description:
       'Track task completion rates and cold-session risk so you can catch work that stalls or gets dropped between sessions.',
-    serverOnly: true,
+    requires: 'serverData',
   },
   {
     view: 'teams',
     label: 'Team Coordination',
     icon: SitemapIcon,
     domain: 'workflow-hygiene',
-    serverOnly: true,
+    requires: 'serverData',
     description:
       'See how your multi-agent teams hand off work so you can spot stalled members and coordination bottlenecks.',
   },
-  { view: 'plans', label: 'Task Plans', icon: ClipboardListIcon, domain: 'workflow-hygiene', serverOnly: true },
+  { view: 'plans', label: 'Task Plans', icon: ClipboardListIcon, domain: 'workflow-hygiene', requires: 'serverData' },
   {
     view: 'search',
     label: 'Search',
@@ -400,7 +408,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // "Activity" (the survivor). Its old `#/stats` deep link is preserved via
   // {@link REDIRECTED_VIEWS} below, which resolves it to `activity`.
   { view: 'activity', label: 'Activity', icon: RunningIcon, domain: 'raw' },
-  { view: 'pulse', label: 'Pulse', icon: ChartLineIcon, domain: 'raw', serverOnly: true },
+  { view: 'pulse', label: 'Pulse', icon: ChartLineIcon, domain: 'raw', requires: 'serverData' },
 ] as const;
 
 /**
@@ -428,10 +436,43 @@ export function getNavItem(view: View): NavItem | undefined {
   return NAV_ITEMS.find((item) => item.view === view);
 }
 
-/** Views that require the live /api/* backend and must not appear in the SPA/upload build. */
-export const SERVER_ONLY_VIEWS = new Set<View>(
-  NAV_ITEMS.filter((i) => i.serverOnly).map((i) => i.view)
+/** Views needing a rich dataset (sample corpus / covered upload / server). */
+export const SERVER_DATA_VIEWS = new Set<View>(
+  NAV_ITEMS.filter((i) => i.requires === 'serverData').map((i) => i.view)
 );
+
+/** Views needing the live backend control plane — excluded from public SPA builds. */
+export const LIVE_SERVER_VIEWS = new Set<View>(
+  NAV_ITEMS.filter((i) => i.requires === 'liveServer').map((i) => i.view)
+);
+
+/**
+ * Union of views that need more than the always-available dataset. Retained for
+ * callers that only care "is this gated at all" (e.g. the live-server redirect
+ * guard); finer gating uses {@link isNavViewAvailable} with the variant caps.
+ */
+export const SERVER_ONLY_VIEWS = new Set<View>(
+  NAV_ITEMS.filter((i) => i.requires).map((i) => i.view)
+);
+
+/**
+ * Whether a view is available under a delivery variant's capabilities (epic
+ * #1852, ADR 0014). `liveServer` views need the backend control plane;
+ * `serverData` views need a rich dataset (the sample corpus, a covered upload,
+ * or a server). Kept here (using the derived sets) so this module stays free of
+ * any `@api-client` value import. Callers pass `variantCapabilities()`.
+ */
+export function isNavViewAvailable(
+  view: View,
+  caps: VariantCapabilities,
+  uploadCoveredViews: ReadonlySet<View> = new Set()
+): boolean {
+  if (LIVE_SERVER_VIEWS.has(view)) return caps.hasLiveServer;
+  if (SERVER_DATA_VIEWS.has(view)) {
+    return caps.hasServerData || uploadCoveredViews.has(view);
+  }
+  return true;
+}
 
 /**
  * #610: the dense "Clean workflow" (workflow-hygiene) group holds 9 flat peers —
@@ -599,16 +640,20 @@ export function migrateNavPrefs(prefs: NavPrefs): NavPrefs {
  * mode falls through to the default. If even the default is unavailable, falls
  * back to the first still-visible tab.
  */
-export function resolveInitialView(prefs: NavPrefs, serverAvailable = true): View {
+export function resolveInitialView(
+  prefs: NavPrefs,
+  caps: VariantCapabilities,
+  uploadCoveredViews: ReadonlySet<View> = new Set()
+): View {
   const hidden = new Set(prefs.hiddenViews);
   const isVisible = (v: View) =>
     VALID_VIEWS.has(v) &&
     !hidden.has(v) &&
-    (serverAvailable || !SERVER_ONLY_VIEWS.has(v));
+    isNavViewAvailable(v, caps, uploadCoveredViews);
   if (prefs.lastView && isVisible(prefs.lastView)) return prefs.lastView;
   if (isVisible(DEFAULT_VIEW)) return DEFAULT_VIEW;
   const firstVisible = NAV_ITEMS.find(
-    (i) => !hidden.has(i.view) && (serverAvailable || !SERVER_ONLY_VIEWS.has(i.view))
+    (i) => !hidden.has(i.view) && isNavViewAvailable(i.view, caps, uploadCoveredViews)
   );
   return firstVisible ? firstVisible.view : DEFAULT_VIEW;
 }

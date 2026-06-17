@@ -32,6 +32,7 @@ import type { DriftEvent } from './parse-backups';
 import type { LiveConfig, LiveResource, DeceitSignals } from '../types';
 import type { AdoptionReceipt } from './adoption-receipts';
 import { ingestModelEvalResults, type ModelEvalSummary } from './model-eval-ingest';
+import { parseShadowCalls, type ShadowCallAggregate } from './parse-shadow-calls';
 // @ts-expect-error - plain ESM build helper, no .d.ts
 import { buildSampleAdoptionReceipts as buildRawSampleAdoptionReceipts, buildSampleModelEvalResults, SAMPLE_ADOPTION_CLAUDE_MD_HUNK } from '../../scripts/sample-data/build-corpus.mjs';
 
@@ -465,4 +466,31 @@ export function buildSampleDeceitSignals(sessionIds: string[]): DeceitSignals[] 
       claimSnippets: [],
     })),
   ];
+}
+
+/**
+ * Shadow-call ledger aggregate for the demo (epic #1852 / #1889). The ledger is
+ * server/local-only — written by the shadow-calls experiment runner under
+ * `~/.claude`, never in the upload zip — so the Shadow Calls view (#519) shows
+ * only its "no ledger" empty state in demo mode. We ship a handful of synthetic
+ * records in the exact ledger JSONL shape and run them through the REAL
+ * {@link parseShadowCalls} so the aggregate is byte-identical to what the live
+ * parser would produce (mirrors the model-eval seed's parse-the-real-shape
+ * approach). Three axes with a realistic win/cost spread: a clear model-downshift
+ * win (cheaper, mostly shadow wins), a marginal config-scoping edge, and a
+ * plan-first axis the default usually beats.
+ */
+export function buildSampleShadowCalls(): ShadowCallAggregate {
+  const rec = (o: unknown) => JSON.stringify(o);
+  const lines = [
+    rec({ mode: 'live', axis: 'model-downshift', judge: { winner: 'shadow' }, main: { tokens: 18200, costUsd: 0.42 }, shadow: { tokens: 19500, costUsd: 0.11 } }),
+    rec({ mode: 'replay', axis: 'model-downshift', judge: { winner: 'shadow' }, main: { tokens: 15000, costUsd: 0.35 }, shadow: { tokens: 16100, costUsd: 0.09 } }),
+    rec({ mode: 'replay', axis: 'model-downshift', judge: { winner: 'main' }, main: { tokens: 21000, costUsd: 0.50 }, shadow: { tokens: 22500, costUsd: 0.13 } }),
+    rec({ mode: 'live', axis: 'model-downshift', judge: { winner: 'tie' }, main: { tokens: 9000, costUsd: 0.20 }, shadow: { tokens: 9800, costUsd: 0.06 } }),
+    rec({ mode: 'live', axis: 'config-scoping', judge: { winner: 'shadow', adherenceRegressions: 0 }, main: { tokens: 28000, costUsd: 0.66 }, shadow: { tokens: 26000, costUsd: 0.60 } }),
+    rec({ mode: 'replay', axis: 'config-scoping', judge: { winner: 'tie', adherenceRegressions: 0 }, main: { tokens: 25000, costUsd: 0.58 }, shadow: { tokens: 24000, costUsd: 0.56 } }),
+    rec({ mode: 'replay', axis: 'plan-first', judge: { winner: 'main' }, main: { tokens: 12000, costUsd: 0.28 }, shadow: { tokens: 15000, costUsd: 0.34 } }),
+    rec({ mode: 'replay', axis: 'plan-first', judge: { winner: 'shadow' }, main: { tokens: 14000, costUsd: 0.32 }, shadow: { tokens: 13000, costUsd: 0.30 } }),
+  ];
+  return parseShadowCalls(lines.join('\n'));
 }
