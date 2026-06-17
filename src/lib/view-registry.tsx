@@ -677,6 +677,7 @@ export const VIEW_RENDERERS: Partial<
       timelines={d.timelines}
       runtimeEvents={d.runtimeEvents}
       apiErrors={d.apiErrors}
+      permissionRows={d.permissionRows}
       focusSessionId={n.focusSessionId}
       focusEvidenceRef={n.focusEvidenceRef}
       onFocusConsumed={n.consumeFocus}
