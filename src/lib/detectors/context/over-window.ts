@@ -11,6 +11,7 @@ const MARKERS_OVER_WINDOW: AppliedMarkers = {
 /** Sessions that blew past the usable context window — compact earlier. */
 export const detector: Detector = {
   id: 'context.over-window',
+  appliedMarkers: MARKERS_OVER_WINDOW,
   category: 'context',
   dataDeps: ['tokenData', 'liveConfig'],
   rule(input) {

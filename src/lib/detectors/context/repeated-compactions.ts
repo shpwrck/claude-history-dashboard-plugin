@@ -15,6 +15,7 @@ const MARKERS = {
 /** Flag chronic repeated compaction within sessions. (#424) */
 export const detector: Detector = {
   id: 'context.repeated-compactions',
+  appliedMarkers: MARKERS,
   category: 'context',
   dataDeps: ['tokenData', 'toolData', 'timelines', 'liveConfig'],
   rule(input) {

@@ -16,6 +16,7 @@ const MARKERS_LOW_CACHE_HIT: AppliedMarkers = {
 /** Low cache hit rate across sessions — context is being re-sent uncached. */
 export const detector: Detector = {
   id: 'context.low-cache-hit',
+  appliedMarkers: MARKERS_LOW_CACHE_HIT,
   category: 'context',
   dataDeps: ['tokenData', 'liveConfig'],
   rule(input) {

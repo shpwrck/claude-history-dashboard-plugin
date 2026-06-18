@@ -17,6 +17,7 @@ const MARKERS_CACHE_1H_WASTE: AppliedMarkers = {
 
 export const detector: Detector = {
   id: 'cost.cache-1h-waste',
+  appliedMarkers: MARKERS_CACHE_1H_WASTE,
   category: 'cost',
   dataDeps: ['tokenData', 'liveConfig'],
   rule(input) {

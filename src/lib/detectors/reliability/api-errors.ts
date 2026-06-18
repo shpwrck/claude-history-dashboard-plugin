@@ -16,6 +16,7 @@ const MARKERS_RATE_LIMITS: AppliedMarkers = {
  */
 export const detector: Detector = {
   id: 'reliability.api-errors',
+  appliedMarkers: MARKERS_RATE_LIMITS,
   category: 'reliability',
   dataDeps: ['apiErrors', 'liveConfig'],
   rule(input) {

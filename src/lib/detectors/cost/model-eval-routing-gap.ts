@@ -96,6 +96,7 @@ function gapLine(rec: EvalRoutingRecommendation): string {
 
 export const detector: Detector = {
   id: 'cost.model-eval-routing-gap',
+  appliedMarkers: MARKERS,
   category: 'cost',
   dataDeps: ['modelEvalSummary', 'liveConfig'],
   rule(input: RecommendationInput, now: number) {

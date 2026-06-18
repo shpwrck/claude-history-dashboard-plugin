@@ -564,4 +564,15 @@ export interface Detector {
    * when present.
    */
   emitAll?: (input: RecommendationInput, now: number) => Recommendation[];
+  /**
+   * The CLAUDE.md marker signature this detector's fix writes, declared
+   * statically so the catalog can resolve a finding id → its markers WITHOUT
+   * running the detector (#1785). It mirrors the `appliedMarkers` the detector
+   * attaches to its emitted `fix`, but stays introspectable even when the
+   * detector is currently SUPPRESSED (its markers already present in CLAUDE.md)
+   * — exactly the adoption case where `rule` returns null and never reaches its
+   * `fix`. Detectors whose fix targets settings.json (or that have no
+   * marker-gated CLAUDE.md fix) leave this undefined.
+   */
+  appliedMarkers?: AppliedMarkers;
 }

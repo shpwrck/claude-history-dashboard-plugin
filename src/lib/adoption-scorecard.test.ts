@@ -3,6 +3,7 @@ import {
   buildAdoptionScorecard,
   liveClaudeMdHunk,
 } from './adoption-scorecard';
+import { findingMarkerCatalog } from './detectors';
 import type {
   AdoptionReceipt,
   SurfacedReceipt,
@@ -44,6 +45,23 @@ Serialize heavy automated batches so the engine stays under the cap.
 
 - one
 - two
+
+## Another section
+
+Unrelated body.
+`;
+
+// CLAUDE.md carrying the FULL `reliability.api-errors` marker signature
+// (MARKERS_RATE_LIMITS): the `## Rate-limit hygiene` heading AND its body phrase
+// "Avoid launching many parallel agent runs". Used for the catalog-backed
+// surfaced→ADOPTED path (#1785). The heading alone is not enough — the strict-AND
+// markers also require the body phrase.
+const CLAUDE_MD_RATE_LIMIT_ADOPTED = `# Project conventions
+
+## Rate-limit hygiene
+
+Avoid launching many parallel agent runs; serialize heavy automated batches so
+the engine stays under the cap.
 
 ## Another section
 
@@ -135,26 +153,66 @@ describe('buildAdoptionScorecard', () => {
     expect(row.daysToAdopt).toBe(2);
   });
 
-  it('SURFACED-only finding (no marker present) stays SURFACED', () => {
+  it('SURFACED-only finding with no catalog entry stays SURFACED', () => {
     const receipts: AdoptionReceipt[] = [
       surfaced('2026-05-28T00:00:00.000Z', ['pending.thing']),
     ];
-    const sc = buildAdoptionScorecard(receipts, config(CLAUDE_MD));
+    // `pending.thing` is not a marker-bearing detector, so even with the live
+    // catalog supplied there are no markers to resolve → SURFACED.
+    const sc = buildAdoptionScorecard(
+      receipts,
+      config(CLAUDE_MD),
+      findingMarkerCatalog()
+    );
     expect(sc.rows[0].status).toBe('SURFACED');
     expect(sc.rows[0].liveHunk).toBeNull();
     expect(sc.header.adoptedCount).toBe(0);
   });
 
-  it('SURFACED finding whose marker is present live but not yet suppressed is ADOPTED', () => {
+  it('SURFACED finding whose detector markers are present live (no suppression yet) is ADOPTED (#1785)', () => {
     const receipts: AdoptionReceipt[] = [
-      surfaced('2026-05-28T00:00:00.000Z', ['reliability.rate-limits']),
+      surfaced('2026-05-28T00:00:00.000Z', ['reliability.api-errors']),
     ];
-    // No suppression record; but the marker section exists. We cannot read the
-    // marker for a SURFACED-only finding (no markerHeading stored) — so this
-    // remains SURFACED. ADOPTED is reached only once a suppression record names
-    // the heading. Documented behaviour: live-hunk read needs the markerHeading.
-    const sc = buildAdoptionScorecard(receipts, config(CLAUDE_MD));
+    // No suppression record, so no stored markerHeading — the heading is
+    // resolved from the live detector catalog by finding id. The fix's full
+    // strict-AND markers are present in CLAUDE.md, so the fix has landed and the
+    // row reaches the "awaiting quiet" ADOPTED state with the live hunk rendered.
+    const sc = buildAdoptionScorecard(
+      receipts,
+      config(CLAUDE_MD_RATE_LIMIT_ADOPTED),
+      findingMarkerCatalog()
+    );
+    expect(sc.rows[0].status).toBe('ADOPTED');
+    expect(sc.rows[0].liveHunk).toContain('## Rate-limit hygiene');
+    expect(sc.rows[0].liveHunk).toContain('Avoid launching many parallel agent runs');
+    // Still excluded from the coached M count — that requires a suppression.
+    expect(sc.header.adoptedCount).toBe(0);
+  });
+
+  it('SURFACED finding whose markers are only partially present stays SURFACED (strict-AND)', () => {
+    const receipts: AdoptionReceipt[] = [
+      surfaced('2026-05-28T00:00:00.000Z', ['reliability.api-errors']),
+    ];
+    // CLAUDE_MD has the `## Rate-limit hygiene` heading but NOT the required body
+    // phrase, so the strict-AND markers are not satisfied → stays SURFACED.
+    const sc = buildAdoptionScorecard(
+      receipts,
+      config(CLAUDE_MD),
+      findingMarkerCatalog()
+    );
     expect(sc.rows[0].status).toBe('SURFACED');
+    expect(sc.rows[0].liveHunk).toBeNull();
+  });
+
+  it('without a marker catalog, a SURFACED-only finding stays SURFACED (back-compat)', () => {
+    const receipts: AdoptionReceipt[] = [
+      surfaced('2026-05-28T00:00:00.000Z', ['reliability.api-errors']),
+    ];
+    // Omitting the third arg (e.g. the SPA build) preserves the prior behaviour:
+    // surfaced-only findings cannot reach ADOPTED without the catalog.
+    const sc = buildAdoptionScorecard(receipts, config(CLAUDE_MD_RATE_LIMIT_ADOPTED));
+    expect(sc.rows[0].status).toBe('SURFACED');
+    expect(sc.rows[0].liveHunk).toBeNull();
   });
 
   it('attribution pending: suppression with no prior surface excluded from M', () => {

@@ -119,6 +119,7 @@ interface Candidate {
 
 export const detector: Detector = {
   id: 'context.repo-map-context-waste',
+  appliedMarkers: MARKERS_REPO_MAP_WASTE,
   category: 'context',
   dataDeps: ['repoMap', 'toolData', 'tokenData', 'liveConfig'],
   rule(input) {

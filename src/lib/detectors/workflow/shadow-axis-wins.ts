@@ -1,4 +1,4 @@
-import type { Detector, RecSeverity, Recommendation, RecProvenance } from '../types';
+import type { AppliedMarkers, Detector, RecSeverity, Recommendation, RecProvenance } from '../types';
 import { avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding } from '../../parse-shadow-calls';
 import type { AxisAggregate, RecsFindingAggregate } from '../../parse-shadow-calls';
 
@@ -21,6 +21,14 @@ export const MIN_SAMPLES = 5; // per axis, before we trust a win rate
 export const MIN_DECIDED = 3; // need ≥3 NON-tie comparisons, not just 5 samples (#545)
 export const MIN_SHADOW_WIN_RATE = 0.6; // shadow wins ≥60% of decided experiments
 const MIN_LIVE_WINS_FOR_WARNING = 3; // live confirmation lifts info → warning
+
+// The CLAUDE.md marker signature for the adopt-winning-variation fix. Hoisted to
+// a module const so the detector can declare it statically (#1785) and the fix
+// can reference the same object — the two can never drift.
+const MARKERS_SHADOW_AXIS_WINS: AppliedMarkers = {
+  headings: [/^##\s+default approach/i],
+  bodyPhrases: ['Revisit if live shadows stop favouring it'],
+};
 
 interface AxisMeta {
   label: string;
@@ -110,10 +118,7 @@ function adoptAxisRec(candidates: Cand[]): Recommendation {
       label: 'Adopt the winning variation',
       note: `Shadow-calls evidence (epic #513). Add a standing note so this becomes the default for this kind of task; keep shadowing to catch regressions.`,
       snippet: `## Default approach (from shadow-calls #513)\n\nFor this class of task, ${m.adopt} — shadow experiments on the "${a.axis}" axis won ${pct}% of ${a.samples} comparisons${best.cheaper ? ' at lower token cost' : ''}. Revisit if live shadows stop favouring it.`,
-      appliedMarkers: {
-        headings: [/^##\s+default approach/i],
-        bodyPhrases: ['Revisit if live shadows stop favouring it'],
-      },
+      appliedMarkers: MARKERS_SHADOW_AXIS_WINS,
     },
   };
 }
@@ -231,6 +236,7 @@ function recsFindingVerdict(a: AxisAggregate): { rec: Recommendation; meaningful
 
 export const detector: Detector = {
   id: 'workflow.shadow-axis-wins',
+  appliedMarkers: MARKERS_SHADOW_AXIS_WINS,
   category: 'workflow',
   dataDeps: ['shadowCalls'],
   rule(input) {

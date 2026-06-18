@@ -21,6 +21,7 @@ const MARKERS = {
  */
 export const detector: Detector = {
   id: 'cost.web-search-spend',
+  appliedMarkers: MARKERS,
   category: 'cost',
   dataDeps: ['tokenData', 'liveConfig'],
   rule(input) {

@@ -37,6 +37,7 @@ function factLine(c: { failed: string; succeeded: string }): string {
 
 export const detector: Detector = {
   id: 'workflow.correction-mining',
+  appliedMarkers: MARKERS_CORRECTIONS,
   category: 'workflow',
   dataDeps: ['toolData', 'liveConfig'],
   rule(input) {

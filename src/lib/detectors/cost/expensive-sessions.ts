@@ -12,6 +12,7 @@ const MARKERS_EXPENSIVE_SESSIONS: AppliedMarkers = {
 /** The few sessions that dominate spend — worth reviewing for waste. */
 export const detector: Detector = {
   id: 'cost.expensive-sessions',
+  appliedMarkers: MARKERS_EXPENSIVE_SESSIONS,
   category: 'cost',
   dataDeps: ['tokenData', 'toolData', 'liveConfig'],
   rule(input) {

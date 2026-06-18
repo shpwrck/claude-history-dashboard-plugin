@@ -11,6 +11,7 @@ const MARKERS_LOW_HEALTH: AppliedMarkers = {
 /** Heuristic health score below the flag line. */
 export const detector: Detector = {
   id: 'context.low-health',
+  appliedMarkers: MARKERS_LOW_HEALTH,
   category: 'context',
   dataDeps: ['tokenData', 'liveConfig'],
   rule(input) {

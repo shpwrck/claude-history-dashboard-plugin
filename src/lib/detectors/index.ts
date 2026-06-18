@@ -34,7 +34,7 @@
  *   import { detector as webSearchSpend } from './cost/web-search-spend';
  *   export const DETECTORS: Detector[] = [webSearchSpend];
  */
-import type { Detector } from './types';
+import type { AppliedMarkers, Detector } from './types';
 
 // ── COST ────────────────────────────────────────────────────────────────
 import { detector as cache1hWaste } from './cost/cache-1h-waste';
@@ -271,3 +271,25 @@ export const DETECTORS: Detector[] = [
  * `DETECTORS` is the canonical name; this alias keeps older importers working.
  */
 export const NEW_DETECTORS = DETECTORS;
+
+/**
+ * Finding-id → CLAUDE.md marker signature, resolved statically from the catalog
+ * (#1785). Built from each detector's declared {@link Detector.appliedMarkers},
+ * so a finding's markers are resolvable even when its detector is currently
+ * SUPPRESSED (markers already present in CLAUDE.md) and therefore absent from the
+ * live recommendations — the exact adoption case the scorecard's surfaced→ADOPTED
+ * transition needs. Detectors with no marker-gated CLAUDE.md fix are omitted.
+ *
+ * Server/test-side only: this iterates `DETECTORS`, so importing it drags the
+ * whole recs engine into the importing chunk. Client/route code (e.g. the
+ * Adoption Scorecard) must instead import the client-safe `FINDING_MARKER_CATALOG`
+ * from `./applied-markers`; the `applied-markers.contract.test.ts` guard keeps
+ * that leaf byte-for-byte equal to what this function returns (#1909).
+ */
+export function findingMarkerCatalog(): ReadonlyMap<string, AppliedMarkers> {
+  const map = new Map<string, AppliedMarkers>();
+  for (const d of DETECTORS) {
+    if (d.appliedMarkers) map.set(d.id, d.appliedMarkers);
+  }
+  return map;
+}

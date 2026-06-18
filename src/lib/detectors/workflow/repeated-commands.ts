@@ -11,6 +11,7 @@ const MARKERS_REPEATED_COMMANDS: AppliedMarkers = {
 /** Identical Bash commands run 3+ times in a session — automate them. */
 export const detector: Detector = {
   id: 'workflow.repeated-commands',
+  appliedMarkers: MARKERS_REPEATED_COMMANDS,
   category: 'workflow',
   dataDeps: ['toolData', 'liveConfig'],
   rule(input) {

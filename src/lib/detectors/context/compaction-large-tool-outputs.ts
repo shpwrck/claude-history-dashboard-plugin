@@ -17,6 +17,7 @@ const MARKERS = {
 /** Flag large tool outputs driving compaction. (#425) */
 export const detector: Detector = {
   id: 'context.compaction-large-tool-outputs',
+  appliedMarkers: MARKERS,
   category: 'context',
   dataDeps: ['tokenData', 'toolData', 'timelines', 'liveConfig'],
   rule(input) {

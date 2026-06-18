@@ -1,4 +1,4 @@
-import type { Detector, RecommendationInput } from '../types';
+import type { AppliedMarkers, Detector, RecommendationInput } from '../types';
 import type { PlanSignature } from '../../parse-plans';
 
 /**
@@ -13,8 +13,17 @@ import type { PlanSignature } from '../../parse-plans';
 const FILE_REFS_THRESHOLD = 6;
 const WORDS_THRESHOLD = 1000;
 
+const MARKERS_PLAN_VERIFICATION: AppliedMarkers = {
+  headings: [/^##\s+plan verification/i],
+  bodyPhrases: [
+    'Verification section describing the minimal observable signal',
+    'plan is not ready to run',
+  ],
+};
+
 export const detector: Detector = {
   id: 'workflow.plan-missing-verification',
+  appliedMarkers: MARKERS_PLAN_VERIFICATION,
   category: 'workflow',
   dataDeps: [],   // plans is injected as a non-standard extension field
   rule(input: RecommendationInput) {
@@ -60,13 +69,7 @@ export const detector: Detector = {
           ` ${WORDS_THRESHOLD} words, it MUST include a ## Verification section describing` +
           ` the minimal observable signal that proves the plan succeeded.` +
           ` No Verification section = plan is not ready to run.`,
-        appliedMarkers: {
-          headings: [/^##\s+plan verification/i],
-          bodyPhrases: [
-            'Verification section describing the minimal observable signal',
-            'plan is not ready to run',
-          ],
-        },
+        appliedMarkers: MARKERS_PLAN_VERIFICATION,
       },
     };
   },

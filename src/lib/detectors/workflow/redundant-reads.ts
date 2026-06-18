@@ -13,6 +13,7 @@ const MARKERS_REDUNDANT_READS: AppliedMarkers = {
 /** Same file Read many times in one session — pin it instead. */
 export const detector: Detector = {
   id: 'workflow.redundant-reads',
+  appliedMarkers: MARKERS_REDUNDANT_READS,
   category: 'workflow',
   dataDeps: ['toolData', 'tokenData', 'liveConfig'],
   rule(input) {

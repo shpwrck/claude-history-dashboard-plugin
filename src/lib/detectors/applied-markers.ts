@@ -1,0 +1,114 @@
+// Client-safe finding-id -> CLAUDE.md marker catalog (#1785, bundle fix #1909).
+//
+// The adoption scorecard renders in a client route (`digest`) and needs each
+// finding's `appliedMarkers` to resolve a SURFACED-only finding's live hunk.
+// Importing the `detectors/index.ts` barrel to get that would eagerly bundle the
+// ENTIRE recs engine (every detector module + its rule/transitive deps) into the
+// client chunk and trip the route bundle-budget gate (ADR 0016 /
+// docs/bundle-budget-contract.md). This LEAF carries only the static marker data
+// — RegExp headings + body phrases, no detector logic — so the client pulls a
+// few hundred bytes, not the engine.
+//
+// The detector modules remain the behavioural source of truth (each declares the
+// same markers on `Detector.appliedMarkers`); `applied-markers.contract.test.ts`
+// asserts this catalog is byte-for-byte equal to the catalog built from those
+// detector fields, so the two representations can never silently drift.
+import type { AppliedMarkers } from './types';
+
+export const MARKERS_LOW_CACHE_HIT: AppliedMarkers = {
+  headings: [/^##\s+(Keep the )?prompt cache\b/i],
+  bodyPhrases: ['stable context prefix, so avoid churning'],
+};
+export const MARKERS_RATE_LIMITS: AppliedMarkers = {
+  headings: [/^##\s+Rate-limit hygiene\b/i],
+  bodyPhrases: ['Avoid launching many parallel agent runs'],
+};
+export const MARKERS_EXPENSIVE_SESSIONS: AppliedMarkers = {
+  headings: [/^##\s+Session scope\b/i],
+  bodyPhrases: ['start a fresh session when the task changes'],
+};
+export const MARKERS_REDUNDANT_READS: AppliedMarkers = {
+  headings: [/^##\s+Key files\b/i],
+  bodyPhrases: ['Load these files once into context'],
+};
+export const MARKERS_CACHE_1H_WASTE: AppliedMarkers = {
+  headings: [/^##\s+Cach(e|ing)\b/i],
+  bodyPhrases: ['default 5-minute prompt cache for routine work'],
+};
+export const MARKERS_LOW_HEALTH: AppliedMarkers = {
+  headings: [/^##\s+(Keep the session|Session) heal/i],
+  bodyPhrases: ['Avoid switching permission modes mid-session'],
+};
+export const MARKERS_REPEATED_COMPACTIONS: AppliedMarkers = {
+  headings: [/^##\s+Session resets\b/i],
+  bodyPhrases: ['split the remaining work into a new session'],
+};
+export const MARKERS_REPEATED_COMMANDS: AppliedMarkers = {
+  headings: [/^##\s+Common commands\b/i],
+  bodyPhrases: ['wrap them in a script'],
+};
+export const MARKERS_MODEL_EVAL_ROUTING_GAP: AppliedMarkers = {
+  headings: [/^##\s+Scoped model routing\b/i],
+  bodyPhrases: ['scoped model-routing decision adopted from eval evidence'],
+};
+export const MARKERS_COMPACTION_HOT_SESSIONS: AppliedMarkers = {
+  headings: [/^##\s+Context discipline\b/i],
+  bodyPhrases: ['letting context grow until it auto-compacts'],
+};
+export const MARKERS_CORRECTIONS: AppliedMarkers = {
+  headings: [/^##\s+(?:Known paths|File locations|Project map|Corrections|Gotchas)\b/i],
+  bodyPhrases: ['not the first place the agent looked'],
+};
+export const MARKERS_OVER_WINDOW: AppliedMarkers = {
+  headings: [/^##\s+Context discipline\b/i],
+  bodyPhrases: ['working context well under the model'],
+};
+export const MARKERS_COMPACTION_LARGE_TOOL_OUTPUTS: AppliedMarkers = {
+  headings: [/^##\s+Tool output discipline\b/i],
+  bodyPhrases: ['prefer Grep/Glob over unfiltered'],
+};
+export const MARKERS_WEB_SEARCH_SPEND: AppliedMarkers = {
+  headings: [/^##\s+Web-search discipline\b/i],
+  bodyPhrases: ['Prefer web_fetch for stable URLs'],
+};
+export const MARKERS_REPO_MAP_WASTE: AppliedMarkers = {
+  headings: [/^##\s+Stable reference files\b/i],
+  bodyPhrases: ['Reference these stable files instead of re-reading them'],
+};
+export const MARKERS_PLAN_VERIFICATION: AppliedMarkers = {
+  headings: [/^##\s+plan verification/i],
+  bodyPhrases: [
+    'Verification section describing the minimal observable signal',
+    'plan is not ready to run',
+  ],
+};
+export const MARKERS_SHADOW_AXIS_WINS: AppliedMarkers = {
+  headings: [/^##\s+default approach/i],
+  bodyPhrases: ['Revisit if live shadows stop favouring it'],
+};
+
+/**
+ * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
+ * Keys are detector ids; each value mirrors that detector's
+ * `Detector.appliedMarkers`. Kept in sync with the detector catalog by
+ * `applied-markers.contract.test.ts`.
+ */
+export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new Map([
+  ['context.low-cache-hit', MARKERS_LOW_CACHE_HIT],
+  ['reliability.api-errors', MARKERS_RATE_LIMITS],
+  ['cost.expensive-sessions', MARKERS_EXPENSIVE_SESSIONS],
+  ['workflow.redundant-reads', MARKERS_REDUNDANT_READS],
+  ['cost.cache-1h-waste', MARKERS_CACHE_1H_WASTE],
+  ['context.low-health', MARKERS_LOW_HEALTH],
+  ['context.repeated-compactions', MARKERS_REPEATED_COMPACTIONS],
+  ['workflow.repeated-commands', MARKERS_REPEATED_COMMANDS],
+  ['cost.model-eval-routing-gap', MARKERS_MODEL_EVAL_ROUTING_GAP],
+  ['context.compaction-hot-sessions', MARKERS_COMPACTION_HOT_SESSIONS],
+  ['workflow.correction-mining', MARKERS_CORRECTIONS],
+  ['context.over-window', MARKERS_OVER_WINDOW],
+  ['context.compaction-large-tool-outputs', MARKERS_COMPACTION_LARGE_TOOL_OUTPUTS],
+  ['cost.web-search-spend', MARKERS_WEB_SEARCH_SPEND],
+  ['context.repo-map-context-waste', MARKERS_REPO_MAP_WASTE],
+  ['workflow.plan-missing-verification', MARKERS_PLAN_VERIFICATION],
+  ['workflow.shadow-axis-wins', MARKERS_SHADOW_AXIS_WINS],
+]);

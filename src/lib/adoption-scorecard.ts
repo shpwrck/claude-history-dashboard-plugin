@@ -18,7 +18,8 @@
  *    "attribution pending".
  */
 import type { LiveConfig } from '../types';
-import { mergedClaudeMdText } from './detectors/shared';
+import { claudeMdMarksApplied, mergedClaudeMdText } from './detectors/shared';
+import type { AppliedMarkers } from './detectors/types';
 import type {
   AdoptionReceipt,
   SurfacedReceipt,
@@ -36,9 +37,12 @@ export interface AdoptionScorecardRow {
   /** First `SUPPRESSED` receipt for this finding, when one exists. */
   suppressed: SuppressedReceipt | null;
   /**
-   * The matching CLAUDE.md hunk rendered live from `liveConfig` by the
-   * suppression record's `markerHeading`. `null` when no live section matches
-   * (e.g. the user deleted it) or there is no suppression record yet.
+   * The matching CLAUDE.md hunk rendered live from `liveConfig`. For a
+   * SUPPRESSED finding it is resolved by the suppression record's
+   * `markerHeading`; for a SURFACED-only finding it is resolved from the
+   * finding's detector markers in the catalog (#1785). `null` when no live
+   * section matches (e.g. the user deleted it), the markers are not yet present,
+   * or no marker catalog was supplied.
    */
   liveHunk: string | null;
   /**
@@ -131,6 +135,33 @@ export function liveClaudeMdHunk(
   return out.join('\n');
 }
 
+/**
+ * Resolve the live CLAUDE.md hunk for a SURFACED-only finding from its detector's
+ * declared markers (#1785). The SUPPRESSED path reads the heading the suppression
+ * receipt stored; a SURFACED receipt carries no `markerHeading`, so we resolve the
+ * heading from the catalog's `appliedMarkers` for this finding instead. Returns a
+ * hunk ONLY when the strict-AND markers are actually present in the merged
+ * CLAUDE.md (a partial/absent fix stays SURFACED) and a heading regex resolves a
+ * concrete section to render; `null` otherwise.
+ */
+function liveHunkFromMarkers(
+  liveConfig: LiveConfig | null | undefined,
+  markers: AppliedMarkers | undefined
+): string | null {
+  if (!markers) return null;
+  if (!claudeMdMarksApplied(liveConfig, markers)) return null;
+  const text = mergedClaudeMdText(liveConfig);
+  const headings = markers.headings ?? [];
+  if (!text || headings.length === 0) return null;
+  const headingRe = /^#{1,6}\s+/;
+  for (const line of text.split('\n')) {
+    if (headingRe.test(line) && headings.some((re) => re.test(line))) {
+      return liveClaudeMdHunk(liveConfig, line.replace(headingRe, '').trim());
+    }
+  }
+  return null;
+}
+
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -148,7 +179,18 @@ function median(values: number[]): number | null {
  */
 export function buildAdoptionScorecard(
   receipts: AdoptionReceipt[],
-  liveConfig: LiveConfig | null | undefined
+  liveConfig: LiveConfig | null | undefined,
+  /**
+   * Finding-id → CLAUDE.md marker signature (#1785). Lets a SURFACED-only
+   * finding resolve its live hunk and reach ADOPTED before any suppression
+   * receipt exists. Client/route callers MUST pass the client-safe
+   * `FINDING_MARKER_CATALOG` from `detectors/applied-markers` — NOT
+   * `findingMarkerCatalog()` from the `detectors` barrel, which pulls the whole
+   * recs engine into the chunk and trips the bundle-budget gate (#1909).
+   * Optional: when omitted (e.g. a build with no catalog wired), surfaced-only
+   * findings keep the prior behaviour and stay SURFACED.
+   */
+  findingMarkers?: ReadonlyMap<string, AppliedMarkers>
 ): AdoptionScorecard {
   // Earliest SURFACED per finding id.
   const surfacedByFinding = new Map<string, SurfacedReceipt>();
@@ -188,6 +230,12 @@ export function buildAdoptionScorecard(
     let liveHunk: string | null = null;
     if (suppressed) {
       liveHunk = liveClaudeMdHunk(liveConfig, suppressed.markerHeading);
+    } else if (surfaced) {
+      // SURFACED-only: no stored markerHeading, so resolve the finding's markers
+      // from the live detector catalog and read the hunk live (#1785). A
+      // non-null hunk means the fix's markers landed in CLAUDE.md before any
+      // suppression receipt — "fix landed, awaiting quiet" → ADOPTED below.
+      liveHunk = liveHunkFromMarkers(liveConfig, findingMarkers?.get(findingId));
     }
 
     let daysToAdopt: number | null = null;
