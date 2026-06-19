@@ -86,6 +86,20 @@ export const MARKERS_SHADOW_AXIS_WINS: AppliedMarkers = {
   headings: [/^##\s+default approach/i],
   bodyPhrases: ['Revisit if live shadows stop favouring it'],
 };
+// Settings.json / hook fixes (#1783): the fix snippet is JSON pasted into
+// settings.json, not CLAUDE.md prose, so there is no snippet to match in the
+// merged CLAUDE.md. These key on the adopt-block wrapper the opt-in helper
+// writes — the `## Claude Coach Adopted Recommendations` section plus the
+// finding's title it emits in the `### <title> (`<id>`)` line (title, not the
+// bare id, to clear the #580 >=4-word specificity guard).
+export const MARKERS_DANGEROUS_BYPASS: AppliedMarkers = {
+  headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
+  bodyPhrases: ['Dangerous commands ran under bypassed permissions'],
+};
+export const MARKERS_TOOL_ERRORS: AppliedMarkers = {
+  headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
+  bodyPhrases: ['Tools with high error rates'],
+};
 
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
@@ -111,4 +125,6 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['context.repo-map-context-waste', MARKERS_REPO_MAP_WASTE],
   ['workflow.plan-missing-verification', MARKERS_PLAN_VERIFICATION],
   ['workflow.shadow-axis-wins', MARKERS_SHADOW_AXIS_WINS],
+  ['safety.dangerous-bypass', MARKERS_DANGEROUS_BYPASS],
+  ['reliability.tool-errors', MARKERS_TOOL_ERRORS],
 ]);

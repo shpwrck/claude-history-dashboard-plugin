@@ -3,6 +3,9 @@ import { computeSuppressionTransitions } from './suppression-transition';
 import { claudeMdMarksApplied } from './shared';
 import type { Detector, Recommendation, RecommendationInput } from './types';
 import type { AppliedMarkers } from './types';
+import { detector as dangerousBypassDetector } from './safety/dangerous-bypass';
+import { detector as toolErrorsDetector } from './reliability/tool-errors';
+import type { ToolCall, ToolUsageData } from '../parse-tools';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 // Synthetic detectors that gate on `claudeMdMarksApplied` exactly like the real
@@ -222,6 +225,105 @@ describe('computeSuppressionTransitions (#576 — engine-loop FIRING→SUPPRESSE
     const result = await computeSuppressionTransitions(
       input,
       { surfacedFindingIds: ['cost.a'], suppressedFindingIds: [] },
+      detectors
+    );
+
+    expect(result.transitions).toHaveLength(0);
+    expect(result.organic).toHaveLength(0);
+  });
+});
+
+// ── #1783: the settings.json / hook findings flip via the adopt-block receipt ─
+// safety.dangerous-bypass and reliability.tool-errors are the findings actually
+// surfaced on real data; before #1783 they declared no appliedMarkers, so they
+// could never flip FIRING→SUPPRESSED. These exercise the REAL detectors (not the
+// synthetic stand-ins above) end-to-end through computeSuppressionTransitions.
+describe('computeSuppressionTransitions with real settings/hook detectors (#1783)', () => {
+  const tc = (toolName: string, isError: boolean, i: number): ToolCall => ({
+    timestamp: `2026-06-12T10:00:0${i}.000Z`,
+    toolName,
+    input: toolName === 'Bash' ? { command: 'rm -rf /tmp/build-output' } : {},
+    toolUseId: `tool-${toolName}-${i}`,
+    isError: isError ? true : null,
+    resultBytes: 0,
+  });
+
+  // One bypass session running a destructive command (fires dangerous-bypass) and
+  // one session whose Edit calls fail 2/5 (fires tool-errors).
+  const toolData: ToolUsageData[] = [
+    { sessionId: 'bypass-1', calls: [tc('Bash', false, 0)] },
+    {
+      sessionId: 'errors-1',
+      calls: Array.from({ length: 5 }, (_, i) => tc('Edit', i < 2, i)),
+    },
+  ];
+  const permissionRows = [{ sessionId: 'bypass-1', mode: 'bypassPermissions' }];
+
+  // Both findings adopted under the one shared section, each with its own id.
+  const ADOPT_BLOCK_BOTH = [
+    '## Claude Coach Adopted Recommendations',
+    '',
+    '### Dangerous commands ran under bypassed permissions (`safety.dangerous-bypass`)',
+    '',
+    'Adopted: 2026-06-12T10:00:00.000Z',
+    '',
+    '### Tools with high error rates (`reliability.tool-errors`)',
+    '',
+    'Adopted: 2026-06-12T10:00:00.000Z',
+  ].join('\n');
+
+  function realInput(claudeMd: string): RecommendationInput {
+    return {
+      tokenData: [],
+      toolData,
+      sessions: [],
+      projects: [],
+      permissionRows: permissionRows as unknown as RecommendationInput['permissionRows'],
+      apiErrors: [],
+      liveConfig: {
+        settings: {},
+        settingsHealth: null,
+        claudeMd: { global: claudeMd, perProject: {} },
+        plugins: [],
+        mcpServers: [],
+        skills: [],
+        subagents: [],
+        commands: [],
+      } as unknown as NonNullable<RecommendationInput['liveConfig']>,
+    };
+  }
+
+  const detectors = [dangerousBypassDetector, toolErrorsDetector];
+
+  it('fires a SUPPRESSED transition for each adopted finding (gated on prior SURFACED)', async () => {
+    const result = await computeSuppressionTransitions(
+      realInput(ADOPT_BLOCK_BOTH),
+      {
+        surfacedFindingIds: ['safety.dangerous-bypass', 'reliability.tool-errors'],
+        suppressedFindingIds: [],
+      },
+      detectors,
+      1_700_000_000_000
+    );
+
+    expect(result.transitions.map((t) => t.findingId).sort()).toEqual([
+      'reliability.tool-errors',
+      'safety.dangerous-bypass',
+    ]);
+    for (const t of result.transitions) {
+      expect(t.kind).toBe('SUPPRESSED');
+      expect(t.markerHeading).toBe('Claude Coach Adopted Recommendations');
+      expect(t.contentFingerprint).toMatch(/^(sha256|fnv1a):[0-9a-f]+$/);
+    }
+  });
+
+  it('does not flip when the adopt block is absent (both still firing)', async () => {
+    const result = await computeSuppressionTransitions(
+      realInput('## Unrelated\n\nnothing adopted here'),
+      {
+        surfacedFindingIds: ['safety.dangerous-bypass', 'reliability.tool-errors'],
+        suppressedFindingIds: [],
+      },
       detectors
     );
 

@@ -12,6 +12,14 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
       "automate, git reset --hard: git reset --hard HEAD",
     ],
     "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "Dangerous commands ran under bypassed permissions",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Claude Coach Adopted Recommendations\\\\b/i,
+        ],
+      },
       "label": "Add destructive-command deny rules",
       "note": "Merge into the "permissions" object in .claude/settings.json (deep-merge "deny"), and reserve bypassPermissions for trusted, reversible work. curl|sh cannot be prefix-matched, so curl/wget are denied wholesale — drop them if too broad.",
       "snippet": "{
@@ -130,6 +138,14 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
       "Read: 50% of 12",
     ],
     "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "Tools with high error rates",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Claude Coach Adopted Recommendations\\\\b/i,
+        ],
+      },
       "fixKind": "illustrative",
       "label": "Add a post-edit typecheck hook",
       "note": "Merge into the "hooks" object in .claude/settings.json. Swap the command for your project’s real typecheck/lint so broken edits surface immediately instead of compounding.",

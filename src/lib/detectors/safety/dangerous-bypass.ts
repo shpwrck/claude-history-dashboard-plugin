@@ -1,9 +1,11 @@
 import type { Detector } from '../types';
 import type { RecSeverity } from '../types';
+import type { AppliedMarkers } from '../types';
 import {
   bumpSeverity,
   short,
   permissionsContain,
+  claudeMdMarksApplied,
   DANGEROUS_DENY_RULES,
   DANGEROUS_ASK_RULES,
 } from '../shared';
@@ -19,6 +21,27 @@ function dangerousEvidence(d: DangerousCommand): string {
 }
 
 /**
+ * Adoption markers for `safety.dangerous-bypass` (#1783). Unlike the prose
+ * detectors (e.g. workflow.redundant-reads), this finding's `fix` pastes a
+ * settings.json `permissions.deny` block — NOT CLAUDE.md prose — so there is no
+ * snippet text to match in the merged CLAUDE.md. Instead we key on the wrapper
+ * the opt-in adopt helper (`adopt-finding.mjs`, shpwrck/claude#95) writes when a
+ * finding is adopted: the `## Claude Coach Adopted Recommendations` section plus
+ * this finding's title, which the helper emits in its `### <title> (`<id>`)`
+ * line. The strict-AND keeps it honest — both the section heading AND this
+ * finding's distinctive title must be present, so an unrelated adoption can't
+ * credit this one. (We key the body phrase on the title, not the bare `<id>`:
+ * the #580 specificity guard requires a >=4-word phrase and the title is the
+ * distinctive, co-located discriminator.) The settings-side adoption (adding the
+ * deny rules) is still suppressed earlier by the `permissionsContain(..., 'deny',
+ * ...)` check; these markers are the CLAUDE.md-receipt path the scorecard credits.
+ */
+const MARKERS_DANGEROUS_BYPASS: AppliedMarkers = {
+  headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
+  bodyPhrases: ['Dangerous commands ran under bypassed permissions'],
+};
+
+/**
  * Dangerous commands that ran while permission prompts were bypassed.
  *
  * DUAL-EMIT: this detector's `id` is `safety.dangerous-bypass`, but its rule
@@ -28,6 +51,7 @@ function dangerousEvidence(d: DangerousCommand): string {
  */
 export const detector: Detector = {
   id: 'safety.dangerous-bypass',
+  appliedMarkers: MARKERS_DANGEROUS_BYPASS,
   category: 'safety',
   dataDeps: ['toolData', 'tokenData', 'permissionRows', 'liveConfig'],
   rule(input) {
@@ -53,6 +77,12 @@ export const detector: Detector = {
     const scores = computeSafetyScores(dangerous, input.permissionRows);
     const risky = scores.filter((s) => s.bypassMode && s.dangerousCount > 0);
     if (risky.length > 0) {
+      // Suppress once the finding's fix is adopted via the CLAUDE.md receipt
+      // (#1783). Scoped to this branch only so adopting `safety.dangerous-bypass`
+      // never silences the sibling `safety.dangerous-commands` emit below.
+      if (claudeMdMarksApplied(input.liveConfig, MARKERS_DANGEROUS_BYPASS)) {
+        return null;
+      }
       const totalDangerous = risky.reduce((s, r) => s + r.dangerousCount, 0);
       // Contributing commands are those in a risky (bypass-mode) session.
       const riskySessions = new Set(risky.map((r) => r.sessionId));
@@ -93,6 +123,9 @@ export const detector: Detector = {
     ]
   }
 }`,
+          // Matches the adopt-block wrapper (not this settings.json snippet) so
+          // the suppression-transition receipt can resolve a heading (#1783).
+          appliedMarkers: MARKERS_DANGEROUS_BYPASS,
         },
       };
     }

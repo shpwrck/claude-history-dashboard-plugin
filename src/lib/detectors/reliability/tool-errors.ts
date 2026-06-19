@@ -1,13 +1,40 @@
 import type { Detector } from '../types';
-import { hasPostEditHook, MIN_TOOL_ERROR_RATE, MIN_TOOL_ERROR_CALLS } from '../shared';
+import type { AppliedMarkers } from '../types';
+import {
+  hasPostEditHook,
+  claudeMdMarksApplied,
+  MIN_TOOL_ERROR_RATE,
+  MIN_TOOL_ERROR_CALLS,
+} from '../shared';
 import { aggregateToolErrors } from '../../parse-errors';
+
+/**
+ * Adoption markers for `reliability.tool-errors` (#1783). The fix pastes a
+ * settings.json PostToolUse hook block, not CLAUDE.md prose, so — like
+ * `safety.dangerous-bypass` — there is no snippet text in the merged CLAUDE.md
+ * to match. We key on the adopt-block wrapper the opt-in helper writes: the
+ * `## Claude Coach Adopted Recommendations` section heading (one heading marker)
+ * AND this finding's title as a body phrase (the discriminator the helper emits
+ * in its `### <title> (`<id>`)` line). Heading + title, strict-AND, so the
+ * section alone never credits this finding. (Title, not the bare `<id>`: the
+ * #580 specificity guard requires a >=4-word phrase.) The settings-side adoption
+ * (adding the hook) is still suppressed earlier by `hasPostEditHook`; these
+ * markers are the CLAUDE.md-receipt path the adoption scorecard credits.
+ */
+const MARKERS_TOOL_ERRORS: AppliedMarkers = {
+  headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
+  bodyPhrases: ['Tools with high error rates'],
+};
 
 /** Tools failing a meaningful share of the time. */
 export const detector: Detector = {
   id: 'reliability.tool-errors',
+  appliedMarkers: MARKERS_TOOL_ERRORS,
   category: 'reliability',
   dataDeps: ['toolData', 'liveConfig'],
   rule(input) {
+    // Suppress once the fix is adopted via the CLAUDE.md receipt (#1783).
+    if (claudeMdMarksApplied(input.liveConfig, MARKERS_TOOL_ERRORS)) return null;
     // The fix is "add a PostToolUse hook on Edit|Write". If the user already has
     // a hook matching either tool, treat the rec as actioned — they may run a
     // typecheck, lint, or a different command, which is exactly what the rec's
@@ -50,6 +77,9 @@ export const detector: Detector = {
     ]
   }
 }`,
+        // Matches the adopt-block wrapper (not this settings.json snippet) so the
+        // suppression-transition receipt can resolve a heading (#1783).
+        appliedMarkers: MARKERS_TOOL_ERRORS,
       },
     };
   },

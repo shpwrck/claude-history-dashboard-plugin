@@ -142,10 +142,13 @@ export interface RecFix {
    */
   fixKind?: FixKind;
   /**
-   * CLAUDE.md presence signals — only meaningful when `target` is `'CLAUDE.md'`.
-   * Drives the suppression check for fixes whose acceptance is a paragraph of
-   * prose rather than a structural settings.json key. Absent ⇒ never suppress
-   * on prose grounds.
+   * CLAUDE.md presence signals. For a `'CLAUDE.md'`-target fix they match the
+   * prose snippet the fix itself pastes. For a `'settings.json'`/`'hook'`-target
+   * fix (whose acceptance is a structural key, not prose) they instead match the
+   * wrapper the opt-in adopt helper writes to CLAUDE.md when the finding is
+   * adopted — the `## Claude Coach Adopted Recommendations` section plus the
+   * finding's title (#1783). Either way these drive the suppression check; absent
+   * ⇒ never suppress on CLAUDE.md grounds.
    */
   appliedMarkers?: AppliedMarkers;
 }
@@ -571,8 +574,9 @@ export interface Detector {
    * attaches to its emitted `fix`, but stays introspectable even when the
    * detector is currently SUPPRESSED (its markers already present in CLAUDE.md)
    * — exactly the adoption case where `rule` returns null and never reaches its
-   * `fix`. Detectors whose fix targets settings.json (or that have no
-   * marker-gated CLAUDE.md fix) leave this undefined.
+   * `fix`. A settings.json/hook-target fix may still declare this when its
+   * adoption is recorded via the adopt-helper's CLAUDE.md wrapper (#1783);
+   * detectors with no marker-gated CLAUDE.md path leave it undefined.
    */
   appliedMarkers?: AppliedMarkers;
 }
