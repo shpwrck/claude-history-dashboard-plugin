@@ -250,4 +250,53 @@ describe('buildAdoptionScorecard', () => {
     expect(sc.rows[0].status).toBe('SUPPRESSED');
     expect(sc.rows[0].liveHunk).toBeNull();
   });
+
+  it('co-adopted findings sharing one section heading each resolve their OWN hunk (#1915)', () => {
+    // safety.dangerous-bypass and reliability.tool-errors (#1783) both key on the
+    // shared `## Claude Coach Adopted Recommendations` heading; adopting each
+    // appends its own copy of that section. The stored markerHeading is identical
+    // for both, so resolving by heading text alone would render the FIRST section
+    // for both rows. Resolution must disambiguate by each finding's body phrase.
+    const claudeMd = [
+      '# Project conventions',
+      '',
+      '## Claude Coach Adopted Recommendations',
+      '',
+      '### Dangerous commands ran under bypassed permissions (`safety.dangerous-bypass`)',
+      '',
+      'Adopted: 2026-06-18T00:00:00.000Z',
+      '',
+      '{ "permissions": { "deny": ["Bash(rm -rf:*)"] } }',
+      '',
+      '## Claude Coach Adopted Recommendations',
+      '',
+      '### Tools with high error rates (`reliability.tool-errors`)',
+      '',
+      'Adopted: 2026-06-18T00:00:00.000Z',
+      '',
+      '{ "hooks": { "PostToolUse": [] } }',
+    ].join('\n');
+    const receipts: AdoptionReceipt[] = [
+      surfaced('2026-06-15T00:00:00.000Z', [
+        'safety.dangerous-bypass',
+        'reliability.tool-errors',
+      ]),
+      suppressed('2026-06-18T00:00:00.000Z', 'safety.dangerous-bypass', 'Claude Coach Adopted Recommendations'),
+      suppressed('2026-06-18T00:00:00.000Z', 'reliability.tool-errors', 'Claude Coach Adopted Recommendations'),
+    ];
+    const sc = buildAdoptionScorecard(receipts, config(claudeMd), findingMarkerCatalog());
+    const byId = Object.fromEntries(sc.rows.map((r) => [r.findingId, r]));
+
+    const bypass = byId['safety.dangerous-bypass'];
+    expect(bypass.status).toBe('SUPPRESSED');
+    expect(bypass.liveHunk).toContain('Dangerous commands ran under bypassed permissions');
+    expect(bypass.liveHunk).toContain('Bash(rm -rf:*)');
+    expect(bypass.liveHunk).not.toContain('Tools with high error rates');
+
+    const toolErrors = byId['reliability.tool-errors'];
+    expect(toolErrors.status).toBe('SUPPRESSED');
+    expect(toolErrors.liveHunk).toContain('Tools with high error rates');
+    expect(toolErrors.liveHunk).toContain('PostToolUse');
+    expect(toolErrors.liveHunk).not.toContain('Dangerous commands ran under bypassed permissions');
+  });
 });

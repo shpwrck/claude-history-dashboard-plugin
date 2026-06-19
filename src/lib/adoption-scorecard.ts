@@ -101,6 +101,26 @@ function ts(value: string): number | null {
  * Matching is case-insensitive on the trimmed heading text and tolerant of the
  * `#` depth, so an author who promoted `### Foo` to `## Foo` still resolves.
  */
+const SECTION_HEADING_RE = /^(#{1,6})\s+(.*?)\s*$/;
+
+/**
+ * Extract the markdown section that STARTS at line `startIdx` (a heading of
+ * depth `depth`): the heading line plus its body up to (not including) the next
+ * heading of the same or shallower depth, trailing blank lines trimmed. Walking
+ * by line index — not by heading text — lets callers disambiguate several
+ * sections that share one heading string (#1915).
+ */
+function sectionFrom(lines: string[], startIdx: number, depth: number): string {
+  const out: string[] = [lines[startIdx]];
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const m = SECTION_HEADING_RE.exec(lines[i]);
+    if (m && m[1].length <= depth) break;
+    out.push(lines[i]);
+  }
+  while (out.length > 1 && out[out.length - 1].trim() === '') out.pop();
+  return out.join('\n');
+}
+
 export function liveClaudeMdHunk(
   liveConfig: LiveConfig | null | undefined,
   markerHeading: string
@@ -111,38 +131,31 @@ export function liveClaudeMdHunk(
   if (!text) return null;
 
   const lines = text.split('\n');
-  const headingRe = /^(#{1,6})\s+(.*?)\s*$/;
-  let startIdx = -1;
-  let startDepth = 0;
   for (let i = 0; i < lines.length; i++) {
-    const m = headingRe.exec(lines[i]);
+    const m = SECTION_HEADING_RE.exec(lines[i]);
     if (m && m[2].trim().toLowerCase() === wanted) {
-      startIdx = i;
-      startDepth = m[1].length;
-      break;
+      return sectionFrom(lines, i, m[1].length);
     }
   }
-  if (startIdx === -1) return null;
-
-  const out: string[] = [lines[startIdx]];
-  for (let i = startIdx + 1; i < lines.length; i++) {
-    const m = headingRe.exec(lines[i]);
-    if (m && m[1].length <= startDepth) break;
-    out.push(lines[i]);
-  }
-  // Trim trailing blank lines so the hunk renders tight.
-  while (out.length > 1 && out[out.length - 1].trim() === '') out.pop();
-  return out.join('\n');
+  return null;
 }
 
 /**
- * Resolve the live CLAUDE.md hunk for a SURFACED-only finding from its detector's
- * declared markers (#1785). The SUPPRESSED path reads the heading the suppression
- * receipt stored; a SURFACED receipt carries no `markerHeading`, so we resolve the
- * heading from the catalog's `appliedMarkers` for this finding instead. Returns a
- * hunk ONLY when the strict-AND markers are actually present in the merged
- * CLAUDE.md (a partial/absent fix stays SURFACED) and a heading regex resolves a
- * concrete section to render; `null` otherwise.
+ * Resolve the live CLAUDE.md hunk for a finding from its detector's declared
+ * markers (#1785). Used for the SURFACED-only ADOPTED path, and preferred over
+ * the receipt's stored heading on the SUPPRESSED path (#1915). Returns a hunk
+ * ONLY when the strict-AND markers are actually present in the merged CLAUDE.md
+ * (a partial/absent fix stays SURFACED) and a heading regex resolves a concrete
+ * section to render; `null` otherwise.
+ *
+ * Disambiguation (#1915): several findings can legitimately share one heading —
+ * the settings/hook findings (#1783) all key on `## Claude Coach Adopted
+ * Recommendations`, and adopting each appends its own copy of that section. So
+ * we don't return the FIRST heading-matching section blindly; we prefer the
+ * matching section whose body actually contains this finding's body phrases (its
+ * title), and only fall back to the first match when none qualifies. For a
+ * unique-heading prose finding exactly one section matches and it contains the
+ * phrase, so behaviour is unchanged.
  */
 function liveHunkFromMarkers(
   liveConfig: LiveConfig | null | undefined,
@@ -153,13 +166,22 @@ function liveHunkFromMarkers(
   const text = mergedClaudeMdText(liveConfig);
   const headings = markers.headings ?? [];
   if (!text || headings.length === 0) return null;
-  const headingRe = /^#{1,6}\s+/;
-  for (const line of text.split('\n')) {
-    if (headingRe.test(line) && headings.some((re) => re.test(line))) {
-      return liveClaudeMdHunk(liveConfig, line.replace(headingRe, '').trim());
+  const lines = text.split('\n');
+  const phrases = (markers.bodyPhrases ?? []).map((p) => p.toLowerCase());
+  let firstMatch: string | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const m = SECTION_HEADING_RE.exec(lines[i]);
+    if (!m || !headings.some((re) => re.test(lines[i]))) continue;
+    // Extract by line index, so two sections sharing one heading string resolve
+    // to different hunks (#1915) rather than both to the first occurrence.
+    const hunk = sectionFrom(lines, i, m[1].length);
+    if (firstMatch === null) firstMatch = hunk;
+    const lower = hunk.toLowerCase();
+    if (phrases.length === 0 || phrases.every((p) => lower.includes(p))) {
+      return hunk;
     }
   }
-  return null;
+  return firstMatch;
 }
 
 function median(values: number[]): number | null {
@@ -229,7 +251,15 @@ export function buildAdoptionScorecard(
 
     let liveHunk: string | null = null;
     if (suppressed) {
-      liveHunk = liveClaudeMdHunk(liveConfig, suppressed.markerHeading);
+      // Prefer marker-based resolution (#1915): the stored `markerHeading` can be
+      // a heading several findings share (the #1783 adopt-block section), and
+      // liveClaudeMdHunk would resolve every one of them to the FIRST such
+      // section. Resolving from the finding's own catalog markers disambiguates
+      // by its body phrase; fall back to the stored heading when the finding has
+      // no catalog markers (older receipts / prose findings still resolve fine).
+      liveHunk =
+        liveHunkFromMarkers(liveConfig, findingMarkers?.get(findingId)) ??
+        liveClaudeMdHunk(liveConfig, suppressed.markerHeading);
     } else if (surfaced) {
       // SURFACED-only: no stored markerHeading, so resolve the finding's markers
       // from the live detector catalog and read the hunk live (#1785). A
