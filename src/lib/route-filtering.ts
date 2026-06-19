@@ -1,4 +1,4 @@
-import type { Session } from '../types';
+import type { Session, SessionTokenData } from '../types';
 import type { ToolUsageData } from './parse-tools';
 import type { ApiErrorEvent } from './parse-errors';
 import type { RouteFilter } from './routing';
@@ -54,6 +54,35 @@ export function filterToolDataByRoute(
         textIncludes(call.input.file_path, file)
     );
     return calls.length > 0 ? [{ ...row, calls }] : [];
+  });
+}
+
+/**
+ * Scope per-session token rows to a route filter's `project` / `date` keys —
+ * the same honored keys the Errors view filters by (`filterApiErrorsByRoute`).
+ *
+ * Context Health derives every panel (compactions, peak-context, cache, health
+ * scores) from `tokenData`, so narrowing the rows here is enough to scope the
+ * whole view. A row matches `date` when ANY of its token entries carries a
+ * timestamp on that day (a session can span midnight). There is intentionally
+ * NO `session` key: `ROUTE_FILTER_KEYS` has none, and routing a session id
+ * through a key the view ignores lands on an empty view (the #1812 dead-end);
+ * project+date is the most-scoped honored target for a per-session drill.
+ */
+export function filterTokenDataByRoute(
+  rows: SessionTokenData[],
+  filter: RouteFilter | undefined
+): SessionTokenData[] {
+  const project = filter?.project;
+  const date = filter?.date;
+  if (!project && !date) return rows;
+
+  return rows.filter((row) => {
+    if (project && !textIncludes(row.project, project)) return false;
+    if (date && !row.entries.some((entry) => timestampMatchesDate(entry.timestamp, date))) {
+      return false;
+    }
+    return true;
   });
 }
 

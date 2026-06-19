@@ -834,13 +834,14 @@ export const VIEW_RENDERERS: Partial<
   memories: ({ data: d, serverAvailable }) => (
     <Memories memories={d.memories} serverAvailable={serverAvailable} />
   ),
-  context: ({ data: d, nav: n }) => (
+  context: ({ data: d, nav: n, routeFilter }) => (
     <ContextHealth
       tokenData={d.tokenData}
       toolData={d.toolData}
       sessions={d.sessions}
       onOpenSession={n.openSession}
       onNavigateWithFilter={n.navigateWithFilter}
+      routeFilter={routeFilter}
     />
   ),
   conversation: ({ data: d, nav: n }) => (
