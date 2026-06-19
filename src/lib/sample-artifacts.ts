@@ -31,6 +31,7 @@ import type { McpAuthState } from './parse-mcp-auth';
 import type { DriftEvent } from './parse-backups';
 import type { LiveConfig, LiveResource, DeceitSignals } from '../types';
 import type { AdoptionReceipt } from './adoption-receipts';
+import type { RepoMapDataset } from './parse-repo-map-join';
 import { ingestModelEvalResults, type ModelEvalSummary } from './model-eval-ingest';
 import { parseShadowCalls, type ShadowCallAggregate } from './parse-shadow-calls';
 // @ts-expect-error - plain ESM build helper, no .d.ts
@@ -493,4 +494,119 @@ export function buildSampleShadowCalls(): ShadowCallAggregate {
     rec({ mode: 'replay', axis: 'plan-first', judge: { winner: 'shadow' }, main: { tokens: 14000, costUsd: 0.32 }, shadow: { tokens: 13000, costUsd: 0.30 } }),
   ];
   return parseShadowCalls(lines.join('\n'));
+}
+
+/**
+ * Bounded structural repo map for the marketing SPA's repo-map context-waste
+ * card (#1651, epic #1264; feature epic #871 / detector #890). The `repoMap`
+ * join is SERVER-ONLY: the live build generates it host-side with the WASM
+ * Tree-sitter parser and the read-only container consumes the JSON artifact
+ * (ADR 0007), but the upload zip never carries one — so the demo SPA's
+ * `context.repo-map-context-waste` card stays dark and a viewer sees no
+ * evidence the repo-map / structural work accomplishes anything.
+ *
+ * This ships a small, hand-authored `RepoMapDataset` in the exact join shape
+ * the detector consumes (NO parser invocation — no `web-tree-sitter` is pulled
+ * into the SPA bundle or the server runtime image). Three files are read-only
+ * (no churn), re-read across multiple sessions, and structurally pinnable: an
+ * exported-API client (`stable-api`, also high-centrality), a config-backed
+ * types module (`config-backed`), and a shared formatter (`stable-api`). The
+ * remaining files are actively churned importers that lend the candidates their
+ * centrality but never become candidates themselves (they carry no re-read
+ * waste). The detector then surfaces exactly one card naming the three files,
+ * their exported symbols, and the re-paid token cost.
+ *
+ * Fully synthetic — no real paths or secrets, no `/api/` literals (spa-boundary
+ * clean) — and a pure literal, so the drift guard in `sample-artifacts.test.ts`
+ * can assert the exact card it produces.
+ */
+export function buildSampleRepoMap(): RepoMapDataset {
+  return {
+    projects: [
+      {
+        root: '/home/dev/acme-web',
+        generatedAtGitSha: '9f83a1c7d2e4b6058a1c3f7e9b2d4068c5a7e1f3',
+        fileCount: 6,
+        truncated: false,
+        text:
+          'src/lib/api-client.ts  interface ApiClient | createClient() | request()\n' +
+          'src/types.ts  interface Order | type OrderStatus | interface ApiResponse\n' +
+          'src/lib/format.ts  formatCurrency() | formatDate()\n' +
+          'src/components/Dashboard.tsx  Dashboard()\n' +
+          'src/components/Header.tsx  Header()\n' +
+          'src/App.tsx  App()',
+        files: [
+          // Candidate 1 — exported, read-only API client re-read across 4
+          // sessions; also imported by 3 files (stable-api wins over centrality).
+          {
+            path: 'src/lib/api-client.ts',
+            symbols: [
+              { name: 'ApiClient', kind: 'interface', exported: true, signature: 'export interface ApiClient', line: 8 },
+              { name: 'createClient', kind: 'function', exported: true, signature: 'export function createClient(opts: ClientOptions): ApiClient', line: 24 },
+              { name: 'request', kind: 'function', exported: true, signature: 'export function request<T>(path: string): Promise<T>', line: 41 },
+            ],
+            imports: ['./types', './format'],
+            reread: { sessions: 4, totalReads: 9, totalEstimatedTokenWaste: 3200, maxPerSession: 3 },
+            configSections: [],
+            recommendations: [],
+          },
+          // Candidate 2 — config-backed types module, read-only, re-read across
+          // 3 sessions (config-backed reason).
+          {
+            path: 'src/types.ts',
+            symbols: [
+              { name: 'Order', kind: 'interface', exported: true, signature: 'export interface Order', line: 3 },
+              { name: 'OrderStatus', kind: 'type', exported: true, signature: "export type OrderStatus = 'open' | 'paid' | 'shipped'", line: 12 },
+              { name: 'ApiResponse', kind: 'interface', exported: true, signature: 'export interface ApiResponse<T>', line: 18 },
+            ],
+            imports: [],
+            reread: { sessions: 3, totalReads: 6, totalEstimatedTokenWaste: 2400, maxPerSession: 2 },
+            configSections: ['Data model conventions'],
+            recommendations: [],
+          },
+          // Candidate 3 — shared formatter, read-only, re-read across 2 sessions;
+          // imported by 2 files (stable-api reason, also central).
+          {
+            path: 'src/lib/format.ts',
+            symbols: [
+              { name: 'formatCurrency', kind: 'function', exported: true, signature: 'export function formatCurrency(cents: number): string', line: 1 },
+              { name: 'formatDate', kind: 'function', exported: true, signature: 'export function formatDate(ms: number): string', line: 9 },
+            ],
+            imports: ['./types'],
+            reread: { sessions: 2, totalReads: 4, totalEstimatedTokenWaste: 1100, maxPerSession: 2 },
+            configSections: [],
+            recommendations: [],
+          },
+          // Importers — actively churned (not read-only) and never re-read, so
+          // they only contribute centrality, never become candidates themselves.
+          {
+            path: 'src/components/Dashboard.tsx',
+            symbols: [{ name: 'Dashboard', kind: 'function', exported: true, signature: 'export function Dashboard()', line: 14 }],
+            imports: ['./Header', '../lib/api-client', '../lib/format', '../types'],
+            churn: { filePath: 'src/components/Dashboard.tsx', churn: 18, edits: 14, writes: 4, sessions: 6, editsPerSession: 3 },
+            configSections: [],
+            recommendations: [],
+          },
+          {
+            path: 'src/components/Header.tsx',
+            symbols: [{ name: 'Header', kind: 'function', exported: true, signature: 'export function Header()', line: 6 }],
+            imports: ['../lib/api-client', '../types'],
+            churn: { filePath: 'src/components/Header.tsx', churn: 7, edits: 6, writes: 1, sessions: 4, editsPerSession: 1.75 },
+            configSections: [],
+            recommendations: [],
+          },
+          {
+            path: 'src/App.tsx',
+            symbols: [{ name: 'App', kind: 'function', exported: true, signature: 'export function App()', line: 20 }],
+            imports: ['./components/Dashboard', './lib/api-client', './types'],
+            churn: { filePath: 'src/App.tsx', churn: 31, edits: 22, writes: 9, sessions: 8, editsPerSession: 3.875 },
+            configSections: [],
+            recommendations: [],
+          },
+        ],
+        configSections: [],
+        configAttribution: [],
+      },
+    ],
+  };
 }

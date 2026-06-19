@@ -14,6 +14,7 @@ import {
   buildSampleLiveConfig,
   buildSampleDeceitSignals,
   buildSampleModelEvalSummary,
+  buildSampleRepoMap,
 } from './sample-artifacts';
 import { buildSampleWorkflows } from './sample-workflows';
 import { parseWorkflows } from './parse-workflows';
@@ -252,5 +253,63 @@ describe('sample data — model-eval summary seeds the workbench demo (#1388)', 
     // generatedAt is pinned to "now", so the demo never reads as a stale
     // "as of <date>" claim (#1102 demotion stays off).
     expect(rec?.title).not.toContain('as of');
+  });
+});
+
+describe('sample data — repo-map context-waste card fires in the SPA demo (#1651)', () => {
+  const NOW_1651 = Date.UTC(2026, 5, 4, 12, 0, 0);
+
+  it('seeds a bounded, parser-free repo map in the join shape the detector reads', () => {
+    const repoMap = buildSampleRepoMap();
+    expect(repoMap.projects.length).toBe(1);
+    const project = repoMap.projects[0];
+    expect(project.files.length).toBeGreaterThan(3);
+    // Three structural candidates: read-only (no churn) + re-read + exported or
+    // config-backed. The importer files carry churn and no re-read, so they only
+    // lend centrality and never become candidates.
+    const candidates = project.files.filter(
+      (f) => f.reread && f.reread.totalEstimatedTokenWaste > 0 && (!f.churn || f.churn.churn === 0)
+    );
+    expect(candidates.length).toBe(3);
+    expect(candidates.every((f) => f.symbols.some((s) => s.exported))).toBe(true);
+    // No web-tree-sitter / parser artifacts leak into the seed: it is a plain
+    // literal, deterministic across builds.
+    expect(JSON.stringify(buildSampleRepoMap())).toEqual(JSON.stringify(repoMap));
+  });
+
+  it('fires context.repo-map-context-waste on the demo dataset', () => {
+    const input: RecommendationInput = {
+      tokenData: [],
+      toolData: [],
+      sessions: [],
+      projects: [],
+      permissionRows: [],
+      apiErrors: [],
+      repoMap: buildSampleRepoMap(),
+    };
+    const rec = buildRecommendations(input, NOW_1651).find(
+      (r) => r.id === 'context.repo-map-context-waste'
+    );
+    expect(rec).toBeDefined();
+    expect(rec?.category).toBe('context');
+    // The card names the three stable files and offers the @-import fix snippet.
+    expect(rec?.affected).toBe(3);
+    expect(rec?.evidence?.some((e) => e.includes('api-client.ts'))).toBe(true);
+    expect(rec?.fix?.snippet).toContain('@src/lib/api-client.ts');
+  });
+
+  it('stays dark when no repo map is present (the server-only gap)', () => {
+    const rec = buildRecommendations(
+      {
+        tokenData: [],
+        toolData: [],
+        sessions: [],
+        projects: [],
+        permissionRows: [],
+        apiErrors: [],
+      },
+      NOW_1651
+    ).find((r) => r.id === 'context.repo-map-context-waste');
+    expect(rec).toBeUndefined();
   });
 });
