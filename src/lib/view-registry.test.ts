@@ -325,6 +325,12 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(NAV_ITEMS.find((item) => item.view === 'plans')?.description).toMatch(
       /how their shapes evolved/
     );
+    expect(
+      NAV_ITEMS.find((item) => item.view === 'context')?.description
+    ).toMatch(/context window your sessions consume/);
+    expect(
+      NAV_ITEMS.find((item) => item.view === 'conversation')?.description
+    ).toMatch(/conversations flow turn by turn/);
   });
 
   it('retires Forensic Graph from nav while redirecting old deep links to Timeline', () => {

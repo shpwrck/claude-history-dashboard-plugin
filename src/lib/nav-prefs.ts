@@ -304,8 +304,22 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'Compare response speed and throughput across models and sessions so you can see where latency is slowing your work down.',
   },
-  { view: 'context', label: 'Context Health', icon: HeartbeatIcon, domain: 'context-health' },
-  { view: 'conversation', label: 'Turn Patterns', icon: CommentIcon, domain: 'context-health' },
+  {
+    view: 'context',
+    label: 'Context Health',
+    icon: HeartbeatIcon,
+    domain: 'context-health',
+    description:
+      'See how much of the context window your sessions consume and where re-reads and growth pressure build up, so you can keep prompts lean.',
+  },
+  {
+    view: 'conversation',
+    label: 'Turn Patterns',
+    icon: CommentIcon,
+    domain: 'context-health',
+    description:
+      'See how your conversations flow turn by turn — message lengths, back-and-forth rhythm, and tool cadence — so you can spot where exchanges get inefficient.',
+  },
   { view: 'tools', label: 'Tool Usage', icon: ToolsIcon, domain: 'workflow-hygiene' },
   {
     view: 'agents',
