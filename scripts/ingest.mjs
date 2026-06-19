@@ -32,6 +32,7 @@ import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIB = join(PROJECT_DIR, 'src', 'lib');
 const { resolveSources } = await import(join(LIB, 'sources.ts'));
+const { filesystemArtifactSource } = await import(join(LIB, 'artifact-source.ts'));
 const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
 const DEFAULT_SOURCE = DATA_SOURCES[0];
 const PROJECTS = DEFAULT_SOURCE.historyDir;
@@ -171,7 +172,16 @@ const EXTRA_PROJECT_ROOTS = SCOPED_INGEST
 const PROJECT_SOURCES = uniqueProjectSources([
   ...DATA_SOURCES.map((source) => projectSourceFrom(source, resolve(source.historyDir))),
   ...EXTRA_PROJECT_ROOTS.map((root, index) => hubSourceFromRoot(root, index)),
-]);
+]).map(({ source, projectsRoot }) => ({
+  source,
+  projectsRoot,
+  // The artifact-source interface (ADR 0009 §1): every source-relative
+  // filesystem read flows through this `list`/`read`-by-`source_id + rel_path
+  // + signature` abstraction, so a second source root is just another
+  // ArtifactSource. Rooted at `dirname(historyDir)` to match the legacy
+  // `sourceArtifactPath`, so single-source paths stay byte-identical.
+  artifacts: filesystemArtifactSource(source),
+}));
 export const PROJECT_ROOTS = PROJECT_SOURCES.map((item) => item.projectsRoot);
 const PUBLIC_DATA_SOURCES = PROJECT_SOURCES.map((item) => ({ ...item.source }));
 
@@ -182,36 +192,34 @@ function provenanceForSource(source) {
   };
 }
 
+// source.id -> its ArtifactSource (ADR 0009 §1). All source-relative reads
+// resolve through this so a path is never re-derived outside the interface.
+const ARTIFACT_SOURCE_BY_ID = new Map(
+  PROJECT_SOURCES.map(({ source, artifacts }) => [source.id, artifacts])
+);
+
+function artifactSourceFor(source) {
+  return ARTIFACT_SOURCE_BY_ID.get(source.id) ?? filesystemArtifactSource(source);
+}
+
 function historyFilesForSource(source) {
-  const claudeRoot = dirname(source.historyDir);
+  const artifacts = artifactSourceFor(source);
+  const provenance = provenanceForSource(source);
+  // Each entry carries its ArtifactSource + the root-relative path so the union
+  // read flows through the interface (`exists`/`read`) rather than re-deriving an
+  // abs path and reaching past the abstraction (ADR 0009 §1). `path` (the abs
+  // path) is retained for the content-hash gate consumers that stat it directly.
   const files = [
-    {
-      path: join(claudeRoot, 'history.jsonl'),
-      provenance: provenanceForSource(source),
-    },
+    { artifacts, relPath: 'history.jsonl', path: artifacts.resolve('history.jsonl'), provenance },
   ];
-  const historyPartsDir = join(claudeRoot, 'history.d');
-  let dir;
-  try {
-    dir = opendirSync(historyPartsDir);
-  } catch {
-    return files;
-  }
-  try {
-    const parts = [];
-    for (;;) {
-      const ent = dir.readSync();
-      if (!ent) break;
-      if (ent.isFile() && ent.name.endsWith('.jsonl')) {
-        parts.push(join(historyPartsDir, ent.name));
-      }
-    }
-    parts.sort();
-    for (const path of parts) {
-      files.push({ path, provenance: provenanceForSource(source) });
-    }
-  } finally {
-    dir.closeSync();
+  // history.d/<part>.jsonl — listed through the artifact-source `list`, sorted
+  // by relPath for deterministic order (parity with the prior abs-path sort,
+  // since a shared directory prefix preserves the same ordering).
+  const parts = artifacts
+    .list('history.d', (ent) => ent.isFile && ent.name.endsWith('.jsonl'))
+    .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
+  for (const ref of parts) {
+    files.push({ artifacts, relPath: ref.relPath, path: ref.absPath, provenance });
   }
   return files;
 }
@@ -229,7 +237,10 @@ const SOURCE_AGGREGATE_ARTIFACTS = [
 ];
 
 function sourceArtifactPath(source, relPath) {
-  return join(dirname(source.historyDir), relPath);
+  // Resolve through the artifact-source interface (ADR 0009 §1) so the abs path
+  // is owned in one place; `resolve` is `join(dirname(historyDir), relPath)`,
+  // identical to the prior inline join (single-source byte-for-byte parity).
+  return artifactSourceFor(source).resolve(relPath);
 }
 
 function sourceArtifactInputs() {
@@ -2198,10 +2209,12 @@ export function assembleDataset() {
   }
 
   // Union: include history.jsonl entries for sessions with no transcript.
-  for (const { path, provenance } of sourceHistoryFiles()) {
-    if (!existsSync(path)) continue;
+  for (const { artifacts, relPath, provenance } of sourceHistoryFiles()) {
+    if (!artifacts.exists(relPath)) continue;
     try {
-      const hist = parseHistoryJsonl(readArtifactTextCappedSync(path));
+      const hist = parseHistoryJsonl(
+        artifacts.read(relPath, { maxBytes: ARTIFACT_FILE_MAX_BYTES }).text
+      );
       for (const e of hist) {
         if (!transcriptSessionIds.has(e.sessionId)) {
           entries.push(withSourceProvenance(e, provenance));
