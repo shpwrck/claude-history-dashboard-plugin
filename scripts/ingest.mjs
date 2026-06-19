@@ -493,7 +493,7 @@ const { buildRepoMapDataset } = await import(join(LIB, 'parse-repo-map-join.ts')
 // `web-tree-sitter` devDependency. The server runtime image ships no
 // node_modules, so pulling the barrel here crash-loops boot (ERR_MODULE_NOT_FOUND).
 // artifactPathFor lives in cache.ts (node builtins + a type only). #1013.
-const { artifactPathFor } = await import(join(LIB, 'repo-map/cache.ts'));
+const { artifactPathFor, unwrapPersistedRepoMap } = await import(join(LIB, 'repo-map/cache.ts'));
 // Live-config assembly (#627 slice 1) — extracted into src/lib/config-loader.ts.
 // It owns the settings.json validator wiring (#167) and the settings/MCP/
 // plugins/resources readers; ingest.mjs just calls assembleLiveConfig().
@@ -1411,11 +1411,17 @@ function hashFileSig(path, hash) {
   hash.update('\n');
 }
 
+// The host producer (#893) persists the PersistedRepoMap envelope
+// `{ version, cacheKey, sizeBounded, droppedFiles, map: RepoMap }`; the consumer
+// wants the inner RepoMap. `unwrapPersistedRepoMap` (shared with the producer's
+// cache module) extracts `.map` (tolerating a flat artifact) and validates it.
+// Without it the top-level `root`/`files` were undefined, so every produced
+// artifact read as null and `dataset.repoMap` stayed empty (#1650).
 function readRepoMapArtifact(root) {
   try {
-    const raw = readArtifactJsonCappedSync(artifactPathFor(REPO_MAP_DIR, root));
-    if (!raw || raw.root !== root || !Array.isArray(raw.files)) return null;
-    return raw;
+    const map = unwrapPersistedRepoMap(readArtifactJsonCappedSync(artifactPathFor(REPO_MAP_DIR, root)));
+    if (!map || map.root !== root) return null;
+    return map;
   } catch {
     return null;
   }
@@ -1438,9 +1444,9 @@ function repoMapArtifactRoots() {
       checked += 1;
       if (!ent.isFile() || !ent.name.endsWith('.json')) continue;
       try {
-        const raw = readArtifactJsonCappedSync(join(REPO_MAP_DIR, ent.name));
-        if (typeof raw?.root === 'string' && raw.root.startsWith('/')) {
-          roots.push(raw.root);
+        const map = unwrapPersistedRepoMap(readArtifactJsonCappedSync(join(REPO_MAP_DIR, ent.name)));
+        if (map && map.root.startsWith('/')) {
+          roots.push(map.root);
         }
       } catch {
         /* skip malformed artifact */

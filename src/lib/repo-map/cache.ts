@@ -118,6 +118,32 @@ export function isCacheValid(
   return current.maxMtimeMs <= cached.maxMtimeMs;
 }
 
+/**
+ * Extract the inner {@link RepoMap} from a persisted artifact, the producer/
+ * consumer seam (ADR 0007). The host producer writes the {@link PersistedRepoMap}
+ * ENVELOPE `{ version, cacheKey, sizeBounded, droppedFiles, map }` — the envelope
+ * carries the cache/staleness metadata the producer reads back via
+ * {@link isCacheValid}, while the consumer (`ingest.mjs`) wants the bare `RepoMap`
+ * the dataset join expects. Returns `raw.map` when the envelope is present, a flat
+ * `RepoMap` if an artifact was written without the envelope, or `null` when the
+ * value isn't a usable map (no string `root` / no `files` array).
+ *
+ * Without this unwrap the consumer read `raw.root`/`raw.files` at the top level of
+ * the envelope — both undefined — so every produced artifact resolved to null and
+ * `dataset.repoMap` stayed empty even once the producer actually ran (#1650).
+ */
+export function unwrapPersistedRepoMap(raw: unknown): RepoMap | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const candidate = (
+    obj.map && typeof obj.map === 'object' ? obj.map : obj
+  ) as Partial<RepoMap>;
+  if (typeof candidate.root !== 'string' || !Array.isArray(candidate.files)) {
+    return null;
+  }
+  return candidate as RepoMap;
+}
+
 /** Serialized byte length of a value as it will be persisted (UTF-8 JSON). */
 export function serializedBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
