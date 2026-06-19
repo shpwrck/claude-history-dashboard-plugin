@@ -79,6 +79,13 @@ describe('workflow.native-bypass (#951)', () => {
     expect(rec?.reclaim).toBeUndefined();
   });
 
+  it('preserves the existing settings.json deny-rules fix and tools deep-link (#1804 only ADDS the copy affordance)', () => {
+    const rec = detector.rule(input(), 0);
+    expect(rec?.view).toBe('tools');
+    expect(rec?.fix?.target).toBe('settings.json');
+    expect(rec?.fix?.snippet).toContain('Bash(grep:*)');
+  });
+
   it('stays silent below the bypass-call floor', () => {
     const few: ToolUsageData[] = [
       { sessionId: 's1', calls: Array.from({ length: 3 }, (_, i) => grepCall(i)) },
