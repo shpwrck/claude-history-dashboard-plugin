@@ -371,7 +371,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'See how your multi-agent teams hand off work so you can spot stalled members and coordination bottlenecks.',
   },
-  { view: 'plans', label: 'Task Plans', icon: ClipboardListIcon, domain: 'workflow-hygiene', requires: 'serverData' },
+  {
+    view: 'plans',
+    label: 'Task Plans',
+    icon: ClipboardListIcon,
+    domain: 'workflow-hygiene',
+    requires: 'serverData',
+    description:
+      'Inspect the plans your agents wrote and how their shapes evolved, so you can see how work was scoped and broken down across sessions.',
+  },
   {
     view: 'search',
     label: 'Search',
