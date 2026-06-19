@@ -62,6 +62,67 @@ export interface AxisAggregate {
    * behaviour in K/N replays") while the per-axis totals stay byte-identical.
    */
   byFinding?: Record<string, RecsFindingAggregate>;
+  /**
+   * Atomic-vs-monolith verdict sub-aggregate, populated ONLY for the `config-scoping`
+   * axis (#1663, epic #1264). Lifted from each record's top-level `configScoping` triple
+   * (SCHEMA.md, #1662): monolith = MAIN arm, atomized = SHADOW arm. Undefined for every
+   * other axis and absent when no config-scoping record carried the triple, so the detector
+   * degrades to its existing per-axis behaviour. Data-driven: only sums/counts what the
+   * records actually contain — never fabricates a delta.
+   */
+  configScoping?: ConfigScopingAggregate;
+}
+
+/**
+ * Per-arm speed/cost/accuracy roll-up for the `config-scoping` axis (#1663). Each metric
+ * carries the monolith (MAIN) and atomized (SHADOW) running sums plus how many records
+ * supplied them, so the detector can render a mean per-run delta and a win tally without
+ * re-deriving anything from the run/judge blocks (the #1662 record already did that work).
+ * monolith = MAIN arm, atomized = SHADOW arm.
+ */
+export interface ConfigScopingAggregate {
+  /** Wall-time (ms): lower wins. */
+  speed: ConfigScopingMetric;
+  /** Tokens + price-aware $: lower wins. */
+  cost: ConfigScopingCostMetric;
+  /** Build/test/lint gate winner + #61 adherence-regression score (10 = none dropped). */
+  accuracy: ConfigScopingAccuracy;
+}
+
+interface ConfigScopingWins {
+  /** Records whose per-metric winner was the monolith (MAIN) arm. */
+  monolithWins: number;
+  /** Records whose per-metric winner was the atomized (SHADOW) arm. */
+  atomizedWins: number;
+  /** Records whose per-metric winner was a tie. */
+  ties: number;
+}
+
+export interface ConfigScopingMetric extends ConfigScopingWins {
+  /** Σ monolith (MAIN) wall-time over records that carried it. */
+  monolithSum: number;
+  /** Σ atomized (SHADOW) wall-time over records that carried it. */
+  atomizedSum: number;
+  /** Records that supplied BOTH arms (so a per-run delta is meaningful). */
+  pairedCount: number;
+}
+
+export interface ConfigScopingCostMetric extends ConfigScopingWins {
+  monolithTokenSum: number;
+  atomizedTokenSum: number;
+  tokenPairedCount: number;
+  monolithCostUsdSum: number;
+  atomizedCostUsdSum: number;
+  costPairedCount: number;
+}
+
+export interface ConfigScopingAccuracy {
+  /** Gate (build/test/lint) winner tally across records that carried one. */
+  gate: ConfigScopingWins;
+  /** Σ #61 adherence-regression score per arm (higher = more rules still honored). */
+  monolithAdherenceSum: number;
+  atomizedAdherenceSum: number;
+  adherencePairedCount: number;
 }
 
 /**
@@ -98,6 +159,27 @@ interface ShadowRecord {
     paraphraseOverlap?: unknown;
     redundant?: unknown;
   } | null;
+  /**
+   * config-scoping-axis-only verdict triple, emitted by `finalizeRecord` for that axis only
+   * (#1662, SCHEMA.md). All sub-fields are individually optional, so a record may carry a
+   * partial triple; we sum/count whatever is a finite number and tally winners that name an
+   * arm. monolith = MAIN, atomized = SHADOW.
+   */
+  configScoping?: {
+    speed?: { monolithWallMs?: unknown; atomizedWallMs?: unknown; winner?: unknown } | null;
+    cost?: {
+      monolithTokens?: unknown;
+      atomizedTokens?: unknown;
+      monolithCostUsd?: unknown;
+      atomizedCostUsd?: unknown;
+      winner?: unknown;
+    } | null;
+    accuracy?: {
+      gateWinner?: unknown;
+      monolithAdherence?: unknown;
+      atomizedAdherence?: unknown;
+    } | null;
+  } | null;
 }
 
 function emptyFinding(findingId: string): RecsFindingAggregate {
@@ -110,6 +192,48 @@ function emptyFinding(findingId: string): RecsFindingAggregate {
     live: 0,
     replay: 0,
   };
+}
+
+function emptyConfigScoping(): ConfigScopingAggregate {
+  return {
+    speed: {
+      monolithSum: 0,
+      atomizedSum: 0,
+      pairedCount: 0,
+      monolithWins: 0,
+      atomizedWins: 0,
+      ties: 0,
+    },
+    cost: {
+      monolithTokenSum: 0,
+      atomizedTokenSum: 0,
+      tokenPairedCount: 0,
+      monolithCostUsdSum: 0,
+      atomizedCostUsdSum: 0,
+      costPairedCount: 0,
+      monolithWins: 0,
+      atomizedWins: 0,
+      ties: 0,
+    },
+    accuracy: {
+      gate: { monolithWins: 0, atomizedWins: 0, ties: 0 },
+      monolithAdherenceSum: 0,
+      atomizedAdherenceSum: 0,
+      adherencePairedCount: 0,
+    },
+  };
+}
+
+/** A finite, non-negative number (the only shape we sum for a per-arm metric), else null. */
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/** Tally one config-scoping per-metric winner onto a wins block. */
+function tallyWinner(w: ConfigScopingWins, winner: unknown): void {
+  if (winner === 'monolith') w.monolithWins++;
+  else if (winner === 'atomized') w.atomizedWins++;
+  else if (winner === 'tie') w.ties++;
 }
 
 function emptyAxis(axis: string): AxisAggregate {
@@ -203,6 +327,49 @@ export function parseShadowCalls(
       }
     }
 
+    // Atomic-vs-monolith verdict triple, config-scoping axis only (#1663). Additive: lifted
+    // verbatim from the record's `configScoping` block (#1662) — we only sum finite numbers
+    // and tally named-arm winners, so a partial/absent triple degrades gracefully.
+    const cs = rec.configScoping;
+    if (axis === 'config-scoping' && cs) {
+      if (!a.configScoping) a.configScoping = emptyConfigScoping();
+      const cfg = a.configScoping;
+
+      const mWall = num(cs.speed?.monolithWallMs);
+      const aWall = num(cs.speed?.atomizedWallMs);
+      if (mWall !== null && aWall !== null) {
+        cfg.speed.monolithSum += mWall;
+        cfg.speed.atomizedSum += aWall;
+        cfg.speed.pairedCount++;
+      }
+      tallyWinner(cfg.speed, cs.speed?.winner);
+
+      const mTok = num(cs.cost?.monolithTokens);
+      const aTok = num(cs.cost?.atomizedTokens);
+      if (mTok !== null && aTok !== null) {
+        cfg.cost.monolithTokenSum += mTok;
+        cfg.cost.atomizedTokenSum += aTok;
+        cfg.cost.tokenPairedCount++;
+      }
+      const mUsd = num(cs.cost?.monolithCostUsd);
+      const aUsd = num(cs.cost?.atomizedCostUsd);
+      if (mUsd !== null && aUsd !== null) {
+        cfg.cost.monolithCostUsdSum += mUsd;
+        cfg.cost.atomizedCostUsdSum += aUsd;
+        cfg.cost.costPairedCount++;
+      }
+      tallyWinner(cfg.cost, cs.cost?.winner);
+
+      tallyWinner(cfg.accuracy.gate, cs.accuracy?.gateWinner);
+      const mAdh = num(cs.accuracy?.monolithAdherence);
+      const aAdh = num(cs.accuracy?.atomizedAdherence);
+      if (mAdh !== null && aAdh !== null) {
+        cfg.accuracy.monolithAdherenceSum += mAdh;
+        cfg.accuracy.atomizedAdherenceSum += aAdh;
+        cfg.accuracy.adherencePairedCount++;
+      }
+    }
+
     const ms = rec.main?.tokens;
     const ss = rec.shadow?.tokens;
     if (typeof ms === 'number' && typeof ss === 'number') {
@@ -266,4 +433,85 @@ export function adherenceClean(a: AxisAggregate): boolean | null {
  */
 export function decidedForFinding(f: RecsFindingAggregate): number {
   return f.shadowWins + f.mainWins;
+}
+
+/** A signed mean per-run delta (atomized − monolith) over `count` paired records, or null. */
+function meanDelta(monolithSum: number, atomizedSum: number, count: number): number | null {
+  return count > 0 ? (atomizedSum - monolithSum) / count : null;
+}
+
+/** Mean per-run wall-time delta (atomized − monolith, ms); negative ⇒ atomized faster. */
+export function configScopingSpeedDelta(a: AxisAggregate): number | null {
+  const c = a.configScoping;
+  return c ? meanDelta(c.speed.monolithSum, c.speed.atomizedSum, c.speed.pairedCount) : null;
+}
+
+/** Mean per-run token delta (atomized − monolith); negative ⇒ atomized leaner. */
+export function configScopingTokenDelta(a: AxisAggregate): number | null {
+  const c = a.configScoping;
+  return c ? meanDelta(c.cost.monolithTokenSum, c.cost.atomizedTokenSum, c.cost.tokenPairedCount) : null;
+}
+
+/** Mean per-run $ delta (atomized − monolith); negative ⇒ atomized cheaper (#726 input). */
+export function configScopingCostDelta(a: AxisAggregate): number | null {
+  const c = a.configScoping;
+  return c ? meanDelta(c.cost.monolithCostUsdSum, c.cost.atomizedCostUsdSum, c.cost.costPairedCount) : null;
+}
+
+/**
+ * Build the atomic-vs-monolith speed/cost/accuracy evidence rows for the config-scoping
+ * axis (#1663). Pure + data-driven: emits ONE row per metric the records actually carried
+ * (a paired delta or a non-empty winner tally), and an empty array when the axis carried no
+ * triple — so the detector's evidence is unchanged for every other axis and degrades to its
+ * existing rows when config-scoping has no verdict data. monolith = MAIN, atomized = SHADOW.
+ */
+export function configScopingEvidence(a: AxisAggregate): string[] {
+  const c = a.configScoping;
+  if (!c) return [];
+  const rows: string[] = [];
+
+  const winTally = (w: ConfigScopingWins): string =>
+    `atomized ${w.atomizedWins} / monolith ${w.monolithWins} / tie ${w.ties}`;
+  const hasWins = (w: ConfigScopingWins): boolean =>
+    w.atomizedWins + w.monolithWins + w.ties > 0;
+
+  // SPEED — mean per-run wall-time delta (atomized − monolith), ms.
+  const speedDelta = configScopingSpeedDelta(a);
+  if (speedDelta !== null) {
+    const ms = Math.round(speedDelta);
+    rows.push(
+      `config-scoping speed: atomized ${ms <= 0 ? `${Math.abs(ms)}ms faster` : `${ms}ms slower`} per run on average (${winTally(c.speed)})`
+    );
+  } else if (hasWins(c.speed)) {
+    rows.push(`config-scoping speed: ${winTally(c.speed)}`);
+  }
+
+  // COST — mean per-run $ delta preferred; raw-token delta when $ is absent (#726 path).
+  const costDelta = configScopingCostDelta(a);
+  const tokenDelta = configScopingTokenDelta(a);
+  if (costDelta !== null) {
+    rows.push(
+      `config-scoping cost: atomized $${Math.abs(costDelta).toFixed(2)} ${costDelta <= 0 ? 'cheaper' : 'pricier'} per run on average (${winTally(c.cost)})`
+    );
+  } else if (tokenDelta !== null) {
+    const tk = Math.round(tokenDelta);
+    rows.push(
+      `config-scoping cost: atomized ${Math.abs(tk)} ${tk <= 0 ? 'fewer' : 'more'} tokens per run on average (${winTally(c.cost)})`
+    );
+  } else if (hasWins(c.cost)) {
+    rows.push(`config-scoping cost: ${winTally(c.cost)}`);
+  }
+
+  // ACCURACY — gate winner tally + mean per-run #61 adherence (higher = fewer rules dropped).
+  const acc = c.accuracy;
+  const accParts: string[] = [];
+  if (hasWins(acc.gate)) accParts.push(`gate ${winTally(acc.gate)}`);
+  if (acc.adherencePairedCount > 0) {
+    const mAdh = acc.monolithAdherenceSum / acc.adherencePairedCount;
+    const aAdh = acc.atomizedAdherenceSum / acc.adherencePairedCount;
+    accParts.push(`adherence atomized ${aAdh.toFixed(1)} vs monolith ${mAdh.toFixed(1)} (10 = no rule dropped)`);
+  }
+  if (accParts.length) rows.push(`config-scoping accuracy: ${accParts.join('; ')}`);
+
+  return rows;
 }

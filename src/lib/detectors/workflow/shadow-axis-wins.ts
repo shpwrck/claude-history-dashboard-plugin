@@ -1,5 +1,5 @@
 import type { AppliedMarkers, Detector, RecSeverity, Recommendation, RecProvenance } from '../types';
-import { avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding } from '../../parse-shadow-calls';
+import { avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding, configScopingEvidence } from '../../parse-shadow-calls';
 import type { AxisAggregate, RecsFindingAggregate } from '../../parse-shadow-calls';
 
 /**
@@ -96,6 +96,12 @@ function adoptAxisRec(candidates: Cand[]): Recommendation {
 
   const other = candidates.slice(1, 3).map((c) => `${meta(c.a.axis).label} (${Math.round(c.winRate * 100)}% over ${c.a.samples})`);
 
+  // For the config-scoping axis (#1663), surface the explicit atomic-vs-monolith
+  // speed/cost/accuracy per-run delta from the #1662 verdict triple. Data-driven: returns []
+  // (so evidence is unchanged) when the records carried no triple, and is inert for every
+  // other axis. The cost row is the #726 realized-savings input.
+  const configRows = a.axis === 'config-scoping' ? configScopingEvidence(a) : [];
+
   return {
     id: 'workflow.shadow-axis-wins',
     category: 'workflow',
@@ -110,6 +116,7 @@ function adoptAxisRec(candidates: Cand[]): Recommendation {
       best.costDelta !== null
         ? `avg $ delta (shadow−main): $${best.costDelta.toFixed(2)}`
         : best.tokenDelta !== null ? `avg token delta (shadow−main): ${Math.round(best.tokenDelta)}` : 'no paired cost/token data',
+      ...configRows,
       ...(other.length ? [`other promising axes: ${other.join(', ')}`] : []),
     ],
     fix: {

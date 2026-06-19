@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { parseShadowCalls, avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding, adherenceClean } from './parse-shadow-calls';
+import {
+  parseShadowCalls,
+  avgTokenDelta,
+  avgCostDelta,
+  shadowCheaper,
+  decidedForFinding,
+  adherenceClean,
+  configScopingSpeedDelta,
+  configScopingCostDelta,
+  configScopingTokenDelta,
+  configScopingEvidence,
+} from './parse-shadow-calls';
 import { buildRecommendations } from './recommendations';
 import type { RecommendationInput } from './recommendations';
 
@@ -527,5 +538,129 @@ describe('workflow.shadow-axis-wins — recs per-finding efficacy verdict (#579,
     const rec = find(buildRecommendations(inputWith(jsonl)));
     expect(rec).toBeDefined();
     expect(rec!.title).toMatch(/cheaper model/i); // the model adoption lead wins
+  });
+});
+
+describe('config-scoping atomic-vs-monolith verdict triple (#1663)', () => {
+  /**
+   * One config-scoping ledger line carrying the #1662 verdict triple (monolith = MAIN arm,
+   * atomized = SHADOW arm). `winner` is 'shadow' so a run of these clears the adopt-this-axis
+   * thresholds and the detector surfaces the breakdown.
+   */
+  const csLine = (
+    opts: {
+      winner?: 'main' | 'shadow' | 'tie';
+      monoWall?: number; atomWall?: number; speedWinner?: string;
+      monoTok?: number; atomTok?: number;
+      monoUsd?: number; atomUsd?: number; costWinner?: string;
+      gateWinner?: string; monoAdh?: number; atomAdh?: number;
+    } = {}
+  ): string =>
+    JSON.stringify({
+      mode: 'live',
+      axis: 'config-scoping',
+      judge: { winner: opts.winner ?? 'shadow' },
+      configScoping: {
+        speed: {
+          monolithWallMs: opts.monoWall,
+          atomizedWallMs: opts.atomWall,
+          winner: opts.speedWinner,
+        },
+        cost: {
+          monolithTokens: opts.monoTok,
+          atomizedTokens: opts.atomTok,
+          monolithCostUsd: opts.monoUsd,
+          atomizedCostUsd: opts.atomUsd,
+          winner: opts.costWinner,
+        },
+        accuracy: {
+          gateWinner: opts.gateWinner,
+          monolithAdherence: opts.monoAdh,
+          atomizedAdherence: opts.atomAdh,
+        },
+      },
+    });
+
+  const find = (recs: { id: string }[]) => recs.find((r) => r.id === 'workflow.shadow-axis-wins');
+
+  it('aggregates the per-run speed/cost/accuracy triple from config-scoping records', () => {
+    const jsonl = [
+      csLine({ monoWall: 1000, atomWall: 600, speedWinner: 'atomized', monoTok: 500, atomTok: 400, monoUsd: 0.3, atomUsd: 0.2, costWinner: 'atomized', gateWinner: 'tie', monoAdh: 10, atomAdh: 9 }),
+      csLine({ monoWall: 800, atomWall: 700, speedWinner: 'atomized', monoTok: 600, atomTok: 500, monoUsd: 0.4, atomUsd: 0.3, costWinner: 'atomized', gateWinner: 'atomized', monoAdh: 10, atomAdh: 10 }),
+    ].join('\n');
+    const a = parseShadowCalls(jsonl).byAxis.find((x) => x.axis === 'config-scoping')!;
+    const c = a.configScoping!;
+    expect(c.speed.pairedCount).toBe(2);
+    expect(c.speed.atomizedWins).toBe(2);
+    // mean wall delta (atomized − monolith) = ((600-1000)+(700-800))/2 = -250
+    expect(configScopingSpeedDelta(a)).toBeCloseTo(-250);
+    // mean $ delta = ((0.2-0.3)+(0.3-0.4))/2 = -0.10
+    expect(configScopingCostDelta(a)).toBeCloseTo(-0.1);
+    // mean token delta = ((400-500)+(500-600))/2 = -100
+    expect(configScopingTokenDelta(a)).toBeCloseTo(-100);
+    expect(c.cost.atomizedWins).toBe(2);
+    expect(c.accuracy.gate.atomizedWins).toBe(1);
+    expect(c.accuracy.gate.ties).toBe(1);
+    expect(c.accuracy.adherencePairedCount).toBe(2);
+  });
+
+  it('renders the speed/cost/accuracy delta in the shadow-axis evidence', () => {
+    // 6 config-scoping records, atomized (shadow) wins 5/6 — clears the adopt-axis thresholds.
+    const win = () => csLine({ winner: 'shadow', monoWall: 1000, atomWall: 600, speedWinner: 'atomized', monoTok: 500, atomTok: 400, monoUsd: 0.30, atomUsd: 0.20, costWinner: 'atomized', gateWinner: 'tie', monoAdh: 10, atomAdh: 10 });
+    const jsonl = [win(), win(), win(), win(), win(), csLine({ winner: 'main', monoWall: 500, atomWall: 900, speedWinner: 'monolith', monoTok: 400, atomTok: 700, monoUsd: 0.2, atomUsd: 0.5, costWinner: 'monolith', gateWinner: 'monolith', monoAdh: 10, atomAdh: 7 })].join('\n');
+    const rec = find(buildRecommendations(inputWith(jsonl)));
+    expect(rec).toBeDefined();
+    const ev = rec!.evidence ?? [];
+    expect(ev.some((e) => /config-scoping speed:/.test(e))).toBe(true);
+    expect(ev.some((e) => /config-scoping cost:.*cheaper|config-scoping cost:.*pricier/.test(e))).toBe(true);
+    expect(ev.some((e) => /config-scoping accuracy:/.test(e))).toBe(true);
+    // The delta is signed: the cost row feeds the #726 realized-savings path.
+    expect(ev.some((e) => /config-scoping cost: atomized \$/.test(e))).toBe(true);
+  });
+
+  it('configScopingEvidence falls back to a token delta when no $ data is present', () => {
+    const a = parseShadowCalls(csLine({ monoTok: 500, atomTok: 300, costWinner: 'atomized' })).byAxis[0];
+    expect(configScopingCostDelta(a)).toBeNull(); // no $ pair
+    expect(configScopingTokenDelta(a)).toBeCloseTo(-200);
+    const rows = configScopingEvidence(a);
+    expect(rows.some((r) => /config-scoping cost: atomized 200 fewer tokens/.test(r))).toBe(true);
+  });
+
+  it('degrades gracefully: config-scoping records WITHOUT a triple add no delta rows and do not error', () => {
+    // Plain config-scoping records (no `configScoping` block) — like slice-2-not-yet-emitting.
+    const plain = (w: 'main' | 'shadow') =>
+      JSON.stringify({ mode: 'live', axis: 'config-scoping', judge: { winner: w }, main: { tokens: 100, costUsd: 0.2 }, shadow: { tokens: 90, costUsd: 0.1 } });
+    const jsonl = [plain('shadow'), plain('shadow'), plain('shadow'), plain('shadow'), plain('shadow'), plain('main')].join('\n');
+    const agg = parseShadowCalls(jsonl);
+    const a = agg.byAxis.find((x) => x.axis === 'config-scoping')!;
+    expect(a.configScoping).toBeUndefined();
+    expect(configScopingEvidence(a)).toEqual([]);
+    const rec = find(buildRecommendations(inputWith(jsonl)));
+    expect(rec).toBeDefined(); // still fires on the win rate
+    expect((rec!.evidence ?? []).some((e) => /config-scoping speed:|config-scoping cost:|config-scoping accuracy:/.test(e))).toBe(false);
+  });
+
+  it('emits no config-scoping rows for other axes (model lead unaffected)', () => {
+    const jsonl = [
+      line('model', 'live', 'shadow', 1000, 200),
+      line('model', 'live', 'shadow', 1000, 250),
+      line('model', 'live', 'shadow', 1000, 220),
+      line('model', 'live', 'shadow', 1000, 210),
+      line('model', 'replay', 'shadow', 900, 300),
+      line('model', 'live', 'main', 100, 600),
+    ].join('\n');
+    const rec = find(buildRecommendations(inputWith(jsonl)));
+    expect(rec).toBeDefined();
+    expect(rec!.title).toMatch(/cheaper model/i);
+    expect((rec!.evidence ?? []).some((e) => /config-scoping/.test(e))).toBe(false);
+  });
+
+  it('returns [] for an axis with no triple and is a no-op for null aggregate fields', () => {
+    const a = parseShadowCalls(line('model', 'live', 'shadow', 1000, 200)).byAxis[0];
+    expect(a.configScoping).toBeUndefined();
+    expect(configScopingEvidence(a)).toEqual([]);
+    expect(configScopingSpeedDelta(a)).toBeNull();
+    expect(configScopingCostDelta(a)).toBeNull();
+    expect(configScopingTokenDelta(a)).toBeNull();
   });
 });
