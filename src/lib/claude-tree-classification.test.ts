@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { classifyClaudePath, isSessionData } from './claude-tree-classification';
 // The shipper (a zero-dep .mjs in the dispatch image) mirrors the classifier byte-for-byte; this is
 // the load-bearing DRIFT GUARD that the two copies never diverge.
-import { classifyClaudePath as shipperClassify } from '../../operator/dispatch/artifact-ship.mjs';
+import { classifyClaudePath as shipperClassify } from '../../probaitio-operator/dispatch/artifact-ship.mjs';
 
 describe('claude-tree-classification', () => {
   it('classifies session-data (the shipper allowlist)', () => {

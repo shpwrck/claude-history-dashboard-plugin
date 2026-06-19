@@ -5,7 +5,7 @@
 // refresh token into the artifact store or silently drop a reliability signal, so there is exactly
 // one classifier, not one per consumer.
 //
-// The session-data shipper (operator/dispatch, a zero-dep .mjs in a separate image) mirrors this
+// The session-data shipper (probaitio-operator/dispatch, a zero-dep .mjs in a separate image) mirrors this
 // byte-for-byte; a drift test guards the two copies (the same pattern as provision-naming).
 
 export type ClaudePathClass = 'config' | 'session-data' | 'secret';

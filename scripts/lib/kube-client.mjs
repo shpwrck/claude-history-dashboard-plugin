@@ -1,7 +1,8 @@
 // Zero-dependency Kubernetes API client for the dashboard server's session-dispatch routes.
 //
-// Mirrors operator/reconciler/k8s.mjs (native fetch, no @kubernetes/client-node, no node_modules —
-// the server boot graph must stay dependency-free, see MEMORY server-runtime-has-no-node-modules),
+// Same zero-dep approach the Go operator's dispatch sidecars use (native fetch, no
+// @kubernetes/client-node, no node_modules — the server boot graph must stay dependency-free, see
+// MEMORY server-runtime-has-no-node-modules),
 // but DUAL-MODE so the dashboard works whether it runs:
 //   - IN-CLUSTER (the DashboardInstance pod): bearer token + namespace from the projected SA at
 //     /var/run/secrets/kubernetes.io/serviceaccount; CA trusted via NODE_EXTRA_CA_CERTS at launch.
