@@ -551,3 +551,149 @@ describe('plan shape', () => {
     expect(plan.trimmedContent).toContain('## Workflows');
   });
 });
+
+// ── #1664: nested per-component AGENTS.md emit + clone-dir scope ──────────────
+//
+// The second emit shape (#1664, epic #1264): instead of .claude/rules/<topic>.md
+// with paths: frontmatter, split the monolith into nested <subtree>/AGENTS.md
+// files driven by each section's source-scope subtree, loadable on demand by a
+// nearest-AGENTS.md harness. Pinned here per the issue's acceptance:
+//   - --dry-run prints the section -> nested-path plan and writes nothing;
+//   - a non-dry run with --into rewrites config inside a GIVEN CLONE DIR only,
+//     never the source working-tree file;
+//   - apply -> revert round-trips byte-identically, including several sections
+//     sharing one subtree (concatenated into one AGENTS.md and split back out).
+
+describe('nested AGENTS.md emit (#1664)', () => {
+  const NESTED = `# Conventions
+
+Intro prose.
+
+## Build
+
+Edit src/lib/a.ts here. Shared rules: @AGENTS.md
+
+## Deploy
+
+Then src/lib/b.ts lives here.
+
+## Workflows
+
+Edit .github/workflows/ci.yml when gates change.
+`;
+
+  it('dry-run prints the section -> nested AGENTS.md plan and writes nothing', () => {
+    const { dir, file } = makeTempMonolith(NESTED);
+    const stdout = execFileSync(
+      'node',
+      [SCRIPT, '--dry-run', '--emit', 'agents-md', '--section', 'Build=src/lib', file],
+      { encoding: 'utf8' }
+    );
+    expect(stdout).toContain('-> nested AGENTS.md');
+    expect(stdout).toContain('would write src/lib/AGENTS.md (subtree: src/lib)');
+    expect(stdout).toContain('nested-for: src/lib');
+    // The trimmed monolith preview shows the marker replacing the section.
+    expect(stdout).toContain('<!-- atomized: src/lib/AGENTS.md -->');
+    expect(stdout).toContain('(dry-run: nothing written)');
+    // Nothing written: source byte-identical, no nested file appeared.
+    expect(readFileSync(file, 'utf8')).toBe(NESTED);
+    expect(existsSync(join(dir, 'src'))).toBe(false);
+  });
+
+  it('writes one nested AGENTS.md per subtree, @imports re-anchored by depth', () => {
+    const { dir, file } = makeTempMonolith(NESTED);
+    const result = atomizeFile(file, {
+      emit: 'agents-md',
+      mapping: new Map([
+        ['Build', 'src/lib'],
+        ['Deploy', 'src/lib'],
+        ['Workflows', '.github/workflows'],
+      ]),
+      ...quiet,
+    });
+    expect(result.written).toBe(true);
+    // Three sections, but two files (Build+Deploy share src/lib).
+    expect(result.plan.moves).toHaveLength(2);
+
+    const libRule = readFileSync(join(dir, 'src', 'lib', 'AGENTS.md'), 'utf8');
+    expect(libRule.startsWith('---\nnested-for: src/lib\n')).toBe(true);
+    expect(libRule).toContain('atomized-from: CLAUDE.md');
+    // Both sections landed in the one file, in document order.
+    expect(libRule).toContain('## Build');
+    expect(libRule).toContain('## Deploy');
+    expect(libRule.indexOf('## Build')).toBeLessThan(libRule.indexOf('## Deploy'));
+    // The relative import is re-anchored two levels up for src/lib depth.
+    expect(libRule).toContain('Shared rules: @../../AGENTS.md');
+
+    const wfRule = readFileSync(join(dir, '.github', 'workflows', 'AGENTS.md'), 'utf8');
+    expect(wfRule).toContain('nested-for: .github/workflows');
+    expect(wfRule).toContain('## Workflows');
+
+    // The monolith keeps a marker per section pointing at its subtree's file.
+    const trimmed = readFileSync(file, 'utf8');
+    expect(trimmed).not.toContain('## Build');
+    expect(trimmed).toContain('<!-- atomized: src/lib/AGENTS.md -->');
+    expect(trimmed).toContain('<!-- atomized: .github/workflows/AGENTS.md -->');
+  });
+
+  it('apply -> revert round-trips byte-identically (incl. shared-subtree merge)', () => {
+    const { dir, file } = makeTempMonolith(NESTED);
+    atomizeFile(file, {
+      emit: 'agents-md',
+      mapping: new Map([
+        ['Build', 'src/lib'],
+        ['Deploy', 'src/lib'],
+        ['Workflows', '.github/workflows'],
+      ]),
+      ...quiet,
+    });
+    const reverted = revertFile(file, quiet);
+    expect(reverted.written).toBe(true);
+    expect(readFileSync(file, 'utf8')).toBe(NESTED);
+    // Consumed files deleted and now-empty subtree dirs pruned.
+    expect(existsSync(join(dir, 'src'))).toBe(false);
+    expect(existsSync(join(dir, '.github'))).toBe(false);
+  });
+
+  it('--into writes only inside the clone dir, never the source file (acceptance 2)', () => {
+    const src = makeTempMonolith(NESTED);
+    const clone = mkdtempSync(join(tmpdir(), 'atomize-config-clone-'));
+    tempDirs.push(clone);
+
+    const result = atomizeFile(src.file, {
+      emit: 'agents-md',
+      into: clone,
+      mapping: new Map([['Build', 'src/lib']]),
+      ...quiet,
+    });
+    expect(result.written).toBe(true);
+
+    // The source working-tree file is byte-identical: nothing was rewritten.
+    expect(readFileSync(src.file, 'utf8')).toBe(NESTED);
+    expect(existsSync(join(src.dir, 'src'))).toBe(false);
+
+    // The clone dir holds the trimmed monolith copy + the nested AGENTS.md.
+    const trimmedClone = readFileSync(join(clone, 'CLAUDE.md'), 'utf8');
+    expect(trimmedClone).toContain('<!-- atomized: src/lib/AGENTS.md -->');
+    expect(trimmedClone).not.toContain('## Build');
+    expect(readFileSync(join(clone, 'src', 'lib', 'AGENTS.md'), 'utf8')).toContain('## Build');
+
+    // And the clone copy reverts back to the original.
+    revertFile(join(clone, 'CLAUDE.md'), quiet);
+    expect(readFileSync(join(clone, 'CLAUDE.md'), 'utf8')).toBe(NESTED);
+  });
+
+  it('CLI rejects an unknown --emit mode', () => {
+    const { file } = makeTempMonolith(NESTED);
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync('node', [SCRIPT, '--emit', 'bogus', file], { encoding: 'utf8' });
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain("--emit requires 'rules' or 'agents-md'");
+  });
+});

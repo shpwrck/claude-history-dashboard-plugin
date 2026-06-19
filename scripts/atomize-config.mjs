@@ -1,5 +1,12 @@
-// Atomizer codemod (#1268, epic #1264): split a monolithic CLAUDE.md/AGENTS.md
-// into path-scoped .claude/rules/<topic>.md files.
+// Atomizer codemod (#1268/#1664, epic #1264): split a monolithic
+// CLAUDE.md/AGENTS.md into per-component config units, in one of two shapes:
+//   --emit rules     (default, #1268) path-scoped .claude/rules/<topic>.md with
+//                    `paths:` frontmatter — the Claude-Code rules mechanism.
+//   --emit agents-md (#1664) nested <subtree>/AGENTS.md driven by each section's
+//                    source-scope subtree, loaded on demand by a nearest-AGENTS.md
+//                    harness. Sections sharing a subtree concatenate into one file.
+// `--into <dir>` scopes a non-dry apply to a clone dir (the source working-tree
+// file is read but never written) — the #1664 clone-scoped acceptance.
 //
 // The over-scope rec (context.over-scoped-config-section, #1267) tells the user
 // to move a root config section into a path-scoped rule, but until now the
@@ -320,21 +327,46 @@ export function resolveMapping(sections, scope, rawMapping) {
   return { resolved, unresolved };
 }
 
+/** `@import` prefix for a body moving into a `<subtree>/AGENTS.md` (`../` per segment). */
+function importPrefixForSubtree(subtree) {
+  const clean = normalizeSubtree(subtree);
+  if (!clean) return '';
+  return `${clean.split('/').map(() => '..').join('/')}/`;
+}
+
 /**
  * Build the atomization plan: which sections move, the rule files to write
  * (frontmatter + import-rewritten body), and the trimmed monolith. Callers
  * that already split the content can pass `sections` to avoid re-parsing.
+ *
+ * Two emit shapes (`emit`):
+ *   - 'rules' (default, #1268) — one `<rulesDirRel>/<topic>.md` per section,
+ *     `paths:` frontmatter scoped to the section's subtree. The Claude-Code
+ *     rules mechanism.
+ *   - 'agents-md' (#1664) — nested per-component `<subtree>/AGENTS.md`, driven
+ *     by each section's source-scope subtree, so a harness that reads the
+ *     nearest `AGENTS.md` loads the rule only when working inside that subtree.
+ *     Sections sharing a subtree concatenate into one file (heading order
+ *     preserved); imports re-anchor for the subtree's depth.
  */
 export function buildPlan({
   content,
   scope,
   mapping,
   rulesDirRel = '.claude/rules',
+  emit = 'rules',
   sections = null,
 }) {
+  if (emit !== 'rules' && emit !== 'agents-md') {
+    throw new Error(`unknown emit mode: ${emit} (expected 'rules' or 'agents-md')`);
+  }
   const secs = sections ?? splitSections(content);
-  const importPrefix = importPrefixFor(rulesDirRel);
 
+  if (emit === 'agents-md') {
+    return buildAgentsMdPlan({ scope, mapping, secs });
+  }
+
+  const importPrefix = importPrefixFor(rulesDirRel);
   const moves = [];
   const skipped = [];
   const trimmedParts = [];
@@ -383,6 +415,73 @@ export function buildPlan({
   };
 }
 
+/**
+ * Build the nested-per-component `AGENTS.md` plan (#1664). Sections that map to
+ * the same subtree are concatenated into one `<subtree>/AGENTS.md` in document
+ * order, separated by a blank line, each body's `@import`s re-anchored for the
+ * subtree depth. The monolith keeps one marker per section (pointing at that
+ * subtree's `AGENTS.md`) so `--revert` restores each section at its own cut
+ * point — sections sharing a file are split back out by heading boundary.
+ */
+function buildAgentsMdPlan({ scope, mapping, secs }) {
+  const skipped = [];
+  const trimmedParts = [];
+  // Two passes: first decide each section's fate (and emit markers in order),
+  // then assemble the grouped files so concatenation order matches the doc.
+  const sectionPlans = [];
+  for (const sec of secs) {
+    const subtree = sec.slug !== undefined && sec.level > 0 ? mapping.get(sec.slug) : undefined;
+    if (subtree === undefined) {
+      trimmedParts.push(...sec.lines);
+      continue;
+    }
+    if (sec.lines.some((line) => MARKER_RE.test(line))) {
+      skipped.push({ slug: sec.slug, heading: sec.heading, reason: 'contains-atomized-marker' });
+      trimmedParts.push(...sec.lines);
+      continue;
+    }
+    const clean = normalizeSubtree(subtree);
+    const rulePathRel = clean ? `${clean}/AGENTS.md` : 'AGENTS.md';
+    const importPrefix = importPrefixForSubtree(clean);
+    const body = rewriteImports(sec.lines.join('\n'), importPrefix);
+    sectionPlans.push({ sec, subtree: clean, rulePathRel, importPrefix, body });
+    trimmedParts.push(markerLine(rulePathRel));
+  }
+
+  // Group section bodies by their target AGENTS.md, document order preserved.
+  const grouped = new Map();
+  for (const sp of sectionPlans) {
+    if (!grouped.has(sp.rulePathRel)) grouped.set(sp.rulePathRel, []);
+    grouped.get(sp.rulePathRel).push(sp);
+  }
+
+  const moves = [];
+  for (const [rulePathRel, members] of grouped) {
+    const subtree = members[0].subtree;
+    // Frontmatter records provenance + the scope each member came from, so
+    // --revert can confirm the file belongs to this monolith before splicing.
+    const bodies = members.map((m) => m.body).join('\n\n');
+    const ruleContent = `---\nnested-for: ${subtree || '.'}\natomized-from: ${scope}\n---\n${bodies}`;
+    moves.push({
+      id: members.map((m) => `${scope}#${m.sec.slug}`).join(','),
+      slug: members.map((m) => m.sec.slug),
+      heading: members.map((m) => m.sec.heading),
+      subtree,
+      rulePathRel,
+      importPrefix: members[0].importPrefix,
+      ruleContent,
+    });
+  }
+
+  return {
+    scope,
+    emit: 'agents-md',
+    moves,
+    skipped,
+    trimmedContent: trimmedParts.join('\n'),
+  };
+}
+
 // -- Apply / revert (filesystem) ----------------------------------------------
 
 /**
@@ -392,9 +491,14 @@ export function buildPlan({
  *            preview-only: dry-run works, apply throws) (#1427)
  *   dryRun   plan + print, write nothing
  *   rulesDirRel  where rule files go, relative to the monolith's directory
+ *   emit     'rules' (#1268, default) | 'agents-md' (#1664, nested AGENTS.md)
+ *   into     write everything UNDER this directory instead of beside the
+ *            monolith — the clone-dir scope (#1664 acceptance 2). The monolith
+ *            is read from `filePath`; the trimmed copy and all rule files land
+ *            under `into` (the working tree is never touched).
  * Returns { plan, unresolved, written }.
  */
-export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = false, rulesDirRel = '.claude/rules', log = console.log, warn = console.error } = {}) {
+export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = false, rulesDirRel = '.claude/rules', emit = 'rules', into = null, log = console.log, warn = console.error } = {}) {
   if (mapping === null && !infer && !dryRun) {
     throw new Error(
       'no section mapping given: pass --map/--section (detector mapping), or --infer to ' +
@@ -403,10 +507,14 @@ export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = 
   }
 
   const abs = resolve(filePath);
-  const dir = dirname(abs);
   const scope = basename(abs);
   const content = readFileSync(abs, 'utf8');
   const sections = splitSections(content);
+  // Output is rooted at `into` (clone-dir scope) when given, else beside the
+  // monolith. The monolith's trimmed rewrite goes to `<root>/<scope>`, so with
+  // --into the source working-tree file is read but never written.
+  const outRoot = into ? resolve(into) : dirname(abs);
+  const monolithOut = into ? join(outRoot, scope) : abs;
 
   let resolvedMapping;
   let unresolved = [];
@@ -421,7 +529,7 @@ export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = 
     warn(`warn: mapping key "${key}" matched no section in ${scope} (already atomized?) - skipped`);
   }
 
-  const plan = buildPlan({ content, scope, mapping: resolvedMapping, rulesDirRel, sections });
+  const plan = buildPlan({ content, scope, mapping: resolvedMapping, rulesDirRel, emit, sections });
   for (const skip of plan.skipped) {
     warn(`warn: section "${skip.heading}" contains an atomized marker - left in place`);
   }
@@ -431,10 +539,14 @@ export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = 
     return { plan, unresolved, written: false };
   }
 
+  const dest = emit === 'agents-md' ? 'nested AGENTS.md' : `${rulesDirRel}/`;
   if (dryRun) {
-    log(`Plan for ${scope}: ${plan.moves.length} section(s) -> ${rulesDirRel}/\n`);
+    log(`Plan for ${scope}: ${plan.moves.length} file(s) -> ${dest}\n`);
     for (const move of plan.moves) {
-      log(`-- would write ${move.rulePathRel} (paths: ${move.pathsGlob}) --`);
+      const tag = emit === 'agents-md'
+        ? `(subtree: ${move.subtree || '.'})`
+        : `(paths: ${move.pathsGlob})`;
+      log(`-- would write ${move.rulePathRel} ${tag} --`);
       log(move.ruleContent);
       log('');
     }
@@ -448,7 +560,7 @@ export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = 
   }
 
   for (const move of plan.moves) {
-    const rulePath = join(dir, move.rulePathRel);
+    const rulePath = join(outRoot, move.rulePathRel);
     if (existsSync(rulePath)) {
       const existing = readFileSync(rulePath, 'utf8');
       if (existing !== move.ruleContent) {
@@ -458,19 +570,51 @@ export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = 
     }
     mkdirSync(dirname(rulePath), { recursive: true });
     writeFileSync(rulePath, move.ruleContent);
-    log(`wrote ${move.rulePathRel} (paths: ${move.pathsGlob})`);
+    const tag = emit === 'agents-md' ? `(subtree: ${move.subtree || '.'})` : `(paths: ${move.pathsGlob})`;
+    log(`wrote ${move.rulePathRel} ${tag}`);
   }
-  writeFileSync(abs, plan.trimmedContent);
-  log(`trimmed ${scope}: moved ${plan.moves.length} section(s)`);
+  mkdirSync(dirname(monolithOut), { recursive: true });
+  writeFileSync(monolithOut, plan.trimmedContent);
+  // In agents-md mode a move groups several sections into one file, so count
+  // sections (move.slug is an array there) rather than files.
+  const sectionCount = plan.moves.reduce(
+    (n, m) => n + (Array.isArray(m.slug) ? m.slug.length : 1),
+    0
+  );
+  log(`trimmed ${scope}: moved ${sectionCount} section(s) into ${plan.moves.length} file(s)`);
   return { plan, unresolved, written: true };
 }
 
 const RULE_HEADER_RE = /^---\n[\s\S]*?\n---\n/;
 
 /**
+ * Split a rule-file body (header already stripped) into one chunk per heading
+ * section, the inverse of buildAgentsMdPlan's `members.map(body).join('\n\n')`.
+ * Each member body started at a heading, and the join inserted exactly one
+ * blank line between members; so a blank line immediately before a heading is a
+ * member boundary. Returns chunks in document order.
+ */
+function splitAgentsMdMembers(body) {
+  const secs = splitSections(body).filter((s) => s.level > 0);
+  // Members were joined with a single '\n\n' separator, so splitSections hands
+  // every member EXCEPT the last a trailing blank line (the separator, which
+  // attaches to the preceding section). Drop that one blank to recover each
+  // member's original bytes; the last member never gained a separator.
+  return secs.map((sec, i) => {
+    let lines = sec.lines;
+    if (i < secs.length - 1 && lines.length > 0 && lines[lines.length - 1] === '') {
+      lines = lines.slice(0, -1);
+    }
+    return lines.join('\n');
+  });
+}
+
+/**
  * Revert a previous atomization: each `<!-- atomized: ... -->` marker is
  * replaced by its rule file's body (imports un-rewritten) and the rule file is
- * deleted. Byte-identical inverse of {@link atomizeFile}.
+ * deleted once fully consumed. Byte-identical inverse of {@link atomizeFile} for
+ * both emit shapes — including nested per-component AGENTS.md (#1664) where
+ * several markers share one file and each restores its own section in order.
  */
 export function revertFile(filePath, { dryRun = false, log = console.log, warn = console.error } = {}) {
   const abs = resolve(filePath);
@@ -478,6 +622,9 @@ export function revertFile(filePath, { dryRun = false, log = console.log, warn =
   const scope = basename(abs);
   const content = readFileSync(abs, 'utf8');
 
+  // Per shared rule file, a queue of the section bodies still to be restored,
+  // drained in marker order so multi-section AGENTS.md files round-trip.
+  const memberQueues = new Map();
   const restoredLines = [];
   const consumedRuleFiles = [];
   for (const line of content.split('\n')) {
@@ -515,10 +662,38 @@ export function revertFile(filePath, { dryRun = false, log = console.log, warn =
       restoredLines.push(line);
       continue;
     }
-    const importPrefix = importPrefixFor(dirname(rulePathRel));
-    const body = unrewriteImports(ruleText.slice(header[0].length), importPrefix);
+    const isNested = header[0].includes('\nnested-for:');
+    const headerBody = ruleText.slice(header[0].length);
+
+    if (!isNested) {
+      // #1268 rules file: whole body is the one section, deleted on consume.
+      const importPrefix = importPrefixFor(dirname(rulePathRel));
+      const body = unrewriteImports(headerBody, importPrefix);
+      restoredLines.push(...body.split('\n'));
+      consumedRuleFiles.push(rulePath);
+      continue;
+    }
+
+    // #1664 nested AGENTS.md: one file, possibly many markers. Build the member
+    // queue once, then pop the next section per marker; delete after the last.
+    if (!memberQueues.has(rulePath)) {
+      // dir of `<subtree>/AGENTS.md` is `<subtree>`; the import prefix re-anchors
+      // by subtree depth, the inverse of importPrefixForSubtree.
+      const importPrefix = importPrefixForSubtree(dirname(rulePathRel));
+      const members = splitAgentsMdMembers(headerBody).map((chunk) =>
+        unrewriteImports(chunk, importPrefix)
+      );
+      memberQueues.set(rulePath, members);
+    }
+    const queue = memberQueues.get(rulePath);
+    const body = queue.shift();
+    if (body === undefined) {
+      warn(`warn: ${rulePathRel} has no section left for a marker - leaving marker in place`);
+      restoredLines.push(line);
+      continue;
+    }
     restoredLines.push(...body.split('\n'));
-    consumedRuleFiles.push(rulePath);
+    if (queue.length === 0) consumedRuleFiles.push(rulePath);
   }
 
   const restored = restoredLines.join('\n');
@@ -558,16 +733,24 @@ export function revertFile(filePath, { dryRun = false, log = console.log, warn =
 
 const USAGE = `Usage: node scripts/atomize-config.mjs [options] <CLAUDE.md|AGENTS.md>
 
-Split monolithic agent config into path-scoped .claude/rules/<topic>.md files.
+Split a monolithic agent config into per-component units, either path-scoped
+.claude/rules/<topic>.md files (default) or nested per-component AGENTS.md.
 
 Options:
-  --dry-run             Print planned rule files + trimmed monolith; write nothing.
+  --dry-run             Print the planned files + trimmed monolith; write nothing.
   --revert              Merge previously atomized sections back (inverse of apply).
+  --emit <mode>         Output shape: 'rules' (default, .claude/rules/<topic>.md
+                        with paths: frontmatter) or 'agents-md' (nested
+                        <subtree>/AGENTS.md, driven by each section's source-scope
+                        subtree — loaded on demand by a nearest-AGENTS.md harness).
+  --into <dir>          Write the trimmed monolith + all atomized files UNDER this
+                        directory (a clone dir) instead of beside the source file;
+                        the source working-tree file is read but never written.
   --map <file.json>     Section->subtree mapping (JSON object). Keys: section id
                         ("CLAUDE.md#build-deploy"), slug, or exact heading text.
   --section <key=tree>  Single mapping entry (repeatable). Same keys as --map.
   --infer               Write CLI-inferred moves when no --map/--section is given.
-  --rules-dir <dir>     Rule-file dir relative to the monolith (default .claude/rules).
+  --rules-dir <dir>     Rule-file dir for --emit rules (default .claude/rules).
   --help                Show this help.
 
 With no --map/--section, sections whose file references all live under one
@@ -577,7 +760,7 @@ preview-only: --dry-run shows the inferred plan, while applying it requires an
 explicit --infer.`;
 
 function parseArgs(argv) {
-  const opts = { dryRun: false, revert: false, infer: false, mapping: null, rulesDirRel: '.claude/rules', file: null };
+  const opts = { dryRun: false, revert: false, infer: false, mapping: null, rulesDirRel: '.claude/rules', emit: 'rules', into: null, file: null };
   const entries = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -585,7 +768,17 @@ function parseArgs(argv) {
     else if (arg === '--revert') opts.revert = true;
     else if (arg === '--infer') opts.infer = true;
     else if (arg === '--help' || arg === '-h') opts.help = true;
-    else if (arg === '--map') {
+    else if (arg === '--emit') {
+      const mode = argv[++i];
+      if (mode !== 'rules' && mode !== 'agents-md') {
+        throw new Error("--emit requires 'rules' or 'agents-md'");
+      }
+      opts.emit = mode;
+    } else if (arg === '--into') {
+      const dir = argv[++i];
+      if (!dir) throw new Error('--into requires a directory argument');
+      opts.into = dir;
+    } else if (arg === '--map') {
       const file = argv[++i];
       if (!file) throw new Error('--map requires a JSON file argument');
       const parsed = JSON.parse(readFileSync(file, 'utf8'));
@@ -630,6 +823,8 @@ export function main(argv) {
     infer: opts.infer,
     dryRun: opts.dryRun,
     rulesDirRel: opts.rulesDirRel,
+    emit: opts.emit,
+    into: opts.into,
   });
   return 0;
 }
