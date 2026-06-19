@@ -429,7 +429,14 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // #14: the former standalone "Stats" view (UsageStats) is folded into
   // "Activity" (the survivor). Its old `#/stats` deep link is preserved via
   // {@link REDIRECTED_VIEWS} below, which resolves it to `activity`.
-  { view: 'activity', label: 'Activity', icon: RunningIcon, domain: 'raw' },
+  {
+    view: 'activity',
+    label: 'Activity',
+    icon: RunningIcon,
+    domain: 'raw',
+    description:
+      'See when and where you work — active days, peak hours, and which projects you return to — derived from session start times in your local timezone.',
+  },
   { view: 'pulse', label: 'Pulse', icon: ChartLineIcon, domain: 'raw', requires: 'serverData' },
 ] as const;
 
