@@ -437,7 +437,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'See when and where you work — active days, peak hours, and which projects you return to — derived from session start times in your local timezone.',
   },
-  { view: 'pulse', label: 'Pulse', icon: ChartLineIcon, domain: 'raw', requires: 'serverData' },
+  {
+    view: 'pulse',
+    label: 'Pulse',
+    icon: ChartLineIcon,
+    domain: 'raw',
+    requires: 'serverData',
+    description:
+      'Week-over-week activity trend from stats-cache.json — how hot this week ran versus last, with no re-aggregation.',
+  },
 ] as const;
 
 /**

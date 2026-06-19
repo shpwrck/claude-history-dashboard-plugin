@@ -337,6 +337,9 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(
       NAV_ITEMS.find((item) => item.view === 'activity')?.description
     ).toMatch(/when and where you work/i);
+    expect(
+      NAV_ITEMS.find((item) => item.view === 'pulse')?.description
+    ).toMatch(/Week-over-week activity trend/i);
   });
 
   it('retires Forensic Graph from nav while redirecting old deep links to Timeline', () => {
