@@ -1,5 +1,6 @@
 import type { View } from '../types';
 import type { Recommendation, RecCategory } from './recommendations';
+import type { RouteFilter } from './routing';
 import { DOMAIN_FOR_CATEGORY, DOMAIN_LANDING } from './digest';
 
 export type CanonicalEvidenceSignal =
@@ -11,6 +12,7 @@ export type CanonicalEvidenceSignal =
 export interface CanonicalEvidenceTarget {
   signal: CanonicalEvidenceSignal | null;
   view: View;
+  filter?: RouteFilter;
 }
 
 type EvidenceRec = Pick<Recommendation, 'id' | 'category' | 'view'>;
@@ -70,6 +72,20 @@ export function canonicalEvidenceTargetForRecommendation(
   rec: EvidenceRec
 ): CanonicalEvidenceTarget {
   const signal = canonicalEvidenceSignalForRecommendation(rec);
+  if (rec.id === 'safety.dangerous-bypass') {
+    return {
+      signal: null,
+      view: 'permissions',
+      filter: { mode: 'bypassPermissions', table: 'dangerous' },
+    };
+  }
+  if (rec.id === 'safety.dangerous-commands') {
+    return {
+      signal: null,
+      view: 'permissions',
+      filter: { table: 'dangerous' },
+    };
+  }
   return {
     signal,
     view: signal

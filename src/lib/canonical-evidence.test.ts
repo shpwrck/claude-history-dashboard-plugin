@@ -89,6 +89,18 @@ describe('canonical evidence routing', () => {
     });
   });
 
+  it('scopes dangerous bypass findings to bypass-mode command evidence', () => {
+    expect(
+      canonicalEvidenceTargetForRecommendation(
+        rec({ id: 'safety.dangerous-bypass', category: 'safety', view: 'permissions' })
+      )
+    ).toEqual({
+      signal: null,
+      view: 'permissions',
+      filter: { mode: 'bypassPermissions', table: 'dangerous' },
+    });
+  });
+
   it('falls back to the domain landing when a detector has no target view', () => {
     expect(
       canonicalEvidenceTargetForRecommendation(

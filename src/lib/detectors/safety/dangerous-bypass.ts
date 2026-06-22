@@ -86,8 +86,9 @@ export const detector: Detector = {
       const totalDangerous = risky.reduce((s, r) => s + r.dangerousCount, 0);
       // Contributing commands are those in a risky (bypass-mode) session.
       const riskySessions = new Set(risky.map((r) => r.sessionId));
+      const riskyDangerous = dangerous.filter((d) => riskySessions.has(d.sessionId));
       const bumped = ranUnattended(
-        dangerous.filter((d) => riskySessions.has(d.sessionId))
+        riskyDangerous
       );
       const baseSeverity: RecSeverity = 'critical';
       return {
@@ -100,7 +101,7 @@ export const detector: Detector = {
         action:
           'Reserve bypassPermissions for trusted, reversible work; add an explicit deny-list for destructive patterns.',
         affected: totalDangerous,
-        evidence: dangerous.slice(0, 5).map(dangerousEvidence),
+        evidence: riskyDangerous.slice(0, 5).map(dangerousEvidence),
         view: 'permissions',
         fix: {
           target: 'settings.json',
