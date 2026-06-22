@@ -2551,6 +2551,12 @@ function assembleRecommendationContext(options = {}) {
     // Repo-committed guidance snapshots (#1302): non-signal aggregate; the
     // engine's attach pass turns them into "Learn More" references.
     externalGuidance: dataset.externalGuidance,
+    // Per-project memory store + MEMORY.md index (#1965): non-signal aggregate,
+    // the seam the #1779 memory-hygiene detector reads. The real read
+    // (`buildMemoryStores` over a fresh memory walk, wired into the dataset
+    // content_hash) lands with that detector; until a consumer exists this stays
+    // `null` so the engine output and recs cache are byte-identical.
+    memoryStores: null,
   });
   return { input, sessions };
 }

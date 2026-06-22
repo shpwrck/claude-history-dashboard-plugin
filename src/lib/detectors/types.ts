@@ -33,6 +33,7 @@ import type { ShadowCallAggregate } from '../parse-shadow-calls';
 import type { ValueFlowSession } from '../parse-value-flow';
 // ── #539 ingest artifacts (per-artifact child issues #559–#569, #572) ──────
 import type { TaskRecord } from '../parse-tasks';
+import type { ProjectMemoryStore } from '../parse-memories';
 import type { TeamSummary } from '../parse-teams';
 import type { FileHistorySession } from '../parse-file-history';
 import type { StatsCache } from '../parse-stats-cache';
@@ -63,7 +64,12 @@ export type RecCategory =
   | 'security'
   | 'reliability'
   | 'speed'
-  | 'activity';
+  | 'activity'
+  // Upkeep of the agent's own durable state — memory-store hygiene (stale,
+  // duplicate, or contradictory memories), and future config/skill rot. The
+  // foundation for the memory-hygiene detector (#1779); no detector emits it
+  // yet, but every exhaustive consumer must render/aggregate it (#1965).
+  | 'maintenance';
 
 export type RecSeverity = 'critical' | 'warning' | 'info';
 
@@ -534,6 +540,16 @@ export interface RecommendationInput {
    * the routing-gap detector (#1086) emits nothing then.
    */
   modelEvalSummary?: ModelEvalSummary | null;
+  /**
+   * Per-project agent memory store + `MEMORY.md` index from
+   * `~/.claude/projects/<slug>/memory/` (#1965, foundation for the #1779
+   * memory-hygiene detector). A non-signal aggregate (like `liveConfig`), built
+   * by `buildMemoryStores` in `parse-memories.ts` and supplied explicitly at the
+   * ingest call site. Optional: `undefined`/`null`/empty (no memory dirs, or the
+   * SPA/upload dataset) means the `maintenance` detectors emit nothing. No
+   * detector reads it yet — this slice only establishes the contract.
+   */
+  memoryStores?: ProjectMemoryStore[] | null;
 }
 
 /**

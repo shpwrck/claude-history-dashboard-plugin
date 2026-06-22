@@ -36,6 +36,7 @@ describe('DOMAIN_FOR_CATEGORY', () => {
     expect(DOMAIN_FOR_CATEGORY.workflow).toBe('workflow-hygiene');
     expect(DOMAIN_FOR_CATEGORY.speed).toBe('speed');
     expect(DOMAIN_FOR_CATEGORY.activity).toBe('workflow-hygiene');
+    expect(DOMAIN_FOR_CATEGORY.maintenance).toBe('workflow-hygiene');
   });
 
   it('routes a speed-category rec onto the speed domain card', () => {

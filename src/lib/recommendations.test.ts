@@ -1659,6 +1659,46 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── speed.serial-tool-gap (#1753): independent serialized read pairs ──────
+  {
+    const minute = 60 * 1000;
+    const ts = (s: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, s)).toISOString();
+    const read = (sec: number, path: string, result: string) => [
+      { timestamp: ts(sec), kind: 'tool_use', summary: `{"file_path":"${path}"}`, toolName: 'Read', toolUseId: `stg${sec}` },
+      { timestamp: ts(sec + 1), kind: 'tool_result', summary: result, toolUseId: `stg${sec}`, isError: false },
+    ];
+    out.push({
+      now,
+      input: bankBase({
+        runtimeEvents: [
+          {
+            sessionId: 'stg',
+            turns: [
+              { sessionId: 'stg', timestamp: ts(0), durationMs: 2 * minute, messageCount: 2 },
+              { sessionId: 'stg', timestamp: ts(40), durationMs: 3 * minute, messageCount: 2 },
+            ],
+            stopHooks: [],
+            awaySummaries: [],
+            scheduledFires: [],
+          },
+        ] as unknown as RecommendationInput['runtimeEvents'],
+        timelines: [
+          {
+            sessionId: 'stg',
+            startTime: ts(0),
+            endTime: ts(20),
+            entries: [
+              ...read(0, '/src/a.ts', 'contents of a — unrelated'),
+              ...read(4, '/src/b.ts', 'contents of b — unrelated'),
+              ...read(8, '/src/c.ts', 'contents of c — unrelated'),
+              ...read(12, '/src/d.ts', 'contents of d — unrelated'),
+            ],
+          },
+        ] as unknown as RecommendationInput['timelines'],
+      }),
+    });
+  }
+
   // ── workflow.low-tool-effectiveness (11 identical Bash, no forward motion) ─
   {
     const calls: ToolCall[] = Array.from({ length: 11 }, (_, i) => ({
@@ -2435,6 +2475,36 @@ function fixtureBank(): Fixture[] {
         tokenData: [interruptTok('mti1'), interruptTok('mti2'), interruptTok('mti3')],
       }),
     });
+  }
+
+  // ── context.last-n-runs-audit (#1882): per-run peak context trending up over
+  // the most recent N runs vs the prior-runs baseline (40k → 80k peak).
+  {
+    const DAY = 24 * 60 * 60 * 1000;
+    const lnrBase = now - 15 * DAY;
+    const lnrRun = (i: number, peak: number): SessionTokenData =>
+      ({
+        sessionId: `lnr${i}`,
+        entrypoint: 'cli',
+        totalCacheReadTokens: peak,
+        model: 'claude-opus-4-8',
+        entries: [
+          {
+            timestamp: new Date(lnrBase + i * DAY).toISOString(),
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheReadTokens: peak,
+            model: 'claude-opus-4-8',
+          },
+        ],
+        compactionEvents: [],
+      }) as unknown as SessionTokenData;
+    const lnrTok = [
+      ...Array.from({ length: 5 }, (_, i) => lnrRun(i, 40_000)),
+      ...Array.from({ length: 10 }, (_, i) => lnrRun(5 + i, 80_000)),
+    ];
+    out.push({ now, input: bankBase({ tokenData: lnrTok }) });
   }
 
   return out;

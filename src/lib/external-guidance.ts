@@ -106,6 +106,7 @@ const REC_CATEGORIES: readonly RecCategory[] = [
   'reliability',
   'speed',
   'activity',
+  'maintenance',
 ];
 
 function asObject(value: unknown, field: string): JsonObject {

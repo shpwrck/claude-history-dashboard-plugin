@@ -43,6 +43,40 @@ export interface ProjectMemories {
   memories: AgentMemory[];
 }
 
+/**
+ * One parsed pointer line from a project's `MEMORY.md` index. The convention
+ * (see the global CLAUDE.md memory contract) is one markdown list link per
+ * memory: `- [Title](file.md) — hook`. Lines that don't match that shape are
+ * skipped, so prose/section headings in the index never become entries.
+ */
+export interface MemoryIndexEntry {
+  /** The link text, e.g. `Burn loop: verify CI green before finishing`. */
+  title: string;
+  /** The linked memory file, e.g. `burn-loop-verify-ci-green.md`. */
+  file: string;
+  /** The trailing hook/summary after the em-dash (or hyphen); `''` when absent. */
+  hook: string;
+  /** The raw index line, verbatim (trimmed). */
+  raw: string;
+}
+
+/**
+ * A project's full memory store: the parsed fact files (frontmatter + body)
+ * PLUS the `MEMORY.md` index (#1965). Separating the store from the index is the
+ * foundation the memory-hygiene detector (#1779) needs — e.g. to spot an index
+ * pointer with no backing file, or a fact file the index never references.
+ */
+export interface ProjectMemoryStore {
+  /** The `~/.claude/projects/<slug>` directory name. */
+  project: string;
+  /** Parsed fact files (every `*.md` except the `MEMORY.md` index). */
+  memories: AgentMemory[];
+  /** Parsed `MEMORY.md` pointer lines; empty when no index file was present. */
+  index: MemoryIndexEntry[];
+  /** Raw `MEMORY.md` body text when present, else `''` (the as-written index). */
+  indexRaw: string;
+}
+
 /** Raw, unparsed shape returned by `GET /api/memories`. */
 export interface RawMemoryFile {
   name: string;
@@ -135,4 +169,72 @@ export function parseMemories(resp: MemoriesResponse | null | undefined): Projec
 /** Total memory count across all projects (for headline KPIs). */
 export function countMemories(grouped: ProjectMemories[]): number {
   return grouped.reduce((n, p) => n + p.memories.length, 0);
+}
+
+/** Is this the per-project memory index file (case-insensitive)? */
+function isIndexFile(name: string): boolean {
+  return name.toLowerCase() === 'memory.md';
+}
+
+const INDEX_LINE_RE =
+  /^[-*]\s*\[([^\]]+)\]\(([^)]+)\)\s*(?:[—–-]\s*(.*))?$/;
+
+/**
+ * Parse a `MEMORY.md` index body into its pointer lines. Only markdown
+ * list-link lines (`- [Title](file.md) — hook`) become entries; headings and
+ * prose are ignored. Tolerant: a malformed line is simply skipped.
+ */
+export function parseMemoryIndex(content: string): MemoryIndexEntry[] {
+  const out: MemoryIndexEntry[] = [];
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+    const m = line.match(INDEX_LINE_RE);
+    if (!m) continue;
+    out.push({
+      title: m[1].trim(),
+      file: m[2].trim(),
+      hook: (m[3] ?? '').trim(),
+      raw: line,
+    });
+  }
+  return out;
+}
+
+/**
+ * Build the per-project memory STORE + INDEX (#1965) from the raw
+ * `/api/memories` response — the foundation the #1779 memory-hygiene detector
+ * reads off {@link RecommendationInput.memoryStores}.
+ *
+ * For each project it splits the `MEMORY.md` index out from the fact files,
+ * parses each fact file's frontmatter+body via {@link parseMemoryFile}, and
+ * parses the index body into pointer lines. Tolerant by design: a project with
+ * no index yields `index: []` / `indexRaw: ''`; a project with only an index and
+ * no fact files yields `memories: []`. Projects whose `memory/` dir held nothing
+ * parseable at all (no facts and no index) are dropped, mirroring
+ * {@link parseMemories}. Projects are sorted by slug; facts by name.
+ *
+ * NOTE: the live server (`readMemories` in `scripts/server.mjs`) currently
+ * EXCLUDES `MEMORY.md` from `/api/memories`, so over the live response `index`
+ * is empty until that read is widened — exercised here over a fixture store.
+ */
+export function buildMemoryStores(
+  resp: MemoriesResponse | null | undefined
+): ProjectMemoryStore[] {
+  const projects = resp?.projects ?? [];
+  const out: ProjectMemoryStore[] = [];
+  for (const p of projects) {
+    const files = p.files ?? [];
+    const indexFile = files.find((f) => isIndexFile(f.name));
+    const memories = files
+      .filter((f) => !isIndexFile(f.name))
+      .map(parseMemoryFile)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const indexRaw = indexFile ? indexFile.content.trim() : '';
+    const index = indexRaw ? parseMemoryIndex(indexRaw) : [];
+    if (memories.length === 0 && index.length === 0 && indexRaw === '') {
+      continue;
+    }
+    out.push({ project: p.slug, memories, index, indexRaw });
+  }
+  return out.sort((a, b) => a.project.localeCompare(b.project));
 }

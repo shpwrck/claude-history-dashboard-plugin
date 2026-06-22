@@ -366,6 +366,43 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     })) as unknown as RecommendationInput['tokenData'];
     return { input: baseInput({ toolData, tokenData }), now: 0 };
   },
+  'context.last-n-runs-audit': () => {
+    // 5 baseline runs (~40k peak) then 10 more-recent window runs (~80k peak),
+    // chronological by entry timestamp, with `now` just after the last run so
+    // the trend is fresh (not stale) and the rec fires.
+    const base = Date.parse('2026-05-01T00:00:00Z');
+    const day = 24 * 60 * 60 * 1000;
+    const make = (i: number, peak: number) => ({
+      sessionId: `lnr${i}`,
+      entrypoint: 'cli',
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: peak,
+      model: 'claude-opus-4-8',
+      messageCount: 1,
+      entries: [
+        {
+          timestamp: new Date(base + i * day).toISOString(),
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 0,
+          cacheCreation1hTokens: 0,
+          cacheReadTokens: peak,
+          webSearchRequests: 0,
+          webFetchRequests: 0,
+          model: 'claude-opus-4-8',
+        },
+      ],
+      compactionEvents: [],
+      hasUnknownModel: false,
+    });
+    const tokenData = [
+      ...Array.from({ length: 5 }, (_, i) => make(i, 40_000)),
+      ...Array.from({ length: 10 }, (_, i) => make(5 + i, 80_000)),
+    ] as unknown as RecommendationInput['tokenData'];
+    return { input: baseInput({ tokenData }), now: base + 15 * day };
+  },
 };
 
 function runAllowlistedDetector(id: string): Recommendation {

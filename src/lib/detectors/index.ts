@@ -62,6 +62,7 @@ import { detector as repeatedCompactions } from './context/repeated-compactions'
 import { detector as compactionLargeToolOutputs } from './context/compaction-large-tool-outputs';
 import { detector as overScopedConfigSection } from './context/over-scoped-config-section';
 import { detector as repoMapContextWaste } from './context/repo-map-context-waste';
+import { detector as lastNRunsAudit } from './context/last-n-runs-audit';
 import { detector as crossSessionReread } from './context/cross-session-reread';
 import { detector as toolCallRightSizing } from './context/tool-call-right-sizing';
 import { detector as mcpSchemaTax } from './context/mcp-schema-tax';
@@ -131,6 +132,7 @@ import { detector as passiveWaitStall } from './reliability/passive-wait-stall';
 import { detector as hookOverhead } from './speed/hook-overhead';
 import { detector as timeMotion } from './speed/time-motion';
 import { detector as modelLatency } from './speed/model-latency';
+import { detector as serialToolGap } from './speed/serial-tool-gap';
 
 // ── ACTIVITY ────────────────────────────────────────────────────────────
 import { detector as staleProjects } from './activity/stale-projects';
@@ -258,6 +260,7 @@ export const DETECTORS: Detector[] = [
   hookOverhead,
   timeMotion,
   modelLatency,
+  serialToolGap,
 
   // ── Epic #975 — model-evals act-now routing gap (#1086) ───────────────────
   // Reads the server-only `modelEvalSummary` rollup (#1085/#1242): fires only on
@@ -328,6 +331,13 @@ export const DETECTORS: Detector[] = [
   // interrupts/session, books no cost-census reclaim; dark on a transcript-free
   // dataset.
   midTurnInterruptSteering,
+
+  // ── #1882 (epic #1910) — rolling "last N runs" maintenance audit ───────────
+  // Orders sessions chronologically, compares the most recent N runs' mean peak
+  // context against the prior-runs baseline, and fires when per-run context is
+  // trending up (environmental drift / scaffolding a newer model no longer
+  // needs). Reads only tokenData; carries provenance with an as-of/stale anchor.
+  lastNRunsAudit,
 ];
 
 /**

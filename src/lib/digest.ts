@@ -28,6 +28,9 @@ export const DOMAIN_FOR_CATEGORY: Record<RecCategory, ActionDomain> = {
   // own their own action-domain; see ADR 0006.
   speed: 'speed',
   activity: 'workflow-hygiene',
+  // Memory-store / config upkeep (#1965) is workflow hygiene: keeping the
+  // agent's own durable state clean is part of keeping the workflow honest.
+  maintenance: 'workflow-hygiene',
 };
 
 /**
