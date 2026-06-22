@@ -61,6 +61,7 @@ import { detector as compactionLargeToolOutputs } from './context/compaction-lar
 import { detector as overScopedConfigSection } from './context/over-scoped-config-section';
 import { detector as repoMapContextWaste } from './context/repo-map-context-waste';
 import { detector as toolCallRightSizing } from './context/tool-call-right-sizing';
+import { detector as mcpSchemaTax } from './context/mcp-schema-tax';
 
 // ── WORKFLOW ────────────────────────────────────────────────────────────
 import { detector as nativeBypass } from './workflow/native-bypass';
@@ -270,6 +271,13 @@ export const DETECTORS: Detector[] = [
   // cacheRead scaleTokens claim. Excludes native-bypass Bash calls so the same
   // bytes aren't double-claimed; compaction-large-tool-outputs books no claim.
   toolCallRightSizing,
+
+  // ── #1920 (epic #1910) — MCP tool-schema prefix tax ───────────────────────
+  // Sizes the MCP tool-schema share of the fixed per-turn prefix and flags
+  // duplicate/redundant MCP servers (overlapping tool sets, e.g. github +
+  // githubmcp) as a safe removal lever. Sibling to bloated-claude-md (prose docs
+  // only); schema size is a documented token proxy → tier-0 estSavingsUsd.
+  mcpSchemaTax,
 ];
 
 /**
