@@ -920,6 +920,41 @@ describe('speed.hook-overhead (#710, epic #708 — the clock, ADR 0006)', () => 
   });
 });
 
+describe('safety.continuation-blocked (#1800)', () => {
+  const blockedStops = (n: number) =>
+    [
+      {
+        sessionId: 'safety-blocked',
+        turns: [],
+        stopHooks: Array.from({ length: n }, (_, index) => ({
+          sessionId: 'safety-blocked',
+          timestamp: `2026-06-12T10:00:0${index}.000Z`,
+          hookCount: 1,
+          totalDurationMs: 0,
+          hadErrors: false,
+          preventedContinuation: true,
+        })),
+        awaySummaries: [],
+        scheduledFires: [],
+      },
+    ] as unknown as RecommendationInput['runtimeEvents'];
+
+  const find = (input: RecommendationInput) =>
+    buildRecommendations(input, 0).find((r) => r.id === 'safety.continuation-blocked');
+
+  it('emits the safety finding through the detector catalog on repeated blocks', () => {
+    const rec = find(baseInput({ runtimeEvents: blockedStops(2) }));
+    expect(rec?.category).toBe('safety');
+    expect(rec?.affected).toBe(2);
+    expect(rec?.view).toBe('permissions');
+    expect(rec?.evidence?.[0]).toContain('safety-');
+  });
+
+  it('stays dark on one-off blocked continuations', () => {
+    expect(find(baseInput({ runtimeEvents: blockedStops(1) }))).toBeUndefined();
+  });
+});
+
 // ── each-fires coverage bank (#507) ──────────────────────────────────────
 // One curated `RecommendationInput` per detector (some cover several at once),
 // reusing the same fixture shapes the per-detector co-located tests use. The

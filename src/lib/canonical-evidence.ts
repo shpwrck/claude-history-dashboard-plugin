@@ -86,6 +86,13 @@ export function canonicalEvidenceTargetForRecommendation(
       filter: { table: 'dangerous' },
     };
   }
+  if (rec.id === 'safety.continuation-blocked') {
+    return {
+      signal: null,
+      view: 'permissions',
+      filter: { entrypoint: 'unattended', table: 'unattended' },
+    };
+  }
   return {
     signal,
     view: signal

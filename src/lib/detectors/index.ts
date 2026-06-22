@@ -102,6 +102,7 @@ import { detector as promptFriction } from './safety/prompt-friction';
 import { detector as denyRuleNeverTriggered } from './safety/deny-rule-never-triggered';
 import { detector as allowRuleOverlapsDeny } from './safety/allow-rule-overlaps-deny';
 import { detector as configHygieneRollup } from './safety/config-hygiene-rollup';
+import { detector as continuationBlocked } from './safety/continuation-blocked';
 
 // ── SECURITY ────────────────────────────────────────────────────────────
 import { detector as modelDeceit } from './security/model-deceit';
@@ -165,6 +166,7 @@ export const DETECTORS: Detector[] = [
   promptFriction,
   denyRuleNeverTriggered,
   allowRuleOverlapsDeny,
+  continuationBlocked,
   // reliability
   toolErrors,
   apiErrors,
