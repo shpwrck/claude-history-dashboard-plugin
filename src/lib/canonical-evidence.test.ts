@@ -8,7 +8,7 @@ import type { Recommendation } from './recommendations';
 
 function rec(
   partial: Pick<Recommendation, 'id' | 'category'> &
-    Partial<Pick<Recommendation, 'view'>>
+    Partial<Pick<Recommendation, 'view' | 'fix'>>
 ): Recommendation {
   return {
     severity: 'info',
@@ -134,6 +134,33 @@ describe('canonical evidence routing', () => {
       signal: null,
       view: 'permissions',
       filter: { entrypoint: 'unattended', table: 'unattended' },
+    });
+  });
+
+  it('routes prompt-friction findings to PolicyBuilder with the suggested allow rules', () => {
+    expect(
+      canonicalEvidenceTargetForRecommendation(
+        rec({
+          id: 'safety.prompt-friction',
+          category: 'safety',
+          view: 'permissions',
+          fix: {
+            target: 'settings.json',
+            label: 'Allowlist safe Bash calls',
+            note: 'Merge into settings.json.',
+            snippet: JSON.stringify({
+              permissions: { allow: ['Bash(pwd)', 'Bash(git status:*)'] },
+            }),
+          },
+        })
+      )
+    ).toEqual({
+      signal: null,
+      view: 'permissions',
+      filter: {
+        table: 'policy',
+        pattern: 'Bash(pwd)|Bash(git status:*)',
+      },
     });
   });
 

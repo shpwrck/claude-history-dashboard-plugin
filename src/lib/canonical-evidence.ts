@@ -15,7 +15,8 @@ export interface CanonicalEvidenceTarget {
   filter?: RouteFilter;
 }
 
-type EvidenceRec = Pick<Recommendation, 'id' | 'category' | 'view'>;
+type EvidenceRec = Pick<Recommendation, 'id' | 'category' | 'view'> &
+  Partial<Pick<Recommendation, 'fix'>>;
 
 const CANONICAL_EVIDENCE_DESTINATIONS = {
   'token-usage': 'tokens',
@@ -68,6 +69,25 @@ function domainLandingForCategory(category: RecCategory): View {
   return DOMAIN_LANDING[DOMAIN_FOR_CATEGORY[category]];
 }
 
+function allowRulesPatternFromFix(rec: EvidenceRec): string | null {
+  const snippet = rec.fix?.snippet;
+  if (!snippet) return null;
+  try {
+    const parsed = JSON.parse(snippet) as {
+      permissions?: { allow?: unknown };
+    };
+    const allow = parsed.permissions?.allow;
+    if (!Array.isArray(allow)) return null;
+    const rules = allow
+      .filter((rule): rule is string => typeof rule === 'string')
+      .map((rule) => rule.trim())
+      .filter(Boolean);
+    return rules.length ? rules.join('|') : null;
+  } catch {
+    return null;
+  }
+}
+
 export function canonicalEvidenceTargetForRecommendation(
   rec: EvidenceRec
 ): CanonicalEvidenceTarget {
@@ -105,6 +125,14 @@ export function canonicalEvidenceTargetForRecommendation(
       signal: null,
       view: 'permissions',
       filter: { entrypoint: 'unattended', table: 'unattended' },
+    };
+  }
+  if (rec.id === 'safety.prompt-friction') {
+    const pattern = allowRulesPatternFromFix(rec);
+    return {
+      signal: null,
+      view: 'permissions',
+      filter: pattern ? { table: 'policy', pattern } : { table: 'policy' },
     };
   }
   return {
