@@ -582,6 +582,178 @@ export function nativeBypassByScope(data: ToolUsageData[]): NativeBypassScope[] 
 }
 
 // ---------------------------------------------------------------------------
+// Tool-call right-sizing (#1924)
+// ---------------------------------------------------------------------------
+// Two faces of the same waste: a tool call that pulls FAR more into context than
+// the task needed, then gets cache-read on every later turn (the steady-state
+// tax that `context.compaction-large-tool-outputs` misses because it never forces
+// a compaction). Face 1 — a fat FIRST-call over-fetch (whole-file Read where an
+// offset/limit/Grep slice would do). Face 2 — chronically verbose USED tools
+// (MCP + Bash) whose return payloads are bloated call after call.
+//
+// DEDUP (acceptance #1924): Bash commands that re-implement a native tool are
+// native-bypass's territory (#951, workflow-rework band) — they are excluded here
+// so the same bytes are not double-claimed. The reclaim claim books against the
+// `cacheRead` pool under the `structural-prefix` cause, which the cascade runs
+// AFTER native-bypass's `input`-pool workflow lever, so overlapping tokens carve
+// disjoint slices by construction (see reclaim.ts).
+
+/** Chars-per-token proxy (matches native-bypass / parse-file-reread). */
+const RIGHTSIZE_CHARS_PER_TOKEN = 4;
+/** A single Read whose result payload is at least this large is an over-fetch candidate. */
+export const FAT_READ_BYTES = 25_000;
+/** Baseline payload a targeted read (offset/limit/Grep) would have returned instead. */
+export const TARGET_READ_BYTES = 4_000;
+/** A used tool whose MEAN result payload is at least this large is chronically verbose. */
+export const VERBOSE_AVG_BYTES = 10_000;
+/** Baseline payload a leaner/paginated call to the same tool would return. */
+export const TARGET_TOOL_BYTES = 2_000;
+/** Minimum calls before a tool's mean payload is trustworthy as "chronic". */
+export const MIN_VERBOSE_CALLS = 3;
+/**
+ * Cap on the cache-read tail multiplier, so one fat call in a very long session
+ * can't claim an absurd tail. The cascade's `residual ≥ 0` guard caps the dollars
+ * regardless; this just keeps `evidenceTokens` sane.
+ */
+const MAX_REMAINING_TURNS = 40;
+
+/** One tool's payload footprint across the corpus (used tools only). */
+export interface ToolPayloadRanking {
+  toolName: string;
+  calls: number;
+  totalResultBytes: number;
+  /** Mean result payload bytes per call (rounded). */
+  avgResultBytes: number;
+}
+
+/** Per-session compounded excess, the unit the reclaim claim books. */
+export interface ToolRightSizingScope {
+  sessionId: string;
+  /** Compounded excess cache-read tokens (excess payload tokens × remaining turns). */
+  excessCacheReadTokens: number;
+  /** Over-fetch + verbose calls counted in this session. */
+  affectedCalls: number;
+}
+
+export interface ToolPayloadRightSizing {
+  /** Per-tool payload ranking across USED tools (excl. native-bypass Bash), desc by mean payload. */
+  ranking: ToolPayloadRanking[];
+  /** Per-session compounded excess + counts, for the reclaim claim. */
+  byScope: ToolRightSizingScope[];
+  /** Total over-fetch + verbose calls across all sessions. */
+  totalAffected: number;
+  /** Total compounded excess cache-read tokens. */
+  totalExcessTokens: number;
+  /** Verbose used-tool offenders (mean payload ≥ threshold over enough MCP/Bash calls). */
+  verboseTools: ToolPayloadRanking[];
+  /** Total over-fetch Read calls across all sessions (full count, not capped). */
+  overFetchCount: number;
+  /** Largest single over-fetch reads, for evidence rows (desc, capped). */
+  topOverFetch: { sessionId: string; resultBytes: number }[];
+}
+
+/** Whether a call belongs to native-bypass (#951) and so is excluded here. */
+function isNativeBypassCall(call: ToolCall): boolean {
+  return call.toolName === 'Bash' && bashBypassCategories(call).length > 0;
+}
+
+/**
+ * Rank used tools by payload-bytes-per-call and dollarize the cache-compounded
+ * tail of over-fetch reads + chronically verbose MCP/Bash returns. See the
+ * section header for the two faces and the native-bypass dedup. Pure over the
+ * distilled `toolData` (reads only `toolName`/`resultBytes`), so it runs on the
+ * free/local path per ADR 0005.
+ */
+export function toolPayloadRightSizing(data: ToolUsageData[]): ToolPayloadRightSizing {
+  // Pass 1 — global per-tool payload aggregate (excluding native-bypass Bash).
+  const agg = new Map<string, { calls: number; totalResultBytes: number }>();
+  for (const session of data) {
+    for (const call of session.calls) {
+      if (isNativeBypassCall(call)) continue;
+      const e = agg.get(call.toolName) ?? { calls: 0, totalResultBytes: 0 };
+      e.calls += 1;
+      e.totalResultBytes += Math.max(0, call.resultBytes);
+      agg.set(call.toolName, e);
+    }
+  }
+  const ranking: ToolPayloadRanking[] = Array.from(agg.entries())
+    .map(([toolName, { calls, totalResultBytes }]) => ({
+      toolName,
+      calls,
+      totalResultBytes,
+      avgResultBytes: calls === 0 ? 0 : Math.round(totalResultBytes / calls),
+    }))
+    .filter((r) => r.totalResultBytes > 0)
+    .sort((a, b) => b.avgResultBytes - a.avgResultBytes);
+
+  // Face 2 scope: chronically verbose MCP + Bash tools.
+  const verboseTools = ranking.filter(
+    (r) =>
+      r.avgResultBytes >= VERBOSE_AVG_BYTES &&
+      r.calls >= MIN_VERBOSE_CALLS &&
+      (r.toolName.startsWith('mcp__') || r.toolName === 'Bash')
+  );
+  const verboseSet = new Set(verboseTools.map((t) => t.toolName));
+
+  // Pass 2 — per-session compounded excess.
+  const byScope: ToolRightSizingScope[] = [];
+  const topOverFetch: { sessionId: string; resultBytes: number }[] = [];
+  let totalAffected = 0;
+  let totalExcessTokens = 0;
+  let overFetchCount = 0;
+  for (const session of data) {
+    const n = session.calls.length;
+    let excessCacheReadTokens = 0;
+    let affectedCalls = 0;
+    for (let i = 0; i < n; i++) {
+      const call = session.calls[i];
+      if (isNativeBypassCall(call)) continue;
+      const bytes = Math.max(0, call.resultBytes);
+      let excessBytes = 0;
+      if (call.toolName === 'Read' && bytes >= FAT_READ_BYTES) {
+        // Face 1 — first-call over-fetch (whole-file Read).
+        excessBytes = bytes - TARGET_READ_BYTES;
+        topOverFetch.push({ sessionId: session.sessionId, resultBytes: bytes });
+        overFetchCount += 1;
+      } else if (verboseSet.has(call.toolName) && bytes > TARGET_TOOL_BYTES) {
+        // Face 2 — chronically verbose used tool (MCP/Bash). Read is handled by
+        // Face 1 above, so a call is never counted by both faces.
+        excessBytes = bytes - TARGET_TOOL_BYTES;
+      }
+      if (excessBytes <= 0) continue;
+      // Cache-compounded tail: the payload is cache-read on every later turn it
+      // sits in context. `remaining turns` is proxied by the calls after this one,
+      // so a fat call that is the last in its session books a 0 tail (it was
+      // never re-read) while still counting as an over-fetch occurrence.
+      const remainingTurns = Math.min(MAX_REMAINING_TURNS, n - 1 - i);
+      excessCacheReadTokens +=
+        (excessBytes / RIGHTSIZE_CHARS_PER_TOKEN) * remainingTurns;
+      affectedCalls += 1;
+    }
+    if (affectedCalls > 0) {
+      byScope.push({
+        sessionId: session.sessionId,
+        excessCacheReadTokens,
+        affectedCalls,
+      });
+      totalAffected += affectedCalls;
+      totalExcessTokens += excessCacheReadTokens;
+    }
+  }
+  topOverFetch.sort((a, b) => b.resultBytes - a.resultBytes);
+
+  return {
+    ranking,
+    byScope,
+    totalAffected,
+    totalExcessTokens,
+    verboseTools,
+    overFetchCount,
+    topOverFetch: topOverFetch.slice(0, 5),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Bash subcommand breakdown
 // ---------------------------------------------------------------------------
 

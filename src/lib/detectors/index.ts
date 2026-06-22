@@ -60,6 +60,7 @@ import { detector as repeatedCompactions } from './context/repeated-compactions'
 import { detector as compactionLargeToolOutputs } from './context/compaction-large-tool-outputs';
 import { detector as overScopedConfigSection } from './context/over-scoped-config-section';
 import { detector as repoMapContextWaste } from './context/repo-map-context-waste';
+import { detector as toolCallRightSizing } from './context/tool-call-right-sizing';
 
 // ── WORKFLOW ────────────────────────────────────────────────────────────
 import { detector as nativeBypass } from './workflow/native-bypass';
@@ -262,6 +263,13 @@ export const DETECTORS: Detector[] = [
   // files re-read across sessions), naming specific files/symbols and emitting a
   // structural-prefix scaleTokens ReclaimClaim. Dark on the SPA dataset (no map).
   repoMapContextWaste,
+
+  // ── #1924 (epic #1910) — tool-call right-sizing ───────────────────────────
+  // Flags first-call over-fetch (fat whole-file Read) + chronically verbose used
+  // MCP/Bash payloads, dollarizing the cache-compounded tail as a structural-prefix
+  // cacheRead scaleTokens claim. Excludes native-bypass Bash calls so the same
+  // bytes aren't double-claimed; compaction-large-tool-outputs books no claim.
+  toolCallRightSizing,
 ];
 
 /**
