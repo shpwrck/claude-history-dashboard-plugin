@@ -54,6 +54,33 @@ describe('rankForDigest', () => {
     expect(ranked[1].category).toBe('cost');
   });
 
+  it('keeps critical safety ahead of a higher-impact cost finding and drives the verdict', () => {
+    const costlyWaste = {
+      ...rec('cost', 'critical', 'cost.high-impact-waste'),
+      title: 'High-impact cost waste',
+      estSavingsUsd: 5_000,
+      estTimeReclaimedMin: 1_200,
+      affected: 50,
+    };
+    const safetyRisk = {
+      ...rec('safety', 'critical', 'safety.dangerous-bypass'),
+      title: 'Dangerous bypass ran',
+      estSavingsUsd: 10,
+      affected: 1,
+    };
+    const input = [costlyWaste, safetyRisk];
+
+    expect(rankForDigest(input).map((r) => r.id)).toEqual([
+      'safety.dangerous-bypass',
+      'cost.high-impact-waste',
+    ]);
+
+    const verdict = digestVerdict(input);
+    expect(verdict.tone).toBe('critical');
+    expect(verdict.text).toContain('Dangerous bypass ran');
+    expect(verdict.text).not.toContain('High-impact cost waste');
+  });
+
   it('preserves the engine order within each partition', () => {
     const input = [
       rec('safety', 'critical', 's1'),
