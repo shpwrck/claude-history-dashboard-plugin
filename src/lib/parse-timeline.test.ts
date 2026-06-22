@@ -109,6 +109,26 @@ describe('parseSessionTimeline', () => {
     expect(byId.get('d')!.backgrounded).toBe(true) // Task self-resumes
   })
 
+  it('flags the user interrupt sentinel and only it (#1754)', () => {
+    const text = [
+      // Real prompt that merely quotes the phrase — NOT an interrupt.
+      line({ type: 'user', timestamp: '2026-01-01', message: { content: 'fix the [Request interrupted by user] handling' } }),
+      // Genuine interrupt sentinel, as a user text block.
+      line({ type: 'user', timestamp: '2026-01-02', message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } }),
+      // The "for tool use" variant as a bare string.
+      line({ type: 'user', timestamp: '2026-01-03', message: { content: '[Request interrupted by user for tool use]' } }),
+      // An assistant turn discussing it — never flagged (it is kind assistant).
+      line({ type: 'assistant', timestamp: '2026-01-04', message: { content: [{ type: 'text', text: 'The [Request interrupted by user] sentinel marks a steer.' }] } }),
+    ].join('\n')
+    const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+    expect(entries[0]).toMatchObject({ kind: 'user' })
+    expect(entries[0].interrupted).toBeUndefined() // quoted, not a real interrupt
+    expect(entries[1].interrupted).toBe(true)
+    expect(entries[2].interrupted).toBe(true)
+    expect(entries[3]).toMatchObject({ kind: 'assistant' })
+    expect(entries[3].interrupted).toBeUndefined()
+  })
+
   it('records an unknown line type as an "other" entry summarized by its type', () => {
     const text = line({ type: 'system', timestamp: '2026-01-01' })
     expect(parseSessionTimeline(text, 's.jsonl')!.entries[0]).toMatchObject({ kind: 'other', summary: 'system' })

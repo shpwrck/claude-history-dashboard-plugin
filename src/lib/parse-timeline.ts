@@ -46,6 +46,18 @@ export interface TimelineEntry {
    */
   waitLanguage?: boolean;
   /**
+   * When `kind === 'user'`: this user record is the literal interrupt sentinel
+   * the harness writes when a human cuts the assistant off mid-response
+   * (`[Request interrupted by user]` / `[Request interrupted by user for tool
+   * use]`), NOT a real human prompt. Detected on the *full* untruncated user text
+   * (anchored with `startsWith`, so a prompt that merely quotes the phrase or an
+   * assistant turn discussing it is never flagged) and set as a derived boolean so
+   * it survives `slimSessionTimeline`. Feeds the
+   * `workflow.mid-turn-interrupt-steering` detector (#1754): everything the
+   * assistant produced in the now-orphaned turn was billed but discarded.
+   */
+  interrupted?: boolean;
+  /**
    * When `kind === 'tool_use'`: the call dispatches harness-backed work that
    * auto-wakes the session on completion (`run_in_background` Bash, or a
    * Task / Workflow / ScheduleWakeup / Monitor call). The clean-separation control
@@ -154,6 +166,21 @@ export function hasWaitLanguage(text: string): boolean {
 }
 
 /**
+ * The literal sentinel the harness writes (as a `user`-type text message) when a
+ * human interrupts the assistant mid-response: `[Request interrupted by user]` or
+ * `[Request interrupted by user for tool use]`. Anchored to the START of the text
+ * so a real prompt that merely quotes the phrase, or an assistant turn discussing
+ * it, is never mistaken for an interrupt — verified against the local corpus where
+ * the genuine markers are exactly these two prefixes, emitted with no leading
+ * whitespace (#1754). Exported so the mid-turn-interrupt-steering detector test
+ * asserts against the same matcher the parser uses.
+ */
+export function isInterruptSentinel(text: string | undefined): boolean {
+  if (!text) return false;
+  return text.startsWith('[Request interrupted by user');
+}
+
+/**
  * Harness mechanisms that resume the session on their own after a turn ends —
  * the clean-separation control for the passive-wait-stall detector (#1873). A
  * turn that dispatches one of these never strands the session waiting on a human:
@@ -257,6 +284,7 @@ export function parseSessionTimeline(
           timestamp,
           kind: 'user',
           summary: summarize(msg.content),
+          ...(isInterruptSentinel(msg.content) ? { interrupted: true } : {}),
         }));
       } else if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
@@ -274,6 +302,7 @@ export function parseSessionTimeline(
               timestamp,
               kind: 'user',
               summary: summarize(block.text ?? ''),
+              ...(isInterruptSentinel(block.text) ? { interrupted: true } : {}),
             }));
           }
         }

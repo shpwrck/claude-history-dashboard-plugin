@@ -2401,6 +2401,42 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── workflow.mid-turn-interrupt-steering (#1754): a "[Request interrupted by
+  // user]" sentinel cuts the assistant off mid-response; the orphaned turn's
+  // billed output tokens are discarded.
+  {
+    const t0 = Date.parse('2026-06-11T00:00:00Z');
+    const at = (s: number) => new Date(t0 + s * 1000).toISOString();
+    const interruptTl = (sessionId: string): SessionTimeline =>
+      ({
+        sessionId,
+        startTime: at(0),
+        endTime: at(30),
+        entries: [
+          { timestamp: at(0), kind: 'user', summary: 'go' },
+          { timestamp: at(10), kind: 'assistant', summary: 'Working…' },
+          { timestamp: at(20), kind: 'tool_use', toolName: 'Bash', summary: '{}' },
+          { timestamp: at(30), kind: 'user', summary: '[Request interrupted by user]', interrupted: true },
+        ],
+      }) as unknown as SessionTimeline;
+    const interruptTok = (sessionId: string): SessionTokenData =>
+      ({
+        sessionId,
+        entries: [richEntry('claude-opus-4-8', 100, 800, {})].map((e) => ({
+          ...(e as unknown as Record<string, unknown>),
+          timestamp: at(10),
+        })),
+        compactionEvents: [],
+      }) as unknown as SessionTokenData;
+    out.push({
+      now,
+      input: bankBase({
+        timelines: [interruptTl('mti1'), interruptTl('mti2'), interruptTl('mti3')],
+        tokenData: [interruptTok('mti1'), interruptTok('mti2'), interruptTok('mti3')],
+      }),
+    });
+  }
+
   return out;
 }
 

@@ -94,6 +94,7 @@ import { detector as harmfulHabit } from './workflow/harmful-habit';
 import { detector as correctionMining } from './workflow/correction-mining';
 import { detector as promptClarity } from './workflow/prompt-clarity';
 import { detector as autonomyOverSteered } from './workflow/autonomy-over-steered';
+import { detector as midTurnInterruptSteering } from './workflow/mid-turn-interrupt-steering';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -318,6 +319,15 @@ export const DETECTORS: Detector[] = [
   // is forced — weighted by the silence gap. Reads parse-timeline's per-turn
   // waitLanguage/backgrounded flags; dark on a transcript-free dataset.
   passiveWaitStall,
+
+  // ── #1754 (epic #1910) — mid-turn user-interrupt steering ─────────────────
+  // Dollarizes the in-flight output tokens discarded when a human cuts the
+  // assistant off mid-response (literal `[Request interrupted by user]` sentinel
+  // on parse-timeline's per-turn `interrupted` flag, joined to parse-sessions
+  // output tokens). Honest workflow/autonomy DIAGNOSTIC — leads with
+  // interrupts/session, books no cost-census reclaim; dark on a transcript-free
+  // dataset.
+  midTurnInterruptSteering,
 ];
 
 /**
