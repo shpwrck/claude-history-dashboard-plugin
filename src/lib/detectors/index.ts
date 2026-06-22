@@ -62,6 +62,7 @@ import { detector as repeatedCompactions } from './context/repeated-compactions'
 import { detector as compactionLargeToolOutputs } from './context/compaction-large-tool-outputs';
 import { detector as overScopedConfigSection } from './context/over-scoped-config-section';
 import { detector as repoMapContextWaste } from './context/repo-map-context-waste';
+import { detector as crossSessionReread } from './context/cross-session-reread';
 import { detector as toolCallRightSizing } from './context/tool-call-right-sizing';
 import { detector as mcpSchemaTax } from './context/mcp-schema-tax';
 
@@ -294,6 +295,14 @@ export const DETECTORS: Detector[] = [
   // reprice (orderKey 82) so the saving is marginal, not double-counted. The
   // batch-route shadow-calls axis is a separate meta follow-on.
   batchableWorkload,
+
+  // ── #1752 (epic #1910) — cross-session cold-read -> distilled-note lever ───
+  // The cross-session slice nothing else covers: aggregates the per-session FIRST
+  // (cold) Read of each DOC across the corpus (parse-file-reread only sees
+  // within-session repeats), books NET savings (eager note-load subtracted),
+  // prices at the measured cache-read residual, stability-gates to read-only docs,
+  // and stays doc-scoped so it never double-books vs repo-map-context-waste (code).
+  crossSessionReread,
 ];
 
 /**

@@ -2279,6 +2279,55 @@ function fixtureBank(): Fixture[] {
     }),
   });
 
+  // context.cross-session-reread (#1752): one DOC cold-read once per session
+  // across 6 read-only sessions, big enough that the NET cross-session tax
+  // (minus the eager note-load) clears the savings floor.
+  {
+    const xsrTool: ToolUsageData[] = [];
+    const xsrToken: SessionTokenData[] = [];
+    for (let i = 0; i < 6; i++) {
+      xsrTool.push({
+        sessionId: `xsr${i}`,
+        calls: [
+          {
+            timestamp: 't',
+            toolName: 'Read',
+            input: { file_path: 'docs/guide.md' },
+            toolUseId: 'u',
+            isError: false,
+            resultBytes: 200_000,
+          },
+        ],
+      });
+      xsrToken.push({
+        sessionId: `xsr${i}`,
+        entrypoint: 'cli',
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCacheCreationTokens: 0,
+        totalCacheReadTokens: 100_000,
+        model: 'claude-opus-4-8',
+        messageCount: 1,
+        entries: [
+          {
+            timestamp: 't',
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheCreation1hTokens: 0,
+            cacheReadTokens: 100_000,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+            model: 'claude-opus-4-8',
+          },
+        ],
+        compactionEvents: [],
+        hasUnknownModel: false,
+      } as unknown as SessionTokenData);
+    }
+    out.push({ now, input: bankBase({ toolData: xsrTool, tokenData: xsrToken }) });
+  }
+
   return out;
 }
 

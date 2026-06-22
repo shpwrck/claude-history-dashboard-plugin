@@ -294,6 +294,49 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     input: baseInput({ modelEvalSummary: modelEvalSummary() }),
     now: MODEL_EVAL_NOW,
   }),
+  'context.cross-session-reread': () => {
+    // A doc cold-read once per session across 6 sessions, read-only, big enough
+    // that the NET cross-session tax clears the savings floor.
+    const toolData = Array.from({ length: 6 }, (_, i) => ({
+      sessionId: `xsr${i}`,
+      calls: [
+        {
+          timestamp: 't',
+          toolName: 'Read',
+          input: { file_path: 'docs/guide.md' },
+          toolUseId: 'u',
+          isError: null,
+          resultBytes: 200_000,
+        },
+      ],
+    })) as RecommendationInput['toolData'];
+    const tokenData = Array.from({ length: 6 }, (_, i) => ({
+      sessionId: `xsr${i}`,
+      entrypoint: 'cli',
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 100_000,
+      model: 'claude-opus-4-8',
+      messageCount: 1,
+      entries: [
+        {
+          timestamp: 't',
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 0,
+          cacheCreation1hTokens: 0,
+          cacheReadTokens: 100_000,
+          webSearchRequests: 0,
+          webFetchRequests: 0,
+          model: 'claude-opus-4-8',
+        },
+      ],
+      compactionEvents: [],
+      hasUnknownModel: false,
+    })) as unknown as RecommendationInput['tokenData'];
+    return { input: baseInput({ toolData, tokenData }), now: 0 };
+  },
 };
 
 function runAllowlistedDetector(id: string): Recommendation {

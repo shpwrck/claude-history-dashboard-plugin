@@ -27,6 +27,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'cost.idle-mcp-tools',
   'workflow.review-bottleneck',
   'cost.model-eval-routing-gap',
+  'context.cross-session-reread',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */
