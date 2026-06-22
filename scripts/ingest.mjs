@@ -5,8 +5,8 @@
 // the app's own parsers and cached in SQLite, keyed by a file signature
 // (mtime+size). On each request we re-ingest only files whose signature changed
 // (e.g. the live, growing session), so the dataset stays fresh without
-// re-parsing everything. history.jsonl is unioned in for legacy sessions that
-// have no transcript on disk.
+// re-parsing everything. history.jsonl plus history.d/*.jsonl are unioned in
+// for legacy sessions that have no transcript on disk.
 //
 // Run under `node --import ./scripts/register-ts.mjs` so the .ts parsers resolve.
 
@@ -202,26 +202,41 @@ function artifactSourceFor(source) {
   return ARTIFACT_SOURCE_BY_ID.get(source.id) ?? filesystemArtifactSource(source);
 }
 
-function historyFilesForSource(source) {
+function historyFileSetForSource(source) {
   const artifacts = artifactSourceFor(source);
   const provenance = provenanceForSource(source);
   // Each entry carries its ArtifactSource + the root-relative path so the union
   // read flows through the interface (`exists`/`read`) rather than re-deriving an
   // abs path and reaching past the abstraction (ADR 0009 §1). `path` (the abs
   // path) is retained for the content-hash gate consumers that stat it directly.
-  const files = [
-    { artifacts, relPath: 'history.jsonl', path: artifacts.resolve('history.jsonl'), provenance },
-  ];
+  const legacy = {
+    artifacts,
+    relPath: 'history.jsonl',
+    path: artifacts.resolve('history.jsonl'),
+    provenance,
+  };
   // history.d/<part>.jsonl — listed through the artifact-source `list`, sorted
   // by relPath for deterministic order (parity with the prior abs-path sort,
   // since a shared directory prefix preserves the same ordering).
   const parts = artifacts
     .list('history.d', (ent) => ent.isFile && ent.name.endsWith('.jsonl'))
-    .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
-  for (const ref of parts) {
-    files.push({ artifacts, relPath: ref.relPath, path: ref.absPath, provenance });
-  }
-  return files;
+    .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0))
+    .map((ref) => ({
+      artifacts,
+      relPath: ref.relPath,
+      path: ref.absPath,
+      provenance,
+    }));
+  return { legacy, parts, provenance };
+}
+
+function historyFilesForSource(source) {
+  const { legacy, parts } = historyFileSetForSource(source);
+  return [legacy, ...parts];
+}
+
+function sourceHistoryFileSets() {
+  return PROJECT_SOURCES.map(({ source }) => historyFileSetForSource(source));
 }
 
 function sourceHistoryFiles() {
@@ -413,7 +428,7 @@ const { slimSessionTimeline } = await import(
 const liveSessionModule = await import(join(LIB, 'live-session.ts'));
 const { liveSession } = liveSessionModule;
 export const LIVE_SESSION_MAX_BYTES = liveSessionModule.LIVE_SESSION_MAX_BYTES;
-const { parseHistoryJsonl, groupBySessions, groupByProjects } = await import(
+const { parseHistoryJsonl, unionHistoryParts, groupBySessions, groupByProjects } = await import(
   join(LIB, 'parse-history.ts')
 );
 const { parsePromptAnalysis } = await import(join(LIB, 'parse-prompt-analysis.ts'));
@@ -1621,9 +1636,9 @@ export function sourceSignature() {
     }
     parts.push(`projects:${projectsRoot}:${Math.floor(maxDirMtime)}`);
   }
-  // Top-level files whose CONTENT feeds the dataset: history.jsonl (the entries
-  // union) plus the liveConfig sources whose bytes are read and parsed
-  // (settings.json x2, CLAUDE.md, ~/.claude.json, installed_plugins.json).
+  // Files whose CONTENT feeds the dataset: history.jsonl/history.d entries plus
+  // the liveConfig sources whose bytes are read and parsed (settings.json x2,
+  // CLAUDE.md, ~/.claude.json, installed_plugins.json).
   // mtime+size catches in-place edits to these (a file's mtime advances on
   // write, unlike a dir's). They MUST be in the signature: ingest()'s
   // contentHash covers the same sources, so without them a settings.json /
@@ -1782,8 +1797,9 @@ export function ingest() {
   // cache. mtime/size is sufficient: these files only change on a rebuild.
   hash.update('usage-data\n');
   hashTree(USAGE_DATA, '', hash);
-  // Section 3: ~/.claude/history.jsonl (unioned in for transcript-less
-  // sessions). Same rationale — read fresh per assemble, must be in the gate.
+  // Section 3: ~/.claude/history.jsonl and history.d parts (unioned in for
+  // transcript-less sessions). Same rationale — read fresh per assemble, must
+  // be in the gate.
   hash.update('history\n');
   for (const { path } of sourceHistoryFiles()) {
     hashFileSig(path, hash);
@@ -2106,7 +2122,8 @@ export function assembleArtifacts() {
 }
 
 // Assemble the normalized payload the client consumes. Transcript-derived
-// entries are authoritative; history.jsonl-only sessions are unioned in.
+// entries are authoritative; history.d parts override history.jsonl for the
+// same session before history-only sessions are unioned in.
 export function assembleDataset() {
   const rows = blobCache.readAllRows();
   const sessionProvenanceById = new Map(
@@ -2208,20 +2225,41 @@ export function assembleDataset() {
     }
   }
 
-  // Union: include history.jsonl entries for sessions with no transcript.
-  for (const { artifacts, relPath, provenance } of sourceHistoryFiles()) {
-    if (!artifacts.exists(relPath)) continue;
-    try {
-      const hist = parseHistoryJsonl(
-        artifacts.read(relPath, { maxBytes: ARTIFACT_FILE_MAX_BYTES }).text
-      );
-      for (const e of hist) {
-        if (!transcriptSessionIds.has(e.sessionId)) {
-          entries.push(withSourceProvenance(e, provenance));
-        }
+  // Union: include history entries for sessions with no transcript. Within each
+  // source, history.d/<sessionId>.jsonl parts own their sessions and suppress
+  // duplicate entries from the legacy flat history.jsonl fallback.
+  for (const { legacy, parts, provenance } of sourceHistoryFileSets()) {
+    let legacyEntries = [];
+    const partEntries = [];
+
+    if (legacy.artifacts.exists(legacy.relPath)) {
+      try {
+        legacyEntries = parseHistoryJsonl(
+          legacy.artifacts.read(legacy.relPath, { maxBytes: ARTIFACT_FILE_MAX_BYTES }).text
+        );
+      } catch {
+        /* ignore malformed legacy history */
       }
-    } catch {
-      /* ignore malformed history */
+    }
+
+    for (const part of parts) {
+      if (!part.artifacts.exists(part.relPath)) continue;
+      try {
+        partEntries.push(
+          ...parseHistoryJsonl(
+            part.artifacts.read(part.relPath, { maxBytes: ARTIFACT_FILE_MAX_BYTES }).text
+          )
+        );
+      } catch {
+        /* ignore malformed history part */
+      }
+    }
+
+    const hist = unionHistoryParts(legacyEntries, partEntries);
+    for (const e of hist) {
+      if (!transcriptSessionIds.has(e.sessionId)) {
+        entries.push(withSourceProvenance(e, provenance));
+      }
     }
   }
   const promptAnalysis = parsePromptAnalysis(entries);

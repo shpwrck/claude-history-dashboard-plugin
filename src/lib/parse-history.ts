@@ -114,6 +114,22 @@ export function unionEntries(
   ];
 }
 
+/**
+ * Merge per-session history.d entries with the legacy flat history.jsonl log.
+ * A session present in any history.d part is owned by those part entries; the
+ * legacy file remains a fallback for sessions that have not been split yet.
+ */
+export function unionHistoryParts(
+  legacyEntries: HistoryEntry[],
+  partEntries: HistoryEntry[]
+): HistoryEntry[] {
+  const partSessionIds = new Set(partEntries.map((e) => e.sessionId));
+  return [
+    ...partEntries,
+    ...legacyEntries.filter((e) => !partSessionIds.has(e.sessionId)),
+  ];
+}
+
 const SYNTHETIC_TURN_RE =
   /^\s*<\s*(task-notification|system-reminder)\b[\s\S]*<\/\s*\1\s*>\s*$/i;
 

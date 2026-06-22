@@ -6,6 +6,7 @@ import {
   groupWorktrees,
   deriveEntriesFromTranscript,
   unionEntries,
+  unionHistoryParts,
 } from './parse-history'
 import type { HistoryEntry, ProjectStats, Session } from '../types'
 
@@ -251,5 +252,48 @@ describe('unionEntries', () => {
       'transcript-with-no-entries',
     ])
     expect(merged.map((e) => e.sessionId).sort()).toEqual(['h-only', 't-only'])
+  })
+})
+
+describe('unionHistoryParts', () => {
+  it('lets per-session history.d parts supersede legacy history.jsonl for the same session', () => {
+    const legacy = [
+      entry({ sessionId: 'split', display: 'legacy split' }),
+      entry({ sessionId: 'legacy-only', display: 'legacy fallback' }),
+    ]
+    const parts = [
+      entry({ sessionId: 'split', display: 'part split', timestamp: 10 }),
+    ]
+
+    const merged = unionHistoryParts(legacy, parts)
+
+    expect(merged.map((e) => [e.sessionId, e.display])).toEqual([
+      ['split', 'part split'],
+      ['legacy-only', 'legacy fallback'],
+    ])
+  })
+
+  it('keeps legacy history as the fallback when no part exists for a session', () => {
+    const legacy = [entry({ sessionId: 'legacy-only', display: 'legacy prompt' })]
+
+    expect(unionHistoryParts(legacy, [])).toEqual(legacy)
+  })
+
+  it('preserves every part entry and suppresses all legacy entries for that session', () => {
+    const legacy = [
+      entry({ sessionId: 'split', display: 'legacy first', timestamp: 1 }),
+      entry({ sessionId: 'split', display: 'legacy second', timestamp: 2 }),
+      entry({ sessionId: 'other', display: 'legacy other', timestamp: 3 }),
+    ]
+    const parts = [
+      entry({ sessionId: 'split', display: 'part first', timestamp: 4 }),
+      entry({ sessionId: 'split', display: 'part second', timestamp: 5 }),
+    ]
+
+    expect(unionHistoryParts(legacy, parts).map((e) => e.display)).toEqual([
+      'part first',
+      'part second',
+      'legacy other',
+    ])
   })
 })
