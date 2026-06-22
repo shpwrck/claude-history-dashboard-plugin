@@ -98,6 +98,13 @@ export function safetyLeadForDigest(recs: Recommendation[]): Recommendation | nu
  * rendering unchanged for callers that don't yet supply coverage).
  */
 export type DomainCoverageLevel = 'healthy' | 'sparse' | 'blind-spot';
+export type DomainEmptyStateKind = 'clean' | 'uninstrumented' | 'stale';
+
+export interface DomainEmptyState {
+  kind: DomainEmptyStateKind;
+  title: string;
+  detail: string;
+}
 
 const COVERAGE_LEVEL_FOR_STATUS: Record<
   DomainCoverageStatus,
@@ -126,7 +133,39 @@ export interface DomainFinding {
    * coverage signal is supplied.
    */
   coverage: DomainCoverageLevel;
+  /** Why an otherwise-quiet domain is low-confidence or stale, when known. */
+  staleNote?: string;
 }
+
+const CLEAN_DOMAIN_DETAIL: Record<ActionDomain, string> = {
+  home: 'No home-level findings in the loaded evidence.',
+  safety:
+    'No bypass, unattended-session, dangerous-command, or policy findings in the loaded evidence.',
+  cost: 'No cost findings in the loaded token evidence.',
+  'success-rate': 'No tool-error or retry findings in the loaded evidence.',
+  speed: 'No speed findings in the loaded timing evidence.',
+  'context-health': 'No context-health findings in the loaded token and timeline evidence.',
+  'workflow-hygiene': 'No workflow-hygiene findings in the loaded tool/task evidence.',
+  discovery: 'No discovery findings in the loaded evidence.',
+  raw: 'No raw-data findings in the loaded evidence.',
+};
+
+const MISSING_DOMAIN_DETAIL: Record<ActionDomain, string> = {
+  home: 'No home signals were loaded yet.',
+  safety:
+    'No safety data yet — load tool calls, permission rows, or deceit signals.',
+  cost: 'No cost data yet — load token-usage records.',
+  'success-rate':
+    'No success-rate data yet — load tool calls, API errors, or runtime events.',
+  speed:
+    'No speed data yet — wire runtime events or model-latency samples.',
+  'context-health':
+    'No context-health data yet — load token, timeline, or repo-map evidence.',
+  'workflow-hygiene':
+    'No workflow-hygiene data yet — load tool calls, tasks, or workflow runs.',
+  discovery: 'No discovery signals were loaded yet.',
+  raw: 'No raw signals were loaded yet.',
+};
 
 /**
  * The "where did it go" beat: the single top finding per action-domain, in
@@ -145,6 +184,9 @@ export function topPerDomain(
   coverage?: readonly DomainCoverage[]
 ): DomainFinding[] {
   const ranked = rankForDigest(recs);
+  const coverageByDomain = new Map<ActionDomain, DomainCoverage>(
+    (coverage ?? []).map((c) => [c.domain, c])
+  );
   const levelByDomain = new Map<ActionDomain, DomainCoverageLevel>(
     (coverage ?? []).map((c) => [c.domain, coverageLevelForStatus(c.status)])
   );
@@ -152,7 +194,40 @@ export function topPerDomain(
     domain,
     rec: ranked.find((r) => domainForRec(r) === domain) ?? null,
     coverage: levelByDomain.get(domain) ?? 'healthy',
+    staleNote: coverageByDomain.get(domain)?.staleNote,
   }));
+}
+
+export function emptyStateForDomainFinding(
+  finding: DomainFinding
+): DomainEmptyState | null {
+  if (finding.rec) return null;
+  if (finding.coverage === 'blind-spot') {
+    return {
+      kind: 'uninstrumented',
+      title: 'Needs data',
+      detail: MISSING_DOMAIN_DETAIL[finding.domain],
+    };
+  }
+  if (finding.staleNote) {
+    return {
+      kind: 'stale',
+      title: 'Stale evidence',
+      detail: finding.staleNote,
+    };
+  }
+  if (finding.coverage === 'sparse') {
+    return {
+      kind: 'uninstrumented',
+      title: 'Partial data',
+      detail: `${MISSING_DOMAIN_DETAIL[finding.domain]} Some inputs are present, so this read is low-confidence.`,
+    };
+  }
+  return {
+    kind: 'clean',
+    title: 'Clean',
+    detail: CLEAN_DOMAIN_DETAIL[finding.domain],
+  };
 }
 
 export type VerdictTone = 'ok' | 'attention' | 'critical';

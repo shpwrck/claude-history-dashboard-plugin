@@ -8,6 +8,7 @@ import {
   domainForRec,
   coverageLevelForStatus,
   DOMAIN_FOR_CATEGORY,
+  emptyStateForDomainFinding,
 } from './digest';
 import type { DomainCoverage } from './coverage';
 
@@ -144,16 +145,53 @@ describe('topPerDomain', () => {
     const coverage: DomainCoverage[] = [
       { domain: 'safety', status: 'PROVE' },
       { domain: 'cost', status: 'CANNOT_SEE' },
-      { domain: 'success-rate', status: 'INFER' },
+      {
+        domain: 'success-rate',
+        status: 'INFER',
+        staleNote: 'Debug logs are stale.',
+      },
     ];
     const out = topPerDomain([], coverage);
-    const byDomain = new Map(out.map((d) => [d.domain, d.coverage]));
+    const byDomain = new Map(out.map((d) => [d.domain, d]));
     // PROVE -> healthy, INFER -> sparse, CANNOT_SEE -> blind-spot.
-    expect(byDomain.get('safety')).toBe('healthy');
-    expect(byDomain.get('cost')).toBe('blind-spot');
-    expect(byDomain.get('success-rate')).toBe('sparse');
+    expect(byDomain.get('safety')?.coverage).toBe('healthy');
+    expect(byDomain.get('cost')?.coverage).toBe('blind-spot');
+    expect(byDomain.get('success-rate')?.coverage).toBe('sparse');
+    expect(byDomain.get('success-rate')?.staleNote).toBe(
+      'Debug logs are stale.'
+    );
     // Domains absent from the coverage array fall back to healthy.
-    expect(byDomain.get('speed')).toBe('healthy');
+    expect(byDomain.get('speed')?.coverage).toBe('healthy');
+  });
+
+  it('classifies empty domain states as clean, uninstrumented, or stale', () => {
+    const out = topPerDomain([], [
+      { domain: 'safety', status: 'PROVE' },
+      { domain: 'speed', status: 'CANNOT_SEE' },
+      {
+        domain: 'success-rate',
+        status: 'INFER',
+        staleNote: 'Debug logs are stale.',
+      },
+    ]);
+    const byDomain = new Map(out.map((d) => [d.domain, d]));
+
+    expect(emptyStateForDomainFinding(byDomain.get('safety')!)).toMatchObject({
+      kind: 'clean',
+      title: 'Clean',
+    });
+    expect(emptyStateForDomainFinding(byDomain.get('speed')!)).toMatchObject({
+      kind: 'uninstrumented',
+      title: 'Needs data',
+      detail: 'No speed data yet — wire runtime events or model-latency samples.',
+    });
+    expect(
+      emptyStateForDomainFinding(byDomain.get('success-rate')!)
+    ).toMatchObject({
+      kind: 'stale',
+      title: 'Stale evidence',
+      detail: 'Debug logs are stale.',
+    });
   });
 });
 
