@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  extractBrevityFacts,
   extractUsageLimitFacts,
   GUIDANCE_ARTICLES,
   guidanceArticleById,
@@ -144,5 +145,50 @@ describe('extractUsageLimitFacts (inline fixtures, decoupled from scraped prose)
     expect(extractUsageLimitFacts('supports 200,000 tokens of context')).toEqual({
       contextWindowTokens: 200000,
     });
+  });
+});
+
+describe('extractBrevityFacts (inline fixtures, decoupled from scraped prose)', () => {
+  it('extracts the full set of brevity tactics from representative prose', () => {
+    expect(
+      extractBrevityFacts(
+        'Budget models benefit from structured rather than conversational prompts. ' +
+          'The four dimensions: Context, Task, Constraint, Output Format. ' +
+          'Every token of social nicety is a token stolen from actual reasoning. ' +
+          'Telegram Style: Omit articles, conjunctions, filler. ' +
+          'Request minimal output, e.g. "Code only. No explanation." ' +
+          'Words and Phrases to Eliminate add length. ' +
+          'Sacrifice grammar before sacrificing precision.'
+      )
+    ).toEqual({
+      preferStructuredPrompts: true,
+      promptDimensions: 'context, task, constraint, output-format',
+      dropSocialNiceties: true,
+      telegramStyle: true,
+      requestMinimalOutput: true,
+      eliminateFillerPhrases: true,
+      precisionOverGrammar: true,
+    });
+  });
+
+  it('extracts nothing from unrelated text', () => {
+    expect(extractBrevityFacts('How to install the desktop app.')).toEqual({});
+    expect(extractBrevityFacts('')).toEqual({});
+  });
+
+  it('matches alternate phrasings independently', () => {
+    expect(extractBrevityFacts('In follow-ups, avoid pleasantries.')).toEqual({
+      dropSocialNiceties: true,
+    });
+    expect(extractBrevityFacts('Add "Code only. No explanation." to the prompt.')).toEqual({
+      requestMinimalOutput: true,
+    });
+  });
+
+  it('requires all four dimension keywords before claiming the dimensions fact', () => {
+    // "four dimensions" alone, without the dimension vocabulary, must not match.
+    expect(extractBrevityFacts('There are four dimensions to consider.')).toEqual(
+      {}
+    );
   });
 });

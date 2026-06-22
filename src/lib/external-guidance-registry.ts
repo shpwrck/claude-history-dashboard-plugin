@@ -81,6 +81,59 @@ export function extractUsageLimitFacts(text: string): ExternalGuidanceFacts {
   return facts;
 }
 
+/**
+ * Structured brevity / token-efficiency tactics from the prompt-brevity guide
+ * (#1589). Pure regex over the snapshot text, keyed on the article's distinctive
+ * load-bearing phrasing so the inline-fixture unit tests pin behaviour without
+ * coupling CI to the scraped prose (which, being a personal blog, drifts more
+ * freely than first-party docs). Each fact is an actionable brevity heuristic
+ * that maps onto the output-verbosity recommendation.
+ */
+export function extractBrevityFacts(text: string): ExternalGuidanceFacts {
+  const normalized = String(text ?? '').toLowerCase();
+  const facts: ExternalGuidanceFacts = {};
+  // "structured rather than conversational prompts"
+  if (/structured rather than conversational/.test(normalized)) {
+    facts.preferStructuredPrompts = true;
+  }
+  // The four dimensions every effective prompt addresses.
+  if (
+    /four dimensions/.test(normalized) &&
+    normalized.includes('context') &&
+    normalized.includes('constraint') &&
+    normalized.includes('output format')
+  ) {
+    facts.promptDimensions = 'context, task, constraint, output-format';
+  }
+  // "Every token of social nicety is a token stolen from actual reasoning."
+  if (
+    /social nicety is a token stolen/.test(normalized) ||
+    /avoid pleasantries/.test(normalized)
+  ) {
+    facts.dropSocialNiceties = true;
+  }
+  // Telegram style: omit articles, conjunctions, filler.
+  if (/omit articles, conjunctions, filler/.test(normalized)) {
+    facts.telegramStyle = true;
+  }
+  // "Request minimal output" / "Code only. No explanation."
+  if (
+    /request minimal output/.test(normalized) ||
+    /code only\. no explanation/.test(normalized)
+  ) {
+    facts.requestMinimalOutput = true;
+  }
+  // The catalog of filler words/phrases to delete.
+  if (/words and phrases to eliminate/.test(normalized)) {
+    facts.eliminateFillerPhrases = true;
+  }
+  // "Sacrifice grammar before sacrificing precision."
+  if (/sacrifice grammar before sacrificing precision/.test(normalized)) {
+    facts.precisionOverGrammar = true;
+  }
+  return facts;
+}
+
 export const GUIDANCE_ARTICLES: readonly GuidanceArticle[] = [
   {
     id: 'anthropic-usage-limits',
@@ -102,6 +155,19 @@ export const GUIDANCE_ARTICLES: readonly GuidanceArticle[] = [
     target: { detectorId: 'reliability.rate-limits' },
     suggestion: 'Review first-party Claude usage and length limit guidance.',
     extractFacts: extractUsageLimitFacts,
+  },
+  {
+    // A community (personal-blog) prompt-brevity guide (#1589). Attaches to the
+    // output-verbosity recommendation as lower-trust "Learn More" backing —
+    // never a standalone rec. The `community` trust tier (from its source) is
+    // surfaced distinctly at render time.
+    id: 'prompt-brevity-language-efficiency',
+    source: 'prahlad-yeri-guides',
+    url: 'https://prahladyeri.github.io/guides/applying-brevity-and-language-efficiency-to-prompt-engineering.html',
+    target: { detectorId: 'cost.output-verbosity' },
+    suggestion:
+      'Tighten prompts: drop social niceties, prefer structured over conversational phrasing, and request minimal output.',
+    extractFacts: extractBrevityFacts,
   },
 ];
 

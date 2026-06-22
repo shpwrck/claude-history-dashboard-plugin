@@ -31,6 +31,16 @@ export const SOURCE_REGISTRY: readonly ExternalGuidanceSource[] = [
     trustTier: 'first-party',
     allowedUrlPrefixes: ['https://support.claude.com/en/articles/'],
   },
+  {
+    // A personal technical blog (#1589) — useful prompt-brevity craft, but not
+    // a vendor or first-party source, so it carries the lower-trust `community`
+    // tier. Downstream rendering marks community guidance distinctly from
+    // first-party (RecommendationCard) so a reader can weigh it accordingly.
+    id: 'prahlad-yeri-guides',
+    label: 'Prahlad Yeri (guides)',
+    trustTier: 'community',
+    allowedUrlPrefixes: ['https://prahladyeri.github.io/guides/'],
+  },
 ];
 
 export interface ExternalGuidanceTarget {
@@ -254,6 +264,27 @@ export function parseExternalGuidanceSnapshot(
     ...(facts ? { facts } : {}),
     ...(pages ? { pages } : {}),
   };
+}
+
+/**
+ * Short, human-readable label for a trust tier, used where guidance is cited so
+ * a reader can weigh a `community` (personal blog) source differently from a
+ * `first-party` (vendor) one (#1589). First-party carries no marker — it is the
+ * baseline; lower-trust tiers are called out explicitly.
+ */
+export function trustTierLabel(
+  tier: ExternalGuidanceTrustTier
+): string | undefined {
+  switch (tier) {
+    case 'first-party':
+      return undefined;
+    case 'vendor':
+      return 'vendor';
+    case 'community':
+      return 'community-sourced';
+    default:
+      return undefined;
+  }
 }
 
 export function externalGuidanceRef(
