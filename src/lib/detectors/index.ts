@@ -104,6 +104,7 @@ import { detector as allowRuleOverlapsDeny } from './safety/allow-rule-overlaps-
 import { detector as configHygieneRollup } from './safety/config-hygiene-rollup';
 import { detector as continuationBlocked } from './safety/continuation-blocked';
 import { detector as policyChange } from './safety/policy-change';
+import { detector as unattendedSessions } from './safety/unattended-sessions';
 
 // ── SECURITY ────────────────────────────────────────────────────────────
 import { detector as modelDeceit } from './security/model-deceit';
@@ -169,6 +170,7 @@ export const DETECTORS: Detector[] = [
   denyRuleNeverTriggered,
   allowRuleOverlapsDeny,
   continuationBlocked,
+  unattendedSessions,
   // reliability
   toolErrors,
   apiErrors,

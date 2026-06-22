@@ -48,6 +48,37 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
     "view": "permissions",
   },
   {
+    "action": "Review the unattended sessions before treating them as low-risk. Move recurring destructive patterns behind deny or ask policy, and reserve unattended bypassPermissions for trusted, reversible work.",
+    "affected": 2,
+    "category": "safety",
+    "detail": "2 dangerous command(s) ran under bypassPermissions across 1 unattended sdk-* session(s).",
+    "evidence": [
+      "automate, sdk-cli: 2 dangerous bypassed command(s) (git reset --hard, rm -rf)",
+    ],
+    "id": "safety.unattended-sessions",
+    "provenance": {
+      "inference": "Dangerous commands are higher-risk when permission prompts are bypassed in unattended SDK sessions because nobody is watching to interrupt the run.",
+      "observations": [
+        {
+          "claim": "1 unattended sdk-* session(s) used bypassPermissions and dangerous Bash commands",
+          "field": "tokenData.entrypoint + permissionRows.mode + detectDangerousCommands",
+          "source": "parse-sessions + parse-permissions",
+          "value": 1,
+        },
+        {
+          "claim": "2 dangerous command(s) contributed to unattended risk",
+          "field": "detectDangerousCommands",
+          "source": "parse-permissions",
+          "value": 2,
+        },
+      ],
+    },
+    "severity": "critical",
+    "title": "Unattended sessions ran dangerous bypassed commands",
+    "unattended": true,
+    "view": "permissions",
+  },
+  {
     "action": "Use the highest cache-read sessions to target context-slimming work. Treat 1-hour cache writes with no same-session cache reads as concrete cache policy waste.",
     "affected": 1,
     "category": "cost",

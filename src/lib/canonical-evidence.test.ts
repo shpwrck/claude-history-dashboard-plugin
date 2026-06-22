@@ -125,6 +125,18 @@ describe('canonical evidence routing', () => {
     });
   });
 
+  it('routes unattended-session findings to filtered Permissions evidence', () => {
+    expect(
+      canonicalEvidenceTargetForRecommendation(
+        rec({ id: 'safety.unattended-sessions', category: 'safety', view: 'permissions' })
+      )
+    ).toEqual({
+      signal: null,
+      view: 'permissions',
+      filter: { entrypoint: 'unattended', table: 'unattended' },
+    });
+  });
+
   it('falls back to the domain landing when a detector has no target view', () => {
     expect(
       canonicalEvidenceTargetForRecommendation(
