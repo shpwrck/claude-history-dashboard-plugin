@@ -2507,6 +2507,20 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ tokenData: lnrTok }) });
   }
 
+  // ── maintenance.memory-hygiene (#1779): an index pointer to a file that is
+  // not on disk (dangling-index-link, one of the five deterministic signals).
+  {
+    const memoryStores = [
+      {
+        project: 'proj',
+        memories: [],
+        index: [{ title: 'Gone', file: 'gone.md', hook: '', raw: '- [Gone](gone.md)' }],
+        indexRaw: '- [Gone](gone.md)',
+      },
+    ] as unknown as RecommendationInput['memoryStores'];
+    out.push({ now, input: bankBase({ memoryStores }) });
+  }
+
   return out;
 }
 

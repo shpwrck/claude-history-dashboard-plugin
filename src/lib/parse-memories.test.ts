@@ -102,6 +102,35 @@ describe('parseMemories', () => {
     expect(parseMemories(null)).toEqual([]);
     expect(parseMemories({ projects: [] })).toEqual([]);
   });
+
+  it('excludes the MEMORY.md index from the Memories view (#1990)', () => {
+    // The server read now INCLUDES MEMORY.md so buildMemoryStores can light up
+    // the #1779 detector — but the index is not a fact card, so parseMemories
+    // must filter it out (and `MEMORY.md` lowercases via isIndexFile too).
+    const withIndex: MemoriesResponse = {
+      projects: [
+        {
+          slug: '-home-u-zeta',
+          files: [
+            { name: 'MEMORY.md', content: '# Index\n- [a](a.md) — hook' },
+            { name: 'a.md', content: '---\nname: ay\nmetadata:\n  type: user\n---\nbody' },
+            { name: 'memory.md', content: '# lowercase index also dropped' },
+          ],
+        },
+      ],
+    };
+    const g = parseMemories(withIndex);
+    expect(g).toHaveLength(1);
+    expect(g[0].memories.map((m) => m.name)).toEqual(['ay']);
+    expect(countMemories(g)).toBe(1);
+  });
+
+  it('drops a project whose only file is the MEMORY.md index (#1990)', () => {
+    const indexOnly: MemoriesResponse = {
+      projects: [{ slug: '-home-u-idx', files: [{ name: 'MEMORY.md', content: '# Index' }] }],
+    };
+    expect(parseMemories(indexOnly)).toEqual([]);
+  });
 });
 
 const INDEX_MD = `# Memory index — demo

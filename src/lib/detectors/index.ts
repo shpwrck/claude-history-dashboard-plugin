@@ -138,6 +138,10 @@ import { detector as serialToolGap } from './speed/serial-tool-gap';
 import { detector as staleProjects } from './activity/stale-projects';
 import { detector as activityTrend } from './activity/activity-trend';
 
+// ── MAINTENANCE ───────────────────────────────────────────────────────────
+// Upkeep of the agent's own durable state (#1965 category foundation).
+import { detector as memoryHygiene } from './maintenance/memory-hygiene';
+
 // ── Registered detectors ────────────────────────────────────────────────
 // Emit order is LOAD-BEARING: `buildRecommendations` evaluates these in array
 // order and then stable-sorts by (severity → estSavingsUsd → affected), so for
@@ -338,6 +342,13 @@ export const DETECTORS: Detector[] = [
   // trending up (environmental drift / scaffolding a newer model no longer
   // needs). Reads only tokenData; carries provenance with an as-of/stale anchor.
   lastNRunsAudit,
+
+  // ── #1779 (epic #1910) — first `maintenance` detector: memory-store hygiene ──
+  // Reads the per-project memory store + MEMORY.md index (#1965 foundation) and
+  // emits the five deterministic signals — oversized index, long index line,
+  // dangling index link, unindexed file, dangling wikilink — grouped into one
+  // recommend-only card. Dark on a memory-store-free dataset (SPA/upload).
+  memoryHygiene,
 ];
 
 /**

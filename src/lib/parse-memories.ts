@@ -151,12 +151,18 @@ export function parseMemoryFile(file: RawMemoryFile): AgentMemory {
  * Parse the raw `/api/memories` response into project-grouped memories.
  * Projects are sorted by slug; within each, memories are sorted by name.
  * Projects whose `memory/` dir held no parseable files are dropped.
+ *
+ * The `MEMORY.md` index is NOT a fact file, so it is excluded here — the server
+ * read now includes it (#1990, so {@link buildMemoryStores} can light up the
+ * #1779 memory-hygiene detector), but the Memories *view* still shows only
+ * facts. Index hygiene is the detector's concern, not a memory card.
  */
 export function parseMemories(resp: MemoriesResponse | null | undefined): ProjectMemories[] {
   const projects = resp?.projects ?? [];
   const out: ProjectMemories[] = [];
   for (const p of projects) {
     const memories = (p.files ?? [])
+      .filter((f) => !isIndexFile(f.name))
       .map(parseMemoryFile)
       .sort((a, b) => a.name.localeCompare(b.name));
     if (memories.length > 0) {

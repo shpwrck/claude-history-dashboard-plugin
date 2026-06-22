@@ -2592,9 +2592,12 @@ function appendVary(res, value) {
 }
 
 // Agent memories (#458). Walk every ~/.claude/projects/<slug>/memory/ dir and
-// return raw markdown per *.md file (excluding the MEMORY.md index), grouped by
-// project slug. Read fresh per request; the client parses the frontmatter. Any
-// unreadable project/file is skipped rather than failing the whole response.
+// return raw markdown per *.md file — INCLUDING the MEMORY.md index (#1990) so
+// `buildMemoryStores` can populate `store.index`/`indexRaw` and the #1779
+// memory-hygiene detector can fire; `parseMemories` still filters the index out
+// of the Memories view. Grouped by project slug. Read fresh per request; the
+// client parses the frontmatter. Any unreadable project/file is skipped rather
+// than failing the whole response.
 async function readMemories(projectsRoot = PROJECTS) {
   const out = [];
   let contentBytes = 0;
@@ -2654,7 +2657,7 @@ async function readMemories(projectsRoot = PROJECTS) {
     const files = [];
     for (const name of mdFiles.entries
       .map((file) => file.name)
-      .filter((file) => file.endsWith('.md') && file !== 'MEMORY.md')
+      .filter((file) => file.endsWith('.md'))
       .sort()) {
       if (fileLimitReached || responseLimitReached) {
         skippedFiles += 1;

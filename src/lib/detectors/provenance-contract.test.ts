@@ -38,6 +38,7 @@ import type {
   ModelEvalSummary,
 } from '../model-eval-ingest';
 import type { EvalRoutingRecommendation } from '../model-eval-result';
+import type { ProjectMemoryStore } from '../parse-memories';
 
 // ── Validator unit tests ─────────────────────────────────────────────────
 
@@ -273,7 +274,23 @@ function passiveWaitTimeline(sessionId: string, gapMinutes: number): SessionTime
   };
 }
 
+const memoryHygieneStore = (): ProjectMemoryStore[] => [
+  {
+    project: 'proj-a',
+    memories: [
+      { name: 'kept', description: '', type: 'project', body: 'links [[ghost-memory]]', file: 'kept.md' },
+    ],
+    // Index points to a file that isn't on disk → dangling-index-link (structural).
+    index: [{ title: 'Gone', file: 'gone.md', hook: 'x', raw: '- [Gone](gone.md) — x' }],
+    indexRaw: '- [Gone](gone.md) — x',
+  },
+];
+
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
+  'maintenance.memory-hygiene': () => ({
+    input: baseInput({ memoryStores: memoryHygieneStore() }),
+    now: 0,
+  }),
   'activity.activity-trend': () => ({
     input: activityInput(makeCache(12576, 2373)),
     now: Date.parse('2026-06-04T00:00:00Z'),

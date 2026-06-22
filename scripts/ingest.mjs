@@ -18,6 +18,7 @@ import {
   mkdirSync,
   opendirSync,
   openSync,
+  readdirSync,
   readSync,
   statSync,
 } from 'node:fs';
@@ -459,6 +460,11 @@ const { parseWorkflows } = await import(join(LIB, 'parse-workflows.ts'));
 const { readExternalGuidanceSnapshots } = await import(
   join(LIB, 'parse-external-guidance.ts')
 );
+// Per-project agent memory store + MEMORY.md index (#1965/#1990). Built fresh
+// per recs assemble from a local memory walk and threaded into
+// `RecommendationInput.memoryStores` so the #1779 memory-hygiene detector fires
+// on the real local store instead of staying dark in production.
+const { buildMemoryStores } = await import(join(LIB, 'parse-memories.ts'));
 const EXTERNAL_GUIDANCE_DIR = join(PROJECT_DIR, 'data', 'external-guidance');
 // Read fresh on every assemble — NOT memoized. The ingest() content-hash gate
 // hashes this dir so a refreshed snapshot (git pull / drift-PR merge under a
@@ -472,6 +478,64 @@ function readExternalGuidance() {
   } catch {
     // Missing/malformed snapshot store degrades to "no references", never
     // sinks the dataset endpoint.
+    return [];
+  }
+}
+
+// Walk every <PROJECTS>/<slug>/memory/ dir and build the per-project memory
+// STORE + MEMORY.md index (#1965/#1990) the #1779 memory-hygiene detector reads
+// off `RecommendationInput.memoryStores`. INCLUDES MEMORY.md (unlike the older
+// /api/memories read) so the index signals can fire. Read fresh per assemble —
+// NOT memoized — exactly like readExternalGuidance: sourceSignature() covers the
+// same memory dirs/files, so an in-place memory edit invalidates the recs cache;
+// a process-lifetime memo would let a stale store be re-served. Mirrors the
+// server's readMemories (single PROJECTS root, file-size cap, path-escape
+// guard). Tolerant: an unreadable project/file is skipped, never sinks recs.
+function readMemoryStores() {
+  const projects = [];
+  let projectDirs;
+  try {
+    projectDirs = readdirSync(PROJECTS, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  let checked = 0;
+  // Sort before the cap so this walk and sourceSignature()'s memory block (which
+  // also sorts) sample the SAME ordered prefix of project dirs at the
+  // INGEST_PROJECT_MAX_DIRS boundary — otherwise the signature could cover a
+  // different project subset than the data it gates.
+  for (const ent of [...projectDirs]
+    .filter((d) => d.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name))) {
+    if (checked >= INGEST_PROJECT_MAX_DIRS) break;
+    checked += 1;
+    const slug = ent.name;
+    const memDir = join(PROJECTS, slug, 'memory');
+    if (!existsSync(memDir)) continue;
+    let names;
+    try {
+      names = readdirSync(memDir)
+        .filter((f) => f.endsWith('.md'))
+        .sort();
+    } catch {
+      continue;
+    }
+    const files = [];
+    for (const name of names) {
+      const full = join(memDir, name);
+      // Defense in depth: never escape the memory dir via a crafted name.
+      if (!full.startsWith(memDir + sep)) continue;
+      try {
+        files.push({ name, content: readArtifactTextCappedSync(full) });
+      } catch {
+        /* skip an unreadable/oversized memory file */
+      }
+    }
+    if (files.length > 0) projects.push({ slug, files });
+  }
+  try {
+    return buildMemoryStores({ projects });
+  } catch {
     return [];
   }
 }
@@ -1636,6 +1700,53 @@ export function sourceSignature() {
     }
     parts.push(`projects:${projectsRoot}:${Math.floor(maxDirMtime)}`);
   }
+  // Memory stores (#1990): readMemoryStores() reads each <PROJECTS>/<slug>/memory
+  // tree (MEMORY.md index + fact files) into RecommendationInput.memoryStores. A
+  // project dir's mtime does NOT advance when a grandchild memory FILE is edited
+  // in place (POSIX dir-mtime semantics), so the `projects:` dir signature above
+  // misses index/fact edits — exactly the changes the #1779 detector keys on.
+  // Stat the memory dir (catches add/remove/rename) plus each .md file's
+  // mtime+size (catches in-place edits) so a memory change invalidates the recs
+  // cache, mirroring the liveConfig file section below. Cheap: memory dirs hold a
+  // handful of small files and are sparse across projects.
+  {
+    let memDirs;
+    try {
+      memDirs = readdirSync(PROJECTS, { withFileTypes: true });
+    } catch {
+      memDirs = [];
+    }
+    let checked = 0;
+    for (const ent of [...memDirs]
+      .filter((d) => d.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      if (checked >= INGEST_PROJECT_MAX_DIRS) break;
+      checked += 1;
+      const memDir = join(PROJECTS, ent.name, 'memory');
+      try {
+        parts.push(`memory-dir:${memDir}:${Math.floor(statSync(memDir).mtimeMs)}`);
+      } catch {
+        continue; // no memory/ dir for this project — contributes nothing
+      }
+      let names;
+      try {
+        names = readdirSync(memDir)
+          .filter((f) => f.endsWith('.md'))
+          .sort();
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        const full = join(memDir, name);
+        try {
+          const s = statSync(full);
+          parts.push(`memory:${full}:${Math.floor(s.mtimeMs)}:${s.size}`);
+        } catch {
+          parts.push(`memory:${full}:0:0`);
+        }
+      }
+    }
+  }
   // Files whose CONTENT feeds the dataset: history.jsonl/history.d entries plus
   // the liveConfig sources whose bytes are read and parsed (settings.json x2,
   // CLAUDE.md, ~/.claude.json, installed_plugins.json).
@@ -2552,11 +2663,11 @@ function assembleRecommendationContext(options = {}) {
     // engine's attach pass turns them into "Learn More" references.
     externalGuidance: dataset.externalGuidance,
     // Per-project memory store + MEMORY.md index (#1965): non-signal aggregate,
-    // the seam the #1779 memory-hygiene detector reads. The real read
-    // (`buildMemoryStores` over a fresh memory walk, wired into the dataset
-    // content_hash) lands with that detector; until a consumer exists this stays
-    // `null` so the engine output and recs cache are byte-identical.
-    memoryStores: null,
+    // the seam the #1779 memory-hygiene detector reads. Built fresh from a local
+    // memory walk (#1990); sourceSignature() covers the memory dirs/files so an
+    // edit invalidates the recs cache. Empty (`[]`) when no memory dirs exist or
+    // on the SPA/upload dataset, so the detector simply emits nothing there.
+    memoryStores: readMemoryStores(),
   });
   return { input, sessions };
 }
