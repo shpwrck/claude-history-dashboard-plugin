@@ -75,6 +75,40 @@ describe('parseSessionTimeline', () => {
     expect(entry).toMatchObject({ kind: 'tool_result', toolUseId: 'u1', isError: true })
   })
 
+  it('flags assistant turn-ends on passive wait language (#1873), even past the summary cutoff', () => {
+    const filler = 'Here is a long status update about the work in progress. '.repeat(6) // > 200 chars
+    const text = [
+      line({ type: 'assistant', timestamp: '2026-01-01', message: { content: [{ type: 'text', text: `${filler}I'll wait for it to finish and report back.` }] } }),
+      line({ type: 'assistant', timestamp: '2026-01-02', message: { content: [{ type: 'text', text: 'Done — here is the result.' }] } }),
+    ].join('\n')
+    const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+    // Detected on the full untruncated text — the phrase is past the ~200-char summary cutoff.
+    expect(entries[0].waitLanguage).toBe(true)
+    expect(entries[0].summary).not.toContain("I'll wait")
+    // A plain (non-wait) ending carries no flag (omitted, not false).
+    expect(entries[1].waitLanguage).toBeUndefined()
+  })
+
+  it('flags harness-backed tool calls as backgrounded (#1873)', () => {
+    const text = line({
+      type: 'assistant',
+      timestamp: '2026-01-01',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'a', name: 'Bash', input: { command: 'sleep 600', run_in_background: true } },
+          { type: 'tool_use', id: 'b', name: 'Bash', input: { command: 'ls' } },
+          { type: 'tool_use', id: 'c', name: 'Workflow', input: {} },
+          { type: 'tool_use', id: 'd', name: 'Task', input: {} },
+        ],
+      },
+    })
+    const byId = new Map(parseSessionTimeline(text, 's.jsonl')!.entries.map((e) => [e.toolUseId, e]))
+    expect(byId.get('a')!.backgrounded).toBe(true) // run_in_background Bash
+    expect(byId.get('b')!.backgrounded).toBeUndefined() // foreground Bash
+    expect(byId.get('c')!.backgrounded).toBe(true) // Workflow self-resumes
+    expect(byId.get('d')!.backgrounded).toBe(true) // Task self-resumes
+  })
+
   it('records an unknown line type as an "other" entry summarized by its type', () => {
     const text = line({ type: 'system', timestamp: '2026-01-01' })
     expect(parseSessionTimeline(text, 's.jsonl')!.entries[0]).toMatchObject({ kind: 'other', summary: 'system' })

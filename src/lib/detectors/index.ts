@@ -123,6 +123,7 @@ import { detector as configDrift } from './reliability/config-drift';
 import { detector as agentReportCard } from './reliability/agent-report-card';
 import { detector as retryPrefixRewaste } from './reliability/retry-prefix-rewaste';
 import { detector as overloadReretry } from './reliability/overload-reretry';
+import { detector as passiveWaitStall } from './reliability/passive-wait-stall';
 
 // ── SPEED ───────────────────────────────────────────────────────────────
 // The clock (ADR 0006) — wall-clock/latency levers.
@@ -309,6 +310,14 @@ export const DETECTORS: Detector[] = [
   // prices at the measured cache-read residual, stability-gates to read-only docs,
   // and stays doc-scoped so it never double-books vs repo-map-context-waste (code).
   crossSessionReread,
+
+  // ── #1873 (epic #1910) — passive-wait stalls (reliability) ────────────────
+  // Flags assistant turn-ends that end on wait/monitor language with no
+  // harness-backed background mechanism (run_in_background / Task / Workflow), so
+  // the session can't self-resume and a real human prompt (never a tool_result)
+  // is forced — weighted by the silence gap. Reads parse-timeline's per-turn
+  // waitLanguage/backgrounded flags; dark on a transcript-free dataset.
+  passiveWaitStall,
 ];
 
 /**

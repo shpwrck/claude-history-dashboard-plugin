@@ -26,6 +26,7 @@ import type { Recommendation, RecommendationInput, RecProvenance } from './types
 import { detector as activityTrend } from './activity/activity-trend';
 import type { LiveConfig } from '../../types';
 import type { RuntimeEvents } from '../parse-runtime-events';
+import type { SessionTimeline } from '../parse-timeline';
 import type { StatsCache } from '../parse-stats-cache';
 import type { ToolInventory } from '../parse-tool-inventory';
 import type {
@@ -254,6 +255,24 @@ type ProvenanceFixture = {
   now: number;
 };
 
+// One passive-wait stall: an assistant turn ending on wait language `gapMinutes`
+// before a real human prompt, with no harness-backed tool in the run.
+function passiveWaitTimeline(sessionId: string, gapMinutes: number): SessionTimeline {
+  const t0 = Date.parse('2026-06-10T00:00:00Z');
+  const turnEnd = new Date(t0).toISOString();
+  const humanPrompt = new Date(t0 + gapMinutes * 60_000).toISOString();
+  return {
+    sessionId,
+    startTime: turnEnd,
+    endTime: humanPrompt,
+    entries: [
+      { timestamp: new Date(t0 - 1000).toISOString(), kind: 'user', summary: 'kick off the push' },
+      { timestamp: turnEnd, kind: 'assistant', summary: "I'll wait for it to finish and report back.", waitLanguage: true },
+      { timestamp: humanPrompt, kind: 'user', summary: 'status?' },
+    ],
+  };
+}
+
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
   'activity.activity-trend': () => ({
     input: activityInput(makeCache(12576, 2373)),
@@ -293,6 +312,16 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
   'cost.model-eval-routing-gap': () => ({
     input: baseInput({ modelEvalSummary: modelEvalSummary() }),
     now: MODEL_EVAL_NOW,
+  }),
+  'reliability.passive-wait-stall': () => ({
+    input: baseInput({
+      timelines: [
+        passiveWaitTimeline('stall-1', 16),
+        passiveWaitTimeline('stall-2', 7),
+        passiveWaitTimeline('stall-3', 3),
+      ],
+    }),
+    now: 0,
   }),
   'context.cross-session-reread': () => {
     // A doc cold-read once per session across 6 sessions, read-only, big enough

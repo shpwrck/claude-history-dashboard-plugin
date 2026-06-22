@@ -36,6 +36,24 @@ export interface TimelineEntry {
   toolName?: string; // when kind === 'tool_use'
   toolUseId?: string; // stable tool_use id, also copied onto matching tool_result entries
   isError?: boolean; // when kind === 'tool_result'
+  /**
+   * When `kind === 'assistant'`: the text ends on passive wait/monitor language
+   * ("I'll wait", "I'll report when it finishes", "I'll surface the rollup when
+   * the watcher fires"). Detected on the *full* untruncated block text, so a
+   * trailing wait phrase past the ~200-char `summary` cutoff is still caught (and
+   * the flag survives `slimSessionTimeline`, which only strips `summary`). Feeds
+   * the `reliability.passive-wait-stall` detector (#1873).
+   */
+  waitLanguage?: boolean;
+  /**
+   * When `kind === 'tool_use'`: the call dispatches harness-backed work that
+   * auto-wakes the session on completion (`run_in_background` Bash, or a
+   * Task / Workflow / ScheduleWakeup / Monitor call). The clean-separation control
+   * for the passive-wait-stall detector (#1873): a turn carrying one of these is
+   * never a passive stall, because the session resumes on its own rather than
+   * forcing a human turn.
+   */
+  backgrounded?: boolean;
 }
 
 export interface SessionTimeline extends SessionDimensions {
@@ -103,6 +121,63 @@ export function slimSessionTimeline(timeline: SessionTimeline): SessionTimeline 
     firstPromptPreview: timeline.firstPromptPreview ?? firstPromptPreview(timeline.entries),
     slim: true,
   };
+}
+
+/**
+ * Passive wait/monitor phrases an assistant turn can END on — "I'll wait", "I'll
+ * report when it finishes", "I'll surface the rollup when the watcher fires".
+ * Matched on the full untruncated text so a trailing wait phrase past the
+ * ~200-char `summary` cutoff is still caught. Feeds the passive-wait-stall
+ * detector (#1873): a turn that ends on one of these with no harness-backed
+ * background mechanism cannot resume on its own and forces a human turn.
+ */
+const WAIT_LANGUAGE_PATTERNS: readonly RegExp[] = [
+  /\bi(?:'|’)?ll\s+wait\b/i, // "I'll wait"
+  /\bi\s+will\s+wait\b/i, // "I will wait"
+  // "I'll report / surface / monitor / let you know / ping you / circle back …"
+  /\bi(?:'|’)?ll\s+(?:report|surface|share|update|let\s+you\s+know|ping\s+you|notify\s+you|circle\s+back|check\s+back|come\s+back|keep\s+you\s+posted|keep\s+you\s+updated|monitor|keep\s+an\s+eye)\b/i,
+  /\bi\s+will\s+(?:report|surface|share|update|let\s+you\s+know|ping\s+you|notify\s+you|circle\s+back|check\s+back|keep\s+you\s+posted|monitor)\b/i,
+  // "report/surface … when/once … finishes/completes/fires"
+  /\b(?:report|surface|update\s+you|let\s+you\s+know|ping\s+you|notify\s+you)\b[^.!?\n]{0,80}\b(?:when|once|after|as\s+soon\s+as)\b[^.!?\n]{0,80}\b(?:finish|complete|done|fire[sd]?|return|ready|land|wrap)/i,
+  // "waiting for it to complete / for completion"
+  /\bwait(?:ing)?\s+for\b[^.!?\n]{0,60}\b(?:to\s+(?:complete|finish|return)|completion)\b/i,
+];
+
+/**
+ * Whether an assistant text block ends a turn on passive wait/monitor language.
+ * Exported so the passive-wait-stall detector test can assert against the same
+ * matcher the parser uses.
+ */
+export function hasWaitLanguage(text: string): boolean {
+  if (!text) return false;
+  return WAIT_LANGUAGE_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * Harness mechanisms that resume the session on their own after a turn ends —
+ * the clean-separation control for the passive-wait-stall detector (#1873). A
+ * turn that dispatches one of these never strands the session waiting on a human:
+ * `run_in_background` Bash auto-wakes on exit, Task/Workflow re-invoke on
+ * completion, and ScheduleWakeup/Monitor are deliberate self-resuming polls.
+ */
+const SELF_RESUMING_TOOLS: ReadonlySet<string> = new Set([
+  'Task',
+  'Agent',
+  'Workflow',
+  'ScheduleWakeup',
+  'Monitor',
+]);
+
+/** Whether a tool_use dispatches harness-backed, self-resuming background work. */
+export function isBackgroundedToolUse(name: string | undefined, input: unknown): boolean {
+  if (
+    input &&
+    typeof input === 'object' &&
+    (input as { run_in_background?: unknown }).run_in_background === true
+  ) {
+    return true;
+  }
+  return name ? SELF_RESUMING_TOOLS.has(name) : false;
 }
 
 function stringifyToolInput(input: unknown): string {
@@ -209,10 +284,12 @@ export function parseSessionTimeline(
       for (const block of msg.content) {
         if (!block || typeof block !== 'object') continue;
         if (block.type === 'text') {
+          const text = block.text ?? '';
           entries.push(timelineEntry({
             timestamp,
             kind: 'assistant',
-            summary: summarize(block.text ?? ''),
+            summary: summarize(text),
+            ...(hasWaitLanguage(text) ? { waitLanguage: true } : {}),
           }));
         } else if (block.type === 'thinking') {
           entries.push(timelineEntry({
@@ -227,6 +304,7 @@ export function parseSessionTimeline(
             summary: stringifyToolInput(block.input),
             toolUseId: typeof block.id === 'string' ? block.id : undefined,
             toolName: block.name ?? 'unknown',
+            ...(isBackgroundedToolUse(block.name, block.input) ? { backgrounded: true } : {}),
           }));
         }
       }

@@ -2380,6 +2380,27 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ toolData: xsrTool, tokenData: xsrToken }) });
   }
 
+  // ── reliability.passive-wait-stall (#1873): assistant turn-ends on wait/monitor
+  // language with no harness-backed background mechanism, forcing a human turn.
+  {
+    const t0 = Date.parse('2026-06-10T00:00:00Z');
+    const pwStall = (sessionId: string, gapMin: number): SessionTimeline =>
+      ({
+        sessionId,
+        startTime: new Date(t0).toISOString(),
+        endTime: new Date(t0 + gapMin * 60_000).toISOString(),
+        entries: [
+          { timestamp: new Date(t0 - 1000).toISOString(), kind: 'user', summary: 'kick it off' },
+          { timestamp: new Date(t0).toISOString(), kind: 'assistant', summary: "I'll wait and report back.", waitLanguage: true },
+          { timestamp: new Date(t0 + gapMin * 60_000).toISOString(), kind: 'user', summary: 'status?' },
+        ],
+      }) as unknown as SessionTimeline;
+    out.push({
+      now,
+      input: bankBase({ timelines: [pwStall('pws1', 2), pwStall('pws2', 7), pwStall('pws3', 16)] }),
+    });
+  }
+
   return out;
 }
 
