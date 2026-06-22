@@ -1442,6 +1442,37 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ assistantFeatures: [feat], tokenData: td }) });
   }
 
+  // ── cost.batchable-workload ────────────────────────────────────────────
+  {
+    const td = [
+      {
+        sessionId: 'bw1',
+        entrypoint: 'sdk-cli',
+        totalInputTokens: 1_000_000,
+        totalOutputTokens: 200_000,
+        totalCacheCreationTokens: 0,
+        totalCacheReadTokens: 0,
+        model: 'claude-opus-4-7',
+        messageCount: 10,
+        entries: [
+          {
+            timestamp: 't',
+            model: 'claude-opus-4-7',
+            inputTokens: 1_000_000,
+            outputTokens: 200_000,
+            cacheCreationTokens: 0,
+            cacheCreation1hTokens: 0,
+            cacheReadTokens: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+          },
+        ],
+        compactionEvents: [],
+      },
+    ] as unknown as RecommendationInput['tokenData'];
+    out.push({ now, input: bankBase({ tokenData: td }) });
+  }
+
   // ── cost.expensive-agent-type ──────────────────────────────────────────
   {
     const taskCall = (i: number): ToolCall =>

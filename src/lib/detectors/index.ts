@@ -50,6 +50,7 @@ import { detector as idleMcpTools } from './cost/idle-mcp-tools';
 import { detector as expensiveAgentType } from './cost/expensive-agent-type';
 import { detector as modelEvalRoutingGap } from './cost/model-eval-routing-gap';
 import { detector as outputVerbosity } from './cost/output-verbosity';
+import { detector as batchableWorkload } from './cost/batchable-workload';
 
 // ── CONTEXT ─────────────────────────────────────────────────────────────
 import { detector as overWindow } from './context/over-window';
@@ -286,6 +287,13 @@ export const DETECTORS: Detector[] = [
   // pool. Sized honestly/prose-only; tier-0 estimate. The causal caveman-vs-normal
   // proof axis is a separate meta follow-on, tracked apart.
   outputVerbosity,
+
+  // ── #1755 (epic #1910) — batchable-workload Batch API -50% cost lever ──────
+  // Flags token-heavy unattended (sdk-*) sessions routable through the Batch API
+  // for ~50% off standard input/output; composes after automation-share's model
+  // reprice (orderKey 82) so the saving is marginal, not double-counted. The
+  // batch-route shadow-calls axis is a separate meta follow-on.
+  batchableWorkload,
 ];
 
 /**
