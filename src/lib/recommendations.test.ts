@@ -2068,6 +2068,23 @@ function fixtureBank(): Fixture[] {
     }),
   });
 
+  // safety.policy-change: latest policy state expands trust/tool access.
+  out.push({
+    now,
+    input: bankBase({
+      configBackups: [
+        {
+          kind: 'enable-all-flip',
+          project: '/repo/app',
+          from: false,
+          to: true,
+          timestamp: now - day,
+          severity: 'warning',
+        },
+      ] as unknown as RecommendationInput['configBackups'],
+    }),
+  });
+
   // reliability.agent-report-card (#572): a committed sdk-cli project with heavy
   // reliability drag → at least one non-KEEP verdict.
   {

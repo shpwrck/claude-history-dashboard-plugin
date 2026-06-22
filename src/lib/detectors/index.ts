@@ -103,6 +103,7 @@ import { detector as denyRuleNeverTriggered } from './safety/deny-rule-never-tri
 import { detector as allowRuleOverlapsDeny } from './safety/allow-rule-overlaps-deny';
 import { detector as configHygieneRollup } from './safety/config-hygiene-rollup';
 import { detector as continuationBlocked } from './safety/continuation-blocked';
+import { detector as policyChange } from './safety/policy-change';
 
 // ── SECURITY ────────────────────────────────────────────────────────────
 import { detector as modelDeceit } from './security/model-deceit';
@@ -163,6 +164,7 @@ export const DETECTORS: Detector[] = [
   dangerousBypass,
   riskyActions,
   configHygieneRollup, // #1164 — unused mcpServer/plugin hygiene rollup
+  policyChange,
   promptFriction,
   denyRuleNeverTriggered,
   allowRuleOverlapsDeny,

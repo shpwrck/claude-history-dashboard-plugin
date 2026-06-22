@@ -93,6 +93,13 @@ export function canonicalEvidenceTargetForRecommendation(
       filter: { entrypoint: 'unattended', table: 'unattended' },
     };
   }
+  if (rec.id === 'safety.policy-change') {
+    return {
+      signal: null,
+      view: 'permissions',
+      filter: { table: 'drift' },
+    };
+  }
   return {
     signal,
     view: signal

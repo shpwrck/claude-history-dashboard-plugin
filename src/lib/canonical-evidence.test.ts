@@ -113,6 +113,18 @@ describe('canonical evidence routing', () => {
     });
   });
 
+  it('scopes policy-change findings to the policy drift evidence card', () => {
+    expect(
+      canonicalEvidenceTargetForRecommendation(
+        rec({ id: 'safety.policy-change', category: 'safety', view: 'permissions' })
+      )
+    ).toEqual({
+      signal: null,
+      view: 'permissions',
+      filter: { table: 'drift' },
+    });
+  });
+
   it('falls back to the domain landing when a detector has no target view', () => {
     expect(
       canonicalEvidenceTargetForRecommendation(
