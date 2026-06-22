@@ -49,6 +49,7 @@ import { detector as priorityTierSpend } from './cost/priority-tier-spend';
 import { detector as idleMcpTools } from './cost/idle-mcp-tools';
 import { detector as expensiveAgentType } from './cost/expensive-agent-type';
 import { detector as modelEvalRoutingGap } from './cost/model-eval-routing-gap';
+import { detector as outputVerbosity } from './cost/output-verbosity';
 
 // ── CONTEXT ─────────────────────────────────────────────────────────────
 import { detector as overWindow } from './context/over-window';
@@ -278,6 +279,13 @@ export const DETECTORS: Detector[] = [
   // githubmcp) as a safe removal lever. Sibling to bloated-claude-md (prose docs
   // only); schema size is a documented token proxy → tier-0 estSavingsUsd.
   mcpSchemaTax,
+
+  // ── #1923 (epic #1910) — output-verbosity (caveman) cost lever ────────────
+  // Measures verbose assistant PROSE output (assistantFeatures.textLength, text
+  // blocks only) and dollarizes a conservative compression against the output
+  // pool. Sized honestly/prose-only; tier-0 estimate. The causal caveman-vs-normal
+  // proof axis is a separate meta follow-on, tracked apart.
+  outputVerbosity,
 ];
 
 /**

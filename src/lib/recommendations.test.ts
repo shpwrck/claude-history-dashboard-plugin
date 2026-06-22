@@ -1412,6 +1412,36 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── cost.output-verbosity ──────────────────────────────────────────────
+  {
+    const feat = {
+      sessionId: 'ov1',
+      assistantTurnCount: 30,
+      textLength: 400_000, // ~100k prose tokens of 120k output → prose-dominant
+      codeBlockCount: 0,
+      toolCallCount: 5,
+      refusalCount: 0,
+      hedgingCount: 0,
+      endsWithQuestionCount: 0,
+      thinkingByteLen: 0,
+    } as unknown as NonNullable<RecommendationInput['assistantFeatures']>[number];
+    const e = () => ({
+      timestamp: 't',
+      model: 'claude-opus-4-7',
+      inputTokens: 0,
+      outputTokens: 6_000,
+      cacheCreationTokens: 0,
+      cacheCreation1hTokens: 0,
+      cacheReadTokens: 0,
+      webSearchRequests: 0,
+      webFetchRequests: 0,
+    });
+    const td = [
+      { sessionId: 'ov1', entries: Array.from({ length: 20 }, e), compactionEvents: [] },
+    ] as unknown as RecommendationInput['tokenData'];
+    out.push({ now, input: bankBase({ assistantFeatures: [feat], tokenData: td }) });
+  }
+
   // ── cost.expensive-agent-type ──────────────────────────────────────────
   {
     const taskCall = (i: number): ToolCall =>
