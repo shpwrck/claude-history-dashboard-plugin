@@ -20,14 +20,29 @@ function severityFor(actions: RiskyAction[]): RecSeverity {
     : 'warning';
 }
 
+/** True for the review-worthy (critical-severity) categories; false for the
+ *  warning-level `other-high-impact` (routine publications). */
+function isCritical(action: RiskyAction): boolean {
+  return action.severity === 'critical';
+}
+
 function categorySummary(actions: RiskyAction[]): string {
-  const counts = new Map<RiskyActionCategory, number>();
+  // Track count AND whether the category carried any critical action, so the
+  // summary leads with the genuinely review-worthy categories rather than
+  // whichever category merely has the largest (often routine) count (#2010).
+  const counts = new Map<RiskyActionCategory, { count: number; critical: boolean }>();
   for (const action of actions) {
-    counts.set(action.category, (counts.get(action.category) ?? 0) + 1);
+    const cur = counts.get(action.category) ?? { count: 0, critical: false };
+    cur.count += 1;
+    if (isCritical(action)) cur.critical = true;
+    counts.set(action.category, cur);
   }
   return Array.from(counts.entries())
-    .sort((a, b) => b[1] - a[1])
-    .map(([category, count]) => `${CATEGORY_LABEL[category]} ${count}`)
+    .sort(
+      (a, b) =>
+        Number(b[1].critical) - Number(a[1].critical) || b[1].count - a[1].count
+    )
+    .map(([category, v]) => `${CATEGORY_LABEL[category]} ${v.count}`)
     .join(', ');
 }
 
@@ -44,21 +59,46 @@ export const detector: Detector = {
     if (actions.length === 0) return null;
 
     const sessions = new Set(actions.map((action) => action.sessionId)).size;
-    const evidenceRefs = actions
+
+    // Rank critical-severity actions ahead of routine ones BEFORE slicing the
+    // top-5 evidence (#2010). `detectRiskyActions` returns actions in
+    // session/timestamp order, so without this the cited "review these calls"
+    // evidence is dominated by routine publications (git push master / PR merge,
+    // which are policy-sanctioned here) and hides the secret-sensitive/deploy
+    // actions that actually drove the CRITICAL severity. Array#sort is stable, so
+    // equal-severity actions keep their original order.
+    const ranked = [...actions].sort(
+      (a, b) => Number(isCritical(b)) - Number(isCritical(a))
+    );
+    // Derive evidence AND evidenceRefs from the SAME top-5 slice so evidence[i]
+    // and evidenceRefs[i] always describe the same action. (An action with no
+    // evidenceRef contributes no ref entry — the consumer matches on toolUseId —
+    // but it never shifts a later action's ref onto an earlier evidence row.)
+    const topActions = ranked.slice(0, 5);
+    const evidenceRefs = topActions
       .map((action) => action.evidenceRef)
       .filter((ref): ref is NonNullable<typeof ref> => Boolean(ref));
+
+    // Split the headline so a flood of routine publications can't bury the
+    // review-worthy count (#2010).
+    const reviewWorthy = actions.filter(isCritical);
+    const routine = actions.filter((action) => !isCritical(action));
+    const detail =
+      reviewWorthy.length > 0 && routine.length > 0
+        ? `${reviewWorthy.length} review-worthy action(s) (${categorySummary(reviewWorthy)}) + ${routine.length} routine publication(s) across ${sessions} session(s).`
+        : `${actions.length} high-impact action(s) across ${sessions} session(s): ${categorySummary(actions)}.`;
 
     return {
       id: 'safety.risky-actions',
       category: 'safety',
       severity: severityFor(actions),
       title: 'High-impact actions need review',
-      detail: `${actions.length} high-impact action(s) across ${sessions} session(s): ${categorySummary(actions)}.`,
+      detail,
       action:
         'Review the cited tool calls before treating the session as low-risk; add ask/deny policy around recurring high-impact actions.',
       affected: actions.length,
-      evidence: actions.slice(0, 5).map(evidenceRow),
-      ...(evidenceRefs.length > 0 ? { evidenceRefs: evidenceRefs.slice(0, 5) } : {}),
+      evidence: topActions.map(evidenceRow),
+      ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}),
       view: 'permissions',
       provenance: {
         observations: [
