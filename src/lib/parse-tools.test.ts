@@ -194,6 +194,23 @@ describe('nativeToolBypass', () => {
     expect(out.grepRatio).toEqual({ native: 1, bash: 1 })
   })
 
+  it('does NOT count a chained `cd <dir> && <cmd>` anchor as a cd bypass (#2014)', () => {
+    // The mandated cwd-anchor idiom (AGENTS.md "Worktrees & Branches" + the
+    // cwd-anchor-guard hook) — a chained cd anchors the following command in the
+    // SAME invocation, so it is not a wasted leading cd. Only a STANDALONE cd is.
+    const data = [
+      session('s', [
+        bash('cd /repo && git push'), // anchored — not a bypass
+        bash('cd /repo; ls'), // `;`-chained — not a bypass
+        bash('cd /repo || true'), // `||`-chained — not a bypass
+        bash('cd /tmp'), // standalone — IS a bypass
+      ]),
+    ]
+    const out = nativeToolBypass(data)
+    const cd = out.categories.find((c) => c.category === 'cd')
+    expect(cd?.count).toBe(1)
+  })
+
   it('does NOT count a pipe-fed grep as a bypass (native Grep cannot read stdin)', () => {
     const data = [session('s', [bash('ls | grep foo')])]
     const out = nativeToolBypass(data)

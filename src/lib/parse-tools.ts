@@ -383,9 +383,15 @@ const BYPASS_DEFS: Array<{
   {
     category: 'cd',
     nativeTool: 'absolute paths',
-    // a leading `cd ` — cwd resets between Bash calls, so this is wasted work
-    test: (c) => /^cd\s/.test(c),
-    hint: 'Leading cd is wasted — cwd resets between Bash calls; use absolute paths.',
+    // A STANDALONE leading `cd` is wasted — cwd resets between Bash calls, so a
+    // lone `cd /tmp` has no effect on the next call. But a `cd <dir> && <cmd>`
+    // (or `;`/`|`-chained) form anchors the following command within the SAME
+    // invocation — that is the MANDATED cwd-anchor idiom (AGENTS.md "Worktrees &
+    // Branches" + the cwd-anchor-guard PreToolUse hook), NOT waste. Counting the
+    // chained form mislabels the required anchor as a bypass (#2014), so flag a
+    // leading `cd` only when no chain operator (`&&`/`||`/`;`/`|`/`&`) follows.
+    test: (c) => /^cd\s/.test(c) && !/[;&|]/.test(c),
+    hint: 'A standalone leading cd is wasted — cwd resets between Bash calls; use absolute paths. (A chained `cd <dir> && <cmd>` anchor is fine.)',
   },
 ];
 
