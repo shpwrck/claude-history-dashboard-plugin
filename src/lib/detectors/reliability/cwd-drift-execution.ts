@@ -1,5 +1,11 @@
-import type { Detector, Recommendation, RecObservation, AppliedMarkers } from '../types';
-import { claudeMdMarksApplied, truncate } from '../shared';
+import type {
+  Detector,
+  Recommendation,
+  RecObservation,
+  AppliedMarkers,
+  RecommendationInput,
+} from '../types';
+import { claudeMdMarksApplied, hasPreToolUseAnchorGuard, truncate } from '../shared';
 import type { ToolCall, ToolUsageData } from '../../parse-tools';
 
 /**
@@ -66,10 +72,43 @@ const GH_REPO_FLAG_RE = /\s(?:-R|--repo)(?:=|\s)/;
 const LEADING_ENV_RE = /^(?:sudo\s+|\w+=\S+\s+)*/;
 const GH_REPO_ENV_RE = /\bGH_REPO=/;
 
+// The engine's own canned snippet (the `fix.snippet` below). `appliedMarkers`
+// keys the fix to this exact wording, so the Adoption loop can recognise its own
+// paste-in.
 const MARKERS: AppliedMarkers = {
   headings: [/^##\s+Anchor (?:repo|git)\b/i],
   bodyPhrases: ['silently targets the wrong repository'],
 };
+
+// A semantically-equivalent USER-AUTHORED anchoring rule with different
+// heading/wording also counts as "applied" (#2013). A real example is AGENTS.md
+// `## Worktrees & Branches` carrying "Never rely on the ambient shell cwd —
+// anchor EVERY git and gh command … an unanchored command may silently read or
+// write the WRONG repository". Implemented CONSERVATIVELY — biased toward NOT
+// suppressing a real finding — by requiring an anchoring-intent heading AND the
+// co-occurrence of an "anchor" phrase AND a "wrong repository" phrase
+// (case-insensitive). All three must match before suppression fires, so a
+// passing mention of the word "anchor" alone never hides the finding.
+const EQUIVALENT_MARKERS: AppliedMarkers = {
+  headings: [
+    /^#{1,6}\s+.*\b(?:anchor\w*|worktree\w*|cwd|working dir\w*|shell cwd)\b/i,
+  ],
+  bodyPhrases: ['anchor', 'wrong repository'],
+};
+
+/**
+ * The detector's CLAUDE.md/AGENTS.md fix is "already applied" when EITHER the
+ * engine's canned snippet OR a semantically-equivalent user-authored anchoring
+ * rule is present. `claudeMdMarksApplied` is strict-AND within one marker set
+ * (heading AND all phrases), so two independent strict-AND checks OR'd together
+ * keep each set tight while broadening coverage.
+ */
+function anchoringRuleApplied(liveConfig: RecommendationInput['liveConfig']): boolean {
+  return (
+    claudeMdMarksApplied(liveConfig, MARKERS) ||
+    claudeMdMarksApplied(liveConfig, EQUIVALENT_MARKERS)
+  );
+}
 
 interface SessionDrift {
   sessionId: string;
@@ -218,7 +257,9 @@ export const detector: Detector = {
   dataDeps: ['toolData', 'liveConfig'],
   appliedMarkers: MARKERS,
   rule(input): Recommendation | null {
-    if (claudeMdMarksApplied(input.liveConfig, MARKERS)) return null;
+    // Suppress when an anchoring rule is already documented — the engine's own
+    // canned snippet OR a semantically-equivalent user-authored rule (#2013).
+    if (anchoringRuleApplied(input.liveConfig)) return null;
 
     const toolData = input.toolData;
     if (!toolData || toolData.length === 0) return null;
@@ -234,7 +275,23 @@ export const detector: Detector = {
 
     const sessionsAffected = perSession.length;
     const maxPerSession = perSession.reduce((m, s) => Math.max(m, s.count), 0);
-    const severity = maxPerSession >= HIGH_PER_SESSION ? 'warning' : 'info';
+
+    // Hook-aware historical demotion (#2013, mirroring hook-errors' #1102
+    // stale-input demotion). `totalUnanchored` is an all-time cumulative count.
+    // When the readable bundle shows a cwd-anchor-guard PreToolUse hook
+    // configured now, the behaviour is already blocked going forward — so the
+    // finding is HISTORICAL, not a current failure: demote to `info` and rephrase
+    // to past tense. `null` liveConfig means "can't tell" → keep the present-tense
+    // WARNING (don't hide a real finding). Mirrors hook-errors exactly.
+    const configReadable = input.liveConfig != null;
+    const guardConfigured = hasPreToolUseAnchorGuard(input.liveConfig?.settings);
+    const demote = configReadable && guardConfigured;
+
+    const severity = demote
+      ? 'info'
+      : maxPerSession >= HIGH_PER_SESSION
+        ? 'warning'
+        : 'info';
 
     const evidence = [...perSession]
       .sort((a, b) => b.count - a.count)
@@ -260,24 +317,39 @@ export const detector: Detector = {
         source: 'parse-tools',
         field: 'toolData[].calls[].input.command ?? commandPreview',
       },
+      {
+        claim: guardConfigured
+          ? 'a cwd-anchor-guard PreToolUse hook is currently configured'
+          : configReadable
+            ? 'no cwd-anchor-guard PreToolUse hook is currently configured'
+            : 'current settings.json could not be read',
+        source: 'settings.json',
+        field: 'hooks.PreToolUse',
+      },
     ];
 
     return {
       id: 'reliability.cwd-drift-execution',
       category: 'reliability',
       severity,
-      title: 'git/gh commands run unanchored to the project directory',
-      detail: `${totalUnanchored} \`git\`/\`gh\` command(s) across ${sessionsAffected} session(s) ran with no explicit anchor (no \`git -C <dir>\`, no preceding \`cd <dir> &&\`, no \`gh -R owner/repo\`/\`GH_REPO=\`). git/gh infer their target repo from the shell cwd, so if that cwd has drifted outside the project tree the op silently targets the wrong repository — committing to the wrong tree or reading stale state behind a false "merged/landed/verified" claim. Build families are excluded: they fail loudly in the wrong tree, and their drift can't be judged from command text alone.`,
-      action:
-        'Anchor every git/gh command to an explicit target the first time — `git -C <project-dir> …` (or `cd <project-dir> && git …`), and `gh -R owner/repo …` / `GH_REPO=owner/repo gh …` — rather than relying on the ambient shell cwd, or rely on the cwd-anchor guard hook to enforce it.',
+      title: demote
+        ? 'git/gh ran unanchored in the past (cwd-anchor guard configured now)'
+        : 'git/gh commands run unanchored to the project directory',
+      detail: demote
+        ? `${totalUnanchored} \`git\`/\`gh\` command(s) across ${sessionsAffected} session(s) ran with no explicit anchor (no \`git -C <dir>\`, no preceding \`cd <dir> &&\`, no \`gh -R owner/repo\`/\`GH_REPO=\`) across your history. A cwd-anchor-guard PreToolUse hook is now configured and blocks these going forward, so this is historical — an unanchored git/gh op run from a drifted cwd would otherwise silently target the wrong repository (committing to the wrong tree, or reading stale state behind a false "merged/landed/verified" claim).`
+        : `${totalUnanchored} \`git\`/\`gh\` command(s) across ${sessionsAffected} session(s) ran with no explicit anchor (no \`git -C <dir>\`, no preceding \`cd <dir> &&\`, no \`gh -R owner/repo\`/\`GH_REPO=\`). git/gh infer their target repo from the shell cwd, so if that cwd has drifted outside the project tree the op silently targets the wrong repository — committing to the wrong tree or reading stale state behind a false "merged/landed/verified" claim. Build families are excluded: they fail loudly in the wrong tree, and their drift can't be judged from command text alone.`,
+      action: demote
+        ? 'No action needed while the cwd-anchor guard stays configured; it blocks unanchored git/gh going forward. If you remove it, anchor every git/gh command yourself — `git -C <project-dir> …` (or `cd <project-dir> && git …`), and `gh -R owner/repo …` / `GH_REPO=owner/repo gh …`.'
+        : 'Anchor every git/gh command to an explicit target the first time — `git -C <project-dir> …` (or `cd <project-dir> && git …`), and `gh -R owner/repo …` / `GH_REPO=owner/repo gh …` — rather than relying on the ambient shell cwd, or rely on the cwd-anchor guard hook to enforce it.',
       affected: totalUnanchored,
       view: 'tools',
       estTimeReclaimedMin: sessionsAffected * 2,
       evidence,
       provenance: {
         observations,
-        inference:
-          'A git/gh op with no explicit anchor resolves its target repository from the shell cwd; on a session whose cwd has drifted outside the project tree that silently selects the wrong repo, so commits land in the wrong tree and reads feed false merge/landing/verification claims. Anchoring each op (or the cwd-anchor guard) removes the ambient-cwd dependency.',
+        inference: demote
+          ? 'The unanchored-op count is historical and a cwd-anchor-guard PreToolUse hook is configured now, so the behaviour is already blocked going forward — the finding is not current and is demoted to past tense. (An unanchored git/gh op resolves its target repo from the shell cwd, which silently selects the wrong repo on a drifted session.)'
+          : 'A git/gh op with no explicit anchor resolves its target repository from the shell cwd; on a session whose cwd has drifted outside the project tree that silently selects the wrong repo, so commits land in the wrong tree and reads feed false merge/landing/verification claims. Anchoring each op (or the cwd-anchor guard) removes the ambient-cwd dependency.',
       },
       fix: {
         target: 'CLAUDE.md',

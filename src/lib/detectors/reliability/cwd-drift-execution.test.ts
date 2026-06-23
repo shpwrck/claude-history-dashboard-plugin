@@ -40,6 +40,21 @@ function liveConfigClaudeMd(global: string): LiveConfig {
   return { claudeMd: { global, perProject: {} } } as unknown as LiveConfig;
 }
 
+/** LiveConfig with a controllable cwd-anchor-guard PreToolUse hook present. */
+function liveConfigWithGuard(guardConfigured: boolean): LiveConfig {
+  return {
+    settings: guardConfigured
+      ? {
+          hooks: {
+            PreToolUse: [
+              { matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/cwd-anchor-guard.mjs' }] },
+            ],
+          },
+        }
+      : { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/some-other-guard.mjs' }] }] } },
+  } as unknown as LiveConfig;
+}
+
 /** One session whose single command is an unanchored git/gh op. */
 function driftSession(id: string, command = 'git log origin/master --oneline -5'): ToolUsageData {
   return session(id, [bash(command)]);
@@ -212,16 +227,93 @@ describe('reliability.cwd-drift-execution — scoping', () => {
 });
 
 describe('reliability.cwd-drift-execution — suppression', () => {
+  const threeDrift = () => [driftSession('a'), driftSession('b'), driftSession('c')];
+
   it('is suppressed when CLAUDE.md already carries the anchoring rule', () => {
     const md =
       '## Anchor repo commands to the project directory\n\n' +
       'An unanchored git/gh command run from a drifted cwd ' +
       'silently targets the wrong repository.';
-    const rec = detector.rule(
-      input([driftSession('a'), driftSession('b'), driftSession('c')], liveConfigClaudeMd(md)),
-      0
-    );
+    const rec = detector.rule(input(threeDrift(), liveConfigClaudeMd(md)), 0);
     expect(rec).toBeNull();
+  });
+
+  it('is suppressed by a semantically-equivalent user-authored anchoring rule (#2013)', () => {
+    // Different heading + wording from the canned snippet (real AGENTS.md form):
+    // "Worktrees & Branches" + "anchor EVERY git and gh command" + "WRONG repository".
+    const md =
+      '## Worktrees & Branches\n\n' +
+      'Never rely on the ambient shell cwd — anchor EVERY `git` and `gh` command on ' +
+      'the first attempt, because an unanchored command may silently read or write ' +
+      'the WRONG repository.';
+    const rec = detector.rule(input(threeDrift(), liveConfigClaudeMd(md)), 0);
+    expect(rec).toBeNull();
+  });
+
+  it('does NOT suppress on a passing mention of "anchor" without the wrong-repo phrase (conservative)', () => {
+    // Bias is toward NOT suppressing a real finding: "anchor" alone is insufficient.
+    const md =
+      '## Worktrees & Branches\n\n' +
+      'Use git worktrees to anchor a feature branch in its own directory.';
+    const rec = detector.rule(input(threeDrift(), liveConfigClaudeMd(md)), 0);
+    expect(rec).not.toBeNull();
+    expect(rec!.severity).toBe('info'); // still present-tense (no guard hook either)
+  });
+});
+
+// ── Hook-aware historical demotion (#2013, mirroring hook-errors #1102) ──────
+describe('reliability.cwd-drift-execution — historical demotion', () => {
+  const threeDrift = () => [driftSession('a'), driftSession('b'), driftSession('c')];
+
+  it('demotes to info + historical wording when a cwd-anchor-guard hook is configured now', () => {
+    const rec = detector.rule(input(threeDrift(), liveConfigWithGuard(true)), 0);
+    expect(rec).not.toBeNull();
+    expect(rec!.severity).toBe('info');
+    expect(rec!.title).toContain('configured now');
+    expect(rec!.detail).toContain('historical');
+    expect(rec!.detail).toContain('now configured');
+    // The present-tense claim is gone.
+    expect(rec!.detail).not.toContain('silently targets the wrong repository');
+  });
+
+  it('demotes a would-be WARNING (>=10 in one session) to info when the guard is configured', () => {
+    const many = session('hot', Array.from({ length: 10 }, () => bash('git status')));
+    const rec = detector.rule(input([many], liveConfigWithGuard(true)), 0);
+    expect(rec!.severity).toBe('info');
+    expect(rec!.title).toContain('configured now');
+  });
+
+  it('keeps present-tense WARNING when history is hot but NO guard hook is configured', () => {
+    const many = session('hot', Array.from({ length: 10 }, () => bash('git status')));
+    const rec = detector.rule(input([many], liveConfigWithGuard(false)), 0);
+    expect(rec!.severity).toBe('warning');
+    expect(rec!.title).toBe('git/gh commands run unanchored to the project directory');
+    expect(rec!.detail).toContain('silently targets the wrong repository');
+  });
+
+  it('keeps present-tense (info) when readable config has NO guard hook and NO CLAUDE.md marker', () => {
+    const rec = detector.rule(input(threeDrift(), liveConfigWithGuard(false)), 0);
+    expect(rec!.severity).toBe('info');
+    expect(rec!.title).toBe('git/gh commands run unanchored to the project directory');
+    expect(rec!.detail).toContain('silently targets the wrong repository');
+  });
+
+  it('keeps present-tense WARNING/info when liveConfig is null (can-not-tell)', () => {
+    const rec = detector.rule(input(threeDrift(), null), 0);
+    expect(rec!.severity).toBe('info');
+    expect(rec!.title).toBe('git/gh commands run unanchored to the project directory');
+    expect(rec!.detail).toContain('silently targets the wrong repository');
+  });
+
+  it('cites the cwd-anchor guard observation in provenance', () => {
+    const rec = detector.rule(input(threeDrift(), liveConfigWithGuard(true)), 0)!;
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.provenance!.observations.map((o) => o.source)).toEqual(
+      expect.arrayContaining(['parse-tools', 'settings.json'])
+    );
+    expect(
+      rec.provenance!.observations.some((o) => o.field === 'hooks.PreToolUse')
+    ).toBe(true);
   });
 });
 

@@ -196,6 +196,28 @@ export function hasStopHook(settings: LiveSettings | null | undefined): boolean 
   return Array.isArray(stop) && stop.length > 0;
 }
 
+/**
+ * True when a cwd-anchoring `PreToolUse` guard is currently configured in
+ * settings. Used by the historical-demotion contract for
+ * `reliability.cwd-drift-execution` (#2013, mirroring the #1102 stale-input
+ * demotion in `hasStopHook`): a historical "git/gh ran unanchored" finding must
+ * not be phrased as a current failure when the guard already blocks it going
+ * forward. We match the guard by its command string containing
+ * `cwd-anchor-guard` (the global `cwd-anchor-guard.mjs` PreToolUse hook in
+ * `shpwrck/claude`), across every PreToolUse entry's inner hook commands.
+ */
+export function hasPreToolUseAnchorGuard(
+  settings: LiveSettings | null | undefined
+): boolean {
+  const pre = settings?.hooks?.PreToolUse;
+  if (!Array.isArray(pre)) return false;
+  return pre.some((entry) =>
+    (entry?.hooks ?? []).some(
+      (h) => typeof h?.command === 'string' && h.command.includes('cwd-anchor-guard')
+    )
+  );
+}
+
 export function isHaikuPinned(settings: LiveSettings | null | undefined): boolean {
   return typeof settings?.model === 'string' && /\bhaiku\b/i.test(settings.model);
 }
