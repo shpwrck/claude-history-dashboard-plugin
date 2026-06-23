@@ -747,14 +747,36 @@ db.exec(`
 // row is the compressed dataset (~2–3 MB), so a handful costs single-digit MB.
 const DATASET_CACHE_KEEP = 3;
 
+// Bump when a per-session PARSER's OUTPUT shape changes without the source
+// transcript changing — the session_blob cache gate is keyed purely on file
+// mtime+size, so an unchanged transcript would otherwise serve a stale blob
+// that lacks the new field. Folding this version into every session `sig`
+// forces a one-time reparse of all sessions on the next ingest.
+//   v2 (#1927): added per-entry `thinkingTokens` + session `totalThinkingTokens`.
+//   v3 (#2006): recalibrated thinking residual (per-block-type token density).
+//   v4 (#2036): precompute target-aware rm -rf certainty + dangerous fragment on
+//       ToolCall, so body-stripped commands keep correct dangerous-command signal.
+// Exported so the dataset-cache-schema regression test can assert the dataset key
+// folds this in (the two cache gates must turn over together).
+export const PARSER_SIG_VERSION = 'v4';
+
 // Bump when assembleDataset() or downstream serialized dataset shape changes
 // without necessarily changing any ~/.claude source artifact. The compressed
 // dataset cache is persisted across deploys, so source-content hashes alone can
 // otherwise reuse JSON assembled by older code.
 export const DATASET_ASSEMBLY_SCHEMA_VERSION = 2;
 
+// The dataset-cache gate (sourceSignature) must also turn over when the
+// per-session PARSER output changes, because that output is folded into the
+// assembled dataset (e.g. dangerous-command signals → recommendations). The two
+// version knobs were decoupled before (#2036 follow-up): bumping
+// PARSER_SIG_VERSION reparsed session blobs but, with transcript mtimes
+// unchanged, sourceSignature() stayed constant so the persisted dataset_cache
+// kept serving JSON assembled by the OLD parser. Folding PARSER_SIG_VERSION into
+// this key makes any parser bump invalidate the dataset cache too, so the recipe
+// "bump PARSER_SIG_VERSION" is once again sufficient on its own.
 export function datasetAssemblySchemaKey() {
-  return `dataset-schema:v${DATASET_ASSEMBLY_SCHEMA_VERSION}`;
+  return `dataset-schema:v${DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${PARSER_SIG_VERSION}`;
 }
 
 const selDatasetCache = db.prepare(
@@ -841,17 +863,8 @@ export function saveDatasetCache(
   }
 }
 
-// Bump when a per-session PARSER's OUTPUT shape changes without the source
-// transcript changing — the session_blob cache gate is keyed purely on file
-// mtime+size, so an unchanged transcript would otherwise serve a stale blob
-// that lacks the new field. Folding this version into every session `sig`
-// forces a one-time reparse of all sessions on the next ingest.
-//   v2 (#1927): added per-entry `thinkingTokens` + session `totalThinkingTokens`.
-//   v3 (#2006): recalibrated thinking residual (per-block-type token density).
-//   v4 (#2036): precompute target-aware rm -rf certainty + dangerous fragment on
-//       ToolCall, so body-stripped commands keep correct dangerous-command signal.
-const PARSER_SIG_VERSION = 'v4';
-
+// PARSER_SIG_VERSION is defined above (next to DATASET_ASSEMBLY_SCHEMA_VERSION)
+// so the dataset-cache key can fold it in — the two must turn over together.
 function sigOf(paths) {
   return paths
     .map((p) => {

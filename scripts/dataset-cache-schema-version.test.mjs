@@ -34,7 +34,15 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.ok(ingest.DATASET_ASSEMBLY_SCHEMA_VERSION > 0);
 
     const key = ingest.datasetAssemblySchemaKey();
-    assert.equal(key, `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}`);
+    // The key folds in BOTH the dataset-assembly schema version AND the per-session
+    // PARSER_SIG_VERSION (#2036 follow-up): the parser output is assembled into the
+    // dataset, so a parser bump must invalidate the persisted dataset_cache too.
+    // Before this, the two gates were decoupled and a parser bump served stale JSON.
+    assert.equal(typeof ingest.PARSER_SIG_VERSION, 'string');
+    assert.equal(
+      key,
+      `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`
+    );
     assert.match(
       ingest.sourceSignature(),
       new RegExp(`(^|\\\\|)${key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}(\\\\||$)`)
