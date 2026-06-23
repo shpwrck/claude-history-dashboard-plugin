@@ -387,6 +387,46 @@ function findingsForPlugins(
 }
 
 /**
+ * Built-in test fixtures that ship for smoke-testing the agent pipeline, not as
+ * real, user-facing resources (#2015). The harness's echo-validator is
+ * infrastructure — it can never have organic invocations, so flagging it for
+ * removal is a permanent false positive. Kept as an explicit, auditable set
+ * (rather than a fuzzy `test-*` pattern) so a genuinely-named user skill like
+ * `test-runner` is never silently dropped.
+ */
+const KNOWN_TEST_FIXTURES = new Set(['test-echo-validator']);
+
+/**
+ * True for resources that can never legitimately appear in the "installed but
+ * unused" list, so flagging them for removal is a permanent false positive
+ * (#2015). This is an EXCLUSION, never a usage rollup — it reattributes no
+ * counts, it only drops structurally-not-removable resources:
+ *  - `_`-prefixed ids are shared-utility dirs (e.g. `_shared`), not invocable
+ *    skills — zero invocations by construction.
+ *  - Subskills (`<parentId>-<phase>`, the split-skill pattern) are invoked
+ *    transitively via their installed parent skill, so a zero *direct* count is
+ *    expected and removing one breaks the parent. We treat an id as a subskill
+ *    only when an *installed skill* is a hyphen-boundary prefix of it (e.g.
+ *    `burn-epic-pick` under `burn-epic`, `groom-release-loose-floor` under
+ *    `groom-release`). Parent set is skills only, so directly-invocable subagent
+ *    variants like `ponytail-lite` (no installed skill parent) stay flagged.
+ *  - Built-in test fixtures (see {@link KNOWN_TEST_FIXTURES}).
+ */
+function isStructurallyExcluded(
+  resourceId: string,
+  installedSkillIds: ReadonlySet<string>
+): boolean {
+  if (resourceId.startsWith('_')) return true;
+  if (KNOWN_TEST_FIXTURES.has(resourceId)) return true;
+  const parts = resourceId.split('-');
+  for (let i = 1; i < parts.length; i++) {
+    const prefix = parts.slice(0, i).join('-');
+    if (prefix !== resourceId && installedSkillIds.has(prefix)) return true;
+  }
+  return false;
+}
+
+/**
  * Top-level entry. Returns findings sorted by (resource-type group →
  * lastSeen ascending → resourceId ascending), matching the UI's stable
  * grouping requirement from Q7.
@@ -402,10 +442,15 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
       ? 'window-shorter-than-threshold'
       : undefined;
   const usages = buildSessionUsage(input.attribution, input.sessions);
+  // Installed skill ids — the parent set for the subskill exclusion (#2015).
+  const installedSkillIds = new Set(lc.skills.map((s) => s.id));
 
   const out: HygieneFinding[] = [];
 
   for (const skill of lc.skills) {
+    // Skip structurally-not-removable resources (#2015): `_shared` utility dirs,
+    // subskills of an installed parent, built-in test fixtures.
+    if (isStructurallyExcluded(skill.id, installedSkillIds)) continue;
     const scope = resourceScope(skill);
     const summary = summariseUsage(
       skill.id,
@@ -430,6 +475,11 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
 
   // Subagents — same logic as skills, different attribution map.
   for (const agent of lc.subagents) {
+    // Same structural exclusions as skills (#2015): a `_`-prefixed helper or a
+    // built-in test fixture (e.g. test-echo-validator) is never a removal
+    // candidate. The subskill-prefix check is keyed on installed SKILLS, so a
+    // directly-invocable subagent variant (e.g. `ponytail-lite`) stays flagged.
+    if (isStructurallyExcluded(agent.id, installedSkillIds)) continue;
     const scope = resourceScope(agent);
     const summary = summariseUsage(
       agent.id,
