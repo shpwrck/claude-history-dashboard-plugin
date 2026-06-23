@@ -13,9 +13,16 @@ const READ_CHUNK_BYTES = 65_536;
 const DEFAULT_MAX_BYTES = 67_108_864;
 // Bump whenever parse-sessions / the signal parsers change their OUTPUT, so the
 // mtime-keyed ingest cache re-parses already-ingested sessions instead of
-// returning stale blobs. 'project-backstop-v1' (#1765): parseSessionJsonl now
-// backstops tokenData.project from the transcript cwd.
-const SESSION_BLOB_PARSER_VERSION = 'project-backstop-v1';
+// returning stale blobs. This is the gate for the session_blob rows that feed
+// the dataset + recommendations — NOT ingest.mjs's PARSER_SIG_VERSION, which
+// only keys the per-session transcript cache (sigOf/getTranscript).
+//   'project-backstop-v1' (#1765): parseSessionJsonl backstops tokenData.project
+//       from the transcript cwd.
+//   'rmrf-certainty-v2' (#2036): parse-tools deriveBashCommandSignals now emits
+//       commandDangerousCertainty + commandDangerousFragment; without this bump
+//       the cached blobs keep the old toolData and the dangerous-bypass fix stays
+//       inert on deploy (only a manual cache wipe picked it up).
+const SESSION_BLOB_PARSER_VERSION = 'rmrf-certainty-v2';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
