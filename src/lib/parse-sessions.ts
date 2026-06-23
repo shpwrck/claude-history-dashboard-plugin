@@ -2,6 +2,11 @@ import type { SessionTokenData, TokenEntry, CompactionEvent } from '../types';
 import { shortenProject } from './parse-history';
 import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
 import { parseJsonl, parseMessage, summarize, type ContentBlock } from './parse-utils';
+import {
+  isThinkingBlock,
+  reconstructThinkingTokens,
+  visibleBlockTokens,
+} from './thinking-tokens';
 
 /**
  * Whether a session's `entrypoint` marks an unattended (non-interactive) run.
@@ -30,6 +35,13 @@ interface RawSessionEntry {
 interface AssistantMessage {
   id?: string;
   model?: string;
+  /**
+   * Content blocks of this assistant message. Used to estimate visible-output
+   * tokens (text + tool_use args) for the #1927 thinking-token residual; the
+   * blocks of one logical message are split across multiple transcript lines
+   * sharing the same `id`, so they accumulate per `id`.
+   */
+  content?: ContentBlock[] | string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -110,7 +122,13 @@ export function parseSessionJsonl(
   fileName: string,
   project?: string
 ): SessionTokenData | null {
-  const tokenMap = new Map<string, TokenEntry>();
+  // Per-message accumulator: a TokenEntry plus the two transient #1927 fields
+  // (`visibleTokens` summed across the message's content-block lines,
+  // `hasThinking` OR-ed). These are resolved into the final `thinkingTokens`
+  // and stripped before the entry is returned, so they never leak into the
+  // serialized blob.
+  type TokenAccumulator = TokenEntry & { visibleTokens: number; hasThinking: boolean };
+  const tokenMap = new Map<string, TokenAccumulator>();
   let model = 'unknown';
 
   // Per-session dimensions: take the first non-empty value seen.
@@ -162,6 +180,22 @@ export function parseSessionJsonl(
         serviceTier = msg.usage.service_tier;
       }
 
+      // #1927: estimate the VISIBLE-output tokens carried on THIS line's
+      // content blocks (text prose + tool_use arg JSON) and note whether any
+      // thinking block is present. The blocks of one logical assistant message
+      // are split across multiple transcript lines sharing `id`, so these
+      // accumulate per id (summed below) and feed the thinking-token residual.
+      let lineVisibleTokens = 0;
+      let lineHasThinking = false;
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content as ContentBlock[]) {
+          lineVisibleTokens += visibleBlockTokens(block);
+          if (isThinkingBlock(block)) lineHasThinking = true;
+        }
+      } else if (typeof msg.content === 'string') {
+        lineVisibleTokens += visibleBlockTokens({ type: 'text', text: msg.content });
+      }
+
       const messageId = msg.id ?? `unknown-${tokenMap.size}`;
       const incoming = {
         timestamp: entry.timestamp ?? '',
@@ -175,6 +209,11 @@ export function parseSessionJsonl(
           msg.usage.server_tool_use?.web_search_requests ?? 0,
         webFetchRequests:
           msg.usage.server_tool_use?.web_fetch_requests ?? 0,
+        // #1927 accumulators (not part of TokenEntry): summed across the
+        // message's lines, then resolved to `thinkingTokens` after the
+        // outputTokens max-merge below.
+        visibleTokens: lineVisibleTokens,
+        hasThinking: lineHasThinking,
         model: msg.model ?? model,
       };
       // #457: a single assistant message id can appear on multiple transcript
@@ -214,6 +253,13 @@ export function parseSessionJsonl(
                 prevUsage.webFetchRequests,
                 incoming.webFetchRequests
               ),
+              // #1927: distinct content blocks of the same message arrive on
+              // separate lines, so SUM their visible-token estimates (each
+              // block counted once). If a line ever repeats blocks already
+              // seen, over-counting visible only shrinks the thinking residual
+              // toward 0 — the safe (conservative) direction.
+              visibleTokens: prevUsage.visibleTokens + incoming.visibleTokens,
+              hasThinking: prevUsage.hasThinking || incoming.hasThinking,
               model: incoming.model ?? prevUsage.model,
             }
           : incoming
@@ -223,7 +269,21 @@ export function parseSessionJsonl(
     }
   }
 
-  const tokenEntries = Array.from(tokenMap.values());
+  // Resolve each accumulated message into a clean TokenEntry, computing the
+  // #1927 thinking-token residual from the (max-merged) billed output and the
+  // (summed) visible-token estimate. The `visibleTokens`/`hasThinking`
+  // accumulators are dropped here so they never leak into the serialized blob.
+  const tokenEntries: TokenEntry[] = Array.from(tokenMap.values()).map((acc) => {
+    const { visibleTokens, hasThinking, ...rest } = acc;
+    return {
+      ...rest,
+      thinkingTokens: reconstructThinkingTokens(
+        rest.outputTokens,
+        visibleTokens,
+        hasThinking
+      ),
+    };
+  });
 
   if (tokenEntries.length === 0) return null;
 
@@ -246,6 +306,7 @@ export function parseSessionJsonl(
       : {}),
     totalInputTokens: tokenEntries.reduce((s, e) => s + e.inputTokens, 0),
     totalOutputTokens: tokenEntries.reduce((s, e) => s + e.outputTokens, 0),
+    totalThinkingTokens: tokenEntries.reduce((s, e) => s + (e.thinkingTokens ?? 0), 0),
     totalCacheCreationTokens: tokenEntries.reduce((s, e) => s + e.cacheCreationTokens, 0),
     totalCacheReadTokens: tokenEntries.reduce((s, e) => s + e.cacheReadTokens, 0),
     model,

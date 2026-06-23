@@ -1352,6 +1352,21 @@ function fixtureBank(): Fixture[] {
     }),
   });
 
+  // ── cost.disproportionate-thinking (thinking dwarfs visible output) ─────
+  out.push({
+    now,
+    input: bankBase({
+      tokenData: [
+        richSession(
+          'think',
+          'cli',
+          [richEntry('claude-opus-4-8', 0, 100_000, { thinkingTokens: 80_000 })],
+          { model: 'claude-opus-4-8', totalOutputTokens: 100_000, totalThinkingTokens: 80_000 }
+        ),
+      ],
+    }),
+  });
+
   // ── cost.priority-tier-spend ───────────────────────────────────────────
   out.push({
     now,

@@ -245,3 +245,79 @@ describe('estimateCost', () => {
     expect(estimateCost(data)).toBe(first)
   })
 })
+
+// One assistant transcript LINE carrying a single content block but the shared
+// per-message `usage`. Claude Code splits a logical message's blocks across
+// multiple lines that all repeat the same `id` + `usage` (#457) — the #1927
+// residual sums the visible blocks across those lines and anchors to the billed
+// output. `thinking` text is intentionally empty: that is the real-world shape
+// (the block persists only an encrypted signature, not the reasoning text).
+const blockLine = (
+  block: Record<string, unknown>,
+  usage: Record<string, unknown>,
+  opts: { id?: string; model?: string } = {}
+) =>
+  JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    message: {
+      id: opts.id ?? 'm1',
+      model: opts.model ?? 'claude-opus-4-8',
+      content: [block],
+      usage,
+    },
+  })
+
+describe('parseSessionJsonl thinking-token residual (#1927)', () => {
+  it('reconstructs thinking as billed output minus visible, anchored', () => {
+    const usage = { input_tokens: 10, output_tokens: 1000 }
+    const text = [
+      // text: 1200 chars -> ceil(1200/4) = 300 visible tokens
+      blockLine({ type: 'thinking', thinking: '', signature: 'sig-blob' }, usage),
+      blockLine({ type: 'text', text: 'a'.repeat(1200) }, usage),
+      // tool_use input {"a":1} = 7 chars -> ceil(7/4) = 2 visible tokens
+      blockLine({ type: 'tool_use', name: 'Bash', input: { a: 1 } }, usage),
+    ].join('\n')
+    const out = parseSessionJsonl(text, 'thinky.jsonl')!
+    expect(out.messageCount).toBe(1)
+    expect(out.totalOutputTokens).toBe(1000)
+    const entry = out.entries[0]
+    // visible = 300 (text) + 2 (tool_use) = 302; thinking = 1000 - 302 = 698
+    expect(entry.thinkingTokens).toBe(698)
+    expect(out.totalThinkingTokens).toBe(698)
+    // Anchoring invariant: thinking + visible <= billed output.
+    expect(entry.thinkingTokens! + 302).toBeLessThanOrEqual(entry.outputTokens)
+  })
+
+  it('attributes nothing to thinking when the message has no thinking block (calibration)', () => {
+    // output 500, visible text 100 tokens -> residual 400, but NO thinking
+    // block, so thinking must be 0 (the residual there is overhead, not reasoning).
+    const text = blockLine(
+      { type: 'text', text: 'a'.repeat(400) },
+      { input_tokens: 10, output_tokens: 500 },
+      { id: 'no-think' }
+    )
+    const out = parseSessionJsonl(text, 'plain.jsonl')!
+    expect(out.entries[0].thinkingTokens).toBe(0)
+    expect(out.totalThinkingTokens).toBe(0)
+  })
+
+  it('clamps the residual at 0 when visible exceeds billed output', () => {
+    // Tiny billed output but a large visible block — the residual would go
+    // negative, so thinking clamps to 0 (anchoring still holds).
+    const text = [
+      blockLine(
+        { type: 'thinking', thinking: '', signature: 's' },
+        { input_tokens: 1, output_tokens: 5 },
+        { id: 'clamp' }
+      ),
+      blockLine(
+        { type: 'text', text: 'a'.repeat(400) },
+        { input_tokens: 1, output_tokens: 5 },
+        { id: 'clamp' }
+      ),
+    ].join('\n')
+    const out = parseSessionJsonl(text, 'clamp.jsonl')!
+    expect(out.entries[0].thinkingTokens).toBe(0)
+  })
+})

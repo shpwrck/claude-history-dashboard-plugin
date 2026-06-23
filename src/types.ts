@@ -211,6 +211,13 @@ export interface SessionTokenData extends SessionDimensions {
   projectShort?: string;
   totalInputTokens: number;
   totalOutputTokens: number;
+  /**
+   * Sum of the per-entry reconstructed `thinkingTokens` estimate (#1927) — a
+   * lower-bound estimate of reasoning tokens billed inside `totalOutputTokens`.
+   * Optional/0 when no entry carried a thinking block. Anchored so
+   * `totalThinkingTokens <= totalOutputTokens`.
+   */
+  totalThinkingTokens?: number;
   totalCacheCreationTokens: number;
   totalCacheReadTokens: number;
   model: string;
@@ -356,6 +363,17 @@ export interface TokenEntry {
   webSearchRequests: number;
   /** `usage.server_tool_use.web_fetch_requests` (flat per-request billing). */
   webFetchRequests: number;
+  /**
+   * Reconstructed ESTIMATE of reasoning ("thinking") tokens billed inside
+   * `outputTokens`, for messages that carried a thinking block (#1927). The
+   * API never separates thinking from visible output, and the transcript does
+   * not persist thinking text — only an encrypted signature — so this is the
+   * residual `max(0, outputTokens − est(visible text + tool_use args))`,
+   * anchored so `thinkingTokens <= outputTokens`. Optional: absent/0 means the
+   * row predates the parser change or the message had no thinking block. See
+   * `src/lib/thinking-tokens.ts`.
+   */
+  thinkingTokens?: number;
   model: string;
 }
 

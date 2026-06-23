@@ -48,6 +48,7 @@ import { detector as webSearchSpend } from './cost/web-search-spend';
 import { detector as priorityTierSpend } from './cost/priority-tier-spend';
 import { detector as idleMcpTools } from './cost/idle-mcp-tools';
 import { detector as expensiveAgentType } from './cost/expensive-agent-type';
+import { detector as disproportionateThinking } from './cost/disproportionate-thinking';
 import { detector as modelEvalRoutingGap } from './cost/model-eval-routing-gap';
 import { detector as outputVerbosity } from './cost/output-verbosity';
 import { detector as batchableWorkload } from './cost/batchable-workload';
@@ -200,6 +201,7 @@ export const DETECTORS: Detector[] = [
   idleMcpTools,
   settingsJsonInvalid,
   expensiveAgentType,
+  disproportionateThinking,
   hookErrors,
   hookPreventedContinuation,
   // Tier C — medium-confidence composites

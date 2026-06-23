@@ -841,6 +841,14 @@ export function saveDatasetCache(
   }
 }
 
+// Bump when a per-session PARSER's OUTPUT shape changes without the source
+// transcript changing — the session_blob cache gate is keyed purely on file
+// mtime+size, so an unchanged transcript would otherwise serve a stale blob
+// that lacks the new field. Folding this version into every session `sig`
+// forces a one-time reparse of all sessions on the next ingest.
+//   v2 (#1927): added per-entry `thinkingTokens` + session `totalThinkingTokens`.
+const PARSER_SIG_VERSION = 'v2';
+
 function sigOf(paths) {
   return paths
     .map((p) => {
@@ -851,7 +859,8 @@ function sigOf(paths) {
         return `${p}:0:0`;
       }
     })
-    .join('|');
+    .join('|')
+    .concat(`#${PARSER_SIG_VERSION}`);
 }
 
 // ── Artifact-ingest cache (#624) ────────────────────────────────────────────
