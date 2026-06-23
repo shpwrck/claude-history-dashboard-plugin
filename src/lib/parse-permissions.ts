@@ -122,7 +122,7 @@ function isScopedRmTarget(raw: string): boolean {
   return false;
 }
 
-function rmRfCertainty(command: string): DangerousCommandCertainty {
+export function rmRfCertainty(command: string): DangerousCommandCertainty {
   const targets = rmRfTargets(command);
   if (targets.length === 0) return 'high'; // target not visible → conservative
   if (targets.some(isCatastrophicRmTarget)) return 'high';
@@ -133,7 +133,7 @@ function rmRfCertainty(command: string): DangerousCommandCertainty {
 /** Display fragment for a dangerous command. For `rm -rf` we start the slice at
  *  the match so the cited evidence shows `rm -rf <target>` instead of a leading
  *  `cd …`/`mkdir …` prefix that hides what was deleted (#2011). */
-function dangerousFragment(command: string, pattern: string): string {
+export function dangerousFragment(command: string, pattern: string): string {
   if (pattern === 'rm -rf') {
     const idx = command.search(/\brm\s+-[a-zA-Z]+/);
     if (idx > 0) return truncateCommand(command.slice(idx));
@@ -167,7 +167,7 @@ export const DANGEROUS_PATTERNS: {
   { name: 'npm publish', test: (c) => /\bnpm\s+publish\b/.test(c) },
 ];
 
-function dangerousPatternCertainty(pattern: string): DangerousCommandCertainty {
+export function dangerousPatternCertainty(pattern: string): DangerousCommandCertainty {
   return DANGEROUS_PATTERNS.find((p) => p.name === pattern)?.certainty ?? 'high';
 }
 
@@ -750,13 +750,26 @@ export function detectDangerousCommands(
           sessionId: session.sessionId,
           timestamp: call.timestamp,
           toolUseId: call.toolUseId,
-          command: dangerousFragment(text, precomputedPattern),
+          // Prefer the parse-time fragment (#2036): the bulk toolData payload
+          // drops raw command bodies, so `text` here is the 200-char preview and
+          // can't show a `rm -rf <target>` buried past it. The precomputed
+          // fragment was sliced from the FULL command at ingest. Fall back to the
+          // live slice when no precompute exists (uploads keep the full body).
+          command:
+            typeof call.commandDangerousFragment === 'string'
+              ? call.commandDangerousFragment
+              : dangerousFragment(text, precomputedPattern),
           pattern: precomputedPattern,
-          // rm -rf certainty is target-aware (#2011); other patterns are static.
+          // Prefer the parse-time certainty (#2036): target-aware rm -rf certainty
+          // needs the full command, which body-stripping removes — recomputing
+          // from the truncated preview would wrongly fall back to 'high' for a
+          // scoped delete. The precompute was done from the full command at
+          // ingest. Fall back to the live computation when absent.
           certainty:
-            precomputedPattern === 'rm -rf'
+            call.commandDangerousCertainty ??
+            (precomputedPattern === 'rm -rf'
               ? rmRfCertainty(text)
-              : dangerousPatternCertainty(precomputedPattern),
+              : dangerousPatternCertainty(precomputedPattern)),
         });
         continue;
       }

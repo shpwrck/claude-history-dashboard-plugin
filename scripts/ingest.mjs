@@ -848,7 +848,9 @@ export function saveDatasetCache(
 // forces a one-time reparse of all sessions on the next ingest.
 //   v2 (#1927): added per-entry `thinkingTokens` + session `totalThinkingTokens`.
 //   v3 (#2006): recalibrated thinking residual (per-block-type token density).
-const PARSER_SIG_VERSION = 'v3';
+//   v4 (#2036): precompute target-aware rm -rf certainty + dangerous fragment on
+//       ToolCall, so body-stripped commands keep correct dangerous-command signal.
+const PARSER_SIG_VERSION = 'v4';
 
 function sigOf(paths) {
   return paths

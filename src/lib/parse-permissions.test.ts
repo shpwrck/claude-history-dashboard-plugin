@@ -130,6 +130,52 @@ describe('detectDangerousCommands', () => {
     ])
   })
 
+  it('prefers precomputed certainty + fragment over the truncated preview (#2036)', () => {
+    // Body-dropped compound command: the preview is the leading cd prefix (no
+    // rm -rf visible), but the parse-time precompute carries the scoped target's
+    // 'medium' certainty and the rm -rf fragment. Recomputing from the preview
+    // would wrongly fall back to 'high' — the bug #2036 fixes.
+    const data = [
+      session('s', [
+        {
+          ...call('Bash'),
+          input: {},
+          commandPreview: 'cd /home/u/project/.worktrees/feature-x && mkdir -p tmp && echo',
+          commandDangerousPattern: 'rm -rf',
+          commandDangerousCertainty: 'medium',
+          commandDangerousFragment: 'rm -rf ./.worktrees/feature-x',
+        },
+      ]),
+    ]
+    expect(detectDangerousCommands(data)).toEqual([
+      {
+        sessionId: 's',
+        timestamp: 't',
+        toolUseId: 'u',
+        command: 'rm -rf ./.worktrees/feature-x',
+        pattern: 'rm -rf',
+        certainty: 'medium',
+      },
+    ])
+  })
+
+  it('falls back to high on a truncated preview when no precompute exists (pre-#2036 blob)', () => {
+    // Old ingested data lacks commandDangerousCertainty; with the rm -rf target
+    // truncated away, the conservative fallback keeps it 'high'. Documents why the
+    // PARSER_SIG_VERSION bump + re-ingest is required for the fix to take effect.
+    const data = [
+      session('s', [
+        {
+          ...call('Bash'),
+          input: {},
+          commandPreview: 'cd /home/u/project/.worktrees/feature-x && mkdir -p tmp && echo',
+          commandDangerousPattern: 'rm -rf',
+        },
+      ]),
+    ]
+    expect(detectDangerousCommands(data)[0].certainty).toBe('high')
+  })
+
   it('ignores non-Bash tools', () => {
     const data = [session('s', [call('Read', undefined)])]
     expect(detectDangerousCommands(data)).toHaveLength(0)

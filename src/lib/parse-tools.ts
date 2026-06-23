@@ -1,5 +1,11 @@
 import { parseJsonl, parseMessage } from './parse-utils';
-import { detectRiskyActionPatternName } from './parse-permissions';
+import {
+  detectRiskyActionPatternName,
+  rmRfCertainty,
+  dangerousFragment,
+  dangerousPatternCertainty,
+  type DangerousCommandCertainty,
+} from './parse-permissions';
 
 /**
  * Distilled tool-call `input`. The raw `call.input` blob is the single largest
@@ -55,6 +61,19 @@ export interface ToolCall {
   commandBypassCategories?: BypassCategory[];
   /** First dangerous-command pattern matched by the Bash command, if any. */
   commandDangerousPattern?: string;
+  /**
+   * Precomputed dangerous-command certainty (target-aware for `rm -rf`), derived
+   * from the FULL command at parse time so it survives raw-body stripping (#2036).
+   * Consumers (detectDangerousCommands) must prefer this over recomputing from the
+   * truncated `commandPreview`, which can't see a `rm -rf <target>` buried past it.
+   */
+  commandDangerousCertainty?: DangerousCommandCertainty;
+  /**
+   * Precomputed display fragment centered on the dangerous match (e.g.
+   * `rm -rf <target>`) so cited evidence isn't a misleading leading `cd …`/`mkdir`
+   * prefix once the raw body is dropped (#2036).
+   */
+  commandDangerousFragment?: string;
   /** First high-impact action pattern matched by the Bash command, if any. */
   commandRiskyActionPattern?: string;
   /** Whether the command references Claude-specific paths such as `.claude`. */
@@ -496,7 +515,20 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
     ...(bypassCategories.length > 0
       ? { commandBypassCategories: bypassCategories }
       : {}),
-    ...(dangerous ? { commandDangerousPattern: dangerous.name } : {}),
+    ...(dangerous
+      ? {
+          commandDangerousPattern: dangerous.name,
+          // Precompute certainty + fragment from the FULL command now, before the
+          // raw body is stripped from the bulk payload (#2036). rm -rf certainty
+          // is target-aware; others are static. Without this, downstream sees only
+          // the 200-char preview and re-inflates buried scoped deletes to 'high'.
+          commandDangerousCertainty:
+            dangerous.name === 'rm -rf'
+              ? rmRfCertainty(command)
+              : dangerousPatternCertainty(dangerous.name),
+          commandDangerousFragment: dangerousFragment(command, dangerous.name),
+        }
+      : {}),
     ...(riskyAction ? { commandRiskyActionPattern: riskyAction } : {}),
     ...(command.includes('.claude') ? { commandMentionsClaudePath: true } : {}),
   };

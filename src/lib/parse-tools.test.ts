@@ -102,6 +102,10 @@ describe('parseToolUsage', () => {
     expect(bashCall.commandHead).toBe('grep')
     expect(bashCall.commandBypassCategories).toContain('grep')
     expect(bashCall.commandDangerousPattern).toBe('rm -rf')
+    // #2036: target-aware certainty + fragment are precomputed from the full
+    // command before the body is stripped. `rm -rf build` is a scoped subpath.
+    expect(bashCall.commandDangerousCertainty).toBe('medium')
+    expect(bashCall.commandDangerousFragment).toBe('rm -rf build')
     expect(stripped.calls[1].input.file_path).toBe('README.md')
     expect(stripped.calls[2].commandPreview?.length).toBe(200)
     expect(stripped.calls[2].commandGitSegments).toEqual([
@@ -110,6 +114,29 @@ describe('parseToolUsage', () => {
       'git stash pop',
     ])
     expect(Object.prototype.hasOwnProperty.call(stripped.calls[3].input, 'command')).toBe(false)
+  })
+
+  it('precomputes correct rm -rf certainty even when the target is buried past the preview (#2036)', () => {
+    // Real burn-loop shape: a long `cd <worktree> && mkdir … && <padding> &&
+    // rm -rf <worktree>` chain where the rm -rf sits well past the 200-char
+    // preview. Certainty must come from the FULL command, not the truncated body.
+    const padding = 'echo step '.repeat(40) // > 200 chars before the rm -rf
+    const scoped = `cd /home/u/project/.worktrees/feature-x && mkdir -p tmp && ${padding} && rm -rf ./.worktrees/feature-x`
+    const catastrophic = `cd /home/u/project && ${padding} && rm -rf ~`
+    const text = [
+      toolUse('u1', 'Bash', { command: scoped }),
+      toolUse('u2', 'Bash', { command: catastrophic }),
+    ].join('\n')
+    const stripped = stripToolCommandBodies(parseToolUsage(text, 's.jsonl')!)
+
+    // Body dropped; preview is the leading cd prefix with no rm -rf visible.
+    expect(Object.prototype.hasOwnProperty.call(stripped.calls[0].input, 'command')).toBe(false)
+    expect(stripped.calls[0].commandPreview).not.toContain('rm -rf')
+    // …but the precomputed signal carries the truth.
+    expect(stripped.calls[0].commandDangerousCertainty).toBe('medium')
+    expect(stripped.calls[0].commandDangerousFragment).toBe('rm -rf ./.worktrees/feature-x')
+    expect(stripped.calls[1].commandDangerousCertainty).toBe('high')
+    expect(stripped.calls[1].commandDangerousFragment).toBe('rm -rf ~')
   })
 })
 
