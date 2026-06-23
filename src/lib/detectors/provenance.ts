@@ -29,6 +29,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'cost.model-eval-routing-gap',
   'context.cross-session-reread',
   'reliability.passive-wait-stall',
+  'reliability.cwd-drift-execution',
   'reliability.stale-state-assertion',
   'context.last-n-runs-audit',
   'maintenance.memory-hygiene',

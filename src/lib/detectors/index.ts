@@ -126,6 +126,7 @@ import { detector as agentReportCard } from './reliability/agent-report-card';
 import { detector as retryPrefixRewaste } from './reliability/retry-prefix-rewaste';
 import { detector as overloadReretry } from './reliability/overload-reretry';
 import { detector as passiveWaitStall } from './reliability/passive-wait-stall';
+import { detector as cwdDriftExecution } from './reliability/cwd-drift-execution';
 import { detector as staleStateAssertion } from './reliability/stale-state-assertion';
 
 // ── SPEED ───────────────────────────────────────────────────────────────
@@ -328,6 +329,15 @@ export const DETECTORS: Detector[] = [
   // waitLanguage/backgrounded flags; dark on a transcript-free dataset.
   passiveWaitStall,
 
+  // ── #1870 (epic #1910) — cwd-drift command execution (reliability) ─────────
+  // Flags `git`/`gh` command segments run with NO anchor (`git -C`, a preceding
+  // `cd <dir> &&`, `gh -R`/`--repo`, `GH_REPO=`). git/gh resolve their target
+  // repo from the shell cwd, so an unanchored op on a drifted session silently
+  // hits the WRONG repo (commit to the wrong tree, stale-read false claims).
+  // Build families are excluded (loud failure; cwd not on the wire). Measures
+  // the behaviour the global cwd-anchor-guard hook prevents (dogfooding loop,
+  // sibling of #1871). Reads toolData; dark on a transcript-free dataset.
+  cwdDriftExecution,
   // ── #1871 (epic #1910) — stale-state assertions (reliability) ─────────────
   // Flags LOCAL git reads of an integration/remote ref (origin/…, master, main,
   // @{u}, --contains) issued with no `git fetch`/`git pull` earlier in the same

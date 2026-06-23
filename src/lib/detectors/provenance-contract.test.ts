@@ -340,6 +340,29 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: 0,
   }),
+  'reliability.cwd-drift-execution': () => {
+    // Three sessions each running an unanchored git read (no -C / cd / -R).
+    const driftRead = (sessionId: string) =>
+      ({
+        sessionId,
+        calls: [
+          {
+            timestamp: '2026-06-10T00:00:01Z',
+            toolName: 'Bash',
+            input: { command: 'git log origin/master --oneline -5' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+          },
+        ],
+      }) as unknown as RecommendationInput['toolData'][number];
+    return {
+      input: baseInput({
+        toolData: [driftRead('cwd1'), driftRead('cwd2'), driftRead('cwd3')],
+      }),
+      now: 0,
+    };
+  },
   'reliability.stale-state-assertion': () => {
     // Three sessions each reading an integration-branch ref with no prior fetch.
     const staleRead = (sessionId: string) =>

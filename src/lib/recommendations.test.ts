@@ -2521,6 +2521,17 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ memoryStores }) });
   }
 
+  // ── reliability.cwd-drift-execution (#1870): unanchored git/gh reads
+  // (`git log origin/master`, `gh pr view`) with no `-C`/`cd`/`-R` anchor.
+  {
+    const cwdDrift = [
+      toolSession('cwd1', ['git log origin/master --oneline -5']),
+      toolSession('cwd2', ['gh pr view 42']),
+      toolSession('cwd3', ['git status']),
+    ];
+    out.push({ now, input: bankBase({ toolData: cwdDrift }) });
+  }
+
   // ── reliability.stale-state-assertion (#1871): integration-branch git reads
   // (`git log origin/master`) with no `git fetch` earlier in the session.
   {

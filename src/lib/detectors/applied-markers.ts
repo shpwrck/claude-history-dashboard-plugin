@@ -108,6 +108,10 @@ export const MARKERS_TOOL_ERRORS: AppliedMarkers = {
   headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
   bodyPhrases: ['Tools with high error rates'],
 };
+export const MARKERS_CWD_DRIFT_EXECUTION: AppliedMarkers = {
+  headings: [/^##\s+Anchor (?:repo|git)\b/i],
+  bodyPhrases: ['silently targets the wrong repository'],
+};
 export const MARKERS_STALE_STATE_ASSERTION: AppliedMarkers = {
   headings: [/^##\s+Fetch before asserting repo state\b/i],
   bodyPhrases: ['local tree can sit many commits behind origin'],
@@ -141,5 +145,6 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['workflow.shadow-axis-wins', MARKERS_SHADOW_AXIS_WINS],
   ['safety.dangerous-bypass', MARKERS_DANGEROUS_BYPASS],
   ['reliability.tool-errors', MARKERS_TOOL_ERRORS],
+  ['reliability.cwd-drift-execution', MARKERS_CWD_DRIFT_EXECUTION],
   ['reliability.stale-state-assertion', MARKERS_STALE_STATE_ASSERTION],
 ]);
