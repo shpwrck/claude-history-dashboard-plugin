@@ -626,6 +626,23 @@ describe('config-scoping atomic-vs-monolith verdict triple (#1663)', () => {
     expect(rows.some((r) => /config-scoping cost: atomized 200 fewer tokens/.test(r))).toBe(true);
   });
 
+  it('configScopingEvidence renders a tie (not "0ms faster"/"$0.00 cheaper") for zero/sub-cent deltas, matching the verdict view (#2002)', () => {
+    // Equal wall-time and equal $ → exact-zero deltas; equal tokens with no $ → zero token delta.
+    const a = parseShadowCalls(csLine({ monoWall: 600, atomWall: 600, monoUsd: 0.2, atomUsd: 0.2 })).byAxis[0];
+    expect(configScopingSpeedDelta(a)).toBe(0);
+    expect(configScopingCostDelta(a)).toBe(0);
+    const rows = configScopingEvidence(a);
+    expect(rows.some((r) => /config-scoping speed: atomized and monolith tied on wall-time/.test(r))).toBe(true);
+    expect(rows.some((r) => /config-scoping cost: atomized and monolith tied on \$/.test(r))).toBe(true);
+    // No misleading "faster"/"cheaper" phrasing for a zero delta.
+    expect(rows.some((r) => /faster|slower|cheaper|pricier/.test(r))).toBe(false);
+
+    // Token-only tie (no $ pair).
+    const t = parseShadowCalls(csLine({ monoTok: 400, atomTok: 400 })).byAxis[0];
+    expect(configScopingTokenDelta(t)).toBe(0);
+    expect(configScopingEvidence(t).some((r) => /config-scoping cost: atomized and monolith tied on tokens/.test(r))).toBe(true);
+  });
+
   it('degrades gracefully: config-scoping records WITHOUT a triple add no delta rows and do not error', () => {
     // Plain config-scoping records (no `configScoping` block) — like slice-2-not-yet-emitting.
     const plain = (w: 'main' | 'shadow') =>

@@ -476,12 +476,17 @@ export function configScopingEvidence(a: AxisAggregate): string[] {
     w.atomizedWins + w.monolithWins + w.ties > 0;
 
   // SPEED — mean per-run wall-time delta (atomized − monolith), ms.
+  // Tie semantics match the verdict view (ShadowCallsPf): an exact-zero wall-time
+  // delta and a sub-cent $ delta read as a tie, not "0ms faster"/"$0.00 cheaper"
+  // — so the same datum renders consistently in the rec evidence and the UI (#2002).
   const speedDelta = configScopingSpeedDelta(a);
   if (speedDelta !== null) {
     const ms = Math.round(speedDelta);
-    rows.push(
-      `config-scoping speed: atomized ${ms <= 0 ? `${Math.abs(ms)}ms faster` : `${ms}ms slower`} per run on average (${winTally(c.speed)})`
-    );
+    const phrase =
+      ms === 0
+        ? 'atomized and monolith tied on wall-time'
+        : `atomized ${ms < 0 ? `${Math.abs(ms)}ms faster` : `${ms}ms slower`}`;
+    rows.push(`config-scoping speed: ${phrase} per run on average (${winTally(c.speed)})`);
   } else if (hasWins(c.speed)) {
     rows.push(`config-scoping speed: ${winTally(c.speed)}`);
   }
@@ -490,14 +495,18 @@ export function configScopingEvidence(a: AxisAggregate): string[] {
   const costDelta = configScopingCostDelta(a);
   const tokenDelta = configScopingTokenDelta(a);
   if (costDelta !== null) {
-    rows.push(
-      `config-scoping cost: atomized $${Math.abs(costDelta).toFixed(2)} ${costDelta <= 0 ? 'cheaper' : 'pricier'} per run on average (${winTally(c.cost)})`
-    );
+    const phrase =
+      Math.abs(costDelta) < 0.005
+        ? 'atomized and monolith tied on $'
+        : `atomized $${Math.abs(costDelta).toFixed(2)} ${costDelta < 0 ? 'cheaper' : 'pricier'}`;
+    rows.push(`config-scoping cost: ${phrase} per run on average (${winTally(c.cost)})`);
   } else if (tokenDelta !== null) {
     const tk = Math.round(tokenDelta);
-    rows.push(
-      `config-scoping cost: atomized ${Math.abs(tk)} ${tk <= 0 ? 'fewer' : 'more'} tokens per run on average (${winTally(c.cost)})`
-    );
+    const phrase =
+      tk === 0
+        ? 'atomized and monolith tied on tokens'
+        : `atomized ${Math.abs(tk)} ${tk < 0 ? 'fewer' : 'more'} tokens`;
+    rows.push(`config-scoping cost: ${phrase} per run on average (${winTally(c.cost)})`);
   } else if (hasWins(c.cost)) {
     rows.push(`config-scoping cost: ${winTally(c.cost)}`);
   }
