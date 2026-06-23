@@ -21,11 +21,21 @@ import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
  * scopes.
  */
 
-// Absolute floor so tiny sessions don't trip the ratio on noise.
+// Hardened thresholds (#2006). The reconstructed thinking estimate is a noisy
+// per-session signal, so the bar to flag is deliberately conservative:
+// substantial absolute thinking, an EXTREME share (not merely >half), and a
+// non-trivial amount of real visible work — so estimator variance on
+// tiny/tool-only sessions can't manufacture a finding.
+//
+// Absolute floor so small sessions don't trip the ratio on noise.
 const MIN_THINKING_TOKENS = 20_000;
-// Thinking must exceed visible output by this factor to flag (thought >50%
-// more than it produced).
-const MIN_OVERTHINK_RATIO = 1.5;
+// Thinking must be at least this multiple of visible output (thought >=2x more
+// than it produced) — an extreme, hard-to-explain-as-noise disproportion.
+const MIN_OVERTHINK_RATIO = 2.0;
+// The session must have produced a non-trivial amount of visible output, so we
+// only flag real work that over-reasoned — not a handful of tiny tool calls
+// where the per-message residual is least reliable.
+const MIN_VISIBLE_TOKENS = 2_000;
 // Lowering reasoning effort cannot eliminate all thinking; treat half the
 // flagged thinking spend as realistically recoverable.
 const RECOVERABLE_FRACTION = 0.5;
@@ -45,6 +55,7 @@ export const detector: Detector = {
       const think = d.totalThinkingTokens ?? 0;
       if (think < MIN_THINKING_TOKENS) continue;
       const visible = Math.max(0, d.totalOutputTokens - think);
+      if (visible < MIN_VISIBLE_TOKENS) continue;
       const ratio = think / Math.max(1, visible);
       if (ratio < MIN_OVERTHINK_RATIO) continue;
 

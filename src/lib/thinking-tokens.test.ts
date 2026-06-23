@@ -6,12 +6,15 @@ import {
   reconstructThinkingTokens,
 } from './thinking-tokens';
 
-describe('thinking-tokens helpers (#1927)', () => {
+describe('thinking-tokens helpers (#1927, recalibrated #2006)', () => {
   describe('estimateTokens', () => {
-    it('uses the repo ceil(chars/4) convention', () => {
+    it('defaults to the calibrated text density (~2.6 chars/token)', () => {
       expect(estimateTokens('')).toBe(0);
-      expect(estimateTokens('abcd')).toBe(1);
-      expect(estimateTokens('abcde')).toBe(2); // ceil(5/4)
+      expect(estimateTokens('abcd')).toBe(2); // ceil(4/2.6)
+      expect(estimateTokens('abcde')).toBe(2); // ceil(5/2.6)
+    });
+    it('accepts an explicit chars/token density', () => {
+      expect(estimateTokens('abcdefgh', 1.7)).toBe(5); // ceil(8/1.7)
     });
     it('treats null/undefined-ish input as 0', () => {
       expect(estimateTokens(undefined as unknown as string)).toBe(0);
@@ -19,12 +22,12 @@ describe('thinking-tokens helpers (#1927)', () => {
   });
 
   describe('visibleBlockTokens', () => {
-    it('counts text-block prose', () => {
-      expect(visibleBlockTokens({ type: 'text', text: 'abcd' })).toBe(1);
+    it('counts text-block prose at the text density', () => {
+      expect(visibleBlockTokens({ type: 'text', text: 'abcd' })).toBe(2); // ceil(4/2.6)
     });
-    it('counts tool_use argument JSON, not the tool name', () => {
-      // JSON.stringify({a:'bb'}) = '{"a":"bb"}' = 10 chars -> ceil(10/4)=3
-      expect(visibleBlockTokens({ type: 'tool_use', input: { a: 'bb' } })).toBe(3);
+    it('counts tool_use argument JSON at the denser tool density, not the tool name', () => {
+      // JSON.stringify({a:'bb'}) = '{"a":"bb"}' = 10 chars -> ceil(10/1.7)=6
+      expect(visibleBlockTokens({ type: 'tool_use', input: { a: 'bb' } })).toBe(6);
     });
     it('returns 0 for thinking blocks (thinking text is not visible output)', () => {
       expect(visibleBlockTokens({ type: 'thinking', thinking: 'lots of reasoning' })).toBe(0);

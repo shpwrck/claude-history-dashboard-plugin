@@ -847,7 +847,8 @@ export function saveDatasetCache(
 // that lacks the new field. Folding this version into every session `sig`
 // forces a one-time reparse of all sessions on the next ingest.
 //   v2 (#1927): added per-entry `thinkingTokens` + session `totalThinkingTokens`.
-const PARSER_SIG_VERSION = 'v2';
+//   v3 (#2006): recalibrated thinking residual (per-block-type token density).
+const PARSER_SIG_VERSION = 'v3';
 
 function sigOf(paths) {
   return paths

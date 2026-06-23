@@ -272,21 +272,21 @@ describe('parseSessionJsonl thinking-token residual (#1927)', () => {
   it('reconstructs thinking as billed output minus visible, anchored', () => {
     const usage = { input_tokens: 10, output_tokens: 1000 }
     const text = [
-      // text: 1200 chars -> ceil(1200/4) = 300 visible tokens
+      // text: 1200 chars -> ceil(1200/2.6) = 462 visible tokens (#2006 density)
       blockLine({ type: 'thinking', thinking: '', signature: 'sig-blob' }, usage),
       blockLine({ type: 'text', text: 'a'.repeat(1200) }, usage),
-      // tool_use input {"a":1} = 7 chars -> ceil(7/4) = 2 visible tokens
+      // tool_use input {"a":1} = 7 chars -> ceil(7/1.7) = 5 visible tokens
       blockLine({ type: 'tool_use', name: 'Bash', input: { a: 1 } }, usage),
     ].join('\n')
     const out = parseSessionJsonl(text, 'thinky.jsonl')!
     expect(out.messageCount).toBe(1)
     expect(out.totalOutputTokens).toBe(1000)
     const entry = out.entries[0]
-    // visible = 300 (text) + 2 (tool_use) = 302; thinking = 1000 - 302 = 698
-    expect(entry.thinkingTokens).toBe(698)
-    expect(out.totalThinkingTokens).toBe(698)
+    // visible = 462 (text) + 5 (tool_use) = 467; thinking = 1000 - 467 = 533
+    expect(entry.thinkingTokens).toBe(533)
+    expect(out.totalThinkingTokens).toBe(533)
     // Anchoring invariant: thinking + visible <= billed output.
-    expect(entry.thinkingTokens! + 302).toBeLessThanOrEqual(entry.outputTokens)
+    expect(entry.thinkingTokens! + 467).toBeLessThanOrEqual(entry.outputTokens)
   })
 
   it('attributes nothing to thinking when the message has no thinking block (calibration)', () => {

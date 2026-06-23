@@ -1,6 +1,6 @@
 /**
  * Reconstruct an ESTIMATE of "thinking" (reasoning) tokens per assistant
- * message (#1927).
+ * message (#1927; recalibrated #2006).
  *
  * Why an estimate, and why a residual: the `usage` object the API returns has
  * **no** thinking/reasoning token field — `output_tokens` lumps thinking and
@@ -16,27 +16,48 @@
  *
  *   thinkingTokens(msg) ≈ max(0, billed_output_tokens − est(visible))
  *
- * computed only for messages that actually carry a thinking block. Two
- * properties fall out for free:
- *  - Anchoring: thinking + visible <= billed output BY CONSTRUCTION (clamp at
- *    0), so the estimate can never exceed the real bill.
- *  - Conservative failure: over-counting visible only shrinks the thinking
- *    estimate toward 0 — it never inflates it.
+ * computed only for messages that actually carry a thinking block. Anchoring:
+ * thinking + visible <= billed output BY CONSTRUCTION (clamp at 0), so the
+ * estimate can never exceed the real bill.
  *
- * Messages with no thinking block must yield ~0 residual; that is the
- * calibration/honesty check (see thinking-tokens.test.ts).
+ * CALIBRATION (#2006). The token counts are NOT the repo's generic `ceil(chars/4)`:
+ * validating against the no-thinking control group (a message with no thinking
+ * block must yield residual ≈ 0) over the full local corpus showed `chars/4`
+ * badly under-counts visible output — assistant text runs ~2.6 chars/token and
+ * `tool_use` argument JSON ~1.7 chars/token (dense), not 4. Using 4 inflated the
+ * residual and over-attributed to thinking (corpus aggregate fell 62.6%→44.5%
+ * after recalibration). The divisors below are the measured per-block-type
+ * control-group medians.
  *
- * Token counts use the repo's established `ceil(chars / 4)` heuristic
- * (`repo-map/generate.ts`, `claude-context.ts`) — good enough for a share/ratio
- * estimate that is then anchored to the billed total.
+ * Precision caveat: the chars↔token relationship has large irreducible
+ * per-message variance (tool_use inputs span ~0→500 chars/token), so NO single
+ * divisor yields per-message accuracy — even recalibrated, only ~18% of control
+ * messages land within ±20% of billed. The divisors are tuned so the POSITIVE
+ * (false-thinking) residual tail is small (control p99 ≈ +107 tokens); the
+ * residual otherwise skews toward over-counting visible, which is the safe
+ * direction because `reconstructThinkingTokens` clamps at 0. Net: a conservative
+ * corpus-directional LOWER BOUND, not a per-message truth. Tight per-message
+ * accuracy would require a real BPE tokenizer (deferred, see #2006).
+ *
+ * KNOWN LIMIT — under-count when no thinking block is present. Reasoning-heavy
+ * turns that end in a small/no-arg tool call frequently carry NO thinking block
+ * (interleaved thinking that Claude Code does not persist; e.g. a `get_me` call
+ * with `input:{}` that still billed ~1800 output tokens). Those score 0 here
+ * because we only attribute thinking with positive evidence (a block). So this
+ * is a corpus-directional LOWER BOUND, not a per-session ground truth.
  */
 
-const CHARS_PER_TOKEN = 4;
+// Measured control-group medians (#2006), not the generic 4 chars/token.
+const TEXT_CHARS_PER_TOKEN = 2.6;
+const TOOL_USE_CHARS_PER_TOKEN = 1.7;
 
-/** Rough token count for a string, matching the repo's `ceil(chars/4)` convention. */
-export function estimateTokens(text: string): number {
+/** Rough token count for a string at the given chars/token density. */
+export function estimateTokens(
+  text: string,
+  charsPerToken: number = TEXT_CHARS_PER_TOKEN
+): number {
   if (!text) return 0;
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
+  return Math.ceil(text.length / charsPerToken);
 }
 
 /** A minimal view of one `message.content` block — only the fields we read. */
@@ -48,21 +69,23 @@ export interface VisibleBlock {
 }
 
 /**
- * Estimated VISIBLE (billed-as-output) tokens for one content block.
+ * Estimated VISIBLE (billed-as-output) tokens for one content block, using the
+ * per-block-type density calibrated in #2006.
  *
- * - `text` blocks: the prose itself.
+ * - `text` blocks: the prose itself (~2.6 chars/token).
  * - `tool_use` blocks: the argument JSON the model emitted (`input`), which is
- *   billed output. The tool's NAME/id is negligible and omitted.
+ *   billed output and tokenizes denser (~1.7 chars/token). The tool's NAME/id
+ *   is negligible and omitted.
  * - `thinking` (and anything else): 0 — thinking text is not persisted and is
  *   not "visible" output; it is exactly what the residual is meant to capture.
  */
 export function visibleBlockTokens(block: VisibleBlock | null | undefined): number {
   if (!block || typeof block !== 'object') return 0;
-  if (block.type === 'text') return estimateTokens(block.text ?? '');
+  if (block.type === 'text') return estimateTokens(block.text ?? '', TEXT_CHARS_PER_TOKEN);
   if (block.type === 'tool_use') {
     if (block.input === undefined || block.input === null) return 0;
     try {
-      return estimateTokens(JSON.stringify(block.input));
+      return estimateTokens(JSON.stringify(block.input), TOOL_USE_CHARS_PER_TOKEN);
     } catch {
       return 0;
     }
@@ -79,9 +102,9 @@ export function isThinkingBlock(block: VisibleBlock | null | undefined): boolean
  * Reconstruct the per-message thinking-token estimate from the billed output
  * total and the summed visible-token estimate.
  *
- * Returns 0 when the message carried no thinking block (the residual there is
- * estimation noise / formatting overhead, not reasoning). Otherwise clamps the
- * residual at 0 so thinking + visible <= billed output always holds.
+ * Returns 0 when the message carried no thinking block (we only attribute
+ * thinking with positive evidence — see the KNOWN LIMIT note above). Otherwise
+ * clamps the residual at 0 so thinking + visible <= billed output always holds.
  */
 export function reconstructThinkingTokens(
   outputTokens: number,
