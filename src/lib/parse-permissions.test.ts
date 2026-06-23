@@ -5,6 +5,7 @@ import {
   detectDangerousCommands,
   computeSafetyScores,
   rankPromptProneTools,
+  executableShellSkeleton,
 } from './parse-permissions'
 import type { ToolCall, ToolUsageData } from './parse-tools'
 
@@ -176,9 +177,44 @@ describe('detectDangerousCommands', () => {
     expect(detectDangerousCommands(data)[0].certainty).toBe('high')
   })
 
+  it('does not flag rm -rf that only appears inside heredocs/scripts/quoted strings (#2039)', () => {
+    const falsePositives = [
+      `node -e "const x='rm -rf '+y; run(x)"`,
+      `cat > settings.json <<'EOF'\n{ "deny": ["Bash(rm -rf:*)"] }\nEOF`,
+      `cat > doc.md <<'EOF'\nDangerous patterns (rm -rf, dd, mkfs) are excluded.\nEOF`,
+      `echo 'do not run rm -rf / ever'`,
+    ]
+    for (const cmd of falsePositives) {
+      expect(detectDangerousCommands([session('s', [call('Bash', cmd)])]), cmd).toHaveLength(0)
+    }
+  })
+
+  it('still flags a real top-level rm -rf, including a quoted variable target (#2039)', () => {
+    const realDeletions = [
+      'rm -rf ~',
+      'cd /tmp/x && mkdir y && rm -rf ~',
+      'rm -rf "$TMPDIR/scratch"',
+    ]
+    for (const cmd of realDeletions) {
+      const found = detectDangerousCommands([session('s', [call('Bash', cmd)])])
+      expect(found, cmd).toHaveLength(1)
+      expect(found[0].pattern, cmd).toBe('rm -rf')
+    }
+  })
+
   it('ignores non-Bash tools', () => {
     const data = [session('s', [call('Read', undefined)])]
     expect(detectDangerousCommands(data)).toHaveLength(0)
+  })
+})
+
+describe('executableShellSkeleton (#2039)', () => {
+  it('strips heredoc bodies and quoted literals but keeps real command tokens', () => {
+    expect(executableShellSkeleton(`echo 'rm -rf /'`)).not.toMatch(/rm -rf/)
+    expect(executableShellSkeleton(`node -e "rm -rf x"`)).not.toMatch(/rm -rf/)
+    expect(executableShellSkeleton(`cat <<'EOF'\nrm -rf /\nEOF`)).not.toMatch(/rm -rf/)
+    expect(executableShellSkeleton('rm -rf "$VAR"')).toMatch(/\brm\s+-rf\b/)
+    expect(executableShellSkeleton('cd x && rm -rf ~')).toMatch(/\brm\s+-rf\b/)
   })
 })
 

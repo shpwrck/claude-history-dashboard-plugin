@@ -61,6 +61,41 @@ type PermissionSessionEntry = RawSessionEntry & {
 
 const MAX_COMMAND_LEN = 200;
 
+// ── executable-shell skeleton (#2039) ──────────────────────────────────────
+// The dangerous-command matchers test for `rm -rf`/`git reset --hard`/`curl|sh`
+// etc. as plain substrings of the command. That over-fires on text that merely
+// CONTAINS those tokens without executing them: heredoc bodies (`cat > f <<'EOF'
+// … rm -rf … EOF`), inline-script source (`node -e "… rm -rf …"`), and quoted
+// string literals (a `'Bash(rm -rf:*)'` deny rule, prose being written to a
+// file). We strip those regions to an "executable skeleton" before matching, so
+// only tokens at real command positions count. Conservative by design — biased
+// toward NOT flagging — so it never inflates a CRITICAL with non-deletions.
+//
+// Known limitation: a shell-exec wrapper DOES execute its quoted body
+// (`sh -c 'rm -rf /'`), but quote-stripping hides it. These do not occur in the
+// corpus this targets, and the conservative bias prefers a rare miss over the
+// rampant false positives; revisit if a real `sh -c`-wrapped deletion appears.
+
+/** Remove heredoc bodies: `<<['"]?WORD['"]? … \nWORD`, incl. `<<-`. */
+function stripHeredocBodies(s: string): string {
+  return s.replace(/<<-?\s*(['"]?)([A-Za-z_]\w*)\1[\s\S]*?\n\s*\2\b/g, '<<HEREDOC');
+}
+
+/** Blank single/double-quoted string literals, preserving token boundaries so a
+ *  real `rm -rf "$VAR"` still reads as `rm -rf ""` (matched) while a quoted
+ *  `"… rm -rf …"` argument to e.g. `node -e` loses its inner tokens. */
+function stripQuotedLiterals(s: string): string {
+  return s
+    .replace(/'[^']*'/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+}
+
+/** The command reduced to tokens at real command positions: heredoc bodies and
+ *  quoted literals removed (#2039). Matchers run against THIS, not the raw text. */
+export function executableShellSkeleton(command: string): string {
+  return stripQuotedLiterals(stripHeredocBodies(command));
+}
+
 // Matches `rm` followed by a flag cluster that contains both `r` and `f`,
 // in either order: e.g. `-rf`, `-fr`, `-Rf`, `-rfv`, `-rfi`.
 // Limitation: doesn't catch split flags like `rm -r -f` (existing behavior).
@@ -775,8 +810,11 @@ export function detectDangerousCommands(
       }
 
       if (commandText === null) continue;
+      // Match against the executable skeleton (#2039) so `rm -rf` (and peers)
+      // inside heredocs/quoted literals/inline-script bodies don't false-fire.
+      const skeleton = executableShellSkeleton(commandText);
       for (const { name, test, certainty } of DANGEROUS_PATTERNS) {
-        if (!test(commandText)) continue;
+        if (!test(skeleton)) continue;
         out.push({
           sessionId: session.sessionId,
           timestamp: call.timestamp,

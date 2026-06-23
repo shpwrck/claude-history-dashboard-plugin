@@ -4,6 +4,7 @@ import {
   rmRfCertainty,
   dangerousFragment,
   dangerousPatternCertainty,
+  executableShellSkeleton,
   type DangerousCommandCertainty,
 } from './parse-permissions';
 
@@ -501,8 +502,12 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
   const bypassCategories = BYPASS_DEFS.filter((def) => def.test(trimmed)).map(
     (def) => def.category
   );
+  // Match dangerous patterns against the executable skeleton (#2039): `rm -rf`
+  // (and peers) inside heredoc bodies, quoted literals, or inline-script source
+  // (`node -e "…"`) are not executed deletions and must not be flagged.
+  const dangerousSkeleton = executableShellSkeleton(command);
   const dangerous = COMMAND_DANGEROUS_PATTERNS.find((pattern) =>
-    pattern.test(command)
+    pattern.test(dangerousSkeleton)
   );
   const riskyAction = detectRiskyActionPatternName(command);
   const head = commandHead(command);

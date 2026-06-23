@@ -138,6 +138,22 @@ describe('parseToolUsage', () => {
     expect(stripped.calls[1].commandDangerousCertainty).toBe('high')
     expect(stripped.calls[1].commandDangerousFragment).toBe('rm -rf ~')
   })
+
+  it('does not precompute a dangerous pattern for rm -rf inside a heredoc/script body (#2039)', () => {
+    const text = [
+      // heredoc writing a deny rule that contains the text rm -rf
+      toolUse('u1', 'Bash', { command: `cat > s.json <<'EOF'\n{ "deny": ["Bash(rm -rf:*)"] }\nEOF` }),
+      // node -e JS source mentioning rm -rf
+      toolUse('u2', 'Bash', { command: `node -e "const c='rm -rf '+p"` }),
+      // a real top-level deletion — must still be flagged
+      toolUse('u3', 'Bash', { command: 'cd /repo && rm -rf ~' }),
+    ].join('\n')
+    const stripped = stripToolCommandBodies(parseToolUsage(text, 's.jsonl')!)
+    expect(stripped.calls[0].commandDangerousPattern).toBeUndefined()
+    expect(stripped.calls[1].commandDangerousPattern).toBeUndefined()
+    expect(stripped.calls[2].commandDangerousPattern).toBe('rm -rf')
+    expect(stripped.calls[2].commandDangerousFragment).toBe('rm -rf ~')
+  })
 })
 
 describe('aggregateTools', () => {

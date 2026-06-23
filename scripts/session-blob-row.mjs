@@ -22,7 +22,10 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       commandDangerousCertainty + commandDangerousFragment; without this bump
 //       the cached blobs keep the old toolData and the dangerous-bypass fix stays
 //       inert on deploy (only a manual cache wipe picked it up).
-const SESSION_BLOB_PARSER_VERSION = 'rmrf-certainty-v2';
+//   'cmd-skeleton-v3' (#2039): dangerous-command matchers now run on the
+//       executable skeleton (heredoc/quoted/inline-script bodies stripped), so a
+//       blob reparse is needed to drop substring false positives.
+const SESSION_BLOB_PARSER_VERSION = 'cmd-skeleton-v3';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
