@@ -74,6 +74,73 @@ function hasRmRfFlags(cmd: string): boolean {
   return /[rR]/.test(flags) && flags.includes('f');
 }
 
+// ── rm -rf target-aware certainty (#2011) ──────────────────────────────────
+// `rm -rf` is only HIGH-certainty dangerous when its TARGET is catastrophic
+// (`/`, `~`, `$HOME`, a bare/unguarded variable, a top-level system dir, or
+// `.`/`..`). A clearly scoped, reversible target — a relative subpath under cwd,
+// a `/tmp/…` scratch path, a worktree dir — is routine cleanup and downgrades to
+// 'medium', so it no longer drives the CRITICAL bypassPermissions finding. When
+// the target isn't visible (compound command truncated past the preview, or no
+// command text), we stay 'high' — never under-report a genuinely dangerous rm.
+
+/** The targets of the first `rm -<flags>` in a command, read up to the next
+ *  shell operator. Empty when no target is visible. */
+function rmRfTargets(command: string): string[] {
+  const m = command.match(/\brm\s+-[a-zA-Z]+\s+([^\n|;&]+)/);
+  if (!m) return [];
+  const tokens = m[1].trim().match(/(?:"[^"]*"|'[^']*'|\S)+/g) ?? [];
+  return tokens.filter((t) => !t.startsWith('-')); // drop trailing flags
+}
+
+function unquoteTarget(t: string): string {
+  return t.replace(/^['"]/, '').replace(/['"]$/, '').trim();
+}
+
+/** A target whose deletion is catastrophic (or whose expansion could be). */
+function isCatastrophicRmTarget(raw: string): boolean {
+  const t = unquoteTarget(raw);
+  if (!t) return true;
+  if (t === '.' || t === '..' || t === './' || t === '../') return true;
+  // root, home, or a bare/root-only variable expansion (an unset var deletes cwd/root)
+  if (/^(\/|~|\$\{?\w+\}?)\/?\*?$/.test(t)) return true;
+  // bare top-level system directories
+  if (/^\/(etc|usr|var|bin|sbin|lib|lib64|boot|dev|sys|proc|opt|root|home)\/?\*?$/.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+/** A clearly scoped, reversible target: a /tmp scratch subpath, or a relative
+ *  subpath under cwd with no shell-variable expansion. */
+function isScopedRmTarget(raw: string): boolean {
+  const t = unquoteTarget(raw);
+  if (!t) return false;
+  if (/^\/tmp\/\S+/.test(t)) return true;
+  if (!t.startsWith('/') && !t.startsWith('~') && !t.includes('$')) {
+    return t !== '.' && t !== '..' && t !== './' && t !== '../';
+  }
+  return false;
+}
+
+function rmRfCertainty(command: string): DangerousCommandCertainty {
+  const targets = rmRfTargets(command);
+  if (targets.length === 0) return 'high'; // target not visible → conservative
+  if (targets.some(isCatastrophicRmTarget)) return 'high';
+  if (targets.every(isScopedRmTarget)) return 'medium';
+  return 'high'; // mixed / unrecognised → conservative
+}
+
+/** Display fragment for a dangerous command. For `rm -rf` we start the slice at
+ *  the match so the cited evidence shows `rm -rf <target>` instead of a leading
+ *  `cd …`/`mkdir …` prefix that hides what was deleted (#2011). */
+function dangerousFragment(command: string, pattern: string): string {
+  if (pattern === 'rm -rf') {
+    const idx = command.search(/\brm\s+-[a-zA-Z]+/);
+    if (idx > 0) return truncateCommand(command.slice(idx));
+  }
+  return truncateCommand(command);
+}
+
 export const DANGEROUS_PATTERNS: {
   name: string;
   test: (cmd: string) => boolean;
@@ -678,13 +745,18 @@ export function detectDangerousCommands(
           : null;
 
       if (precomputedPattern) {
+        const text = commandText ?? preview ?? '';
         out.push({
           sessionId: session.sessionId,
           timestamp: call.timestamp,
           toolUseId: call.toolUseId,
-          command: truncateCommand(commandText ?? preview ?? ''),
+          command: dangerousFragment(text, precomputedPattern),
           pattern: precomputedPattern,
-          certainty: dangerousPatternCertainty(precomputedPattern),
+          // rm -rf certainty is target-aware (#2011); other patterns are static.
+          certainty:
+            precomputedPattern === 'rm -rf'
+              ? rmRfCertainty(text)
+              : dangerousPatternCertainty(precomputedPattern),
         });
         continue;
       }
@@ -696,9 +768,10 @@ export function detectDangerousCommands(
           sessionId: session.sessionId,
           timestamp: call.timestamp,
           toolUseId: call.toolUseId,
-          command: truncateCommand(commandText),
+          command: dangerousFragment(commandText, name),
           pattern: name,
-          certainty: certainty ?? 'high',
+          // rm -rf certainty is target-aware (#2011); other patterns are static.
+          certainty: name === 'rm -rf' ? rmRfCertainty(commandText) : certainty ?? 'high',
         });
         break; // only record first matching pattern per command
       }
@@ -770,6 +843,11 @@ export function computeSafetyScores(
 ): SessionSafetyScore[] {
   const dangerCounts = new Map<string, number>();
   for (const d of dangerous) {
+    // Gate on HIGH-certainty (#2011): scoped/reversible rm -rf (./.worktrees,
+    // /tmp, …) is 'medium' and must not drive the bypassPermissions safety
+    // score. Mirrors session-scorecard's high-certainty filter so both the
+    // dangerous-bypass and unattended-sessions detectors agree on the count.
+    if (d.certainty !== 'high') continue;
     dangerCounts.set(d.sessionId, (dangerCounts.get(d.sessionId) ?? 0) + 1);
   }
 

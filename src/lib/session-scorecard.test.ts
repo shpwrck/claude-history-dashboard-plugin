@@ -284,7 +284,7 @@ describe('computeSessionScorecard', () => {
       tokenData: tokenData(),
       toolData: toolData([
         toolCall('Bash', {
-          input: { command: 'rm -rf build' },
+          input: { command: 'rm -rf ~' },
           isError: true,
         }),
         toolCall('Edit', { isError: true }),
@@ -365,7 +365,7 @@ describe('computeSessionScorecard', () => {
       tokenData: tokenData(),
       toolData: toolData([
         toolCall('Bash', {
-          input: { command: 'rm -rf build' },
+          input: { command: 'rm -rf ~' },
         }),
       ]),
       permissionRows: [{ sessionId: 'sess-1', mode: 'default' }],

@@ -83,7 +83,7 @@ describe('safety.dangerous-bypass', () => {
   it('flags destructive commands that ran under bypassPermissions', () => {
     const rec = detector.rule(
       input({
-        toolData: [bash('rm -rf /tmp/build-output')],
+        toolData: [bash('rm -rf ~')],
         permissionRows: [{ sessionId: 'session-1', mode: 'bypassPermissions' }],
       }),
       0
@@ -104,6 +104,34 @@ describe('safety.dangerous-bypass', () => {
     expect(rec?.evidence?.[0]).toContain('rm -rf');
     expect(rec?.fix?.snippet).toContain('"deny"');
     expect(rec?.fix?.snippet).toContain('"Bash(rm -rf:*)"');
+  });
+
+  it('does not flag a scoped/reversible rm -rf under bypass (#2011)', () => {
+    // Worktree cleanup is medium-certainty; it must not drive the CRITICAL
+    // bypass finding (nor the dangerous-commands sibling) — both branches null.
+    for (const scoped of ['rm -rf ./.worktrees/feature-x', 'rm -rf /tmp/y']) {
+      const rec = detector.rule(
+        input({
+          toolData: [bash(scoped)],
+          permissionRows: [{ sessionId: 'session-1', mode: 'bypassPermissions' }],
+        }),
+        0
+      );
+      expect(rec, scoped).toBeNull();
+    }
+  });
+
+  it('still flags an unguarded variable-expansion rm -rf as CRITICAL (#2011)', () => {
+    // `rm -rf "$UNSET"` is catastrophic when the variable is unset, so target-
+    // aware certainty must keep it 'high' and drive the bypass finding.
+    const rec = detector.rule(
+      input({
+        toolData: [bash('rm -rf "$UNSET"')],
+        permissionRows: [{ sessionId: 'session-1', mode: 'bypassPermissions' }],
+      }),
+      0
+    );
+    expect(rec).toMatchObject({ id: 'safety.dangerous-bypass', severity: 'critical' });
   });
 
   it('emits the warning-only dangerous-commands variant outside bypass mode', () => {
@@ -129,7 +157,7 @@ describe('safety.dangerous-bypass', () => {
     expect(
       detector.rule(
         input({
-          toolData: [bash('rm -rf /tmp/build-output')],
+          toolData: [bash('rm -rf ~')],
           permissionRows: [{ sessionId: 'session-1', mode: 'bypassPermissions' }],
           liveConfig: liveConfig({ deny: DANGEROUS_DENY_RULES }),
         }),
@@ -151,7 +179,7 @@ describe('safety.dangerous-bypass', () => {
   it('carries adoption markers on the fix so the scorecard can credit it (#1783)', () => {
     const rec = detector.rule(
       input({
-        toolData: [bash('rm -rf /tmp/build-output')],
+        toolData: [bash('rm -rf ~')],
         permissionRows: [{ sessionId: 'session-1', mode: 'bypassPermissions' }],
       }),
       0
@@ -167,7 +195,7 @@ describe('safety.dangerous-bypass', () => {
     expect(
       detector.rule(
         input({
-          toolData: [bash('rm -rf /tmp/build-output')],
+          toolData: [bash('rm -rf ~')],
           permissionRows: [{ sessionId: 'session-1', mode: 'bypassPermissions' }],
           liveConfig: liveConfigClaudeMd(ADOPT_BLOCK_BYPASS),
         }),
@@ -193,7 +221,7 @@ describe('safety.dangerous-bypass', () => {
   it('marks unattended dangerous sessions without inventing a higher severity', () => {
     const rec = detector.rule(
       input({
-        toolData: [bash('rm -rf /tmp/build-output')],
+        toolData: [bash('rm -rf ~')],
         tokenData: [tokenSession('session-1', 'sdk-py')],
         permissionRows: [{ sessionId: 'session-1', mode: 'bypassPermissions' }],
       }),

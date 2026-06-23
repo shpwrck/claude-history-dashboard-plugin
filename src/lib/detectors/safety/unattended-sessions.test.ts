@@ -35,7 +35,7 @@ function token(sessionId: string, entrypoint: string): SessionTokenData {
   } as unknown as SessionTokenData;
 }
 
-function dangerousTool(sessionId: string, command = 'rm -rf /tmp/build'): ToolUsageData {
+function dangerousTool(sessionId: string, command = 'rm -rf ~'): ToolUsageData {
   return {
     sessionId,
     calls: [

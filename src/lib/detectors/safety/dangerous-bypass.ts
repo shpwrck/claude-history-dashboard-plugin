@@ -55,7 +55,14 @@ export const detector: Detector = {
   category: 'safety',
   dataDeps: ['toolData', 'tokenData', 'permissionRows', 'liveConfig'],
   rule(input) {
-    const dangerous = detectDangerousCommands(input.toolData);
+    // Gate on HIGH-certainty (#2011): scoped/reversible rm -rf (./.worktrees,
+    // /tmp scratch, …) is now 'medium' and must not drive this CRITICAL finding
+    // or its `safety.dangerous-commands` sibling. Mirrors session-scorecard's
+    // high-certainty filter. (Also drops the statically-'medium' `dd if=`
+    // pattern, by design — same bar as the scorecard.)
+    const dangerous = detectDangerousCommands(input.toolData).filter(
+      (d) => d.certainty === 'high'
+    );
     if (dangerous.length === 0) return null;
     // If the canonical deny block from the fix is already present in settings,
     // every recommendation variant this rule emits is satisfied (deny is

@@ -117,7 +117,7 @@ describe('bumpSeverity', () => {
 describe('ruleDangerousBypass entrypoint-scaled severity (#197)', () => {
   it('keeps the warning baseline for an interactive-only dangerous-commands finding', () => {
     const input = baseInput({
-      toolData: [toolSession('s1', ['rm -rf /tmp/x'])],
+      toolData: [toolSession('s1', ['rm -rf ~'])],
       tokenData: [tokenSession('s1', 'cli')],
     });
     const rec = buildRecommendations(input).find(
@@ -130,18 +130,18 @@ describe('ruleDangerousBypass entrypoint-scaled severity (#197)', () => {
 
   it('includes the exact dangerous command in evidence rows', () => {
     const input = baseInput({
-      toolData: [toolSession('s1', ['rm -rf /tmp/x'])],
+      toolData: [toolSession('s1', ['rm -rf ~'])],
       tokenData: [tokenSession('s1', 'cli')],
     });
     const rec = buildRecommendations(input).find(
       (r) => r.id === 'safety.dangerous-commands'
     );
-    expect(rec?.evidence?.[0]).toContain('rm -rf: rm -rf /tmp/x');
+    expect(rec?.evidence?.[0]).toContain('rm -rf: rm -rf ~');
   });
 
   it('bumps warning → critical when a dangerous command ran under an sdk-* entrypoint', () => {
     const input = baseInput({
-      toolData: [toolSession('s1', ['rm -rf /tmp/x'])],
+      toolData: [toolSession('s1', ['rm -rf ~'])],
       tokenData: [tokenSession('s1', 'sdk-cli')],
     });
     const rec = buildRecommendations(input).find(
@@ -154,7 +154,7 @@ describe('ruleDangerousBypass entrypoint-scaled severity (#197)', () => {
 
   it('caps the bypass finding at critical even when run unattended', () => {
     const input = baseInput({
-      toolData: [toolSession('s1', ['rm -rf /tmp/x'])],
+      toolData: [toolSession('s1', ['rm -rf ~'])],
       tokenData: [tokenSession('s1', 'sdk-py')],
       permissionRows: [bypassRow('s1')],
     });
@@ -169,7 +169,7 @@ describe('ruleDangerousBypass entrypoint-scaled severity (#197)', () => {
 
   it('leaves the bypass finding unmarked when the bypass session is interactive', () => {
     const input = baseInput({
-      toolData: [toolSession('s1', ['rm -rf /tmp/x'])],
+      toolData: [toolSession('s1', ['rm -rf ~'])],
       tokenData: [tokenSession('s1', 'cli')],
       permissionRows: [bypassRow('s1')],
     });

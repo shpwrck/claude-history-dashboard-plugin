@@ -242,7 +242,7 @@ describe('computeSuppressionTransitions with real settings/hook detectors (#1783
   const tc = (toolName: string, isError: boolean, i: number): ToolCall => ({
     timestamp: `2026-06-12T10:00:0${i}.000Z`,
     toolName,
-    input: toolName === 'Bash' ? { command: 'rm -rf /tmp/build-output' } : {},
+    input: toolName === 'Bash' ? { command: 'rm -rf ~' } : {},
     toolUseId: `tool-${toolName}-${i}`,
     isError: isError ? true : null,
     resultBytes: 0,

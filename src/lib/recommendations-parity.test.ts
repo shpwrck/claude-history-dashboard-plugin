@@ -152,8 +152,11 @@ describe('recommendations parity snapshot (#507)', () => {
       bashCall('npm run build'),
       bashCall('npm run build'),
       bashCall('npm run build'),
-      // dangerous command under bypass + unattended entrypoint
-      bashCall('rm -rf /tmp/scratch'),
+      // dangerous command under bypass + unattended entrypoint. Use a
+      // catastrophic target (`~`): scoped/reversible rm -rf is now medium-
+      // certainty and gated out of the safety findings (#2011), so the corpus
+      // must use an unscoped target to keep exercising the safety rule.
+      bashCall('rm -rf ~'),
       bashCall('git reset --hard HEAD'),
       ...editChurn,
       ...erroringReads,
