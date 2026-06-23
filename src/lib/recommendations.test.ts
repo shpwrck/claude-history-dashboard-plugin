@@ -2521,6 +2521,29 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ memoryStores }) });
   }
 
+  // ── reliability.stale-state-assertion (#1871): integration-branch git reads
+  // (`git log origin/master`) with no `git fetch` earlier in the session.
+  {
+    const ssaRead = (sessionId: string): ToolUsageData =>
+      ({
+        sessionId,
+        calls: [
+          {
+            timestamp: '2026-06-10T00:00:01Z',
+            toolName: 'Bash',
+            input: { command: 'git log origin/master --oneline -5' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+          },
+        ],
+      }) as unknown as ToolUsageData;
+    out.push({
+      now,
+      input: bankBase({ toolData: [ssaRead('ssa1'), ssaRead('ssa2'), ssaRead('ssa3')] }),
+    });
+  }
+
   return out;
 }
 

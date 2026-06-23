@@ -340,6 +340,29 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: 0,
   }),
+  'reliability.stale-state-assertion': () => {
+    // Three sessions each reading an integration-branch ref with no prior fetch.
+    const staleRead = (sessionId: string) =>
+      ({
+        sessionId,
+        calls: [
+          {
+            timestamp: '2026-06-10T00:00:01Z',
+            toolName: 'Bash',
+            input: { command: 'git log origin/master --oneline -5' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+          },
+        ],
+      }) as unknown as RecommendationInput['toolData'][number];
+    return {
+      input: baseInput({
+        toolData: [staleRead('ssa1'), staleRead('ssa2'), staleRead('ssa3')],
+      }),
+      now: 0,
+    };
+  },
   'context.cross-session-reread': () => {
     // A doc cold-read once per session across 6 sessions, read-only, big enough
     // that the NET cross-session tax clears the savings floor.

@@ -126,6 +126,7 @@ import { detector as agentReportCard } from './reliability/agent-report-card';
 import { detector as retryPrefixRewaste } from './reliability/retry-prefix-rewaste';
 import { detector as overloadReretry } from './reliability/overload-reretry';
 import { detector as passiveWaitStall } from './reliability/passive-wait-stall';
+import { detector as staleStateAssertion } from './reliability/stale-state-assertion';
 
 // ── SPEED ───────────────────────────────────────────────────────────────
 // The clock (ADR 0006) — wall-clock/latency levers.
@@ -326,6 +327,15 @@ export const DETECTORS: Detector[] = [
   // is forced — weighted by the silence gap. Reads parse-timeline's per-turn
   // waitLanguage/backgrounded flags; dark on a transcript-free dataset.
   passiveWaitStall,
+
+  // ── #1871 (epic #1910) — stale-state assertions (reliability) ─────────────
+  // Flags LOCAL git reads of an integration/remote ref (origin/…, master, main,
+  // @{u}, --contains) issued with no `git fetch`/`git pull` earlier in the same
+  // session — the un-fetched-tree source of "X is merged/landed/exists" claims.
+  // gh reads (live) and ref-less git reads are excluded. Measures the behaviour
+  // the global repo-freshness hook prevents (dogfooding loop). Reads toolData;
+  // dark on a dataset with no Bash calls.
+  staleStateAssertion,
 
   // ── #1754 (epic #1910) — mid-turn user-interrupt steering ─────────────────
   // Dollarizes the in-flight output tokens discarded when a human cuts the

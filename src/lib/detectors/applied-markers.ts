@@ -108,6 +108,10 @@ export const MARKERS_TOOL_ERRORS: AppliedMarkers = {
   headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
   bodyPhrases: ['Tools with high error rates'],
 };
+export const MARKERS_STALE_STATE_ASSERTION: AppliedMarkers = {
+  headings: [/^##\s+Fetch before asserting repo state\b/i],
+  bodyPhrases: ['local tree can sit many commits behind origin'],
+};
 
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
@@ -137,4 +141,5 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['workflow.shadow-axis-wins', MARKERS_SHADOW_AXIS_WINS],
   ['safety.dangerous-bypass', MARKERS_DANGEROUS_BYPASS],
   ['reliability.tool-errors', MARKERS_TOOL_ERRORS],
+  ['reliability.stale-state-assertion', MARKERS_STALE_STATE_ASSERTION],
 ]);
