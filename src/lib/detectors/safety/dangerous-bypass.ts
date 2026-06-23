@@ -97,14 +97,26 @@ export const detector: Detector = {
       const bumped = ranUnattended(
         riskyDangerous
       );
+      // How many of the contributing commands ran in an unattended (`sdk-*`)
+      // session (#2012). Surfaced here so the unattended dimension reads as a
+      // field on this single CRITICAL card; the standalone
+      // `safety.unattended-sessions` card (a subset of these commands) is
+      // collapsed away in recommendations.ts when this finding is present.
+      const unattendedCount = riskyDangerous.filter((d) =>
+        unattendedSessions.has(d.sessionId)
+      ).length;
       const baseSeverity: RecSeverity = 'critical';
+      const unattendedNote = unattendedCount
+        ? ` ${unattendedCount} of these ran in unattended sdk-* session(s).`
+        : '';
       return {
         id: 'safety.dangerous-bypass',
         category: 'safety',
         severity: bumped ? bumpSeverity(baseSeverity) : baseSeverity,
         unattended: bumped,
+        ...(unattendedCount ? { unattendedCount } : {}),
         title: 'Dangerous commands ran under bypassed permissions',
-        detail: `${totalDangerous} risky command(s) (e.g. rm -rf, git reset --hard, curl|sh) ran in ${risky.length} session(s) that used bypassPermissions.`,
+        detail: `${totalDangerous} risky command(s) (e.g. rm -rf, git reset --hard, curl|sh) ran in ${risky.length} session(s) that used bypassPermissions.${unattendedNote}`,
         action:
           'Reserve bypassPermissions for trusted, reversible work; add an explicit deny-list for destructive patterns.',
         affected: totalDangerous,

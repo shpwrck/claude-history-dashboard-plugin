@@ -368,6 +368,15 @@ export interface Recommendation {
    */
   unattended?: boolean;
   /**
+   * How many of this finding's contributing commands ran under an unattended
+   * (`sdk-*`) entrypoint (#2012). Surfaced on `safety.dangerous-bypass` so the
+   * unattended dimension reads as a field on the single CRITICAL card instead of
+   * spawning a duplicate `safety.unattended-sessions` card for the same commands
+   * (the unattended set is a subset of the bypass set). Drives an "N unattended"
+   * badge in the UI; omitted when zero or not applicable.
+   */
+  unattendedCount?: number;
+  /**
    * Projects this finding is attributable to, derived from the session-ids that
    * lead its `evidence` rows (#330). Populated ONLY on the project-filtered
    * response from `filterRecommendationsByProject`; the global (unfiltered)

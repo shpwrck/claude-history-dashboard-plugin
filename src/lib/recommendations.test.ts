@@ -182,6 +182,71 @@ describe('ruleDangerousBypass entrypoint-scaled severity (#197)', () => {
   });
 });
 
+describe('safety.unattended-sessions collapses into dangerous-bypass (#2012)', () => {
+  const safetyCards = (recs: Recommendation[]) =>
+    recs.filter(
+      (r) => r.id === 'safety.dangerous-bypass' || r.id === 'safety.unattended-sessions'
+    );
+
+  it('emits ONE critical card (not two) when all dangerous bypassed commands are unattended', () => {
+    const recs = buildRecommendations(
+      baseInput({
+        toolData: [toolSession('s1', ['rm -rf ~'])],
+        tokenData: [tokenSession('s1', 'sdk-py')],
+        permissionRows: [bypassRow('s1')],
+      })
+    );
+    const cards = safetyCards(recs);
+    // Exactly one card, and it is the dangerous-bypass one (unattended collapsed in).
+    expect(cards.map((r) => r.id)).toEqual(['safety.dangerous-bypass']);
+    const bypass = cards[0];
+    expect(bypass.severity).toBe('critical');
+    expect(bypass.unattended).toBe(true);
+    // The unattended dimension survives as a count on the single card.
+    expect(bypass.unattendedCount).toBe(1);
+    expect(bypass.detail).toContain('unattended sdk-* session');
+    // No standalone unattended-sessions card remains.
+    expect(recs.some((r) => r.id === 'safety.unattended-sessions')).toBe(false);
+  });
+
+  it('does not count a command toward both cards on a mixed attended/unattended input', () => {
+    const recs = buildRecommendations(
+      baseInput({
+        toolData: [
+          toolSession('attended', ['rm -rf ~']),
+          toolSession('auto', ['git reset --hard HEAD~1']),
+        ],
+        tokenData: [
+          tokenSession('attended', 'cli'),
+          tokenSession('auto', 'sdk-py'),
+        ],
+        permissionRows: [bypassRow('attended'), bypassRow('auto')],
+      })
+    );
+    const cards = safetyCards(recs);
+    // Still one card; the unattended subset is not split off into a second card.
+    expect(cards.map((r) => r.id)).toEqual(['safety.dangerous-bypass']);
+    const bypass = cards[0];
+    expect(bypass.severity).toBe('critical'); // bumped because one ran unattended
+    expect(bypass.affected).toBe(2); // both commands counted once, on this card
+    expect(bypass.unattendedCount).toBe(1); // only the unattended one
+  });
+
+  it('leaves the unattended card alone when dangerous-bypass is absent (no duplication)', () => {
+    // No bypassPermissions rows → dangerous-bypass does not fire, so there is no
+    // duplicate to collapse. unattended-sessions also needs bypass, so neither
+    // fires here — assert we did not invent a card or crash.
+    const recs = buildRecommendations(
+      baseInput({
+        toolData: [toolSession('s1', ['rm -rf ~'])],
+        tokenData: [tokenSession('s1', 'sdk-py')],
+      })
+    );
+    expect(recs.some((r) => r.id === 'safety.dangerous-bypass')).toBe(false);
+    expect(recs.some((r) => r.id === 'safety.unattended-sessions')).toBe(false);
+  });
+});
+
 describe('automationCostShare shared helper (#299)', () => {
   const entry = (
     model: string,

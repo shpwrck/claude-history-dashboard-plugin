@@ -258,6 +258,32 @@ export function rankRecommendations(
  *
  * Skip cache when the caller pins `now` — those calls are time-keyed.
  */
+/**
+ * Collapse the duplicate `safety.unattended-sessions` card into the single
+ * `safety.dangerous-bypass` card (#2012, epic #2009). Both detectors run the
+ * same `detectDangerousCommands` + `computeSafetyScores` over bypassPermissions
+ * sessions; `safety.unattended-sessions` only adds the `isUnattendedEntrypoint`
+ * filter, so its command set is BY CONSTRUCTION a subset of dangerous-bypass's.
+ * Emitting both shows two CRITICAL cards for one underlying set of commands,
+ * which erodes the severity tier. When dangerous-bypass is present we drop the
+ * standalone unattended card; its count already rides dangerous-bypass as
+ * `unattendedCount` (set in the detector), and we backfill it here if absent so
+ * the surviving card never loses the unattended dimension. Mutates `recs` in
+ * place. When dangerous-bypass is NOT present (e.g. suppressed by an adopted
+ * deny block), the unattended card is left alone — there is no duplication.
+ */
+function collapseUnattendedIntoDangerousBypass(recs: Recommendation[]): void {
+  const bypass = recs.find((r) => r.id === 'safety.dangerous-bypass');
+  if (!bypass) return;
+  const unattendedIdx = recs.findIndex((r) => r.id === 'safety.unattended-sessions');
+  if (unattendedIdx === -1) return;
+  const unattended = recs[unattendedIdx];
+  if (bypass.unattendedCount == null) {
+    bypass.unattendedCount = unattended.affected;
+  }
+  recs.splice(unattendedIdx, 1);
+}
+
 export function buildRecommendations(
   input: RecommendationInput,
   now?: number
@@ -277,6 +303,7 @@ export function buildRecommendations(
     const r = d.rule(input, t);
     if (r) recs.push(r);
   }
+  collapseUnattendedIntoDangerousBypass(recs);
   const sorted = rankRecommendations(
     attachExternalGuidanceReferences(recs, input.externalGuidance)
   );
