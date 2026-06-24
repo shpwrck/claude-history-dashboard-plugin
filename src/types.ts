@@ -220,6 +220,25 @@ export interface SessionTokenData extends SessionDimensions {
   totalThinkingTokens?: number;
   totalCacheCreationTokens: number;
   totalCacheReadTokens: number;
+  /**
+   * Context-composition reconstruction (#1926). Sum, over the session's turns,
+   * of each turn's CUMULATIVE conversation-history token estimate (user prose +
+   * prior assistant visible output present in that turn's input context). Stored
+   * per session (not per turn) to keep the dataset lean; because each addend is
+   * the cumulative-at-turn value, the sum naturally weights later turns more —
+   * preserving the "history grows across the session" signal. High fidelity
+   * (tokenized from transcript content). Used by `context-composition.ts`.
+   * Absent/0 when the row predates the parser change.
+   */
+  contextHistoryTokensSum?: number;
+  /**
+   * Context-composition reconstruction (#1926). Sum, over the session's turns,
+   * of each turn's CUMULATIVE file/tool-payload token estimate (`tool_result`
+   * content present in that turn's input context). Per-session companion to
+   * {@link contextHistoryTokensSum}; typically the dominant slice. Absent/0 when
+   * the row predates the parser change.
+   */
+  contextToolResultTokensSum?: number;
   model: string;
   messageCount: number;
   entries: TokenEntry[];

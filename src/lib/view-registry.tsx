@@ -705,6 +705,7 @@ export const VIEW_RENDERERS: Partial<
       routeFilter={routeFilter}
       onOpenSession={n.openSession}
       onNavigate={n.navigateWithFilter}
+      liveConfig={d.liveConfig}
     />
   ),
   tools: ({ data: d, nav: n, routeFilter }) => (

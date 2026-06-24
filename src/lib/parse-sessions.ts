@@ -4,10 +4,23 @@ import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
 import { parseJsonl, parseMessage, summarize, type ContentBlock } from './parse-utils';
 import { resultContentSize } from './parse-tools';
 import {
+  estimateTokens,
   isThinkingBlock,
   reconstructThinkingTokens,
   visibleBlockTokens,
 } from './thinking-tokens';
+
+/**
+ * Chars/token density for `tool_result` PAYLOAD content (#1926 context
+ * composition). Tool output (file contents, command logs, JSON) tokenizes
+ * somewhat denser than prose but lighter than minified JSON: ~3.5 chars/token
+ * is a documented mid estimate between the thinking-token text (2.6) and
+ * tool_use JSON (1.7) densities. This bucket is a totals-anchored
+ * reconstruction, not a billed split, so the absolute density only shifts the
+ * raw share between buckets; the apportionment is re-anchored to the billed
+ * total and the residual is shown (see `context-composition.ts`).
+ */
+const TOOL_RESULT_CHARS_PER_TOKEN = 3.5;
 
 /**
  * Whether a session's `entrypoint` marks an unattended (non-interactive) run.
@@ -128,9 +141,25 @@ export function parseSessionJsonl(
   // `hasThinking` OR-ed). These are resolved into the final `thinkingTokens`
   // and stripped before the entry is returned, so they never leak into the
   // serialized blob.
-  type TokenAccumulator = TokenEntry & { visibleTokens: number; hasThinking: boolean };
+  type TokenAccumulator = TokenEntry & {
+    visibleTokens: number;
+    hasThinking: boolean;
+    // #1926: cumulative context snapshots, taken once at the message's FIRST
+    // line (before this message's own visible output is folded into history).
+    ctxHistorySnapshot: number;
+    ctxToolResultSnapshot: number;
+  };
   const tokenMap = new Map<string, TokenAccumulator>();
   let model = 'unknown';
+
+  // #1926: running cumulative estimates of the two high-fidelity input-context
+  // buckets, advanced in transcript order. `cumHistoryTokens` = user prose +
+  // prior assistant visible output (text + tool_use args). `cumToolResultTokens`
+  // = tool_result payload content. At each assistant message's first line we
+  // snapshot these as that turn's input-context composition (see
+  // `context-composition.ts`).
+  let cumHistoryTokens = 0;
+  let cumToolResultTokens = 0;
 
   // #1928: ID linkage between billed messages and the tool calls they
   // dispatched. `tool_use` block ids accumulate per assistant message id (above,
@@ -178,10 +207,17 @@ export function parseSessionJsonl(
       // parse-tools `ToolCall.resultBytes`) and key it by id so the assistant
       // message that emitted that `tool_use` can join its result bytes by ID.
       if (entry.type === 'user' && entry.message) {
+        // #1926: user prose enters the conversation-history bucket.
+        cumHistoryTokens += estimateTokens(userMessageText(entry.message));
         const userMsg = parseMessage(entry.message);
         if (userMsg && Array.isArray(userMsg.content)) {
           for (const block of userMsg.content as ContentBlock[]) {
             if (!block || block.type !== 'tool_result') continue;
+            // #1926: ALL tool_result payload tokens feed the file/tool bucket,
+            // whether or not the block carries a joinable tool_use_id.
+            cumToolResultTokens += Math.ceil(
+              resultContentSize(block.content) / TOOL_RESULT_CHARS_PER_TOKEN
+            );
             const id = block.tool_use_id;
             if (typeof id !== 'string' || !id) continue;
             const bytes = resultContentSize(block.content);
@@ -252,6 +288,11 @@ export function parseSessionJsonl(
         // #1928: tool_use ids emitted on this line; concatenated (not max-merged)
         // across the message's streamed lines below, then deduped at resolution.
         toolUseIds: lineToolUseIds,
+        // #1926: this turn's input-context snapshot. Valid for the message's
+        // FIRST line (taken before its own visible output is folded into
+        // history below); the merge keeps the first snapshot for later lines.
+        ctxHistorySnapshot: cumHistoryTokens,
+        ctxToolResultSnapshot: cumToolResultTokens,
         model: msg.model ?? model,
       };
       // #457: a single assistant message id can appear on multiple transcript
@@ -304,10 +345,20 @@ export function parseSessionJsonl(
                 ...(prevUsage.toolUseIds ?? []),
                 ...(incoming.toolUseIds ?? []),
               ],
+              // #1926: keep the FIRST line's input-context snapshot; later lines
+              // of the same message must not re-snapshot a grown cumulative.
+              ctxHistorySnapshot: prevUsage.ctxHistorySnapshot,
+              ctxToolResultSnapshot: prevUsage.ctxToolResultSnapshot,
               model: incoming.model ?? prevUsage.model,
             }
           : incoming
       );
+
+      // #1926: fold THIS assistant line's visible output (text + tool_use args)
+      // into the running history cumulative so it counts toward LATER turns'
+      // input context — done after the snapshot above, so it never lands in this
+      // turn's own input composition.
+      cumHistoryTokens += lineVisibleTokens;
     } catch {
       // skip unparseable lines
     }
@@ -317,8 +368,21 @@ export function parseSessionJsonl(
   // #1927 thinking-token residual from the (max-merged) billed output and the
   // (summed) visible-token estimate. The `visibleTokens`/`hasThinking`
   // accumulators are dropped here so they never leak into the serialized blob.
+  // #1926: accumulate the per-turn context snapshots into per-SESSION sums
+  // (stored on SessionTokenData, not per entry, to keep the dataset lean).
+  let contextHistoryTokensSum = 0;
+  let contextToolResultTokensSum = 0;
   const tokenEntries: TokenEntry[] = Array.from(tokenMap.values()).map((acc) => {
-    const { visibleTokens, hasThinking, toolUseIds, ...rest } = acc;
+    const {
+      visibleTokens,
+      hasThinking,
+      toolUseIds,
+      ctxHistorySnapshot,
+      ctxToolResultSnapshot,
+      ...rest
+    } = acc;
+    contextHistoryTokensSum += ctxHistorySnapshot;
+    contextToolResultTokensSum += ctxToolResultSnapshot;
     // #1928: dedupe the message's tool_use ids (preserving first-seen order) and
     // join their result-payload bytes by ID. Both fields are omitted when the
     // message dispatched no tool calls, so rows with no tools stay byte-clean.
@@ -363,6 +427,9 @@ export function parseSessionJsonl(
     totalThinkingTokens: tokenEntries.reduce((s, e) => s + (e.thinkingTokens ?? 0), 0),
     totalCacheCreationTokens: tokenEntries.reduce((s, e) => s + e.cacheCreationTokens, 0),
     totalCacheReadTokens: tokenEntries.reduce((s, e) => s + e.cacheReadTokens, 0),
+    // #1926: per-session context-composition sums (omit when 0 to stay byte-clean).
+    ...(contextHistoryTokensSum > 0 ? { contextHistoryTokensSum } : {}),
+    ...(contextToolResultTokensSum > 0 ? { contextToolResultTokensSum } : {}),
     model,
     messageCount: tokenEntries.length,
     entries: tokenEntries,

@@ -32,7 +32,11 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       (the ID linkage from assistant tool_use.id <-> user tool_result.tool_use_id),
 //       enabling ID-based per-tool cost attribution; reparse so cached blobs gain
 //       the linkage instead of shipping the change inert.
-const SESSION_BLOB_PARSER_VERSION = 'tool-use-id-v5';
+//   'context-composition-v6' (#1926): TokenEntry now carries contextHistoryTokens
+//       + contextToolResultTokens (per-turn input-context composition snapshots);
+//       reparse so cached blobs gain the bucket fields the composition view needs
+//       instead of shipping the change inert.
+const SESSION_BLOB_PARSER_VERSION = 'context-composition-v6';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
