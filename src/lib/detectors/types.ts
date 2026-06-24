@@ -54,6 +54,7 @@ import type {
   ExternalGuidanceRef,
 } from '../parse-external-guidance';
 import type { ModelEvalSummary } from '../model-eval-ingest';
+import type { GitOutcome } from '../parse-git-outcome';
 import type { EvidenceRef } from '../evidence';
 
 export type RecCategory =
@@ -559,6 +560,20 @@ export interface RecommendationInput {
    * detector reads it yet — this slice only establishes the contract.
    */
   memoryStores?: ProjectMemoryStore[] | null;
+  /**
+   * Per-session git delivery-outcome labels (#1757, epic #1911), dataset key
+   * `gitOutcomes`. The one ground-truth outcome signal we possess: each
+   * session's `gitBranch` joined to its PR and classified into `merged-clean` /
+   * `merged-then-reverted` / `merged-then-fixed` / `abandoned`, each carrying
+   * `provenance`. Built at ingest time by `buildGitOutcomes` (parse-git-outcome)
+   * from PR records the ingest step fetches via `gh`/GitHub API (network-side;
+   * zero Anthropic API egress). SIGNAL ONLY this release — NO detector
+   * reads it yet; the delivery-outcome detector + autonomy-proxy validation
+   * harness are deferred to a Future child of #1911. Optional:
+   * `undefined`/`null`/empty (no PR join, the SPA/upload dataset, or `gh`
+   * unavailable) means downstream detectors emit nothing.
+   */
+  gitOutcomes?: GitOutcome[] | null;
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { delimiter, join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -465,6 +466,11 @@ const { readExternalGuidanceSnapshots } = await import(
 // `RecommendationInput.memoryStores` so the #1779 memory-hygiene detector fires
 // on the real local store instead of staying dark in production.
 const { buildMemoryStores } = await import(join(LIB, 'parse-memories.ts'));
+// Git delivery-outcome signal (#1757, epic #1911). Pure label/parse logic lives
+// in parse-git-outcome.ts (no network, so it stays safe under the zero-deps
+// runtime import guard); the live `gh`/GitHub-API fetch that feeds it happens
+// HERE, server-side, in readGitOutcomes() below.
+const { buildGitOutcomes } = await import(join(LIB, 'parse-git-outcome.ts'));
 const EXTERNAL_GUIDANCE_DIR = join(PROJECT_DIR, 'data', 'external-guidance');
 // Read fresh on every assemble — NOT memoized. The ingest() content-hash gate
 // hashes this dir so a refreshed snapshot (git pull / drift-PR merge under a
@@ -535,6 +541,82 @@ function readMemoryStores() {
   }
   try {
     return buildMemoryStores({ projects });
+  } catch {
+    return [];
+  }
+}
+
+// Git delivery-outcome signal (#1757, epic #1911). OPT-IN: the live `gh` fetch
+// only runs when CHD_GIT_OUTCOMES names a `owner/repo` (or a comma list), so the
+// default server path makes ZERO `gh` calls and ships an empty `gitOutcomes`
+// (the downstream detector, deferred to a Future child, then emits nothing).
+// Opt-in because this is the one signal that shells out at ingest time — we keep
+// it off by default rather than firing `gh` on every assemble. Tolerant by
+// design: a missing `gh`, a network failure, or a malformed payload degrades to
+// `[]` and never sinks the dataset endpoint. The CLASSIFICATION is pure
+// (parse-git-outcome.ts, unit-tested without network); only the PR FETCH lives
+// here, server-side, and never reaches the Anthropic API.
+const GIT_OUTCOMES_REPOS = String(process.env.CHD_GIT_OUTCOMES || '')
+  .split(/[,\s]+/)
+  .map((part) => part.trim())
+  .filter((part) => /^[\w.-]+\/[\w.-]+$/.test(part));
+
+function fetchPullRequestsForRepo(repo) {
+  // One bounded `gh` call per repo: recent PRs with the fields the pure
+  // classifier reads. `--limit` caps the join cost; failures throw and are
+  // swallowed by the caller.
+  const raw = execFileSync(
+    'gh',
+    [
+      'pr',
+      'list',
+      '--repo',
+      repo,
+      '--state',
+      'all',
+      '--limit',
+      '200',
+      '--json',
+      'number,headRefName,title,body,state',
+    ],
+    { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }
+  );
+  const list = JSON.parse(raw);
+  if (!Array.isArray(list)) return [];
+  // `gh` exposes merge state via `state: 'MERGED'`; the revert/fix-up signals
+  // are not on the list payload, so they stay undefined here. A later slice may
+  // enrich them by scanning merge-commit trailers — until then a merged PR with
+  // no later revert/fix reads as `merged-clean`, which is the honest default.
+  return list.map((pr) => ({
+    number: pr.number,
+    headRefName: pr.headRefName,
+    title: pr.title,
+    body: pr.body,
+    state: pr.state,
+    merged: String(pr.state || '').toUpperCase() === 'MERGED',
+  }));
+}
+
+function readGitOutcomes(sessions) {
+  if (GIT_OUTCOMES_REPOS.length === 0) return [];
+  const pullRequests = [];
+  for (const repo of GIT_OUTCOMES_REPOS) {
+    try {
+      pullRequests.push(...fetchPullRequestsForRepo(repo));
+    } catch {
+      /* `gh` missing / network / parse failure ⇒ skip this repo's PRs */
+    }
+  }
+  if (pullRequests.length === 0) return [];
+  try {
+    return buildGitOutcomes(
+      sessions.map((s) => ({
+        sessionId: s.sessionId,
+        project: s.project,
+        gitBranch: s.gitBranch,
+      })),
+      pullRequests
+    );
   } catch {
     return [];
   }
@@ -764,7 +846,7 @@ export const PARSER_SIG_VERSION = 'v4';
 // without necessarily changing any ~/.claude source artifact. The compressed
 // dataset cache is persisted across deploys, so source-content hashes alone can
 // otherwise reuse JSON assembled by older code.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 2;
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 3;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the
@@ -2476,6 +2558,9 @@ export function assembleDataset() {
   const churnFiles = topChurnFiles(toolData);
   const recSessions = groupBySessions(entries);
   const recProjects = groupByProjects(recSessions);
+  // Git delivery-outcome signal (#1757): opt-in `gh` fetch + pure classify.
+  // Empty unless CHD_GIT_OUTCOMES names a repo, so the default path is unchanged.
+  const gitOutcomes = readGitOutcomes(recSessions);
   const signalInput = {};
   for (const s of SESSION_SIGNALS) {
     if (s.datasetKey) signalInput[s.datasetKey] = {
@@ -2519,6 +2604,7 @@ export function assembleDataset() {
       mcpAuth,
       configBackups,
       externalGuidance,
+      gitOutcomes,
     })
   );
   const repoMap = buildRepoMapDataset({
@@ -2613,6 +2699,8 @@ export function assembleDataset() {
     mcpAuth,
     configBackups,
     externalGuidance,
+    // Git delivery-outcome rows (#1757); empty unless CHD_GIT_OUTCOMES is set.
+    gitOutcomes,
   };
 }
 
@@ -2693,6 +2781,10 @@ function assembleRecommendationContext(options = {}) {
     // edit invalidates the recs cache. Empty (`[]`) when no memory dirs exist or
     // on the SPA/upload dataset, so the detector simply emits nothing there.
     memoryStores: readMemoryStores(),
+    // Git delivery-outcome rows (#1757): non-signal aggregate computed in
+    // assembleDataset (opt-in `gh` fetch + pure classify). SIGNAL ONLY — no
+    // detector reads it yet; empty unless CHD_GIT_OUTCOMES names a repo.
+    gitOutcomes: dataset.gitOutcomes,
   });
   return { input, sessions };
 }
