@@ -107,8 +107,12 @@ const MAX_COMMAND_GIT_SEGMENTS = 12;
  * blocks (e.g. `[{ type: 'text', text: '...' }]`); for arrays we sum the length
  * of each block's `text`/`content` (falling back to a JSON encoding for opaque
  * blocks). Returns 0 for null/empty content.
+ *
+ * Exported so parse-sessions can size the SAME tool_result payloads while
+ * threading the `tool_use_id` linkage onto `TokenEntry` (#1928) — both parsers
+ * then measure the result byte cost identically.
  */
-function resultContentSize(content: unknown): number {
+export function resultContentSize(content: unknown): number {
   if (content == null) return 0;
   if (typeof content === 'string') return content.length;
   if (Array.isArray(content)) {

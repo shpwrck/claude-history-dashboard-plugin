@@ -2,6 +2,7 @@ import type { SessionTokenData, TokenEntry, CompactionEvent } from '../types';
 import { shortenProject } from './parse-history';
 import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
 import { parseJsonl, parseMessage, summarize, type ContentBlock } from './parse-utils';
+import { resultContentSize } from './parse-tools';
 import {
   isThinkingBlock,
   reconstructThinkingTokens,
@@ -131,6 +132,15 @@ export function parseSessionJsonl(
   const tokenMap = new Map<string, TokenAccumulator>();
   let model = 'unknown';
 
+  // #1928: ID linkage between billed messages and the tool calls they
+  // dispatched. `tool_use` block ids accumulate per assistant message id (above,
+  // in the assistant branch); `tool_result` payload sizes are collected here
+  // keyed by `tool_use_id` from the user lines that echo tool output back. After
+  // the per-message accumulation, each `TokenEntry` is tagged with its
+  // `toolUseIds` and the summed `toolResultBytes` joined by those ids — the tight
+  // ID join that supersedes the timestamp-/byte-share heuristic where ids exist.
+  const resultBytesByToolUseId = new Map<string, number>();
+
   // Per-session dimensions: take the first non-empty value seen.
   let version: string | undefined;
   let gitBranch: string | undefined;
@@ -163,6 +173,26 @@ export function parseSessionJsonl(
         if (text) opener = text;
       }
 
+      // #1928: user lines echo tool output back as `tool_result` blocks carrying
+      // the matching `tool_use_id`. Size each payload (same sizing as
+      // parse-tools `ToolCall.resultBytes`) and key it by id so the assistant
+      // message that emitted that `tool_use` can join its result bytes by ID.
+      if (entry.type === 'user' && entry.message) {
+        const userMsg = parseMessage(entry.message);
+        if (userMsg && Array.isArray(userMsg.content)) {
+          for (const block of userMsg.content as ContentBlock[]) {
+            if (!block || block.type !== 'tool_result') continue;
+            const id = block.tool_use_id;
+            if (typeof id !== 'string' || !id) continue;
+            const bytes = resultContentSize(block.content);
+            resultBytesByToolUseId.set(
+              id,
+              (resultBytesByToolUseId.get(id) ?? 0) + bytes
+            );
+          }
+        }
+      }
+
       if (entry.type !== 'assistant' || !entry.message) continue;
 
       let msg: AssistantMessage;
@@ -187,10 +217,15 @@ export function parseSessionJsonl(
       // accumulate per id (summed below) and feed the thinking-token residual.
       let lineVisibleTokens = 0;
       let lineHasThinking = false;
+      // #1928: tool_use block ids emitted on this line, in order.
+      const lineToolUseIds: string[] = [];
       if (Array.isArray(msg.content)) {
         for (const block of msg.content as ContentBlock[]) {
           lineVisibleTokens += visibleBlockTokens(block);
           if (isThinkingBlock(block)) lineHasThinking = true;
+          if (block && block.type === 'tool_use' && typeof block.id === 'string' && block.id) {
+            lineToolUseIds.push(block.id);
+          }
         }
       } else if (typeof msg.content === 'string') {
         lineVisibleTokens += visibleBlockTokens({ type: 'text', text: msg.content });
@@ -214,6 +249,9 @@ export function parseSessionJsonl(
         // outputTokens max-merge below.
         visibleTokens: lineVisibleTokens,
         hasThinking: lineHasThinking,
+        // #1928: tool_use ids emitted on this line; concatenated (not max-merged)
+        // across the message's streamed lines below, then deduped at resolution.
+        toolUseIds: lineToolUseIds,
         model: msg.model ?? model,
       };
       // #457: a single assistant message id can appear on multiple transcript
@@ -260,6 +298,12 @@ export function parseSessionJsonl(
               // toward 0 — the safe (conservative) direction.
               visibleTokens: prevUsage.visibleTokens + incoming.visibleTokens,
               hasThinking: prevUsage.hasThinking || incoming.hasThinking,
+              // #1928: tool_use blocks of one message arrive on separate streamed
+              // lines, so CONCATENATE their ids (deduped at resolution).
+              toolUseIds: [
+                ...(prevUsage.toolUseIds ?? []),
+                ...(incoming.toolUseIds ?? []),
+              ],
               model: incoming.model ?? prevUsage.model,
             }
           : incoming
@@ -274,7 +318,15 @@ export function parseSessionJsonl(
   // (summed) visible-token estimate. The `visibleTokens`/`hasThinking`
   // accumulators are dropped here so they never leak into the serialized blob.
   const tokenEntries: TokenEntry[] = Array.from(tokenMap.values()).map((acc) => {
-    const { visibleTokens, hasThinking, ...rest } = acc;
+    const { visibleTokens, hasThinking, toolUseIds, ...rest } = acc;
+    // #1928: dedupe the message's tool_use ids (preserving first-seen order) and
+    // join their result-payload bytes by ID. Both fields are omitted when the
+    // message dispatched no tool calls, so rows with no tools stay byte-clean.
+    const uniqueToolUseIds = toolUseIds ? Array.from(new Set(toolUseIds)) : [];
+    const toolResultBytes = uniqueToolUseIds.reduce(
+      (sum, id) => sum + (resultBytesByToolUseId.get(id) ?? 0),
+      0
+    );
     return {
       ...rest,
       thinkingTokens: reconstructThinkingTokens(
@@ -282,6 +334,8 @@ export function parseSessionJsonl(
         visibleTokens,
         hasThinking
       ),
+      ...(uniqueToolUseIds.length > 0 ? { toolUseIds: uniqueToolUseIds } : {}),
+      ...(toolResultBytes > 0 ? { toolResultBytes } : {}),
     };
   });
 

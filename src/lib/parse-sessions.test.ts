@@ -321,3 +321,87 @@ describe('parseSessionJsonl thinking-token residual (#1927)', () => {
     expect(out.entries[0].thinkingTokens).toBe(0)
   })
 })
+
+describe('parseSessionJsonl tool_use_id linkage (#1928)', () => {
+  // Assistant line emitting one or more tool_use blocks under a shared usage.
+  const assistantTools = (
+    blocks: Array<{ id: string; name: string; input?: Record<string, unknown> }>,
+    usage: Record<string, unknown>,
+    id = 'm1'
+  ) =>
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      message: {
+        id,
+        model: 'claude-opus-4-8',
+        content: blocks.map((b) => ({ type: 'tool_use', id: b.id, name: b.name, input: b.input ?? {} })),
+        usage,
+      },
+    })
+  // User line echoing tool_result payloads back, keyed by tool_use_id.
+  const toolResults = (results: Array<{ id: string; content: string }>) =>
+    JSON.stringify({
+      type: 'user',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      message: {
+        role: 'user',
+        content: results.map((r) => ({ type: 'tool_result', tool_use_id: r.id, content: r.content })),
+      },
+    })
+
+  it('threads a message\'s tool_use ids onto its TokenEntry, in order', () => {
+    const text = [
+      assistantTools(
+        [
+          { id: 'toolu_a', name: 'Read' },
+          { id: 'toolu_b', name: 'Bash' },
+        ],
+        { input_tokens: 10, output_tokens: 5 }
+      ),
+    ].join('\n')
+    const entry = parseSessionJsonl(text, 'link.jsonl')!.entries[0]
+    expect(entry.toolUseIds).toEqual(['toolu_a', 'toolu_b'])
+  })
+
+  it('joins tool_result payload bytes by tool_use_id (not by timestamp)', () => {
+    const text = [
+      assistantTools(
+        [
+          { id: 'toolu_a', name: 'Read' },
+          { id: 'toolu_b', name: 'Bash' },
+        ],
+        { input_tokens: 10, output_tokens: 5 }
+      ),
+      // Results arrive out of emission order, proving the join is by ID: a
+      // big Read payload (50 chars) and a tiny Bash payload (2 chars).
+      toolResults([
+        { id: 'toolu_b', content: 'ok' },
+        { id: 'toolu_a', content: 'x'.repeat(50) },
+      ]),
+    ].join('\n')
+    const entry = parseSessionJsonl(text, 'link.jsonl')!.entries[0]
+    expect(entry.toolUseIds).toEqual(['toolu_a', 'toolu_b'])
+    expect(entry.toolResultBytes).toBe(52)
+  })
+
+  it('omits the linkage fields when the message dispatched no tools', () => {
+    const text = assistant({ input_tokens: 10, output_tokens: 5 })
+    const entry = parseSessionJsonl(text, 'plain.jsonl')!.entries[0]
+    expect(entry.toolUseIds).toBeUndefined()
+    expect(entry.toolResultBytes).toBeUndefined()
+  })
+
+  it('concatenates + dedupes ids across streamed lines sharing a message id', () => {
+    // Same logical message split across two lines (#457): tool_use blocks arrive
+    // on separate lines repeating the id, and one id repeats — it must dedupe.
+    const usage = { input_tokens: 10, output_tokens: 5 }
+    const text = [
+      assistantTools([{ id: 'toolu_a', name: 'Read' }], usage, 'shared'),
+      assistantTools([{ id: 'toolu_a', name: 'Read' }, { id: 'toolu_c', name: 'Grep' }], usage, 'shared'),
+    ].join('\n')
+    const out = parseSessionJsonl(text, 'stream.jsonl')!
+    expect(out.messageCount).toBe(1)
+    expect(out.entries[0].toolUseIds).toEqual(['toolu_a', 'toolu_c'])
+  })
+})

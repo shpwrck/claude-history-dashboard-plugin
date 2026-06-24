@@ -374,6 +374,26 @@ export interface TokenEntry {
    * `src/lib/thinking-tokens.ts`.
    */
   thinkingTokens?: number;
+  /**
+   * The `tool_use` block IDs (`toolu_…`) this assistant message emitted, in
+   * emission order (#1928). The ID linkage between a billed message and the
+   * specific tool calls it dispatched: each ID joins to a `ToolCall.toolUseId`
+   * (parse-tools) and to the matching `tool_result` payload, so a consumer can
+   * attribute this message's usage to those exact calls by ID rather than by the
+   * timestamp-/byte-share heuristic. `usage` is per-MESSAGE (one object covers
+   * thinking + text + every tool_use), so this is still not a billed per-tool
+   * split — but the ID join is far tighter than the heuristic. Absent/empty when
+   * the message dispatched no tool calls (or the row predates the parser change).
+   */
+  toolUseIds?: string[];
+  /**
+   * Summed character size of the `tool_result` payloads returned for THIS
+   * message's `toolUseIds`, joined by ID (#1928) using the same sizing as
+   * `ToolCall.resultBytes`. A cheap proxy for the result tokens this message's
+   * tool calls pulled back into context. 0/absent when no result was seen or the
+   * row predates the parser change.
+   */
+  toolResultBytes?: number;
   model: string;
 }
 

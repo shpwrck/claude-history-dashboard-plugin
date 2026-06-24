@@ -28,7 +28,11 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //   'force-with-lease-v4' (#2042): git push --force pattern no longer matches the
 //       safe --force-with-lease / --force-if-includes variants; reparse to drop
 //       them from the dangerous-command set.
-const SESSION_BLOB_PARSER_VERSION = 'force-with-lease-v4';
+//   'tool-use-id-v5' (#1928): TokenEntry now carries toolUseIds + toolResultBytes
+//       (the ID linkage from assistant tool_use.id <-> user tool_result.tool_use_id),
+//       enabling ID-based per-tool cost attribution; reparse so cached blobs gain
+//       the linkage instead of shipping the change inert.
+const SESSION_BLOB_PARSER_VERSION = 'tool-use-id-v5';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
