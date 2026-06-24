@@ -50,14 +50,12 @@ describe('parseValueFlow', () => {
     expect(parsed?.sessionId).toBe('session-a');
     expect(parsed?.hypotheses).toEqual([]);
     expect(parsed?.edges).toHaveLength(1);
-    expect(parsed?.edges[0]).toMatchObject({
+    // Slim edge (#2108): only the consumer-read fields. sessionId/source/target/
+    // confidence/reason were dropped as redundant or constant.
+    expect(parsed?.edges[0]).toEqual({
       value: 'deploy-target-9f83a1c7',
       sourceToolUseId: 'tool-read',
       targetToolUseId: 'tool-bash',
-      confidence: 'high',
-      reason: 'distinctive-value-reuse',
-      source: { sessionId: 'session-a', entryIndex: 1, toolUseId: 'tool-read' },
-      target: { sessionId: 'session-a', entryIndex: 2, toolUseId: 'tool-bash' },
     });
   });
 

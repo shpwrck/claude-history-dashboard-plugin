@@ -4,15 +4,19 @@ import { parseSessionTimeline } from './parse-timeline';
 import { parseJsonl, parseMessage } from './parse-utils';
 import { scrubSecrets } from './transcript-hygiene';
 
+// Slim serialized edge (#2108): only the fields the consumer reads. The forensic
+// graph (forensic-graph.ts) anchors edges by stable toolUseId and derives
+// source/target entry indices from `toolUseIndexById`, so it needs only `value`,
+// `sourceToolUseId`, and `targetToolUseId`. The dropped fields were pure
+// redundancy at ~580 B/edge x up to 200 edges/row: `sessionId` always equalled
+// the row's `sessionId`; `source`/`target` (EvidenceRef) duplicated the
+// top-level tool-use ids and carried unused entryIndex/timestamp; `confidence`
+// and `reason` were per-edge constants ('high' / 'distinctive-value-reuse').
+// This is ~78% of the valueFlow payload (the dataset's heaviest per-row field).
 export interface ValueFlowEdge {
-  sessionId: string;
   value: string;
-  source: EvidenceRef;
-  target: EvidenceRef;
   sourceToolUseId: string;
   targetToolUseId: string;
-  confidence: 'high';
-  reason: 'distinctive-value-reuse';
 }
 
 export interface ValueFlowHypothesis {
@@ -247,14 +251,9 @@ export function parseValueFlow(
       if (pairCount >= MAX_EDGES_PER_PAIR) continue;
       edgesPerPair.set(pairKey, pairCount + 1);
       edges.push({
-        sessionId: timeline.sessionId,
         value: scrubSecrets(prior.value).slice(0, MAX_VALUE_CHARS),
-        source: prior.source,
-        target: event.ref,
         sourceToolUseId: prior.sourceToolUseId,
         targetToolUseId: event.toolUseId,
-        confidence: 'high',
-        reason: 'distinctive-value-reuse',
       });
       if (edges.length >= MAX_EDGES) break;
     }

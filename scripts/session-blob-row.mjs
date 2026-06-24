@@ -36,7 +36,13 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       + contextToolResultTokens (per-turn input-context composition snapshots);
 //       reparse so cached blobs gain the bucket fields the composition view needs
 //       instead of shipping the change inert.
-const SESSION_BLOB_PARSER_VERSION = 'context-composition-v6';
+//   'value-flow-slim-v7' (#2108): parseValueFlow now emits slim edges
+//       ({ value, sourceToolUseId, targetToolUseId }) — the dropped
+//       sessionId/source/target/confidence/reason were redundant or constant and
+//       made valueFlow the dataset's heaviest field (~21 MB, ~78% of it edge
+//       redundancy). Reparse so cached blobs shed the fat edges instead of
+//       serving the change inert.
+const SESSION_BLOB_PARSER_VERSION = 'value-flow-slim-v7';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
