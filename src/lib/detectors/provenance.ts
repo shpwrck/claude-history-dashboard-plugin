@@ -32,6 +32,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'reliability.cwd-drift-execution',
   'reliability.stale-state-assertion',
   'context.last-n-runs-audit',
+  'context.reclaim-potential',
   'maintenance.memory-hygiene',
 ];
 

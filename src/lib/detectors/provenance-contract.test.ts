@@ -466,6 +466,52 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     ] as unknown as RecommendationInput['tokenData'];
     return { input: baseInput({ tokenData }), now: base + 15 * day };
   },
+  'context.reclaim-potential': () => {
+    // One session re-fetching the same large Bash output 3x (duplicate bucket),
+    // big enough that the reclaim clears the dollar floor.
+    const toolData = [
+      {
+        sessionId: 'rp1',
+        calls: Array.from({ length: 3 }, () => ({
+          timestamp: '2026-06-10T00:00:01Z',
+          toolName: 'Bash',
+          input: { command: 'cat huge.log' },
+          toolUseId: 'u',
+          isError: null,
+          resultBytes: 800_000,
+          commandFingerprint: 'cat-huge-log',
+        })),
+      },
+    ] as unknown as RecommendationInput['toolData'];
+    const tokenData = [
+      {
+        sessionId: 'rp1',
+        entrypoint: 'cli',
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCacheCreationTokens: 0,
+        totalCacheReadTokens: 100_000,
+        model: 'claude-opus-4-8',
+        messageCount: 1,
+        entries: [
+          {
+            timestamp: 't',
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheCreation1hTokens: 0,
+            cacheReadTokens: 100_000,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+            model: 'claude-opus-4-8',
+          },
+        ],
+        compactionEvents: [],
+        hasUnknownModel: false,
+      },
+    ] as unknown as RecommendationInput['tokenData'];
+    return { input: baseInput({ toolData, tokenData }), now: 0 };
+  },
 };
 
 function runAllowlistedDetector(id: string): Recommendation {

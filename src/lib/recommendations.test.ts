@@ -2635,6 +2635,55 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── context.reclaim-potential (#1758): a large NON-file Bash output
+  // re-fetched 3x in one session — duplicate tool-output reclaim, distinct from
+  // any file-Read re-ingestion the file detectors own.
+  {
+    const dupBash = (sessionId: string): ToolUsageData =>
+      ({
+        sessionId,
+        calls: Array.from({ length: 3 }, () => ({
+          timestamp: '2026-06-10T00:00:01Z',
+          toolName: 'Bash',
+          input: { command: 'cat huge.log' },
+          toolUseId: 'u',
+          isError: null,
+          resultBytes: 800_000,
+          commandFingerprint: 'cat-huge-log',
+        })),
+      }) as unknown as ToolUsageData;
+    const rpToken = (sessionId: string): SessionTokenData =>
+      ({
+        sessionId,
+        entrypoint: 'cli',
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalCacheCreationTokens: 0,
+        totalCacheReadTokens: 100_000,
+        model: 'claude-opus-4-8',
+        messageCount: 1,
+        entries: [
+          {
+            timestamp: 't',
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheCreation1hTokens: 0,
+            cacheReadTokens: 100_000,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+            model: 'claude-opus-4-8',
+          },
+        ],
+        compactionEvents: [],
+        hasUnknownModel: false,
+      }) as unknown as SessionTokenData;
+    out.push({
+      now,
+      input: bankBase({ toolData: [dupBash('rp1')], tokenData: [rpToken('rp1')] }),
+    });
+  }
+
   return out;
 }
 

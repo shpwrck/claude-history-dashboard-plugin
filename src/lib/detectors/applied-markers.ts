@@ -79,6 +79,10 @@ export const MARKERS_CROSS_SESSION_REREAD: AppliedMarkers = {
   headings: [/^##\s+Distilled reference notes\b/i],
   bodyPhrases: ['Distill these docs once here instead of re-reading them cold'],
 };
+export const MARKERS_RECLAIM_POTENTIAL: AppliedMarkers = {
+  headings: [/^##\s+Context reclaim discipline\b/i],
+  bodyPhrases: ['Cache or reference these large tool outputs and pasted blocks'],
+};
 export const MARKERS_OUTPUT_VERBOSITY: AppliedMarkers = {
   headings: [/^##\s+Output brevity\b/i],
   bodyPhrases: ['keep assistant output terse'],
@@ -141,6 +145,7 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['cost.output-verbosity', MARKERS_OUTPUT_VERBOSITY],
   ['context.repo-map-context-waste', MARKERS_REPO_MAP_WASTE],
   ['context.cross-session-reread', MARKERS_CROSS_SESSION_REREAD],
+  ['context.reclaim-potential', MARKERS_RECLAIM_POTENTIAL],
   ['workflow.plan-missing-verification', MARKERS_PLAN_VERIFICATION],
   ['workflow.shadow-axis-wins', MARKERS_SHADOW_AXIS_WINS],
   ['safety.dangerous-bypass', MARKERS_DANGEROUS_BYPASS],

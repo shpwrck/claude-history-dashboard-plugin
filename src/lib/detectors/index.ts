@@ -67,6 +67,7 @@ import { detector as lastNRunsAudit } from './context/last-n-runs-audit';
 import { detector as crossSessionReread } from './context/cross-session-reread';
 import { detector as toolCallRightSizing } from './context/tool-call-right-sizing';
 import { detector as mcpSchemaTax } from './context/mcp-schema-tax';
+import { detector as reclaimPotential } from './context/reclaim-potential';
 
 // ── WORKFLOW ────────────────────────────────────────────────────────────
 import { detector as nativeBypass } from './workflow/native-bypass';
@@ -322,6 +323,16 @@ export const DETECTORS: Detector[] = [
   // prices at the measured cache-read residual, stability-gates to read-only docs,
   // and stays doc-scoped so it never double-books vs repo-map-context-waste (code).
   crossSessionReread,
+
+  // ── #1758 (epic #1911) — native context-reclaim-potential measurement ──────
+  // The decided competitive response to the headroom tool: a DETERMINISTIC,
+  // ML-free counter of compressible/removable context. Owns ONLY the buckets the
+  // file-Read detectors don't — oversized/duplicate NON-file tool_result payloads
+  // (toolData) and re-pasted file content in user turns (sessions[].pastedContents)
+  // — so it never double-books vs cross-session-reread (doc cold first-reads) or
+  // repo-map-context-waste (structural code repeats). Prices at the cache-read
+  // residual; ML estimate is DEFERRED (Future follow-up).
+  reclaimPotential,
 
   // ── #1873 (epic #1910) — passive-wait stalls (reliability) ────────────────
   // Flags assistant turn-ends that end on wait/monitor language with no
