@@ -140,6 +140,43 @@ await withServerDirs('server-hardening-jwt', async ({ env }) => {
   );
 });
 
+await withServerDirs('server-hardening-bind', async ({ env }) => {
+  // Exposed beyond loopback (DASHBOARD_BIND_HOST non-loopback) with no auth must
+  // refuse to start (#2064).
+  const refused = await spawnServerExpectExit({
+    ...env,
+    PORT: '5993',
+    DASHBOARD_BIND_HOST: '0.0.0.0',
+  });
+  check(
+    'exposed bind without auth exits before binding',
+    !refused.timedOut && refused.code !== 0,
+    refused.output.slice(-2000)
+  );
+  check(
+    'exposed bind refusal explains the fix',
+    /Refusing to start: the dashboard is bound beyond loopback/.test(refused.output),
+    refused.output.slice(-2000)
+  );
+
+  // The DASHBOARD_ALLOW_INSECURE_BIND override lets it boot (does NOT exit at
+  // startup) — also proves the guard doesn't break a normal boot.
+  const overridden = await spawnServerExpectExit(
+    {
+      ...env,
+      PORT: '5994',
+      DASHBOARD_BIND_HOST: '0.0.0.0',
+      DASHBOARD_ALLOW_INSECURE_BIND: '1',
+    },
+    5000
+  );
+  check(
+    'exposed bind with override boots instead of failing closed',
+    overridden.timedOut === true,
+    overridden.output.slice(-2000)
+  );
+});
+
 const serverSource = await readFile(join(SCRIPTS_DIR, 'server.mjs'), 'utf8');
 check(
   'recommendationsBuilds has a pruning function',

@@ -4949,6 +4949,52 @@ const ENTERPRISE_AUTH_CONFIGURED =
 if (ENTERPRISE_AUTH_ON && ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR) {
   throw new Error(`[enterprise-auth] ${ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR}`);
 }
+
+// Fail-open-bind guard (#2064). The dashboard reads ~/.claude live, so it must
+// not be reachable UNAUTHENTICATED beyond loopback. Inside our container HOST is
+// always 0.0.0.0 (so the published port works), so HOST alone can't reveal
+// whether the port is actually exposed to the LAN — DASHBOARD_BIND_HOST, which
+// docker-compose forwards from BIND_HOST, carries the real host publish
+// interface. When that is explicitly non-loopback with no auth configured, refuse
+// to start (fail closed). For a bare `node` run that only sets a non-loopback
+// HOST (ambiguous — could be the container default), warn loudly instead of
+// breaking the boot. DASHBOARD_ALLOW_INSECURE_BIND=1 overrides the hard failure.
+function isLoopbackHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  return (
+    h === '' ||
+    h === 'localhost' ||
+    h === 'loopback' ||
+    h === '::1' ||
+    h.startsWith('127.')
+  );
+}
+{
+  const anyAuthConfigured = BASIC_AUTH_ON || ENTERPRISE_AUTH_ON;
+  const publishHost = String(process.env.DASHBOARD_BIND_HOST || '').trim();
+  const insecureBindOverride =
+    String(process.env.DASHBOARD_ALLOW_INSECURE_BIND || '') === '1';
+  const confidentExposure = publishHost !== '' && !isLoopbackHost(publishHost);
+  const ambiguousExposure = publishHost === '' && !isLoopbackHost(HOST);
+  if (!anyAuthConfigured && (confidentExposure || ambiguousExposure)) {
+    const where = confidentExposure
+      ? `DASHBOARD_BIND_HOST=${publishHost}`
+      : `HOST=${HOST}`;
+    const detail =
+      `the dashboard is bound beyond loopback (${where}) with no DASHBOARD_USER/DASHBOARD_PASS ` +
+      `and no DASHBOARD_AUTH_MODE=enterprise, so it is reachable UNAUTHENTICATED while reading ~/.claude live`;
+    if (confidentExposure && !insecureBindOverride) {
+      throw new Error(
+        `[security] Refusing to start: ${detail}. Set DASHBOARD_USER/DASHBOARD_PASS, ` +
+          `enable enterprise auth, bind to loopback, or set DASHBOARD_ALLOW_INSECURE_BIND=1 to override.`
+      );
+    }
+    console.warn(
+      `[security] WARNING: ${detail}.` +
+        (insecureBindOverride ? ' DASHBOARD_ALLOW_INSECURE_BIND=1 set — proceeding.' : '')
+    );
+  }
+}
 let enterpriseAuditWriteQueue = Promise.resolve();
 const enterpriseRateLimitBuckets = new Map();
 let enterpriseRateLimitNextPruneAt = 0;
