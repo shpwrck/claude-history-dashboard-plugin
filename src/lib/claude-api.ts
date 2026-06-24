@@ -28,9 +28,22 @@ export const DEFAULT_MODEL: AnthropicModelId = CURRENT_MODEL_IDS.sonnet;
 const ANTHROPIC_BASE = 'https://api.anthropic.com/v1';
 const ANTHROPIC_VERSION = '2023-06-01';
 
+// The Ask-Claude key lives in sessionStorage, not localStorage (#2063): it is
+// cleared on tab close and not shared across tabs, shrinking the window in which
+// a script in the origin could read it, and matching where the enterprise auth
+// token is held. getApiKey migrates a key written by an older localStorage-based
+// build so users don't have to re-enter it once.
 export function getApiKey(): string | null {
   try {
-    return localStorage.getItem(API_KEY_STORAGE);
+    const current = sessionStorage.getItem(API_KEY_STORAGE);
+    if (current !== null) return current;
+    const legacy = localStorage.getItem(API_KEY_STORAGE);
+    if (legacy !== null) {
+      sessionStorage.setItem(API_KEY_STORAGE, legacy);
+      localStorage.removeItem(API_KEY_STORAGE);
+      return legacy;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -38,14 +51,16 @@ export function getApiKey(): string | null {
 
 export function setApiKey(key: string): void {
   try {
-    localStorage.setItem(API_KEY_STORAGE, key);
+    sessionStorage.setItem(API_KEY_STORAGE, key);
   } catch {
-    /* localStorage may be disabled (private mode etc.) — silently fail */
+    /* sessionStorage may be disabled (private mode etc.) — silently fail */
   }
 }
 
 export function clearApiKey(): void {
   try {
+    sessionStorage.removeItem(API_KEY_STORAGE);
+    // Also drop any key left by an older localStorage-based build.
     localStorage.removeItem(API_KEY_STORAGE);
   } catch {
     /* see setApiKey */
