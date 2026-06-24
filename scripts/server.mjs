@@ -1109,6 +1109,13 @@ function datasetState(apiPromise, key = 'global') {
     // handler skip the O(files) ingest walk when a cheap stat signature is
     // unchanged. null until the first ingest runs.
     lastSourceSig: null,
+    // One assembled dataset reused per contentHash (#2071). A recs request
+    // assembles the ~128 MB dataset twice (recs build + suppression emit); this
+    // single slot collapses that to once, and lets consecutive recs requests on
+    // the same content skip re-assembly entirely. Overwritten when contentHash
+    // moves, so its memory cost is one dataset object bounded by the dataset's
+    // own growth. null until the first recs build assembles.
+    assembledMemo: null, // { contentHash, dataset }
   };
 }
 
@@ -2020,6 +2027,21 @@ function pruneRecommendationsBuilds(state) {
   }
 }
 
+// Reuse one assembled dataset per contentHash across a recs request's two
+// internal assembles (recs build + suppression emit) and across consecutive
+// recs requests, instead of rebuilding the ~128 MB dataset each time (#2071).
+// The memo is a single slot on the per-request dataset state, overwritten when
+// the contentHash moves. The exported assembleDataset() is intentionally left
+// un-memoized so the ingest parity tests still exercise the warm assembly path.
+function memoizedAssembleDataset(state, api, contentHash) {
+  if (state.assembledMemo && state.assembledMemo.contentHash === contentHash) {
+    return state.assembledMemo.dataset;
+  }
+  const dataset = api.assembleDataset();
+  state.assembledMemo = { contentHash, dataset };
+  return dataset;
+}
+
 async function buildRecommendationsCacheEntry(
   state,
   api,
@@ -2029,11 +2051,16 @@ async function buildRecommendationsCacheEntry(
   { emitSuppressionTransitions = false, organizationIdentity = null } = {}
 ) {
   const stats = api.ingest();
+  // Assemble once and thread the same dataset into both the suppression emit
+  // and the recs build (#2071) — each previously called assembleDataset()
+  // independently, doubling the synchronous event-loop stall per request.
+  const dataset = memoizedAssembleDataset(state, api, stats.contentHash);
   if (emitSuppressionTransitions) {
     api
       .recordSuppressionTransitions(ADOPTION_RECEIPTS, {
         shadowCallsDir: SHADOW_CALLS_DIR,
         organizationIdentity,
+        dataset,
       })
       .catch((err) => {
         console.warn(
@@ -2044,6 +2071,7 @@ async function buildRecommendationsCacheEntry(
   }
   const recs = api.assembleRecommendations(project || undefined, {
     organizationIdentity,
+    dataset,
   });
   const json = safeJsonStringify(recs); // scrub lone surrogates so the export stays strict-parser-valid (#1104)
   const actualBytes = Buffer.byteLength(json, 'utf8');

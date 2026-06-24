@@ -2724,7 +2724,12 @@ export function assembleDataset() {
 // `assembleRecommendations` (the recs route) and `recordSuppressionTransitions`
 // (the adoption-receipt emit) so both observe the exact same dataset state.
 function assembleRecommendationContext(options = {}) {
-  const dataset = assembleDataset();
+  // Reuse a caller-provided dataset (#2071) so a single recs request assembles
+  // the ~128 MB dataset once — shared by the recs build and the suppression-
+  // transition emit — instead of assembling it twice. Falls back to a fresh
+  // assemble when no dataset is supplied (the parity tests and any non-server
+  // caller), so the exported assembleDataset() path is unchanged.
+  const dataset = options.dataset ?? assembleDataset();
   const sessions = groupBySessions(dataset.entries);
   const projects = groupByProjects(sessions);
   // Signal-derived RecommendationInput fields flow straight from the descriptor
@@ -2824,9 +2829,9 @@ export function assembleRecommendationResult(project, options = {}) {
  * error (best-effort, like the rest of the recs route's side effects).
  */
 export async function recordSuppressionTransitions(receiptsFile, opts = {}) {
-  const { organizationIdentity = null, ...receiptOpts } = opts;
+  const { organizationIdentity = null, dataset = undefined, ...receiptOpts } = opts;
   const prior = await readAdoptionReceiptIndex(receiptsFile);
-  const { input } = assembleRecommendationContext({ organizationIdentity });
+  const { input } = assembleRecommendationContext({ organizationIdentity, dataset });
   const result = await computeSuppressionTransitions(input, {
     surfacedFindingIds: prior.surfacedFindingIds,
     suppressedFindingIds: prior.suppressedFindingIds,
