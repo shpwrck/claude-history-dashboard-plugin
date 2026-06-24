@@ -63,6 +63,21 @@ export interface StableFileRef {
   symbols: string[];
 }
 
+/**
+ * One step of a multi-session chain (#2082). Each step is run as its OWN cold
+ * jailed session over the same accumulating tree, so the control arm re-reads
+ * the stable file from cold each session while the treatment arm (which carries
+ * the recommendation as a persistent `CLAUDE.md`) can cite the symbols instead.
+ * This is what exhibits the CROSS-SESSION re-read waste the #890 detector prices
+ * — the single-session v0.4 fixtures structurally could not (see the v0.4 NULL,
+ * #1078). The step `instruction` obeys the same anti-gaming constraints as a
+ * single-session instruction: it must genuinely need the stable file and be
+ * solvable given its symbols, and must NOT quote the file's contents.
+ */
+export interface ChainStep {
+  instruction: string;
+}
+
 /** One matched task pair: a single task definition runnable two ways. */
 export interface ProofFixturePair {
   /** Stable, unique, single-hyphen kebab-case id (never contains `--`). */
@@ -73,8 +88,20 @@ export interface ProofFixturePair {
   taskShape: string;
   /** Which #890 structural candidate reason this pair reproduces. */
   wasteReason: WasteReason;
-  /** The prompt the runner issues — identical across both arms. */
+  /** The prompt the runner issues — identical across both arms. For a
+   *  multi-session pair this is the human-facing summary of the chain; the
+   *  per-session prompts come from {@link chain}. */
   instruction: string;
+  /**
+   * Multi-session chain (#2082): an ordered list of per-session tasks, each run
+   * as its own cold jailed session over the accumulating tree. When present, the
+   * runner executes one session per step (instead of one session for
+   * `instruction`); cost is summed across the chain and Gate 0 runs on the final
+   * tree. Absent for legacy single-session pairs. Both arms run the IDENTICAL
+   * chain — the only difference is the treatment `CLAUDE.md` (anti-gaming
+   * constraint 1).
+   */
+  chain?: ChainStep[];
   /** Substrate tree dir, relative to the bundle root. Gate commands run with
    *  this directory as cwd. */
   tree: string;
@@ -96,11 +123,24 @@ export interface ProofPairBundle {
   detectorRef: string;
   /** Pre-registered minimum DECIDED-pair N this bundle is sized for. */
   minDecidedPairs: number;
+  /**
+   * Pre-registered sessions per chain (#2082). When set, the bundle is a
+   * multi-session bundle and every pair must carry a {@link ProofFixturePair.chain}
+   * of exactly this length. Absent for a legacy single-session bundle.
+   */
+  sessionsPerChain?: number;
   pairs: ProofFixturePair[];
 }
 
 const MAX_ID_LEN = 60;
 const MAX_TEXT_LEN = 600;
+/** Multi-session chain bounds (#2082). A chain must be genuinely multi-session
+ *  (>= 2) to exhibit cross-session re-read; the upper bound is a sanity cap. */
+const MIN_CHAIN_STEPS = 2;
+const MAX_CHAIN_STEPS = 12;
+/** Pre-registered sessions-per-chain for the v2 multi-session bundle (#2082,
+ *  amendment to `docs/v0.4-proof-preregistration.md`). */
+export const PRE_REGISTERED_SESSIONS_PER_CHAIN = 8;
 const MAX_RECOMMENDATION_LEN = 2000;
 const MAX_STABLE_FILES = 5;
 const MAX_SYMBOLS_PER_FILE = 3;
@@ -128,6 +168,26 @@ function parseStableFileRef(raw: unknown): StableFileRef | null {
     }
   }
   return { path, symbols };
+}
+
+/**
+ * Parse a multi-session chain. Returns `undefined` when no chain key is present
+ * (a legacy single-session pair), or `null` when a chain key IS present but
+ * malformed — so the caller rejects the pair rather than silently degrading a
+ * multi-session fixture to single-session (which would reproduce the v0.4 NULL).
+ */
+function parseChain(raw: unknown): ChainStep[] | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return null;
+  if (raw.length < MIN_CHAIN_STEPS || raw.length > MAX_CHAIN_STEPS) return null;
+  const steps: ChainStep[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return null;
+    const instruction = cleanString((item as Record<string, unknown>).instruction, MAX_TEXT_LEN);
+    if (!instruction) return null;
+    steps.push({ instruction });
+  }
+  return steps;
 }
 
 function parseTags(raw: unknown): string[] {
@@ -179,6 +239,8 @@ export function parseProofPair(raw: unknown): ProofFixturePair | null {
   }
   const gate = parseObjectiveGate(r.gate);
   if (!gate) return null;
+  const chain = parseChain(r.chain);
+  if (chain === null) return null; // chain key present but malformed -> reject
   const stableFiles: StableFileRef[] = [];
   if (Array.isArray(r.stableFiles)) {
     for (const f of r.stableFiles) {
@@ -199,6 +261,7 @@ export function parseProofPair(raw: unknown): ProofFixturePair | null {
     taskShape,
     wasteReason: wasteReason as WasteReason,
     instruction,
+    ...(chain ? { chain } : {}),
     tree,
     stableFiles,
     injectedRecommendation,
@@ -226,6 +289,13 @@ export function parseProofPairBundle(raw: unknown): ProofPairBundle | null {
     r.minDecidedPairs > 0
       ? r.minDecidedPairs
       : PRE_REGISTERED_MIN_PAIRS;
+  const sessionsPerChain =
+    typeof r.sessionsPerChain === 'number' &&
+    Number.isInteger(r.sessionsPerChain) &&
+    r.sessionsPerChain >= MIN_CHAIN_STEPS &&
+    r.sessionsPerChain <= MAX_CHAIN_STEPS
+      ? r.sessionsPerChain
+      : undefined;
   const pairs: ProofFixturePair[] = [];
   const seen = new Set<string>();
   if (Array.isArray(r.pairs)) {
@@ -236,7 +306,25 @@ export function parseProofPairBundle(raw: unknown): ProofPairBundle | null {
       pairs.push(pair);
     }
   }
-  return { bundle, preRegistrationRef, detectorRef, minDecidedPairs, pairs };
+  return {
+    bundle,
+    preRegistrationRef,
+    detectorRef,
+    minDecidedPairs,
+    ...(sessionsPerChain ? { sessionsPerChain } : {}),
+    pairs,
+  };
+}
+
+/**
+ * The ordered per-session instructions the runner executes for a pair: the
+ * chain steps for a multi-session pair, or the single `instruction` for a
+ * legacy single-session pair. Always non-empty.
+ */
+export function chainSteps(pair: ProofFixturePair): string[] {
+  return pair.chain && pair.chain.length > 0
+    ? pair.chain.map((s) => s.instruction)
+    : [pair.instruction];
 }
 
 /** Derived corpus-task id for one arm of a pair. */
@@ -317,6 +405,19 @@ export function validateProofPairBundle(bundle: ProofPairBundle): {
   for (const reason of WASTE_REASONS) {
     if (!reasons.has(reason)) {
       errors.push(`no pair reproduces the '${reason}' waste reason`);
+    }
+  }
+  // Multi-session bundle (#2082): every pair must carry a chain of exactly the
+  // pre-registered length, so the cross-session re-read effect is uniform and a
+  // single-session pair cannot silently dilute the batch back toward the v0.4 NULL.
+  if (bundle.sessionsPerChain !== undefined) {
+    for (const pair of bundle.pairs) {
+      const len = pair.chain?.length ?? 0;
+      if (len !== bundle.sessionsPerChain) {
+        errors.push(
+          `pair ${pair.pairId} has a ${len}-step chain; the multi-session bundle requires exactly ${bundle.sessionsPerChain}`
+        );
+      }
     }
   }
   return { ok: errors.length === 0, errors };

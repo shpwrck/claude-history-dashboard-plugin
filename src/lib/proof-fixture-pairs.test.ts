@@ -81,12 +81,30 @@ describe('proof fixture bundle (manifest.json)', () => {
     }
   });
 
-  it('pairs vary meaningfully: all 3 waste reasons, all 3 gate kinds, >= 6 task shapes', () => {
+  it('pairs vary meaningfully: all 3 waste reasons, >= 2 gate kinds, >= 6 task shapes', () => {
     expect(new Set(bundle.pairs.map((p) => p.wasteReason)).size).toBe(WASTE_REASONS.length);
-    expect([...new Set(bundle.pairs.map((p) => p.gate.kind))].sort()).toEqual(
-      [...OBJECTIVE_GATE_KINDS].sort()
-    );
+    // Gate-kind diversity guards against a single-gate artifact. The
+    // multi-session bundle (#2082) drops the `diff` kind: a diff gate ships an
+    // `expected/` answer key, which would let an agent solve the task by reading
+    // the answer instead of re-reading the stable file — defeating the
+    // cross-session re-read premise. So we require >= 2 kinds, all valid.
+    const gateKinds = new Set(bundle.pairs.map((p) => p.gate.kind));
+    expect(gateKinds.size).toBeGreaterThanOrEqual(2);
+    for (const k of gateKinds) expect(OBJECTIVE_GATE_KINDS).toContain(k);
     expect(new Set(bundle.pairs.map((p) => p.taskShape)).size).toBeGreaterThanOrEqual(6);
+  });
+
+  it('is a multi-session bundle: every pair carries an 8-session chain (#2082)', () => {
+    expect(bundle.sessionsPerChain).toBe(8);
+    for (const pair of bundle.pairs) {
+      expect(pair.chain, pair.pairId).toBeDefined();
+      expect(pair.chain!.length, pair.pairId).toBe(8);
+      for (const step of pair.chain!) {
+        expect(typeof step.instruction).toBe('string');
+        expect(step.instruction.length).toBeGreaterThan(0);
+      }
+    }
+    expect(validateProofPairBundle(bundle).errors).toEqual([]);
   });
 
   it('loads deterministically (two independent loads are deeply equal)', () => {

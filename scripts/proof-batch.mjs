@@ -43,6 +43,7 @@ import { execFile } from 'node:child_process';
 import {
   parseProofPairBundle,
   validateProofPairBundle,
+  chainSteps,
 } from '../src/lib/proof-fixture-pairs.ts';
 import { resolveModelPricing } from '../src/lib/pricing.ts';
 import {
@@ -163,14 +164,14 @@ function tokensFromWorkerJson(cj) {
 }
 
 // ---------------------------------------------------------------- jailed worker
-function buildPrompt(pair, arm) {
-  // Injected arm gets the #890 recommendation PREPENDED; control gets the bare
-  // instruction. This is the binary recs shadow axis (§2 of the pre-registration).
-  const header =
-    arm === 'injected'
-      ? `${pair.injectedRecommendation}\n\n---\n\n`
-      : '';
-  return `${header}You are working in a small standalone code repository. Complete this task:\n\n${pair.instruction}\n\nMake the minimal change needed. Do not explain; just edit the files.\n`;
+function buildPrompt(instruction) {
+  // One per-session prompt — the bare task. The treatment is NOT prepended here:
+  // in the multi-session design (#2082) the #890 recommendation is persisted as a
+  // CLAUDE.md in the tree (materialized once by runArmOnce for the injected arm),
+  // so it is present in EVERY session's project context — exactly how the real
+  // fix is deployed — instead of a one-shot prompt prepend. Control gets no such
+  // file, so it re-reads the stable file from cold each session.
+  return `You are working in a small standalone code repository. Complete this task:\n\n${instruction}\n\nMake the minimal change needed. Do not explain; just edit the files.\n`;
 }
 
 /** Spawn one jailed worker; resolve with its parsed JSON result (or an error marker). */
@@ -249,35 +250,75 @@ function runGate(tree, gate) {
 }
 
 // ---------------------------------------------------------------- one arm-run
+/**
+ * Run ONE arm of a pair as a multi-session chain (#2082): materialize the tree
+ * once, then run each chain step as its own COLD jailed session over the SAME
+ * accumulating tree. The injected arm gets the #890 recommendation written as a
+ * persistent `CLAUDE.md` (present every session → it can cite symbols instead of
+ * re-reading); the control arm has no such file → it re-reads from cold each
+ * session. Cost/tokens/wall are summed across the chain; `perStepCostUsd` records
+ * the dose-response. Gate 0 runs once, on the FINAL accumulated tree. Any session
+ * that errors or yields no parseable result makes the whole chain-run UNRESOLVED.
+ * A legacy single-session pair (no `chain`) runs as a 1-step chain — identical to
+ * the prior behavior, minus the prompt prepend (now via CLAUDE.md).
+ */
 async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
   // Materialize a throwaway copy of the fixture tree (a standalone mini-repo,
-  // NOT a git worktree). The jailed worker edits it; Gate 0 verifies it.
+  // NOT a git worktree). The jailed workers edit it across sessions; Gate 0
+  // verifies the final state.
   const treeSrc = join(BUNDLE_DIR, pair.tree);
   const scratch = mkdtempSync(join(tmpdir(), `proof-${pair.pairId}-${arm}-`));
   const tree = join(scratch, 'tree');
   cpSync(treeSrc, tree, { recursive: true });
 
-  const prompt = buildPrompt(pair, arm);
-  let worker;
-  try {
-    worker = await runWorker({ worktree: tree, prompt, model, maxBudgetUsd });
-  } catch (err) {
-    return { unresolved: true, reason: `worker exception: ${err.message}`, costUsd: 0, wallMs: 0, scratch };
+  // Treatment mechanism: persist the recommendation as a project CLAUDE.md so it
+  // is in EVERY session's context. APPEND to any pre-existing CLAUDE.md (some
+  // fixtures ship a scenario convention file) so the ONLY difference between arms
+  // is the appended recommendation (anti-gaming constraint 1) — never replace it.
+  // Control gets the tree's CLAUDE.md (if any) unchanged.
+  if (arm === 'injected') {
+    const claudeMdPath = join(tree, 'CLAUDE.md');
+    const existing = existsSync(claudeMdPath) ? `${readFileSync(claudeMdPath, 'utf8').replace(/\n*$/, '')}\n\n` : '';
+    writeFileSync(claudeMdPath, `${existing}${pair.injectedRecommendation}\n`, 'utf8');
   }
 
-  if (!worker.ok) {
-    return { unresolved: true, reason: worker.reason, costUsd: 0, wallMs: worker.wallMs || 0, scratch, tempHome: worker.tempHome };
+  const steps = chainSteps(pair);
+  const tempHomes = [];
+  const perStepCostUsd = [];
+  const perStepTokens = [];
+  let costUsd = 0;
+  let tokens = 0;
+  let wallMs = 0;
+  let costSource;
+
+  for (let i = 0; i < steps.length; i++) {
+    const where = `session ${i + 1}/${steps.length}`;
+    let worker;
+    try {
+      worker = await runWorker({ worktree: tree, prompt: buildPrompt(steps[i]), model, maxBudgetUsd });
+    } catch (err) {
+      return { unresolved: true, reason: `worker exception (${where}): ${err.message}`, costUsd, tokens, costSource, wallMs, perStepCostUsd, scratch, tempHomes };
+    }
+    if (worker.tempHome) tempHomes.push(worker.tempHome);
+    if (!worker.ok) {
+      return { unresolved: true, reason: `${worker.reason} (${where})`, costUsd, tokens, costSource, wallMs: wallMs + (worker.wallMs || 0), perStepCostUsd, scratch, tempHomes };
+    }
+    const { usd, source } = costFromWorkerJson(worker.cj, model);
+    costSource = source;
+    const stepTokens = tokensFromWorkerJson(worker.cj);
+    costUsd += usd;
+    tokens += stepTokens;
+    wallMs += worker.wallMs;
+    perStepCostUsd.push(usd);
+    perStepTokens.push(stepTokens);
+    const isError = worker.cj.is_error === true || worker.cj.subtype === 'error_max_turns' || worker.cj.subtype === 'error_during_execution';
+    // A session that errored out (max-budget / crash) makes the chain UNRESOLVED.
+    if (isError) {
+      return { unresolved: true, reason: `worker is_error/${worker.cj.subtype} (${where})`, costUsd, tokens, costSource, wallMs, perStepCostUsd, scratch, tempHomes };
+    }
   }
 
-  const { usd: costUsd, source: costSource } = costFromWorkerJson(worker.cj, model);
-  const tokens = tokensFromWorkerJson(worker.cj);
-  const isError = worker.cj.is_error === true || worker.cj.subtype === 'error_max_turns' || worker.cj.subtype === 'error_during_execution';
-
-  // A worker that errored out (max-budget / crash) is UNRESOLVED, not DECIDED-fail.
-  if (isError) {
-    return { unresolved: true, reason: `worker is_error/${worker.cj.subtype}`, costUsd, tokens, costSource, wallMs: worker.wallMs, scratch, tempHome: worker.tempHome };
-  }
-
+  // Gate 0 on the FINAL accumulated tree.
   const gate = await runGate(tree, pair.gate);
   return {
     unresolved: false,
@@ -286,14 +327,18 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
     costUsd,
     tokens,
     costSource,
-    wallMs: worker.wallMs,
+    wallMs,
+    sessions: steps.length,
+    perStepCostUsd,
+    perStepTokens,
     scratch,
-    tempHome: worker.tempHome,
+    tempHomes,
   };
 }
 
 function cleanupScratch(run) {
-  for (const p of [run?.scratch, run?.tempHome]) {
+  const paths = [run?.scratch, run?.tempHome, ...(run?.tempHomes ?? [])];
+  for (const p of paths) {
     if (p && existsSync(p)) { try { rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ } }
   }
 }
@@ -367,8 +412,11 @@ async function main() {
   }
 
   const pairs = bundle.pairs.slice(0, args.limit);
+  const sessionsPer = (p) => chainSteps(p).length;
+  const totalSessions = pairs.reduce((s, p) => s + sessionsPer(p) * 2 * args.k, 0);
+  const mDesc = bundle.sessionsPerChain ? ` x M=${bundle.sessionsPerChain} sessions` : '';
   console.log(
-    `proof-batch: ${pairs.length} pair(s) x 2 arms x k=${args.k} = ${pairs.length * 2 * args.k} jailed ${args.model} workers`
+    `proof-batch: ${pairs.length} pair(s) x 2 arms x k=${args.k}${mDesc} = ${totalSessions} jailed ${args.model} sessions`
   );
   console.log(
     `budget: per-worker $${args.maxBudgetUsd}, batch cap $${args.totalBudgetUsd}, concurrency ${args.concurrency}, dry-run=${args.dryRun}`
@@ -379,8 +427,9 @@ async function main() {
   const perPair = [];
 
   for (const pair of pairs) {
-    // Worst-case spend of the next pair = both arms x k runs at the per-worker cap.
-    const worstCaseNext = 2 * args.k * args.maxBudgetUsd;
+    // Worst-case spend of the next pair = both arms x k runs x M sessions/run at
+    // the per-SESSION cap (each session is one capped jailed worker).
+    const worstCaseNext = 2 * args.k * sessionsPer(pair) * args.maxBudgetUsd;
     if (totalSpend + worstCaseNext > args.totalBudgetUsd) {
       console.warn(
         `STOP: running ${pair.pairId} could exceed --total-budget-usd ($${args.totalBudgetUsd}); spent $${totalSpend.toFixed(4)} so far.`
@@ -405,6 +454,14 @@ async function main() {
       const successes = decided.filter((r) => r.decidedSuccess);
       const costs = decided.map((r) => r.costUsd);
       const wall = decided.map((r) => r.wallMs);
+      // Dose-response (#2082): element-wise median per-session cost over the
+      // DECIDED runs, so the cumulative onset curve can be built downstream.
+      const stepArrays = decided.map((r) => r.perStepCostUsd).filter(Array.isArray);
+      const nSteps = stepArrays.length ? Math.max(...stepArrays.map((a) => a.length)) : 0;
+      const perStepMedianCostUsd = Array.from({ length: nSteps }, (_, i) => {
+        const vals = stepArrays.map((a) => a[i]).filter((v) => typeof v === 'number');
+        return vals.length ? median(vals) : NaN;
+      });
       return {
         runs,
         nRuns: runs.length,
@@ -413,6 +470,7 @@ async function main() {
         nSuccess: successes.length,
         medianCostUsd: costs.length ? median(costs) : NaN,
         medianWallMs: wall.length ? median(wall) : NaN,
+        perStepMedianCostUsd,
         // The arm "passes" (contributes a usable cost summary) iff >=1 DECIDED run.
         armDecided: decided.length > 0,
         armSuccess: successes.length > 0,
@@ -455,6 +513,34 @@ async function main() {
   const wilcoxon = costPairs.length ? wilcoxonSignedRank(costPairs) : { statistic: 0, pOneSided: 1, n: 0 };
   const latMedDelta = latencyPairs.length ? pairedMedianDelta(latencyPairs) : NaN;
 
+  // Dose-response (#2082, SUPPORTING — never sets the verdict). Cumulative
+  // control/injected cost and their delta at each session boundary, median over
+  // DECIDED pairs. Characterizes the ONSET of the cross-session re-read effect;
+  // the §5 verdict is still the chain-total test at full M.
+  const cumulative = (arr) => {
+    const out = [];
+    let s = 0;
+    for (const v of arr) { s += Number.isFinite(v) ? v : 0; out.push(s); }
+    return out;
+  };
+  const mSessions = bundle.sessionsPerChain ?? 0;
+  const doseResponse = mSessions
+    ? Array.from({ length: mSessions }, (_, i) => {
+        const deltas2 = decidedPairs
+          .map((p) => {
+            const ctl = cumulative(p.control.perStepMedianCostUsd)[i];
+            const inj = cumulative(p.injected.perStepMedianCostUsd)[i];
+            return Number.isFinite(ctl) && Number.isFinite(inj) ? inj - ctl : null;
+          })
+          .filter((v) => v !== null);
+        return {
+          session: i + 1,
+          medianCumulativeDeltaUsd: deltas2.length ? median(deltas2) : NaN,
+          n: deltas2.length,
+        };
+      })
+    : [];
+
   // Quality hold (§4): treatment DECIDED-success rate within 5pp of control's.
   const controlSuccessRate = rate(decidedPairs.map((p) => p.control.armSuccess));
   const injectedSuccessRate = rate(decidedPairs.map((p) => p.injected.armSuccess));
@@ -482,6 +568,10 @@ async function main() {
   console.log(`Wilcoxon signed-rank: W-=${wilcoxon.statistic}, p(one-sided)=${wilcoxon.pOneSided.toExponential(3)}, n=${wilcoxon.n}`);
   console.log(`quality hold: control success ${(controlSuccessRate * 100).toFixed(0)}% vs injected ${(injectedSuccessRate * 100).toFixed(0)}% -> ${qualityHoldPass ? 'PASS' : 'FAIL'}`);
   console.log(`latency paired-median delta: ${fmtMs(latMedDelta)} (secondary, not gated)`);
+  if (doseResponse.length) {
+    console.log('dose-response (cumulative injected-control $ delta by session, SUPPORTING — does not set verdict):');
+    for (const d of doseResponse) console.log(`   s${d.session}: $${fmt(d.medianCumulativeDeltaUsd)} (n=${d.n})`);
+  }
   console.log(`VERDICT: ${decision.verdict.toUpperCase()}`);
   for (const r of decision.reasons) console.log(`   - ${r}`);
 
@@ -539,6 +629,8 @@ async function main() {
         costPct: Number.isFinite(medPctDelta) ? medPctDelta : 0,
         latencyMs: Number.isFinite(latMedDelta) ? latMedDelta : 0,
       },
+      // SUPPORTING readout (#2082): cumulative onset curve, never the verdict.
+      ...(doseResponse.length ? { doseResponse } : {}),
       verdict: receiptVerdict,
     },
     projection: {
