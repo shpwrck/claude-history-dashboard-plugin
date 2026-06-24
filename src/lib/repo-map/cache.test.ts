@@ -169,22 +169,33 @@ describe('assertNoBodyLeakage (privacy invariant)', () => {
 });
 
 describe('artifactPathFor', () => {
-  it('encodes the root the same way the projects dir does', () => {
-    expect(artifactPathFor('/out', '/home/u/proj')).toBe('/out/-home-u-proj.json');
+  it('keeps a readable, dash-sanitized prefix of the root', () => {
+    const p = artifactPathFor('/out', '/home/u/proj');
+    expect(p.startsWith('/out/-home-u-proj-')).toBe(true);
+    expect(p.endsWith('.json')).toBe(true);
+  });
+
+  // #1935: the encoding MUST be injective. The old `replace(/[^a-zA-Z0-9]/g,'-')`
+  // mapped every separator to `-`, so proj-a / proj.a / proj_a / proj/a all
+  // collided to ONE filename and the multi-root refresh driver silently
+  // overwrote one root's artifact with another's (data loss, falsely-reassuring
+  // "written" count). A sha256 suffix over the FULL root guarantees distinct
+  // files; identity is recovered from the artifact's stored `root`, not the name.
+  it('produces DISTINCT paths for roots that differ only in punctuation', () => {
+    const dir = '/out';
+    const colliding = [
+      '/home/u/proj-a',
+      '/home/u/proj.a',
+      '/home/u/proj_a',
+      '/home/u/proj/a',
+    ];
+    const paths = colliding.map((r) => artifactPathFor(dir, r));
+    expect(new Set(paths).size).toBe(colliding.length);
   });
 
   // #719/#1004: ADR 0007 names the artifact path as THE producer/consumer seam.
   // scripts/repo-map-generate.mjs WRITES via artifactPathFor and scripts/ingest.mjs
-  // now READS via the same function (it previously hand-joined its own encodeRoot
-  // regex, which would silently break the join if either side drifted). These
-  // assertions pin the single encoding so a regression in the regex is caught.
-  it('replaces every non-alphanumeric character in the root with a dash', () => {
-    // Slashes, dots, spaces, underscores — all collapse to `-`, never kept.
-    expect(artifactPathFor('/out', '/home/u/my.proj_v2 (wip)')).toBe(
-      '/out/-home-u-my-proj-v2--wip-.json'
-    );
-  });
-
+  // READS via the same function, so both MUST derive the same file for a root.
   it('derives the producer and consumer path from one function (round-trip)', () => {
     // Stand-in for the producer write (repo-map-generate.mjs L77) and the
     // consumer read (ingest.mjs readRepoMapArtifact): both call artifactPathFor

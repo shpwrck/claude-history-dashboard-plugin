@@ -19,6 +19,7 @@
  * This module is HOST-ONLY (it stats source files and reads/writes the artifact
  * dir). The runtime only reads the JSON it produces — see ADR 0007.
  */
+import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RepoMap } from './types';
@@ -234,6 +235,16 @@ export function assertNoBodyLeakage(
 /** Path of the persisted artifact for `root` under the artifact dir. Mirrors
  *  the `~/.claude/projects/<slug>/` encoding the producer uses. */
 export function artifactPathFor(artifactDir: string, root: string): string {
-  const encoded = root.replace(/[^a-zA-Z0-9]/g, '-');
-  return join(artifactDir, `${encoded}.json`);
+  // Injective (#1935): the old encoding mapped EVERY non-alphanumeric char to
+  // `-`, so roots differing only in punctuation (proj-a / proj.a / proj_a /
+  // proj/a) collided to one filename and the multi-root refresh driver (#1650)
+  // silently overwrote one root's artifact with another's — data loss behind a
+  // falsely-reassuring "written" count. The sha256 suffix over the FULL root
+  // makes the filename collision-free; the dash-sanitized prefix is a debugging
+  // aid only — a root's identity is recovered from the artifact's stored `root`
+  // (ingest.mjs repoMapArtifactRoots reads that field), never decoded from the
+  // filename, so the hash needs no reverse mapping.
+  const prefix = root.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 80);
+  const digest = createHash('sha256').update(root).digest('hex').slice(0, 16);
+  return join(artifactDir, `${prefix}-${digest}.json`);
 }

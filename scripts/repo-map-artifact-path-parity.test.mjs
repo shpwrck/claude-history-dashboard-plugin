@@ -90,10 +90,12 @@ test('(1) a fixture artifact at the producer path is found by ingest after #1004
     const ingest = await loadIngest(home);
     const dataset = ingest.assembleDataset();
 
-    // Sanity: the artifact really lives at the producer's encoded path (dashes
-    // for every non-alphanumeric), not at the raw root path.
+    // Sanity: the artifact lives at the producer's INJECTIVE encoded path — a
+    // readable dash-sanitized prefix of the root plus a sha256 suffix (#1935),
+    // not the raw root path and not a punctuation-collapsed name that could
+    // collide with a sibling root.
     assert.ok(
-      artifactPath.endsWith('/-tmp-proj-with-special-chars.json'),
+      /\/-tmp-proj-with-special-chars-[0-9a-f]{16}\.json$/.test(artifactPath),
       `unexpected artifact path: ${artifactPath}`
     );
 
