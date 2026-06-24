@@ -145,6 +145,11 @@ const { drainAdoptionSpoolQuiet } = await import(
 const { safeJsonStringify } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'json-safe.ts')
 );
+// Single-serialization dataset body + ETag-stable bytes (#2070). Same register-ts
+// dynamic import as the helpers above.
+const { buildDatasetBody } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'dataset-body.ts')
+);
 // Server LLM calls are registered and enforced through this chokepoint (#931).
 const { callAnthropic, callAnthropicMessages, egressScrub } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'anthropic-egress.ts')
@@ -1195,10 +1200,13 @@ async function refreshReviewEventsForIngest(ingestApi) {
 
 async function buildDatasetCache(api, contentHash) {
   const dataset = api.assembleDataset();
-  // Serialize once. Derive the ETag from a stable view (drop generatedAt) so it
-  // only changes with the actual data, not the per-build timestamp. Lone
-  // surrogates are scrubbed so the export stays valid for strict parsers (#1104).
-  const json = safeJsonStringify(dataset);
+  // Serialize the dataset exactly ONCE (#2070). buildDatasetBody serializes the
+  // stable view (dataset minus the volatile generatedAt), then splices
+  // generatedAt back into the served body without a second full stringify. The
+  // ETag hashes `stableJson` directly, so it only changes with the actual data,
+  // not the per-build timestamp. Lone surrogates are scrubbed so the export
+  // stays valid for strict parsers (#1104).
+  const { json, stableJson } = buildDatasetBody(dataset);
   const buf = Buffer.from(json);
   if (buf.length > DATASET_RESPONSE_MAX_BYTES) {
     const err = new Error(`Dataset response exceeds ${DATASET_RESPONSE_MAX_BYTES} byte limit`);
@@ -1207,9 +1215,7 @@ async function buildDatasetCache(api, contentHash) {
     err.actualBytes = buf.length;
     throw err;
   }
-  const { generatedAt, ...stable } = dataset;
-  void generatedAt;
-  const etag = datasetEtagFrom(JSON.stringify(stable));
+  const etag = datasetEtagFrom(stableJson);
   // Compress both encodings concurrently on the libuv threadpool so the brotli
   // (~310 ms at this size) and gzip never block the event loop (#1015). The
   // result shape is identical to the old synchronous build.
