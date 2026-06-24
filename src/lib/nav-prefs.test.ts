@@ -37,7 +37,6 @@ afterEach(() => localStorage.clear());
 function prefsAt(version: number, over: Partial<NavPrefs> = {}): NavPrefs {
   return {
     hiddenViews: [],
-    bannerDismissed: false,
     entrypointFilter: 'all',
     navLayoutVersion: version,
     customized: false,

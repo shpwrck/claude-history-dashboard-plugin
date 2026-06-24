@@ -3,8 +3,6 @@ import { createReadStream, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-export type AdoptionReceiptKind = 'SURFACED' | 'SUPPRESSED' | 'PROOF';
-
 export interface SurfacedReceipt {
   schemaVersion: '1';
   kind: 'SURFACED';

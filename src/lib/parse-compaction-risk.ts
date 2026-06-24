@@ -32,13 +32,6 @@ export const GROWTH_WINDOW_TURNS = 10;
  */
 export const LARGE_TOOL_OUTPUT_BYTES = 20_000;
 
-/**
- * Minimum repeat count to call a file "re-read". Mirrors the threshold used
- * by {@link redundantReads} so the two analyses don't disagree on what
- * counts as redundant.
- */
-export const REREAD_MIN_REPEAT = 3;
-
 /** Context utilisation thresholds for risk-class bucketing (percent of 200K). */
 export const PEAK_PCT_WARN = 50; // 100K / 200K
 export const PEAK_PCT_HIGH = 80; // 160K / 200K

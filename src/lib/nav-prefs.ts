@@ -52,7 +52,6 @@ export type EntrypointFilter = 'all' | 'unattended';
 
 export interface NavPrefs {
   hiddenViews: View[];
-  bannerDismissed: boolean;
   /**
    * Last route the user was on (#141), so a reload lands where they left off
    * instead of the static default. Absent until the first navigation; guarded
@@ -143,7 +142,6 @@ export const CURATED_DEFAULT_HIDDEN_VIEWS: readonly View[] = [];
 
 const DEFAULTS: NavPrefs = {
   hiddenViews: [...CURATED_DEFAULT_HIDDEN_VIEWS],
-  bannerDismissed: false,
   entrypointFilter: 'all',
   navLayoutVersion: CURRENT_NAV_LAYOUT_VERSION,
   customized: false,
@@ -618,7 +616,6 @@ function sanitize(raw: unknown): NavPrefs {
   const hiddenViews = rawHidden.filter(
     (v): v is View => typeof v === 'string' && VALID_VIEWS.has(v as View)
   );
-  const bannerDismissed = obj.bannerDismissed === true;
   const lastView =
     typeof obj.lastView === 'string' && VALID_VIEWS.has(obj.lastView as View)
       ? (obj.lastView as View)
@@ -644,7 +641,6 @@ function sanitize(raw: unknown): NavPrefs {
     obj.customized === true || (navLayoutVersion === 0 && hiddenViews.length > 0);
   return {
     hiddenViews,
-    bannerDismissed,
     entrypointFilter,
     navLayoutVersion,
     customized,
@@ -747,11 +743,6 @@ export function showAllViews(prefs: NavPrefs): NavPrefs {
   // Explicitly revealing every tab is itself a customization (#608): the user
   // wants everything, so a future curated default must not re-hide views.
   return { ...prefs, hiddenViews: [], customized: true };
-}
-
-export function dismissBanner(prefs: NavPrefs): NavPrefs {
-  if (prefs.bannerDismissed) return prefs;
-  return { ...prefs, bannerDismissed: true };
 }
 
 /**

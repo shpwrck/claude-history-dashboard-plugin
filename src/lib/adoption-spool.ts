@@ -129,12 +129,3 @@ export async function drainAdoptionSpoolQuiet(
     return { drained: 0, skipped: 0 };
   }
 }
-
-// Exported only so a test can clean up its temp spool; not used in the boot path.
-export async function removeSpool(spoolFile: string): Promise<void> {
-  try {
-    await rm(spoolFile, { force: true });
-  } catch {
-    /* best-effort */
-  }
-}
