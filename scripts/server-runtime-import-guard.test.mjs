@@ -83,6 +83,9 @@ const port = await freePort();
 const claudeDir = await mkdtemp(join(tmpdir(), 'runtime-import-claude-'));
 const distDir = await mkdtemp(join(tmpdir(), 'runtime-import-dist-'));
 const cacheDir = await mkdtemp(join(tmpdir(), 'runtime-import-cache-'));
+const ingestDir = await mkdtemp(join(tmpdir(), 'runtime-import-ingest-'));
+const INGEST_TOKEN = 'runtime-import-ingest-token';
+const WRITE_TOKEN = 'runtime-import-write-token';
 const base = `http://127.0.0.1:${port}`;
 
 await writeFile(join(distDir, 'index.html'), '<!doctype html><main>ok</main>');
@@ -106,6 +109,11 @@ const proc = spawn('node', ['--import', REGISTER, SERVER], {
     DASHBOARD_AUTH_MODE: '',
     DASHBOARD_AUTH_TOKENS: '',
     DASHBOARD_ADMIN_TOKEN: '',
+    // Opt-in surfaces whose handlers lazy-import() only when enabled (#1576):
+    // set so the POST exercises below reach those import chains under the guard.
+    PROBAITIO_INGEST_DIR: ingestDir,
+    PROBAITIO_INGEST_TOKEN: INGEST_TOKEN,
+    POLICY_WRITE_TOKEN: WRITE_TOKEN,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -144,12 +152,69 @@ try {
     const body = await response.json().catch(() => null);
     check('auth session route responds', response.status === 200, `got ${response.status}`);
     check('local mode remains unauthenticated', body?.authRequired === false);
+
+    // #1576: exercise the function-scoped lazy import() chains that only resolve
+    // when these opt-in operator/ingest/dispatch routes are actually hit, so a
+    // future npm-package leak in those graphs fails the guard HERE, not in prod.
+    // Each handler import()s under DASHBOARD_RUNTIME_IMPORT_GUARD=1; the stderr
+    // scan below is the backstop assertion that none pulled a bare package.
+    //   GET  /api/sessions             -> ./lib/kube-client.mjs (imported before
+    //                                     the isConfigured() gate, so no cluster)
+    //   POST /api/sessions             -> ./lib/remotesession-dispatch.mjs
+    //   POST /api/ingest/:id/artifacts -> ../src/lib/claude-tree-classification.ts
+    const sessionsList = await fetch(`${base}/api/sessions`);
+    // 200 = import resolved + no cluster configured (or the list succeeded); 502 =
+    // import resolved but a CONFIGURED cluster (e.g. the in-cluster ARC CI runner,
+    // which has a service-account kubeconfig) rejected the list. Both prove
+    // kube-client.mjs imported under the guard — only a 500 'dispatch module
+    // unavailable' (the import-catch) would mean the guard blocked a bare package.
+    check(
+      'GET /api/sessions resolves the kube-client import chain',
+      sessionsList.status === 200 || sessionsList.status === 502,
+      `got ${sessionsList.status}`
+    );
+
+    const sessionsCreate = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: base,
+        'x-csrf-token': WRITE_TOKEN,
+      },
+      body: '{}',
+    });
+    // 400 proves write-auth PASSED and the dispatch module imported, then
+    // validateDispatchInput rejected the empty body. A 401/403/415 would mean we
+    // never reached the import; a 500 would mean the import itself was blocked.
+    check(
+      'POST /api/sessions resolves the remotesession-dispatch import',
+      sessionsCreate.status === 400,
+      `got ${sessionsCreate.status}`
+    );
+
+    const ingest = await fetch(`${base}/api/ingest/probe-source/artifacts`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${INGEST_TOKEN}`,
+      },
+      body: JSON.stringify({ artifacts: [] }),
+    });
+    // < 500 proves the claude-tree-classification import resolved — a guard block
+    // in that (un-try/caught) chain surfaces as a 500. Empty artifacts[] is
+    // accepted (nothing written), so the handler runs past the import.
+    check(
+      'POST /api/ingest/:id/artifacts resolves the claude-tree-classification import',
+      ingest.status < 500,
+      `got ${ingest.status}`
+    );
   }
 } finally {
   proc.kill();
   await rm(claudeDir, { recursive: true, force: true });
   await rm(distDir, { recursive: true, force: true });
   await rm(cacheDir, { recursive: true, force: true });
+  await rm(ingestDir, { recursive: true, force: true });
 }
 
 if (/Server runtime import guard blocked bare package/.test(stderr)) {
