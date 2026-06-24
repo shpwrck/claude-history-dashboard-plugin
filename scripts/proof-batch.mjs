@@ -203,14 +203,26 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd }) {
     child.on('close', (code) => {
       const wallMs = Date.now() - started;
       let cj = null;
-      // `claude -p --output-format json` prints a single JSON object on stdout.
-      const trimmed = stdout.trim();
-      try {
-        cj = JSON.parse(trimmed);
-      } catch {
-        // Some builds wrap or prefix; grab the last {...} block.
-        const m = trimmed.match(/\{[\s\S]*\}$/);
-        if (m) { try { cj = JSON.parse(m[0]); } catch { /* give up */ } }
+      // The jailed worker runs with `--output-format stream-json --verbose`
+      // (set by the shadow-calls buildWorkerLaunch), so stdout is NDJSON: many
+      // JSON lines, the LAST of which is the `{"type":"result", total_cost_usd,
+      // usage, ...}` summary the cost/token extractors read. Walk lines from the
+      // end and take the last parseable object, preferring the result line.
+      const lines = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const obj = JSON.parse(lines[i]);
+          if (obj && typeof obj === 'object') {
+            cj = obj;
+            if (obj.type === 'result') break;
+          }
+        } catch {
+          /* not a JSON line (verbose preamble, etc.) */
+        }
+      }
+      // Fallback for a single-object `--output-format json` build.
+      if (!cj) {
+        try { cj = JSON.parse(stdout.trim()); } catch { /* give up */ }
       }
       if (!cj) {
         resolveRun({ ok: false, unresolved: true, reason: `worker produced no parseable JSON (exit ${code})`, stderr: stderr.slice(-400), wallMs, tempHome });
