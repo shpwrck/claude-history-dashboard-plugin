@@ -25,7 +25,10 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //   'cmd-skeleton-v3' (#2039): dangerous-command matchers now run on the
 //       executable skeleton (heredoc/quoted/inline-script bodies stripped), so a
 //       blob reparse is needed to drop substring false positives.
-const SESSION_BLOB_PARSER_VERSION = 'cmd-skeleton-v3';
+//   'force-with-lease-v4' (#2042): git push --force pattern no longer matches the
+//       safe --force-with-lease / --force-if-includes variants; reparse to drop
+//       them from the dangerous-command set.
+const SESSION_BLOB_PARSER_VERSION = 'force-with-lease-v4';
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));

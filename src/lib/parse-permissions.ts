@@ -185,7 +185,11 @@ export const DANGEROUS_PATTERNS: {
   { name: 'git reset --hard', test: (c) => /\bgit\s+reset\s+--hard/i.test(c) },
   {
     name: 'git push --force',
-    test: (c) => /\bgit\s+push\s+(-f\b|--force\b)/i.test(c),
+    // The `(?![\w-])` rejects the SAFE variants `--force-with-lease` /
+    // `--force-if-includes` (they refuse to clobber a moved remote — the
+    // recommended way to push a rebased branch) while still matching the bare
+    // dangerous `--force` / `-f` (#2042). Keep in sync with parse-tools.ts.
+    test: (c) => /\bgit\s+push\s+(-f|--force)(?![\w-])/i.test(c),
   },
   { name: 'chmod 777', test: (c) => /\bchmod\s+(-R\s+)?[0-7]*777\b/i.test(c) },
   { name: 'dd if=', test: (c) => /\bdd\s+if=/i.test(c), certainty: 'medium' },

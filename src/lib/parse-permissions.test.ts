@@ -202,6 +202,27 @@ describe('detectDangerousCommands', () => {
     }
   })
 
+  it('flags bare git push --force/-f but not the safe --force-with-lease/--force-if-includes (#2042)', () => {
+    const dangerous = [
+      'git push --force',
+      'git push -f origin main',
+      'cd /repo && git push --force origin feature',
+    ]
+    for (const cmd of dangerous) {
+      const found = detectDangerousCommands([session('s', [call('Bash', cmd)])])
+      expect(found, cmd).toHaveLength(1)
+      expect(found[0].pattern, cmd).toBe('git push --force')
+    }
+    const safe = [
+      'git push --force-with-lease origin pr218:feature/x',
+      'git push --force-with-lease',
+      'git push --force-if-includes origin main',
+    ]
+    for (const cmd of safe) {
+      expect(detectDangerousCommands([session('s', [call('Bash', cmd)])]), cmd).toHaveLength(0)
+    }
+  })
+
   it('ignores non-Bash tools', () => {
     const data = [session('s', [call('Read', undefined)])]
     expect(detectDangerousCommands(data)).toHaveLength(0)

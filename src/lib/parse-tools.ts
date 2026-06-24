@@ -480,7 +480,10 @@ const COMMAND_DANGEROUS_PATTERNS: Array<{
   { name: 'git reset --hard', test: (c) => /\bgit\s+reset\s+--hard/i.test(c) },
   {
     name: 'git push --force',
-    test: (c) => /\bgit\s+push\s+(-f\b|--force\b)/i.test(c),
+    // The `(?![\w-])` rejects the SAFE variants `--force-with-lease` /
+    // `--force-if-includes` while still matching bare `--force` / `-f` (#2042).
+    // Keep in sync with parse-permissions.ts DANGEROUS_PATTERNS.
+    test: (c) => /\bgit\s+push\s+(-f|--force)(?![\w-])/i.test(c),
   },
   { name: 'chmod 777', test: (c) => /\bchmod\s+(-R\s+)?[0-7]*777\b/i.test(c) },
   { name: 'dd if=', test: (c) => /\bdd\s+if=/i.test(c) },
