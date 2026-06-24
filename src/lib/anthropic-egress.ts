@@ -217,6 +217,59 @@ export async function callAnthropicMessages(
   };
 }
 
+// Transmission-grade local redaction applied to every string in the egress
+// payload before it leaves the process. Patterns are conservative: they match
+// secret-SHAPED substrings (keys, tokens, JWTs, emails, home paths, env
+// secrets), so non-secret strings (model ids, roles, instructions) pass
+// through unchanged. This is intentionally over-eager on the secret side —
+// for an egress boundary a false redaction is cheap, a false pass is not.
+const REDACTIONS: { re: RegExp; to: string }[] = [
+  // Anthropic / OpenAI-style API keys (sk-..., sk-ant-...).
+  { re: /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}/g, to: '[REDACTED_KEY]' },
+  // JWT / OAuth-style three-part tokens.
+  {
+    re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}/g,
+    to: '[REDACTED_JWT]',
+  },
+  // Authorization: Bearer <token>.
+  { re: /\bBearer\s+[A-Za-z0-9._~+/=-]{10,}/gi, to: 'Bearer [REDACTED_TOKEN]' },
+  // Email addresses.
+  {
+    re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
+    to: '[REDACTED_EMAIL]',
+  },
+  // Absolute home/user paths.
+  { re: /\/(?:Users|home)\/[^\s"']+/g, to: '[REDACTED_PATH]' },
+  // Env-style secret assignments: FOO_TOKEN=..., API_KEY=..., PASSWORD=...
+  {
+    re: /\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL)[A-Z0-9_]*)\s*=\s*\S+/g,
+    to: '$1=[REDACTED]',
+  },
+  // Long hex blobs (≥32) — covers many opaque credentials/hashes.
+  { re: /\b[A-Fa-f0-9]{32,}\b/g, to: '[REDACTED_HEX]' },
+];
+
+function redactString(value: string): string {
+  let out = value;
+  for (const { re, to } of REDACTIONS) out = out.replace(re, to);
+  return out;
+}
+
+function redactDeep<T>(value: T): T {
+  if (typeof value === 'string') return redactString(value) as unknown as T;
+  if (Array.isArray(value)) {
+    return value.map((item) => redactDeep(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = redactDeep(v);
+    }
+    return out as T;
+  }
+  return value;
+}
+
 export function egressScrub<T>(
   registryId: LlmUsageId,
   content: T,
@@ -229,10 +282,19 @@ export function egressScrub<T>(
       `No LLM usage registry entry for ${registryId}`
     );
   }
-  if (entry.egressScrub !== 'stub') {
+  if (entry.egressScrub === 'none') {
     throw new AnthropicEgressError(
       'ERR_DASHBOARD_LLM_SCRUB_NOT_CONFIGURED',
       `${registryId} does not use an egress scrub step`
+    );
+  }
+  // FAIL-CLOSED: only the transmission-grade 'redact' mode may send. A 'stub'
+  // (identity) mode — or any unrecognised mode — refuses egress entirely, so a
+  // misconfiguration can never leak unredacted transcript content (#1581).
+  if (entry.egressScrub !== 'redact') {
+    throw new AnthropicEgressError(
+      'ERR_DASHBOARD_LLM_SCRUB_NOT_TRANSMISSION_GRADE',
+      `${registryId} egressScrub mode "${entry.egressScrub}" is not a transmission-grade redactor; refusing to egress`
     );
   }
   if (!options || typeof options.logger !== 'function') {
@@ -242,14 +304,15 @@ export function egressScrub<T>(
     );
   }
   const inputBytes = jsonByteLength(content);
+  const redacted = redactDeep(content);
   const receipt = {
     registryId,
     mode: entry.egressScrub,
     inputBytes,
-    outputBytes: inputBytes,
+    outputBytes: jsonByteLength(redacted),
   };
   options.logger(receipt);
-  return { content, receipt };
+  return { content: redacted, receipt };
 }
 
 function buildHeaders(req: CallAnthropicRequest): Record<string, string> {
@@ -275,7 +338,7 @@ function validScrubReceipt(
   receipt: EgressScrubReceipt | undefined
 ): boolean {
   return (
-    expectedMode === 'stub' &&
+    expectedMode === 'redact' &&
     receipt?.registryId === registryId &&
     receipt.mode === expectedMode &&
     Number.isFinite(receipt.inputBytes) &&

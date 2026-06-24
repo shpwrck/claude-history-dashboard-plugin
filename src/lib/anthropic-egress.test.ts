@@ -52,7 +52,7 @@ describe('LLM usage registry', () => {
     expect(getLlmUsageEntry('server.usage-gauge')?.credential).toBe('oauth');
     expect(getLlmUsageEntry('server.audit-judge')?.rule).toBe('B');
     expect(getLlmUsageEntry('server.audit-judge')?.dataClass).toBe('scrubbed');
-    expect(getLlmUsageEntry('server.audit-judge')?.egressScrub).toBe('stub');
+    expect(getLlmUsageEntry('server.audit-judge')?.egressScrub).toBe('redact');
     expect(getLlmUsageEntry('browser.ask-claude')?.surface).toBe('browser');
   });
 
@@ -102,26 +102,49 @@ describe('LLM usage registry', () => {
 });
 
 describe('egressScrub', () => {
-  it('returns pass-through content and logs only scrub metadata', () => {
+  it('redacts transcript-derived secrets before egress and logs scrub metadata', () => {
     const receipts: EgressScrubReceipt[] = [];
     const content = {
+      model: 'claude-sonnet-4-5-20250929',
       system: 'Return JSON',
-      messages: [{ role: 'user', content: 'secret prompt text' }],
+      messages: [
+        {
+          role: 'user',
+          content:
+            'ACTION: bash cat /home/jane/.claude/.credentials.json; ' +
+            'leaked key sk-ant-abcdef0123456789ABCDEFG in the log; ' +
+            'export DB_PASSWORD=hunter2supersecretvalue; ' +
+            'ping ops@example.com',
+        },
+      ],
     };
 
     const result = egressScrub('server.audit-judge', content, {
       logger: (receipt) => receipts.push(receipt),
     });
 
-    expect(result.content).toBe(content);
+    const payload = JSON.stringify(result.content);
+    // The secret-shaped substrings must be gone from what would egress.
+    expect(payload).not.toContain('sk-ant-abcdef0123456789ABCDEFG');
+    expect(payload).not.toContain('hunter2supersecretvalue');
+    expect(payload).not.toContain('/home/jane/.claude');
+    expect(payload).not.toContain('ops@example.com');
+    expect(payload).toContain('[REDACTED_KEY]');
+    expect(payload).toContain('[REDACTED_PATH]');
+    expect(payload).toContain('[REDACTED_EMAIL]');
+    expect(payload).toContain('DB_PASSWORD=[REDACTED]');
+    // Non-secret content is preserved.
+    expect(payload).toContain('claude-sonnet-4-5-20250929');
+    expect(payload).toContain('Return JSON');
+
     expect(result.receipt).toMatchObject({
       registryId: 'server.audit-judge',
-      mode: 'stub',
+      mode: 'redact',
     });
     expect(result.receipt.inputBytes).toBeGreaterThan(0);
-    expect(result.receipt.outputBytes).toBe(result.receipt.inputBytes);
     expect(receipts).toEqual([result.receipt]);
-    expect(JSON.stringify(receipts)).not.toContain('secret prompt text');
+    // The receipt itself must never carry the raw secret.
+    expect(JSON.stringify(receipts)).not.toContain('sk-ant-abcdef');
   });
 
   it('rejects entries that are not configured for an egress scrub step', () => {
@@ -132,7 +155,7 @@ describe('egressScrub', () => {
     ).toThrow(/does not use an egress scrub step/);
   });
 
-  it('rejects configured stub entries without a scrub logger', () => {
+  it('rejects a redact entry without a scrub logger', () => {
     expect(() =>
       egressScrub(
         'server.audit-judge',

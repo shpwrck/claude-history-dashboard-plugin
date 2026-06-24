@@ -149,6 +149,9 @@ const { safeJsonStringify } = await import(
 const { callAnthropic, callAnthropicMessages, egressScrub } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'anthropic-egress.ts')
 );
+const { getLlmUsageEntry } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'llm-registry.ts')
+);
 // Tier-3 judge-audit harness (#605/#738) lives in src/lib/audit/judge.ts.
 // The route injects a governed chat function rather than letting the audit core
 // own network egress, so the SPA bundle and browser client stay decoupled.
@@ -298,6 +301,13 @@ const DASHBOARD_ENABLE_HSTS = parseBooleanEnv('DASHBOARD_ENABLE_HSTS');
 const DASHBOARD_ENABLE_SERVER_LLM_AUDITS = parseBooleanEnv(
   'DASHBOARD_ENABLE_SERVER_LLM_AUDITS'
 );
+// Fail-closed feature gate (#1581): the audit-judge path may only egress when
+// its registered scrub is the transmission-grade redactor. If the registry is
+// reverted to the identity 'stub' (or any non-'redact' mode), the feature
+// disables itself instead of leaking unredacted transcript content — even when
+// the operator opt-in flag above is set.
+const SERVER_AUDIT_EGRESS_SCRUB_READY =
+  getLlmUsageEntry('server.audit-judge')?.egressScrub === 'redact';
 const DASHBOARD_ENABLE_SERVER_USAGE_GAUGE = parseBooleanEnv(
   'DASHBOARD_ENABLE_SERVER_USAGE_GAUGE'
 );
@@ -7915,9 +7925,11 @@ const server = createServer(async (req, res) => {
       const apiKey = process.env.ANTHROPIC_API_KEY || null;
       const disabledReason = !DASHBOARD_ENABLE_SERVER_LLM_AUDITS
         ? 'server_llm_audits_disabled'
-        : !apiKey
-          ? 'missing_anthropic_api_key'
-          : null;
+        : !SERVER_AUDIT_EGRESS_SCRUB_READY
+          ? 'egress_scrub_not_transmission_grade'
+          : !apiKey
+            ? 'missing_anthropic_api_key'
+            : null;
       if (disabledReason) {
         appendEnterpriseAuditEvent(req, {
           type: 'enterprise.llm_audit',
@@ -7963,7 +7975,7 @@ const server = createServer(async (req, res) => {
                   outcome: 'allowed',
                   status: 200,
                   path: pathname,
-                  reason: 'egress_scrub_stub',
+                  reason: 'egress_scrub_redact',
                   principal: req.enterprisePrincipal,
                   llmUsageId: receipt.registryId,
                   egressScrub: receipt.mode,

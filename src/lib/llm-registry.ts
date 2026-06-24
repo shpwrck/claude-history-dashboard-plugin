@@ -12,7 +12,11 @@ export type LlmCredentialKind = 'oauth' | 'console-key' | 'browser-key';
 export type LlmSurface = 'server' | 'browser';
 export type LlmDataClass = 'none' | 'scrubbed' | 'raw-forbidden';
 export type LlmTriggerKind = 'automatic' | 'opt-in' | 'user-initiated';
-export type LlmEgressScrubMode = 'none' | 'stub' | 'local-model';
+// 'none'   — no transcript-derived content leaves the process (Rule A / BYO).
+// 'stub'   — legacy identity pass-through; FAIL-CLOSED at egress (cannot send).
+// 'redact' — transmission-grade local redaction (keys/tokens/paths/emails/env)
+//            applied to content before egress. The only mode cleared to send.
+export type LlmEgressScrubMode = 'none' | 'stub' | 'redact';
 export type LlmWhoPays = 'operator' | 'end-user';
 export type LlmTenancyBoundary = 'single' | 'per-tenant';
 export type LlmPublicExposureDeployment = 'single-tenant' | 'multi-tenant';
@@ -118,7 +122,7 @@ export const LLM_USAGE_REGISTRY: readonly LlmUsageEntry[] = [
       'GET /api/audit.json when DASHBOARD_ENABLE_SERVER_LLM_AUDITS and ANTHROPIC_API_KEY are set.',
     dataClass: 'scrubbed',
     dataBoundary:
-      'May send capped, locally scrubbed audit prompts derived from dashboard data.',
+      'May send capped audit prompts derived from dashboard data after transmission-grade local redaction (keys, tokens, file paths, emails, env secrets).',
     caps: {
       callBudget: [
         'DASHBOARD_AUDIT_MAX_JUDGE_CALLS bounds judge calls per /api/audit.json request',
@@ -134,10 +138,10 @@ export const LLM_USAGE_REGISTRY: readonly LlmUsageEntry[] = [
         'operators should set Anthropic Console workspace spend limits',
       ],
     },
-    egressScrub: 'stub',
+    egressScrub: 'redact',
     exposure: LLM_PHASE_1_EXPOSURE_DEFAULTS,
     requiredControls: [
-      'egressScrub must run and produce a matching receipt',
+      'egressScrub must run a transmission-grade redactor and produce a matching receipt',
       'capChecked must be true with a matching cap receipt',
       'server audit route must emit an enterprise audit event',
     ],
