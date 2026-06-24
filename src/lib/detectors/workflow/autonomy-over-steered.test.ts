@@ -19,6 +19,7 @@ function steering(overrides: Partial<TaskSteering> = {}): TaskSteering {
     approving: 1,
     other: 0,
     interruptions: 0,
+    divergenceRate: 0.5,
     ...overrides,
   };
 }
@@ -116,6 +117,86 @@ describe('workflow.autonomy-over-steered', () => {
       0
     );
 
+    expect(rec?.id).toBe('workflow.autonomy-over-steered');
+  });
+
+  it('surfaces divergenceRate in detail, evidence, and provenance', () => {
+    const rec = detector.rule(
+      input([steering({ divergenceRate: 0.5 })], [success()]),
+      0
+    );
+
+    expect(rec?.detail).toContain('steering-divergence rate 50%');
+    expect(rec?.evidence?.[0]).toContain('divergence 50%');
+    expect(
+      rec?.provenance?.observations.some((o) =>
+        o.field.includes('divergenceRate')
+      )
+    ).toBe(true);
+  });
+
+  // ── Monotone-inverse suppression gate (#1751, log-don't-surface) ────────────
+  // Build a corpus large enough to falsify the trend. Only the FIRST task of
+  // each session passes the over-steered candidate filter (steering-load gate),
+  // but the concordance check runs over ALL steering rows that have a success
+  // match, so additional rows shape the direction.
+  function corpus(
+    pairs: { divergenceRate: number; successScore: number; load?: boolean }[]
+  ): RecommendationInput {
+    const steeringRows: TaskSteering[] = [];
+    const successRows: TaskSuccessProxy[] = [];
+    pairs.forEach((p, idx) => {
+      const sessionId = `cohort-${idx}`;
+      steeringRows.push(
+        steering({
+          sessionId,
+          taskIndex: 0,
+          divergenceRate: p.divergenceRate,
+          // A non-candidate row still feeds the concordance check but should not
+          // be the over-steered candidate.
+          ...(p.load === false
+            ? { corrective: 0, clarifyingAnswer: 0, approving: 0, humanTurns: 0 }
+            : {}),
+        })
+      );
+      successRows.push(
+        success({
+          sessionId,
+          taskIndex: 0,
+          successScore: p.successScore,
+          // keep high confidence so candidate gate can pass for load:true rows
+          confidence: 'high',
+        })
+      );
+    });
+    return input(steeringRows, successRows);
+  }
+
+  it('suppresses (log-don\'t-surface) when divergenceRate is NOT inverse with success', () => {
+    // Same-direction: higher divergence pairs with higher success — the wrong
+    // direction for the autonomy thesis, so the signal must be suppressed.
+    const rec = detector.rule(
+      corpus([
+        { divergenceRate: 0.1, successScore: 0.9 },
+        { divergenceRate: 0.5, successScore: 0.95 },
+        { divergenceRate: 0.9, successScore: 1 },
+      ]),
+      0
+    );
+    expect(rec).toBeNull();
+  });
+
+  it('surfaces when divergenceRate IS monotone-inverse with success across the corpus', () => {
+    // The candidate row (high divergence) has the lowest success among the
+    // high-confidence set, and the corpus trend is inverse — surface.
+    const rec = detector.rule(
+      corpus([
+        { divergenceRate: 0.9, successScore: 0.9 },
+        { divergenceRate: 0.5, successScore: 0.95, load: false },
+        { divergenceRate: 0.1, successScore: 1, load: false },
+      ]),
+      0
+    );
     expect(rec?.id).toBe('workflow.autonomy-over-steered');
   });
 });

@@ -23,6 +23,15 @@ export interface TaskSteering {
   approving: number;
   other: number;
   interruptions: number;
+  /**
+   * Steering-divergence rate for the span: corrective human turns over total
+   * real human turns (#1751). 0 when there were no human turns. This is the
+   * per-task corrective-rate signal the autonomy axis (#1266) was missing — the
+   * structural-anchor corrective classifier (see {@link isStructuralCorrective})
+   * drives the numerator, so the rate measures how often the human had to point
+   * back at the agent's last action and redirect it.
+   */
+  divergenceRate: number;
 }
 
 export interface TaskSteeringInput {
@@ -73,6 +82,34 @@ const CLARIFYING_START_RE =
 const APPROVING_START_RE =
   /^(ok\b|okay\b|looks good\b|lgtm\b|thanks\b|thank you\b|ship it\b|go ahead\b|continue\b|proceed\b|approved\b|yes[,.\s]+(that|looks|works|please))/i;
 
+// ── Structural anchor (#1751) ────────────────────────────────────────────────
+// A corrective user turn references the *immediately-prior assistant action* and
+// redirects it, rather than introducing fresh, additive scope. Detectors only
+// ever see the ~200-char timeline summary plus turn position, so the anchor is
+// computed purely from the turn text + its position in the span. The anchor is
+// the PRIMARY feature; the existing lexicon (CORRECTIVE_START_RE) is SECONDARY,
+// used to confirm negative/redirection valence.
+
+// Back-reference to what the agent just did: deictic / second-person markers
+// ("that", "it", "your change", "you just …", "the X you …"). These only make
+// sense as a reaction to a preceding assistant action.
+const BACKREF_RE =
+  /\b(that|this|it|those|these|you|your|you'?re|you'?ve|the (?:one|change|edit|code|file|version|approach|fix|part|line|function|test) (?:you|that)|what you (?:did|wrote|changed|added))\b/i;
+
+// Turn-initial reaction tokens — the user is reacting to the last action, not
+// opening a fresh task. A turn that *starts* this way is anchored to the prior
+// step even before we look at valence.
+const REACTION_OPENER_RE =
+  /^(no\b|nope\b|not\b|wait\b|hold on\b|actually\b|stop\b|revert\b|undo\b|wrong\b|that'?s\b|that\b|this\b|it\b|you\b|why\b|instead\b|don'?t\b|do not\b|change\b|remove\b|delete\b|put\b back|undo)/i;
+
+// Fresh-task markers — an additive instruction that introduces new scope rather
+// than reacting. Presence (turn-initial) means the turn is NOT a back-reference.
+const ADDITIVE_OPENER_RE =
+  /^(now\b|next\b|also\b|then\b|after that\b|let'?s\b|please (?:add|create|write|implement|build|make|set up|add)|add\b|create\b|write\b|implement\b|build\b|make\b|set up\b|can you (?:also )?(?:add|create|write|implement|build|make)|could you (?:also )?(?:add|create|write|implement))/i;
+
+// A short reactive turn is far more likely a correction than a long fresh spec.
+const SHORT_TURN_CHARS = 200;
+
 function stripSyntheticTurn(text: string): string {
   return text
     .replace(SYNTHETIC_BLOCK_RE, ' ')
@@ -92,6 +129,68 @@ export function classifySteeringTurn(text: string): SteeringTurnKind | null {
   if (APPROVING_START_RE.test(normalized)) return 'approving';
   if (CLARIFYING_START_RE.test(normalized)) return 'clarifying-answer';
   return 'other';
+}
+
+/**
+ * 2-way structural-anchor corrective classifier (#1751).
+ *
+ * PRIMARY feature — the structural anchor: a user turn is corrective when it
+ * *references the immediately-prior assistant action* and redirects it, instead
+ * of introducing fresh, additive scope. We approximate "references the prior
+ * action" from the summary + turn position, since detectors never see raw JSONL:
+ *
+ *  - `isFirstInSpan` — the very first turn of a span has no prior assistant
+ *    action to reference, so it can never be a *back*-reference correction; it is
+ *    the task kickoff. This makes turn position load-bearing, as the spec
+ *    requires.
+ *  - A turn-initial reaction opener OR a deictic/second-person back-reference
+ *    ("no, …", "that's wrong", "you changed the wrong file", "revert it") anchors
+ *    the turn to the last step.
+ *  - A turn-initial additive opener ("now add …", "next, create …", "also write
+ *    …") is a fresh instruction, not a correction — it disqualifies the turn even
+ *    if a stray lexicon word appears later.
+ *  - Long turns are treated as fresh specs, not reactions, unless they carry an
+ *    explicit corrective opener.
+ *
+ * SECONDARY feature — the existing lexicon (`CORRECTIVE_START_RE`) confirms the
+ * negative / redirection valence so a neutral back-reference ("yes, that one")
+ * does not count as corrective.
+ */
+export function isStructuralCorrective(
+  text: string,
+  isFirstInSpan: boolean
+): boolean {
+  // No prior assistant action to point back at.
+  if (isFirstInSpan) return false;
+
+  const cleaned = stripSyntheticTurn(text);
+  if (!cleaned) return false;
+  const normalized = cleaned.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+
+  // An additive kickoff for new scope is never a correction, regardless of any
+  // incidental lexicon hit further in.
+  if (ADDITIVE_OPENER_RE.test(normalized) && !CORRECTIVE_START_RE.test(normalized)) {
+    return false;
+  }
+
+  // PRIMARY: does the turn structurally anchor to the prior action?
+  const reactionOpener = REACTION_OPENER_RE.test(normalized);
+  const backRef = BACKREF_RE.test(normalized);
+  const isShort = normalized.length <= SHORT_TURN_CHARS;
+  // A short turn that opens as a reaction, or any turn that explicitly points
+  // back at the agent's work, is anchored.
+  const anchored = (reactionOpener && isShort) || (backRef && reactionOpener);
+
+  // SECONDARY: redirection valence from the existing lexicon.
+  const correctiveValence = CORRECTIVE_START_RE.test(normalized);
+
+  // An explicit corrective opener is anchored + valenced on its own (matches the
+  // existing lexicon contract). Otherwise require the structural anchor AND a
+  // back-reference target so a polite redirect ("actually, let's keep it") still
+  // counts while a fresh additive turn does not.
+  if (correctiveValence) return true;
+  return anchored && backRef;
 }
 
 function finiteMs(value: string): number | null {
@@ -148,6 +247,10 @@ function finalize(span: SpanDraft): TaskSteering {
     approving: span.approving,
     other: span.other,
     interruptions: span.interruptions,
+    divergenceRate:
+      span.humanTurns > 0
+        ? Number((span.corrective / span.humanTurns).toFixed(3))
+        : 0,
   };
 }
 
@@ -195,15 +298,39 @@ export function computeTaskSteering(input: TaskSteeringInput): TaskSteering[] {
       return created;
     };
 
-    for (const entry of session?.entries ?? []) {
+    const orderedTurns = (session?.entries ?? [])
+      .filter((entry) => Number.isFinite(entry.timestamp))
+      .slice()
+      .sort((a, b) => a.timestamp - b.timestamp);
+    let seenHumanTurns = 0;
+    for (const entry of orderedTurns) {
       const kind = classifySteeringTurn(entry.display);
       if (!kind) continue;
       const ms = entry.timestamp;
-      if (!Number.isFinite(ms)) continue;
-      const span = getSpan(bucketIndex(ms, stops));
+      const taskIndex = bucketIndex(ms, stops);
+      const span = getSpan(taskIndex);
       touch(span, ms);
       span.humanTurns += 1;
-      span[kind === 'clarifying-answer' ? 'clarifyingAnswer' : kind] += 1;
+      // Turn position is session-global: only the very first real human turn of
+      // the session is the genuine kickoff with no prior assistant action to
+      // reference. A turn that opens a *later* span still follows the agent's
+      // work in the previous span(s), so it can be a back-reference correction.
+      const isFirstInSpan = seenHumanTurns === 0;
+      seenHumanTurns += 1;
+      // Structural-anchor corrective decision (#1751) is PRIMARY: it overrides
+      // the lexicon-only `classifySteeringTurn` verdict for the `corrective`
+      // count. Non-corrective kinds keep their lexicon bucket so
+      // clarifying/approving/other totals are unchanged.
+      if (isStructuralCorrective(entry.display, isFirstInSpan)) {
+        span.corrective += 1;
+      } else if (kind !== 'corrective') {
+        span[kind === 'clarifying-answer' ? 'clarifyingAnswer' : kind] += 1;
+      } else {
+        // Lexicon flagged corrective but the structural anchor rejected it
+        // (e.g. a fresh additive turn that happens to contain "wrong"); fold it
+        // into `other` so it does not inflate the corrective rate.
+        span.other += 1;
+      }
     }
 
     for (const entry of token?.entries ?? []) {

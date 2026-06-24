@@ -499,6 +499,7 @@ describe('project-scoped view data filtering', () => {
           approving: 0,
           other: 0,
           interruptions: 0,
+          divergenceRate: 0,
         },
         {
           sessionId: 'beta-1',
@@ -513,6 +514,7 @@ describe('project-scoped view data filtering', () => {
           approving: 0,
           other: 0,
           interruptions: 0,
+          divergenceRate: 0,
         },
       ],
       churnGeometry: [
