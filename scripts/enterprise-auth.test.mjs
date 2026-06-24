@@ -31,7 +31,15 @@ function check(name, cond, detail = '') {
 }
 
 async function fileMode(path) {
-  return (await stat(path)).mode & 0o777;
+  // Return a sentinel for a missing path so a coverage gap fails the relevant
+  // check cleanly instead of throwing an uncaught ENOENT that aborts the whole
+  // suite (#1578).
+  try {
+    return (await stat(path)).mode & 0o777;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return -1;
+    throw err;
+  }
 }
 
 function scopedCacheDbPath(dataRoot) {
@@ -65,6 +73,12 @@ async function startServer(extraEnv = {}) {
       HOST: '127.0.0.1',
       CLAUDE_DIR: claudeDir,
       DIST_DIR: distDir,
+      // Pin the scoped-ingest cache root to PROJECT_DIR/.cache so the
+      // scopedCacheDbPath() helper and the cache-dir mode assertions resolve
+      // to the same place the server writes. The server default moved to
+      // <CLAUDE>/.cache/chd, which is why the test asserted a path the server
+      // never created (#1578). PROJECT_DIR/.cache is gitignored.
+      CHD_CACHE_DIR: join(PROJECT_DIR, '.cache'),
       DASHBOARD_USER: '',
       DASHBOARD_PASS: '',
       DASHBOARD_BASIC_AUTH_MAX_BYTES: '',
@@ -2792,6 +2806,10 @@ try {
 server = await startServer({
   DASHBOARD_AUTH_MODE: 'enterprise',
   DASHBOARD_AUTH_JWKS: jwtJwks,
+  // Issuer is mandatory once JWKS signing is configured (server fail-closes
+  // otherwise). Audience is left unpinned so this scenario still exercises the
+  // jwt-claim-pinning = action-required posture (#1578).
+  DASHBOARD_AUTH_JWT_ISSUER: jwtIssuer,
   DASHBOARD_ORG_ID: 'acme',
   DASHBOARD_ORG_NAME: 'Acme',
 });
@@ -4359,6 +4377,10 @@ try {
 
 server = await startServer({
   DASHBOARD_AUTH_MODE: 'enterprise',
+  // Issuer is mandatory once a signing source (JWKS_URL) is present; the server
+  // fail-closes at boot otherwise. The URL-validation 503 under test still fires
+  // at request time with the issuer set (#1578).
+  DASHBOARD_AUTH_JWT_ISSUER: jwtIssuer,
   DASHBOARD_AUTH_JWKS_URL: 'http://idp.example.test/.well-known/jwks.json',
 });
 try {
@@ -4375,6 +4397,7 @@ try {
 
 server = await startServer({
   DASHBOARD_AUTH_MODE: 'enterprise',
+  DASHBOARD_AUTH_JWT_ISSUER: jwtIssuer,
   DASHBOARD_AUTH_JWKS_URL: 'redactme-jwks-url',
 });
 try {
@@ -4393,6 +4416,7 @@ try {
 
 server = await startServer({
   DASHBOARD_AUTH_MODE: 'enterprise',
+  DASHBOARD_AUTH_JWT_ISSUER: jwtIssuer,
   DASHBOARD_AUTH_JWKS_URL_MAX_BYTES: '128',
   DASHBOARD_AUTH_JWKS_URL: `https://idp.example.test/${'x'.repeat(256)}/jwks.json`,
 });
