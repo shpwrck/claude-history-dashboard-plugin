@@ -150,7 +150,7 @@ export const LLM_USAGE_REGISTRY: readonly LlmUsageEntry[] = [
     id: 'browser.ask-claude',
     surface: 'browser',
     rule: 'BYO',
-    callSite: { file: 'src/lib/claude-api.ts', symbol: 'callClaude' },
+    callSite: { file: 'src/lib/claude-api.ts', symbol: 'chat' },
     credential: 'browser-key',
     purpose:
       'Let a user ask Claude about the currently loaded dashboard data with their own browser-held key.',

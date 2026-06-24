@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   AnthropicEgressError,
@@ -54,6 +57,21 @@ describe('LLM usage registry', () => {
     expect(getLlmUsageEntry('server.audit-judge')?.dataClass).toBe('scrubbed');
     expect(getLlmUsageEntry('server.audit-judge')?.egressScrub).toBe('redact');
     expect(getLlmUsageEntry('browser.ask-claude')?.surface).toBe('browser');
+  });
+
+  it('cites a callSite.symbol that actually resolves in its callSite.file', () => {
+    // The registry is the governance source of truth; a cited symbol that does
+    // not appear in its file makes the manifest unauditable and masks drift
+    // (#1579: browser.ask-claude cited callClaude, but claude-api.ts exports chat).
+    const root = fileURLToPath(new URL('../..', import.meta.url));
+    for (const entry of LLM_USAGE_REGISTRY) {
+      const { file, symbol } = entry.callSite;
+      const source = readFileSync(join(root, file), 'utf8');
+      expect(
+        source.includes(symbol),
+        `${entry.id}: callSite.symbol "${symbol}" not found in ${file}`
+      ).toBe(true);
+    }
   });
 
   it('validates complete call-site descriptors and exposure policies', () => {
