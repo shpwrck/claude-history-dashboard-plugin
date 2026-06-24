@@ -67,6 +67,25 @@ describe('validatePolicyInput', () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.perms.allow).toEqual(['Bash(ls:*)']);
   });
+
+  it('rejects a malformed rule but accepts grammatically valid (even broad) ones', () => {
+    expect(validatePolicyInput({ permissions: { allow: ['; rm -rf /'] } })).toEqual({
+      ok: false,
+      error:
+        'permissions.allow contains a malformed rule "; rm -rf /" (expected ToolName or ToolName(specifier))',
+    });
+    expect(validatePolicyInput({ permissions: { deny: ['not a rule'] } }).ok).toBe(false);
+    expect(validatePolicyInput({ permissions: { ask: ['Bash ls'] } }).ok).toBe(false);
+    // We gate GRAMMAR, not breadth: a broad-but-well-formed rule is accepted.
+    expect(validatePolicyInput({ permissions: { allow: ['Bash(*)'] } }).ok).toBe(true);
+    expect(
+      validatePolicyInput({ permissions: { allow: ['WebFetch(domain:example.com)'] } }).ok,
+    ).toBe(true);
+    expect(
+      validatePolicyInput({ permissions: { deny: ['mcp__github__create_issue'] } }).ok,
+    ).toBe(true);
+    expect(validatePolicyInput({ permissions: { allow: ['Bash'] } }).ok).toBe(true);
+  });
 });
 
 describe('mergeAndDedupe', () => {
@@ -194,5 +213,46 @@ describe('applyPolicyWrite', () => {
       status: 409,
       error: 'Existing settings.json is not a JSON object; refusing to overwrite.',
     });
+  });
+
+  it('writes atomically — leaves no temp file behind after a successful write', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'settings.json');
+    const r = await applyPolicyWrite(file, { allow: ['Bash(ls:*)'] });
+    expect(r.ok).toBe(true);
+    const leftovers = (await readdir(dir)).filter((f) => f.includes('.tmp-'));
+    expect(leftovers).toEqual([]);
+  });
+
+  it('prunes timestamped backups to the newest 10 across many writes', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'settings.json');
+    // 15 sequential writes, each adding a distinct rule so each backs up.
+    for (let i = 0; i < 15; i++) {
+      const r = await applyPolicyWrite(file, { allow: [`Bash(cmd${i}:*)`] });
+      expect(r.ok).toBe(true);
+    }
+    const backups = (await readdir(dir)).filter((f) =>
+      f.startsWith('settings.json.backup-'),
+    );
+    expect(backups.length).toBeLessThanOrEqual(10);
+    // The live file still holds every rule (writes were not lost to pruning).
+    const merged = JSON.parse(await readFile(file, 'utf8'));
+    expect(merged.permissions.allow).toHaveLength(15);
+  });
+
+  it('serialises concurrent writes — no added rule is lost to interleaving', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'settings.json');
+    // Fire many writes concurrently; without serialisation their
+    // read->merge->write would interleave and clobber each other.
+    const rules = Array.from({ length: 20 }, (_, i) => `Bash(c${i}:*)`);
+    const results = await Promise.all(
+      rules.map((rule) => applyPolicyWrite(file, { allow: [rule] })),
+    );
+    expect(results.every((r) => r.ok)).toBe(true);
+    const merged = JSON.parse(await readFile(file, 'utf8'));
+    expect(new Set(merged.permissions.allow)).toEqual(new Set(rules));
+    expect(merged.permissions.allow).toHaveLength(20);
   });
 });

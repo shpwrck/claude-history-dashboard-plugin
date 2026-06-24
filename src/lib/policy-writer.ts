@@ -6,18 +6,39 @@
 // them unit-testable without booting a server, on the one path that mutates the
 // user's global ~/.claude/settings.json.
 //
-// Behaviour is byte-identical to the prior inline implementation: same
-// validation messages, same corrupt-file refusals, same timestamped backup
-// BEFORE any write, same append+dedupe (idempotent, never drops existing rules),
-// same pretty-print + trailing newline, same success payload. The HTTP route in
-// server.mjs now only frames these results into responses.
+// Behaviour matches the prior inline implementation — same validation messages,
+// same corrupt-file refusals, same timestamped backup BEFORE any write, same
+// append+dedupe (idempotent, never drops existing rules), same pretty-print +
+// trailing newline, same success payload — hardened for integrity under #2062:
+//   - writes are ATOMIC (temp file + rename) so a crash can't truncate settings;
+//   - writes are SERIALISED per file so concurrent requests can't clobber each
+//     other's merged rules;
+//   - backups are pruned to the newest MAX_POLICY_BACKUPS so a write loop can't
+//     fill the user's home;
+//   - rules are GRAMMAR-validated (ToolName / ToolName(specifier)) so malformed
+//     junk can't land in the global permission buckets.
+// The HTTP route in server.mjs now only frames these results into responses.
 
-import { readFile, writeFile, copyFile, stat } from 'node:fs/promises';
+import { readFile, writeFile, copyFile, rename, unlink, readdir, stat } from 'node:fs/promises';
+import { dirname, basename, join } from 'node:path';
 
 export const POLICY_BUCKETS = ['allow', 'deny', 'ask'] as const;
 export type PolicyBucket = (typeof POLICY_BUCKETS)[number];
 
 export type PermissionsInput = Partial<Record<PolicyBucket, string[]>>;
+
+// A Claude permission rule is `ToolName` or `ToolName(specifier)`. The tool name
+// starts with a letter and is word-characters only (covers Bash, Read, WebFetch,
+// WebSearch, and mcp__server__tool); the optional parenthesised specifier may be
+// any text. We validate GRAMMAR (parseable), not breadth — a legitimately broad
+// rule like `Bash(*)` is well-formed and accepted; junk like `; rm -rf` or
+// `not a rule` is rejected before it lands in the user's global settings (#2062).
+const PERMISSION_RULE_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(\(.*\))?$/;
+
+// Keep at most this many timestamped settings.json.backup-* files; older ones
+// are pruned after each successful write so a write loop cannot fill the user's
+// home directory (#2062).
+const MAX_POLICY_BACKUPS = 10;
 
 export type ValidateResult =
   | { ok: true; perms: PermissionsInput }
@@ -44,6 +65,12 @@ export function validatePolicyInput(parsed: unknown): ValidateResult {
     for (const rule of val) {
       if (typeof rule !== 'string' || rule.trim() === '') {
         return { ok: false, error: `permissions.${bucket} contains a non-string or empty rule` };
+      }
+      if (!PERMISSION_RULE_PATTERN.test(rule)) {
+        return {
+          ok: false,
+          error: `permissions.${bucket} contains a malformed rule "${rule}" (expected ToolName or ToolName(specifier))`,
+        };
       }
     }
     if (val.length > 0) hasAny = true;
@@ -103,7 +130,35 @@ export interface PolicyWriteOptions {
 // HTTP route maps {ok:false,status} to a response without knowing the file
 // mechanics. On any failure the original file is left untouched (the only write
 // is the final settings write, which is the last step).
-export async function applyPolicyWrite(
+// Serialise writes per file so concurrent requests cannot interleave their
+// read -> merge -> write and clobber each other's added rules (#2062).
+const policyWriteTails = new Map<string, Promise<unknown>>();
+let policyWriteCounter = 0;
+
+export function applyPolicyWrite(
+  file: string,
+  perms: PermissionsInput,
+  opts: PolicyWriteOptions = {},
+): Promise<ApplyResult> {
+  const prior = policyWriteTails.get(file) ?? Promise.resolve();
+  const run = prior.then(
+    () => applyPolicyWriteInner(file, perms, opts),
+    () => applyPolicyWriteInner(file, perms, opts),
+  );
+  // The stored tail swallows result and error so the next writer always
+  // proceeds; drop the entry once this is the last write in flight.
+  const tail = run.then(
+    () => {},
+    () => {},
+  );
+  policyWriteTails.set(file, tail);
+  void tail.then(() => {
+    if (policyWriteTails.get(file) === tail) policyWriteTails.delete(file);
+  });
+  return run;
+}
+
+async function applyPolicyWriteInner(
   file: string,
   perms: PermissionsInput,
   opts: PolicyWriteOptions = {},
@@ -169,10 +224,17 @@ export async function applyPolicyWrite(
   // Append + dedupe into permissions.allow/deny/ask.
   const { merged, added } = mergeAndDedupe(current, perms);
 
-  // Write the merged result (pretty-printed, trailing newline).
+  // Write the merged result (pretty-printed, trailing newline) ATOMICALLY:
+  // write a sibling temp file, then rename it over the target. rename(2) is
+  // atomic on the same filesystem, so a crash/ENOSPC mid-write can never leave
+  // a half-written or truncated settings.json — the old file stays intact until
+  // the complete new one replaces it in one step (#2062).
+  const tmpFile = `${file}.tmp-${process.pid}-${policyWriteCounter++}`;
   try {
-    await writeFile(file, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
+    await writeFile(tmpFile, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
+    await rename(tmpFile, file);
   } catch (err) {
+    await unlink(tmpFile).catch(() => {});
     const e = err as { message?: string };
     return {
       ok: false,
@@ -181,6 +243,9 @@ export async function applyPolicyWrite(
     };
   }
 
+  // Prune old timestamped backups so a write loop cannot fill the user's home.
+  if (fileExisted) await pruneOldBackups(file, MAX_POLICY_BACKUPS);
+
   return {
     ok: true,
     file,
@@ -188,6 +253,26 @@ export async function applyPolicyWrite(
     added,
     addedCount: added.allow.length + added.deny.length + added.ask.length,
   };
+}
+
+// Keep only the newest `keep` settings.json.backup-* files. Timestamps are
+// ISO-8601, which sorts chronologically as plain strings. Best-effort: pruning
+// must never fail the write it follows.
+async function pruneOldBackups(file: string, keep: number): Promise<void> {
+  try {
+    const dir = dirname(file);
+    const prefix = `${basename(file)}.backup-`;
+    const backups = (await readdir(dir)).filter((f) => f.startsWith(prefix));
+    if (backups.length <= keep) return;
+    backups.sort();
+    await Promise.all(
+      backups
+        .slice(0, backups.length - keep)
+        .map((f) => unlink(join(dir, f)).catch(() => {})),
+    );
+  } catch {
+    // ignore — pruning is non-critical
+  }
 }
 
 function normalizePositiveByteCap(value?: number): number {
