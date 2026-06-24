@@ -824,6 +824,20 @@ db.exec(`
   );
 `);
 
+// #1577: fence the cold-start latest-load by the dataset-assembly schema key.
+// content_hash already folds the schema in, but loadLatestDatasetCache() returns
+// the NEWEST row by created_at and can't filter by "current schema" without a
+// stored column — so after a schema-bumping deploy over a PERSISTED cache volume
+// the newest row (built by the old code) was served until the background rebuild
+// landed. Rows predating this column read NULL schema_key and never match the
+// current key, so they're skipped (clean rebuild), not served stale. Idempotent:
+// the ALTER throws "duplicate column" once the column exists, which we ignore.
+try {
+  db.exec('ALTER TABLE dataset_cache ADD COLUMN schema_key TEXT');
+} catch {
+  /* column already present (added on a prior boot) */
+}
+
 // Keep the last few rows for rollback/debugging rather than just the live one —
 // a recently-superseded build can be inspected after a regression. Cheap: each
 // row is the compressed dataset (~2–3 MB), so a handful costs single-digit MB.
@@ -865,14 +879,15 @@ const selDatasetCache = db.prepare(
   'SELECT etag, json_br, json_gz FROM dataset_cache WHERE content_hash = ?'
 );
 const selLatestDatasetCache = db.prepare(
-  'SELECT content_hash, etag, json_br, json_gz FROM dataset_cache ORDER BY created_at DESC LIMIT 1'
+  'SELECT content_hash, etag, json_br, json_gz FROM dataset_cache WHERE schema_key = ? ORDER BY created_at DESC LIMIT 1'
 );
 const insDatasetCache = db.prepare(`
-  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key)
+  VALUES (?, ?, ?, ?, ?, ?)
   ON CONFLICT(content_hash) DO UPDATE SET
     etag=excluded.etag, json_br=excluded.json_br,
-    json_gz=excluded.json_gz, created_at=excluded.created_at
+    json_gz=excluded.json_gz, created_at=excluded.created_at,
+    schema_key=excluded.schema_key
 `);
 const pruneDatasetCache = db.prepare(`
   DELETE FROM dataset_cache WHERE content_hash NOT IN (
@@ -910,7 +925,7 @@ export function loadDatasetCache(contentHash) {
 export function loadLatestDatasetCache() {
   let row;
   try {
-    row = selLatestDatasetCache.get();
+    row = selLatestDatasetCache.get(datasetAssemblySchemaKey());
   } catch {
     return null;
   }
@@ -938,7 +953,7 @@ export function saveDatasetCache(
   createdAt
 ) {
   try {
-    insDatasetCache.run(contentHash, etag, brBuf, gzBuf, createdAt);
+    insDatasetCache.run(contentHash, etag, brBuf, gzBuf, createdAt, datasetAssemblySchemaKey());
     pruneDatasetCache.run(DATASET_CACHE_KEEP);
   } catch (err) {
     console.error('dataset_cache persist failed:', err?.message ?? err);
