@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -274,6 +274,35 @@ try {
     await cachedResponse.arrayBuffer();
     await check('unchanged pushed artifacts hit the dataset stat gate', () => {
       assert.equal(cachedIngestHeader, 'skipped=true;cached=true');
+    });
+
+    // #2065: a pre-planted symlink at the destination must NOT be followed —
+    // the write is refused and the outside target is left untouched.
+    const outsideTarget = join(distDir, 'symlink-escape-target.txt');
+    await writeFile(outsideTarget, 'original');
+    await mkdir(join(ingestDir, 'projects'), { recursive: true });
+    await symlink(outsideTarget, join(ingestDir, 'projects', 'evil.jsonl'));
+    const symlinkPost = await fetch(`${base}/api/ingest/remote-a/artifacts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${INGEST_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        artifacts: [
+          { relPath: 'projects/evil.jsonl', content: 'PWNED', signature: 'sig-evil' },
+        ],
+      }),
+    });
+    const symlinkBody = await symlinkPost.json();
+    await check('symlinked artifact dest is refused, not followed', async () => {
+      assert.equal(symlinkPost.status, 200);
+      assert.equal(symlinkBody.written, 0);
+      assert.ok(
+        (symlinkBody.refused || []).some((r) => r.relPath === 'projects/evil.jsonl'),
+        `expected projects/evil.jsonl in refused, got ${JSON.stringify(symlinkBody.refused)}`
+      );
+      assert.equal(await readFile(outsideTarget, 'utf8'), 'original');
     });
   }
 } finally {

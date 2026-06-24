@@ -19,7 +19,7 @@
 
 import { createServer } from 'node:http';
 import { appendFile, chmod, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { closeSync, createReadStream, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, normalize, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -3792,7 +3792,32 @@ async function handleIngestArtifacts(req, res, sourceId) {
       continue;
     }
     await mkdir(dirname(dest), { recursive: true });
-    await writeFile(dest, buf);
+    // Re-verify containment against the symlink-RESOLVED parent (the normalize()
+    // gate above is symlink-blind), then open with O_NOFOLLOW so neither a
+    // symlinked parent component nor a symlinked dest can redirect the write
+    // outside the ingest root (#2065).
+    const realParent = await realpathOrNull(dirname(dest));
+    if (!realParent || !pathInside(realIngest, realParent)) {
+      refused.push({ relPath, reason: 'escapes-root' });
+      continue;
+    }
+    let fh;
+    try {
+      fh = await open(
+        dest,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
+        0o600
+      );
+      await fh.writeFile(buf);
+    } catch (err) {
+      if (err?.code === 'ELOOP') {
+        refused.push({ relPath, reason: 'symlink-dest' });
+        continue;
+      }
+      throw err;
+    } finally {
+      await fh?.close();
+    }
     if (signature) ledger[relPath] = signature;
     written += 1;
   }
@@ -7684,7 +7709,10 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET or POST' });
     }
     if (pathname.startsWith('/api/sessions/')) {
-      const name = decodeURIComponent(pathname.slice('/api/sessions/'.length));
+      // requestPathname() already decoded the URL once; do NOT decodeURIComponent
+      // the segment again. A second decode re-expands a double-encoded payload
+      // (%252e%252e -> %2e%2e -> ..) and throws on a legit lone '%' (#2065).
+      const name = pathname.slice('/api/sessions/'.length);
       if (req.method === 'DELETE') return handleSessionsDelete(req, res, name);
       return sendJson(res, 405, { ok: false, error: 'Method not allowed; use DELETE' });
     }
@@ -7692,7 +7720,7 @@ const server = createServer(async (req, res) => {
     // Session-history push-ingest (#1563): the shipper POSTs session artifacts here.
     const ingestMatch = pathname.match(/^\/api\/ingest\/([^/]+)\/artifacts$/);
     if (ingestMatch) {
-      if (req.method === 'POST') return handleIngestArtifacts(req, res, decodeURIComponent(ingestMatch[1]));
+      if (req.method === 'POST') return handleIngestArtifacts(req, res, ingestMatch[1]);
       return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
     }
 
@@ -8138,7 +8166,7 @@ const server = createServer(async (req, res) => {
     const sourceHistory = pathname.match(/^\/api\/sources\/([^/]+)\/history\.jsonl$/);
     if (sourceHistory) {
       let body;
-      const sourceId = decodeURIComponent(sourceHistory[1]);
+      const sourceId = sourceHistory[1];
       const sourceRoot = enterpriseRequestSourceClaudeRoot(req, sourceId);
       if (!sourceRoot) {
         res.statusCode = 404;
@@ -8166,7 +8194,7 @@ const server = createServer(async (req, res) => {
     const sourceSession = pathname.match(/^\/api\/sources\/([^/]+)\/sessions\/([^/]+)\/([^/]+)$/);
     if (sourceSession) {
       let body;
-      const sourceId = decodeURIComponent(sourceSession[1]);
+      const sourceId = sourceSession[1];
       const sourceProjectsRoot = enterpriseRequestSourceProjectsRoot(req, sourceId);
       if (!sourceProjectsRoot) {
         res.statusCode = 404;
@@ -8175,8 +8203,8 @@ const server = createServer(async (req, res) => {
       }
       try {
         body = await readMergedSession(
-          decodeURIComponent(sourceSession[2]),
-          decodeURIComponent(sourceSession[3]),
+          sourceSession[2],
+          sourceSession[3],
           sourceProjectsRoot
         );
       } catch (err) {
@@ -8214,9 +8242,7 @@ const server = createServer(async (req, res) => {
     const tTimeline = pathname.match(/^\/api\/session\/([^/]+)\/timeline(?:\.json)?$/);
     if (tTimeline) {
       const ingestApi = await enterpriseRequestIngestApi(req);
-      const detail = ingestApi.getSessionTimelineDetail(
-        decodeURIComponent(tTimeline[1])
-      );
+      const detail = ingestApi.getSessionTimelineDetail(tTimeline[1]);
       if (!detail) {
         res.statusCode = 404;
         res.end('');
@@ -8243,9 +8269,7 @@ const server = createServer(async (req, res) => {
     const tTools = pathname.match(/^\/api\/session\/([^/]+)\/tools(?:\.json)?$/);
     if (tTools) {
       const ingestApi = await enterpriseRequestIngestApi(req);
-      const detail = ingestApi.getSessionToolDetail(
-        decodeURIComponent(tTools[1])
-      );
+      const detail = ingestApi.getSessionToolDetail(tTools[1]);
       if (!detail) {
         res.statusCode = 404;
         res.end('');
@@ -8270,7 +8294,7 @@ const server = createServer(async (req, res) => {
       const ingestApi = await enterpriseRequestIngestApi(req);
       let row;
       try {
-        row = ingestApi.getTranscript(decodeURIComponent(tThinking[1]));
+        row = ingestApi.getTranscript(tThinking[1]);
       } catch (err) {
         if (isTranscriptTooLargeError(err)) return sendTranscriptTooLarge(res, err);
         throw err;
@@ -8307,7 +8331,7 @@ const server = createServer(async (req, res) => {
       const ingestApi = await enterpriseRequestIngestApi(req);
       let row;
       try {
-        row = ingestApi.getTranscript(decodeURIComponent(tContent[1]));
+        row = ingestApi.getTranscript(tContent[1]);
       } catch (err) {
         if (isTranscriptTooLargeError(err)) return sendTranscriptTooLarge(res, err);
         throw err;

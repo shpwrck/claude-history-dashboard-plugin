@@ -77,15 +77,33 @@ export class AnthropicEgressError extends Error {
   }
 }
 
+// Cap the upstream error body retained on the error so a future handler that
+// logs or returns err.body can't leak a large or sensitive payload — the
+// credential lives one frame away (#2065). Anthropic error bodies are small and
+// don't echo the request, so a short bound is ample for debugging.
+const EGRESS_ERROR_BODY_MAX_CHARS = 512;
+function boundEgressErrorBody(body: unknown): string {
+  let s: string;
+  try {
+    s = typeof body === 'string' ? body : JSON.stringify(body);
+  } catch {
+    s = String(body);
+  }
+  if (s == null) return '';
+  return s.length > EGRESS_ERROR_BODY_MAX_CHARS
+    ? `${s.slice(0, EGRESS_ERROR_BODY_MAX_CHARS)}…[truncated]`
+    : s;
+}
+
 export class AnthropicEgressHttpError extends Error {
   status: number;
-  body: unknown;
+  body: string;
 
   constructor(status: number, body: unknown) {
     super(`Anthropic API error (${status})`);
     this.name = 'AnthropicEgressHttpError';
     this.status = status;
-    this.body = body;
+    this.body = boundEgressErrorBody(body);
   }
 }
 

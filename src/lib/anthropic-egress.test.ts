@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   AnthropicEgressError,
+  AnthropicEgressHttpError,
   callAnthropic,
   callAnthropicMessages,
   egressScrub,
@@ -116,6 +117,21 @@ describe('LLM usage registry', () => {
       'server.usage-gauge: callSite.file and callSite.symbol are required',
       'server.usage-gauge: caps.callBudget/inputBounds/spendControls are required',
     ]);
+  });
+});
+
+describe('AnthropicEgressHttpError', () => {
+  it('bounds a large upstream body so it cannot leak a big payload', () => {
+    const err = new AnthropicEgressHttpError(429, { error: 'x'.repeat(5000) });
+    expect(typeof err.body).toBe('string');
+    expect(err.body.length).toBeLessThanOrEqual(512 + 16);
+    expect(err.body).toContain('…[truncated]');
+    expect(err.status).toBe(429);
+  });
+
+  it('keeps a small body intact as a string', () => {
+    const err = new AnthropicEgressHttpError(400, { type: 'error', message: 'bad' });
+    expect(err.body).toBe('{"type":"error","message":"bad"}');
   });
 });
 
