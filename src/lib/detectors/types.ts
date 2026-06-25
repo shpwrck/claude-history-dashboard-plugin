@@ -104,6 +104,29 @@ export type FixTarget = 'settings.json' | 'CLAUDE.md' | 'hook' | 'command';
 export type FixKind = 'validated' | 'illustrative' | 'manual';
 
 /**
+ * ADR 0017 — claim epistemics. An `'accounting'` claim is a MEASUREMENT of what
+ * happened ("you re-paid $X in cache-read tokens"); it is proven by arithmetic
+ * on the cited artifact and asserts no counterfactual. A `'causal'` claim
+ * asserts a counterfactual ("doing X WILL reduce your cost") and therefore needs
+ * an experiment to back it beyond Tier 1. Most detectors are `'accounting'`.
+ */
+export type ClaimClass = 'accounting' | 'causal';
+
+/**
+ * ADR 0017 — the depth of proof backing a claim, ascending in rigor:
+ * - `'auditable'` (T0): evidence-cited + reproducible + detector-tested. The
+ *   FLOOR every claim must meet (the Auditability contract); not a choice.
+ * - `'accounting'` (T1): the arithmetic on real data IS the proof — Class A.
+ * - `'observational'` (T2): a cheap causal signal from shadow-calls / replay /
+ *   on-real-history A-B — correlational, good for prioritisation.
+ * - `'causal-proof'` (T3): a pre-registered jailed matched-pair fixture batch +
+ *   external review (the v0.4 proof engine). EXPENSIVE — reserve for
+ *   high-stakes, contested causal claims, and gate it behind a priced premise
+ *   (`premiseUsdPerMo`). See ADR 0017's selection rule.
+ */
+export type ProofTier = 'auditable' | 'accounting' | 'observational' | 'causal-proof';
+
+/**
  * Structural signal that a CLAUDE.md-targeted fix has already been written.
  * Suppression fires only when **every declared category matches** — so a rule
  * that names both a heading AND a body phrase needs both present. Rules with
@@ -385,6 +408,24 @@ export interface Recommendation {
    * and the v1 `/recs` consumer is unaffected.
    */
   projects?: string[];
+  /**
+   * Proof posture (ADR 0017). `claimClass` declares whether this is an
+   * `'accounting'` measurement or a `'causal'` counterfactual; `proofTier`
+   * declares the depth of proof actually backing it. Additive + optional —
+   * detectors adopt incrementally, exactly like {@link provenance}/{@link fixKind};
+   * the doc contract (`docs/adding-a-recommendation.md`) states when each is
+   * required. A causal claim must not assert a cost win above the `'accounting'`
+   * tier without the corresponding Tier-2/Tier-3 backing.
+   */
+  claimClass?: ClaimClass;
+  proofTier?: ProofTier;
+  /**
+   * The real-history priced premise ($/mo) for this pattern — the GATE before a
+   * Tier-3 `'causal-proof'` (ADR 0017): if the pattern does not fire on real
+   * history with a material price, it is not worth a full causal proof. Records
+   * the figure the proof was (or was not) worth running against.
+   */
+  premiseUsdPerMo?: number;
 }
 
 export interface RecommendationInput {
