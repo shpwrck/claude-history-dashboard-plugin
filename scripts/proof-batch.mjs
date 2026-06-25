@@ -85,6 +85,7 @@ function parseArgs(argv) {
     totalBudgetUsd: 30,
     concurrency: 4,
     out: null,
+    pairs: null, // optional allowlist of pairIds to run (repeatable --pair)
     dryRun: false,
     observedUsdPerMo: null,
     externalReviewRef: '',
@@ -102,6 +103,7 @@ function parseArgs(argv) {
       case '--total-budget-usd': a.totalBudgetUsd = Number(next()); break;
       case '--concurrency': a.concurrency = Number(next()); break;
       case '--out': a.out = next(); break;
+      case '--pair': (a.pairs ??= []).push(next()); break;
       case '--dry-run': a.dryRun = true; break;
       case '--observed-usd-per-mo': a.observedUsdPerMo = Number(next()); break;
       case '--external-review-ref': a.externalReviewRef = next(); break;
@@ -423,7 +425,16 @@ async function main() {
     console.warn(`bundle validation warnings: ${validation.errors.join('; ')}`);
   }
 
-  const pairs = bundle.pairs.slice(0, args.limit);
+  // Optional --pair allowlist (repeatable) selects specific pairIds before the
+  // --limit slice; used for cheap targeted re-calibration of specific fixtures.
+  const selectable = args.pairs
+    ? bundle.pairs.filter((p) => args.pairs.includes(p.pairId))
+    : bundle.pairs;
+  if (args.pairs) {
+    const found = new Set(selectable.map((p) => p.pairId));
+    for (const id of args.pairs) if (!found.has(id)) console.warn(`--pair ${id}: no such pairId in bundle`);
+  }
+  const pairs = selectable.slice(0, args.limit);
   const sessionsPer = (p) => chainSteps(p).length;
   const totalSessions = pairs.reduce((s, p) => s + sessionsPer(p) * 2 * args.k, 0);
   const mDesc = bundle.sessionsPerChain ? ` x M=${bundle.sessionsPerChain} sessions` : '';
