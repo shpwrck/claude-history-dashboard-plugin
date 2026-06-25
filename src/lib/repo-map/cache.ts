@@ -27,6 +27,7 @@ import { join } from 'node:path';
 // @ts-expect-error - plain ESM constant registry, no .d.ts (matches the
 // sample-artifacts.ts -> build-corpus.mjs precedent).
 import { REPO_MAP_OUTPUT } from '../../../scripts/lib/parser-output-versions.mjs';
+import type { HostProducedArtifact } from '../artifact-source';
 import type { RepoMap } from './types';
 
 /**
@@ -56,12 +57,17 @@ export interface RepoMapCacheKey {
   maxMtimeMs: number;
 }
 
-/** The persisted artifact: the structural map plus its cache key and the
- *  size-enforcement outcome. The runtime reads `map`; the producer reads
- *  `cacheKey` to decide whether to regenerate. */
-export interface PersistedRepoMap {
-  /** Schema/format version so a producer change can invalidate old artifacts. */
-  version: number;
+/**
+ * The persisted artifact: the structural map plus its cache key and the
+ * size-enforcement outcome. The runtime reads `map`; the producer reads
+ * `cacheKey` to decide whether to regenerate. This is the repo-map instance of
+ * the host-producer seam's {@link HostProducedArtifact} contract (#2077, ADR
+ * 0007): it carries the contract's `version` field, and its `map` IS the
+ * contract's `payload` (the field is named `map` for historical reasons — the
+ * shared `.mjs` discovery tolerates both `map` and a flat artifact).
+ */
+export interface PersistedRepoMap
+  extends Pick<HostProducedArtifact<RepoMap>, 'version'> {
   cacheKey: RepoMapCacheKey;
   /** True when {@link enforceSizeLimit} trimmed files to fit the byte ceiling. */
   sizeBounded: boolean;

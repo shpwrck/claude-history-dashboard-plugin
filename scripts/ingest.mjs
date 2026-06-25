@@ -31,6 +31,19 @@ import { createHash } from 'node:crypto';
 import { gunzipSync, brotliCompressSync, constants as zlibConstants } from 'node:zlib';
 import { readWorkflowsSync } from './read-workflows.mjs';
 import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
+// The host-producer seam (#2077, ADR 0007): shared root discovery + capped
+// artifact reads + their cap constants, dependency-free so the zero-node_modules
+// server boot graph stays clean. ingest re-exports the cap constants under their
+// established names (server.mjs imports them) and routes discovery/reads through
+// these helpers so it stays glued to the same bounded reads the producers use.
+import {
+  resolveArtifactFileMaxBytes,
+  resolveRepoMapArtifactMaxEntries,
+  readArtifactTextCappedSync,
+  readArtifactJsonCappedSync,
+  claudeJsonProjectRoots as discoverClaudeJsonProjectRoots,
+  repoMapArtifactRoots as discoverRepoMapArtifactRoots,
+} from './lib/host-producer.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIB = join(PROJECT_DIR, 'src', 'lib');
@@ -459,13 +472,15 @@ export const INGEST_SESSION_DISCOVERY_MAX_ENTRIES = Math.max(
     parseNonNegativeIntEnv('DASHBOARD_INGEST_SESSION_DISCOVERY_MAX_ENTRIES', 250_000)
   )
 );
-export const ARTIFACT_FILE_MAX_BYTES = Math.max(
-  65_536,
-  Math.min(
-    536_870_912,
-    parseNonNegativeIntEnv('DASHBOARD_ARTIFACT_FILE_MAX_BYTES', 67_108_864)
-  )
-);
+// ARTIFACT_FILE_MAX_BYTES + REPO_MAP_ARTIFACT_MAX_ENTRIES are owned by the
+// host-producer seam (./lib/host-producer.mjs) so every producer (ingest,
+// repo-map-refresh, the #280 bridge) shares one cap + clamp. Evaluated through
+// the seam's resolvers HERE (not re-exported from the seam's frozen const) so a
+// fresh `?fixture=` re-import of ingest picks up an env override — the
+// env-override test contract (#2077). server.mjs's existing imports of these
+// names are unchanged.
+export const ARTIFACT_FILE_MAX_BYTES = resolveArtifactFileMaxBytes();
+export const REPO_MAP_ARTIFACT_MAX_ENTRIES = resolveRepoMapArtifactMaxEntries();
 export const ARTIFACT_DIR_MAX_ENTRIES = Math.max(
   1,
   Math.min(
@@ -492,13 +507,6 @@ export const SIGNATURE_TREE_MAX_ENTRIES = Math.max(
   Math.min(
     1_000_000,
     parseNonNegativeIntEnv('DASHBOARD_SIGNATURE_TREE_MAX_ENTRIES', 250_000)
-  )
-);
-export const REPO_MAP_ARTIFACT_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_REPO_MAP_ARTIFACT_MAX_ENTRIES', 50_000)
   )
 );
 // Live config inputs assembled into the `liveConfig` dataset bundle. Every
@@ -1519,13 +1527,6 @@ function isIngestSessionTooLargeError(err) {
   return err?.code === 'ERR_DASHBOARD_INGEST_SESSION_TOO_LARGE';
 }
 
-function artifactFileTooLargeError(maxBytes) {
-  const err = new Error(`Auxiliary artifact exceeds ${maxBytes} byte limit`);
-  err.code = 'ERR_DASHBOARD_ARTIFACT_FILE_TOO_LARGE';
-  err.maxBytes = maxBytes;
-  return err;
-}
-
 function readUtf8FileCappedSync(filePath, maxBytes, initialBytes = 0) {
   const fd = openSync(filePath, 'r');
   const chunks = [];
@@ -1548,28 +1549,9 @@ function readUtf8FileCappedSync(filePath, maxBytes, initialBytes = 0) {
   };
 }
 
-function readArtifactTextCappedSync(filePath, maxBytes = ARTIFACT_FILE_MAX_BYTES) {
-  const fd = openSync(filePath, 'r');
-  const chunks = [];
-  let bytes = 0;
-  const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes + 1));
-  try {
-    while (true) {
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      bytes += bytesRead;
-      if (bytes > maxBytes) throw artifactFileTooLargeError(maxBytes);
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
-    }
-  } finally {
-    closeSync(fd);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-function readArtifactJsonCappedSync(filePath, maxBytes = ARTIFACT_FILE_MAX_BYTES) {
-  return JSON.parse(readArtifactTextCappedSync(filePath, maxBytes));
-}
+// readArtifactTextCappedSync / readArtifactJsonCappedSync / artifactFileTooLargeError
+// now live in the shared host-producer seam (./lib/host-producer.mjs, #2077),
+// imported at the top of this file.
 
 function readMergedSessionSync(s, topRead = readUtf8FileCappedSync(s.topPath, INGEST_SESSION_MAX_BYTES)) {
   let merged = topRead.text;
@@ -1763,35 +1745,16 @@ function readRepoMapArtifact(root) {
   }
 }
 
+// Roots that already have a persisted repo-map artifact. Delegates to the shared
+// host-producer discovery (#2077) so ingest, repo-map-refresh, and the #280
+// bridge discover roots through the same capped, entry-bounded read. The shared
+// helper's root-only unwrap agrees with the consumer's `unwrapPersistedRepoMap`
+// on the `root`/`files` shape, so the discovered set is unchanged.
 function repoMapArtifactRoots() {
-  let dir;
-  try {
-    dir = opendirSync(REPO_MAP_DIR);
-  } catch {
-    return [];
-  }
-  const roots = [];
-  let checked = 0;
-  try {
-    for (;;) {
-      const ent = dir.readSync();
-      if (!ent) break;
-      if (checked >= REPO_MAP_ARTIFACT_MAX_ENTRIES) break;
-      checked += 1;
-      if (!ent.isFile() || !ent.name.endsWith('.json')) continue;
-      try {
-        const map = unwrapPersistedRepoMap(readArtifactJsonCappedSync(join(REPO_MAP_DIR, ent.name)));
-        if (map && map.root.startsWith('/')) {
-          roots.push(map.root);
-        }
-      } catch {
-        /* skip malformed artifact */
-      }
-    }
-  } finally {
-    dir.closeSync();
-  }
-  return [...new Set(roots)].sort();
+  return discoverRepoMapArtifactRoots(REPO_MAP_DIR, {
+    maxEntries: REPO_MAP_ARTIFACT_MAX_ENTRIES,
+    maxBytes: ARTIFACT_FILE_MAX_BYTES,
+  });
 }
 
 function projectRootsFrom(entries, tokenData) {
@@ -1809,19 +1772,11 @@ function projectRootsFrom(entries, tokenData) {
   return [...roots].sort();
 }
 
+// Absolute project roots from `~/.claude.json` — delegates to the shared
+// host-producer discovery (#2077), the same capped read repo-map-refresh now
+// uses (it previously read this file uncapped).
 function claudeJsonProjectRoots() {
-  let raw;
-  try {
-    raw = readArtifactJsonCappedSync(CLAUDE_JSON);
-  } catch {
-    return [];
-  }
-  const projects = raw?.projects && typeof raw.projects === 'object'
-    ? raw.projects
-    : {};
-  return Object.keys(projects)
-    .filter((root) => typeof root === 'string' && root.startsWith('/'))
-    .sort();
+  return discoverClaudeJsonProjectRoots(CLAUDE_JSON, ARTIFACT_FILE_MAX_BYTES);
 }
 
 function liveConfigProjectRoots(extraRoots = []) {

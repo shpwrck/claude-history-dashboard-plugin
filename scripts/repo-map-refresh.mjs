@@ -31,10 +31,21 @@
  *   REPO_MAP_REFRESH_MAX_ROOTS=10 node ...       # bound how many roots are walked
  */
 import { execFileSync } from 'node:child_process';
-import { opendirSync, readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// Shared host-producer seam (#2077, ADR 0007): the SAME capped, entry-bounded
+// root discovery ingest uses. This replaces the driver's previous UNCAPPED
+// `JSON.parse(readFileSync(...))` reads of `~/.claude.json` and each repo-map
+// artifact (a real robustness gap — a runaway artifact could OOM the deploy) and
+// drops the inline root-unwrap that duplicated ingest's. Imported as `.mjs` so it
+// loads under the deploy path's bare `node` (no register-ts), preserving ADR
+// 0007's zero-node_modules boot constraint.
+import {
+  claudeJsonProjectRoots,
+  repoMapArtifactRoots,
+} from './lib/host-producer.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const HOME = homedir();
@@ -50,55 +61,18 @@ const MAX_ROOTS = Number(process.env.REPO_MAP_REFRESH_MAX_ROOTS) || 50;
 const PER_ROOT_TIMEOUT_MS = Number(process.env.REPO_MAP_REFRESH_TIMEOUT_MS) || 120_000;
 const FORCE = process.env.REPO_MAP_REFRESH_FORCE === '1';
 
-/** Absolute project roots from `~/.claude.json`'s `projects` map (the same set
- *  ingest's `claudeJsonProjectRoots()` uses), or [] if the file is absent. */
-function claudeJsonProjectRoots() {
-  let raw;
-  try {
-    raw = JSON.parse(readFileSync(CLAUDE_JSON, 'utf8'));
-  } catch {
-    return [];
-  }
-  const projects =
-    raw?.projects && typeof raw.projects === 'object' ? raw.projects : {};
-  return Object.keys(projects).filter((r) => typeof r === 'string' && r.startsWith('/'));
-}
-
-/** Roots that already have a persisted artifact, decoded from each artifact's
- *  own `root` field (mirrors ingest's `repoMapArtifactRoots()`), so an existing
- *  map is refreshed even if the project left `~/.claude.json`. */
-function existingArtifactRoots() {
-  let dir;
-  try {
-    dir = opendirSync(REPO_MAP_DIR);
-  } catch {
-    return [];
-  }
-  const roots = [];
-  try {
-    for (let ent = dir.readSync(); ent; ent = dir.readSync()) {
-      if (!ent.isFile() || !ent.name.endsWith('.json')) continue;
-      try {
-        const raw = JSON.parse(readFileSync(join(REPO_MAP_DIR, ent.name), 'utf8'));
-        // Producer persists the PersistedRepoMap envelope `{ ..., map: RepoMap }`
-        // (#893); the root lives at `raw.map.root`. Unwrap it (tolerate a flat
-        // artifact too) — reading `raw.root` directly always missed (#1650).
-        const map = raw && typeof raw.map === 'object' ? raw.map : raw;
-        if (typeof map?.root === 'string' && map.root.startsWith('/')) roots.push(map.root);
-      } catch {
-        /* skip unreadable/!JSON artifact */
-      }
-    }
-  } finally {
-    dir.closeSync();
-  }
-  return roots;
-}
-
-/** Dedup discovery, keep only roots that are real directories on disk, sort for
- *  determinism, and bound the count. Returns { roots, discovered, capped }. */
+/** Dedup discovery (`~/.claude.json` project roots + roots that already have a
+ *  persisted artifact), keep only roots that are real directories on disk, sort
+ *  for determinism, and bound the count. Discovery comes from the shared
+ *  host-producer seam, so it is capped + entry-bounded identically to ingest
+ *  (#2077). Returns { roots, discovered, capped }. */
 function discoverRoots() {
-  const all = [...new Set([...claudeJsonProjectRoots(), ...existingArtifactRoots()])];
+  const all = [
+    ...new Set([
+      ...claudeJsonProjectRoots(CLAUDE_JSON),
+      ...repoMapArtifactRoots(REPO_MAP_DIR),
+    ]),
+  ];
   const onDisk = all
     .filter((root) => {
       try {

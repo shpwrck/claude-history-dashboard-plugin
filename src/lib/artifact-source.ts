@@ -92,6 +92,32 @@ export interface ArtifactSource {
   read(relPath: string, options?: ArtifactReadOptions): ArtifactReadResult;
 }
 
+/**
+ * The PRODUCER half of the host-producer seam (ADR 0007), the symmetric partner
+ * to {@link ArtifactSource} (the consumer half). A host process — which has the
+ * devDeps + WASM grammars the zero-node_modules runtime container lacks — writes
+ * a `HostProducedArtifact<T>` envelope under `~/.claude/usage-data/...`, and the
+ * read-only runtime consumes it through an {@link ArtifactSource}. The persisted
+ * repo-map artifact (`PersistedRepoMap`, whose payload field is historically
+ * named `map`) and the #280 `/insights` bridge output are both instances.
+ *
+ * The runtime implementation of this contract — shared root discovery, the capped
+ * artifact read, and the cap constants (`ARTIFACT_FILE_MAX_BYTES` /
+ * `REPO_MAP_ARTIFACT_MAX_ENTRIES`) — lives in `scripts/lib/host-producer.mjs`
+ * (dependency-free `.mjs` so it loads in the server boot graph AND in the
+ * deploy-path producers that run under bare `node`); its JSDoc `@typedef`
+ * mirrors this type. Defining the contract here, alongside the consumer
+ * interface, is the point of #2077: a third producer references one shape instead
+ * of inventing a fourth.
+ */
+export interface HostProducedArtifact<T> {
+  /** Producer output-shape version (owned by the parser-output seam #2075) so a
+   *  stale envelope from an older producer is not consumed. */
+  version: number;
+  /** The structural payload the runtime reads. */
+  payload: T;
+}
+
 const READ_CHUNK_BYTES = 1 << 20; // 1 MiB, matching ingest's reader.
 
 function statSignature(absPath: string): ArtifactSignature {
