@@ -184,6 +184,7 @@ function promptRow(sessionId: string, project: string): PromptAnalysis {
     questionTurnCount: 1,
     imperativeTurnCount: 1,
     filePathMentionCount: 1,
+    filePathTurnCount: 1,
     backtickIdentifierCount: 0,
     specificityMarkerCount: 1,
     lowSpecificityTurnCount: 0,

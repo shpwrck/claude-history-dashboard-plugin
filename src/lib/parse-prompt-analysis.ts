@@ -43,6 +43,7 @@ function createRecord(entry: HistoryEntry): MutablePromptAnalysis {
     questionTurnCount: 0,
     imperativeTurnCount: 0,
     filePathMentionCount: 0,
+    filePathTurnCount: 0,
     backtickIdentifierCount: 0,
     specificityMarkerCount: 0,
     lowSpecificityTurnCount: 0,
@@ -96,6 +97,7 @@ export function parsePromptAnalysis(
     if (QUESTION_RE.test(text)) record.questionTurnCount += 1;
     if (IMPERATIVE_RE.test(text)) record.imperativeTurnCount += 1;
     record.filePathMentionCount += filePathMentions;
+    if (filePathMentions > 0) record.filePathTurnCount += 1;
     record.backtickIdentifierCount += backtickIdentifiers;
     record.specificityMarkerCount += specificityMarkers;
     if (HEDGING_RE.test(text)) record.hedgingTurnCount += 1;

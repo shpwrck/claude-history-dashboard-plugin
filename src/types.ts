@@ -310,8 +310,10 @@ export interface PromptAnalysis {
   questionTurnCount: number;
   /** Prompt turns starting with a direct action verb. */
   imperativeTurnCount: number;
-  /** Prompt turns that include a file/path-like reference. */
+  /** Total file/path-like references across prompt turns (can exceed turn count). */
   filePathMentionCount: number;
+  /** Prompt turns that include at least one file/path-like reference. */
+  filePathTurnCount: number;
   /** Backtick-delimited identifiers or snippets mentioned in prompts. */
   backtickIdentifierCount: number;
   /** Sum of file/path and backtick specificity markers. */

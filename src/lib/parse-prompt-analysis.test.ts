@@ -36,6 +36,7 @@ describe('parsePromptAnalysis', () => {
       imperativeTurnCount: 1,
       questionTurnCount: 0,
       filePathMentionCount: 1,
+      filePathTurnCount: 1,
       backtickIdentifierCount: 1,
       specificityMarkerCount: 2,
       lowSpecificityTurnCount: 0,
@@ -44,6 +45,20 @@ describe('parsePromptAnalysis', () => {
     expect(analysis.totalPromptChars).toBeGreaterThan(0);
     expect(analysis.avgPromptChars).toBe(analysis.totalPromptChars);
     expect(JSON.stringify(analysis)).not.toContain('parse-prompt-analysis.ts');
+  });
+
+  it('counts multiple file references in one turn as a single file/path turn', () => {
+    const [analysis] = parsePromptAnalysis([
+      entry('s-multi', 'Update src/a.ts and src/b.ts, then check src/c.ts.'),
+    ]);
+
+    // Three mentions but one turn: the mention count is a density (>1 allowed),
+    // while the turn count stays bounded by promptTurnCount so the chart's
+    // per-turn rate never exceeds 100% (regression for #2129).
+    expect(analysis.promptTurnCount).toBe(1);
+    expect(analysis.filePathMentionCount).toBe(3);
+    expect(analysis.filePathTurnCount).toBe(1);
+    expect(analysis.filePathTurnCount).toBeLessThanOrEqual(analysis.promptTurnCount);
   });
 
   it('scores vague questions as questions with low specificity', () => {
