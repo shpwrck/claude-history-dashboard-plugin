@@ -888,7 +888,12 @@ export const PARSER_SIG_VERSION = 'v4';
 // without necessarily changing any ~/.claude source artifact. The compressed
 // dataset cache is persisted across deploys, so source-content hashes alone can
 // otherwise reuse JSON assembled by older code.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 3;
+// v4 (#2129): PromptAnalysis now serializes filePathTurnCount. The field landed
+// while the key was already at v3 (bumped by #2047 for an unrelated signal), so
+// a persisted v3 blob assembled before the field exists would be reused for
+// unchanged source data and the "Prompt turns by trait" chart would render the
+// file/path row as 0. A dedicated bump invalidates those stale v3 blobs.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 4;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the
