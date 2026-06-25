@@ -294,6 +294,58 @@ describe('artifact-source multi-root aggregating ingest (#1643)', () => {
     });
   });
 
+  it('attributes shipped sessions to the pod/member that shipped them via the ledger (#2136)', () => {
+    withTemp('artifact-shipped-', (dir) => {
+      // The hub layout: ONE ingest dir whose shared projects/ holds every shipped
+      // transcript; each shipper's provenance + per-artifact ledger live under
+      // .sources/<podSourceId>/ (written by the push-ingest endpoint).
+      const claudeDir = join(dir, '.claude');
+      const projects = join(claudeDir, 'projects');
+      mkdirSync(projects, { recursive: true });
+      // Two transcripts in the shared dir, shipped by two different pods.
+      writeSession(projects, 'workspace', 'uuid-pod-a', transcript('pod a prompt'));
+      writeSession(projects, 'workspace', 'uuid-pod-b', transcript('pod b prompt'));
+
+      const writeShipped = (sourceId: string, member: string, shippedUuid: string) => {
+        const sdir = join(claudeDir, '.sources', sourceId);
+        mkdirSync(sdir, { recursive: true });
+        writeFileSync(
+          join(sdir, '_source.json'),
+          JSON.stringify({ sourceId, member, displayName: member, repo: 'https://github.com/x/y' })
+        );
+        // Ledger keys are root-relative artifact paths; the transcript key carries the sessionId.
+        writeFileSync(
+          join(sdir, '.signatures.json'),
+          JSON.stringify({
+            'projects/workspace/bridge-pointer.json': '147:1',
+            [`projects/workspace/${shippedUuid}.jsonl`]: '79271:1',
+          })
+        );
+      };
+      writeShipped('ri-pod-a', 'dashboard', 'uuid-pod-a');
+      writeShipped('ri-pod-b', 'dashboard', 'uuid-pod-b');
+
+      const out = runIngest({
+        CLAUDE_DIR: claudeDir,
+        CLAUDE_HOME_DIR: dir,
+        CHD_DB_PATH: join(dir, 'dashboard.db'),
+      });
+
+      // The two pod sources are surfaced as distinct attributable sources w/ member.
+      const podA = out.sources.find((s) => s.id === 'ri-pod-a');
+      const podB = out.sources.find((s) => s.id === 'ri-pod-b');
+      expect(podA).toEqual({ id: 'ri-pod-a', member: 'dashboard', displayName: 'dashboard', repo: 'https://github.com/x/y' });
+      expect(podB).toEqual({ id: 'ri-pod-b', member: 'dashboard', displayName: 'dashboard', repo: 'https://github.com/x/y' });
+
+      // Each shipped session is attributed to the pod that shipped it — NOT collapsed
+      // into the default `claude-code` source.
+      const a = out.entries.find((e) => e.sessionId === 'uuid-pod-a');
+      const b = out.entries.find((e) => e.sessionId === 'uuid-pod-b');
+      expect(a?.sourceId).toBe('ri-pod-a');
+      expect(b?.sourceId).toBe('ri-pod-b');
+    });
+  });
+
   it('transcript-vs-history precedence is preserved ACROSS sources', () => {
     withTemp('artifact-precedence-', (dir) => {
       const claudeA = join(dir, 'a', '.claude');

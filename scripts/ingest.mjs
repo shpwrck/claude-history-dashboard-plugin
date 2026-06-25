@@ -193,9 +193,11 @@ export const PROJECT_ROOTS = PROJECT_SOURCES.map((item) => item.projectsRoot);
 // public source descriptor so the dashboard can label/group aggregated sessions by member off the
 // existing `sourceId` provenance — no new endpoint. Best-effort: a source with no `_source.json`
 // (every single-machine / local source) is returned byte-identically.
-function memberMetadataForSource(source) {
+// Read `member`/`displayName`/`repo` from a `_source.json` provenance file, returning only
+// the present non-empty string fields (or null). Shared by the configured-source enrichment
+// (#1999) and the shipped-source discovery (#2136).
+function readSourceMemberMeta(metaPath) {
   try {
-    const metaPath = join(dirname(source.historyDir), '.sources', source.id, '_source.json');
     if (!existsSync(metaPath)) return null;
     const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
     if (!meta || typeof meta !== 'object') return null;
@@ -208,6 +210,72 @@ function memberMetadataForSource(source) {
   } catch {
     return null;
   }
+}
+
+function memberMetadataForSource(source) {
+  return readSourceMemberMeta(
+    join(dirname(source.historyDir), '.sources', source.id, '_source.json')
+  );
+}
+
+// #2136: shipped-source attribution. The push-ingest endpoint writes each shipper's provenance
+// + a per-artifact ledger under `<ingestDir>/.sources/<sourceId>/` while the transcripts land in
+// the SHARED `projects/` dir (UUID-named, collision-free). The ledger (`.signatures.json`) records
+// exactly which `projects/<proj>/<uuid>.jsonl` transcripts that source shipped — the authoritative
+// session->source map. Without this, every shipped session collapses into the one default source
+// (the live #2000/#2136 gap on hub: 16 pod-sources, all attributed to `claude-code`). Here we
+// enumerate those ledgers as distinct attributable sources and remember which session each shipped,
+// so `assembleDataset` can tag it with the pod/member that produced it.
+//
+// A session-data transcript relpath: `projects/<encoded-project>/<sessionUuid>.jsonl`. Non-transcript
+// shipped artifacts (bridge-pointer.json, *.ccr-tip.json, history parts) are ignored for attribution.
+const SHIPPED_TRANSCRIPT_RE = /^projects\/[^/]+\/([^/]+)\.jsonl$/;
+
+function discoverShippedSources() {
+  const sources = [];
+  const sessionToSource = new Map();
+  const seenIngestDirs = new Set();
+  for (const { source } of PROJECT_SOURCES) {
+    const ingestDir = dirname(source.historyDir);
+    if (seenIngestDirs.has(ingestDir)) continue;
+    seenIngestDirs.add(ingestDir);
+    const sourcesRoot = join(ingestDir, '.sources');
+    let dirents;
+    try {
+      dirents = readdirSync(sourcesRoot, { withFileTypes: true });
+    } catch {
+      continue; // no push-ingest provenance under this root
+    }
+    for (const ent of dirents) {
+      if (!ent.isDirectory()) continue;
+      const sourceId = ent.name;
+      // A configured/default source already carries its own descriptor; don't shadow it.
+      if (ARTIFACT_SOURCE_BY_ID.has(sourceId)) continue;
+      const dir = join(sourcesRoot, sourceId);
+      let ledger;
+      try {
+        ledger = JSON.parse(readFileSync(join(dir, '.signatures.json'), 'utf8'));
+      } catch {
+        continue; // provenance-only (no shipped artifacts) -> nothing to attribute
+      }
+      const claimed = [];
+      for (const relPath of Object.keys(ledger || {})) {
+        const m = SHIPPED_TRANSCRIPT_RE.exec(relPath);
+        if (m) claimed.push(m[1]);
+      }
+      if (!claimed.length) continue; // shipped only non-transcript artifacts
+      const harness = DEFAULT_SOURCE.harness;
+      for (const sessionId of claimed) {
+        // First writer wins so attribution is deterministic across the dirent order.
+        if (!sessionToSource.has(sessionId)) {
+          sessionToSource.set(sessionId, { sourceId, harness });
+        }
+      }
+      const meta = readSourceMemberMeta(join(dir, '_source.json')) || {};
+      sources.push({ id: sourceId, harness, historyDir: dir, ...meta });
+    }
+  }
+  return { sources, sessionToSource };
 }
 
 const PUBLIC_DATA_SOURCES = PROJECT_SOURCES.map((item) => {
@@ -227,6 +295,17 @@ function provenanceForSource(source) {
 const ARTIFACT_SOURCE_BY_ID = new Map(
   PROJECT_SOURCES.map(({ source, artifacts }) => [source.id, artifacts])
 );
+
+// Discovered AFTER ARTIFACT_SOURCE_BY_ID (which it reads to avoid shadowing a configured source).
+const { sources: SHIPPED_SOURCES, sessionToSource: SHIPPED_SESSION_SOURCE } =
+  discoverShippedSources();
+
+// dataset.sources = configured/default sources + discovered shipped sources (deduped by id).
+function datasetSources() {
+  const byId = new Map(PUBLIC_DATA_SOURCES.map((s) => [s.id, s]));
+  for (const s of SHIPPED_SOURCES) if (!byId.has(s.id)) byId.set(s.id, s);
+  return [...byId.values()];
+}
 
 function artifactSourceFor(source) {
   return ARTIFACT_SOURCE_BY_ID.get(source.id) ?? filesystemArtifactSource(source);
@@ -893,7 +972,12 @@ export const PARSER_SIG_VERSION = 'v4';
 // a persisted v3 blob assembled before the field exists would be reused for
 // unchanged source data and the "Prompt turns by trait" chart would render the
 // file/path row as 0. A dedicated bump invalidates those stale v3 blobs.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 4;
+// v5 (#2136): assembleDataset now enumerates push-shipped sources from
+// .sources/<id>/ ledgers and re-attributes each shipped session to the
+// pod/member that shipped it. The .sources/ provenance pre-exists (no source
+// artifact changes), so without this bump the deployed instance's persisted
+// dataset cache would keep serving the old single-source attribution.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 5;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the
@@ -2393,13 +2477,20 @@ export function assembleArtifacts() {
 export function assembleDataset() {
   const rows = blobCache.readAllRows();
   const sessionProvenanceById = new Map(
-    listSessions().map((session) => [
-      session.sessionId,
-      {
-        sourceId: session.sourceId || DEFAULT_SOURCE_PROVENANCE.sourceId,
-        harness: session.harness || DEFAULT_SOURCE_PROVENANCE.harness,
-      },
-    ])
+    listSessions().map((session) => {
+      // #2136: a shipped session is attributed to the pod/member that shipped it
+      // (per its ledger), overriding the default source it was physically read under.
+      const shipped = SHIPPED_SESSION_SOURCE.get(session.sessionId);
+      return [
+        session.sessionId,
+        shipped
+          ? { sourceId: shipped.sourceId, harness: shipped.harness }
+          : {
+              sourceId: session.sourceId || DEFAULT_SOURCE_PROVENANCE.sourceId,
+              harness: session.harness || DEFAULT_SOURCE_PROVENANCE.harness,
+            },
+      ];
+    })
   );
   const tokenData = [];
   const toolData = [];
@@ -2693,7 +2784,7 @@ export function assembleDataset() {
     generatedAt,
     windowStart,
     windowEnd,
-    sources: PUBLIC_DATA_SOURCES,
+    sources: datasetSources(),
     sourceId: DEFAULT_SOURCE.id,
     harness: DEFAULT_SOURCE.harness,
     // Units for numeric fields whose name doesn't already encode the unit.
