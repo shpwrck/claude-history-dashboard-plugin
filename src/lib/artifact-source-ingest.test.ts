@@ -79,7 +79,12 @@ interface IngestResult {
     sourceId?: string;
     harness?: string;
   }>;
-  sources: Array<{ id: string }>;
+  sources: Array<{
+    id: string;
+    member?: string;
+    displayName?: string;
+    repo?: string;
+  }>;
   sourceId: string;
 }
 
@@ -92,7 +97,8 @@ function runIngest(env: Record<string, string>): IngestResult {
     console.log(JSON.stringify({
       entries: dataset.entries.map(({ sessionId, display, sourceId, harness }) =>
         ({ sessionId, display, sourceId, harness })),
-      sources: (dataset.sources || []).map(({ id }) => ({ id })),
+      sources: (dataset.sources || []).map(({ id, member, displayName, repo }) =>
+        ({ id, ...(member ? { member } : {}), ...(displayName ? { displayName } : {}), ...(repo ? { repo } : {}) })),
       sourceId: dataset.sourceId,
     }));
   `;
@@ -235,6 +241,56 @@ describe('artifact-source multi-root aggregating ingest (#1643)', () => {
       // Collision-free: distinct UUIDs both survive, each with its own provenance.
       expect(a?.sourceId).toBe('machine-a');
       expect(b?.sourceId).toBe('machine-b');
+    });
+  });
+
+  it('surfaces per-member attribution from .sources/<id>/_source.json on the source descriptor (#1999)', () => {
+    withTemp('artifact-member-', (dir) => {
+      const claudeA = join(dir, 'a', '.claude');
+      const claudeB = join(dir, 'b', '.claude');
+      const projectsA = join(claudeA, 'projects');
+      const projectsB = join(claudeB, 'projects');
+      mkdirSync(projectsA, { recursive: true });
+      mkdirSync(projectsB, { recursive: true });
+      writeSession(projectsA, 'proj-a', 'uuid-a', transcript('alpha prompt'));
+      writeSession(projectsB, 'proj-b', 'uuid-b', transcript('beta prompt'));
+
+      // The push-ingest endpoint stamps member provenance out of band at
+      // `<dirname(historyDir)>/.sources/<id>/_source.json`. Only machine-a has it.
+      const metaDir = join(claudeA, '.sources', 'machine-a');
+      mkdirSync(metaDir, { recursive: true });
+      writeFileSync(
+        join(metaDir, '_source.json'),
+        JSON.stringify({
+          sourceId: 'machine-a',
+          member: 'ada',
+          displayName: 'Ada Lovelace',
+          repo: 'https://github.com/shpwrck/example.git',
+        })
+      );
+
+      const sources = [
+        { id: 'machine-a', harness: 'claude-code', historyDir: projectsA },
+        { id: 'machine-b', harness: 'claude-code', historyDir: projectsB },
+      ];
+      const out = runIngest({
+        CLAUDE_DIR: claudeA,
+        CLAUDE_HOME_DIR: join(dir, 'a'),
+        CHD_DB_PATH: join(dir, 'dashboard.db'),
+        CODING_AGENT_SOURCES: JSON.stringify(sources),
+      });
+
+      const sourceA = out.sources.find((s) => s.id === 'machine-a');
+      const sourceB = out.sources.find((s) => s.id === 'machine-b');
+      // machine-a carries the member label the dashboard groups by.
+      expect(sourceA).toEqual({
+        id: 'machine-a',
+        member: 'ada',
+        displayName: 'Ada Lovelace',
+        repo: 'https://github.com/shpwrck/example.git',
+      });
+      // A source without _source.json is unchanged (no member fields).
+      expect(sourceB).toEqual({ id: 'machine-b' });
     });
   });
 

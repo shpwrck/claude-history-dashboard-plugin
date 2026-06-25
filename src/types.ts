@@ -5,6 +5,15 @@ export interface DataSource {
   harness: CodingHarness;
   historyDir: string;
   configFile?: string;
+  /**
+   * Per-member attribution (#1563/#1999), stamped by the push-ingest shipper.
+   * Present only for pushed/aggregated sources; absent on a local single source.
+   * The dashboard groups/filters aggregated sessions by `member` (falling back
+   * to `displayName`, then `id`) off each session's `sourceId` provenance.
+   */
+  member?: string;
+  displayName?: string;
+  repo?: string;
 }
 
 export interface HistoryEntry {

@@ -19,6 +19,7 @@ import {
   opendirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   statSync,
 } from 'node:fs';
@@ -185,7 +186,34 @@ const PROJECT_SOURCES = uniqueProjectSources([
   artifacts: filesystemArtifactSource(source),
 }));
 export const PROJECT_ROOTS = PROJECT_SOURCES.map((item) => item.projectsRoot);
-const PUBLIC_DATA_SOURCES = PROJECT_SOURCES.map((item) => ({ ...item.source }));
+
+// Per-source member attribution (#1999). The push-ingest endpoint stamps the shipper's
+// member/displayName/repo out of band at `<root>/.sources/<sourceId>/_source.json` (root =
+// `dirname(historyDir)`, the same anchor the artifact-source interface uses). Fold it onto the
+// public source descriptor so the dashboard can label/group aggregated sessions by member off the
+// existing `sourceId` provenance — no new endpoint. Best-effort: a source with no `_source.json`
+// (every single-machine / local source) is returned byte-identically.
+function memberMetadataForSource(source) {
+  try {
+    const metaPath = join(dirname(source.historyDir), '.sources', source.id, '_source.json');
+    if (!existsSync(metaPath)) return null;
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+    if (!meta || typeof meta !== 'object') return null;
+    const pick = (v) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+    const out = {};
+    if (pick(meta.member)) out.member = pick(meta.member);
+    if (pick(meta.displayName)) out.displayName = pick(meta.displayName);
+    if (pick(meta.repo)) out.repo = pick(meta.repo);
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+const PUBLIC_DATA_SOURCES = PROJECT_SOURCES.map((item) => {
+  const meta = memberMetadataForSource(item.source);
+  return meta ? { ...item.source, ...meta } : { ...item.source };
+});
 
 function provenanceForSource(source) {
   return {

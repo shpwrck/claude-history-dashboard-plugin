@@ -34,6 +34,7 @@ import type {
   PromptAnalysis,
   DeceitSignals,
   ActionDomain,
+  DataSource,
 } from '../types';
 import type { ToolUsageData } from './parse-tools';
 import type { ToolInventory } from './parse-tool-inventory';
@@ -291,6 +292,8 @@ export interface ViewData {
    * real receipt store) and empty until sample mode activates.
    */
   sampleAdoptionReceipts: AdoptionReceipt[];
+  /** Per-source descriptors w/ member attribution (#1563/#1999); used by SessionList. */
+  sources?: DataSource[];
 }
 
 /** Navigation + session-focus callbacks every view wires its affordances to. */
@@ -678,6 +681,7 @@ export const VIEW_RENDERERS: Partial<
       runtimeEvents={d.runtimeEvents}
       apiErrors={d.apiErrors}
       permissionRows={d.permissionRows}
+      sources={d.sources}
       focusSessionId={n.focusSessionId}
       focusEvidenceRef={n.focusEvidenceRef}
       onFocusConsumed={n.consumeFocus}
