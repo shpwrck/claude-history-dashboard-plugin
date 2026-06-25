@@ -87,6 +87,7 @@ import {
   WORKFLOW_FIELD_MAX_CHARS,
 } from './read-workflows.mjs';
 import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
+import { resolveStatGatedCache } from './lib/stat-gated-cache.mjs';
 
 const PROJECT_DIR = join(fileURLToPath(import.meta.url), '..', '..');
 const { resolveSources } = await import(
@@ -540,6 +541,17 @@ const DASHBOARD_RECOMMENDATIONS_CACHE_MAX_ENTRIES = Math.max(
     10_000,
     parseNonNegativeIntEnv('DASHBOARD_RECOMMENDATIONS_CACHE_MAX_ENTRIES', 256)
   )
+);
+// Bounds for the per-state /api/digest and /api/search response caches (#1573).
+// Search keys include the free-text query, so its cache can hold more distinct
+// keys than digest (one per date) under varied traffic; both stay LRU-bounded.
+const DASHBOARD_DIGEST_CACHE_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(10_000, parseNonNegativeIntEnv('DASHBOARD_DIGEST_CACHE_MAX_ENTRIES', 64))
+);
+const DASHBOARD_SEARCH_CACHE_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(10_000, parseNonNegativeIntEnv('DASHBOARD_SEARCH_CACHE_MAX_ENTRIES', 256))
 );
 const DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES = Math.max(
   1,
@@ -1105,6 +1117,19 @@ function datasetState(apiPromise, key = 'global') {
     // expensive enough to avoid repeat ingest+assemble work under org traffic.
     recommendationsCache: new Map(),
     recommendationsBuilds: new Map(),
+    // Bounded response caches for /api/digest and /api/search (#1573). Both
+    // routes previously ran a full ingest()+assembleDataset() (and, for search,
+    // a score+embed over every entry) on the event loop per request with no
+    // gate, single-flight, or cache — head-of-line blocking under concurrency.
+    // Mirroring the recommendations machinery: a sourceSignature() stat-gate
+    // keys the cache, a `*Builds` Map single-flights concurrent identical
+    // requests, and the cache holds the computed response payload. The search
+    // key folds in the query + project + limit (the score/embed cost is
+    // per-query); the digest key folds in the requested date.
+    digestCache: new Map(),
+    digestBuilds: new Map(),
+    searchCache: new Map(),
+    searchBuilds: new Map(),
     // Source signature from the last full ingest() (#182). Lets the dataset
     // handler skip the O(files) ingest walk when a cheap stat signature is
     // unchanged. null until the first ingest runs.
@@ -2159,6 +2184,78 @@ async function recommendationsResponseCache(
   }
   const entry = await build.promise;
   return { entry, cache: cached ? 'refresh' : 'miss' };
+}
+
+// Stat-gated, single-flight response cache for the digest and search routes
+// (#1573), the same shape recommendationsResponseCache already uses: a
+// sourceSignature() stat-gate decides freshness, the cache holds the computed
+// payload per key, and a `*Builds` Map collapses concurrent identical requests
+// (same key + same sourceSig) onto ONE build. The route-agnostic core lives in
+// ./lib/stat-gated-cache.mjs so it can be unit-tested directly; this wrapper just
+// supplies the ingest API's signature getter and the build invocation.
+function statGatedResponseCache(api, { cacheMap, buildsMap, key, max, build }) {
+  return resolveStatGatedCache({
+    sourceSignature: () => api.sourceSignature(),
+    cacheMap,
+    buildsMap,
+    key,
+    max,
+    build,
+    buildArgs: [api],
+  });
+}
+
+// /api/digest cache key: one entry per requested calendar date. The digest is a
+// pure function of (assembled dataset, date), so the sourceSig stat-gate covers
+// dataset changes and the date is the only per-request input.
+function digestCacheKey(date) {
+  return `date:${date}`;
+}
+
+// /api/search cache key: scoring + embedding runs per query, so the key MUST
+// fold in every input that changes the result — the normalized query text, the
+// project filter, and the result limit. Anything with the same triple shares one
+// cached (and single-flighted) score+embed pass.
+function searchCacheKey(q, project, limit) {
+  return JSON.stringify(['q', q, 'project', project ?? null, 'limit', limit]);
+}
+
+// Build the /api/digest payload for one date, reusing the assembled dataset per
+// contentHash via memoizedAssembleDataset (#2071) so concurrent dates on the same
+// corpus assemble once. ingest() is required to learn contentHash; on an unchanged
+// source it is the same cheap stat-walk the stat-gate already accounts for.
+function buildDigestPayload(state, api, date) {
+  const stats = api.ingest();
+  const ds = memoizedAssembleDataset(state, api, stats.contentHash);
+  return buildDailyDigest(
+    {
+      sessions: groupBySessions(ds.entries || []),
+      tokenData: ds.tokenData || [],
+      toolData: ds.toolData || [],
+      timelines: ds.timelines || [],
+      apiErrors: ds.apiErrors || [],
+      taskSuccess: ds.taskSuccess || [],
+      statsCache: ds.statsCache || null,
+    },
+    date
+  );
+}
+
+// Build the /api/search payload for one (query, project, limit), reusing the
+// assembled dataset per contentHash (#2071); the per-query score+embed is the
+// expensive part the cache exists to collapse.
+function buildSearchPayload(state, api, q, project, limit) {
+  const stats = api.ingest();
+  const ds = memoizedAssembleDataset(state, api, stats.contentHash);
+  const results = hybridSearchEntries(ds.entries || [], q, {
+    project,
+    limit,
+    semanticEnabled: true,
+  }).map((result) => ({
+    ...result,
+    entry: { ...result.entry, pastedContents: {} },
+  }));
+  return { mode: 'hybrid', semanticAvailable: true, results };
 }
 
 // RFC 7232 If-None-Match check. Handles comma-separated lists and the "*" form.
@@ -7758,22 +7855,21 @@ async function handleDigest(req, res) {
       error: 'Invalid date; expected YYYY-MM-DD',
     });
   }
-  const { ingestApi } = await loadIngestedDataset(req, { useCache: false });
-  const ds = ingestApi.assembleDataset();
-  const digest = buildDailyDigest(
-    {
-      sessions: groupBySessions(ds.entries || []),
-      tokenData: ds.tokenData || [],
-      toolData: ds.toolData || [],
-      timelines: ds.timelines || [],
-      apiErrors: ds.apiErrors || [],
-      taskSuccess: ds.taskSuccess || [],
-      statsCache: ds.statsCache || null,
-    },
-    date
-  );
+  // useCache:true — this route drives ingest through its own stat-gated cache
+  // below (#1573), so the shared preamble must NOT run a per-request ingest().
+  const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+    useCache: true,
+  });
+  const { value: digest, cache } = await statGatedResponseCache(ingestApi, {
+    cacheMap: ingestState.digestCache,
+    buildsMap: ingestState.digestBuilds,
+    key: digestCacheKey(date),
+    max: DASHBOARD_DIGEST_CACHE_MAX_ENTRIES,
+    build: (api) => buildDigestPayload(ingestState, api, date),
+  });
   res.setHeader('X-Source', 'live');
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Digest-Cache', cache);
   return sendJson(res, 200, digest);
 }
 
@@ -7793,23 +7889,22 @@ async function handleSearch(req, res) {
       results: [],
     });
   }
-  const { ingestApi } = await loadIngestedDataset(req, { useCache: false });
-  const ds = ingestApi.assembleDataset();
-  const results = hybridSearchEntries(ds.entries || [], q, {
-    project,
-    limit,
-    semanticEnabled: true,
-  }).map((result) => ({
-    ...result,
-    entry: { ...result.entry, pastedContents: {} },
-  }));
+  // useCache:true — search drives ingest through its own stat-gated per-query
+  // cache below (#1573); the shared preamble must NOT run a per-request ingest().
+  const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+    useCache: true,
+  });
+  const { value: payload, cache } = await statGatedResponseCache(ingestApi, {
+    cacheMap: ingestState.searchCache,
+    buildsMap: ingestState.searchBuilds,
+    key: searchCacheKey(q, project, limit),
+    max: DASHBOARD_SEARCH_CACHE_MAX_ENTRIES,
+    build: (api) => buildSearchPayload(ingestState, api, q, project, limit),
+  });
   res.setHeader('X-Source', 'live');
   res.setHeader('Cache-Control', 'no-store');
-  return sendJson(res, 200, {
-    mode: 'hybrid',
-    semanticAvailable: true,
-    results,
-  });
+  res.setHeader('X-Search-Cache', cache);
+  return sendJson(res, 200, payload);
 }
 
 async function handleRecommendationsJson(req, res) {
