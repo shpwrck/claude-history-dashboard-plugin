@@ -176,8 +176,35 @@ function buildPrompt(instruction) {
   return `You are working in a small standalone code repository. Complete this task:\n\n${instruction}\n\nMake the minimal change needed. Do not explain; just edit the files.\n`;
 }
 
+/**
+ * Adherence proxy (#2083, threat #1): count the agent's tool_use blocks that
+ * REFERENCE a stable file this session — Read(file_path), Bash(command), Grep,
+ * etc. that mention a stable path. A treatment arm that actually honors the
+ * injected reference should touch the stable file FEWER times than control,
+ * which re-discovers it cold each session. Separates "mechanism doesn't help"
+ * from "agent ignored the recommendation". Counts tool INVOCATIONS, not bytes.
+ */
+function countStableReads(stdout, stablePaths) {
+  if (!stablePaths || stablePaths.length === 0) return 0;
+  let count = 0;
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    const content = obj?.message?.content ?? obj?.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (!b || b.type !== 'tool_use') continue;
+      const s = JSON.stringify(b.input ?? {});
+      if (stablePaths.some((p) => p && s.includes(p))) count++;
+    }
+  }
+  return count;
+}
+
 /** Spawn one jailed worker; resolve with its parsed JSON result (or an error marker). */
-function runWorker({ worktree, prompt, model, maxBudgetUsd }) {
+function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
   return new Promise((resolveRun) => {
     const tempHome = seedTempHome();
     const promptPath = join(tempHome, 'prompt.txt');
@@ -230,7 +257,8 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd }) {
         resolveRun({ ok: false, unresolved: true, reason: `worker produced no parseable JSON (exit ${code})`, stderr: stderr.slice(-400), wallMs, tempHome });
         return;
       }
-      resolveRun({ ok: true, cj, wallMs, exitCode: code, tempHome });
+      const stableReads = countStableReads(stdout, stablePaths);
+      resolveRun({ ok: true, cj, wallMs, exitCode: code, tempHome, stableReads });
     });
   });
 }
@@ -297,19 +325,21 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
   }
 
   const steps = chainSteps(pair);
+  const stablePaths = (pair.stableFiles ?? []).map((f) => f.path).filter(Boolean);
   const tempHomes = [];
   const perStepCostUsd = [];
   const perStepTokens = [];
   let costUsd = 0;
   let tokens = 0;
   let wallMs = 0;
+  let stableReads = 0; // #2083 adherence: total stable-file tool touches across the chain
   let costSource;
 
   for (let i = 0; i < steps.length; i++) {
     const where = `session ${i + 1}/${steps.length}`;
     let worker;
     try {
-      worker = await runWorker({ worktree: tree, prompt: buildPrompt(steps[i]), model, maxBudgetUsd });
+      worker = await runWorker({ worktree: tree, prompt: buildPrompt(steps[i]), model, maxBudgetUsd, stablePaths });
     } catch (err) {
       return { unresolved: true, reason: `worker exception (${where}): ${err.message}`, costUsd, tokens, costSource, wallMs, perStepCostUsd, scratch, tempHomes };
     }
@@ -323,6 +353,7 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
     costUsd += usd;
     tokens += stepTokens;
     wallMs += worker.wallMs;
+    stableReads += worker.stableReads ?? 0;
     perStepCostUsd.push(usd);
     perStepTokens.push(stepTokens);
     const isError = worker.cj.is_error === true || worker.cj.subtype === 'error_max_turns' || worker.cj.subtype === 'error_during_execution';
@@ -343,6 +374,7 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
     costSource,
     wallMs,
     sessions: steps.length,
+    stableReads,
     perStepCostUsd,
     perStepTokens,
     scratch,
@@ -494,6 +526,10 @@ async function main() {
         medianCostUsd: costs.length ? median(costs) : NaN,
         medianWallMs: wall.length ? median(wall) : NaN,
         perStepMedianCostUsd,
+        // #2083 adherence: median stable-file tool touches per chain over DECIDED runs.
+        medianStableReads: decided.length
+          ? median(decided.map((r) => r.stableReads ?? 0))
+          : NaN,
         // The arm "passes" (contributes a usable cost summary) iff >=1 DECIDED run.
         armDecided: decided.length > 0,
         armSuccess: successes.length > 0,
@@ -509,8 +545,8 @@ async function main() {
     perPair.push({ pair, control, injected, pairDecided });
 
     console.log(
-      `  ${pair.pairId.padEnd(34)} ctl[dec ${control.nDecided}/${control.nRuns} ok ${control.nSuccess} $${fmt(control.medianCostUsd)} ${fmtMs(control.medianWallMs)}] ` +
-        `inj[dec ${injected.nDecided}/${injected.nRuns} ok ${injected.nSuccess} $${fmt(injected.medianCostUsd)} ${fmtMs(injected.medianWallMs)}] ` +
+      `  ${pair.pairId.padEnd(34)} ctl[dec ${control.nDecided}/${control.nRuns} ok ${control.nSuccess} $${fmt(control.medianCostUsd)} rd ${fmt(control.medianStableReads)}] ` +
+        `inj[dec ${injected.nDecided}/${injected.nRuns} ok ${injected.nSuccess} $${fmt(injected.medianCostUsd)} rd ${fmt(injected.medianStableReads)}] ` +
         `pair=${pairDecided ? 'DECIDED' : 'EXCLUDED'}`
     );
   }
@@ -570,6 +606,13 @@ async function main() {
   const qualityHoldPass =
     nDecided === 0 ? false : injectedSuccessRate >= controlSuccessRate - 0.05;
 
+  // #2083 adherence: median stable-file tool touches per chain, by arm, over
+  // DECIDED pairs. If injected << control, the treatment is being honored (the
+  // null is about the mechanism's payoff, not non-adoption). If injected ≈
+  // control, agents ignored the injected reference (the null is confounded).
+  const adhControl = nDecided ? median(decidedPairs.map((p) => p.control.medianStableReads)) : NaN;
+  const adhInjected = nDecided ? median(decidedPairs.map((p) => p.injected.medianStableReads)) : NaN;
+
   const decision = decideVerdict({
     pairedMedianPctDelta: medPctDelta,
     ci,
@@ -590,6 +633,7 @@ async function main() {
   console.log(`bootstrap 95% CI: [${fmt(ci.lo)}, ${fmt(ci.hi)}]  (seed=1, iters=10000)`);
   console.log(`Wilcoxon signed-rank: W-=${wilcoxon.statistic}, p(one-sided)=${wilcoxon.pOneSided.toExponential(3)}, n=${wilcoxon.n}`);
   console.log(`quality hold: control success ${(controlSuccessRate * 100).toFixed(0)}% vs injected ${(injectedSuccessRate * 100).toFixed(0)}% -> ${qualityHoldPass ? 'PASS' : 'FAIL'}`);
+  console.log(`adherence (stable-file tool touches per chain, median): control ${fmt(adhControl)} vs injected ${fmt(adhInjected)} -> ${Number.isFinite(adhControl) && Number.isFinite(adhInjected) ? (adhInjected < adhControl ? 'treatment touches the file LESS (honored)' : 'treatment touches the file >= control (low adoption / confounded null)') : 'n/a'}`);
   console.log(`latency paired-median delta: ${fmtMs(latMedDelta)} (secondary, not gated)`);
   if (doseResponse.length) {
     console.log('dose-response (cumulative injected-control $ delta by session, SUPPORTING — does not set verdict):');
