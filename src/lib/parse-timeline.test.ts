@@ -173,21 +173,44 @@ describe('slimSessionTimeline (#1035)', () => {
     ],
   }
 
-  it('strips every entry summary, carries derived fields, and flags the timeline slim', () => {
+  it('strips every entry summary, prunes derived fields to user entries, and flags the timeline slim', () => {
     const slim = slimSessionTimeline(base)
     expect(slim.slim).toBe(true)
     expect(slim.firstPromptPreview).toBe('fix the bug please')
     expect(slim.entries.every((e) => !('summary' in e))).toBe(true)
-    expect(slim.entries.map((e) => e.summaryLen)).toEqual([18, 23, 23, 18, 0])
-    expect(slim.entries.map((e) => e.hasCode)).toEqual([false, false, false, false, false])
-    expect(slim.entries.map((e) => e.isQuestion)).toEqual([false, false, false, false, false])
-    // Everything except summary survives untouched.
+    // #2106: summaryLen survives only on the `user` entry (its only bulk reader);
+    // non-user entries drop it (read back as 0 via the `?? 0` fallback).
+    expect(slim.entries.map((e) => e.summaryLen)).toEqual([18, undefined, undefined, undefined, undefined])
+    // #2106: hasCode/isQuestion are sparse-true on user entries and dropped on
+    // every non-user entry — none are true here, so all read undefined.
+    expect(slim.entries.map((e) => e.hasCode)).toEqual([undefined, undefined, undefined, undefined, undefined])
+    expect(slim.entries.map((e) => e.isQuestion)).toEqual([undefined, undefined, undefined, undefined, undefined])
+    // Everything except summary + pruned derived signals survives untouched.
     expect(slim.entries.map((e) => e.kind)).toEqual(base.entries.map((e) => e.kind))
     expect(slim.entries[2].toolName).toBe('Read')
     expect(slim.entries[2].toolUseId).toBe('read-1')
     expect(slim.entries[3].toolUseId).toBe('read-1')
     expect(slim.entries[3].isError).toBe(false)
     expect(slim.sessionId).toBe('s1')
+  })
+
+  it('keeps hasCode/isQuestion on user entries only when true (#2106 sparse-true)', () => {
+    const withSignals: SessionTimeline = {
+      ...base,
+      entries: [
+        { timestamp: '2026-01-01', kind: 'user', summary: '```diff``` is this right?' },
+        // a non-user entry whose summary would set the flags — pruned in bulk
+        { timestamp: '2026-01-01', kind: 'assistant', summary: '```code``` here?' },
+      ],
+    }
+    const out = slimSessionTimeline(withSignals)
+    expect(out.entries[0].hasCode).toBe(true)
+    expect(out.entries[0].isQuestion).toBe(true)
+    expect(out.entries[0].summaryLen).toBe('```diff``` is this right?'.length)
+    // non-user entry: every derived signal dropped regardless of its summary.
+    expect('hasCode' in out.entries[1]).toBe(false)
+    expect('isQuestion' in out.entries[1]).toBe(false)
+    expect('summaryLen' in out.entries[1]).toBe(false)
   })
 
   it('does not mutate the input timeline', () => {
@@ -207,20 +230,17 @@ describe('slimSessionTimeline (#1035)', () => {
     const out = slimSessionTimeline(allUser)
     expect(out).not.toBe(allUser)
     expect(out.slim).toBe(true)
+    // #2106: user keeps summaryLen; its false booleans are dropped (sparse-true).
+    // The non-user entry drops all three derived signals.
     expect(out.entries).toEqual([
       {
         timestamp: '2026-01-01',
         kind: 'user',
         summaryLen: 5,
-        hasCode: false,
-        isQuestion: false,
       },
       {
         timestamp: '2026-01-01',
         kind: 'assistant',
-        summaryLen: 0,
-        hasCode: false,
-        isQuestion: false,
       },
     ])
   })

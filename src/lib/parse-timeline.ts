@@ -117,14 +117,40 @@ function firstPromptPreview(entries: TimelineEntry[]): string | undefined {
 }
 
 /**
- * Bulk-dataset slimming (#1035/#1284): remove `summary` from every entry after
- * carrying the derived fields aggregate readers need. The session_blob row keeps
- * the full parse; the Timeline view hydrates it lazily when selected.
+ * Bulk-dataset slimming (#1035/#1284, #2106): remove `summary` from every entry,
+ * and prune the summary-derived fields (`summaryLen`/`hasCode`/`isQuestion`) down
+ * to only what bulk readers actually consult. The session_blob row keeps the full
+ * parse; the Timeline view hydrates it lazily when selected.
+ *
+ * #2106 — the derived signals dominated the bulk timeline payload (~14 MB on the
+ * ~1 GB corpus), yet EVERY dataset-level consumer reads them only for
+ * `kind === 'user'` entries (conversation-patterns.ts, session-overview.ts,
+ * session-scorecard.ts, parse-model-recommendation.ts — all filter on the user
+ * kind first). So we:
+ *   - keep `summaryLen` only on `user` entries (its only readers; absent elsewhere
+ *     reads back as 0 via the `?? summary?.length ?? 0` fallback on stripped bulk);
+ *   - keep `hasCode`/`isQuestion` only on `user` entries AND only when `true`
+ *     (their `e.hasCode ?? containsCodeBlock(summary)` fallbacks recompute false on
+ *     the stripped bulk summary, so an omitted flag is read back as false —
+ *     byte-identical behaviour). Non-`user` entries drop all three.
+ * The full per-session detail (served lazily by getSessionTimelineDetail) keeps
+ * every field, so the detail/forensic views are unaffected.
  */
 export function slimSessionTimeline(timeline: SessionTimeline): SessionTimeline {
   const entries = timeline.entries.map((entry) => {
-    const rest = { ...withSummarySignals(entry) };
+    const filled = withSummarySignals(entry);
+    const rest = { ...filled };
     delete rest.summary;
+    if (rest.kind === 'user') {
+      // user entries: keep summaryLen; demote the booleans to sparse-true.
+      if (!rest.hasCode) delete rest.hasCode;
+      if (!rest.isQuestion) delete rest.isQuestion;
+    } else {
+      // non-user entries: no bulk reader consults the derived signals.
+      delete rest.summaryLen;
+      delete rest.hasCode;
+      delete rest.isQuestion;
+    }
     return rest;
   });
   return {

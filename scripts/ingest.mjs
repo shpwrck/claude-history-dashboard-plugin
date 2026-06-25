@@ -992,7 +992,12 @@ export const PARSER_SIG_VERSION = 'v4';
 // pod/member that shipped it. The .sources/ provenance pre-exists (no source
 // artifact changes), so without this bump the deployed instance's persisted
 // dataset cache would keep serving the old single-source attribution.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 5;
+// v6 (#2106): slimSessionTimeline now prunes the summary-derived per-entry
+// signals (summaryLen/hasCode/isQuestion) to user entries only — and the two
+// booleans to sparse-true — shrinking the bulk `timelines` payload (~14 MB on
+// the ~1 GB corpus). The source transcripts are unchanged, so without this bump
+// a persisted v5 dataset blob would keep shipping the fat per-entry signals.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 6;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the
