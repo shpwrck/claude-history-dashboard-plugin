@@ -151,6 +151,12 @@ const { safeJsonStringify } = await import(
 const { buildDatasetBody } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'dataset-body.ts')
 );
+// Restores the zero-valued tokenData numerics that buildDatasetBody slims out of
+// the wire (#2107), for the one server path that re-parses the slimmed cache JSON
+// instead of the full in-memory dataset (the LLM-audit route below).
+const { rehydrateDataset } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'dataset-slim.ts')
+);
 // Server LLM calls are registered and enforced through this chokepoint (#931).
 const { callAnthropic, callAnthropicMessages, egressScrub } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'anthropic-egress.ts')
@@ -8251,8 +8257,13 @@ const server = createServer(async (req, res) => {
         };
         // Reuse the in-memory uncompressed dataset if a prior /api/dataset.json
         // built it; otherwise assemble once. Cheap relative to the judge calls.
+        // The cached `.json` is the SLIMMED wire body (#2107 drops zero-valued
+        // tokenData numerics); rehydrate the dropped zeros before the cost
+        // mappers run unguarded arithmetic over the entries (else NaN costs). The
+        // assembleDataset() fallback is the full in-memory dataset (already full,
+        // and rehydrateDataset is a no-op on it).
         const ds = globalDatasetState.datasetCache?.json
-          ? JSON.parse(globalDatasetState.datasetCache.json)
+          ? rehydrateDataset(JSON.parse(globalDatasetState.datasetCache.json))
           : assembleDataset();
         findings = await runAudits({
           sessions: toAuditSessions(ds),

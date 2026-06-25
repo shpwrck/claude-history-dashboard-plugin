@@ -997,7 +997,14 @@ export const PARSER_SIG_VERSION = 'v4';
 // booleans to sparse-true — shrinking the bulk `timelines` payload (~14 MB on
 // the ~1 GB corpus). The source transcripts are unchanged, so without this bump
 // a persisted v5 dataset blob would keep shipping the fat per-entry signals.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 6;
+// v7 (#2107): the /api/dataset.json WIRE bytes now slim per-session tokenData
+// entries — zero-valued numeric members (web-search/web-fetch requests, the
+// 1h-cache split, thinkingTokens, etc.) are dropped via dataset-body.ts and
+// restored to 0 client-side (dataset-slim.ts). The slim is a serialized-shape
+// change with no source-artifact change, so a persisted v6 compressed blob would
+// keep serving the un-slimmed body; this bump invalidates it. (The in-memory
+// dataset and toolData are unchanged; the client rehydrates the dropped zeros.)
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 7;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the

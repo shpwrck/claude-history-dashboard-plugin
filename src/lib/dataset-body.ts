@@ -13,6 +13,7 @@
 // (only safeJsonStringify) so it is unit-testable and SPA-safe.
 
 import { safeJsonStringify } from './json-safe';
+import { slimDataset } from './dataset-slim';
 
 export interface DatasetBody {
   /** The full served JSON body, including `generatedAt`. */
@@ -37,7 +38,13 @@ export interface DatasetBody {
  * hashes the stable bytes directly).
  */
 export function buildDatasetBody(dataset: unknown): DatasetBody {
-  const record = (dataset ?? {}) as Record<string, unknown>;
+  // Slim the heavy per-session tokenData rows (#2107): drop zero-valued
+  // TokenEntry numeric members from the WIRE bytes only (toolData is left
+  // verbatim — see dataset-slim.ts for why). slimDataset shallow-clones only the
+  // tokenData array, so the caller's in-memory dataset (which the server's
+  // recommendation path reads) is untouched; the client restores every dropped
+  // zero via rehydrateDataset on load. Lossless and value-preserving.
+  const record = (slimDataset(dataset) ?? {}) as Record<string, unknown>;
   const { generatedAt, ...stable } = record;
   // The one full serialization. safeJsonStringify scrubs lone surrogates so the
   // export stays valid for strict (non-JS) parsers, exactly as before (#1104).
