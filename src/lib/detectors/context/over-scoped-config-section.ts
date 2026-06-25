@@ -253,6 +253,9 @@ export const detector: Detector = {
   id: DETECTOR_ID,
   category: 'context',
   dataDeps: ['repoMap', 'shadowCalls'],
+  // Hidden detector->detector edge made explicit (#2080): the graduation gate
+  // reuses `clearsShadowWinThresholds()` from workflow.shadow-axis-wins.
+  dependsOn: ['workflow.shadow-axis-wins'],
   rule(input) {
     const first = overScopedCandidates(input)[0];
     return first ? toRecommendation(first, DETECTOR_ID, configScopingProof(input)) : null;

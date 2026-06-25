@@ -147,6 +147,39 @@ export type {
  * {@link RecommendationInput} (in ./detectors/types) and map it below.
  */
 export type RecommendationViews = RecommendationInput;
+
+/**
+ * The union of every field any detector declares in its `dataDeps` (#2080),
+ * computed once from the static catalog. `assembleRecommendationInput` uses it
+ * to make `dataDeps` load-bearing on the mapper side: any declared dependency a
+ * caller omitted is filled with an explicit `null` ("looked, nothing there")
+ * rather than left `undefined` ("silently absent"). Detectors already treat
+ * `null`/`undefined`/empty identically for emit purposes, so this normalisation
+ * changes no emitted recommendation — it only guarantees a detector that names a
+ * field can rely on the key existing, and keeps the catalog test's
+ * populated-or-explicitly-null contract honest. The required base fields
+ * (`tokenData`, `toolData`, …) are never nulled — they are non-optional and a
+ * caller must supply them.
+ */
+const REQUIRED_INPUT_FIELDS: ReadonlySet<keyof RecommendationInput> = new Set([
+  'tokenData',
+  'toolData',
+  'sessions',
+  'projects',
+  'permissionRows',
+  'apiErrors',
+]);
+
+const DECLARED_DATA_DEP_FIELDS: ReadonlySet<keyof RecommendationInput> = (() => {
+  const s = new Set<keyof RecommendationInput>();
+  for (const d of DETECTORS) {
+    for (const dep of d.dataDeps ?? []) {
+      if (!REQUIRED_INPUT_FIELDS.has(dep)) s.add(dep);
+    }
+  }
+  return s;
+})();
+
 export function assembleRecommendationInput(
   v: RecommendationViews
 ): RecommendationInput {
@@ -163,14 +196,29 @@ export function assembleRecommendationInput(
     assistantFeatures: v.assistantFeatures ?? null,
     promptAnalysis: v.promptAnalysis ?? null,
   };
-  if ('modelPinSavings' in v) return normalized;
+
+  // #2080: make dataDeps load-bearing on the mapper. Every declared dependency
+  // that the caller omitted becomes an explicit `null` so detectors never read a
+  // silently-undefined declared field. `modelPinSavings` is handled by its own
+  // derive path below, so leave it for that step.
+  const normalizedRecord = normalized as unknown as Record<string, unknown>;
+  for (const field of DECLARED_DATA_DEP_FIELDS) {
+    if (field === 'modelPinSavings') continue;
+    if (normalizedRecord[field] === undefined) {
+      normalizedRecord[field] = null;
+    }
+  }
+
+  if ('modelPinSavings' in v) {
+    normalized.modelPinSavings = v.modelPinSavings ?? null;
+    return normalized;
+  }
 
   const derivedModelPinSavings = deriveModelPinSavingsConfig({
     tokenData: v.tokenData,
   });
-  return derivedModelPinSavings
-    ? { ...normalized, modelPinSavings: derivedModelPinSavings }
-    : normalized;
+  normalized.modelPinSavings = derivedModelPinSavings ?? null;
+  return normalized;
 }
 
 const buildCache: WeakMap<RecommendationInput, Recommendation[]> = new WeakMap();

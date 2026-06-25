@@ -633,11 +633,30 @@ export interface Detector {
   id: string;
   category: RecCategory;
   /**
-   * Which {@link RecommendationInput} fields this detector reads. Documentation
-   * + introspection only (the discovery workflow and the "what feeds the
-   * engine" map use it); it does NOT drive evaluation or loading.
+   * Which {@link RecommendationInput} fields this detector reads. This is
+   * **load-bearing metadata** (#2080), not just documentation:
+   *  - `assembleRecommendationInput` normalises every declared dependency to
+   *    "populated-or-explicitly-null" so a detector that names a field can rely
+   *    on the key being present (absent ⇒ `null`, never a silent `undefined`).
+   *  - The catalog completeness test (`data-deps.contract.test.ts`) statically
+   *    parses each detector's source and FAILS the build if it reads a
+   *    {@link RecommendationInput} field it did not declare here — so the
+   *    detector→input coupling can no longer stay hidden until a test fires.
+   * It still does NOT drive per-run evaluation or loading; `buildRecommendations`
+   * runs every detector regardless.
    */
   dataDeps?: (keyof RecommendationInput)[];
+  /**
+   * Other detectors this one imports and calls directly (by their stable `id`),
+   * making an otherwise-invisible detector→detector edge explicit in the Catalog
+   * (#2080). The canonical case: `context.over-scoped-config-section` calls
+   * `clearsShadowWinThresholds()` from `workflow.shadow-axis-wins` to reuse its
+   * evidence-bar threshold. Validated by the catalog test: every id listed here
+   * must be a real registered detector, and the test cross-checks that the source
+   * actually imports from the named detector's module so the declaration can't
+   * rot. Documentation + introspection only — it does not drive evaluation.
+   */
+  dependsOn?: string[];
   /** The pure detector function. Returns `null` when there's nothing to say. */
   rule: (input: RecommendationInput, now: number) => Recommendation | null;
   /**

@@ -10,54 +10,36 @@
  * behind a more-legible cost finding the user would otherwise read first
  * (S1-Priya's siloing failure-mode; see `docs/reviews/nav-redesign-funnel.md`).
  */
-import type { Recommendation, RecCategory } from './recommendations';
+import type { Recommendation } from './recommendations';
 import type { DomainCoverage, DomainCoverageStatus } from './coverage';
 import type { ActionDomain, View } from '../types';
+import {
+  ACTION_DOMAIN_NAMES,
+  CATEGORY_TO_DOMAIN,
+  DOMAIN_LANDING_VIEW,
+} from './domain-registry';
+import type { RecCategory } from './recommendations';
 
-/** Map a rec engine `category` onto the action-domain taxonomy (#490). */
-export const DOMAIN_FOR_CATEGORY: Record<RecCategory, ActionDomain> = {
-  cost: 'cost',
-  reliability: 'success-rate',
-  safety: 'safety',
-  // Agent-trustworthiness findings (model-deceit, #686) ride the safety-first
-  // lane: an unverified completion claim is a safety concern, not config hygiene.
-  security: 'safety',
-  context: 'context-health',
-  workflow: 'workflow-hygiene',
-  // Speed findings (the clock — wall-clock/latency levers, e.g. slow stop-hooks)
-  // own their own action-domain; see ADR 0006.
-  speed: 'speed',
-  activity: 'workflow-hygiene',
-  // Memory-store / config upkeep (#1965) is workflow hygiene: keeping the
-  // agent's own durable state clean is part of keeping the workflow honest.
-  maintenance: 'workflow-hygiene',
-};
+/**
+ * Map a rec engine `category` onto the action-domain taxonomy (#490). Derived
+ * from the single source of truth in {@link domain-registry.ts} (#2079) — edit
+ * the category→domain mapping there, not here.
+ */
+export const DOMAIN_FOR_CATEGORY: Record<RecCategory, ActionDomain> =
+  CATEGORY_TO_DOMAIN;
 
 /**
  * The six action-domains in digest order — safety first. The `speed` slot stays
- * empty until a clock-lever detector fires (ADR 0006 — honestly sparse at launch).
+ * empty until a clock-lever detector fires (ADR 0006 — honestly sparse at
+ * launch). Derived from the domain registry (#2079).
  */
-export const ACTION_DOMAINS: readonly ActionDomain[] = [
-  'safety',
-  'cost',
-  'success-rate',
-  'speed',
-  'context-health',
-  'workflow-hygiene',
-];
+export const ACTION_DOMAINS: readonly ActionDomain[] = ACTION_DOMAIN_NAMES;
 
-/** The default raw view to deep-link to for a domain's "open full view" link. */
-export const DOMAIN_LANDING: Record<ActionDomain, View> = {
-  home: 'home',
-  safety: 'permissions',
-  cost: 'cost',
-  'success-rate': 'errors',
-  speed: 'evaluator',
-  'context-health': 'context',
-  'workflow-hygiene': 'tools',
-  discovery: 'search',
-  raw: 'stats',
-};
+/**
+ * The default raw view to deep-link to for a domain's "open full view" link.
+ * Derived from the domain registry (#2079).
+ */
+export const DOMAIN_LANDING: Record<ActionDomain, View> = DOMAIN_LANDING_VIEW;
 
 /** The action-domain a recommendation belongs to. */
 export function domainForRec(rec: Recommendation): ActionDomain {

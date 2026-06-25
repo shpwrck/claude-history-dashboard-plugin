@@ -29,10 +29,9 @@ const MIN_REWORK_SCORE = 10;
 export const detector: Detector = {
   id: 'workflow.rework-signature',
   category: 'workflow',
-  dataDeps: ['sessions'], // fileHistory is injected via the cast below; sessions for context
+  dataDeps: ['fileHistory', 'sessions'], // fileHistory drives the signal; sessions for context
   rule(input) {
-    // fileHistory is an optional extension field not yet on the base type.
-    // Cast here so this detector compiles without touching the shared types file.
+    // `fileHistory` is a first-class optional field on RecommendationInput.
     const data = (input as RecommendationInput & { fileHistory?: FileHistorySession[] })
       .fileHistory ?? [];
 

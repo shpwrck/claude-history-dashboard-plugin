@@ -15,7 +15,7 @@ const MIN_RUNS = 5;
 export const detector: Detector = {
   id: 'cost.expensive-agent-type',
   category: 'cost',
-  dataDeps: ['agentSettings', 'attribution', 'runtimeEvents', 'toolData', 'tokenData'],
+  dataDeps: ['agentSettings', 'attribution', 'runtimeEvents', 'toolData', 'tokenData', 'liveConfig'],
   rule(input) {
     if (isHaikuPinned(input.liveConfig?.settings)) return null;
     const rows = computeAgentEffectiveness(

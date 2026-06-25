@@ -75,11 +75,10 @@ function buildReauthCommands(blockerNames: string[]): string {
 export const detector: Detector = {
   id: 'reliability.mcp-needs-auth',
   category: 'reliability',
-  dataDeps: ['attribution', 'sessions'],
+  dataDeps: ['attribution', 'sessions', 'mcpAuth'],
 
   rule(input: RecommendationInput) {
-    // Access mcpAuth via the optional extension pattern (keeps RecommendationInput
-    // pristine — the ingest layer adds the field without touching types.ts).
+    // mcpAuth is a first-class optional field on RecommendationInput.
     const st = (input as RecommendationInput & { mcpAuth?: McpAuthState | null }).mcpAuth;
     if (!st || !st.serversNeedingAuth.length) return null;
 

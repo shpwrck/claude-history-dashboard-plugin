@@ -25,10 +25,9 @@ export const detector: Detector = {
   id: 'workflow.plan-missing-verification',
   appliedMarkers: MARKERS_PLAN_VERIFICATION,
   category: 'workflow',
-  dataDeps: [],   // plans is injected as a non-standard extension field
+  dataDeps: ['plans'],
   rule(input: RecommendationInput) {
-    // Read the optional `plans` field without touching the shared RecommendationInput
-    // type — the field is wired by the caller when plan data is available.
+    // `plans` is a first-class optional field on RecommendationInput.
     const data = (input as RecommendationInput & { plans?: PlanSignature[] }).plans ?? [];
     if (data.length === 0) return null;
 

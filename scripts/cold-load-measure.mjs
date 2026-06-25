@@ -267,6 +267,23 @@ async function measureOnce(browser, url, { cpuThrottle = 1 } = {}) {
     } catch {
       /* unsupported — stays null */
     }
+    // Cumulative Layout Shift (CLS, #1575). The default home view (DigestSpine)
+    // mounts before the async sample-data parse completes, then injects its
+    // verdict Alert + ranked-finding sections — a late-settle that shifts content
+    // unless the boxes reserve their space. Sum the unexpected (no recent-input)
+    // layout-shift values from first paint; the observer is buffered so it catches
+    // shifts that fire before this script's listener attaches.
+    window.__coldLoadCls = 0;
+    try {
+      const clsObs = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (!entry.hadRecentInput) window.__coldLoadCls += entry.value;
+        }
+      });
+      clsObs.observe({ type: 'layout-shift', buffered: true });
+    } catch {
+      /* unsupported — stays 0 */
+    }
     // Content-Painted: first time #root gets a child element. Arm a
     // MutationObserver as early as possible (init script runs before the app
     // bundle), and also check synchronously in case #root already has content.
@@ -313,6 +330,14 @@ async function measureOnce(browser, url, { cpuThrottle = 1 } = {}) {
       lcp: window.__coldLoadLcp,
     };
   });
+  // CLS settle window (#1575): the home digest's data-driven sections inject
+  // after the sample-data parse, which lands well after `load` fires. Give the
+  // async pipeline + any late layout shifts time to settle, then read the
+  // accumulated CLS. 3s comfortably covers the cold sample parse on CI hardware
+  // (the cp medians are sub-second; this is deliberate headroom).
+  await page.waitForTimeout(3000);
+  const cls = await page.evaluate(() => window.__coldLoadCls);
+  metrics.cls = cls;
   if (cdp) {
     try {
       await cdp.detach();
@@ -336,6 +361,7 @@ async function measureFlavor(browser, flavor, preview, { cpuThrottle = 1 } = {})
   const ttis = [];
   const cps = [];
   const lcps = [];
+  const clss = [];
   for (let i = 0; i < RUNS; i++) {
     const m = await measureOnce(browser, preview.url, opts);
     if (m.fcp == null) die(`${flavor}: no First Contentful Paint recorded — did the app render?`);
@@ -345,11 +371,16 @@ async function measureFlavor(browser, flavor, preview, { cpuThrottle = 1 } = {})
     ttis.push(m.tti);
     cps.push(m.cp);
     if (m.lcp != null) lcps.push(m.lcp);
+    // CLS is always a number (defaults to 0 even with no shifts / unsupported API).
+    clss.push(typeof m.cls === 'number' ? m.cls : 0);
   }
+  // Round CLS to 4 dp — it is a small unitless ratio, not a millisecond count.
+  const r4 = (n) => Math.round(n * 10000) / 10000;
   return {
     fcp: { runs: fcps.map(Math.round), median: Math.round(median(fcps)) },
     tti: { runs: ttis.map(Math.round), median: Math.round(median(ttis)) },
     cp: { runs: cps.map(Math.round), median: Math.round(median(cps)) },
+    cls: { runs: clss.map(r4), median: r4(median(clss)) },
     // LCP is opportunistic — null entries are dropped; report only if we got any.
     lcp: lcps.length
       ? { runs: lcps.map(Math.round), median: Math.round(median(lcps)) }
@@ -397,6 +428,7 @@ async function main() {
     console.log(`    FCP  median ${fmtMs(r.fcp.median).padStart(8)}   runs [${r.fcp.runs.join(', ')}]`);
     console.log(`    TTI  median ${fmtMs(r.tti.median).padStart(8)}   runs [${r.tti.runs.join(', ')}]`);
     console.log(`    CP   median ${fmtMs(r.cp.median).padStart(8)}   runs [${r.cp.runs.join(', ')}]`);
+    console.log(`    CLS  median ${r.cls.median.toFixed(4).padStart(8)}   runs [${r.cls.runs.map((n) => n.toFixed(4)).join(', ')}]`);
     if (r.lcp) {
       console.log(`    LCP  median ${fmtMs(r.lcp.median).padStart(8)}   runs [${r.lcp.runs.join(', ')}]  (cross-check, not gated)`);
     }
@@ -433,6 +465,21 @@ async function main() {
           `${fmtMs(actual).padStart(8)}  / budget ${fmtMs(max)}`,
       );
       if (!ok) failures.push(`${FLAVORS[flavor].label} ${metric.toUpperCase()} ${fmtMs(actual)} exceeds budget ${fmtMs(max)}`);
+    }
+    // CLS gate (#1575): a unitless ratio, not a millisecond count, so it has its
+    // own budget key and formatting. Lower is better; Core Web Vitals call < 0.1
+    // "good". Gated only when the flavor budget declares clsMaxBudget so the gate
+    // is opt-in per flavor.
+    const clsMax = flavorBudget.clsMaxBudget;
+    if (clsMax != null) {
+      const actual = r.cls.median;
+      const ok = actual <= clsMax;
+      const mark = ok ? '✓' : '✗';
+      console.log(
+        `  ${mark} ${FLAVORS[flavor].label.padEnd(11)} CLS ` +
+          `${actual.toFixed(4).padStart(8)}  / budget ${clsMax.toFixed(4)}`,
+      );
+      if (!ok) failures.push(`${FLAVORS[flavor].label} CLS ${actual.toFixed(4)} exceeds budget ${clsMax.toFixed(4)}`);
     }
   }
 

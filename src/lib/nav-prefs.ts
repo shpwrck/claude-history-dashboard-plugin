@@ -40,6 +40,7 @@ import FlaskIcon from '@patternfly/react-icons/dist/esm/icons/flask-icon';
 import ServerIcon from '@patternfly/react-icons/dist/esm/icons/server-icon';
 import type { View, ActionDomain } from '../types';
 import type { ViewRequirement, VariantCapabilities } from './variant-capabilities';
+import { ALL_DOMAINS, DOMAIN_OUTCOME_VERB } from './domain-registry';
 
 const STORAGE_KEY = 'claude-dashboard:nav-prefs';
 
@@ -94,32 +95,17 @@ export const DEFAULT_VIEW: View = 'home';
  * data-type: the digest `home` first, then the six action domains with
  * **safety leading** (so a critical safety finding can't hide behind a cost tab
  * the user opens first — S1-Priya's siloing failure-mode), then the global
- * `discovery` Find utility, then the demoted `raw` orientation drawer.
+ * `discovery` Find utility, then the demoted `raw` orientation drawer. Derived
+ * from the domain registry (#2079) — the single source of truth for domain
+ * order/labels/landing/categories.
  */
-export const DOMAIN_ORDER: readonly ActionDomain[] = [
-  'home',
-  'safety',
-  'cost',
-  'success-rate',
-  'speed',
-  'context-health',
-  'workflow-hygiene',
-  'discovery',
-  'raw',
-] as const;
+export const DOMAIN_ORDER: readonly ActionDomain[] = ALL_DOMAINS;
 
-/** Human label per domain group header in the sidebar. */
-export const DOMAIN_LABEL: Record<ActionDomain, string> = {
-  home: 'Overview',
-  safety: 'Stay safe',
-  cost: 'Cut cost',
-  'success-rate': 'Fail less',
-  speed: 'Go faster',
-  'context-health': 'Tame context',
-  'workflow-hygiene': 'Clean workflow',
-  discovery: 'Find',
-  raw: 'Raw data',
-};
+/**
+ * Human label (outcome-verb) per domain group header in the sidebar. Derived
+ * from the domain registry (#2079).
+ */
+export const DOMAIN_LABEL: Record<ActionDomain, string> = DOMAIN_OUTCOME_VERB;
 
 /**
  * Current curated-default generation (#608). Bump this whenever
