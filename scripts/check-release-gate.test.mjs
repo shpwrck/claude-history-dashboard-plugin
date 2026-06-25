@@ -7,7 +7,13 @@
 // minor cut (bare `x.y` or `x.y.0`) is gated; a patch (`x.y.z`, z>0) is exempt.
 
 import assert from 'node:assert/strict';
-import { classifyTarget, expectsSecurityGate, candidateMilestones } from './check-release-gate.mjs';
+import {
+  classifyTarget,
+  expectsSecurityGate,
+  expectsDataIntegrityGate,
+  expectedGateCount,
+  candidateMilestones,
+} from './check-release-gate.mjs';
 
 const cases = [
   ['v0.2', { milestone: 'v0.2', patch: null, isPatch: false }],
@@ -56,6 +62,47 @@ for (const [input, expected] of securityCases) {
   } catch (err) {
     failures += 1;
     console.error(`  FAIL expectsSecurityGate(${input}): ${err.message}`);
+  }
+}
+
+// Data-integrity gate (fourth standing epic) is expected only from v0.6 onward
+// (#2130). v0.3–v0.5 keep the perf+architecture+security trio; v0.6+ and any
+// v1+ also expect data-integrity.
+const dataIntegrityCases = [
+  ['v0.2', false],
+  ['v0.3', false],
+  ['v0.5', false],
+  ['v0.6', true],
+  ['v0.10', true],
+  ['v1.0', true],
+  ['v2.4', true],
+];
+for (const [input, expected] of dataIntegrityCases) {
+  try {
+    assert.equal(expectsDataIntegrityGate(input), expected);
+    console.log(`  ok  expectsDataIntegrityGate(${input}) -> ${expected}`);
+  } catch (err) {
+    failures += 1;
+    console.error(`  FAIL expectsDataIntegrityGate(${input}): ${err.message}`);
+  }
+}
+
+// The expected standing-set size rolls up the rollouts: 2 (perf+arch) below
+// v0.3, 3 once security lands at v0.3, 4 once data-integrity lands at v0.6.
+const gateCountCases = [
+  ['v0.2', 2],
+  ['v0.3', 3],
+  ['v0.5', 3],
+  ['v0.6', 4],
+  ['v1.0', 4],
+];
+for (const [input, expected] of gateCountCases) {
+  try {
+    assert.equal(expectedGateCount(input), expected);
+    console.log(`  ok  expectedGateCount(${input}) -> ${expected}`);
+  } catch (err) {
+    failures += 1;
+    console.error(`  FAIL expectedGateCount(${input}): ${err.message}`);
   }
 }
 

@@ -113,6 +113,40 @@ test('seeds only the perf+architecture pair for a < v0.3 milestone', async () =>
   assert.ok(!github.created.some((i) => i.labels.includes('security')));
 });
 
+test('seeds the full 4-epic set for a >= v0.6 milestone (#2130)', async () => {
+  const github = fakeGitHub({ milestones: [{ title: 'v0.6', number: 9 }] });
+  const result = await seed('v0.6', github);
+
+  assert.equal(result.seeded, true);
+  assert.deepEqual(
+    result.created.map((c) => c.domain),
+    ['performance', 'architecture', 'security', 'data-integrity'],
+  );
+  assert.equal(github.created.length, 4);
+  assert.deepEqual(
+    github.created.map((i) => i.labels.find((l) => !['epic', 'release-gate'].includes(l))),
+    ['performance', 'tech-debt', 'security', 'data-integrity'],
+  );
+  assert.deepEqual(
+    github.created.map((i) => i.title),
+    [
+      'Performance review for v0.6',
+      'Architecture review for v0.6',
+      'Security review for v0.6',
+      'Data-integrity review for v0.6',
+    ],
+  );
+});
+
+test('keeps the 3-epic set for v0.3–v0.5 — no data-integrity epic before v0.6', async () => {
+  const github = fakeGitHub({ milestones: [{ title: 'v0.5', number: 8 }] });
+  const result = await seed('v0.5', github);
+
+  assert.deepEqual(result.created.map((c) => c.domain), ['performance', 'architecture', 'security']);
+  assert.equal(github.created.length, 3);
+  assert.ok(!github.created.some((i) => i.labels.includes('data-integrity')));
+});
+
 test('epic bodies are dormant concern buckets, not decomposed specs', async () => {
   const github = fakeGitHub({ milestones: [{ title: 'v0.5', number: 9 }] });
   await seed('v0.5', github);
@@ -222,11 +256,19 @@ test('classifySeedTarget separates minors, patches, and non-release buckets', ()
   assert.equal(classifySeedTarget(undefined).reason, 'not-release');
 });
 
-test('expectedGateDomains delegates the security cutoff to check-release-gate', () => {
+test('expectedGateDomains delegates the security + data-integrity cutoffs to check-release-gate', () => {
   assert.deepEqual(expectedGateDomains('v0.2').map((d) => d.key), ['performance', 'architecture']);
   assert.deepEqual(
     expectedGateDomains('v0.3').map((d) => d.key),
     ['performance', 'architecture', 'security'],
+  );
+  assert.deepEqual(
+    expectedGateDomains('v0.5').map((d) => d.key),
+    ['performance', 'architecture', 'security'],
+  );
+  assert.deepEqual(
+    expectedGateDomains('v0.6').map((d) => d.key),
+    ['performance', 'architecture', 'security', 'data-integrity'],
   );
   assert.equal(expectedGateDomains('v1.0').length, GATE_DOMAINS.length);
 });
@@ -262,4 +304,13 @@ test('gateEpicBody names the milestone and the domain concern', () => {
   const body = gateEpicBody(security, 'v0.6');
   assert.match(body, /security-review gate for v0\.6/);
   assert.match(body, /security-review pass/);
+});
+
+test('gateEpicBody frames the data-integrity gate as provable + faultless (#2130)', () => {
+  const dataIntegrity = GATE_DOMAINS.find((d) => d.key === 'data-integrity');
+  const body = gateEpicBody(dataIntegrity, 'v0.6');
+  assert.match(body, /data-integrity-review gate for v0\.6/);
+  assert.match(body, /provable/);
+  assert.match(body, /faultless/);
+  assert.match(body, /docs\/adding-a-recommendation\.md/);
 });

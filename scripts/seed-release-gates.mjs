@@ -3,7 +3,8 @@
 //
 // docs/RELEASING.md -> "Release-gating epics" makes every minor release carry
 // standing review epics (performance / architecture, plus security from v0.3
-// onward, #698), seeded DORMANT at release start as concern buckets per the
+// onward, #698, and data-integrity from v0.6 onward, #2130), seeded DORMANT at
+// release start as concern buckets per the
 // two-phase model (#642): they bank concerns during the feature phase and are
 // only groomed/decomposed at the review phase. `scripts/check-release-gate.mjs`
 // is the *check* half of that contract — it fails the cut when the epics are
@@ -31,7 +32,7 @@
 
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { classifyTarget, expectsSecurityGate } from './check-release-gate.mjs';
+import { classifyTarget, expectsSecurityGate, expectsDataIntegrityGate } from './check-release-gate.mjs';
 
 const API_ROOT = 'https://api.github.com';
 const GATE_LABEL = 'release-gate';
@@ -39,7 +40,8 @@ const RELEASE_MILESTONE = /^v\d+\.\d+(\.\d+)?$/;
 
 // The standing gate domains. `label` is the domain label the idempotency check
 // keys on (and the one docs/RELEASING.md prescribes); `security` only applies
-// from v0.3 onward — see expectedGateDomains().
+// from v0.3 onward and `data-integrity` only from v0.6 onward — see
+// expectedGateDomains().
 export const GATE_DOMAINS = [
   {
     key: 'performance',
@@ -62,15 +64,28 @@ export const GATE_DOMAINS = [
     concern: 'security',
     groomHint: 'a fresh /security-review pass',
   },
+  {
+    key: 'data-integrity',
+    label: 'data-integrity',
+    title: (milestone) => `Data-integrity review for ${milestone}`,
+    concern: 'data-integrity',
+    groomHint:
+      'a fresh data-integrity pass — audit that every recommendation/calculation shipped ' +
+      'this cycle is provable (evidence-backed and reproducible per docs/adding-a-recommendation.md), ' +
+      'the arithmetic is re-derived and faultless, stale signals are demoted to "as of <date>", ' +
+      'and every `validated` fix snippet is genuinely copy-paste-safe',
+  },
 ];
 
 // The expected standing set for a milestone. Version-awareness is delegated to
 // check-release-gate.mjs so the "which gates does vX.Y expect" rule lives in
-// exactly one place (#698).
+// exactly one place (#698, #2130): security is dropped below v0.3 and
+// data-integrity below v0.6.
 export function expectedGateDomains(milestoneTitle) {
-  return expectsSecurityGate(milestoneTitle)
-    ? GATE_DOMAINS
-    : GATE_DOMAINS.filter((d) => d.key !== 'security');
+  const dropped = new Set();
+  if (!expectsSecurityGate(milestoneTitle)) dropped.add('security');
+  if (!expectsDataIntegrityGate(milestoneTitle)) dropped.add('data-integrity');
+  return GATE_DOMAINS.filter((d) => !dropped.has(d.key));
 }
 
 // Decide whether a milestone title should be seeded at all.

@@ -3,12 +3,13 @@
 // epics are closed.
 //
 // Every minor release (milestone vX.Y) is seeded with standing `release-gate`
-// epics — a performance review and an architecture review, and from v0.3 onward
-// a security review too (see docs/RELEASING.md). This script is the hard gate:
-// it FAILS (non-zero exit) if the target milestone has no gating epics seeded,
-// or if any of them are still open. The pass/fail rule is generic ("every
-// release-gate epic in the milestone is closed"), so it already covers the
-// third epic; only the "expected set" messaging is version-aware (#698). Run it
+// epics — a performance review and an architecture review, from v0.3 onward a
+// security review too (#698), and from v0.6 onward a data-integrity review
+// (#2130) (see docs/RELEASING.md). This script is the hard gate: it FAILS
+// (non-zero exit) if the target milestone has no gating epics seeded, or if any
+// of them are still open. The pass/fail rule is generic ("every release-gate
+// epic in the milestone is closed"), so it already covers the later epics;
+// only the "expected set" messaging is version-aware (#698, #2130). Run it
 // before `gh release create`, and in CI on tag push.
 //
 // PATCH / hotfix releases (`x.y.z`, z>0) are EXEMPT: the perf/architecture/
@@ -72,11 +73,36 @@ export function expectsSecurityGate(milestone) {
   return major > 0 || minor >= 3;
 }
 
+// The data-integrity review is the fourth standing gate epic, rolled out from
+// v0.6 onward (#2130). It is the deliberate per-cycle check that every
+// recommendation/calculation shipped this release is provable (evidence-backed,
+// reproducible per docs/adding-a-recommendation.md) and arithmetically
+// faultless. Earlier milestones (<= v0.5) keep the perf+architecture+security
+// set and must NOT be flagged for a missing data-integrity epic. A milestone
+// qualifies when it is >= v0.6: any major > 0, or major 0 with minor >= 6.
+export function expectsDataIntegrityGate(milestone) {
+  const m = String(milestone).match(/v?(\d+)\.(\d+)/);
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 0 || minor >= 6;
+}
+
+// The number of standing gate epics a milestone is expected to carry: the
+// perf+architecture pair, plus security (>= v0.3) and data-integrity (>= v0.6)
+// as they roll in. The pass/fail rule below stays generic ("every release-gate
+// epic is closed"); this only drives the version-aware "expected set" warning.
+export function expectedGateCount(milestone) {
+  return 2 + (expectsSecurityGate(milestone) ? 1 : 0) + (expectsDataIntegrityGate(milestone) ? 1 : 0);
+}
+
 // Human-readable description of the standing set expected for a milestone.
 function expectedSet(milestone) {
-  return expectsSecurityGate(milestone)
-    ? 'a performance epic, an architecture-review epic AND a security-review epic'
-    : 'a performance epic AND an architecture-review epic';
+  const epics = ['a performance epic', 'an architecture-review epic'];
+  if (expectsSecurityGate(milestone)) epics.push('a security-review epic');
+  if (expectsDataIntegrityGate(milestone)) epics.push('a data-integrity-review epic');
+  const last = epics.pop();
+  return `${epics.join(', ')} AND ${last}`;
 }
 
 // The milestone naming convention standardized on the three-part `vX.Y.Z` form
@@ -169,7 +195,7 @@ function main() {
   const open = gateIssues.filter((i) => i.state.toLowerCase() === 'open');
   const closed = gateIssues.filter((i) => i.state.toLowerCase() === 'closed');
 
-  const expectedCount = expectsSecurityGate(resolved) ? 3 : 2;
+  const expectedCount = expectedGateCount(resolved);
   if (gateIssues.length < expectedCount) {
     // Fewer gating epics than the standing set for this milestone. Warn loudly;
     // the open check below still governs pass/fail.
