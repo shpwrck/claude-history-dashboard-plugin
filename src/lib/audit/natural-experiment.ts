@@ -35,7 +35,7 @@
  * SERVER-ONLY (runs behind /api/audit.json with the rest of the harness).
  */
 import type { AuditFinding, AuditConfidence } from './types';
-import type { JudgeFn } from './judge';
+import type { JudgeFn } from './judge-types';
 
 /**
  * One per-session observation. `outcome` is the regression target (1 = good,

@@ -2,14 +2,12 @@ import type { ActionDomain } from '../types';
 import { ACTION_DOMAINS } from './digest';
 import type { RecommendationInput } from './detectors/types';
 import { aggregateStopHooks } from './parse-runtime-events';
-
-export type DomainCoverageStatus = 'PROVE' | 'INFER' | 'CANNOT_SEE';
-
-export interface DomainCoverage {
-  domain: ActionDomain;
-  status: DomainCoverageStatus;
-  staleNote?: string;
-}
+// Coverage types live in a dependency-free leaf (#1582) so `digest.ts` can import
+// them without a (type-only) cycle back through this module, which imports a value
+// from digest. Re-exported here so every existing `from './coverage'` importer is
+// unaffected.
+import type { DomainCoverage } from './coverage-types';
+export type { DomainCoverage, DomainCoverageStatus } from './coverage-types';
 
 type InputKey = keyof RecommendationInput;
 

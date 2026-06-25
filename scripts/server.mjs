@@ -1265,14 +1265,22 @@ async function buildDatasetCache(api, contentHash) {
   // not the per-build timestamp. Lone surrogates are scrubbed so the export
   // stays valid for strict parsers (#1104).
   const { json, stableJson } = buildDatasetBody(dataset);
-  const buf = Buffer.from(json);
-  if (buf.length > DATASET_RESPONSE_MAX_BYTES) {
+  // Measure the serialized byte length BEFORE materializing the response Buffer
+  // (#1582). Buffer.byteLength(json) is exactly Buffer.from(json).length for the
+  // default utf8 encoding, so the 413 threshold and reported `actualBytes` are
+  // unchanged — but an over-cap dataset no longer co-resides the object, the JSON
+  // string, AND a full Buffer copy before the throw: it bails at the string stage
+  // and never allocates the second multi-hundred-MB Buffer. The success path is
+  // byte-identical: under the cap, `buf` is built exactly as before.
+  const responseBytes = Buffer.byteLength(json);
+  if (responseBytes > DATASET_RESPONSE_MAX_BYTES) {
     const err = new Error(`Dataset response exceeds ${DATASET_RESPONSE_MAX_BYTES} byte limit`);
     err.code = 'DATASET_RESPONSE_TOO_LARGE';
     err.maxBytes = DATASET_RESPONSE_MAX_BYTES;
-    err.actualBytes = buf.length;
+    err.actualBytes = responseBytes;
     throw err;
   }
+  const buf = Buffer.from(json);
   const etag = datasetEtagFrom(stableJson);
   // Compress both encodings concurrently on the libuv threadpool so the brotli
   // (~310 ms at this size) and gzip never block the event loop (#1015). The

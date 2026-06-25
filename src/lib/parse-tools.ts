@@ -5,86 +5,31 @@ import {
   dangerousFragment,
   dangerousPatternCertainty,
   executableShellSkeleton,
-  type DangerousCommandCertainty,
 } from './parse-permissions';
+// The tool-call shapes live in a dependency-free leaf (#1582) so `parse-permissions`
+// can import `ToolUsageData` WITHOUT a (type-only) cycle back through this module,
+// which imports its classifier VALUES. Re-exported so every existing
+// `from './parse-tools'` importer is unaffected.
+import type {
+  DistilledToolInput,
+  BypassCategory,
+  ToolCall,
+  ToolUsageData,
+} from './parse-tools-types';
+export type {
+  DistilledToolInput,
+  BypassCategory,
+  DangerousCommandCertainty,
+  ToolCall,
+  ToolUsageData,
+} from './parse-tools-types';
 
-/**
- * Distilled tool-call `input`. The raw `call.input` blob is the single largest
- * contributor to the dataset payload (file contents, full command bodies, MCP
- * argument blobs), but only a handful of small sub-fields are ever read
- * client-side. Session-detail rows keep those fields under the same names, but
- * the bulk dataset strips `input.command` after deriving compact Bash command
- * signals. Any field not listed here is intentionally dropped on the wire.
- *
- * Consumers (audited):
- *  - Bash `command`       → parse-tools (topBashCommands / bypass / subcommand /
- *                            repeated), parse-permissions (detectDangerousCommands)
- *  - file tools `file_path` → parse-files (Read/Edit/Write/NotebookEdit/MultiEdit)
- *  - Task `subagent_type` → parse-agents (aggregateAgentInvocations)
- *  - Skill `skill`        → parse-agents (aggregateSkillInvocations)
- */
-export interface DistilledToolInput {
-  command?: string;
-  file_path?: string;
-  subagent_type?: string;
-  skill?: string;
-}
-
-/**
- * Categories of shell command that re-implement a first-class Claude tool.
- * Using the native tool is cheaper (no shell spin-up / output streaming) and
- * goes through permission integration, so each detected use is a nudge.
- */
-export type BypassCategory = 'grep' | 'find' | 'cat' | 'sed' | 'awk' | 'cd';
-
-export interface ToolCall {
-  timestamp: string;
-  toolName: string;
-  input: DistilledToolInput;
-  toolUseId: string;
-  isError: boolean | null;
-  /**
-   * Size of the tool_result content in characters, used as a cheap proxy for
-   * how many tokens the result consumed (no actual token count is available
-   * per tool_result on the wire). 0 when no result was seen or it was empty.
-   * Additive field — see cost-attribution's token-weighted attribution.
-   */
-  resultBytes: number;
-  /** Compact fingerprint for repeat grouping after raw Bash text is stripped. */
-  commandFingerprint?: string;
-  /** Small redacted-ish display preview; raw command bodies stay out of bulk JSON. */
-  commandPreview?: string;
-  /** First executable token after leading env assignments. */
-  commandHead?: string;
-  /** Git-related command segments needed by workflow detectors after stripping. */
-  commandGitSegments?: string[];
-  /** Precomputed native-tool-bypass categories for Bash commands. */
-  commandBypassCategories?: BypassCategory[];
-  /** First dangerous-command pattern matched by the Bash command, if any. */
-  commandDangerousPattern?: string;
-  /**
-   * Precomputed dangerous-command certainty (target-aware for `rm -rf`), derived
-   * from the FULL command at parse time so it survives raw-body stripping (#2036).
-   * Consumers (detectDangerousCommands) must prefer this over recomputing from the
-   * truncated `commandPreview`, which can't see a `rm -rf <target>` buried past it.
-   */
-  commandDangerousCertainty?: DangerousCommandCertainty;
-  /**
-   * Precomputed display fragment centered on the dangerous match (e.g.
-   * `rm -rf <target>`) so cited evidence isn't a misleading leading `cd …`/`mkdir`
-   * prefix once the raw body is dropped (#2036).
-   */
-  commandDangerousFragment?: string;
-  /** First high-impact action pattern matched by the Bash command, if any. */
-  commandRiskyActionPattern?: string;
-  /** Whether the command references Claude-specific paths such as `.claude`. */
-  commandMentionsClaudePath?: boolean;
-}
-
-export interface ToolUsageData {
-  sessionId: string;
-  calls: ToolCall[];
-}
+// `DistilledToolInput`, `BypassCategory`, `ToolCall`, and `ToolUsageData` are
+// defined in the `./parse-tools-types` leaf and re-exported above (#1582). The
+// `input` consumer map for reference: Bash `command` → parse-tools (topBashCommands
+// / bypass / subcommand / repeated) + parse-permissions (detectDangerousCommands);
+// file tools `file_path` → parse-files; Task `subagent_type` and Skill `skill` →
+// parse-agents.
 
 export interface ToolAggregate {
   toolName: string;

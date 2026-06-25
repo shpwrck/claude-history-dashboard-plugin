@@ -25,7 +25,7 @@
  * SERVER-ONLY (runs behind /api/audit.json with the rest of the harness).
  */
 import type { AuditFinding } from './types';
-import type { JudgeFn } from './judge';
+import type { JudgeFn } from './judge-types';
 
 /** One session's deterministic rework metrics (from parse-file-history). */
 export interface ReworkSession {

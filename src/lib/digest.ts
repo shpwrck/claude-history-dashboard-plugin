@@ -10,15 +10,22 @@
  * behind a more-legible cost finding the user would otherwise read first
  * (S1-Priya's siloing failure-mode; see `docs/reviews/nav-redesign-funnel.md`).
  */
-import type { Recommendation } from './recommendations';
-import type { DomainCoverage, DomainCoverageStatus } from './coverage';
+// Source these types from their leaf modules, not from the cyclic `./recommendations`
+// / `./coverage` barrels (#1582): `digest.ts` imports VALUES from `domain-registry`
+// (which `recommendations` reaches) and is reached BY `coverage`, so importing the
+// types from those modules closed a (type-only, runtime-erased) madge cycle.
+// `Recommendation` is defined in `./detectors/types`; `RecCategory` in the
+// `./detectors/rec-enums` leaf; the coverage types in the `./coverage-types` leaf.
+// All three are re-exported by the original barrels, so this is a pure path swap.
+import type { Recommendation } from './detectors/types';
+import type { RecCategory } from './detectors/rec-enums';
+import type { DomainCoverage, DomainCoverageStatus } from './coverage-types';
 import type { ActionDomain, View } from '../types';
 import {
   ACTION_DOMAIN_NAMES,
   CATEGORY_TO_DOMAIN,
   DOMAIN_LANDING_VIEW,
 } from './domain-registry';
-import type { RecCategory } from './recommendations';
 
 /**
  * Map a rec engine `category` onto the action-domain taxonomy (#490). Derived

@@ -56,21 +56,14 @@ import type {
 import type { ModelEvalSummary } from '../model-eval-ingest';
 import type { GitOutcome } from '../parse-git-outcome';
 import type { EvidenceRef } from '../evidence';
-
-export type RecCategory =
-  | 'cost'
-  | 'context'
-  | 'workflow'
-  | 'safety'
-  | 'security'
-  | 'reliability'
-  | 'speed'
-  | 'activity'
-  // Upkeep of the agent's own durable state — memory-store hygiene (stale,
-  // duplicate, or contradictory memories), and future config/skill rot. The
-  // foundation for the memory-hygiene detector (#1779); no detector emits it
-  // yet, but every exhaustive consumer must render/aggregate it (#1965).
-  | 'maintenance';
+// RecCategory and SavingsAttributionTier are defined in a dependency-free leaf
+// (#1582) so the parsers this module pulls types from (reclaim,
+// parse-external-guidance, parse-config-attribution via parse-repo-map-join) can
+// import the enum WITHOUT a (type-only) cycle back through here. Re-exported so
+// every existing `from './detectors/types'` / `from './recommendations'` importer
+// is unaffected.
+import type { RecCategory, SavingsAttributionTier } from './rec-enums';
+export type { RecCategory, SavingsAttributionTier } from './rec-enums';
 
 export type RecSeverity = 'critical' | 'warning' | 'info';
 
@@ -252,11 +245,6 @@ export interface RecProvenance {
    */
   stale?: boolean;
 }
-
-export type SavingsAttributionTier =
-  | 'tier-0-estimate'
-  | 'tier-1-before-after'
-  | 'tier-2-ablation';
 
 export type SavingsAttributionConfidence = 'low' | 'medium' | 'high';
 

@@ -20,7 +20,7 @@
  * (SessionCost.estimatedCost). Same intent, real APIs.
  */
 import type { AuditFinding } from './types';
-import type { JudgeFn } from './judge';
+import type { JudgeFn } from './judge-types';
 
 /** One session's ordered tool usage plus the $ it cost (the displaced-cost weight). */
 export interface ToolSequenceSession {

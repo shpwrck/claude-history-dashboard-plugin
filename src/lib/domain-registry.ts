@@ -24,7 +24,12 @@
  * are unchanged) are guarded by `domain-registry.test.ts`.
  */
 import type { ActionDomain, View } from '../types';
-import type { RecCategory } from './recommendations';
+// From the dependency-free enum leaf, not the cyclic `./recommendations` barrel
+// (#1582): `digest.ts` imports VALUES from here and `recommendations` reaches here
+// transitively, so importing `RecCategory` from `./recommendations` closed a
+// (type-only, runtime-erased) madge cycle. `recommendations` re-exports the enum,
+// so this is a pure path swap.
+import type { RecCategory } from './detectors/rec-enums';
 
 /**
  * One registry entry per action-domain. `order` is the sidebar/digest sort

@@ -13,6 +13,12 @@
  * presents (mirroring `/api/usage`).
  */
 import type { AuditFinding, AuditConfidence } from './types';
+// The injectable judge contract lives in a dependency-free leaf (#1582) so the
+// per-audit modules below can import it WITHOUT a (type-only) cycle back through
+// this module, which imports their values. Re-exported here so existing
+// `import { JudgeFn, JudgeVerdict } from './judge'` consumers are unaffected.
+import type { JudgeFn, JudgeVerdict } from './judge-types';
+export type { JudgeFn, JudgeVerdict } from './judge-types';
 import {
   detectRecurringSequences,
   runAgenticOpportunityAudit,
@@ -63,19 +69,6 @@ export interface AuditSession {
   toolCalls: number;
   messageCount: number;
 }
-
-/** A judge's verdict over one candidate. */
-export interface JudgeVerdict {
-  isFinding: boolean;
-  rationale: string;
-  confidence: AuditConfidence;
-}
-
-/** The judge call, abstracted so tests inject a deterministic fake. */
-export type JudgeFn = (prompt: {
-  system: string;
-  user: string;
-}) => Promise<JudgeVerdict>;
 
 export interface ClaudeJudgeChatRequest {
   model?: string;

@@ -50,7 +50,7 @@
 
 import type { ConfigReferenceKind, ConfigSection } from './parse-config-sections';
 import { nativeToolBypass, type ToolUsageData } from './parse-tools';
-import type { SavingsAttributionTier } from './detectors/types';
+import type { SavingsAttributionTier } from './detectors/rec-enums';
 
 // ── Public taxonomy ──────────────────────────────────────────────────────────
 

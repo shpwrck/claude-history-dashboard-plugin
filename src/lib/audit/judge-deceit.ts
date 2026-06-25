@@ -39,7 +39,7 @@
  * read + judged per run.
  */
 import type { AuditFinding } from './types';
-import type { JudgeFn, JudgeVerdict } from './judge';
+import type { JudgeFn, JudgeVerdict } from './judge-types';
 
 /**
  * A session worth paying the judge to read. `assistantTurnCount` drives the seed

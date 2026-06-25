@@ -8,7 +8,7 @@
  * runtime. The on-disk snapshot reader lives in `parse-external-guidance.ts`,
  * which re-exports everything here for back-compat.
  */
-import type { RecCategory } from './detectors/types';
+import type { RecCategory } from './detectors/rec-enums';
 
 type JsonObject = Record<string, unknown>;
 

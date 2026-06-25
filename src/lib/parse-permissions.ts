@@ -1,4 +1,10 @@
-import type { ToolUsageData } from './parse-tools';
+// From the `./parse-tools-types` leaf, not `./parse-tools` (#1582): `parse-tools`
+// imports this module's classifier VALUES, so importing `ToolUsageData` from it
+// closed a (type-only, runtime-erased) madge cycle. `DangerousCommandCertainty`
+// also moved to that leaf (it is referenced by `ToolCall` there); re-exported here
+// so existing `from './parse-permissions'` importers are unaffected.
+import type { ToolUsageData, DangerousCommandCertainty } from './parse-tools-types';
+export type { DangerousCommandCertainty } from './parse-tools-types';
 import { evidenceRefForEntry, type EvidenceRef } from './evidence';
 import type { SessionTimeline } from './parse-timeline';
 import { parseJsonl, type RawSessionEntry } from './parse-utils';
@@ -8,8 +14,6 @@ export interface PermissionModeStat {
   entryCount: number;
   sessionCount: number;
 }
-
-export type DangerousCommandCertainty = 'high' | 'medium';
 
 export interface DangerousCommand {
   sessionId: string;

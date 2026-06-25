@@ -44,7 +44,7 @@
  * detectors that omit `cause` fall into the {@link DEFAULT_CAUSE} bucket and keep
  * compiling unchanged.
  */
-import type { RecCategory } from './detectors/types';
+import type { RecCategory } from './detectors/rec-enums';
 import type { SessionTokenData, TokenEntry } from '../types';
 import { getModelPricing } from './pricing';
 

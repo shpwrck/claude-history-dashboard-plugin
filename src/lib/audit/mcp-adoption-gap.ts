@@ -34,7 +34,7 @@
  * rather than `parse-timeline`. Same intent, real surfaces.
  */
 import type { AuditFinding } from './types';
-import type { JudgeFn } from './judge';
+import type { JudgeFn } from './judge-types';
 
 /**
  * One coarse, explainable capability signal aggregated from history. `weight` is
