@@ -1205,6 +1205,32 @@ async function refreshReviewEventsForIngest(ingestApi) {
   return ingestApi.refreshReviewEvents();
 }
 
+// Shared ingest preamble for the dataset-bearing routes (#2076). Every one of
+// /api/dataset.json, /api/recommendations.json, /api/digest and /api/search
+// resolved the per-request dataset state, awaited its ingest API promise, and
+// refreshed review events with the exact same three lines before doing anything
+// route-specific. This captures that preamble plus the cache-reuse policy in one
+// place so the routes share it instead of repeating it.
+//
+//   useCache:true  — the caller drives ingest through its own cache machinery
+//                    (the dataset stat-gate / cold-build, or the recommendations
+//                    response cache), so this helper must NOT call ingest().
+//   useCache:false — the caller (digest/search) has no dataset cache and runs a
+//                    full ingest()+assembleDataset() per request, so fold the
+//                    ingest() call in here, in the same position it ran before
+//                    (immediately after refreshReviewEventsForIngest).
+//
+// Pure seam extraction: the resulting call order is byte-for-byte identical to
+// the inlined preamble at each site. Per-request ingest semantics for
+// digest/search are deliberately unchanged here (that caching is issue #1573).
+async function loadIngestedDataset(req, { useCache = false } = {}) {
+  const ingestState = enterpriseRequestDatasetState(req);
+  const ingestApi = await ingestState.apiPromise;
+  await refreshReviewEventsForIngest(ingestApi);
+  if (!useCache) ingestApi.ingest();
+  return { ingestState, ingestApi };
+}
+
 async function buildDatasetCache(api, contentHash) {
   const dataset = api.assembleDataset();
   // Serialize the dataset exactly ONCE (#2070). buildDatasetBody serializes the
@@ -7621,6 +7647,236 @@ async function handleEnterpriseOrganizationRollup(req, res) {
   );
 }
 
+// Route-handler seam for the four dataset-bearing routes (#2076). Each handler
+// has the shape (req, res) => Promise<void> and is reached through the
+// DATASET_ROUTES map below. The handler bodies are the inlined dispatcher blocks
+// verbatim, with the repeated three-line ingest preamble replaced by the shared
+// loadIngestedDataset() helper. Behaviour is byte-for-byte unchanged: same
+// validation order, same status codes, headers, ETag/compression, and the same
+// per-request ingest semantics (search/digest still ingest+assemble per request;
+// caching that is issue #1573, layered on top of this seam).
+
+async function handleDatasetJson(req, res) {
+  const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+    useCache: true,
+  });
+  // Stat-gate (#182): a bounded source signature answers "could anything
+  // have changed since the last full ingest?" without re-walking every
+  // transcript or touching SQLite. When it matches the signature from
+  // the last ingest AND we already hold a built dataset cache, skip ingest()
+  // entirely and serve the cache. NOTE: an in-place append to an existing
+  // transcript does NOT move this signature (POSIX dir mtime semantics), so
+  // it lags until the next structural change — accepted by design; in-flight
+  // liveness is the Live Session widget's job (#131). See sourceSignature().
+  const sig = ingestApi.sourceSignature();
+  if (!ingestState.datasetCache) {
+    ingestState.datasetCache = ingestApi.loadLatestDatasetCache();
+  }
+  const skipped =
+    !!ingestState.datasetCache &&
+    ingestState.lastSourceSig !== null &&
+    sig === ingestState.lastSourceSig;
+  let stats = null;
+  // On the skip path we reuse the existing compressed dataset, so `cached`
+  // (did we reuse the prior compressed build?) is true by construction.
+  let cached = true;
+  let stale = false;
+  let revalidating = false;
+  if (!skipped) {
+    if (ingestState.datasetCache) {
+      // Stale-while-revalidate for the large live dataset: when we have a
+      // last-good compressed dataset, return it immediately and refresh the
+      // SQLite/content-hash cache after the response. This avoids blocking
+      // the UI on a full cold corpus read for every structural source
+      // change or process restart. A truly empty install still blocks once
+      // because there is no lossless dataset to serve yet.
+      stale = true;
+      revalidating = !ingestState.datasetRefresh;
+      startDatasetRefresh(ingestState, sig);
+    } else {
+      // Truly cold (no in-memory or disk cache): build once, awaited.
+      // Single-flight so concurrent first requests share one async build
+      // instead of each kicking off a redundant ingest+compress.
+      if (!ingestState.datasetColdBuild) {
+        ingestState.datasetColdBuild = rebuildDatasetCache(ingestState, sig).finally(() => {
+          ingestState.datasetColdBuild = null;
+        });
+      }
+      try {
+        ({ stats, cached } = await ingestState.datasetColdBuild);
+      } catch (err) {
+        if (isDatasetResponseTooLargeError(err)) {
+          return sendDatasetResponseTooLarge(res, err);
+        }
+        throw err;
+      }
+    }
+  }
+  const { etag, json, brBuf, gzBuf } = ingestState.datasetCache;
+  res.setHeader('X-Source', 'live');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  // Conditional revalidation: the client may always re-request, but a
+  // matching ETag avoids resending the (large) body. The ETag changes
+  // whenever the underlying ~/.claude data changes.
+  res.setHeader('Cache-Control', revalidatingLiveCacheControl());
+  // X-Ingest is for external verification (perf-probe / curl): `cached`
+  // reflects whether we reused the existing compressed dataset (issue
+  // #159's contentHash gate), and `skipped` reflects whether the #182
+  // stat-gate let us bypass ingest() entirely. On the skip path there is no
+  // fresh stats object to report counts from.
+  res.setHeader(
+    'X-Ingest',
+    skipped
+      ? 'skipped=true;cached=true'
+      : stale
+        ? `stale=true;cached=true;revalidating=${revalidating}`
+        : `total=${stats.total};reparsed=${stats.reparsed};removed=${stats.removed};transcripts=${stats.transcriptsWritten ?? 0};skippedSessions=${stats.skippedSessions ?? 0};cached=${cached};skipped=false`
+  );
+  if (etagMatches(req, etag)) {
+    res.setHeader('ETag', etag);
+    appendVary(res, 'Accept-Encoding');
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
+  sendBody(req, res, json, {
+    etag,
+    precompressed: { br: brBuf, gz: gzBuf },
+  });
+}
+
+async function handleDigest(req, res) {
+  if (req.method !== 'GET') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
+  }
+  const url = new URL(req.url, 'http://localhost');
+  const rawDate = url.searchParams.get('date');
+  const date = rawDate || todayDigestDate();
+  if (!isDailyDigestDate(date)) {
+    return sendJson(res, 400, {
+      ok: false,
+      error: 'Invalid date; expected YYYY-MM-DD',
+    });
+  }
+  const { ingestApi } = await loadIngestedDataset(req, { useCache: false });
+  const ds = ingestApi.assembleDataset();
+  const digest = buildDailyDigest(
+    {
+      sessions: groupBySessions(ds.entries || []),
+      tokenData: ds.tokenData || [],
+      toolData: ds.toolData || [],
+      timelines: ds.timelines || [],
+      apiErrors: ds.apiErrors || [],
+      taskSuccess: ds.taskSuccess || [],
+      statsCache: ds.statsCache || null,
+    },
+    date
+  );
+  res.setHeader('X-Source', 'live');
+  res.setHeader('Cache-Control', 'no-store');
+  return sendJson(res, 200, digest);
+}
+
+async function handleSearch(req, res) {
+  if (req.method !== 'GET') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
+  }
+  const url = new URL(req.url, 'http://localhost');
+  const q = url.searchParams.get('q') || '';
+  const project = url.searchParams.get('project') || undefined;
+  const limit = parseBoundedSearchInt(url.searchParams, 'limit', 100, 1, 100);
+  if (!q.trim()) {
+    res.setHeader('Cache-Control', 'no-store');
+    return sendJson(res, 200, {
+      mode: 'hybrid',
+      semanticAvailable: true,
+      results: [],
+    });
+  }
+  const { ingestApi } = await loadIngestedDataset(req, { useCache: false });
+  const ds = ingestApi.assembleDataset();
+  const results = hybridSearchEntries(ds.entries || [], q, {
+    project,
+    limit,
+    semanticEnabled: true,
+  }).map((result) => ({
+    ...result,
+    entry: { ...result.entry, pastedContents: {} },
+  }));
+  res.setHeader('X-Source', 'live');
+  res.setHeader('Cache-Control', 'no-store');
+  return sendJson(res, 200, {
+    mode: 'hybrid',
+    semanticAvailable: true,
+    results,
+  });
+}
+
+async function handleRecommendationsJson(req, res) {
+  const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+    useCache: true,
+  });
+  // Server-side mirror of the UI's Recommendations view (#126): the same
+  // pure engine (buildRecommendations) over the same assembled dataset, so
+  // headless / agent consumers (Aya, P10) get byte-identical recs — stable
+  // `id`s and `fix` snippets — without booting a browser. A bounded
+  // source-signature cache keeps repeated org/admin traffic from rerunning
+  // ingest+assemble work for unchanged data while preserving the old
+  // freshness gate for consumers that never call /api/dataset.json.
+  const url = new URL(req.url, 'http://localhost');
+  const project = url.searchParams.get('project');
+  const emitSuppressionTransitions =
+    enterpriseRequestUsesGlobalIngest(req) &&
+    !project;
+  const organizationIdentity = enterpriseRecommendationIdentity(req);
+  let entry;
+  let cache;
+  try {
+    ({ entry, cache } = await recommendationsResponseCache(
+      ingestState,
+      ingestApi,
+      project,
+      { emitSuppressionTransitions, organizationIdentity }
+    ));
+  } catch (err) {
+    if (isRecommendationsResponseTooLargeError(err)) {
+      return sendRecommendationsResponseTooLarge(res, err);
+    }
+    throw err;
+  }
+  // #330: `?project=<path>` narrows recs to that project; absent → global
+  // list, byte-identical to pre-#330. The filtered body is a different
+  // string per project, so the ETag derived below stays correct per slice.
+  // Recs are deterministic in the dataset (no per-request timestamp), so the
+  // serialized body is a stable ETag source — If-None-Match 304s work as on
+  // the dataset route.
+  res.setHeader('X-Source', 'live');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', revalidatingLiveCacheControl());
+  res.setHeader('X-Recommendations-Cache', cache);
+  if (etagMatches(req, entry.etag)) {
+    res.setHeader('ETag', entry.etag);
+    appendVary(res, 'Accept-Encoding');
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
+  // sendBody negotiates brotli/gzip from Accept-Encoding, same as the
+  // dataset route (no precompressed buffers — this body is small and live).
+  sendBody(req, res, entry.json, { etag: entry.etag });
+}
+
+// Pathname -> Handler map for the dataset-bearing routes. The dispatcher does a
+// single Map lookup and delegates; each handler resolves its own ingest state
+// via loadIngestedDataset() at the same point it did inline, so the validation
+// short-circuits in handleDigest/handleSearch still run before any ingest work.
+const DATASET_ROUTES = new Map([
+  ['/api/dataset.json', handleDatasetJson],
+  ['/api/recommendations.json', handleRecommendationsJson],
+  ['/api/digest', handleDigest],
+  ['/api/search', handleSearch],
+]);
+
 const server = createServer(async (req, res) => {
   try {
     applySecurityHeaders(res);
@@ -7770,222 +8026,9 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
     }
 
-    if (pathname === '/api/dataset.json') {
-      const ingestState = enterpriseRequestDatasetState(req);
-      const ingestApi = await ingestState.apiPromise;
-      await refreshReviewEventsForIngest(ingestApi);
-      // Stat-gate (#182): a bounded source signature answers "could anything
-      // have changed since the last full ingest?" without re-walking every
-      // transcript or touching SQLite. When it matches the signature from
-      // the last ingest AND we already hold a built dataset cache, skip ingest()
-      // entirely and serve the cache. NOTE: an in-place append to an existing
-      // transcript does NOT move this signature (POSIX dir mtime semantics), so
-      // it lags until the next structural change — accepted by design; in-flight
-      // liveness is the Live Session widget's job (#131). See sourceSignature().
-      const sig = ingestApi.sourceSignature();
-      if (!ingestState.datasetCache) {
-        ingestState.datasetCache = ingestApi.loadLatestDatasetCache();
-      }
-      const skipped =
-        !!ingestState.datasetCache &&
-        ingestState.lastSourceSig !== null &&
-        sig === ingestState.lastSourceSig;
-      let stats = null;
-      // On the skip path we reuse the existing compressed dataset, so `cached`
-      // (did we reuse the prior compressed build?) is true by construction.
-      let cached = true;
-      let stale = false;
-      let revalidating = false;
-      if (!skipped) {
-        if (ingestState.datasetCache) {
-          // Stale-while-revalidate for the large live dataset: when we have a
-          // last-good compressed dataset, return it immediately and refresh the
-          // SQLite/content-hash cache after the response. This avoids blocking
-          // the UI on a full cold corpus read for every structural source
-          // change or process restart. A truly empty install still blocks once
-          // because there is no lossless dataset to serve yet.
-          stale = true;
-          revalidating = !ingestState.datasetRefresh;
-          startDatasetRefresh(ingestState, sig);
-        } else {
-          // Truly cold (no in-memory or disk cache): build once, awaited.
-          // Single-flight so concurrent first requests share one async build
-          // instead of each kicking off a redundant ingest+compress.
-          if (!ingestState.datasetColdBuild) {
-            ingestState.datasetColdBuild = rebuildDatasetCache(ingestState, sig).finally(() => {
-              ingestState.datasetColdBuild = null;
-            });
-          }
-          try {
-            ({ stats, cached } = await ingestState.datasetColdBuild);
-          } catch (err) {
-            if (isDatasetResponseTooLargeError(err)) {
-              return sendDatasetResponseTooLarge(res, err);
-            }
-            throw err;
-          }
-        }
-      }
-      const { etag, json, brBuf, gzBuf } = ingestState.datasetCache;
-      res.setHeader('X-Source', 'live');
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      // Conditional revalidation: the client may always re-request, but a
-      // matching ETag avoids resending the (large) body. The ETag changes
-      // whenever the underlying ~/.claude data changes.
-      res.setHeader('Cache-Control', revalidatingLiveCacheControl());
-      // X-Ingest is for external verification (perf-probe / curl): `cached`
-      // reflects whether we reused the existing compressed dataset (issue
-      // #159's contentHash gate), and `skipped` reflects whether the #182
-      // stat-gate let us bypass ingest() entirely. On the skip path there is no
-      // fresh stats object to report counts from.
-      res.setHeader(
-        'X-Ingest',
-        skipped
-          ? 'skipped=true;cached=true'
-          : stale
-            ? `stale=true;cached=true;revalidating=${revalidating}`
-            : `total=${stats.total};reparsed=${stats.reparsed};removed=${stats.removed};transcripts=${stats.transcriptsWritten ?? 0};skippedSessions=${stats.skippedSessions ?? 0};cached=${cached};skipped=false`
-      );
-      if (etagMatches(req, etag)) {
-        res.setHeader('ETag', etag);
-        appendVary(res, 'Accept-Encoding');
-        res.statusCode = 304;
-        res.end();
-        return;
-      }
-      sendBody(req, res, json, {
-        etag,
-        precompressed: { br: brBuf, gz: gzBuf },
-      });
-      return;
-    }
-
-    if (pathname === '/api/digest') {
-      if (req.method !== 'GET') {
-        return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
-      }
-      const url = new URL(req.url, 'http://localhost');
-      const rawDate = url.searchParams.get('date');
-      const date = rawDate || todayDigestDate();
-      if (!isDailyDigestDate(date)) {
-        return sendJson(res, 400, {
-          ok: false,
-          error: 'Invalid date; expected YYYY-MM-DD',
-        });
-      }
-      const ingestState = enterpriseRequestDatasetState(req);
-      const ingestApi = await ingestState.apiPromise;
-      await refreshReviewEventsForIngest(ingestApi);
-      ingestApi.ingest();
-      const ds = ingestApi.assembleDataset();
-      const digest = buildDailyDigest(
-        {
-          sessions: groupBySessions(ds.entries || []),
-          tokenData: ds.tokenData || [],
-          toolData: ds.toolData || [],
-          timelines: ds.timelines || [],
-          apiErrors: ds.apiErrors || [],
-          taskSuccess: ds.taskSuccess || [],
-          statsCache: ds.statsCache || null,
-        },
-        date
-      );
-      res.setHeader('X-Source', 'live');
-      res.setHeader('Cache-Control', 'no-store');
-      return sendJson(res, 200, digest);
-    }
-
-    if (pathname === '/api/search') {
-      if (req.method !== 'GET') {
-        return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
-      }
-      const url = new URL(req.url, 'http://localhost');
-      const q = url.searchParams.get('q') || '';
-      const project = url.searchParams.get('project') || undefined;
-      const limit = parseBoundedSearchInt(url.searchParams, 'limit', 100, 1, 100);
-      if (!q.trim()) {
-        res.setHeader('Cache-Control', 'no-store');
-        return sendJson(res, 200, {
-          mode: 'hybrid',
-          semanticAvailable: true,
-          results: [],
-        });
-      }
-      const ingestState = enterpriseRequestDatasetState(req);
-      const ingestApi = await ingestState.apiPromise;
-      await refreshReviewEventsForIngest(ingestApi);
-      ingestApi.ingest();
-      const ds = ingestApi.assembleDataset();
-      const results = hybridSearchEntries(ds.entries || [], q, {
-        project,
-        limit,
-        semanticEnabled: true,
-      }).map((result) => ({
-        ...result,
-        entry: { ...result.entry, pastedContents: {} },
-      }));
-      res.setHeader('X-Source', 'live');
-      res.setHeader('Cache-Control', 'no-store');
-      return sendJson(res, 200, {
-        mode: 'hybrid',
-        semanticAvailable: true,
-        results,
-      });
-    }
-
-    if (pathname === '/api/recommendations.json') {
-      const ingestState = enterpriseRequestDatasetState(req);
-      const ingestApi = await ingestState.apiPromise;
-      await refreshReviewEventsForIngest(ingestApi);
-      // Server-side mirror of the UI's Recommendations view (#126): the same
-      // pure engine (buildRecommendations) over the same assembled dataset, so
-      // headless / agent consumers (Aya, P10) get byte-identical recs — stable
-      // `id`s and `fix` snippets — without booting a browser. A bounded
-      // source-signature cache keeps repeated org/admin traffic from rerunning
-      // ingest+assemble work for unchanged data while preserving the old
-      // freshness gate for consumers that never call /api/dataset.json.
-      const url = new URL(req.url, 'http://localhost');
-      const project = url.searchParams.get('project');
-      const emitSuppressionTransitions =
-        enterpriseRequestUsesGlobalIngest(req) &&
-        !project;
-      const organizationIdentity = enterpriseRecommendationIdentity(req);
-      let entry;
-      let cache;
-      try {
-        ({ entry, cache } = await recommendationsResponseCache(
-          ingestState,
-          ingestApi,
-          project,
-          { emitSuppressionTransitions, organizationIdentity }
-        ));
-      } catch (err) {
-        if (isRecommendationsResponseTooLargeError(err)) {
-          return sendRecommendationsResponseTooLarge(res, err);
-        }
-        throw err;
-      }
-      // #330: `?project=<path>` narrows recs to that project; absent → global
-      // list, byte-identical to pre-#330. The filtered body is a different
-      // string per project, so the ETag derived below stays correct per slice.
-      // Recs are deterministic in the dataset (no per-request timestamp), so the
-      // serialized body is a stable ETag source — If-None-Match 304s work as on
-      // the dataset route.
-      res.setHeader('X-Source', 'live');
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.setHeader('Cache-Control', revalidatingLiveCacheControl());
-      res.setHeader('X-Recommendations-Cache', cache);
-      if (etagMatches(req, entry.etag)) {
-        res.setHeader('ETag', entry.etag);
-        appendVary(res, 'Accept-Encoding');
-        res.statusCode = 304;
-        res.end();
-        return;
-      }
-      // sendBody negotiates brotli/gzip from Accept-Encoding, same as the
-      // dataset route (no precompressed buffers — this body is small and live).
-      sendBody(req, res, entry.json, { etag: entry.etag });
-      return;
+    const datasetRoute = DATASET_ROUTES.get(pathname);
+    if (datasetRoute) {
+      return datasetRoute(req, res);
     }
 
     if (pathname === '/api/memories') {
