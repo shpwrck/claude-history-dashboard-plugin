@@ -961,6 +961,13 @@ const DATASET_CACHE_KEEP = 3;
 //       ToolCall, so body-stripped commands keep correct dangerous-command signal.
 // Exported so the dataset-cache-schema regression test can assert the dataset key
 // folds this in (the two cache gates must turn over together).
+//
+// SEAM NOTE (#2075): this gates the per-session TRANSCRIPT cache (sigOf) and is
+// folded into the dataset schema key — a DIFFERENT artifact from the
+// session_blob row cache, which is gated by SESSION_BLOB_OUTPUT.version in the
+// parser-output seam (scripts/lib/parser-output-versions.mjs). The seam lists
+// this knob under RELATED_INVALIDATION_KNOBS so the two are discoverable
+// together but NOT collapsed — they invalidate distinct caches.
 export const PARSER_SIG_VERSION = 'v4';
 
 // Bump when assembleDataset() or downstream serialized dataset shape changes

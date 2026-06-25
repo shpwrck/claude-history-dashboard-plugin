@@ -22,6 +22,11 @@
 import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
+// The persisted-repo-map version is owned by the single parser-output ->
+// cache-invalidation seam (#2075), shared with the session-blob cache key.
+// @ts-expect-error - plain ESM constant registry, no .d.ts (matches the
+// sample-artifacts.ts -> build-corpus.mjs precedent).
+import { REPO_MAP_OUTPUT } from '../../../scripts/lib/parser-output-versions.mjs';
 import type { RepoMap } from './types';
 
 /**
@@ -65,8 +70,15 @@ export interface PersistedRepoMap {
   map: RepoMap;
 }
 
-/** Bump when the persisted shape changes so stale artifacts are not reused. */
-export const PERSISTED_REPO_MAP_VERSION = 1;
+/**
+ * Bump when the persisted repo-map output shape changes so stale artifacts are
+ * not reused. The value is owned by the single parser-output ->
+ * cache-invalidation SEAM (#2075) in `scripts/lib/parser-output-versions.mjs`;
+ * bump it THERE (and update its contract fingerprint) so the forward-fence test
+ * catches an un-bumped shape change. Re-exported here under the original name so
+ * existing consumers (`isCacheValid`, `enforceSizeLimit`, tests) are unchanged.
+ */
+export const PERSISTED_REPO_MAP_VERSION: number = REPO_MAP_OUTPUT.version;
 
 /**
  * Compute the cache key for a generated map. `gitSha` is the caller-resolved

@@ -7,15 +7,23 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { SESSION_BLOB_OUTPUT } from './lib/parser-output-versions.mjs';
+
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIB = join(PROJECT_DIR, 'src', 'lib');
 const READ_CHUNK_BYTES = 65_536;
 const DEFAULT_MAX_BYTES = 67_108_864;
-// Bump whenever parse-sessions / the signal parsers change their OUTPUT, so the
-// mtime-keyed ingest cache re-parses already-ingested sessions instead of
-// returning stale blobs. This is the gate for the session_blob rows that feed
-// the dataset + recommendations — NOT ingest.mjs's PARSER_SIG_VERSION, which
-// only keys the per-session transcript cache (sigOf/getTranscript).
+// The session_blob cache key consumes the session-blob output version from the
+// single parser-output -> cache-invalidation SEAM (#2075):
+// scripts/lib/parser-output-versions.mjs. Bump it THERE (and update its
+// contract fingerprint) whenever parse-sessions / a signal parser changes its
+// OUTPUT shape, or a signal column changes in src/lib/signals/index.ts — the
+// forward-fence test fails if the output shape drifts without the bump. This is
+// the gate for the session_blob rows that feed the dataset + recommendations —
+// NOT ingest.mjs's PARSER_SIG_VERSION, which only keys the per-session
+// transcript cache (sigOf/getTranscript).
+//
+// Version history (rationale stays here; the live value lives in the seam):
 //   'project-backstop-v1' (#1765): parseSessionJsonl backstops tokenData.project
 //       from the transcript cwd.
 //   'rmrf-certainty-v2' (#2036): parse-tools deriveBashCommandSignals now emits
@@ -42,7 +50,7 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       made valueFlow the dataset's heaviest field (~21 MB, ~78% of it edge
 //       redundancy). Reparse so cached blobs shed the fat edges instead of
 //       serving the change inert.
-const SESSION_BLOB_PARSER_VERSION = 'value-flow-slim-v7';
+const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
 const { parseToolUsage } = await import(join(LIB, 'parse-tools.ts'));
