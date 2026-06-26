@@ -61,7 +61,7 @@
 export const SESSION_BLOB_OUTPUT = {
   // History of prior values is documented in scripts/session-blob-row.mjs next
   // to where this is consumed; keep new rationale there AND bump here.
-  version: 'value-flow-slim-v7',
+  version: 'timeline-backgroundable-kind-v8',
   contract: [
     'token_json',
     'tool_json',

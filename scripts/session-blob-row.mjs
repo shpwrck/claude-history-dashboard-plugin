@@ -50,6 +50,16 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       made valueFlow the dataset's heaviest field (~21 MB, ~78% of it edge
 //       redundancy). Reparse so cached blobs shed the fat edges instead of
 //       serving the change inert.
+//   'timeline-backgroundable-kind-v8' (#2238): parseSessionTimeline now sets
+//       `backgroundableKind` on tool_use entries (a long-running Bash toolchain
+//       invocation, or an Agent/Task/Workflow/Monitor/ScheduleWakeup call),
+//       preserved through slimSessionTimeline. The timeline_json column shape
+//       changes, so without this bump the cached blobs keep the old parse and the
+//       conversational-availability detector stays dark on live data (and blind to
+//       blocking Agent/Workflow calls). timeline_json gates the dataset's
+//       input.timelines, which is what the recs detector reads — so THIS is the
+//       knob to bump, not PARSER_SIG_VERSION (transcript view only) or
+//       DATASET_ASSEMBLY_SCHEMA_VERSION (serialized assembleDataset shape).
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));

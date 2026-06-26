@@ -22,7 +22,7 @@ import {
 } from './recommendations';
 import type { ToolCall, ToolUsageData } from './parse-tools';
 import type { SessionTokenData, TokenEntry } from '../types';
-import type { SessionTimeline } from './parse-timeline';
+import { isBackgroundableBashCommand, type SessionTimeline } from './parse-timeline';
 import { CHEAPEST_MODEL } from './pricing';
 
 const call = (command: string): ToolCall => ({
@@ -2534,7 +2534,14 @@ function fixtureBank(): Fixture[] {
         entries: [
           { timestamp: at(0), kind: 'user', summary: 'build it' },
           { timestamp: at(1), kind: 'assistant', summary: 'working' },
-          { timestamp: at(2), kind: 'tool_use', toolName: 'Bash', summary: JSON.stringify({ command }) },
+          {
+            timestamp: at(2),
+            kind: 'tool_use',
+            toolName: 'Bash',
+            summary: JSON.stringify({ command }),
+            // Mirror parse-timeline: backgroundableKind set from the raw command.
+            ...(isBackgroundableBashCommand(command) ? { backgroundableKind: true } : {}),
+          },
           { timestamp: at(2 + blockSec), kind: 'tool_result', summary: 'output' },
           { timestamp: at(2 + blockSec + 1), kind: 'assistant', summary: 'done' },
         ],

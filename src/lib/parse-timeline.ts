@@ -66,6 +66,19 @@ export interface TimelineEntry {
    * forcing a human turn.
    */
   backgrounded?: boolean;
+  /**
+   * When `kind === 'tool_use'`: the tool is of a backgroundable KIND — a
+   * long-running Bash toolchain invocation (build/test/install/typecheck/container
+   * build|compose, classified by {@link isBackgroundableBashCommand}), or an
+   * Agent/Task/Workflow/Monitor/ScheduleWakeup call. ORTHOGONAL to `backgrounded`
+   * ("was actually run in the background"): a foreground/blocking Agent or Workflow
+   * carries `backgroundableKind: true` AND `backgrounded: false`. Set at parse time
+   * (when the raw command is still available) as a derived boolean so it survives
+   * `slimSessionTimeline`, which strips the command `summary`. Feeds the
+   * `workflow.conversational-availability` detector (#2238): a backgroundable-kind
+   * call that was NOT backgrounded yet blocked the turn is recoverable wait.
+   */
+  backgroundableKind?: boolean;
 }
 
 export interface SessionTimeline extends SessionDimensions {
@@ -233,6 +246,92 @@ export function isBackgroundedToolUse(name: string | undefined, input: unknown):
   return name ? SELF_RESUMING_TOOLS.has(name) : false;
 }
 
+/**
+ * Tool kinds that are a backgroundable KIND even when run synchronously in the
+ * foreground — a sub-agent fan-out / long-running orchestration call that
+ * `run_in_background` (or its own self-resuming nature) could have detached. This
+ * is the KIND set, NOT the "was actually backgrounded" set: `isBackgroundedToolUse`
+ * already flags the self-resuming ones, so a foreground/blocking Agent or Workflow
+ * carries `backgroundableKind: true` AND `backgrounded: false` — the real
+ * availability cost the `workflow.conversational-availability` detector (#2238)
+ * counts. Mirrors `SELF_RESUMING_TOOLS` so the two stay in lockstep.
+ */
+const BACKGROUNDABLE_TOOL_KINDS: ReadonlySet<string> = new Set([
+  'Task',
+  'Agent',
+  'Workflow',
+  'ScheduleWakeup',
+  'Monitor',
+]);
+
+/**
+ * A backgroundable toolchain command must be the INVOCATION at the start of a
+ * command segment, not a bare word anywhere in the string. Each pattern is
+ * anchored to a command boundary — start of string, or right after a shell
+ * separator (`&&`, `||`, `|`, `;`, `(`, newline) — past an optional `sudo` /
+ * env-var / `time` prefix — so a toolchain binary only matches when it is actually
+ * being run. That conservatism is what keeps a leading `ls deploy/`, `cat
+ * build.log`, `find . -name "*.test.ts"`, or `grep -n test src/foo.ts` from
+ * matching: there `ls`/`cat`/`find`/`grep` is the command and
+ * `build`/`test`/`deploy` is just an argument.
+ *
+ * This is the SHARED classifier (#2238): the parser calls it on the raw Bash
+ * `command` to set `backgroundableKind`, and the `conversational-availability`
+ * detector consumes that flag rather than re-classifying — so the parser and the
+ * detector cannot drift, and the classification survives `slimSessionTimeline`
+ * (which strips the command text from the bulk dataset).
+ */
+// A command-boundary: start of the whole string, or just after a shell operator
+// that begins a new command — plus the common no-op prefixes (env assignments,
+// `sudo`, `time`) that can sit in front of the real command.
+const CMD_START = String.raw`(?:^|[\n;&|(])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+|sudo\s+|time\s+)*`;
+const atCmd = (invocation: string) => new RegExp(CMD_START + invocation, 'i');
+const BACKGROUNDABLE_BASH: readonly RegExp[] = [
+  // npm/pnpm/yarn run-scripts and the package managers' install/ci verbs.
+  atCmd(String.raw`(?:npm|pnpm|yarn)\s+run\b`),
+  atCmd(String.raw`(?:npm|pnpm|yarn)\s+(?:ci|install|i|test|t)\b`),
+  // Bundlers / typecheckers / test runners invoked directly or via npx.
+  atCmd(String.raw`(?:npx\s+)?vite\s+(?:build|preview)\b`),
+  atCmd(String.raw`(?:npx\s+)?vitest\b`),
+  atCmd(String.raw`(?:npx\s+)?tsc\b`),
+  atCmd(String.raw`(?:npx\s+)?(?:jest|playwright|cypress)\b`),
+  // Other-language build/test toolchains, invoked as the command.
+  atCmd(String.raw`(?:pytest|cargo\s+(?:build|test)|go\s+(?:build|test)|mvn|gradle|make)\b`),
+  // Container builds / compose orchestration as the command.
+  atCmd(String.raw`(?:docker|podman)\s+(?:compose\s+|build\b)`),
+];
+
+/**
+ * Whether a raw Bash `command` string is a long-running, backgroundable toolchain
+ * invocation (build / test / install / typecheck / container build|compose). Used
+ * by the parser to set `backgroundableKind` on Bash `tool_use` entries. Operates
+ * on the RAW command text (not the truncated `summary`), so the classification is
+ * baked into the entry before `slimSessionTimeline` strips the command.
+ */
+export function isBackgroundableBashCommand(command: string | undefined): boolean {
+  if (!command) return false;
+  return BACKGROUNDABLE_BASH.some((re) => re.test(command));
+}
+
+/**
+ * Whether a `tool_use` is of a backgroundable KIND — a long-running Bash toolchain
+ * invocation, or an Agent/Task/Workflow/Monitor/ScheduleWakeup call. This is
+ * orthogonal to `isBackgroundedToolUse` ("was actually backgrounded"): a
+ * foreground/blocking Agent or Workflow is a backgroundable KIND that was NOT
+ * backgrounded. Set as `backgroundableKind` on the entry so it survives slimming.
+ */
+export function isBackgroundableKind(name: string | undefined, input: unknown): boolean {
+  if (name && BACKGROUNDABLE_TOOL_KINDS.has(name)) return true;
+  if (name !== 'Bash') return false;
+  const command =
+    input && typeof input === 'object'
+      ? (input as { command?: unknown }).command
+      : typeof input === 'string'
+        ? input
+        : undefined;
+  return isBackgroundableBashCommand(typeof command === 'string' ? command : undefined);
+}
+
 function stringifyToolInput(input: unknown): string {
   if (input == null) return '';
   if (typeof input === 'string') return summarize(input);
@@ -360,6 +459,7 @@ export function parseSessionTimeline(
             toolUseId: typeof block.id === 'string' ? block.id : undefined,
             toolName: block.name ?? 'unknown',
             ...(isBackgroundedToolUse(block.name, block.input) ? { backgrounded: true } : {}),
+            ...(isBackgroundableKind(block.name, block.input) ? { backgroundableKind: true } : {}),
           }));
         }
       }

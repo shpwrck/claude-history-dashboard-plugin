@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { parseSessionTimeline, slimSessionTimeline, type SessionTimeline } from './parse-timeline'
+import {
+  parseSessionTimeline,
+  slimSessionTimeline,
+  isBackgroundableBashCommand,
+  type SessionTimeline,
+} from './parse-timeline'
 
 const line = (o: Record<string, unknown>) => JSON.stringify(o)
 
@@ -109,6 +114,49 @@ describe('parseSessionTimeline', () => {
     expect(byId.get('d')!.backgrounded).toBe(true) // Task self-resumes
   })
 
+  it('flags backgroundableKind for long Bash invocations and Agent/Workflow, orthogonal to backgrounded (#2238)', () => {
+    const text = line({
+      type: 'assistant',
+      timestamp: '2026-01-01',
+      message: {
+        content: [
+          // Long-running foreground Bash toolchain invocations -> backgroundableKind, NOT backgrounded.
+          { type: 'tool_use', id: 'build', name: 'Bash', input: { command: 'cd /repo && npm run build' } },
+          { type: 'tool_use', id: 'test', name: 'Bash', input: { command: 'npx vitest run' } },
+          // Backgrounded build: backgroundableKind AND backgrounded both true.
+          { type: 'tool_use', id: 'bgbuild', name: 'Bash', input: { command: 'npm run build', run_in_background: true } },
+          // Innocuous Bash -> neither flag.
+          { type: 'tool_use', id: 'status', name: 'Bash', input: { command: 'git status' } },
+          { type: 'tool_use', id: 'lsbuild', name: 'Bash', input: { command: 'ls build/' } },
+          // Foreground Agent -> backgroundableKind without backgrounded (the new countable cost).
+          // (Agent/Task/Workflow are in BOTH the self-resuming and backgroundable-kind sets, so the
+          // parser marks them backgrounded too; the foreground/blocking case is exercised by the
+          // detector test where backgrounded is explicitly absent.)
+          { type: 'tool_use', id: 'agent', name: 'Agent', input: { description: 'fan out' } },
+        ],
+      },
+    })
+    const byId = new Map(parseSessionTimeline(text, 's.jsonl')!.entries.map((e) => [e.toolUseId, e]))
+    expect(byId.get('build')!.backgroundableKind).toBe(true)
+    expect(byId.get('build')!.backgrounded).toBeUndefined() // foreground long Bash
+    expect(byId.get('test')!.backgroundableKind).toBe(true)
+    expect(byId.get('bgbuild')!.backgroundableKind).toBe(true)
+    expect(byId.get('bgbuild')!.backgrounded).toBe(true)
+    expect(byId.get('status')!.backgroundableKind).toBeUndefined() // git status is not backgroundable
+    expect(byId.get('lsbuild')!.backgroundableKind).toBeUndefined() // `build` is an argument, not the command
+    expect(byId.get('agent')!.backgroundableKind).toBe(true) // Agent is a backgroundable kind
+  })
+
+  it('isBackgroundableBashCommand matches invocations, not bare-word arguments', () => {
+    for (const cmd of ['npm run build', 'cd /r && pnpm install', 'npx vitest', 'sudo podman compose up', 'CI=1 tsc -b', 'make']) {
+      expect(isBackgroundableBashCommand(cmd)).toBe(true)
+    }
+    for (const cmd of ['ls deploy/', 'cat build.log', 'find . -name "*.test.ts"', 'grep -n test src/foo.ts', 'git status', '']) {
+      expect(isBackgroundableBashCommand(cmd)).toBe(false)
+    }
+    expect(isBackgroundableBashCommand(undefined)).toBe(false)
+  })
+
   it('flags the user interrupt sentinel and only it (#1754)', () => {
     const text = [
       // Real prompt that merely quotes the phrase — NOT an interrupt.
@@ -211,6 +259,25 @@ describe('slimSessionTimeline (#1035)', () => {
     expect('hasCode' in out.entries[1]).toBe(false)
     expect('isQuestion' in out.entries[1]).toBe(false)
     expect('summaryLen' in out.entries[1]).toBe(false)
+  })
+
+  it('preserves backgroundableKind through slimming (modelled on waitLanguage, #2238)', () => {
+    const withKind: SessionTimeline = {
+      ...base,
+      entries: [
+        { timestamp: '2026-01-01', kind: 'user', summary: 'build it' },
+        { timestamp: '2026-01-01', kind: 'tool_use', summary: '{"command":"npm run build"}', toolName: 'Bash', toolUseId: 'b1', backgroundableKind: true },
+        // a backgrounded Agent: both flags survive
+        { timestamp: '2026-01-01', kind: 'tool_use', summary: '{}', toolName: 'Agent', toolUseId: 'a1', backgroundableKind: true, backgrounded: true },
+      ],
+    }
+    const out = slimSessionTimeline(withKind)
+    // command summary is gone...
+    expect('summary' in out.entries[1]).toBe(false)
+    // ...but backgroundableKind survives so the detector fires on the bulk path.
+    expect(out.entries[1].backgroundableKind).toBe(true)
+    expect(out.entries[2].backgroundableKind).toBe(true)
+    expect(out.entries[2].backgrounded).toBe(true)
   })
 
   it('does not mutate the input timeline', () => {

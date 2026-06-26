@@ -26,7 +26,7 @@ import type { Recommendation, RecommendationInput, RecProvenance } from './types
 import { detector as activityTrend } from './activity/activity-trend';
 import type { LiveConfig } from '../../types';
 import type { RuntimeEvents } from '../parse-runtime-events';
-import type { SessionTimeline } from '../parse-timeline';
+import { isBackgroundableBashCommand, type SessionTimeline } from '../parse-timeline';
 import type { StatsCache } from '../parse-stats-cache';
 import type { ToolInventory } from '../parse-tool-inventory';
 import type {
@@ -288,7 +288,14 @@ function conversationalAvailabilityTimeline(
     entries: [
       { timestamp: at(0), kind: 'user', summary: 'build it' },
       { timestamp: at(1), kind: 'assistant', summary: 'working' },
-      { timestamp: at(2), kind: 'tool_use', toolName: 'Bash', summary: JSON.stringify({ command }) },
+      {
+        timestamp: at(2),
+        kind: 'tool_use',
+        toolName: 'Bash',
+        summary: JSON.stringify({ command }),
+        // Mirror parse-timeline: backgroundableKind is set from the raw command.
+        ...(isBackgroundableBashCommand(command) ? { backgroundableKind: true } : {}),
+      },
       { timestamp: at(2 + blockSec), kind: 'tool_result', summary: 'output' },
       { timestamp: at(2 + blockSec + 1), kind: 'assistant', summary: 'done' },
     ],

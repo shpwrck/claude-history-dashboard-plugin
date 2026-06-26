@@ -1,5 +1,5 @@
 import type { Detector, Recommendation, RecObservation } from '../types';
-import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
+import type { SessionTimeline } from '../../parse-timeline';
 
 /**
  * `workflow.conversational-availability` (#2230, part of #2227).
@@ -16,23 +16,27 @@ import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
  * turn-ends, this one keys on in-turn `tool_use` block time.
  *
  * A Backgroundable-Foreground Call (BFC) is a `tool_use` entry that:
- *   (a) is NOT already backgrounded (`entries[].backgrounded` falsy — so
- *       `run_in_background` Bash and Agent/Task/Workflow/Monitor calls, which the
- *       parser flags, are excluded by construction); AND
- *   (b) is of a backgroundable KIND — a long-running Bash command whose text
- *       (`entries[].summary`, which holds `stringifyToolInput`) matches a
- *       build/test/install/deploy/watch toolchain pattern, OR a (hypothetical)
- *       non-backgrounded Agent/Task/Workflow; AND
+ *   (a) is of a backgroundable KIND (`entries[].backgroundableKind` true) — a
+ *       long-running Bash toolchain invocation, OR an Agent/Task/Workflow/Monitor/
+ *       ScheduleWakeup call. This is set by the parser (`isBackgroundableKind` in
+ *       parse-timeline), so it survives `slimSessionTimeline` and is computed
+ *       WITHOUT the command `summary`; AND
+ *   (b) was NOT actually backgrounded (`entries[].backgrounded` falsy) — a
+ *       `run_in_background` Bash or a self-resuming Agent/Workflow already detached,
+ *       so it cost no foreground wait. The two flags are orthogonal: a
+ *       foreground/blocking Agent or Workflow has `backgroundableKind:true` AND
+ *       `backgrounded:false`, and IS counted here; AND
  *   (c) imposed real BLOCK time — the wall-clock gap from this `tool_use`
  *       timestamp to the NEXT assistant entry exceeds {@link BLOCK_FLOOR_MS}.
  *
  * The block floor is the false-positive guard the issue calls for: a sub-second
  * foreground Read/Grep/Glob or a quick `git status` never clears it, so only calls
- * that genuinely held the conversation hostage count. Because the Bash-kind test
- * reads `summary`, this detector is dark on the SLIM bulk dataset (where `summary`
- * is stripped — `slimSessionTimeline`); it fires on client-parsed timelines
- * (uploads, the SPA sample corpus) where the command text survives. That is the
- * same parser-dependency posture passive-wait-stall has on `waitLanguage`.
+ * that genuinely held the conversation hostage count. Because the kind test reads
+ * the parser-set `backgroundableKind` boolean (not the command `summary`), the
+ * detector fires on the SLIM bulk/server dataset (live ~/.claude) just as it does
+ * on client-parsed timelines (uploads, the SPA sample corpus) — and it now counts
+ * blocking Agent/Workflow calls that the old summary-text classifier could not see
+ * (#2238).
  */
 
 // Block-time floor: the wall-clock gap from a foreground tool_use to the next
@@ -46,61 +50,10 @@ const MIN_BFC = 3;
 const EGREGIOUS_BLOCKED_MIN = 10;
 const MAX_EVIDENCE = 5;
 
-/**
- * A backgroundable toolchain command must be the INVOCATION at the start of a
- * command segment, not a bare word anywhere in the string. The patterns below are
- * each anchored to a command boundary — start of string, the opening quote of the
- * JSON-stringified `{"command":"…"}` value the parser actually stores, or right
- * after a shell separator (`&&`, `||`, `|`, `;`, `(`, newline) — past an optional
- * `sudo` / env-var / `time` prefix — so a toolchain binary only matches when it is
- * actually being run. That is what makes the conservatism claim true: a leading
- * `ls deploy/`, `cat build.log`, `find . -name "*.test.ts"`, or `grep -n test
- * src/foo.ts` does NOT match, because `ls`/`cat`/`find`/`grep` is the command and
- * `build`/`test`/`deploy` is just an argument. Standalone `build`/`test`/`deploy`/
- * `compose`/`watch` words were dropped for exactly this reason — they matched
- * arguments, not invocations.
- */
-// A command-boundary: start of the whole string, the `"` that opens the
-// JSON-stringified command value (the parser stores `{"command":"…"}` via
-// stringifyToolInput), or just after a shell operator that begins a new command —
-// plus the common no-op prefixes (env assignments, `sudo`, `time`) that can sit in
-// front of the real command.
-const CMD_START = String.raw`(?:^|["\n;&|(])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+|sudo\s+|time\s+)*`;
-const atCmd = (invocation: string) => new RegExp(CMD_START + invocation, 'i');
-const BACKGROUNDABLE_BASH = [
-  // npm/pnpm/yarn run-scripts and the package managers' install/ci verbs.
-  atCmd(String.raw`(?:npm|pnpm|yarn)\s+run\b`),
-  atCmd(String.raw`(?:npm|pnpm|yarn)\s+(?:ci|install|i|test|t)\b`),
-  // Bundlers / typecheckers / test runners invoked directly or via npx.
-  atCmd(String.raw`(?:npx\s+)?vite\s+(?:build|preview)\b`),
-  atCmd(String.raw`(?:npx\s+)?vitest\b`),
-  atCmd(String.raw`(?:npx\s+)?tsc\b`),
-  atCmd(String.raw`(?:npx\s+)?(?:jest|playwright|cypress)\b`),
-  // Other-language build/test toolchains, invoked as the command.
-  atCmd(String.raw`(?:pytest|cargo\s+(?:build|test)|go\s+(?:build|test)|mvn|gradle|make)\b`),
-  // Container builds / compose orchestration as the command.
-  atCmd(String.raw`(?:docker|podman)\s+(?:compose\s+|build\b)`),
-];
-
-// Tool kinds that are inherently backgroundable even as a bare foreground call.
-// In practice the parser already flags these as `backgrounded`, so a non-
-// backgrounded one is rare/forward-compatible rather than the common case (the
-// common case is foreground Bash); we still count it for completeness.
-const BACKGROUNDABLE_TOOLS: ReadonlySet<string> = new Set(['Agent', 'Task', 'Workflow']);
-
 interface Bfc {
   sessionId: string;
   toolName: string;
   blockedMs: number;
-}
-
-/** Whether a non-backgrounded tool_use entry is of a backgroundable KIND. */
-function isBackgroundableKind(e: TimelineEntry): boolean {
-  if (e.toolName && BACKGROUNDABLE_TOOLS.has(e.toolName)) return true;
-  if (e.toolName !== 'Bash') return false;
-  const cmd = e.summary ?? '';
-  if (!cmd) return false; // slim timeline — command text gone, cannot classify
-  return BACKGROUNDABLE_BASH.some((re) => re.test(cmd));
 }
 
 /**
@@ -123,7 +76,11 @@ function collectSessionBfcs(tl: SessionTimeline): Bfc[] {
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
     if (e.kind !== 'tool_use' || e.backgrounded) continue;
-    if (!isBackgroundableKind(e)) continue;
+    // Parser-set flag (isBackgroundableKind in parse-timeline): a long-running
+    // Bash toolchain invocation OR a non-backgrounded Agent/Workflow/etc. Reading
+    // the boolean (not the command summary) is what lights this up on the slim
+    // bulk/server dataset and lets blocking Agent/Workflow calls count (#2238).
+    if (!e.backgroundableKind) continue;
     // Block time = gap until the next assistant entry (the turn resumes there).
     let continuation = -1;
     for (let j = i + 1; j < entries.length; j++) {
@@ -180,9 +137,9 @@ export const detector: Detector = {
 
     const observations: RecObservation[] = [
       {
-        claim: `${bfcs.length} foreground tool call(s) across ${sessions} session(s) were of a backgroundable kind (long-running Bash build/test/install/deploy, or a non-backgrounded Agent/Workflow) yet ran with no run_in_background flag`,
+        claim: `${bfcs.length} foreground tool call(s) across ${sessions} session(s) were of a backgroundable kind (long-running Bash build/test/install/deploy, or a blocking Agent/Workflow) yet were not backgrounded`,
         source: 'parse-timeline',
-        field: 'entries[].kind / entries[].backgrounded / entries[].toolName',
+        field: 'entries[].backgroundableKind / entries[].backgrounded / entries[].toolName',
         value: bfcs.length,
       },
       {

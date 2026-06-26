@@ -2,7 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { detector } from './conversational-availability';
 import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
-import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
+import {
+  isBackgroundableBashCommand,
+  slimSessionTimeline,
+  type SessionTimeline,
+  type TimelineEntry,
+} from '../../parse-timeline';
 
 const T0 = Date.parse('2026-06-10T00:00:00Z');
 const iso = (ms: number) => new Date(T0 + ms).toISOString();
@@ -32,16 +37,31 @@ function input(timelines?: SessionTimeline[]): RecommendationInput {
 
 const userE = (ms: number, summary = 'go'): TimelineEntry => ({ timestamp: iso(ms), kind: 'user', summary });
 const assistantE = (ms: number, summary = 'working'): TimelineEntry => ({ timestamp: iso(ms), kind: 'assistant', summary });
-const bashE = (ms: number, command: string): TimelineEntry =>
-  ({ timestamp: iso(ms), kind: 'tool_use', toolName: 'Bash', summary: JSON.stringify({ command }) });
-const bgBashE = (ms: number, command: string): TimelineEntry =>
-  ({
-    timestamp: iso(ms),
-    kind: 'tool_use',
-    toolName: 'Bash',
-    summary: JSON.stringify({ command, run_in_background: true }),
-    backgrounded: true,
-  });
+// Mirror what the parser sets: backgroundableKind is derived from the raw command
+// via the SHARED classifier, so the detector tests exercise realistic entries.
+const bashE = (ms: number, command: string): TimelineEntry => ({
+  timestamp: iso(ms),
+  kind: 'tool_use',
+  toolName: 'Bash',
+  summary: JSON.stringify({ command }),
+  ...(isBackgroundableBashCommand(command) ? { backgroundableKind: true } : {}),
+});
+const bgBashE = (ms: number, command: string): TimelineEntry => ({
+  timestamp: iso(ms),
+  kind: 'tool_use',
+  toolName: 'Bash',
+  summary: JSON.stringify({ command, run_in_background: true }),
+  backgrounded: true,
+  ...(isBackgroundableBashCommand(command) ? { backgroundableKind: true } : {}),
+});
+// A foreground (blocking) Agent/Workflow/Task: backgroundableKind WITHOUT backgrounded.
+const fgAgentE = (ms: number, toolName: string): TimelineEntry => ({
+  timestamp: iso(ms),
+  kind: 'tool_use',
+  toolName,
+  summary: JSON.stringify({ description: 'do work' }),
+  backgroundableKind: true,
+});
 const toolResultE = (ms: number): TimelineEntry => ({ timestamp: iso(ms), kind: 'tool_result', summary: 'output' });
 
 /**
@@ -289,15 +309,73 @@ describe('workflow.conversational-availability — false-positive guards', () =>
     ).toBeNull();
   });
 
-  it('is SILENT on a slim timeline where the command text is stripped', () => {
-    // No `summary` => Bash kind cannot be classified => no BFC.
-    const slim = (sessionId: string): SessionTimeline =>
+  it('is SILENT on a stripped Bash entry that the parser did NOT mark backgroundable', () => {
+    // No `summary` AND no `backgroundableKind` (e.g. a quick `git status`, or any
+    // command the parser classified as not-backgroundable): nothing to count.
+    const plain = (sessionId: string): SessionTimeline =>
       timeline(sessionId, [
         userE(0, 'build'),
         assistantE(1 * SEC),
         { timestamp: iso(2 * SEC), kind: 'tool_use', toolName: 'Bash' },
         assistantE(2 * SEC + 60 * SEC, 'done'),
       ]);
-    expect(detector.rule(input([slim('a'), slim('b'), slim('c')]), 0)).toBeNull();
+    expect(detector.rule(input([plain('a'), plain('b'), plain('c')]), 0)).toBeNull();
+  });
+});
+
+describe('workflow.conversational-availability — slim/server path + blocking sub-agents (#2238)', () => {
+  it('fires on a SLIM timeline (no `summary`) using the parser-set backgroundableKind flag', () => {
+    // The bulk/server dataset strips `summary`; the detector must still fire by
+    // reading `backgroundableKind`. Run each session through slimSessionTimeline to
+    // prove the boolean survives slimming AND that the detector reads it post-slim.
+    const slimmed = (['aaaaaaaa1', 'bbbbbbbb2', 'cccccccc3'] as const).map((id, k) =>
+      slimSessionTimeline(bfcSession(id, ['npm run build', 'vitest run', 'tsc -b'][k], 60))
+    );
+    // slimSessionTimeline strips the command summary from the Bash entry...
+    const bashEntry = slimmed[0].entries.find((e) => e.toolName === 'Bash');
+    expect(bashEntry?.summary).toBeUndefined();
+    // ...but preserves backgroundableKind (modelled on waitLanguage).
+    expect(bashEntry?.backgroundableKind).toBe(true);
+
+    const rec = detector.rule(input(slimmed), 0);
+    expect(rec).not.toBeNull();
+    expect(rec?.affected).toBe(3);
+  });
+
+  it('counts a blocking (non-backgrounded) Agent/Workflow as a BFC', () => {
+    // A foreground Agent/Workflow/Task held the turn 60s. The old summary-text
+    // classifier could never see these; now they count.
+    const blockingAgent = (sessionId: string, toolName: string): SessionTimeline =>
+      timeline(sessionId, [
+        userE(0, 'fan out'),
+        assistantE(1 * SEC),
+        fgAgentE(2 * SEC, toolName),
+        toolResultE(2 * SEC + 60 * SEC),
+        assistantE(2 * SEC + 60 * SEC + 100, 'done'),
+      ]);
+    const rec = detector.rule(
+      input([
+        blockingAgent('aaaaaaaa1', 'Agent'),
+        blockingAgent('bbbbbbbb2', 'Workflow'),
+        blockingAgent('cccccccc3', 'Task'),
+      ]),
+      0
+    );
+    expect(rec).not.toBeNull();
+    expect(rec?.affected).toBe(3);
+    expect(rec?.evidence?.[0]).toContain('Agent');
+  });
+
+  it('does NOT count an Agent/Workflow that WAS backgrounded', () => {
+    // backgroundableKind true but backgrounded true => already detached => silent.
+    const bgAgent = (sessionId: string): SessionTimeline =>
+      timeline(sessionId, [
+        userE(0, 'fan out'),
+        assistantE(1 * SEC),
+        { ...fgAgentE(2 * SEC, 'Agent'), backgrounded: true },
+        toolResultE(2 * SEC + 60 * SEC),
+        assistantE(2 * SEC + 60 * SEC + 100, 'done'),
+      ]);
+    expect(detector.rule(input([bgAgent('a'), bgAgent('b'), bgAgent('c')]), 0)).toBeNull();
   });
 });
