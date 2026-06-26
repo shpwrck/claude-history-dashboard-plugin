@@ -2175,6 +2175,87 @@ async function recommendationsResponseCache(
     cached.lastAccess = Date.now();
     return { entry: cached, cache: 'hit' };
   }
+  // Content-hash gate (parity with the dataset route's #182 stat-gate). The
+  // sourceSignature() above is a CHEAP mtime fingerprint that an active agent
+  // session trips on nearly every request (each transcript write bumps the
+  // project-dir mtime) — but the recommendation BODY only changes when the
+  // ingested CONTENT changes. ingest() is incremental (~200ms warm), so when it
+  // reports the same contentHash the cached recs are byte-identical: restamp the
+  // entry's signature and serve it as a hit, skipping the multi-second
+  // assemble+detector rebuild entirely. This is what keeps the dataset route at
+  // ~0.4s under the same churn while the un-gated recs route paid the full
+  // recompute every request (#2184).
+  if (cached) {
+    const stats = api.ingest();
+    if (stats.contentHash === cached.contentHash) {
+      cached.sourceSig = sourceSig;
+      cached.lastAccess = Date.now();
+      return { entry: cached, cache: 'hit-content' };
+    }
+  }
+  // Stale-while-revalidate (#2184). The content changed (gate above fell
+  // through) but we still hold a last-good cached entry: serve it immediately
+  // and refresh in the background. The recs body is small and advisory and the
+  // underlying ~/.claude data is at most seconds stale, so this trades brief
+  // staleness for a fast response. CRUCIALLY the rebuild must run AFTER the
+  // current response has flushed: buildRecommendationsCacheEntry is ~12-17s of
+  // UNINTERRUPTED synchronous CPU (assembleDataset -> 90-detector engine ->
+  // safeJsonStringify) with no internal await, so running it on this tick — even
+  // via setImmediate/setTimeout — blocks the event loop before the stale body
+  // reaches the socket (measured: the "stale" response itself still took ~17s).
+  // The route therefore wires the returned `scheduleRefresh` thunk to the
+  // response's `finish` event, so the rebuild only starts once the bytes are
+  // out. A single-flight slot is reserved synchronously so concurrent requests
+  // (which find the reserved slot) don't stack a second rebuild.
+  if (cached) {
+    cached.lastAccess = Date.now();
+    const existing = state.recommendationsBuilds.get(key);
+    if (existing) {
+      existing.lastAccess = Date.now();
+      return { entry: cached, cache: 'stale', scheduleRefresh: null };
+    }
+    let settle;
+    const promise = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    }).finally(() => {
+      const current = state.recommendationsBuilds.get(key);
+      if (current?.promise === promise) {
+        state.recommendationsBuilds.delete(key);
+      }
+    });
+    // Mark the reserved promise handled so a failed background rebuild never
+    // becomes an unhandled rejection (the cold path below awaits its own build
+    // and still surfaces errors through the route try/catch).
+    promise.catch(() => {});
+    state.recommendationsBuilds.set(key, {
+      sourceSig,
+      promise,
+      lastAccess: Date.now(),
+    });
+    pruneRecommendationsBuilds(state);
+    let fired = false;
+    const scheduleRefresh = () => {
+      if (fired) return;
+      fired = true;
+      buildRecommendationsCacheEntry(
+        state,
+        api,
+        key,
+        sourceSig,
+        project,
+        { emitSuppressionTransitions, organizationIdentity }
+      ).then(settle.resolve, (err) => {
+        console.warn(
+          '[recommendations] background refresh failed:',
+          err?.message || err
+        );
+        settle.reject(err);
+      });
+    };
+    return { entry: cached, cache: 'stale', scheduleRefresh };
+  }
+  // Cold key (no cached entry to serve): build now and await it. This is the
+  // only path that blocks, and only on the very first request for a key.
   let build = state.recommendationsBuilds.get(key);
   if (!build || build.sourceSig !== sourceSig) {
     const promise = buildRecommendationsCacheEntry(
@@ -2197,7 +2278,7 @@ async function recommendationsResponseCache(
     build.lastAccess = Date.now();
   }
   const entry = await build.promise;
-  return { entry, cache: cached ? 'refresh' : 'miss' };
+  return { entry, cache: 'miss' };
 }
 
 // Stat-gated, single-flight response cache for the digest and search routes
@@ -7940,8 +8021,9 @@ async function handleRecommendationsJson(req, res) {
   const organizationIdentity = enterpriseRecommendationIdentity(req);
   let entry;
   let cache;
+  let scheduleRefresh = null;
   try {
-    ({ entry, cache } = await recommendationsResponseCache(
+    ({ entry, cache, scheduleRefresh } = await recommendationsResponseCache(
       ingestState,
       ingestApi,
       project,
@@ -7952,6 +8034,19 @@ async function handleRecommendationsJson(req, res) {
       return sendRecommendationsResponseTooLarge(res, err);
     }
     throw err;
+  }
+  // Stale-while-revalidate (#2184): kick the (synchronous, multi-second) rebuild
+  // only AFTER this response has fully flushed, so serving the stale body stays
+  // fast. `finish` fires once res.end()'s bytes are out; if the socket errors
+  // first the refresh is skipped (a later request will retry). See
+  // recommendationsResponseCache for why setImmediate is insufficient here.
+  if (scheduleRefresh) {
+    res.once('finish', scheduleRefresh);
+    // Backstop: if the client aborts before `finish`, `close` still fires, so
+    // the reserved single-flight slot can never leak (its pending promise would
+    // otherwise block every future rebuild for this key). The thunk is
+    // idempotent, so running on whichever fires first is safe.
+    res.once('close', scheduleRefresh);
   }
   // #330: `?project=<path>` narrows recs to that project; absent → global
   // list, byte-identical to pre-#330. The filtered body is a different
