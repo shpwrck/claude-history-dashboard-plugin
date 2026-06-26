@@ -1233,3 +1233,80 @@ describe('cloud-capture local/sync hardening (#1426)', () => {
     });
   });
 });
+
+describe('cloud-capture data-loss hardening (#1430)', () => {
+  it('rescues a prior-run unpushed snapshot across a source prune before the cross-run reset discards it', { timeout: 30000 }, () => {
+    withTemp('hub-rescue-crossrun-', (dir) => {
+      const home = join(dir, 'home');
+      const projectsRoot = join(home, '.claude/projects');
+      const hub = initBareHub(dir);
+      const cacheDir = join(dir, 'hub-cache');
+      const baseEnv = {
+        CLAUDE_HUB_REMOTE: `file://${hub}`,
+        CLAUDE_HUB_BRANCH: 'main',
+        CLAUDE_CONFIG_DIR: join(home, '.claude'),
+        CLAUDE_HUB_CACHE_DIR: cacheDir,
+      };
+
+      // Run 1: publish v1 successfully. Hub main holds v1; the cache is synced.
+      writeTranscript(home, 'first snapshot', {
+        projectSlug: 'acme-app',
+        sessionId: 'sess-x',
+      });
+      expect(runSync({ cwd: dir, projectsRoot, env: baseEnv }).status).toBe(0);
+
+      // Run 2: grow to v2, then a TOTAL outage (push and recovery fetch both
+      // fail) leaves the v2 commit committed-but-unpushed in the cache — the
+      // only copy of v2 now lives in the cache HEAD.
+      rmSync(hub, { recursive: true, force: true });
+      writeTranscript(home, 'first snapshot\nsecond snapshot only in the local cache', {
+        projectSlug: 'acme-app',
+        sessionId: 'sess-x',
+      });
+      const outage = runSync({
+        cwd: dir,
+        projectsRoot,
+        env: { ...baseEnv, CLAUDE_HUB_PUSH_RETRIES: '1' },
+      });
+      expect(outage.status).toBe(1);
+      expect(outage.stderr).toContain('committed snapshot remains unpushed');
+
+      // Recreate the hub at v1 only (it never received v2), so the next run's
+      // fetch succeeds and prepare_hub_checkout's hard reset onto v1 would drop
+      // the local v2 commit. v1 is the cache's pre-outage commit (HEAD~1).
+      git(['init', '--bare', hub], dir);
+      git(
+        ['--git-dir', join(cacheDir, '.git'), 'push', `file://${hub}`, 'HEAD~1:refs/heads/main'],
+        dir
+      );
+
+      // The source transcript is pruned before the next run — the exact window
+      // where v2 would become unrecoverable without the rescue ref.
+      rmSync(join(projectsRoot, 'acme-app/sess-x.jsonl'), { force: true });
+      rmSync(join(projectsRoot, 'acme-app/sess-x'), { recursive: true, force: true });
+
+      // Run 3: hub reachable again. prepare_hub_checkout fetches v1 and resets
+      // over the unpushed v2 commit; the rescue ref must preserve it first.
+      const run3 = runSync({ cwd: dir, projectsRoot, env: baseEnv });
+      expect(run3.status, run3.stderr).toBe(0);
+      expect(run3.stderr).toContain('preserved unpushed hub snapshot as rescue ref');
+
+      // Exactly one rescue ref (only prepare_hub_checkout rescues; the in-process
+      // retry loop does not), and its tree carries the v2 content that never
+      // reached the hub and was pruned from the source — proving it is the LOCAL
+      // discarded snapshot, recoverable from the persistent cache.
+      const rescueRefs = git(
+        ['for-each-ref', '--format=%(refname)', 'refs/cloud-capture/rescue'],
+        cacheDir
+      )
+        .split('\n')
+        .filter(Boolean);
+      expect(rescueRefs).toHaveLength(1);
+      const rescued = git(
+        ['show', `${rescueRefs[0]}:projects/acme-app/sess-x.jsonl`],
+        cacheDir
+      );
+      expect(rescued).toContain('second snapshot only in the local cache');
+    });
+  });
+});
