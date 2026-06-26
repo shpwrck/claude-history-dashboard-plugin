@@ -1,5 +1,9 @@
 import type { Detector, Recommendation, RecObservation } from '../types';
-import type { SessionTimeline } from '../../parse-timeline';
+import {
+  BLOCK_FLOOR_MS,
+  collectSessionBfcs,
+  type Bfc,
+} from '../../experiments/conversational-availability-metric';
 
 /**
  * `workflow.conversational-availability` (#2230, part of #2227).
@@ -39,10 +43,6 @@ import type { SessionTimeline } from '../../parse-timeline';
  * (#2238).
  */
 
-// Block-time floor: the wall-clock gap from a foreground tool_use to the next
-// assistant entry must exceed this for the call to count. 10s excludes sub-second
-// reads and quick status checks — only genuinely blocking calls clear it (#2230).
-const BLOCK_FLOOR_MS = 10_000;
 // Noise floor across the dataset: never fire on one or two blocking calls — a
 // clean / all-backgrounded corpus stays silent.
 const MIN_BFC = 3;
@@ -50,58 +50,9 @@ const MIN_BFC = 3;
 const EGREGIOUS_BLOCKED_MIN = 10;
 const MAX_EVIDENCE = 5;
 
-interface Bfc {
-  sessionId: string;
-  toolName: string;
-  blockedMs: number;
-}
-
-/**
- * Collect Backgroundable-Foreground Calls in one session: non-backgrounded
- * tool_use entries of a backgroundable kind whose block time (gap to the next
- * assistant entry) exceeds the floor.
- *
- * Parallel-batch dedup: one assistant message can emit several tool_use blocks in
- * parallel; the parser gives every block in that message the SAME timestamp, and
- * the scan-forward from each lands on the SAME continuation assistant entry. Those
- * N blocks are ONE block window — the human waited once, for whichever call
- * finished last — not N independent waits. Keying the window by its continuation
- * entry index collapses the batch to a single BFC (the worst-blocking member is
- * its representative) so `affected` and total blocked time are not over-counted.
- */
-function collectSessionBfcs(tl: SessionTimeline): Bfc[] {
-  const entries = tl.entries;
-  // continuation entry index -> the single block window that resumes there.
-  const windowByContinuation = new Map<number, Bfc>();
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
-    if (e.kind !== 'tool_use' || e.backgrounded) continue;
-    // Parser-set flag (isBackgroundableKind in parse-timeline): a long-running
-    // Bash toolchain invocation OR a non-backgrounded Agent/Workflow/etc. Reading
-    // the boolean (not the command summary) is what lights this up on the slim
-    // bulk/server dataset and lets blocking Agent/Workflow calls count (#2238).
-    if (!e.backgroundableKind) continue;
-    // Block time = gap until the next assistant entry (the turn resumes there).
-    let continuation = -1;
-    for (let j = i + 1; j < entries.length; j++) {
-      if (entries[j].kind === 'assistant') {
-        continuation = j;
-        break;
-      }
-    }
-    if (continuation < 0) continue; // turn never resumed in-band — not a block we can size
-    const blockedMs = Date.parse(entries[continuation].timestamp) - Date.parse(e.timestamp);
-    if (!Number.isFinite(blockedMs) || blockedMs <= BLOCK_FLOOR_MS) continue;
-    const candidate: Bfc = { sessionId: tl.sessionId, toolName: e.toolName ?? 'unknown', blockedMs };
-    // Collapse all backgroundable calls that resume at the same continuation into
-    // ONE window, keeping the longest-blocked call as its representative.
-    const existing = windowByContinuation.get(continuation);
-    if (!existing || candidate.blockedMs > existing.blockedMs) {
-      windowByContinuation.set(continuation, candidate);
-    }
-  }
-  return [...windowByContinuation.values()];
-}
+// The per-session BFC collector (`collectSessionBfcs`) and the BLOCK_FLOOR_MS
+// constant live in the SHARED metric module so this detector and the experiment
+// evaluator (#2242) run ONE implementation and never drift.
 
 function fmtMin(ms: number): string {
   const min = ms / 60000;

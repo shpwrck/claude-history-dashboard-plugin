@@ -19,10 +19,10 @@
 
 import { createServer } from 'node:http';
 import { appendFile, chmod, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, normalize, resolve, extname, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createCipheriv,
   createDecipheriv,
@@ -116,6 +116,16 @@ const { findAccessToken, buildUsagePayload } = await import(
 );
 const { hybridSearchEntries } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'hybrid-search.ts')
+);
+// Experiment-axis evaluator (#2242): the ledger parser + per-axis verdict engine
+// live in src/lib/experiments/*.ts so their pure logic is unit-testable without
+// booting a server. Imported dynamically (like the .ts parsers) so they resolve
+// under the register-ts loader the container launches with.
+const { parseEnrollmentLedger } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'experiments', 'enrollment-ledger.ts')
+);
+const { evaluateExperiments } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'experiments', 'evaluator.ts')
 );
 // Policy write-back core (#625) lives in src/lib/policy-writer.ts — the pure
 // validate/merge/dedupe steps + the backup/write contract for the one route
@@ -260,6 +270,17 @@ const PROJECT_ROOTS = uniqueProjectsRoots([
   ...projectsRootsFromEnv('CLAUDE_HUB_DIR', true),
 ]);
 const SHADOW_CALLS_DIR = join(CLAUDE, 'shadow-calls');
+// Experiment-axis enrollment ledger (#2242): the append-only JSONL the
+// `/experiment-enroll` skill writes. Read live like the shadow-calls ledger;
+// CLAUDE_EXPERIMENT_LEDGER overrides the path (tests / custom deploys). The
+// sibling registry.mjs (read best-effort for axis labels) lives next to it.
+const EXPERIMENT_LEDGER =
+  process.env.CLAUDE_EXPERIMENT_LEDGER ||
+  join(CLAUDE, 'experiments', 'enrollment.jsonl');
+const EXPERIMENT_REGISTRY = join(
+  dirname(EXPERIMENT_LEDGER),
+  'registry.mjs'
+);
 // All runtime writes below default to CHD_CACHE_DIR so they land outside the
 // plugin install dir and survive updates (#1336). Individual *_PATH overrides
 // take precedence when explicitly set (test / container / custom-deploy use cases).
@@ -7485,6 +7506,7 @@ function enterpriseScopedDataPath(pathname) {
     pathname === '/history.jsonl' ||
     pathname === '/api/memories' ||
     pathname === '/api/workflows' ||
+    pathname === '/api/experiments.json' ||
     /^\/api\/session\/[^/]+\/timeline$/.test(pathname) ||
     /^\/api\/session\/[^/]+\/tools$/.test(pathname) ||
     pathname.startsWith('/projects/')
@@ -8276,6 +8298,66 @@ async function handleRecommendationsJson(req, res) {
   sendBody(req, res, entry.json, { etag: entry.etag });
 }
 
+// Best-effort read of the experiment registry's axis metadata (key + label) for
+// human-readable axis labels in the verdict. Fail-open: the registry lives in
+// ~/.claude/experiments/ and is NOT shipped in the runtime image, so a missing or
+// malformed registry simply yields no labels and the evaluator falls back to the
+// axis key. Never throws.
+async function readExperimentAxisMeta() {
+  if (!existsSync(EXPERIMENT_REGISTRY)) return [];
+  try {
+    const mod = await import(pathToFileURL(EXPERIMENT_REGISTRY).href);
+    const axes = typeof mod.listAxes === 'function' ? mod.listAxes() : mod.AXES;
+    if (!Array.isArray(axes)) return [];
+    return axes
+      .filter((a) => a && typeof a.key === 'string')
+      .map((a) => ({ key: a.key, label: typeof a.label === 'string' ? a.label : a.key }));
+  } catch {
+    return [];
+  }
+}
+
+// GET /api/experiments.json — experiment-axis evaluator (#2242, loop-closer for
+// #2227). Joins the live enrollment ledger (arm per session) to the measured
+// conversational-availability BFC metric (#2238), aggregates per arm, and
+// qualifies each axis success/failure/inconclusive. Server-only (reads ~/.claude
+// directly) — there is no client fetch, so the SPA boundary is untouched. Honesty
+// contract: every verdict carries observational confidence (menu assignment), a
+// provisional `not-auto-measured` counter-metric, and the control-arm-bias caveat,
+// so a `success` is never overclaimed (AGENTS.md auditable-claims rule).
+async function handleExperimentsJson(req, res) {
+  if (req.method !== 'GET') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
+  }
+  // Fresh-per-request ingest (like /api/dataset.json): useCache false makes
+  // loadIngestedDataset run ingest() so assembleDataset() reflects the live
+  // transcripts. (/api/memories and /api/workflows instead do raw file walks
+  // with no ingest, so they are not the right analogue for this pattern.) This
+  // is a low-traffic dogfood endpoint, so a per-request ingest is acceptable
+  // rather than wiring a dedicated dataset cache.
+  const { ingestApi } = await loadIngestedDataset(req, { useCache: false });
+  const dataset = ingestApi.assembleDataset();
+  const timelines = Array.isArray(dataset.timelines) ? dataset.timelines : [];
+
+  // Fail-open ledger read: a missing / empty / unreadable ledger yields zero
+  // enrollments (the evaluator then returns []), never an error.
+  let ledgerText = '';
+  if (existsSync(EXPERIMENT_LEDGER)) {
+    try {
+      ledgerText = readFileSync(EXPERIMENT_LEDGER, 'utf8');
+    } catch {
+      ledgerText = '';
+    }
+  }
+  const enrollments = parseEnrollmentLedger(ledgerText);
+  const axisMeta = await readExperimentAxisMeta();
+  const axes = evaluateExperiments(timelines, enrollments, axisMeta);
+
+  res.setHeader('X-Source', 'live');
+  res.setHeader('Cache-Control', 'no-store');
+  return sendJson(res, 200, { axes });
+}
+
 // Pathname -> Handler map for the dataset-bearing routes. The dispatcher does a
 // single Map lookup and delegates; each handler resolves its own ingest state
 // via loadIngestedDataset() at the same point it did inline, so the validation
@@ -8467,6 +8549,14 @@ const server = createServer(async (req, res) => {
       }
       const workflows = await readWorkflows(enterpriseRequestProjectsRoot(req));
       return sendJson(res, 200, workflows);
+    }
+
+    if (pathname === '/api/experiments.json') {
+      // Experiment-axis evaluator (#2242). Server-only — reads the live
+      // enrollment ledger + the measured BFC metric and returns per-axis
+      // verdicts. handleExperimentsJson fails open (no ledger -> { axes: [] }).
+      await handleExperimentsJson(req, res);
+      return;
     }
 
     if (pathname === '/api/usage') {
