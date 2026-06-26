@@ -43,6 +43,7 @@ import {
   constants as zconstants,
 } from 'node:zlib';
 import { promisify } from 'node:util';
+import { Worker } from 'node:worker_threads';
 
 // Async (libuv-threadpool) compressors. Unlike the *Sync variants these run the
 // CPU-heavy brotli/gzip work OFF the event loop, so compressing the multi-MB
@@ -2107,6 +2108,186 @@ function memoizedAssembleDataset(state, api, contentHash) {
   return dataset;
 }
 
+// ── Off-main-thread recommendations rebuild worker (#2196, epic #2181) ───────
+// The recs rebuild is multi-second synchronous CPU; running it inline (even
+// finish-deferred, #2184) stalls the event loop, so a request landing during a
+// rebuild waits behind it. This long-lived worker runs the rebuild on its own
+// thread with its OWN SQLite cache (worker-private CHD_DB_PATH), so the main
+// loop never blocks. The worker serves the GLOBAL ingest path only; enterprise
+// per-principal scoped rebuilds and the cold first-build fall back to the inline
+// path. Set CHD_RECS_WORKER=0 to disable and always build inline.
+const RECS_WORKER_ENABLED = process.env.CHD_RECS_WORKER !== '0';
+let recsWorker = null;
+let recsWorkerReqId = 0;
+const recsWorkerPending = new Map(); // id -> { resolve, reject }
+
+function recsWorkerDbPath() {
+  return (
+    process.env.CHD_RECS_WORKER_DB_PATH ||
+    join(CHD_CACHE_DIR, 'dashboard-recs-worker.db')
+  );
+}
+
+function failRecsWorker(worker, err) {
+  // Bind to the specific worker: a dying worker emits BOTH 'error' and 'exit',
+  // and a fresh worker may have been spawned between them. Only tear down state
+  // if `worker` is still the active one, so the second event (or a stale
+  // handler) can't null a healthy replacement or reject its in-flight pendings.
+  if (worker && recsWorker !== worker) {
+    try {
+      worker.terminate?.();
+    } catch {
+      /* already gone */
+    }
+    return;
+  }
+  recsWorker = null;
+  for (const [, p] of recsWorkerPending) p.reject(err);
+  recsWorkerPending.clear();
+  try {
+    worker?.terminate?.();
+  } catch {
+    /* already gone */
+  }
+}
+
+function spawnRecsWorker() {
+  if (recsWorker) return recsWorker;
+  if (!RECS_WORKER_ENABLED) return null;
+  try {
+    const w = new Worker(join(PROJECT_DIR, 'scripts', 'recs-worker.mjs'), {
+      // Same register-ts loader the server boots with, so the worker resolves
+      // the .ts parsers ingest.mjs dynamically imports.
+      execArgv: ['--import', join(PROJECT_DIR, 'scripts', 'register-ts.mjs')],
+      workerData: { projectDir: PROJECT_DIR },
+      // Worker-private SQLite cache so the worker's ingest never shares the main
+      // process's DB handle (no WAL / shared-handle concurrency).
+      env: { ...process.env, CHD_DB_PATH: recsWorkerDbPath() },
+    });
+    w.on('message', (msg) => {
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'ready') return;
+      if (msg.type === 'log') {
+        console.warn(msg.message);
+        return;
+      }
+      const p = recsWorkerPending.get(msg.id);
+      if (!p) return;
+      recsWorkerPending.delete(msg.id);
+      if (msg.ok) {
+        p.resolve(msg);
+      } else {
+        p.reject(new Error(msg.error || 'recs worker rebuild failed'));
+      }
+    });
+    w.on('error', (err) => failRecsWorker(w, err));
+    w.on('exit', (code) =>
+      failRecsWorker(
+        w,
+        new Error(code !== 0 ? `recs worker exited with code ${code}` : 'recs worker exited')
+      )
+    );
+    // Don't keep the process alive solely for the worker.
+    w.unref?.();
+    recsWorker = w;
+  } catch (err) {
+    console.warn('[recs-worker] spawn failed:', err?.message || err);
+    recsWorker = null;
+  }
+  return recsWorker;
+}
+
+// Resolves { json, contentHash, sourceSig } from the worker, or rejects (caller
+// falls back to the inline build). Single message round-trip; the caller owns
+// single-flight via the reserved cache slot.
+// Safety valve: a worker rebuild that never replies (pathological hang) would
+// otherwise leave the reserved single-flight slot pending forever, wedging all
+// future refreshes for that key. On timeout we reject (→ inline fallback) and
+// drop the pending entry; a late worker reply for a dropped id is ignored. The
+// budget is generous — a cold worker ingest on a large corpus plus assemble runs
+// well under this. Override with CHD_RECS_WORKER_TIMEOUT_MS.
+const RECS_WORKER_TIMEOUT_MS = Math.max(
+  10_000,
+  parseNonNegativeIntEnv('CHD_RECS_WORKER_TIMEOUT_MS', 180_000)
+);
+
+function requestRecsRebuildViaWorker(project, organizationIdentity, emitSuppressionTransitions) {
+  const w = spawnRecsWorker();
+  if (!w) return Promise.reject(new Error('recs worker unavailable'));
+  const id = ++recsWorkerReqId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (recsWorkerPending.delete(id)) {
+        reject(new Error(`recs worker rebuild timed out after ${RECS_WORKER_TIMEOUT_MS}ms`));
+      }
+    }, RECS_WORKER_TIMEOUT_MS);
+    timer.unref?.();
+    recsWorkerPending.set(id, {
+      resolve: (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      reject: (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    });
+    try {
+      w.postMessage({
+        id,
+        project: project || null,
+        organizationIdentity: organizationIdentity || null,
+        emitSuppressionTransitions: !!emitSuppressionTransitions,
+        adoptionReceiptsPath: ADOPTION_RECEIPTS,
+        shadowCallsDir: SHADOW_CALLS_DIR,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      recsWorkerPending.delete(id);
+      reject(err);
+    }
+  });
+}
+
+// Worker-backed twin of buildRecommendationsCacheEntry: the rebuild runs off the
+// event loop; the main thread only does the cheap size-gate + ETag + cache.set.
+// Reuses the request-time `sourceSig` (like the inline path) so the freshness
+// gate stays consistent; the worker's content-derived contentHash matches the
+// main process's for the same source state (verified path-independent).
+async function buildRecommendationsCacheEntryViaWorker(
+  state,
+  key,
+  sourceSig,
+  project,
+  { emitSuppressionTransitions = false, organizationIdentity = null } = {}
+) {
+  const { json, contentHash } = await requestRecsRebuildViaWorker(
+    project,
+    organizationIdentity,
+    emitSuppressionTransitions
+  );
+  const actualBytes = Buffer.byteLength(json, 'utf8');
+  if (actualBytes > DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES) {
+    const err = new Error(
+      `Recommendations response exceeds ${DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES} byte limit`
+    );
+    err.code = 'ERR_DASHBOARD_RECOMMENDATIONS_RESPONSE_TOO_LARGE';
+    err.maxBytes = DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES;
+    err.actualBytes = actualBytes;
+    throw err;
+  }
+  const entry = {
+    etag: datasetEtagFrom(json),
+    json,
+    contentHash,
+    sourceSig,
+    lastAccess: Date.now(),
+  };
+  state.recommendationsCache.set(key, entry);
+  pruneRecommendationsCache(state);
+  return entry;
+}
+
 async function buildRecommendationsCacheEntry(
   state,
   api,
@@ -2165,7 +2346,11 @@ async function recommendationsResponseCache(
   state,
   api,
   project,
-  { emitSuppressionTransitions = false, organizationIdentity = null } = {}
+  {
+    emitSuppressionTransitions = false,
+    organizationIdentity = null,
+    allowWorker = false,
+  } = {}
 ) {
   const sourceSig = api.sourceSignature();
   const identityKey = recommendationIdentityCacheKey(organizationIdentity);
@@ -2234,17 +2419,35 @@ async function recommendationsResponseCache(
     });
     pruneRecommendationsBuilds(state);
     let fired = false;
+    const inlineBuild = () =>
+      buildRecommendationsCacheEntry(state, api, key, sourceSig, project, {
+        emitSuppressionTransitions,
+        organizationIdentity,
+      });
     const scheduleRefresh = () => {
       if (fired) return;
       fired = true;
-      buildRecommendationsCacheEntry(
-        state,
-        api,
-        key,
-        sourceSig,
-        project,
-        { emitSuppressionTransitions, organizationIdentity }
-      ).then(settle.resolve, (err) => {
+      // #2196: on the global ingest path, run the rebuild on the worker thread
+      // so the event loop never blocks (even concurrent requests during the
+      // rebuild stay fast). Fall back to the inline finish-deferred build
+      // (#2184) when the worker is disabled/unavailable or dies mid-rebuild — a
+      // 413 size cap is a real result, not a worker failure, so it is NOT
+      // retried inline.
+      const build =
+        allowWorker && RECS_WORKER_ENABLED
+          ? buildRecommendationsCacheEntryViaWorker(state, key, sourceSig, project, {
+              emitSuppressionTransitions,
+              organizationIdentity,
+            }).catch((err) => {
+              if (isRecommendationsResponseTooLargeError(err)) throw err;
+              console.warn(
+                '[recs-worker] rebuild failed, falling back to inline:',
+                err?.message || err
+              );
+              return inlineBuild();
+            })
+          : inlineBuild();
+      build.then(settle.resolve, (err) => {
         console.warn(
           '[recommendations] background refresh failed:',
           err?.message || err
@@ -8015,10 +8218,13 @@ async function handleRecommendationsJson(req, res) {
   // freshness gate for consumers that never call /api/dataset.json.
   const url = new URL(req.url, 'http://localhost');
   const project = url.searchParams.get('project');
-  const emitSuppressionTransitions =
-    enterpriseRequestUsesGlobalIngest(req) &&
-    !project;
+  const usesGlobalIngest = enterpriseRequestUsesGlobalIngest(req);
+  const emitSuppressionTransitions = usesGlobalIngest && !project;
   const organizationIdentity = enterpriseRecommendationIdentity(req);
+  // #2196: only the global ingest path may use the rebuild worker — the worker
+  // ingests the main process's global CLAUDE_DIR, not a per-principal scoped
+  // dataRoot, so enterprise scoped requests stay on the inline build.
+  const allowWorker = usesGlobalIngest;
   let entry;
   let cache;
   let scheduleRefresh = null;
@@ -8027,7 +8233,7 @@ async function handleRecommendationsJson(req, res) {
       ingestState,
       ingestApi,
       project,
-      { emitSuppressionTransitions, organizationIdentity }
+      { emitSuppressionTransitions, organizationIdentity, allowWorker }
     ));
   } catch (err) {
     if (isRecommendationsResponseTooLargeError(err)) {
