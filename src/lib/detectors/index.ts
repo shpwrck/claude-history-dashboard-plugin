@@ -98,6 +98,7 @@ import { detector as correctionMining } from './workflow/correction-mining';
 import { detector as promptClarity } from './workflow/prompt-clarity';
 import { detector as autonomyOverSteered } from './workflow/autonomy-over-steered';
 import { detector as midTurnInterruptSteering } from './workflow/mid-turn-interrupt-steering';
+import { detector as conversationalAvailability } from './workflow/conversational-availability';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -368,6 +369,16 @@ export const DETECTORS: Detector[] = [
   // interrupts/session, books no cost-census reclaim; dark on a transcript-free
   // dataset.
   midTurnInterruptSteering,
+
+  // ── #2230 (part of #2227) — conversational-availability (workflow) ─────────
+  // The DURING-work complement to reliability.passive-wait-stall (turn-END dead-
+  // air): foreground tool calls fired mid-turn that were eligible to be
+  // backgrounded (long-running Bash build/test/install/deploy, or an un-detached
+  // Agent/Workflow) but ran synchronously, blocking the human's thread past a
+  // 10s floor. Reads parse-timeline's per-entry kind/backgrounded/toolName/
+  // timestamp; sub-second reads never clear the floor. Dark on a slim/transcript-
+  // free dataset (the Bash-kind test reads the stripped `summary`).
+  conversationalAvailability,
 
   // ── #1882 (epic #1910) — rolling "last N runs" maintenance audit ───────────
   // Orders sessions chronologically, compares the most recent N runs' mean peak

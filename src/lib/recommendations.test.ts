@@ -2521,6 +2521,36 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── workflow.conversational-availability (#2230): long foreground backgroundable
+  // calls (npm run build / vitest) that blocked the turn past the 10s floor.
+  {
+    const t0 = Date.parse('2026-06-10T00:00:00Z');
+    const at = (s: number) => new Date(t0 + s * 1000).toISOString();
+    const caSession = (sessionId: string, command: string, blockSec: number): SessionTimeline =>
+      ({
+        sessionId,
+        startTime: at(0),
+        endTime: at(2 + blockSec + 1),
+        entries: [
+          { timestamp: at(0), kind: 'user', summary: 'build it' },
+          { timestamp: at(1), kind: 'assistant', summary: 'working' },
+          { timestamp: at(2), kind: 'tool_use', toolName: 'Bash', summary: JSON.stringify({ command }) },
+          { timestamp: at(2 + blockSec), kind: 'tool_result', summary: 'output' },
+          { timestamp: at(2 + blockSec + 1), kind: 'assistant', summary: 'done' },
+        ],
+      }) as unknown as SessionTimeline;
+    out.push({
+      now,
+      input: bankBase({
+        timelines: [
+          caSession('ca1', 'npm run build', 30),
+          caSession('ca2', 'vitest run', 45),
+          caSession('ca3', 'podman compose up --build', 60),
+        ],
+      }),
+    });
+  }
+
   // ── workflow.mid-turn-interrupt-steering (#1754): a "[Request interrupted by
   // user]" sentinel cuts the assistant off mid-response; the orphaned turn's
   // billed output tokens are discarded.
