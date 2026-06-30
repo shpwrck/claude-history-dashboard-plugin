@@ -1,5 +1,5 @@
 import type { Detector, Recommendation, RecObservation } from '../types';
-import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
+import type { SessionTimeline, TimelineEntry, WaitClass } from '../../parse-timeline';
 
 /**
  * `reliability.passive-wait-stall` (#1873).
@@ -34,11 +34,19 @@ const MIN_STALL_GAP_MS = 60 * 1000; // 1 minute
 const HIGH_CONFIDENCE_GAP_MS = 5 * 60 * 1000; // the "likely genuine stall" floor (#1873)
 const MAX_EVIDENCE = 5;
 
-interface Stall {
+export interface Stall {
   sessionId: string;
   turnEndTs: string;
   silenceGapMs: number;
   snippet: string;
+  /**
+   * The kind of external wait this turn-end was on (#1880), read from the
+   * parser-set `entries[].waitClass`. `'generic'` when the parser saw wait
+   * language but no class-specific signal (or, defensively, when an older
+   * dataset predates the field). The `workflow.reclaim-wait-windows` detector
+   * groups stalls by this; `reliability.passive-wait-stall` itself ignores it.
+   */
+  waitClass: WaitClass;
 }
 
 function quantile(sortedAsc: number[], q: number): number {
@@ -96,6 +104,7 @@ function evaluateRun(
     turnEndTs,
     silenceGapMs: gap,
     snippet: (lastAssistantText.summary ?? '').trim(),
+    waitClass: lastAssistantText.waitClass ?? 'generic',
   };
 }
 
@@ -104,7 +113,7 @@ function evaluateRun(
  * wait language, carry no harness-backed background mechanism, and are followed
  * by a real human prompt (NOT a tool_result — tool results keep the turn going).
  */
-function collectSessionStalls(tl: SessionTimeline): Stall[] {
+export function collectSessionStalls(tl: SessionTimeline): Stall[] {
   const stalls: Stall[] = [];
   const entries = tl.entries;
   let runStart = 0;

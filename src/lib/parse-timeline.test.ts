@@ -94,6 +94,29 @@ describe('parseSessionTimeline', () => {
     expect(entries[1].waitLanguage).toBeUndefined()
   })
 
+  it('classifies the wait class on a passive-wait turn-end (#1880)', () => {
+    const text = [
+      line({ type: 'assistant', timestamp: '2026-01-01', message: { content: [{ type: 'text', text: "I'll wait for CI to go green and report back." }] } }),
+      line({ type: 'assistant', timestamp: '2026-01-02', message: { content: [{ type: 'text', text: "I'll wait for the deploy to finish and let you know." }] } }),
+      line({ type: 'assistant', timestamp: '2026-01-03', message: { content: [{ type: 'text', text: "I'll wait and report back." }] } }),
+      line({ type: 'assistant', timestamp: '2026-01-04', message: { content: [{ type: 'text', text: 'Done — here is the result.' }] } }),
+    ].join('\n')
+    const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+    expect(entries[0].waitClass).toBe('ci')
+    expect(entries[1].waitClass).toBe('deploy')
+    // Wait language with no class-specific signal → the 'generic' floor.
+    expect(entries[2].waitClass).toBe('generic')
+    // A non-wait ending carries no class at all (it is only set alongside waitLanguage).
+    expect(entries[3].waitClass).toBeUndefined()
+  })
+
+  it('preserves waitClass through slimSessionTimeline (survives summary stripping)', () => {
+    const text = line({ type: 'assistant', timestamp: '2026-01-01', message: { content: [{ type: 'text', text: "I'll wait for the rollout to complete and circle back." }] } })
+    const slim = slimSessionTimeline(parseSessionTimeline(text, 's.jsonl')!)
+    expect(slim.entries[0].summary).toBeUndefined()
+    expect(slim.entries[0].waitClass).toBe('deploy')
+  })
+
   it('flags harness-backed tool calls as backgrounded (#1873)', () => {
     const text = line({
       type: 'assistant',

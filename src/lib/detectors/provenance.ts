@@ -30,6 +30,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'context.cross-session-reread',
   'reliability.passive-wait-stall',
   'workflow.conversational-availability',
+  'workflow.reclaim-wait-windows',
   'reliability.cwd-drift-execution',
   'reliability.stale-state-assertion',
   'context.last-n-runs-audit',

@@ -99,6 +99,7 @@ import { detector as promptClarity } from './workflow/prompt-clarity';
 import { detector as autonomyOverSteered } from './workflow/autonomy-over-steered';
 import { detector as midTurnInterruptSteering } from './workflow/mid-turn-interrupt-steering';
 import { detector as conversationalAvailability } from './workflow/conversational-availability';
+import { detector as reclaimWaitWindows } from './workflow/reclaim-wait-windows';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -379,6 +380,15 @@ export const DETECTORS: Detector[] = [
   // timestamp; sub-second reads never clear the floor. Dark on a slim/transcript-
   // free dataset (the Bash-kind test reads the stripped `summary`).
   conversationalAvailability,
+
+  // ── #1880 (epic #867) — wait-class reclaim ruleset ─────────────────────────
+  // The engine-side policy author following reliability.passive-wait-stall: from
+  // the same stall signature it groups forced-human turn-ends by their parsed
+  // wait class (CI/deploy/push/remote-queue/watcher) and emits a suggest-only
+  // ruleset for reclaiming the idle window with provably non-interfering backlog
+  // work. The live enforcer Stop-hook that consumes the ruleset is the `meta`
+  // sibling child (mirrored to shpwrck/claude).
+  reclaimWaitWindows,
 
   // ── #1882 (epic #1910) — rolling "last N runs" maintenance audit ───────────
   // Orders sessions chronologically, compares the most recent N runs' mean peak

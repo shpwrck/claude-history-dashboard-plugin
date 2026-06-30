@@ -378,6 +378,39 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: 0,
   }),
+  'workflow.reclaim-wait-windows': () => {
+    // Three passive-wait stalls, each carrying a parsed wait class, so the
+    // ruleset detector groups them into reclaimable classes and fires.
+    const t0 = Date.parse('2026-06-10T00:00:00Z');
+    const classedStall = (
+      sessionId: string,
+      waitClass: 'ci' | 'deploy' | 'push',
+      gapMin: number
+    ): SessionTimeline => {
+      const turnEnd = new Date(t0).toISOString();
+      const humanPrompt = new Date(t0 + gapMin * 60_000).toISOString();
+      return {
+        sessionId,
+        startTime: turnEnd,
+        endTime: humanPrompt,
+        entries: [
+          { timestamp: new Date(t0 - 1000).toISOString(), kind: 'user', summary: 'go' },
+          { timestamp: turnEnd, kind: 'assistant', summary: "I'll wait and report back.", waitLanguage: true, waitClass },
+          { timestamp: humanPrompt, kind: 'user', summary: 'status?' },
+        ],
+      };
+    };
+    return {
+      input: baseInput({
+        timelines: [
+          classedStall('rww-1', 'ci', 16),
+          classedStall('rww-2', 'deploy', 7),
+          classedStall('rww-3', 'push', 3),
+        ],
+      }),
+      now: 0,
+    };
+  },
   'reliability.cwd-drift-execution': () => {
     // Three sessions each running an unanchored git read (no -C / cd / -R).
     const driftRead = (sessionId: string) =>

@@ -23,6 +23,20 @@ export type EntryKind =
   | 'thinking'
   | 'other';
 
+/**
+ * The kind of pending external state a passive-wait turn-end (#1873) is waiting
+ * on, classified from the assistant text by {@link classifyWaitClass}. The class
+ * determines the waited-on task's footprint, which the `workflow.reclaim-wait-windows`
+ * ruleset (#1880) uses to decide what other work is provably non-interfering:
+ *  - `'ci'`           — CI / PR checks / a test suite / a pipeline run.
+ *  - `'deploy'`       — a deploy / rollout / container build / preview bring-up.
+ *  - `'push'`         — a git push or a PR merge landing.
+ *  - `'remote-queue'` — a remote queue / background worker / agent-fleet job.
+ *  - `'watcher'`      — a Monitor / watcher / poll on a file or condition.
+ *  - `'generic'`      — wait language with no class-specific signal (the floor).
+ */
+export type WaitClass = 'ci' | 'deploy' | 'push' | 'remote-queue' | 'watcher' | 'generic';
+
 export interface TimelineEntry {
   // sessionId intentionally omitted — it is redundant with the enclosing
   // SessionTimeline.sessionId and was repeated on every entry (38B × N).
@@ -45,6 +59,19 @@ export interface TimelineEntry {
    * the `reliability.passive-wait-stall` detector (#1873).
    */
   waitLanguage?: boolean;
+  /**
+   * When `kind === 'assistant'` AND {@link waitLanguage} is set: the kind of
+   * external state the turn is waiting on, classified from the *full* untruncated
+   * block text by {@link classifyWaitClass} (`'ci'` | `'deploy'` | `'push'` |
+   * `'remote-queue'` | `'watcher'` | `'generic'`). Like `waitLanguage`, this is a
+   * derived field set at parse time, so it survives `slimSessionTimeline` (which
+   * strips `summary`) and the wait-CLASS is recoverable on the slim bulk/server
+   * dataset where the text is gone. Feeds the `workflow.reclaim-wait-windows`
+   * ruleset detector (#1880): the wait class drives which backlog work is
+   * provably non-interfering with the waited-on task. Only set alongside
+   * `waitLanguage`; absent ⇒ the turn did not end on a wait.
+   */
+  waitClass?: WaitClass;
   /**
    * When `kind === 'user'`: this user record is the literal interrupt sentinel
    * the harness writes when a human cuts the assistant off mid-response
@@ -202,6 +229,46 @@ const WAIT_LANGUAGE_PATTERNS: readonly RegExp[] = [
 export function hasWaitLanguage(text: string): boolean {
   if (!text) return false;
   return WAIT_LANGUAGE_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * Per-class signals for {@link classifyWaitClass}. Evaluated in array order and
+ * FIRST match wins, so the list is ordered most-specific → least: a "wait for CI
+ * then merge" turn classifies as `'ci'` (the thing actually pending) rather than
+ * `'push'`. Patterns are deliberately tight — a bare "merge" or "image" without a
+ * wait-domain word would over-match, so each anchors on a token that co-occurs
+ * with a genuine pending external wait. No match ⇒ `'generic'` (the floor); the
+ * class is only consulted when {@link hasWaitLanguage} already held.
+ */
+const WAIT_CLASS_PATTERNS: ReadonlyArray<readonly [WaitClass, RegExp]> = [
+  // CI / PR checks / a test suite / pipeline run.
+  ['ci', /\b(?:CI|continuous\s+integration|pr\s+checks?|gh\s+pr\s+checks|checks?\s+(?:are\s+)?(?:run|pass|green|complete)|test\s+suite|pipeline|workflow\s+run|the\s+(?:checks?|build)\s+(?:to\s+)?(?:finish|complete|pass|go\s+green))\b/i],
+  // Deploy / rollout / container build / preview bring-up.
+  ['deploy', /\b(?:deploy(?:ment|ing|s|ed)?|redeploy(?:ing|ed)?|rollout|roll\s+out|podman|docker|compose\s+up|container\s+(?:to\s+)?(?:build|come\s+up|start)|preview\s+(?:to\s+)?(?:come\s+up|deploy|build)|image\s+(?:to\s+)?(?:build|publish|push))\b/i],
+  // A git push or a PR merge landing. Each alternative requires a git-domain
+  // co-signal (a bare "pushing"/"the merge" can be ordinary prose), so the class
+  // stays footprint-honest even though the text already ended on wait language.
+  ['push', /\b(?:git\s+push|the\s+push|pushed|pushing\s+(?:to\b|up\b|now\b|the\s+(?:remote|branch|commit|changes?|code|pr|fix)|changes?\b)|(?:the\s+)?merge\s+(?:to\s+)?(?:land(?:s|ed|ing)?|complete[sd]?|finish(?:e[sd])?|go(?:es)?\s+through)|merging\s+(?:the\s+)?(?:pr|branch|it|changes?)|pr\s+(?:to\s+)?(?:land|merge))\b/i],
+  // Remote queue / background worker / agent-fleet job.
+  ['remote-queue', /\b(?:remote\s+(?:queue|run|worker|job|session)|background\s+(?:worker|job|agent|queue)|the\s+queue|agent\s+fleet|cloud\s+(?:run|agent|job)|worker\s+(?:to\s+)?(?:finish|return|complete))\b/i],
+  // A Monitor / watcher / poll on a file or condition.
+  ['watcher', /\b(?:watcher|the\s+monitor|monitoring\b|polling|poll\s+(?:for|until)|file\s+change|until\s+the\s+condition|watch(?:ing)?\s+(?:for|the\s+file))\b/i],
+];
+
+/**
+ * Classify a passive-wait turn-end into a {@link WaitClass} from its assistant
+ * text. Returns `'generic'` when no class-specific signal is present. Intended to
+ * be called only when {@link hasWaitLanguage} is already true (the parser does
+ * exactly this), so it always returns a concrete class for a wait turn. Exported
+ * so the `workflow.reclaim-wait-windows` detector test can assert against the
+ * same matcher the parser uses.
+ */
+export function classifyWaitClass(text: string): WaitClass {
+  if (!text) return 'generic';
+  for (const [cls, re] of WAIT_CLASS_PATTERNS) {
+    if (re.test(text)) return cls;
+  }
+  return 'generic';
 }
 
 /**
@@ -443,7 +510,9 @@ export function parseSessionTimeline(
             timestamp,
             kind: 'assistant',
             summary: summarize(text),
-            ...(hasWaitLanguage(text) ? { waitLanguage: true } : {}),
+            ...(hasWaitLanguage(text)
+              ? { waitLanguage: true, waitClass: classifyWaitClass(text) }
+              : {}),
           }));
         } else if (block.type === 'thinking') {
           entries.push(timelineEntry({
