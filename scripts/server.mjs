@@ -143,6 +143,9 @@ const {
 const { appendRejectSignal } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'reject-signals.ts')
 );
+const { readSteerTelemetry } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'parse-steer-telemetry.ts')
+);
 const { parseGitHubReviewSyncConfig } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'github-review-sync.ts')
 );
@@ -296,6 +299,11 @@ const ADOPTION_RECEIPTS =
 const REJECT_SIGNALS =
   process.env.REJECT_SIGNALS_PATH ||
   join(CHD_CACHE_DIR, 'reject-signals.jsonl');
+// Read-only PreToolUse-steer delivery/outcome log (#2203). Written by the recs
+// steer hook under ~/.claude/skills/recs; the dashboard only reads + aggregates it.
+const STEER_TELEMETRY_LOG =
+  process.env.STEER_TELEMETRY_PATH ||
+  join(CLAUDE, 'skills', 'recs', '.pretooluse-steer.jsonl');
 const ENTERPRISE_AUDIT_LOG =
   process.env.ENTERPRISE_AUDIT_LOG_PATH ||
   join(CHD_CACHE_DIR, 'enterprise-audit.jsonl');
@@ -4336,6 +4344,22 @@ async function handleAdoptionReceiptRead(req, res) {
   }
 }
 
+// GET /api/steer-telemetry — read-only per-rule rollup of the EXISTING
+// PreToolUse-steer delivery/outcome log (#2203). Each line is re-sanitized
+// through the same fail-closed allowlist on read, and a missing/empty log is an
+// empty array (the dashboard renders a "no data" state).
+async function handleSteerTelemetryRead(req, res) {
+  try {
+    const records = await readSteerTelemetry(STEER_TELEMETRY_LOG);
+    return sendJson(res, 200, { ok: true, records });
+  } catch (err) {
+    return sendJson(res, 500, {
+      ok: false,
+      error: `Failed to read steer telemetry: ${err.message}`,
+    });
+  }
+}
+
 // Optional HTTP Basic Auth gate. When DASHBOARD_USER + DASHBOARD_PASS are both
 // set, every route requires them — this is what protects the dashboard once the
 // host port is bound beyond loopback (the server reads ~/.claude live). Unset →
@@ -7525,6 +7549,7 @@ function enterpriseOrganizationDataPath(pathname) {
     pathname === '/api/dataset.json' ||
     pathname === '/api/recommendations.json' ||
     pathname === '/api/adoption/receipts' ||
+    pathname === '/api/steer-telemetry' ||
     pathname === '/api/usage' ||
     pathname === '/api/audit.json' ||
     pathname === '/api/live'
@@ -8520,6 +8545,13 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
       }
       return handlePolicyWrite(req, res);
+    }
+
+    if (pathname === '/api/steer-telemetry') {
+      if (req.method !== 'GET') {
+        return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
+      }
+      return handleSteerTelemetryRead(req, res);
     }
 
     if (pathname === '/api/adoption/receipts') {

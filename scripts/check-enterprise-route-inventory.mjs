@@ -179,6 +179,7 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'exact', value: '/api/policy/write', access: 'policy-write' },
   { kind: 'exact', value: '/api/adoption/receipts', access: 'organization-data' },
   { kind: 'exact', value: '/api/recommendations/reject', access: 'policy-write' },
+  { kind: 'exact', value: '/api/steer-telemetry', access: 'organization-data' },
   { kind: 'exact', value: '/api/sessions', access: 'session-dispatch' },
   { kind: 'prefix', value: '/api/sessions/', access: 'session-dispatch' },
   { kind: 'regex', value: '^\\/api\\/ingest\\/([^/]+)\\/artifacts$', access: 'session-ingest' },

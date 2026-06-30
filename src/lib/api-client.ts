@@ -34,6 +34,7 @@ import type { WorkflowsResponse } from './parse-workflows';
 import type { AuditFinding } from './audit/types';
 import type { AdoptionReceipt } from './adoption-receipts';
 import type { RejectReason } from './reject-reason';
+import type { SteerRuleTelemetry } from './steer-telemetry-types';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
@@ -813,6 +814,24 @@ export async function fetchAdoptionReceipts(): Promise<AdoptionReceipt[]> {
   return Array.isArray(body.receipts)
     ? (body.receipts as AdoptionReceipt[])
     : [];
+}
+
+/**
+ * Read the per-rule PreToolUse-steer telemetry rollup (#2203): fire-count +
+ * followed/ignored + misfire tags, aggregated from the existing steer log. The
+ * server route is read-only; never called on dataset load. The `/api/steer-telemetry`
+ * literal is owned here so the SPA build (aliased to api-client.spa.ts) carries
+ * no server string — the spa-boundary gate depends on it.
+ */
+export async function fetchSteerTelemetry(): Promise<SteerRuleTelemetry[]> {
+  const res = await serverFetch('/api/steer-telemetry', {
+    headers: { Accept: 'application/json' },
+  });
+  if (!res.ok) {
+    throw new Error(`Steer telemetry request failed (HTTP ${res.status})`);
+  }
+  const body = (await res.json()) as { records?: unknown };
+  return Array.isArray(body.records) ? (body.records as SteerRuleTelemetry[]) : [];
 }
 
 /**

@@ -15,6 +15,7 @@ import type { MemoriesResponse } from './parse-memories';
 import type { WorkflowsResponse } from './parse-workflows';
 import type { AuditFinding } from './audit/types';
 import type { AdoptionReceipt } from './adoption-receipts';
+import type { SteerRuleTelemetry } from './steer-telemetry-types';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
@@ -456,6 +457,13 @@ export async function fetchAuditFindings(): Promise<AuditFinding[]> {
 }
 
 export async function fetchAdoptionReceipts(): Promise<AdoptionReceipt[]> {
+  return [];
+}
+
+// Steer telemetry (#2203) is a server-tier read of a live ~/.claude log; the
+// upload-only SPA has no server, so this returns empty (the scorecard renders
+// its "no data" state).
+export async function fetchSteerTelemetry(): Promise<SteerRuleTelemetry[]> {
   return [];
 }
 
