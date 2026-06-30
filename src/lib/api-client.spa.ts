@@ -499,6 +499,13 @@ export async function writePolicy(): Promise<PolicyWriteResult> {
   return { ok: false, error: UNAVAILABLE };
 }
 
+// Recommendation reject-signal capture (#1294) is a server-tier write; the
+// upload-only SPA has no server to persist it, so this no-ops.
+export type RejectSignalWriteResult = { ok: true } | { ok: false; error: string };
+export async function postRejectSignal(): Promise<RejectSignalWriteResult> {
+  return { ok: false, error: UNAVAILABLE };
+}
+
 // Session provisioning (#1251) is a server-tier feature; the upload-only SPA cannot reach a cluster.
 export interface RemoteSessionPod {
   name: string;

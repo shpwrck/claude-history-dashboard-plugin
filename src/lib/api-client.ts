@@ -33,6 +33,7 @@ import type { MemoriesResponse } from './parse-memories';
 import type { WorkflowsResponse } from './parse-workflows';
 import type { AuditFinding } from './audit/types';
 import type { AdoptionReceipt } from './adoption-receipts';
+import type { RejectReason } from './reject-reason';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
@@ -959,6 +960,45 @@ export async function writePolicy(payload: unknown): Promise<PolicyWriteResult> 
         err instanceof Error
           ? err.message
           : 'Network error while writing settings.json',
+    };
+  }
+}
+
+/** Client-facing outcome of writing a recommendation reject signal (#1294). */
+export type RejectSignalWriteResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Record that the user rejected a recommendation, with a reason
+ * (`dismiss` / `wrong` / `not-relevant`). Fetches the per-process CSRF token
+ * then POSTs to the capture route. The `/api/recommendations/reject` literal is
+ * owned here so the SPA build (aliased to api-client.spa.ts, which no-ops this)
+ * carries no server string — the spa-boundary gate depends on it. Resolves a
+ * normalized result; never rejects.
+ */
+export async function postRejectSignal(
+  findingId: string,
+  reason: RejectReason
+): Promise<RejectSignalWriteResult> {
+  const token = await csrfToken();
+  if (!token) return { ok: false, error: 'Could not obtain auth token' };
+  try {
+    const res = await serverFetch('/api/recommendations/reject', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': token,
+      },
+      body: JSON.stringify({ findingId, reason }),
+    });
+    const body = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+    if (!res.ok || !body?.ok) {
+      return { ok: false, error: body?.error || `Reject failed (HTTP ${res.status})` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Network error while recording reject signal',
     };
   }
 }

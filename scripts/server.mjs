@@ -140,6 +140,9 @@ const {
   appendAdoptionReceipt,
   readAdoptionReceipts,
 } = await import(join(PROJECT_DIR, 'src', 'lib', 'adoption-receipts.ts'));
+const { appendRejectSignal } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'reject-signals.ts')
+);
 const { parseGitHubReviewSyncConfig } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'github-review-sync.ts')
 );
@@ -287,6 +290,12 @@ const EXPERIMENT_REGISTRY = join(
 const ADOPTION_RECEIPTS =
   process.env.ADOPTION_RECEIPTS_PATH ||
   join(CHD_CACHE_DIR, 'adoption-receipts.jsonl');
+// Append-only user reject-signal log (#1294): the capture primitive for the
+// recommendation feedback loop. Dashboard-owned data dir; sibling of the
+// adoption receipts above.
+const REJECT_SIGNALS =
+  process.env.REJECT_SIGNALS_PATH ||
+  join(CHD_CACHE_DIR, 'reject-signals.jsonl');
 const ENTERPRISE_AUDIT_LOG =
   process.env.ENTERPRISE_AUDIT_LOG_PATH ||
   join(CHD_CACHE_DIR, 'enterprise-audit.jsonl');
@@ -3972,6 +3981,33 @@ async function handleAdoptionReceiptWrite(req, res) {
   const result = await appendAdoptionReceipt(ADOPTION_RECEIPTS, parsed, {
     shadowCallsDir: SHADOW_CALLS_DIR,
   });
+  if (!result.ok) {
+    return sendJson(res, result.status, { ok: false, error: result.error });
+  }
+  return sendJson(res, 200, result);
+}
+
+// POST /api/recommendations/reject — append-only recommendation reject-signal
+// writer (#1294). Same mutating-route auth gate as the adoption writer; the core
+// writer drops every non-allowlisted field before append, so only
+// {findingId, reason} survive.
+async function handleRejectSignalWrite(req, res) {
+  if (!passesWriteAuth(req, res)) return;
+
+  let raw;
+  try {
+    raw = await readRequestBody(req);
+  } catch (err) {
+    return sendJson(res, 413, { ok: false, error: err.message || 'Failed to read request body' });
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return sendJson(res, 400, { ok: false, error: 'Body is not valid JSON' });
+  }
+
+  const result = await appendRejectSignal(REJECT_SIGNALS, parsed);
   if (!result.ok) {
     return sendJson(res, result.status, { ok: false, error: result.error });
   }
@@ -8494,6 +8530,13 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET or POST' });
       }
       return handleAdoptionReceiptWrite(req, res);
+    }
+
+    if (pathname === '/api/recommendations/reject') {
+      if (req.method !== 'POST') {
+        return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
+      }
+      return handleRejectSignalWrite(req, res);
     }
 
     // Session dispatch (#1251, Slice 1): list/create/delete RemoteSession CRs.
