@@ -121,6 +121,11 @@ export const MARKERS_STALE_STATE_ASSERTION: AppliedMarkers = {
   bodyPhrases: ['local tree can sit many commits behind origin'],
 };
 
+export const MARKERS_HUMAN_INPUT_LEVERAGE: AppliedMarkers = {
+  headings: [/^##\s+(?:Ask(?:ing)? upfront|Human input|Value of human input|Upfront questions)\b/i],
+  bodyPhrases: ['ask the human upfront'],
+};
+
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
  * Keys are detector ids; each value mirrors that detector's
@@ -139,6 +144,7 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['cost.model-eval-routing-gap', MARKERS_MODEL_EVAL_ROUTING_GAP],
   ['context.compaction-hot-sessions', MARKERS_COMPACTION_HOT_SESSIONS],
   ['workflow.correction-mining', MARKERS_CORRECTIONS],
+  ['workflow.human-input-leverage', MARKERS_HUMAN_INPUT_LEVERAGE],
   ['context.over-window', MARKERS_OVER_WINDOW],
   ['context.compaction-large-tool-outputs', MARKERS_COMPACTION_LARGE_TOOL_OUTPUTS],
   ['cost.web-search-spend', MARKERS_WEB_SEARCH_SPEND],

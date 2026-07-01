@@ -2343,6 +2343,100 @@ function fixtureBank(): Fixture[] {
     }),
   });
 
+  // workflow.human-input-leverage (#2200): four typical small spans plus one
+  // costly span that ended in a late human correction → an excursion whose
+  // outlier excess a cheap upfront human input could have averted.
+  {
+    const win = {
+      startTime: '2026-05-29T10:00:00.000Z',
+      endTime: '2026-05-29T11:00:00.000Z',
+    };
+    const entryTs = '2026-05-29T10:30:00.000Z';
+    const tokenSession = (sessionId: string, total: number) => ({
+      sessionId,
+      entrypoint: 'cli',
+      totalInputTokens: total,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      model: 'claude-opus-4-8',
+      messageCount: 1,
+      entries: [
+        {
+          timestamp: entryTs,
+          inputTokens: total,
+          outputTokens: 0,
+          cacheCreationTokens: 0,
+          cacheCreation1hTokens: 0,
+          cacheReadTokens: 0,
+          webSearchRequests: 0,
+          webFetchRequests: 0,
+          model: 'claude-opus-4-8',
+        },
+      ],
+      compactionEvents: [],
+      hasUnknownModel: false,
+    });
+    const steeringRow = (
+      sessionId: string,
+      corrective: number,
+      humanTurns: number
+    ) => ({
+      sessionId,
+      project: '/repo/app',
+      taskIndex: 0,
+      ...win,
+      wallClockMs: 60 * 60 * 1000,
+      costUsd: 1,
+      humanTurns,
+      corrective,
+      clarifyingAnswer: corrective > 0 ? 1 : 0,
+      approving: corrective > 0 ? 0 : 1,
+      other: 0,
+      interruptions: 0,
+      divergenceRate: 0,
+    });
+    out.push({
+      now,
+      input: bankBase({
+        taskSteering: [
+          steeringRow('hil-typ-0', 0, 1),
+          steeringRow('hil-typ-1', 0, 1),
+          steeringRow('hil-typ-2', 0, 1),
+          steeringRow('hil-typ-3', 0, 1),
+          steeringRow('hil-exc', 2, 3),
+        ] as unknown as RecommendationInput['taskSteering'],
+        taskSuccess: [
+          {
+            sessionId: 'hil-exc',
+            project: '/repo/app',
+            taskIndex: 0,
+            ...win,
+            wallClockMs: 60 * 60 * 1000,
+            verdict: 'correct',
+            agentClaim: 'completed',
+            confidence: 'high',
+            successScore: 0.4,
+            backedByMutation: true,
+            mutatingToolCount: 1,
+            toolCallCount: 6,
+            toolResultCount: 6,
+            toolErrorCount: 0,
+            toolErrorRate: 0,
+            errorPenalty: 0,
+          },
+        ] as unknown as RecommendationInput['taskSuccess'],
+        tokenData: [
+          tokenSession('hil-typ-0', 10_000),
+          tokenSession('hil-typ-1', 10_000),
+          tokenSession('hil-typ-2', 10_000),
+          tokenSession('hil-typ-3', 10_000),
+          tokenSession('hil-exc', 300_000),
+        ] as unknown as RecommendationInput['tokenData'],
+      }),
+    });
+  }
+
   // security.model-deceit (#686): a session with a contradicted success claim
   // and an unbacked action claim → the detector fires.
   out.push({

@@ -97,6 +97,7 @@ import { detector as harmfulHabit } from './workflow/harmful-habit';
 import { detector as correctionMining } from './workflow/correction-mining';
 import { detector as promptClarity } from './workflow/prompt-clarity';
 import { detector as autonomyOverSteered } from './workflow/autonomy-over-steered';
+import { detector as humanInputLeverage } from './workflow/human-input-leverage';
 import { detector as midTurnInterruptSteering } from './workflow/mid-turn-interrupt-steering';
 import { detector as conversationalAvailability } from './workflow/conversational-availability';
 import { detector as reclaimWaitWindows } from './workflow/reclaim-wait-windows';
@@ -259,6 +260,9 @@ export const DETECTORS: Detector[] = [
 
   // ── Epic #1266 — quality-gated autonomy level, over-steered cohort ───────
   autonomyOverSteered,
+
+  // ── Epic #1934 — value of a cheap upfront human input (#2200, keystone) ──
+  humanInputLeverage,
 
   // ── Epic #683 — model-deceit detection (#686, slice B) ────────────────────
   // Reads the Slice-A ingest feature (deceitSignals, #685); dark on the
