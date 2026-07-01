@@ -168,3 +168,35 @@ test('driver keeps the WASM parser off its own import graph (ADR 0007 / #1013)',
   assert.doesNotMatch(src, /web-tree-sitter|tree-sitter/);
   assert.match(src, /execFileSync/, 'spawns the producer as a child process');
 });
+
+test('meaningfulStderrLine surfaces the real error, not the Node banner (#2291)', async () => {
+  // Importing the driver must NOT run main() (guarded on argv[1]); it just
+  // exposes the pure helper.
+  const { meaningfulStderrLine } = await import(DRIVER);
+
+  // A real ERR_MODULE_NOT_FOUND crash. The old `.slice(-1)[0]` reported the
+  // trailing "Node.js vX" banner; the helper must surface the Error line.
+  const crash = [
+    '',
+    'node:internal/modules/run_main:107',
+    '    triggerUncaughtException(',
+    '    ^',
+    "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'web-tree-sitter' imported from /x/src/lib/repo-map/parser.ts",
+    '    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:301:9)',
+    '    at packageResolve (node:internal/modules/esm/resolve:764:81)',
+    '  code: "ERR_MODULE_NOT_FOUND"',
+    '}',
+    '',
+    'Node.js v24.15.0',
+  ].join('\n');
+  const line = meaningfulStderrLine(crash);
+  assert.match(line, /ERR_MODULE_NOT_FOUND/, 'reports the real cause');
+  assert.doesNotMatch(line, /^Node\.js v/, 'not the version banner');
+
+  // Degrade gracefully: empty in → empty out; a banner-only crash falls back to
+  // the banner rather than throwing; a plain one-line message passes through.
+  assert.equal(meaningfulStderrLine(''), '');
+  assert.equal(meaningfulStderrLine(null), '');
+  assert.equal(meaningfulStderrLine('Node.js v24.15.0'), 'Node.js v24.15.0');
+  assert.match(meaningfulStderrLine('Command failed: node … timed out'), /timed out/);
+});

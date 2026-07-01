@@ -31,7 +31,7 @@
  *   REPO_MAP_REFRESH_MAX_ROOTS=10 node ...       # bound how many roots are walked
  */
 import { execFileSync } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,6 +85,29 @@ function discoverRoots() {
   return { roots: onDisk.slice(0, MAX_ROOTS), discovered: onDisk.length, capped: onDisk.length > MAX_ROOTS };
 }
 
+/** Pick the most informative line from a crashed child's stderr/message.
+ *
+ *  Node prints a `Node.js vX.Y.Z` banner as the FINAL line of every uncaught
+ *  exception, so naively taking the last line reported "FAILED <root> — Node.js
+ *  v24.15.0" for a plain missing-dependency crash — a version-looking red
+ *  herring that hid the real cause. Prefer the first line that names an error,
+ *  skipping stack frames (`at …`) and the trailing banner; fall back to the
+ *  last non-noise line, then to the raw last line. Pure string logic — no heavy
+ *  imports (keeps the ADR 0007 boundary: the driver never pulls in the parser). */
+export function meaningfulStderrLine(raw) {
+  const lines = (raw ?? '')
+    .toString()
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return '';
+  const informative = lines.filter(
+    (l) => !/^Node\.js v\d/.test(l) && !/^at\s/.test(l)
+  );
+  const errLine = informative.find((l) => /(^|[\s[])[A-Za-z]*Error\b/.test(l));
+  return errLine || informative[informative.length - 1] || lines[lines.length - 1];
+}
+
 /** Run the host-side producer for one root. Returns 'written' | 'cache-hit' |
  *  'error'. Never throws — a failing root is logged and the rest continue. */
 function generate(root) {
@@ -103,8 +126,14 @@ function generate(root) {
     console.log(`repo-map-refresh: ${hit ? 'up to date' : 'regenerated'} ${root}`);
     return hit ? 'cache-hit' : 'written';
   } catch (err) {
-    const detail = (err.stderr || err.message || '').toString().trim().split('\n').slice(-1)[0];
-    console.error(`repo-map-refresh: FAILED ${root} — ${detail}`);
+    const detail = meaningfulStderrLine(err.stderr || err.message || '');
+    // The host-side producer needs devDeps (the WASM grammar packages — ADR
+    // 0007); a stale/prod-only `node_modules` in the deploy checkout surfaces
+    // here as a module-not-found. Point at the one-line fix, not a cryptic crash.
+    const hint = /Cannot find package|ERR_MODULE_NOT_FOUND/.test(detail)
+      ? ' (host-side devDeps missing — run `npm ci` in this checkout; see ADR 0007)'
+      : '';
+    console.error(`repo-map-refresh: FAILED ${root} — ${detail}${hint}`);
     return 'error';
   }
 }
@@ -135,4 +164,9 @@ function main() {
   return 0;
 }
 
-process.exit(main());
+// Run main() only when invoked as a script, so the module can be imported for
+// unit testing (`meaningfulStderrLine`) without executing the driver / exiting.
+const invokedDirectly =
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+if (invokedDirectly) process.exit(main());
