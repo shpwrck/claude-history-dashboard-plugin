@@ -13,7 +13,7 @@
  *   - trivial:  short prompt, ≤2 tools, ≤1 file edit, no agents, modest output
  *               → claude-haiku-4-5-20251001
  *   - moderate: medium prompt, ≤5 tools, ≤3 file edits, no nested agent spawn
- *               → claude-sonnet-4-6
+ *               → claude-sonnet-5
  *   - complex:  anything else → keep the current model (or Opus when unknown)
  *
  * The thresholds are deliberately conservative; the UI surfaces this as a

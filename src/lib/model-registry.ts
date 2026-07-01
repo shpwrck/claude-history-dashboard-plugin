@@ -37,7 +37,7 @@ function tier(baseInput: number): ModelPricing {
 
 export const CURRENT_MODEL_IDS = {
   opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-4-6',
+  sonnet: 'claude-sonnet-5',
   haiku: 'claude-haiku-4-5-20251001',
 } as const satisfies Record<RoutingModelFamily, string>;
 
@@ -94,9 +94,9 @@ const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
     family: 'sonnet',
     pricing: SONNET_CURRENT,
     picker: true,
-    label: 'Claude Sonnet 4.6',
-    description: 'Balanced capability and speed.',
-    aliases: ['claude-sonnet-4-5-20250514', 'claude-sonnet-4-5-20250929'],
+    label: 'Claude Sonnet 5',
+    description: 'Most agentic Sonnet yet; balances capability and speed.',
+    aliases: ['claude-sonnet-4-6', 'claude-sonnet-4-5-20250514', 'claude-sonnet-4-5-20250929'],
   },
   {
     id: CURRENT_MODEL_IDS.haiku,

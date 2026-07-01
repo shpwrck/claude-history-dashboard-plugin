@@ -13,7 +13,7 @@ describe('model registry', () => {
   it('keeps current model targets in one place', () => {
     expect(CURRENT_MODEL_IDS).toEqual({
       opus: 'claude-opus-4-8',
-      sonnet: 'claude-sonnet-4-6',
+      sonnet: 'claude-sonnet-5',
       haiku: 'claude-haiku-4-5-20251001',
     });
     expect(CURRENT_RECOMMENDATION_MODEL_IDS).toEqual(CURRENT_MODEL_IDS);
@@ -36,6 +36,9 @@ describe('model registry', () => {
     expect(MODEL_PRICING['claude-fable-5'].input).toBe(10);
     expect(MODEL_PRICING['claude-fable-5'].output).toBe(50);
     expect(MODEL_PRICING['claude-mythos-5'].input).toBe(10);
+    expect(MODEL_PRICING['claude-sonnet-5'].input).toBe(3);
+    expect(MODEL_PRICING['claude-sonnet-5'].output).toBe(15);
+    expect(MODEL_PRICING['claude-sonnet-4-6'].input).toBe(3);
     expect(MODEL_PRICING['claude-opus-4-8'].input).toBe(5);
     expect(MODEL_PRICING['claude-opus-4-7'].input).toBe(5);
     expect(MODEL_PRICING['claude-opus-4-1-20250414'].input).toBe(15);
@@ -46,6 +49,7 @@ describe('model registry', () => {
     expect(resolveModelFamily('claude-fable-5')).toBe('fable');
     expect(resolveModelFamily('claude-mythos-5')).toBe('mythos');
     expect(resolveModelFamily('claude-opus-4-8')).toBe('opus');
+    expect(resolveModelFamily('claude-sonnet-5')).toBe('sonnet');
     expect(resolveModelFamily('claude-sonnet-4-6')).toBe('sonnet');
     expect(resolveModelFamily('claude-haiku-4-5-20251001')).toBe('haiku');
     expect(resolveModelFamily('claude-rhyme-1-20260609')).toBeNull();

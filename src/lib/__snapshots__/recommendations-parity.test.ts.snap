@@ -486,7 +486,7 @@ Load these files once into context, then reuse that copy instead of re-reading t
       "label": "Pin a known model",
       "note": "Set an explicit model in settings.json so future sessions are priced from a known rate instead of the Sonnet-tier fallback used for the 1 guessed session(s).",
       "snippet": "{
-  "model": "claude-sonnet-4-6"
+  "model": "claude-sonnet-5"
 }",
       "target": "settings.json",
     },
