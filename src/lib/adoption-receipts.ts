@@ -2,6 +2,7 @@ import { appendFile, mkdir, open, stat } from 'node:fs/promises';
 import { createReadStream, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { REJECT_REASONS, type RejectReason } from './reject-reason';
 
 export interface SurfacedReceipt {
   schemaVersion: '1';
@@ -18,6 +19,27 @@ export interface SuppressedReceipt {
   findingId: string;
   markerHeading: string;
   contentFingerprint: string;
+}
+
+/**
+ * A user's explicit reject of a recommendation (#2206, epic #1298). Distinct
+ * from the engine-emitted SURFACED->SUPPRESSED adoption lifecycle: this is a
+ * button-click reject captured from the #1294 reject signal, carrying its
+ * {@link RejectReason}. `active` makes the suppression reversible on an
+ * append-only log — an un-reject appends a receipt with `active:false`, and the
+ * latest receipt per finding wins (see {@link readRejectedFindingIds}). It is
+ * NOT routed through the marker-based `SUPPRESSED`/`suppression-transition` path,
+ * which requires a `markerHeading`/`contentFingerprint` a click reject has no way
+ * to supply.
+ */
+export interface RejectedReceipt {
+  schemaVersion: '1';
+  kind: 'REJECTED';
+  ts: string;
+  findingId: string;
+  reason: RejectReason;
+  /** true = rejected (suppress the finding); false = un-rejected (restore it). */
+  active: boolean;
 }
 
 /** Outcome of a matched-pair efficacy experiment. */
@@ -89,6 +111,7 @@ export interface ProofReceipt {
 export type AdoptionReceipt =
   | SurfacedReceipt
   | SuppressedReceipt
+  | RejectedReceipt
   | ProofReceipt;
 
 export type AdoptionReceiptResult =
@@ -203,6 +226,16 @@ export function sanitizeAdoptionReceipt(
       markerHeading,
       contentFingerprint,
     };
+  }
+
+  if (raw.kind === 'REJECTED') {
+    const findingId = cleanString(raw.findingId, MAX_ID_LEN);
+    const reason = cleanEnum(raw.reason, REJECT_REASONS);
+    if (!findingId || !reason) return null;
+    // Default missing/non-boolean `active` to true: a plain reject is the common
+    // case; only an explicit `active:false` records an un-reject.
+    const active = raw.active === false ? false : true;
+    return { schemaVersion: '1', kind: 'REJECTED', ts, findingId, reason, active };
   }
 
   if (raw.kind === 'PROOF') {
@@ -537,7 +570,7 @@ export async function appendAdoptionReceipt(
       ok: false,
       status: 400,
       error:
-        'Body must be a SURFACED, SUPPRESSED, or PROOF adoption receipt with required allowlisted fields',
+        'Body must be a SURFACED, SUPPRESSED, REJECTED, or PROOF adoption receipt with required allowlisted fields',
     };
   }
 
@@ -588,4 +621,33 @@ export async function readAdoptionReceiptIndex(file: string): Promise<{
     suppressedFindingIds.clear();
   }
   return { surfacedFindingIds, suppressedFindingIds };
+}
+
+/**
+ * The rejected-finding index the engine's reject-suppression query (#2206, epic
+ * #1298) reads: the set of finding ids the user has explicitly rejected and NOT
+ * since un-rejected. Streams the shared append-only log through the same parser;
+ * per finding the latest `REJECTED` receipt by ts decides — `active:true`
+ * suppresses the finding, `active:false` (an un-reject) restores it. A missing
+ * file is an empty set (no throw), so a first-ever run doesn't error.
+ *
+ * Deliberately SEPARATE from {@link readAdoptionReceiptIndex}: that index feeds
+ * the CLAUDE.md-marker `suppression-transition` diff (#576) and keeps its
+ * surfaced/suppressed shape. A `REJECTED` receipt is neither surfaced- nor
+ * suppressed-indexed, so the transition path stays untouched.
+ */
+export async function readRejectedFindingIds(file: string): Promise<Set<string>> {
+  const latest = new Map<string, RejectedReceipt>();
+  const result = await streamAdoptionReceipts(file, () => new Date(), (record) => {
+    if (record.kind === 'REJECTED') {
+      const prev = latest.get(record.findingId);
+      if (!prev || record.ts >= prev.ts) latest.set(record.findingId, record);
+    }
+  });
+  const rejected = new Set<string>();
+  if (!result.read) return rejected;
+  for (const [findingId, receipt] of latest) {
+    if (receipt.active) rejected.add(findingId);
+  }
+  return rejected;
 }

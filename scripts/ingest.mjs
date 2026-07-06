@@ -560,12 +560,15 @@ const {
   filterRecommendationsByProject,
   backfillReclaimSavings,
   computeSuppressionTransitions,
+  suppressRejectedRecommendations,
 } = await import(join(LIB, 'recommendations.ts'));
 // Recs adoption-receipt store (#575/#576): reader for the prior SURFACED/
 // SUPPRESSED index and the allowlist-drop, killswitch-aware appender.
-const { appendAdoptionReceipt, readAdoptionReceiptIndex } = await import(
-  join(LIB, 'adoption-receipts.ts')
-);
+// `readRejectedFindingIds` (#2206) is the user-reject suppression query,
+// re-exported below so the off-main-thread recs worker can read it too.
+const { appendAdoptionReceipt, readAdoptionReceiptIndex, readRejectedFindingIds } =
+  await import(join(LIB, 'adoption-receipts.ts'));
+export { readRejectedFindingIds };
 // Shadow-calls experiment ledger (epic #513) — per-axis aggregate feeds the
 // workflow.shadow-axis-wins detector (#518/#523).
 const { parseShadowCalls } = await import(join(LIB, 'parse-shadow-calls.ts'));
@@ -2919,10 +2922,20 @@ export function assembleRecommendationResult(project, options = {}) {
   // the global recs before any project slice so the cascade dedup is computed
   // over the full lever set (dc-reclaim-1).
   const result = buildRecommendationResult(input);
-  const recs = backfillReclaimSavings(
+  // Drop findings the user explicitly rejected (#2206, epic #1298) BEFORE the
+  // reclaim cascade. A REJECTED adoption receipt suppresses its finding from
+  // output; reversible via an un-reject (active:false) receipt. The rejected set
+  // is read by the async caller (server/worker, which own the receipts path) and
+  // threaded in via options; absent/empty -> no suppression, so non-server
+  // callers and the SPA path stay byte-identical. Suppress first so
+  // backfillReclaimSavings books the guarded-marginal cascade over ONLY the
+  // surviving cards — otherwise a hidden rejected card consumes residual budget
+  // and undercounts the visible card's estSavingsUsd.
+  const surviving = suppressRejectedRecommendations(
     result.recommendations,
-    input.tokenData
+    options.rejectedFindingIds ?? new Set()
   );
+  const recs = backfillReclaimSavings(surviving, input.tokenData);
   return {
     ...result,
     recommendations: project

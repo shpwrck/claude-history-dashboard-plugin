@@ -1,1 +1,0 @@
-import{c as e}from"./Td-BRSYSKGm.js";import{An as t,jn as n,kn as r}from"./index-CasPAG5B.js";var i=t(),a=t=>{var{children:a,className:o}=t,s=n(t,[`children`,`className`]);return(0,i.jsx)(`caption`,Object.assign({className:r(e.tableCaption,o)},s,{children:a}))};a.displayName=`Caption`;export{a as t};

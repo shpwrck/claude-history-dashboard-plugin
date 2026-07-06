@@ -332,6 +332,25 @@ function collapseUnattendedIntoDangerousBypass(recs: Recommendation[]): void {
   recs.splice(unattendedIdx, 1);
 }
 
+/**
+ * Drop every recommendation the user has explicitly rejected (#2206, epic #1298).
+ * `rejectedFindingIds` is the set of `Recommendation.id`s carrying an active
+ * `REJECTED` adoption receipt (see `adoption-receipts.ts`
+ * `readRejectedFindingIds`): a rejected finding is suppressed from output. The
+ * suppression is reversible — un-rejecting a finding drops its id from the set,
+ * so it reappears on the next build. Pure and non-mutating: returns a NEW array
+ * when any finding is filtered, and the input reference unchanged on the
+ * empty-set fast path (no receipts → no copy), so the browser/SPA path — which
+ * has no receipts — is byte-identical.
+ */
+export function suppressRejectedRecommendations(
+  recs: Recommendation[],
+  rejectedFindingIds: ReadonlySet<string>
+): Recommendation[] {
+  if (rejectedFindingIds.size === 0) return recs;
+  return recs.filter((rec) => !rejectedFindingIds.has(rec.id));
+}
+
 export function buildRecommendations(
   input: RecommendationInput,
   now?: number

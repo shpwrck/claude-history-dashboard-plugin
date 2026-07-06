@@ -77,6 +77,7 @@ import {
   LIVE_SESSION_MAX_BYTES,
   computeLiveSession,
   recordSuppressionTransitions,
+  readRejectedFindingIds,
   refreshReviewEvents,
 } from './ingest.mjs';
 import {
@@ -1144,6 +1145,7 @@ const GLOBAL_INGEST_API = {
   getSessionToolDetail,
   computeLiveSession,
   recordSuppressionTransitions,
+  readRejectedFindingIds,
   refreshReviewEvents,
 };
 
@@ -2353,9 +2355,14 @@ async function buildRecommendationsCacheEntry(
         );
       });
   }
+  // User-reject suppression (#2206): read the active REJECTED receipts and drop
+  // those findings from output. Best-effort like the rest of the route's receipt
+  // I/O — a read failure yields an empty set (no suppression), never a 500.
+  const rejectedFindingIds = await api.readRejectedFindingIds(ADOPTION_RECEIPTS);
   const recs = api.assembleRecommendations(project || undefined, {
     organizationIdentity,
     dataset,
+    rejectedFindingIds,
   });
   const json = safeJsonStringify(recs); // scrub lone surrogates so the export stays strict-parser-valid (#1104)
   const actualBytes = Buffer.byteLength(json, 'utf8');
@@ -3995,6 +4002,19 @@ async function handleAdoptionReceiptWrite(req, res) {
   return sendJson(res, 200, result);
 }
 
+// Drop every cached /api/recommendations.json entry (global + enterprise-scoped)
+// so the next request rebuilds with fresh receipt state (#2206). The recs cache
+// freshness gate is keyed only by source signature / contentHash, neither of
+// which covers the receipt log — so a reject/un-reject that leaves transcripts
+// unchanged would otherwise serve a stale, un-suppressed body until the source
+// churns. Cheap: a rejected click is rare relative to recs requests.
+function invalidateRecommendationsCaches() {
+  globalDatasetState.recommendationsCache.clear();
+  for (const state of scopedDatasetStates.values()) {
+    state.recommendationsCache.clear();
+  }
+}
+
 // POST /api/recommendations/reject — append-only recommendation reject-signal
 // writer (#1294). Same mutating-route auth gate as the adoption writer; the core
 // writer drops every non-allowlisted field before append, so only
@@ -4019,6 +4039,27 @@ async function handleRejectSignalWrite(req, res) {
   if (!result.ok) {
     return sendJson(res, result.status, { ok: false, error: result.error });
   }
+  // #2206: mirror the reject into a REJECTED adoption receipt so the engine's
+  // reject-suppression query actually drops the finding — the reject signal
+  // alone (for the #2207 judge gold set) never reaches the suppression path.
+  // Built from the sanitized signal with NO client ts, so appendAdoptionReceipt
+  // server-stamps the write time and append order decides a later un-reject
+  // (avoids a client backdating a reversal). Best-effort: the reject signal is
+  // already persisted, so a receipt write failure must not fail the request.
+  try {
+    await appendAdoptionReceipt(ADOPTION_RECEIPTS, {
+      kind: 'REJECTED',
+      findingId: result.record.findingId,
+      reason: result.record.reason,
+      active: true,
+    });
+  } catch (err) {
+    console.warn('[reject] REJECTED receipt mirror failed:', err?.message || err);
+  }
+  // Unconditional (outside the try): clearing an already-consistent cache is a
+  // harmless no-op, and busting it is a correctness obligation — not best-effort
+  // — so a future fallible change here can never silently serve a stale body.
+  invalidateRecommendationsCaches();
   return sendJson(res, 200, result);
 }
 

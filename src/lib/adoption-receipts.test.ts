@@ -9,6 +9,7 @@ import {
   parseAdoptionReceiptLines,
   readAdoptionReceipts,
   readAdoptionReceiptIndex,
+  readRejectedFindingIds,
   sanitizeAdoptionReceipt,
 } from './adoption-receipts';
 
@@ -424,6 +425,110 @@ describe('readAdoptionReceiptIndex (#576)', () => {
     const index = await readAdoptionReceiptIndex(file);
     expect([...index.surfacedFindingIds]).toEqual(['cost.a']);
     expect([...index.suppressedFindingIds]).toEqual(['cost.a']);
+  });
+
+  it('ignores REJECTED receipts — the suppression-transition index is untouched (#2206)', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    await writeFile(
+      file,
+      JSON.stringify({
+        kind: 'REJECTED',
+        ts: '2026-06-09T12:00:00.000Z',
+        findingId: 'cost.a',
+        reason: 'wrong',
+      }) + '\n'
+    );
+    const index = await readAdoptionReceiptIndex(file);
+    expect(index.surfacedFindingIds.size).toBe(0);
+    expect(index.suppressedFindingIds.size).toBe(0);
+  });
+});
+
+describe('sanitizeAdoptionReceipt REJECTED (#2206)', () => {
+  it('normalizes a valid reject and defaults active to true', () => {
+    expect(
+      sanitizeAdoptionReceipt(
+        { kind: 'REJECTED', findingId: 'cost.a', reason: 'wrong' },
+        now
+      )
+    ).toEqual({
+      schemaVersion: '1',
+      kind: 'REJECTED',
+      ts: '2026-06-09T12:00:00.000Z',
+      findingId: 'cost.a',
+      reason: 'wrong',
+      active: true,
+    });
+  });
+
+  it('records an un-reject when active is explicitly false', () => {
+    const rec = sanitizeAdoptionReceipt(
+      { kind: 'REJECTED', findingId: 'cost.a', reason: 'dismiss', active: false },
+      now
+    );
+    expect(rec).toMatchObject({ kind: 'REJECTED', findingId: 'cost.a', active: false });
+  });
+
+  it('rejects an unknown reason or a missing findingId', () => {
+    expect(
+      sanitizeAdoptionReceipt({ kind: 'REJECTED', findingId: 'x', reason: 'nope' }, now)
+    ).toBeNull();
+    expect(
+      sanitizeAdoptionReceipt({ kind: 'REJECTED', reason: 'wrong' }, now)
+    ).toBeNull();
+  });
+});
+
+describe('readRejectedFindingIds (#2206)', () => {
+  it('returns an empty set when the file is missing', async () => {
+    const dir = await makeDir();
+    const rejected = await readRejectedFindingIds(join(dir, 'nope.jsonl'));
+    expect(rejected.size).toBe(0);
+  });
+
+  it('includes actively-rejected findings and skips malformed lines', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ kind: 'REJECTED', ts: '2026-06-09T11:00:00.000Z', findingId: 'cost.a', reason: 'wrong' }),
+        'not json', // skipped
+        JSON.stringify({ kind: 'REJECTED', ts: '2026-06-09T11:00:00.000Z', findingId: 'reliability.b', reason: 'not-relevant' }),
+        // a SURFACED receipt is not a reject → ignored
+        JSON.stringify({ kind: 'SURFACED', ts: '2026-06-09T11:00:00.000Z', sessionHash: 's', findingIds: ['x'] }),
+      ].join('\n') + '\n'
+    );
+    expect([...(await readRejectedFindingIds(file))].sort()).toEqual(['cost.a', 'reliability.b']);
+  });
+
+  it('un-rejecting restores a finding — the latest receipt per finding wins', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ kind: 'REJECTED', ts: '2026-06-09T11:00:00.000Z', findingId: 'cost.a', reason: 'wrong' }),
+        // later un-reject → cost.a restored (dropped from the set)
+        JSON.stringify({ kind: 'REJECTED', ts: '2026-06-09T12:00:00.000Z', findingId: 'cost.a', reason: 'wrong', active: false }),
+        JSON.stringify({ kind: 'REJECTED', ts: '2026-06-09T11:30:00.000Z', findingId: 'reliability.b', reason: 'dismiss' }),
+      ].join('\n') + '\n'
+    );
+    expect([...(await readRejectedFindingIds(file))]).toEqual(['reliability.b']);
+  });
+
+  it('a later re-reject after an un-reject suppresses again', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ kind: 'REJECTED', ts: '2026-06-09T11:00:00.000Z', findingId: 'cost.a', reason: 'wrong', active: false }),
+        JSON.stringify({ kind: 'REJECTED', ts: '2026-06-09T12:00:00.000Z', findingId: 'cost.a', reason: 'wrong', active: true }),
+      ].join('\n') + '\n'
+    );
+    expect([...(await readRejectedFindingIds(file))]).toEqual(['cost.a']);
   });
 });
 

@@ -45,13 +45,14 @@ const {
   assembleDataset,
   assembleRecommendations,
   recordSuppressionTransitions,
+  readRejectedFindingIds,
   sourceSignature,
 } = await import(join(projectDir, 'scripts', 'ingest.mjs'));
 const { safeJsonStringify } = await import(
   join(projectDir, 'src', 'lib', 'json-safe.ts')
 );
 
-parentPort.on('message', (msg) => {
+parentPort.on('message', async (msg) => {
   if (!msg || typeof msg !== 'object') return;
   const {
     id,
@@ -81,9 +82,16 @@ parentPort.on('message', (msg) => {
         });
       });
     }
+    // User-reject suppression (#2206): drop findings carrying an active REJECTED
+    // receipt, mirroring the inline server path. Best-effort — no path -> empty
+    // set -> no suppression.
+    const rejectedFindingIds = adoptionReceiptsPath
+      ? await readRejectedFindingIds(adoptionReceiptsPath)
+      : new Set();
     const recs = assembleRecommendations(project || undefined, {
       organizationIdentity: organizationIdentity ?? null,
       dataset,
+      rejectedFindingIds,
     });
     const json = safeJsonStringify(recs);
     parentPort.postMessage({

@@ -13,6 +13,7 @@ import {
   reclaimCascade,
   backfillReclaimSavings,
   rankRecommendations,
+  suppressRejectedRecommendations,
   scopeKeyOf,
   type Recommendation,
   type AppliedMarkers,
@@ -103,6 +104,42 @@ describe('rankRecommendations time fallback (#1290)', () => {
       'time-high',
       'time-low',
     ]);
+  });
+});
+
+describe('suppressRejectedRecommendations (#2206, epic #1298)', () => {
+  const rec = (id: string): Recommendation => ({
+    id,
+    category: 'cost',
+    severity: 'medium',
+    title: id,
+    detail: '',
+    action: '',
+    evidence: [],
+  });
+
+  it('drops findings whose id is in the rejected set', () => {
+    const recs = [rec('cost.a'), rec('reliability.b'), rec('safety.c')];
+    const out = suppressRejectedRecommendations(recs, new Set(['reliability.b']));
+    expect(out.map((r) => r.id)).toEqual(['cost.a', 'safety.c']);
+  });
+
+  it('is a no-op passthrough for an empty set (byte-identical output)', () => {
+    const recs = [rec('cost.a'), rec('reliability.b')];
+    const out = suppressRejectedRecommendations(recs, new Set());
+    expect(out).toBe(recs); // same reference — no copy when nothing is rejected
+  });
+
+  it('does not mutate the input array', () => {
+    const recs = [rec('cost.a'), rec('reliability.b')];
+    suppressRejectedRecommendations(recs, new Set(['cost.a']));
+    expect(recs.map((r) => r.id)).toEqual(['cost.a', 'reliability.b']);
+  });
+
+  it('ignores rejected ids that match no current finding', () => {
+    const recs = [rec('cost.a')];
+    const out = suppressRejectedRecommendations(recs, new Set(['gone.x']));
+    expect(out.map((r) => r.id)).toEqual(['cost.a']);
   });
 });
 
