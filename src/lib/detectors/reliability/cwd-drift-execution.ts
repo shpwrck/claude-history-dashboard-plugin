@@ -5,7 +5,12 @@ import type {
   AppliedMarkers,
   RecommendationInput,
 } from '../types';
-import { claudeMdMarksApplied, hasPreToolUseAnchorGuard, truncate } from '../shared';
+import {
+  claudeMdMarksApplied,
+  hasPreToolUseAnchorGuard,
+  truncate,
+  splitSegments,
+} from '../shared';
 import type { ToolCall, ToolUsageData } from '../../parse-tools';
 
 /**
@@ -114,74 +119,6 @@ interface SessionDrift {
   sessionId: string;
   count: number;
   example: string;
-}
-
-// ── Quote- and heredoc-aware command splitting (ported from cwd-anchor-guard) ──
-
-const HEREDOC_OPENER_RE = /<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/g;
-/** Drop heredoc BODIES so their text isn't parsed as commands. */
-function stripHeredocs(command: string): string {
-  const lines = command.split('\n');
-  const out: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    out.push(lines[i]);
-    const openers = [...lines[i].matchAll(HEREDOC_OPENER_RE)].map((m) => ({
-      dash: m[1] === '-',
-      delim: m[3],
-    }));
-    if (!openers.length) continue;
-    let j = i + 1;
-    for (const op of openers) {
-      while (j < lines.length) {
-        const term = op.dash ? lines[j].replace(/^\t+/, '') : lines[j];
-        j++;
-        if (term === op.delim) break;
-      }
-    }
-    i = j - 1;
-  }
-  return out.join('\n');
-}
-
-const SEGMENT_DELIMS = new Set([';', '|', '\n']);
-/** Split a command into top-level segments, ignoring delimiters inside quotes. */
-function splitSegments(command: string): string[] {
-  const src = stripHeredocs(command);
-  const segs: string[] = [];
-  let cur = '';
-  let quote: string | null = null;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (quote) {
-      if (c === '\\' && quote === '"' && i + 1 < src.length) {
-        cur += c + src[++i];
-        continue;
-      }
-      cur += c;
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      cur += c;
-      continue;
-    }
-    const two = src.slice(i, i + 2);
-    if (two === '&&' || two === '||') {
-      segs.push(cur);
-      cur = '';
-      i++;
-      continue;
-    }
-    if (SEGMENT_DELIMS.has(c)) {
-      segs.push(cur);
-      cur = '';
-      continue;
-    }
-    cur += c;
-  }
-  segs.push(cur);
-  return segs.map((s) => s.trim()).filter(Boolean);
 }
 
 function leadingEnv(seg: string): string {

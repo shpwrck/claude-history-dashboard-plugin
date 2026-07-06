@@ -133,6 +133,7 @@ import { detector as overloadReretry } from './reliability/overload-reretry';
 import { detector as passiveWaitStall } from './reliability/passive-wait-stall';
 import { detector as cwdDriftExecution } from './reliability/cwd-drift-execution';
 import { detector as staleStateAssertion } from './reliability/stale-state-assertion';
+import { detector as discoveryFreshness } from './reliability/discovery-freshness';
 
 // ── SPEED ───────────────────────────────────────────────────────────────
 // The clock (ADR 0006) — wall-clock/latency levers.
@@ -365,6 +366,15 @@ export const DETECTORS: Detector[] = [
   // the global repo-freshness hook prevents (dogfooding loop). Reads toolData;
   // dark on a dataset with no Bash calls.
   staleStateAssertion,
+  // ── #2325 (epic #1868) — discovery freshness (reliability) ────────────────
+  // The FILE-READ sibling of #1871: a Read of a repo-map-tracked file, then a
+  // working-tree-moving git op (checkout/pull/rebase/…), then an Edit/Write of
+  // the same path with NO re-Read — the edit is applied against content the ref
+  // moved past. Counts the (Read,Edit) file pair; inspects Bash only to spot the
+  // intervening tree-move (disjoint from #1871's Bash git-ref reads). Emitted as
+  // an observational hypothesis. Reads toolData + repoMap (tracked-path oracle +
+  // generation sha); dark without a repo-map or tool calls.
+  discoveryFreshness,
 
   // ── #1754 (epic #1910) — mid-turn user-interrupt steering ─────────────────
   // Dollarizes the in-flight output tokens discarded when a human cuts the

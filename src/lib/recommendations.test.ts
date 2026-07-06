@@ -2803,6 +2803,65 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── reliability.discovery-freshness (#2325): a repo-mapped file Read, then a
+  // working-tree-moving git op (`git pull`), then an Edit of the same path with
+  // no intervening re-Read — an acted-on stale read, anchored on the repo-map's
+  // generatedAtGitSha.
+  {
+    const dfChain = (sessionId: string): ToolUsageData =>
+      ({
+        sessionId,
+        calls: [
+          {
+            timestamp: '2026-06-10T00:00:01Z',
+            toolName: 'Read',
+            input: { file_path: '/repo/src/lib/reclaim.ts' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 400,
+          },
+          {
+            timestamp: '2026-06-10T00:00:02Z',
+            toolName: 'Bash',
+            input: { command: 'git pull --rebase' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+          },
+          {
+            timestamp: '2026-06-10T00:00:03Z',
+            toolName: 'Edit',
+            input: { file_path: '/repo/src/lib/reclaim.ts' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+          },
+        ],
+      }) as unknown as ToolUsageData;
+    out.push({
+      now,
+      input: bankBase({
+        toolData: [dfChain('df1'), dfChain('df2'), dfChain('df3')],
+        repoMap: {
+          projects: [
+            {
+              root: '/repo',
+              generatedAtGitSha: 'abc123',
+              fileCount: 1,
+              truncated: false,
+              text: '',
+              files: [
+                { path: 'src/lib/reclaim.ts', symbols: [], imports: [], configSections: [], recommendations: [] },
+              ],
+              configSections: [],
+              configAttribution: [],
+            },
+          ],
+        } as unknown as RecommendationInput['repoMap'],
+      }),
+    });
+  }
+
   // ── context.reclaim-potential (#1758): a large NON-file Bash output
   // re-fetched 3x in one session — duplicate tool-output reclaim, distinct from
   // any file-Read re-ingestion the file detectors own.

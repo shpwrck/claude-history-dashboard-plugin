@@ -36,6 +36,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'context.last-n-runs-audit',
   'context.reclaim-potential',
   'maintenance.memory-hygiene',
+  'reliability.discovery-freshness',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */

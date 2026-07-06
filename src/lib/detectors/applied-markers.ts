@@ -120,6 +120,10 @@ export const MARKERS_STALE_STATE_ASSERTION: AppliedMarkers = {
   headings: [/^##\s+Fetch before asserting repo state\b/i],
   bodyPhrases: ['local tree can sit many commits behind origin'],
 };
+export const MARKERS_DISCOVERY_FRESHNESS: AppliedMarkers = {
+  headings: [/^##\s+Read freshness\b/i],
+  bodyPhrases: ['re-read the target after the ref moves before acting'],
+};
 
 export const MARKERS_HUMAN_INPUT_LEVERAGE: AppliedMarkers = {
   headings: [/^##\s+(?:Ask(?:ing)? upfront|Human input|Value of human input|Upfront questions)\b/i],
@@ -158,4 +162,5 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['reliability.tool-errors', MARKERS_TOOL_ERRORS],
   ['reliability.cwd-drift-execution', MARKERS_CWD_DRIFT_EXECUTION],
   ['reliability.stale-state-assertion', MARKERS_STALE_STATE_ASSERTION],
+  ['reliability.discovery-freshness', MARKERS_DISCOVERY_FRESHNESS],
 ]);

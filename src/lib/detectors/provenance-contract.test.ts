@@ -457,6 +457,63 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now: 0,
     };
   },
+  'reliability.discovery-freshness': () => {
+    // Three sessions, each: Read a repo-mapped file, a `git pull` moves the tree,
+    // then Edit the same file with no re-Read → an acted-on stale read.
+    const staleEdit = (sessionId: string) =>
+      ({
+        sessionId,
+        calls: [
+          {
+            timestamp: '2026-06-10T00:00:01Z',
+            toolName: 'Read',
+            input: { file_path: '/repo/src/lib/reclaim.ts' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 400,
+          },
+          {
+            timestamp: '2026-06-10T00:00:02Z',
+            toolName: 'Bash',
+            input: { command: 'git pull --rebase' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+          },
+          {
+            timestamp: '2026-06-10T00:00:03Z',
+            toolName: 'Edit',
+            input: { file_path: '/repo/src/lib/reclaim.ts' },
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+          },
+        ],
+      }) as unknown as RecommendationInput['toolData'][number];
+    const repoMap = {
+      projects: [
+        {
+          root: '/repo',
+          generatedAtGitSha: 'abc1234567890def',
+          fileCount: 1,
+          truncated: false,
+          text: '',
+          files: [
+            { path: 'src/lib/reclaim.ts', symbols: [], imports: [], configSections: [], recommendations: [] },
+          ],
+          configSections: [],
+          configAttribution: [],
+        },
+      ],
+    } as unknown as RecommendationInput['repoMap'];
+    return {
+      input: baseInput({
+        toolData: [staleEdit('df1'), staleEdit('df2'), staleEdit('df3')],
+        repoMap,
+      }),
+      now: 0,
+    };
+  },
   'context.cross-session-reread': () => {
     // A doc cold-read once per session across 6 sessions, read-only, big enough
     // that the NET cross-session tax clears the savings floor.
