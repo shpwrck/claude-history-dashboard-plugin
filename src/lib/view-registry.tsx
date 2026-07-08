@@ -23,6 +23,7 @@
 import { lazy } from 'react';
 import type { ReactNode } from 'react';
 import { isDashboardFilterActive } from './filtered-empty';
+import { recommendationViewsFromViewData } from './recommendation-view-data';
 import type {
   View,
   HistoryEntry,
@@ -581,39 +582,14 @@ function renderCostAttributionView(
 export const VIEW_RENDERERS: Partial<
   Record<View, (ctx: ViewContext) => ReactNode>
 > = {
+  // #2352: both recommendation surfaces spread the ONE canonical engine
+  // envelope (recommendationViewsFromViewData) instead of hand-listing fields,
+  // so Home Digest and Recommendations cannot drift apart in what they feed
+  // the engine. Only non-engine props stay explicit here.
   home: ({ data: d, nav: n, serverAvailable }) => (
     <DigestSpine
+      {...recommendationViewsFromViewData(d)}
       serverAvailable={serverAvailable}
-      tokenData={d.tokenData}
-      toolData={d.toolData}
-      sessions={d.sessions}
-      projects={d.projects}
-      permissionRows={d.permissionRows}
-      apiErrors={d.apiErrors}
-      timelines={d.timelines}
-      attribution={d.attribution}
-      agentSettings={d.agentSettings}
-      runtimeEvents={d.runtimeEvents}
-      taskSteering={d.taskSteering}
-      churnGeometry={d.churnGeometry}
-      taskSuccess={d.taskSuccess}
-      toolInventories={d.toolInventories}
-      liveConfig={d.liveConfig}
-      assistantFeatures={d.assistantFeatures}
-      deceitSignals={d.deceitSignals}
-      tasks={d.tasks}
-      teams={d.teams}
-      reviewEvents={d.reviewEvents}
-      sessionRegistry={d.sessionRegistry}
-      telemetry={d.telemetry}
-      modelLatency={d.modelLatency}
-      debugLogs={d.debugLogs}
-      statsCache={d.statsCache}
-      fileHistory={d.fileHistory}
-      plans={d.plans}
-      updateResults={d.updateResults}
-      mcpAuth={d.mcpAuth}
-      configBackups={d.configBackups}
       onNavigate={n.navigateWithFilter}
       onOpenSession={n.openSession}
       onActiveDomains={n.onActiveDomains}
@@ -621,40 +597,8 @@ export const VIEW_RENDERERS: Partial<
   ),
   recommendations: ({ data: d, nav: n, filter, serverAvailable }) => (
     <Recommendations
+      {...recommendationViewsFromViewData(d)}
       serverAvailable={serverAvailable}
-      tokenData={d.tokenData}
-      toolData={d.toolData}
-      sessions={d.sessions}
-      projects={d.projects}
-      permissionRows={d.permissionRows}
-      apiErrors={d.apiErrors}
-      timelines={d.timelines}
-      attribution={d.attribution}
-      agentSettings={d.agentSettings}
-      runtimeEvents={d.runtimeEvents}
-      taskSteering={d.taskSteering}
-      churnGeometry={d.churnGeometry}
-      taskSuccess={d.taskSuccess}
-      toolInventories={d.toolInventories}
-      liveConfig={d.liveConfig}
-      assistantFeatures={d.assistantFeatures}
-      deceitSignals={d.deceitSignals}
-      tasks={d.tasks}
-      teams={d.teams}
-      reviewEvents={d.reviewEvents}
-      sessionRegistry={d.sessionRegistry}
-      telemetry={d.telemetry}
-      modelLatency={d.modelLatency}
-      debugLogs={d.debugLogs}
-      statsCache={d.statsCache}
-      fileHistory={d.fileHistory}
-      plans={d.plans}
-      modelEvalSummary={d.modelEvalSummary}
-      updateResults={d.updateResults}
-      mcpAuth={d.mcpAuth}
-      configBackups={d.configBackups}
-      repoMap={d.repoMap}
-      externalGuidance={d.externalGuidance}
       activeFilter={filter}
       onNavigate={n.navigateWithFilter}
       navigateWithFilter={n.navigateWithFilter}

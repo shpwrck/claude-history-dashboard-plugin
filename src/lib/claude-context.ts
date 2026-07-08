@@ -26,8 +26,11 @@ import {
 } from './parse-tool-effectiveness';
 import type { SessionOverview } from './session-overview';
 import {
+  assembleRecommendationInput,
   buildRecommendations,
+  listOmittedEngineSignals,
   type Recommendation,
+  type RecommendationViews,
 } from './recommendations';
 import type {
   RepoMapDataset,
@@ -216,14 +219,14 @@ export interface ProjectPayload {
   repoMap?: RepoMapDataset | null;
 }
 
-export interface RecommendationsPayload {
-  tokenData: SessionTokenData[];
-  toolData: ToolUsageData[];
-  sessions: Session[];
-  projects: ProjectStats[];
-  permissionRows: { mode: string; sessionId: string }[];
-  apiErrors: ApiErrorEvent[];
-}
+/**
+ * #2352: the recommendations context accepts the full engine envelope — the
+ * same {@link RecommendationViews} the Recommendations page and Home Digest
+ * assemble — so Ask Claude no longer computes a narrower finding set. Callers
+ * that only have the six required base fields still type-check; whatever they
+ * omit is labelled in the context via `signalCoverage.omitted`.
+ */
+export type RecommendationsPayload = RecommendationViews;
 
 export interface ToolsPayload {
   toolData: ToolUsageData[];
@@ -365,17 +368,33 @@ function buildProjectContext(p: ProjectPayload): unknown {
 }
 
 function buildRecommendationsContext(p: RecommendationsPayload): unknown {
-  const recs: Recommendation[] = buildRecommendations({
-    tokenData: p.tokenData,
-    toolData: p.toolData,
-    sessions: p.sessions,
-    projects: p.projects,
-    permissionRows: p.permissionRows,
-    apiErrors: p.apiErrors,
-  });
+  // #2352: run the engine on the full envelope the caller supplies (App now
+  // passes the canonical client envelope), normalized exactly like the
+  // Recommendations page and Home Digest do, so the three surfaces agree.
+  const recs: Recommendation[] = buildRecommendations(
+    assembleRecommendationInput(p)
+  );
+  // Signals the caller did not supply are labelled explicitly rather than
+  // silently narrowing the finding set — the model (and the user reading the
+  // context) can see which detector families were not computable here.
+  const omittedSignals = listOmittedEngineSignals(p);
 
   return {
     view: 'recommendations',
+    ...(omittedSignals.length > 0
+      ? {
+          signalCoverage: {
+            omitted: omittedSignals,
+            // Wording notes: keep this free of server-route literals like
+            // "/api/…" — the string ships in the SPA bundle and the
+            // spa-boundary gate greps the emitted assets for them (#324). And
+            // make no claims about what OTHER surfaces see: the client pages
+            // lack the server-only signals too, so "the Recommendations page
+            // sees the full set" would be a false coverage claim.
+            note: 'Findings that depend on these signals are not computed in this context; surfaces supplied with them (such as the server recommendations endpoint) may report additional findings.',
+          },
+        }
+      : {}),
     totalRecommendations: recs.length,
     bySeverity: {
       critical: recs.filter((r) => r.severity === 'critical').length,

@@ -259,3 +259,43 @@ describe('buildContext repo-map injection', () => {
     expect('repoMap' in out).toBe(false);
   });
 });
+
+describe('buildContext recommendations signal coverage (#2352)', () => {
+  const baseSix = {
+    tokenData: [],
+    toolData: [],
+    sessions: [],
+    projects: [],
+    permissionRows: [],
+    apiErrors: [],
+  };
+
+  it('labels omitted engine signals when only the base fields are supplied', () => {
+    const out = buildContext({
+      view: 'recommendations',
+      data: baseSix,
+    }) as Record<string, unknown>;
+    const coverage = out.signalCoverage as
+      | { omitted: string[]; note: string }
+      | undefined;
+    expect(coverage).toBeDefined();
+    expect(coverage!.omitted).toContain('repoMap');
+    expect(coverage!.omitted).toContain('modelEvalSummary');
+    // The note must not claim other client surfaces see these signals — they
+    // don't (Codex review on #2359); it may only point at supplied surfaces.
+    expect(coverage!.note).toMatch(/surfaces supplied with them/);
+  });
+
+  it('shrinks the omission list as the envelope widens', () => {
+    const out = buildContext({
+      view: 'recommendations',
+      data: { ...baseSix, repoMap: null, modelEvalSummary: null },
+    }) as Record<string, unknown>;
+    const coverage = out.signalCoverage as
+      | { omitted: string[] }
+      | undefined;
+    expect(coverage).toBeDefined();
+    expect(coverage!.omitted).not.toContain('repoMap');
+    expect(coverage!.omitted).not.toContain('modelEvalSummary');
+  });
+});

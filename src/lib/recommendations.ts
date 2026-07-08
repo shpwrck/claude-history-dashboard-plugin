@@ -180,6 +180,38 @@ const DECLARED_DATA_DEP_FIELDS: ReadonlySet<keyof RecommendationInput> = (() => 
   return s;
 })();
 
+/**
+ * Every input field any detector consumes: the required base fields plus the
+ * union of declared `dataDeps` (#2080). Exported for the #2352 parity
+ * contract — the client envelope (`recommendation-view-data.ts`) is tested
+ * against this list so a new detector dependency on a client-carried signal
+ * cannot be silently dropped from the client surfaces.
+ */
+export function engineConsumedFields(): (keyof RecommendationInput)[] {
+  return [...REQUIRED_INPUT_FIELDS, ...DECLARED_DATA_DEP_FIELDS].sort();
+}
+
+/**
+ * The declared detector signals a caller did NOT supply (`undefined`, as
+ * opposed to an explicit "looked, nothing there" null). A surface that
+ * intentionally passes a narrower envelope must label these omissions in its
+ * output instead of silently disagreeing with the Recommendations page (#2352).
+ */
+export function listOmittedEngineSignals(v: RecommendationViews): string[] {
+  const record = v as unknown as Record<string, unknown>;
+  return [...DECLARED_DATA_DEP_FIELDS]
+    .filter(
+      (f) =>
+        record[f] === undefined &&
+        // Derived, never truly omitted: `assembleRecommendationInput` computes
+        // modelPinSavings from tokenData when the caller doesn't supply it, so
+        // detectors that depend on it DO run — reporting it as omitted would
+        // be a false coverage claim (AGENTS.md: recommendations are auditable).
+        f !== 'modelPinSavings'
+    )
+    .sort();
+}
+
 export function assembleRecommendationInput(
   v: RecommendationViews
 ): RecommendationInput {
