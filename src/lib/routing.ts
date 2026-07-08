@@ -299,6 +299,24 @@ export function scrollToSignalAnchor(
   return true;
 }
 
+/**
+ * The deferred in-view scroll used by KPI tiles and evidence links: waits one
+ * tick so the smooth scroll runs after the click settles (#1813), falling back
+ * to the synchronous scroll outside a browser. One home for the idiom that
+ * used to be copied per view (#2349) — ErrorRetry/SessionPatterns delegate
+ * here; keep any future scroll-behavior change in this function.
+ */
+export function deferredScrollToSignalAnchor(
+  signalId: string,
+  options: ScrollToSignalAnchorOptions = { focus: true }
+): void {
+  if (typeof window === 'undefined') {
+    scrollToSignalAnchor(signalId, options);
+    return;
+  }
+  window.setTimeout(() => scrollToSignalAnchor(signalId, options), 0);
+}
+
 /** Parse the current `window.location.hash` (empty in non-browser/test envs). */
 export function initialRoute(options: ParseRouteOptions = {}): ParsedRoute {
   if (typeof window === 'undefined') {

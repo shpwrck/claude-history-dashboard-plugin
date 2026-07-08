@@ -24,6 +24,7 @@ import { lazy } from 'react';
 import type { ReactNode } from 'react';
 import { isDashboardFilterActive } from './filtered-empty';
 import { recommendationViewsFromViewData } from './recommendation-view-data';
+import { navigateDrillThroughWithFilter } from '../components/affordance/DrillThrough';
 import type {
   View,
   HistoryEntry,
@@ -656,7 +657,7 @@ export const VIEW_RENDERERS: Partial<
       liveConfig={d.liveConfig}
     />
   ),
-  tools: ({ data: d, nav: n, routeFilter }) => (
+  tools: ({ data: d, nav: n, routeFilter, filter }) => (
     <ToolUsage
       toolData={d.toolData}
       apiErrors={d.apiErrors}
@@ -666,6 +667,7 @@ export const VIEW_RENDERERS: Partial<
       liveConfig={d.liveConfig}
       onOpenSession={n.openSession}
       routeFilter={routeFilter}
+      activeFilter={filter}
       onNavigateWithFilter={n.navigateWithFilter}
     />
   ),
@@ -735,11 +737,14 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
     />
   ),
-  prompts: ({ data: d }) => (
+  prompts: ({ data: d, nav: n }) => (
     <PromptAnalyzer
       promptAnalysis={d.promptAnalysis}
       timelines={d.timelines}
       apiErrors={d.apiErrors}
+      onDrillThrough={(target) =>
+        navigateDrillThroughWithFilter(n.navigateWithFilter, target)
+      }
     />
   ),
   errors: ({ data: d, nav: n, routeFilter }) => (
@@ -811,6 +816,9 @@ export const VIEW_RENDERERS: Partial<
       activeFilter={filter}
       routeFilter={routeFilter}
       onOpenSession={n.openSession}
+      onDrillThrough={(target) =>
+        navigateDrillThroughWithFilter(n.navigateWithFilter, target)
+      }
     />
   ),
   'shadow-calls': ({ data: d, serverAvailable }) => (
