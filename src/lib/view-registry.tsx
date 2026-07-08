@@ -767,7 +767,6 @@ export const VIEW_RENDERERS: Partial<
       projects={d.projects}
       entries={d.entries}
       activeFilter={filter}
-      onOpenSession={n.openSession}
       navigateWithFilter={n.navigateWithFilter}
     />
   ),
