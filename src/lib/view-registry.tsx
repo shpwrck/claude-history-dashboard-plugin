@@ -700,19 +700,23 @@ function collectSessionIds(
   ]);
 }
 
-function sessionScopedOverrides(
+function applyFilterMaps<C extends { sessionIds: ReadonlySet<string> }>(
   data: ViewData,
-  keys: readonly (keyof ViewData)[],
-  sessionIds: ReadonlySet<string>
-): Partial<ViewData> {
-  const out: Record<string, unknown> = {};
-  for (const key of keys) {
+  sessionKeys: readonly (keyof ViewData)[],
+  map: { [K in keyof ViewData]?: (d: ViewData, c: C) => ViewData[K] },
+  ctx: C
+): ViewData {
+  const out: Record<string, unknown> = { ...data };
+  for (const key of sessionKeys) {
     out[key] = filterBySessionId(
       data[key] as unknown as readonly { sessionId: string }[],
-      sessionIds
+      ctx.sessionIds
     );
   }
-  return out as Partial<ViewData>;
+  for (const key in map) {
+    out[key] = map[key as keyof ViewData]!(data, ctx);
+  }
+  return out as unknown as ViewData;
 }
 
 function byProjectEq<K extends keyof ViewData>(key: K) {
@@ -804,20 +808,7 @@ function applyTimeFilteredData(data: ViewData, filter: DashboardFilter): ViewDat
     sessionIds,
   };
 
-  const overrides = {
-    ...sessionScopedOverrides(data, SESSION_SCOPED_FIELDS, sessionIds),
-    ...Object.fromEntries(
-      (Object.entries(FILTER_BY_TIME) as [
-        string,
-        (data: ViewData, ctx: TimeFilterContext) => unknown,
-      ][]).map(([key, filterBy]) => [key, filterBy(data, context)])
-    ),
-  } as Partial<ViewData>;
-
-  return {
-    ...data,
-    ...overrides,
-  };
+  return applyFilterMaps(data, SESSION_SCOPED_FIELDS, FILTER_BY_TIME, context);
 }
 
 export function filterViewDataByTime(
@@ -915,6 +906,7 @@ function renderCapabilitiesView(ctx: ViewContext, forcedTab?: string): ReactNode
               promptAnalysis={d.promptAnalysis}
               timelines={d.timelines}
               apiErrors={d.apiErrors}
+              onOpenSession={n.openSession}
               onDrillThrough={(target) =>
                 navigateDrillThroughWithFilter(n.navigateWithFilter, target)
               }
@@ -1323,23 +1315,11 @@ export function filterViewDataByProject(
     entry.cwd === project
   );
   const sessionIds = collectSessionIds(sessions, tokenData, sessionRegistry);
-  const overrides = {
-    ...sessionScopedOverrides(data, PROJECT_SESSION_SCOPED_FIELDS, sessionIds),
-    ...Object.fromEntries(
-      (Object.entries(FILTER_BY_PROJECT) as [
-        string,
-        (data: ViewData, ctx: ProjectFilterContext) => unknown,
-      ][]).map(([key, filterBy]) => [
-        key,
-        filterBy(data, { project, sessions, sessionIds }),
-      ])
-    ),
-  } as Partial<ViewData>;
-
-  return {
-    ...data,
-    ...overrides,
-  };
+  return applyFilterMaps(data, PROJECT_SESSION_SCOPED_FIELDS, FILTER_BY_PROJECT, {
+    project,
+    sessions,
+    sessionIds,
+  });
 }
 
 /** Render the active view. Returns null for an unknown view (defensive). */

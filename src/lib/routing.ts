@@ -43,6 +43,11 @@ export const ROUTE_FILTER_KEYS = [
   'tool',
   'file',
   'mode',
+  // Model-family drill (#2418): the tokens view filters token entries by
+  // `modelFamily(entry.model)`, so a Summary By-model row (which buckets
+  // per-entry) hands off with matching entry-level semantics — unlike `mode`,
+  // which substring-matches whole sessions on their last-model-wins fields.
+  'family',
   'entrypoint',
   'pattern',
   'table',

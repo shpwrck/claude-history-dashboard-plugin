@@ -164,7 +164,13 @@ describe('view page heading drift guard (#1599)', () => {
 
       await waitFor(() => {
         expect(container.querySelector('[data-testid="lazy-view-loading"]')).toBeNull();
-      }, { timeout: 5000 });
+        // #2418: bumped 5000→15000ms because the Summary lazy chunk grew when it
+        // pulled in @patternfly/react-table (the By-project Table), pushing the
+        // slowest view's lazy-import + first render past the old 5s ceiling on a
+        // contended CI/vitest worker. The guard only cares that the chunk
+        // eventually resolves, so a wider ceiling avoids flakes without masking a
+        // real regression.
+      }, { timeout: 15000 });
 
       const h1s = Array.from(container.querySelectorAll('h1'));
       expect(
