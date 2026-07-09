@@ -84,7 +84,10 @@ function sessionJsonl(spec) {
 // Two sessions in one project, each with distinct, non-empty signal content.
 const SESSIONS = {
   'sess-alpha': {
-    prompt: 'do the alpha thing',
+    // Code fence + trailing '?' so this session's USER entry yields hasCode=true
+    // AND isQuestion=true — exercising the sparse-true signals #2106's
+    // slimSessionTimeline KEEPS on user entries (see the shape assertions below).
+    prompt: 'run ```ls``` for the alpha thing?',
     text: 'Here is the alpha answer.',
     toolName: 'Read',
     toolInput: { file_path: '/tmp/a.txt' },
@@ -190,11 +193,39 @@ test('(a) ingest()+assembleDataset() round-trips; a second unchanged run is byte
       false,
       'bulk timelines strip every entries[].summary key'
     );
+    // #2106 (slimSessionTimeline) pruned the summary-derived signals to USER
+    // entries only, and demoted hasCode/isQuestion to sparse-true (present ONLY
+    // when true — downstream fallbacks recompute false on the stripped summary).
+    // So the bulk shape is: user entries keep summaryLen (number) and carry
+    // hasCode/isQuestion only when true; non-user entries drop all three. (The
+    // pre-#2106 shape — every entry carrying all three as concrete types — is the
+    // stale expectation that made this assertion fail on master; #2384.)
+    const userBulkEntries = bulkTimelineEntries.filter((entry) => entry.kind === 'user');
+    assert.ok(userBulkEntries.length > 0, 'fixture yields user bulk entries (non-vacuous)');
     for (const entry of bulkTimelineEntries) {
-      assert.equal(typeof entry.summaryLen, 'number', 'bulk entry carries summaryLen');
-      assert.equal(typeof entry.hasCode, 'boolean', 'bulk entry carries hasCode');
-      assert.equal(typeof entry.isQuestion, 'boolean', 'bulk entry carries isQuestion');
+      if (entry.kind === 'user') {
+        assert.equal(typeof entry.summaryLen, 'number', 'user bulk entry keeps summaryLen');
+        if (Object.hasOwn(entry, 'hasCode')) {
+          assert.equal(entry.hasCode, true, 'user bulk hasCode is present only when true');
+        }
+        if (Object.hasOwn(entry, 'isQuestion')) {
+          assert.equal(entry.isQuestion, true, 'user bulk isQuestion is present only when true');
+        }
+      } else {
+        assert.equal(Object.hasOwn(entry, 'summaryLen'), false, 'non-user bulk entry drops summaryLen');
+        assert.equal(Object.hasOwn(entry, 'hasCode'), false, 'non-user bulk entry drops hasCode');
+        assert.equal(Object.hasOwn(entry, 'isQuestion'), false, 'non-user bulk entry drops isQuestion');
+      }
     }
+    // The derived signals genuinely SURVIVE slimming on the user entry whose
+    // summary has them (sess-alpha's prompt carries a code fence and ends with
+    // '?'), proving #2106's user-entry readers are still fed after the pruning.
+    const alphaUserEntry = cold.timelines
+      .find((timeline) => timeline.sessionId === 'sess-alpha')
+      ?.entries.find((entry) => entry.kind === 'user');
+    assert.equal(typeof alphaUserEntry?.summaryLen, 'number', 'surviving user summaryLen');
+    assert.equal(alphaUserEntry?.hasCode, true, 'surviving user hasCode (code fence in prompt)');
+    assert.equal(alphaUserEntry?.isQuestion, true, 'surviving user isQuestion (prompt ends with ?)');
     assert.equal(
       cold.timelines.find((timeline) => timeline.sessionId === 'sess-alpha')
         ?.firstPromptPreview,
