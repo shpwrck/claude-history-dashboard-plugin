@@ -50,9 +50,21 @@ describe('model-eval ingest boot wiring (#1242)', () => {
     const artifacts = assembleSection('assembleArtifacts');
     // Returned from assembleArtifacts()...
     expect(artifacts).toMatch(/return \{[\s\S]*?modelEvalSummary,[\s\S]*?\};/);
+    // ...destructured from assembleArtifacts() and re-emitted by the shared
+    // assembly core (#2182 extracted the fold/aggregate build into
+    // assembleDatasetCore(), consumed by BOTH the full dataset and the lighter
+    // recs dataset)...
+    const coreIdx = src.indexOf('function assembleDatasetCore');
+    expect(coreIdx, 'assembleDatasetCore() found in ingest.mjs').toBeGreaterThan(-1);
+    const core = src.slice(coreIdx, coreIdx + 20000);
+    expect(core).toMatch(/\{[\s\S]*?modelEvalSummary,[\s\S]*?\} = assembleArtifacts\(\);/);
+    const coreRet = core.indexOf('\n  return {');
+    expect(coreRet).toBeGreaterThan(-1);
+    expect(core.slice(coreRet)).toContain('modelEvalSummary,');
+    // ...then destructured from assembleDatasetCore() and re-emitted as a
+    // dataset key by the full assembleDataset().
     const dataset = assembleSection('assembleDataset');
-    // ...destructured and re-emitted as a dataset key.
-    expect(dataset).toMatch(/\{[\s\S]*?modelEvalSummary,[\s\S]*?\} = assembleArtifacts\(\);/);
+    expect(dataset).toMatch(/\{[\s\S]*?modelEvalSummary,[\s\S]*?\} = assembleDatasetCore\(\);/);
     const retIdx = dataset.indexOf('\n  return {');
     expect(retIdx).toBeGreaterThan(-1);
     expect(dataset.slice(retIdx)).toContain('modelEvalSummary,');

@@ -42,7 +42,7 @@ if (!projectDir) {
 // ingest + serialization code path (no drift).
 const {
   ingest,
-  assembleDataset,
+  assembleRecommendationDataset,
   assembleRecommendations,
   recordSuppressionTransitions,
   readRejectedFindingIds,
@@ -64,7 +64,10 @@ parentPort.on('message', async (msg) => {
   } = msg;
   try {
     const stats = ingest();
-    const dataset = assembleDataset();
+    // #2182: assemble ONLY the fields the recs input needs (not the full
+    // /api/dataset.json payload). Shared by the suppression-transition emit and
+    // the recs build below, so a single light assemble serves both (#2071).
+    const dataset = assembleRecommendationDataset();
     if (emitSuppressionTransitions && adoptionReceiptsPath) {
       // Best-effort, like the inline path: never fail the rebuild on a receipts
       // write error. Reuses the same dataset (no second assemble).

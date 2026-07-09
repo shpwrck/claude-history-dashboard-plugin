@@ -2481,10 +2481,23 @@ export function assembleArtifacts() {
   };
 }
 
-// Assemble the normalized payload the client consumes. Transcript-derived
-// entries are authoritative; history.d parts override history.jsonl for the
-// same session before history-only sessions are unioned in.
-export function assembleDataset() {
+// #2182 (epic #2181): call-count instrumentation so a test can PROVE the recs
+// path assembles the LIGHT recommendation dataset and never triggers the full
+// assembleDataset() build. Test-only observable; never affects output.
+const assemblyCallCounts = { full: 0, recommendation: 0 };
+export function assemblyInstrumentation() {
+  return { ...assemblyCallCounts };
+}
+
+// Shared assembly core (#2182). Builds every signal array, the entries union,
+// the aggregate/artifact fields, and the repoMap INPUTS that BOTH the full
+// /api/dataset.json payload (assembleDataset) and the lighter recommendation
+// dataset (assembleRecommendationDataset) consume — through the SAME per-signal
+// fold and the SAME builders, so their shared fields are byte-identical. The
+// full-only extras (promptAnalysis, the embedded first-pass recommendations that
+// populate repoMap.files[].recommendations, and the schema/window metadata) plus
+// the two divergent repoMap builds stay with each caller below.
+function assembleDatasetCore() {
   const rows = blobCache.readAllRows();
   const sessionProvenanceById = new Map(
     listSessions().map((session) => {
@@ -2629,7 +2642,6 @@ export function assembleDataset() {
       }
     }
   }
-  const promptAnalysis = parsePromptAnalysis(entries);
   const taskSteering = computeTaskSteering({
     entries,
     runtimeEvents,
@@ -2729,6 +2741,113 @@ export function assembleDataset() {
       valueFlow,
     }[s.datasetKey];
   }
+  return {
+    // Signal arrays (the 13 SESSION_SIGNALS datasetKeys)
+    tokenData,
+    toolData,
+    toolInventories,
+    timelines,
+    apiErrors,
+    agentSettings,
+    attribution,
+    runtimeEvents,
+    churnGeometry,
+    assistantFeatures,
+    deceitSignals,
+    taskSuccess,
+    valueFlow,
+    // Special signals
+    entries,
+    permissionRows,
+    permissionChanges,
+    // Aggregates
+    taskSteering,
+    liveConfig,
+    shadowCalls,
+    workflows,
+    // Server artifacts
+    tasks,
+    teams,
+    reviewEvents,
+    sessionRegistry,
+    telemetry,
+    modelLatency,
+    debugLogs,
+    statsCache,
+    fileHistory,
+    plans,
+    modelEvalSummary,
+    updateResults,
+    mcpAuth,
+    configBackups,
+    externalGuidance,
+    gitOutcomes,
+    // repoMap inputs (each caller builds repoMap; only the full path folds in
+    // the embedded recommendations)
+    maps,
+    configSections,
+    configAttribution,
+    fileReread,
+    churnFiles,
+    // Embedded first-pass recommendation inputs (full path only)
+    recSessions,
+    recProjects,
+    signalInput,
+  };
+}
+
+// Assemble the normalized payload the client consumes. Transcript-derived
+// entries are authoritative; history.d parts override history.jsonl for the
+// same session before history-only sessions are unioned in.
+export function assembleDataset() {
+  assemblyCallCounts.full += 1;
+  const {
+    tokenData,
+    toolData,
+    toolInventories,
+    timelines,
+    apiErrors,
+    agentSettings,
+    attribution,
+    runtimeEvents,
+    churnGeometry,
+    assistantFeatures,
+    deceitSignals,
+    taskSuccess,
+    valueFlow,
+    entries,
+    permissionRows,
+    permissionChanges,
+    taskSteering,
+    liveConfig,
+    shadowCalls,
+    workflows,
+    tasks,
+    teams,
+    reviewEvents,
+    sessionRegistry,
+    telemetry,
+    modelLatency,
+    debugLogs,
+    statsCache,
+    fileHistory,
+    plans,
+    modelEvalSummary,
+    updateResults,
+    mcpAuth,
+    configBackups,
+    externalGuidance,
+    gitOutcomes,
+    maps,
+    configSections,
+    configAttribution,
+    fileReread,
+    churnFiles,
+    recSessions,
+    recProjects,
+    signalInput,
+  } = assembleDatasetCore();
+  const promptAnalysis = parsePromptAnalysis(entries);
   const recommendations = buildRecommendations(
     assembleRecommendationInput({
       ...signalInput,
@@ -2853,6 +2972,75 @@ export function assembleDataset() {
   };
 }
 
+// Lighter assembly for the recommendation path (#2182, epic #2181). Builds ONLY
+// the fields `assembleRecommendationContext` reads off the dataset — via the
+// SAME `assembleDatasetCore()` builders as the full dataset — and SKIPS the
+// full-only work the recs input never consumes:
+//   * `parsePromptAnalysis(entries)` — recs never pass promptAnalysis (the
+//     workflow.prompt-clarity detector gets null on this path);
+//   * the embedded first-pass `buildRecommendations()` 88-detector pass whose
+//     ONLY output is repoMap.files[].recommendations — a cross-link NO served
+//     detector reads (verified), so omitting it leaves the served recs body
+//     byte-identical while dropping a full detector pass from the rebuild;
+//   * the schema envelope + window scan + units metadata (dataset-only).
+// The result carries every field the recs input needs, so a caller can pass it
+// as `options.dataset` to `assembleRecommendations` /
+// `recordSuppressionTransitions` exactly like the full dataset — but without
+// building the ~132 MB serialized payload's dataset-only extras. Full
+// `assembleDataset()` (for /api/dataset.json and its embedded recs) is unchanged.
+export function assembleRecommendationDataset() {
+  assemblyCallCounts.recommendation += 1;
+  const core = assembleDatasetCore();
+  // repoMap WITHOUT the embedded recommendations: files[].recommendations is
+  // empty here (no served detector reads it), every other repoMap field matches
+  // the full path, so the served recs are byte-identical.
+  const repoMap = buildRepoMapDataset({
+    maps: core.maps,
+    configSections: core.configSections,
+    configAttribution: core.configAttribution,
+    fileReread: core.fileReread,
+    churnFiles: core.churnFiles,
+  });
+  return {
+    entries: core.entries,
+    tokenData: core.tokenData,
+    toolData: core.toolData,
+    toolInventories: core.toolInventories,
+    timelines: core.timelines,
+    apiErrors: core.apiErrors,
+    agentSettings: core.agentSettings,
+    attribution: core.attribution,
+    runtimeEvents: core.runtimeEvents,
+    churnGeometry: core.churnGeometry,
+    assistantFeatures: core.assistantFeatures,
+    deceitSignals: core.deceitSignals,
+    taskSuccess: core.taskSuccess,
+    valueFlow: core.valueFlow,
+    permissionRows: core.permissionRows,
+    taskSteering: core.taskSteering,
+    liveConfig: core.liveConfig,
+    shadowCalls: core.shadowCalls,
+    workflows: core.workflows,
+    tasks: core.tasks,
+    teams: core.teams,
+    reviewEvents: core.reviewEvents,
+    sessionRegistry: core.sessionRegistry,
+    telemetry: core.telemetry,
+    modelLatency: core.modelLatency,
+    debugLogs: core.debugLogs,
+    statsCache: core.statsCache,
+    fileHistory: core.fileHistory,
+    plans: core.plans,
+    modelEvalSummary: core.modelEvalSummary,
+    updateResults: core.updateResults,
+    mcpAuth: core.mcpAuth,
+    configBackups: core.configBackups,
+    externalGuidance: core.externalGuidance,
+    gitOutcomes: core.gitOutcomes,
+    repoMap,
+  };
+}
+
 // Build the recommendation list server-side from the same assembled dataset the
 // /api/dataset.json route serializes, so headless / agent consumers (Aya, P10)
 // get recs byte-identical to the UI's Recommendations view — same stable `id`s
@@ -2874,11 +3062,15 @@ export function assembleDataset() {
 // (the adoption-receipt emit) so both observe the exact same dataset state.
 function assembleRecommendationContext(options = {}) {
   // Reuse a caller-provided dataset (#2071) so a single recs request assembles
-  // the ~128 MB dataset once — shared by the recs build and the suppression-
-  // transition emit — instead of assembling it twice. Falls back to a fresh
-  // assemble when no dataset is supplied (the parity tests and any non-server
-  // caller), so the exported assembleDataset() path is unchanged.
-  const dataset = options.dataset ?? assembleDataset();
+  // the dataset once — shared by the recs build and the suppression-transition
+  // emit — instead of assembling it twice. Falls back to the LIGHTER
+  // recommendation dataset (#2182) when no dataset is supplied: it carries every
+  // field consumed below via the SAME builders as assembleDataset() but skips the
+  // dataset-only extras (promptAnalysis, the embedded first-pass recs, schema
+  // metadata), so the served recs are byte-identical while the rebuild drops a
+  // full detector pass. Full assembleDataset() stays available for callers that
+  // inject it (e.g. a request that also serves /api/dataset.json).
+  const dataset = options.dataset ?? assembleRecommendationDataset();
   const sessions = groupBySessions(dataset.entries);
   const projects = groupByProjects(sessions);
   // Signal-derived RecommendationInput fields flow straight from the descriptor

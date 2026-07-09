@@ -54,6 +54,7 @@ const gzipAsync = promisify(gzip);
 import {
   ingest,
   assembleDataset,
+  assembleRecommendationDataset,
   assembleRecommendations,
   loadDatasetCache,
   loadLatestDatasetCache,
@@ -1135,6 +1136,7 @@ function datasetEtagFrom(stableJson) {
 const GLOBAL_INGEST_API = {
   ingest,
   assembleDataset,
+  assembleRecommendationDataset,
   assembleRecommendations,
   loadDatasetCache,
   loadLatestDatasetCache,
@@ -1188,6 +1190,10 @@ function datasetState(apiPromise, key = 'global') {
     // moves, so its memory cost is one dataset object bounded by the dataset's
     // own growth. null until the first recs build assembles.
     assembledMemo: null, // { contentHash, dataset }
+    // #2182: separate memo for the lighter recommendation dataset (recs-input
+    // fields only), so the recs route doesn't build the full payload and doesn't
+    // evict the full-dataset memo the digest/dataset routes reuse.
+    assembledRecoMemo: null, // { contentHash, dataset }
   };
 }
 
@@ -2148,6 +2154,25 @@ function memoizedAssembleDataset(state, api, contentHash) {
   return dataset;
 }
 
+// #2182: the recs route's own memoized assemble. Mirrors memoizedAssembleDataset
+// but builds the LIGHTER recommendation dataset (recs-input fields only, no
+// dataset-only promptAnalysis/embedded-recs/metadata), keyed on the same
+// contentHash. Kept in a SEPARATE memo slot from the full dataset (which the
+// /api/digest and /api/dataset.json routes still need) so neither evicts the
+// other. Shared within one recs request by the suppression emit + recs build
+// (#2071), so a single light assemble serves both.
+function memoizedAssembleRecommendationDataset(state, api, contentHash) {
+  if (
+    state.assembledRecoMemo &&
+    state.assembledRecoMemo.contentHash === contentHash
+  ) {
+    return state.assembledRecoMemo.dataset;
+  }
+  const dataset = api.assembleRecommendationDataset();
+  state.assembledRecoMemo = { contentHash, dataset };
+  return dataset;
+}
+
 // ── Off-main-thread recommendations rebuild worker (#2196, epic #2181) ───────
 // The recs rebuild is multi-second synchronous CPU; running it inline (even
 // finish-deferred, #2184) stalls the event loop, so a request landing during a
@@ -2339,8 +2364,14 @@ async function buildRecommendationsCacheEntry(
   const stats = api.ingest();
   // Assemble once and thread the same dataset into both the suppression emit
   // and the recs build (#2071) — each previously called assembleDataset()
-  // independently, doubling the synchronous event-loop stall per request.
-  const dataset = memoizedAssembleDataset(state, api, stats.contentHash);
+  // independently, doubling the synchronous event-loop stall per request. #2182:
+  // this is the recs path, so build only the recs-input fields (lighter than the
+  // full /api/dataset.json payload), not the full dataset.
+  const dataset = memoizedAssembleRecommendationDataset(
+    state,
+    api,
+    stats.contentHash
+  );
   if (emitSuppressionTransitions) {
     api
       .recordSuppressionTransitions(ADOPTION_RECEIPTS, {
