@@ -159,6 +159,15 @@ function freshDefaults(): NavPrefs {
 // them; `liveServer` views need the live backend control plane and stay out of
 // the public SPA builds entirely (they also carry server-touching code that the
 // `spa-boundary` gate forbids). See {@link variantCapabilities}.
+/**
+ * A route's page-contract class (#2350, epic #2345): what job the page holds
+ * itself to. `action` pages exist to fix/decide (copy/write/drill affordances
+ * are the point); `evidence` pages are ledgers the user consults to verify a
+ * claim; `raw` pages are orientation/replay/reference off the primary path.
+ * The full per-view matrix lives in docs/page-contracts.md.
+ */
+export type PageContract = 'action' | 'evidence' | 'raw';
+
 export interface NavItem {
   view: View;
   label: string;
@@ -167,11 +176,26 @@ export interface NavItem {
   /** Optional one-line explainer used by PageHeader; source of truth for views. */
   description?: string;
   requires?: ViewRequirement;
+  /**
+   * Page-contract class (#2350). Required so the compiler enforces that every
+   * catalog route declares its class — a new view cannot silently default.
+   */
+  contract: PageContract;
+}
+
+/**
+ * The contract class a view declares. The `evidence` fallback applies only to
+ * non-catalog views (retired/redirected ids) — every NAV_ITEMS entry carries
+ * an explicit class, enforced by the type.
+ */
+export function getViewContract(view: View): PageContract {
+  return NAV_ITEMS.find((i) => i.view === view)?.contract ?? 'evidence';
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
   {
     view: 'home',
+    contract: 'action',
     label: 'Overview',
     icon: TachometerAltIcon,
     domain: 'home',
@@ -180,6 +204,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'recommendations',
+    contract: 'action',
     label: 'Recommendations',
     icon: StarIcon,
     domain: 'home',
@@ -188,6 +213,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'adoption',
+    contract: 'evidence',
     label: 'Adoption',
     icon: ClipboardCheckIcon,
     domain: 'home',
@@ -197,6 +223,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'provisioning',
+    contract: 'action',
     label: 'Provision',
     icon: ServerIcon,
     domain: 'home',
@@ -208,9 +235,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // server (`fetchDigest` -> /api/digest) with no client-side fallback, so it has
   // no data to render on the sample/upload builds — hide it there rather than
   // ship an empty day (#1889).
-  { view: 'diary', label: 'Diary', icon: CalendarAltIcon, domain: 'home', requires: 'liveServer' },
+  { view: 'diary', contract: 'raw', label: 'Diary', icon: CalendarAltIcon, domain: 'home', requires: 'liveServer' },
   {
     view: 'permissions',
+    contract: 'action',
     label: 'Permissions',
     icon: LockIcon,
     domain: 'safety',
@@ -219,6 +247,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'enterprise',
+    // Evidence, not action: the page's affordances are downloads/refresh only
+    // (no write UI today) — see docs/page-contracts.md.
+    contract: 'evidence',
     label: 'Enterprise',
     icon: LockIcon,
     domain: 'safety',
@@ -226,9 +257,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'Configure enterprise authentication and review who has access when the dashboard runs in shared, multi-user mode.',
   },
-  { view: 'summary', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
+  { view: 'summary', contract: 'evidence', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
   {
     view: 'cost',
+    contract: 'action',
     label: 'Cost',
     icon: DollarSignIcon,
     domain: 'cost',
@@ -237,6 +269,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'reclaim-compass',
+    contract: 'action',
     label: 'Reclaim Compass',
     icon: BullseyeIcon,
     domain: 'cost',
@@ -245,6 +278,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'tokens',
+    contract: 'evidence',
     label: 'Tokens',
     icon: CoinsIcon,
     domain: 'cost',
@@ -253,6 +287,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'files',
+    contract: 'evidence',
     label: 'File Impact',
     icon: FileAltIcon,
     domain: 'cost',
@@ -261,9 +296,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   // Model Evals workbench (#1086, epic #975): routing-eval evidence + scoped
   // routing recommendations live under the cost lever (model routing).
-  { view: 'model-evals', label: 'Model Evals', icon: FlaskIcon, domain: 'cost', requires: 'serverData' },
+  { view: 'model-evals', contract: 'evidence', label: 'Model Evals', icon: FlaskIcon, domain: 'cost', requires: 'serverData' },
   {
     view: 'errors',
+    contract: 'evidence',
     label: 'Errors',
     icon: ExclamationTriangleIcon,
     domain: 'success-rate',
@@ -272,6 +308,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'report-card',
+    contract: 'action',
     label: 'Report Card',
     icon: ClipboardCheckIcon,
     domain: 'success-rate',
@@ -279,9 +316,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
       'Grade how reliably your unattended automation runs complete so you can tell whether headless agents are finishing their work or failing silently.',
     requires: 'serverData',
   },
-  { view: 'review-queue', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', requires: 'serverData' },
+  { view: 'review-queue', contract: 'action', label: 'Review Queue', icon: ClipboardListIcon, domain: 'success-rate', requires: 'serverData' },
   {
     view: 'evaluator',
+    contract: 'evidence',
     label: 'Speed Check',
     icon: BullseyeIcon,
     domain: 'speed',
@@ -290,6 +328,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'context',
+    contract: 'evidence',
     label: 'Context Health',
     icon: HeartbeatIcon,
     domain: 'context-health',
@@ -298,15 +337,17 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'conversation',
+    contract: 'evidence',
     label: 'Turn Patterns',
     icon: CommentIcon,
     domain: 'context-health',
     description:
       'See how your conversations flow turn by turn — message lengths, back-and-forth rhythm, and tool cadence — so you can spot where exchanges get inefficient.',
   },
-  { view: 'tools', label: 'Tool Usage', icon: ToolsIcon, domain: 'workflow-hygiene' },
+  { view: 'tools', contract: 'evidence', label: 'Tool Usage', icon: ToolsIcon, domain: 'workflow-hygiene' },
   {
     view: 'agents',
+    contract: 'evidence',
     label: 'Agents',
     icon: UsersIcon,
     domain: 'workflow-hygiene',
@@ -315,6 +356,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'automation',
+    contract: 'evidence',
     label: 'Automation',
     icon: RobotIcon,
     domain: 'workflow-hygiene',
@@ -323,15 +365,17 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'workflows',
+    contract: 'evidence',
     label: 'Workflows',
     icon: ProjectDiagramIcon,
     domain: 'workflow-hygiene',
     description:
       'Inspect completed Workflow-tool runs so you can see how multi-agent orchestrations fanned out and where they spent time or failed.',
   },
-  { view: 'prompts', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
+  { view: 'prompts', contract: 'evidence', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
   {
     view: 'shadow-calls',
+    contract: 'evidence',
     label: 'Shadow Calls',
     icon: FlaskIcon,
     domain: 'workflow-hygiene',
@@ -339,12 +383,13 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'Review the shadow A/B experiments run against your tasks so you can see which alternative approaches beat your default and fed the recommendation engine.',
   },
-  { view: 'patterns', label: 'Session Patterns', icon: ThLargeIcon, domain: 'workflow-hygiene' },
+  { view: 'patterns', contract: 'evidence', label: 'Session Patterns', icon: ThLargeIcon, domain: 'workflow-hygiene' },
   // Not serverOnly: like Workflows, Memories accepts the user's own uploaded
   // `memory/*.md` in the SPA/upload build (#538) and shows a data-aware
   // "needs a server" placeholder only when empty (see Memories.tsx).
   {
     view: 'memories',
+    contract: 'raw',
     label: 'Memories',
     icon: BrainIcon,
     domain: 'workflow-hygiene',
@@ -353,6 +398,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'tasks',
+    contract: 'evidence',
     label: 'Task Health',
     icon: TasksIcon,
     domain: 'workflow-hygiene',
@@ -362,6 +408,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'teams',
+    contract: 'evidence',
     label: 'Team Coordination',
     icon: SitemapIcon,
     domain: 'workflow-hygiene',
@@ -371,6 +418,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'plans',
+    contract: 'evidence',
     label: 'Task Plans',
     icon: ClipboardListIcon,
     domain: 'workflow-hygiene',
@@ -380,6 +428,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'search',
+    contract: 'evidence',
     label: 'Search',
     icon: SearchIcon,
     domain: 'discovery',
@@ -388,6 +437,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'sessions',
+    contract: 'evidence',
     label: 'Sessions',
     icon: CommentsIcon,
     domain: 'discovery',
@@ -396,6 +446,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'projects',
+    contract: 'raw',
     label: 'Projects',
     icon: FolderIcon,
     domain: 'discovery',
@@ -404,6 +455,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'timeline',
+    contract: 'raw',
     label: 'Timeline',
     icon: HistoryIcon,
     domain: 'raw',
@@ -415,6 +467,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // {@link REDIRECTED_VIEWS} below, which resolves it to `activity`.
   {
     view: 'activity',
+    contract: 'raw',
     label: 'Activity',
     icon: RunningIcon,
     domain: 'raw',
@@ -423,6 +476,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   },
   {
     view: 'pulse',
+    contract: 'raw',
     label: 'Pulse',
     icon: ChartLineIcon,
     domain: 'raw',
