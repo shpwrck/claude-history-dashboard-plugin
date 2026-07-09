@@ -941,4 +941,89 @@ describe('workflow.procedural-memory (#2250)', () => {
     );
     expect(rec).toBeNull(); // covered by the build/test/deploy skill
   });
+
+  // ── #2410 item A: a workspace selector must not hide the real script verb ──────
+  it('captures the real script verb when a workspace selector sits between `run` and the script (finding :440, #2410)', () => {
+    // `npm run -w core build:prod`: normalizeStep drops the bare `-w` and keeps
+    // `core` as a positional, so a naive "token after run is the script" reading
+    // grabs the WORKSPACE name and drops the real action (`build`). `--workspace=api`
+    // stays as a flag token. The detector must still capture build/deploy/lint.
+    const proc = [
+      'npm run -w core build:prod',
+      'npm run -w edge deploy:staging',
+      'npm run --workspace=api lint:ci',
+    ];
+    // A skill covering the real actions (build/deploy/lint) suppresses — proving
+    // those verbs are in the coverage set despite the workspace selectors. (Under
+    // the pre-fix logic the verbs were {core,edge,workspace,api} and this fired.)
+    const covered = detector.rule(
+      input({
+        toolData: [session('a', proc), session('b', proc), session('c', proc)],
+        liveConfig: liveConfigWith([skill('release', 'build deploy and lint the project')]),
+      }),
+      NOW
+    );
+    expect(covered).toBeNull();
+    // Control: with no covering skill it still fires (genuinely uncaptured).
+    const uncovered = detector.rule(
+      input({ toolData: [session('a', proc), session('b', proc), session('c', proc)] }),
+      NOW
+    );
+    expect(uncovered?.id).toBe('workflow.procedural-memory');
+  });
+
+  // ── #2410 round-2: rescue the SCRIPT, not trailing args ───────────────────────
+  it('does not fold trailing `npm run` script args into the verb set (finding :440, #2410)', () => {
+    // `npm run build:prod -- app:v2`: the script (build:prod) is the action; the
+    // trailing `app:v2` arg must NOT become a verb, or a skill naming only the arg
+    // target could reach the >=2 overlap and spuriously suppress.
+    const proc = ['npm run build:prod -- app:v2', 'npm run test:e2e', 'npm run deploy:prod'];
+    // A skill naming only the arg target does NOT suppress (the arg is not a verb)…
+    const argSkill = detector.rule(
+      input({
+        toolData: [session('a', proc), session('b', proc), session('c', proc)],
+        liveConfig: liveConfigWith([skill('app-v2', 'manage the app v2 target')]),
+      }),
+      NOW
+    );
+    expect(argSkill?.id).toBe('workflow.procedural-memory');
+    // …but a skill covering the real actions still suppresses.
+    const actionSkill = detector.rule(
+      input({
+        toolData: [session('a', proc), session('b', proc), session('c', proc)],
+        liveConfig: liveConfigWith([skill('ci', 'build test and deploy')]),
+      }),
+      NOW
+    );
+    expect(actionSkill).toBeNull();
+  });
+
+  it('rescues a `npm run` script name that starts with punctuation (finding :440, #2410)', () => {
+    // `_postinstall` begins with punctuation the letters-only gate rejects; the
+    // rescue must still feed it to actionTokens so `postinstall` is covered, not
+    // dropped to the `npm` fallback.
+    const proc = ['npm run _postinstall', 'npm run build:prod', 'git push'];
+    const rec = detector.rule(
+      input({
+        toolData: [session('a', proc), session('b', proc), session('c', proc)],
+        liveConfig: liveConfigWith([skill('setup', 'run postinstall and build steps')]),
+      }),
+      NOW
+    );
+    expect(rec).toBeNull(); // postinstall + build covered
+  });
+
+  it('keeps a package script literally named `run` (finding :440, #2410)', () => {
+    // `npm run run` — only the FIRST `run` is the generic keyword; the second is the
+    // script name and must still contribute the `run` verb.
+    const proc = ['npm run run', 'npm run build:prod', 'git push'];
+    const rec = detector.rule(
+      input({
+        toolData: [session('a', proc), session('b', proc), session('c', proc)],
+        liveConfig: liveConfigWith([skill('runner', 'run and build the project')]),
+      }),
+      NOW
+    );
+    expect(rec).toBeNull(); // run + build covered
+  });
 });

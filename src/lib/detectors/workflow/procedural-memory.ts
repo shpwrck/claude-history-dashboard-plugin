@@ -462,8 +462,14 @@ const RUNNER_VERBS = new Set(['run', 'run-script']);
  * `verbText` (not the capped label) so a long target can't hide a verb (:445).
  * EXCEPTION (:320): a single-token step with no sub-command (`make`, `pytest`,
  * `./deploy.sh`) contributes the BINARY itself, else a covering skill is missed.
- * RUNNER EXCEPTION (:440): after a package-manager `run`, the script name (whose
- * `:`/digits would otherwise drop it) contributes its action tokens instead.
+ * RUNNER EXCEPTION (:440, #2410): in a package-manager `run` step the FIRST generic
+ * `run`/`run-script` keyword is dropped and the FIRST following non-flag script name
+ * the letters-only gate rejects for a `:`/digit/punctuation (`build:prod`,
+ * `_postinstall`) contributes its action tokens. Scanning past a workspace value
+ * before it (`npm run -w app build:prod`, `npm run --workspace=app build:prod`) keeps
+ * the real action from hiding behind the workspace name; stopping after the script
+ * keeps trailing script args (`… -- app:v2`) out, a script literally named `run` is
+ * still counted, and punctuation-led names are rescued (actionTokens strips it).
  */
 function procedureVerbs(steps: string[]): Set<string> {
   const verbs = new Set<string>();
@@ -473,29 +479,38 @@ function procedureVerbs(steps: string[]): Set<string> {
   };
   for (const step of steps) {
     const words = step.split(' ');
-    const isRunner = words.length > 0 && SCRIPT_RUNNERS.has(words[0].toLowerCase());
+    const bin = words[0]?.toLowerCase() ?? '';
+    const isRunner = SCRIPT_RUNNERS.has(bin);
+    let runVerbSeen = false; // have we dropped the generic `run`/`run-script` keyword?
+    let scriptRescued = false; // have we rescued the one `:`/digit script name yet?
     let added = 0;
     for (let k = 1; k < words.length; k += 1) {
       const w = words[k].toLowerCase();
-      // `npm run build:prod`: the script name after a generic runner verb names the
-      // real action (`build`), even though its `:`/digits make it fail isVerbWord —
-      // feed the SCRIPT NAME through actionTokens and drop the generic `run` keyword
-      // so it can't be the sole one-token coverage key (:440).
-      if (isRunner && RUNNER_VERBS.has(w) && k + 1 < words.length) {
-        addWord(words[k + 1].toLowerCase());
-        added += 1;
-        k += 1; // consume the script name we just tokenized
+      if (isRunner && !runVerbSeen && RUNNER_VERBS.has(w)) {
+        // Drop the generic runner verb — but only the FIRST one, so a package script
+        // literally named `run` (`npm run run`) is still counted below (:440, #2410).
+        runVerbSeen = true;
         continue;
       }
       if (isVerbWord(w)) {
         addWord(w);
         added += 1;
+      } else if (isRunner && runVerbSeen && !scriptRescued && !w.startsWith('-')) {
+        // The FIRST non-flag token after `run` that the letters-only gate rejects for
+        // a `:`/digit/punctuation (`build:prod`, `test:e2e`, `_postinstall`) is the
+        // SCRIPT NAME — tokenize it and stop. Scanning PAST a workspace value before
+        // it (`npm run -w app build:prod` → verbText `npm run app build:prod`, where
+        // `app` is a plain positional handled above) keeps the real action from hiding
+        // behind the workspace name; stopping AFTER the script keeps later script ARGS
+        // (`… -- app:v2`) out of the verb set. Excluding only `-`-prefixed tokens
+        // (rather than requiring a leading letter) rescues punctuation-led scripts,
+        // since `actionTokens` strips the punctuation anyway (:440, #2410).
+        addWord(w);
+        added += 1;
+        scriptRescued = true;
       }
     }
-    if (added === 0 && words.length > 0) {
-      const bin = words[0].toLowerCase();
-      if (isVerbWord(bin)) addWord(bin); // single-token command → binary is the verb
-    }
+    if (added === 0 && isVerbWord(bin)) addWord(bin); // single-token command → binary is the verb
   }
   return verbs;
 }
