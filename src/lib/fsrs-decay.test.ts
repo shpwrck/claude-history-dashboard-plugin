@@ -132,6 +132,15 @@ describe('lapse shrinks and never increases stability (the cap)', () => {
     expect(recalled.stability).toBeGreaterThan(state.stability);
     expect(lapsed.stability).toBeLessThanOrEqual(state.stability);
   });
+
+  it('caps a lapse at STABILITY_MAX even from an out-of-band incoming stability', () => {
+    // With a huge incoming stability, low difficulty and r=0 the forget formula
+    // produces sf above STABILITY_MAX; the explicit ceiling clamps it in band.
+    const capped = nextStabilityForget(1, 1e12, 0);
+    expect(capped).toBeLessThanOrEqual(STABILITY_MAX);
+    expect(capped).toBeGreaterThan(0);
+    expect(isFiniteNum(capped)).toBe(true);
+  });
 });
 
 describe('defensive clamps (finite, sane, no NaN/Infinity/throw)', () => {
@@ -192,6 +201,22 @@ describe('defensive clamps (finite, sane, no NaN/Infinity/throw)', () => {
     expect(initStability(0)).toBe(initStability(1));
     expect(initStability(99)).toBe(initStability(4));
   });
+
+  it('recordRecall / recordLapse re-clamp an out-of-range difficulty into [1,10]', () => {
+    // A caller passing an unclamped difficulty must not have it propagate out of
+    // range through the returned item state.
+    expect(recordRecall({ stability: 10, difficulty: 42 }, 5).difficulty).toBe(10);
+    expect(recordLapse({ stability: 10, difficulty: -3 }, 5).difficulty).toBe(1);
+    // non-finite difficulty falls back into band, never propagates NaN
+    for (const s of [
+      recordRecall({ stability: 10, difficulty: Number.NaN }, 5),
+      recordLapse({ stability: 10, difficulty: Number.POSITIVE_INFINITY }, 5),
+    ]) {
+      expect(isFiniteNum(s.difficulty)).toBe(true);
+      expect(s.difficulty).toBeGreaterThanOrEqual(1);
+      expect(s.difficulty).toBeLessThanOrEqual(10);
+    }
+  });
 });
 
 describe('refit: cold-start default + evidence-gated evergreen', () => {
@@ -237,6 +262,30 @@ describe('refit: cold-start default + evidence-gated evergreen', () => {
     const result = refit(withoutPredictions);
     expect(result.ok).toBe(false); // none usable -> below threshold
     if (!result.ok) expect(result.receipts).toBe(0);
+  });
+
+  it('drops receipts with no observed grade (missing outcome)', () => {
+    // 50 valid graded receipts plus 10 with a finite prediction but no grade;
+    // the no-grade receipts must NOT count (a missing outcome is not a recall).
+    const noGrade = Array.from(
+      { length: 10 },
+      () => ({ predictedRetrievability: 0.9 }) as unknown as RefitReceipt,
+    );
+    const result = refit([...makeReceipts(MIN_REFIT_RECEIPTS), ...noGrade]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.receipts).toBe(MIN_REFIT_RECEIPTS);
+  });
+
+  it('rejects receipts whose predicted retrievability is outside [0,1]', () => {
+    // 50 valid receipts plus 10 with an out-of-range prediction; the out-of-range
+    // receipts are corrupt evidence and must NOT count toward the fit.
+    const outOfRange: RefitReceipt[] = Array.from({ length: 10 }, (_, i) => ({
+      grade: GOOD,
+      predictedRetrievability: i % 2 === 0 ? 1.5 : -0.2,
+    }));
+    const result = refit([...makeReceipts(MIN_REFIT_RECEIPTS), ...outOfRange]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.receipts).toBe(MIN_REFIT_RECEIPTS);
   });
 
   it('fits a clamped multiplier in [0.5, 1.5] at >= 50 receipts', () => {

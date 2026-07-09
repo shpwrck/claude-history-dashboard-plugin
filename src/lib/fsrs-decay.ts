@@ -213,7 +213,8 @@ export function nextStabilityRecall(
 /**
  * Stability after a lapse (shrinks). Faithful port of engram
  * `next_stability_forget(d, s, r)`. Hard cap: `min(sf, s)` — a lapse can NEVER
- * increase stability.
+ * increase stability — and an explicit `STABILITY_MAX` ceiling so an incoming
+ * stability already above the band can't propagate out of range.
  */
 export function nextStabilityForget(
   difficulty: number,
@@ -230,9 +231,12 @@ export function nextStabilityForget(
     (Math.pow(s + 1, W[13]) - 1) *
     Math.exp(W[14] * (1 - rr));
   // min(sf, s) is the "lapse never increases stability" cap; clamp keeps it in
-  // band without ever raising it above the incoming stability `s`.
+  // band without ever raising it above the incoming stability `s`, and the
+  // Math.min(s, STABILITY_MAX) upper bound clamps explicitly to the ceiling so
+  // an out-of-band incoming stability can't leak through (belt-and-suspenders —
+  // a lapse always shrinks, but the clamp guarantees the band).
   const capped = Math.min(finite(sf, s), s);
-  return clamp(capped, STABILITY_MIN, s);
+  return clamp(capped, STABILITY_MIN, Math.min(s, STABILITY_MAX));
 }
 
 // --- Domain mapping: memory notes / recommendations as decaying items -------
@@ -253,7 +257,9 @@ export function initItemState(grade: ReviewGrade | number = GOOD): ItemMemorySta
  * (HARD/GOOD/EASY); an {@link AGAIN} is coerced up to {@link HARD} because a
  * recall is by definition not a lapse (use {@link recordLapse} for lapses).
  * Difficulty is carried unchanged (FSRS difficulty re-estimation is out of scope
- * for this decay util — issue #2338 scopes stability + retrievability).
+ * for this decay util — issue #2338 scopes stability + retrievability) aside from
+ * a defensive re-clamp into [1, 10] so a caller passing an unclamped difficulty
+ * can't propagate it out of range through the returned state.
  *
  * (Target retention is a SCHEDULING input for {@link intervalFor}, not a stability
  * update input — the recall math uses the observed retrievability `r` — so it is
@@ -268,14 +274,15 @@ export function recordRecall(
   const r = retrievability(elapsedDays, state.stability);
   return {
     stability: nextStabilityRecall(state.difficulty, state.stability, r, g),
-    difficulty: state.difficulty,
+    difficulty: clamp(finite(state.difficulty, 5), 1, 10),
   };
 }
 
 /**
  * Record a LAPSE — the item was found stale / contradicted / overridden. Shrinks
  * stability along the FSRS forget path, hard-capped so a lapse never increases
- * stability. Difficulty is carried unchanged (see {@link recordRecall}).
+ * stability. Difficulty is carried unchanged (see {@link recordRecall}) aside
+ * from the same defensive re-clamp into [1, 10].
  */
 export function recordLapse(
   state: ItemMemoryState,
@@ -284,7 +291,7 @@ export function recordLapse(
   const r = retrievability(elapsedDays, state.stability);
   return {
     stability: nextStabilityForget(state.difficulty, state.stability, r),
-    difficulty: state.difficulty,
+    difficulty: clamp(finite(state.difficulty, 5), 1, 10),
   };
 }
 
@@ -294,8 +301,10 @@ export function recordLapse(
  * One review receipt with a recorded prediction, the evidence {@link refit}
  * consumes. Mirrors engram's review receipts: a `grade` (the observed rating)
  * plus the `predictedRetrievability` the model expected at review time. A
- * receipt missing a finite prediction is ignored (can't compare predicted vs
- * observed).
+ * receipt is ignored unless it carries BOTH a finite observed `grade` (no
+ * outcome = can't count it as a recall or a lapse) and a finite
+ * `predictedRetrievability` in [0, 1] (retrievability is a probability, so an
+ * out-of-range prediction is corrupt evidence).
  */
 export interface RefitReceipt {
   /** Observed rating for this review (AGAIN = lapse; 2..4 = recall). */
@@ -309,7 +318,7 @@ export interface RefitOk {
   ok: true;
   /** Fitted interval multiplier, clamped to [MULTIPLIER_MIN, MULTIPLIER_MAX]. */
   intervalMultiplier: number;
-  /** Count of usable receipts (with finite predictions) the fit used. */
+  /** Count of usable receipts (finite grade + in-range [0,1] prediction) the fit used. */
   receipts: number;
   /** Observed recall rate (fraction of non-lapse reviews). */
   observedRecall: number;
@@ -351,13 +360,23 @@ export type RefitResult = RefitOk | RefitInsufficient;
  * Pure: `asOf` is an optional caller-supplied label for the result; this
  * function never reads a clock.
  *
- * @param receipts review receipts (only those with a finite prediction count).
+ * @param receipts review receipts (only those with a finite observed grade AND a
+ *                 finite prediction in [0, 1] count).
  * @param asOf     optional "as of <date>" label to stamp on the result.
  */
 export function refit(receipts: readonly RefitReceipt[], asOf?: string): RefitResult {
-  const usable = (Array.isArray(receipts) ? receipts : []).filter(
-    (r) => r != null && Number.isFinite(r.predictedRetrievability as number),
-  );
+  const usable = (Array.isArray(receipts) ? receipts : []).filter((r) => {
+    if (r == null) return false;
+    // Reject an out-of-range prediction: retrievability is a probability, so a
+    // predicted value outside [0, 1] is corrupt evidence, not a comparison point.
+    const pred = r.predictedRetrievability as number;
+    if (!Number.isFinite(pred) || pred < 0 || pred > 1) return false;
+    // Drop receipts with no observed grade: without an outcome we can't count
+    // the review as a recall or a lapse (normalizeGrade would otherwise coerce a
+    // missing grade up to GOOD and silently inflate observedRecall).
+    if (!Number.isFinite(r.grade as number)) return false;
+    return true;
+  });
   const n = usable.length;
 
   if (n < MIN_REFIT_RECEIPTS) {
