@@ -55,7 +55,9 @@ export const detector: Detector = {
   dataDeps: ['shadowCalls'],
   rule(input) {
     const agg = input.shadowCalls;
-    if (!agg || agg.total === 0) return null;
+    // `counted` (real rows) is the old `total` semantics; `total` now includes
+    // synthetic/skipped lines and must NOT gate real-evidence detectors (#2149).
+    if (!agg || agg.counted === 0) return null;
 
     const uncovered = agg.byAxis
       .filter((a) => {

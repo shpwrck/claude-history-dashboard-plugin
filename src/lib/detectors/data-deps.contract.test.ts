@@ -191,7 +191,15 @@ describe('assembleRecommendationInput dataDeps normalization', () => {
       projects: [],
       permissionRows: [],
       apiErrors: [],
-      shadowCalls: { total: 0, byAxis: [] } as unknown as RecommendationInput['shadowCalls'],
+      shadowCalls: {
+        total: 0,
+        counted: 0,
+        synthetic: 0,
+        skipped: 0,
+        live: 0,
+        replay: 0,
+        byAxis: [],
+      } as unknown as RecommendationInput['shadowCalls'],
     });
     expect(assembled.shadowCalls).not.toBeNull();
   });

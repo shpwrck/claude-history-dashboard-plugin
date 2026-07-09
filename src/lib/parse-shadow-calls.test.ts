@@ -55,9 +55,19 @@ const inputWith = (jsonl: string): RecommendationInput => ({
 });
 
 describe('parseShadowCalls', () => {
+  const ZEROED = {
+    total: 0,
+    counted: 0,
+    synthetic: 0,
+    skipped: 0,
+    live: 0,
+    replay: 0,
+    byAxis: [],
+  };
+
   it('returns a zeroed aggregate for empty/null input', () => {
-    expect(parseShadowCalls(null)).toEqual({ total: 0, byAxis: [] });
-    expect(parseShadowCalls('')).toEqual({ total: 0, byAxis: [] });
+    expect(parseShadowCalls(null)).toEqual(ZEROED);
+    expect(parseShadowCalls('')).toEqual(ZEROED);
   });
 
   it('aggregates per axis with mode + winner + token deltas, skipping malformed lines', () => {
@@ -70,7 +80,10 @@ describe('parseShadowCalls', () => {
     ].join('\n');
 
     const agg = parseShadowCalls(jsonl);
-    expect(agg.total).toBe(4); // malformed line skipped
+    expect(agg.total).toBe(5); // every non-empty line, incl. the malformed one (#2149)
+    expect(agg.counted).toBe(4); // real rows
+    expect(agg.skipped).toBe(1); // the malformed line is surfaced, not dropped
+    expect(agg.synthetic).toBe(0);
     const model = agg.byAxis.find((a) => a.axis === 'model')!;
     expect(model.samples).toBe(3);
     expect(model.live).toBe(2);
@@ -111,7 +124,10 @@ describe('parseShadowCalls', () => {
       JSON.stringify({ mode: 'live', judge: { winner: 'shadow' } }), // no axis
       JSON.stringify({ axis: 'model', judge: { winner: 'shadow' } }), // no mode
     ].join('\n'));
-    expect(agg.total).toBe(0);
+    expect(agg.counted).toBe(0); // neither is a real experiment
+    expect(agg.skipped).toBe(2); // both surfaced as skipped (#2149)
+    expect(agg.total).toBe(2);
+    expect(agg.byAxis).toEqual([]);
   });
 
   it('skips synthetic seed/demo rows so they do not inflate an axis (#570)', () => {
@@ -123,7 +139,9 @@ describe('parseShadowCalls', () => {
       JSON.stringify({ mode: 'replay', axis: 'model', synthetic: true, judge: { winner: 'main' }, main: { tokens: 9 }, shadow: { tokens: 9 } }),
     ].join('\n');
     const agg = parseShadowCalls(jsonl);
-    expect(agg.total).toBe(1); // only the genuine row
+    expect(agg.counted).toBe(1); // only the genuine row feeds byAxis
+    expect(agg.synthetic).toBe(3); // the 3 seed rows are surfaced, not dropped (#2149)
+    expect(agg.total).toBe(4); // every non-empty line accounted for
     const model = agg.byAxis.find((a) => a.axis === 'model')!;
     expect(model.samples).toBe(1);
     expect(model.shadowWins).toBe(1);
@@ -134,7 +152,50 @@ describe('parseShadowCalls', () => {
     const agg = parseShadowCalls([
       JSON.stringify({ mode: 'live', axis: 'prompt', synthetic: false, judge: { winner: 'shadow' }, main: { tokens: 1 }, shadow: { tokens: 1 } }),
     ].join('\n'));
+    expect(agg.counted).toBe(1);
+    expect(agg.synthetic).toBe(0);
     expect(agg.total).toBe(1);
+  });
+
+  // #2149 — counting transparency: EVERY non-empty ledger line lands in exactly one
+  // bucket, so the headline number reconciles against the raw ledger size and nothing
+  // is silently dropped or merged into a lossy `total`.
+  it('surfaces every bucket and reconciles counted + synthetic + skipped === total (#2149)', () => {
+    const lines = [
+      line('model', 'live', 'shadow', 1000, 200),   // 1) real, live
+      line('model', 'replay', 'main', 900, 300),     // 2) real, replay
+      JSON.stringify({ mode: 'live', axis: 'model', synthetic: true, judge: { winner: 'shadow' } }), // 3) synthetic
+      JSON.stringify({ mode: 'replay-skip', axis: 'model' }),          // 4) skipped: bad mode (replay-skip)
+      JSON.stringify({ mode: 'live', judge: { winner: 'shadow' } }),   // 5) skipped: no axis
+      JSON.stringify({ mode: 'bogus', axis: 'skills' }),               // 6) skipped: unknown mode
+      '{ not valid json',                                              // 7) skipped: malformed
+    ];
+    const jsonl = lines.join('\n');
+    const totalLedgerLines = lines.filter((l) => l.trim()).length; // 7
+    const agg = parseShadowCalls(jsonl);
+
+    // Each bucket is explicit on the surface.
+    expect(agg.counted).toBe(2);   // rows 1 + 2
+    expect(agg.synthetic).toBe(1); // row 3
+    expect(agg.skipped).toBe(4);   // rows 4, 5, 6, 7 (replay-skip / no-axis / bad-mode / malformed)
+    expect(agg.live).toBe(1);      // row 1
+    expect(agg.replay).toBe(1);    // row 2
+    expect(agg.total).toBe(7);     // every non-empty line
+
+    // Reconciliation: NOTHING is silently dropped or merged.
+    expect(agg.counted + agg.synthetic + agg.skipped).toBe(agg.total);
+    expect(agg.total).toBe(totalLedgerLines);
+    // And the live/replay split fully partitions the counted rows.
+    expect(agg.live + agg.replay).toBe(agg.counted);
+
+    // Only the two real rows feed the per-axis aggregate (synthetic/skipped excluded).
+    const model = agg.byAxis.find((a) => a.axis === 'model')!;
+    expect(agg.byAxis.map((a) => a.axis)).toEqual(['model']); // 'skills' bad-mode row excluded
+    expect(model.samples).toBe(2);
+    expect(model.live).toBe(1);
+    expect(model.replay).toBe(1);
+    expect(model.shadowWins).toBe(1);
+    expect(model.mainWins).toBe(1);
   });
 });
 

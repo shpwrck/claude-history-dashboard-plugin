@@ -1007,7 +1007,18 @@ export const PARSER_SIG_VERSION = 'v4';
 // change with no source-artifact change, so a persisted v6 compressed blob would
 // keep serving the un-slimmed body; this bump invalidates it. (The in-memory
 // dataset and toolData are unchanged; the client rehydrates the dropped zeros.)
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 7;
+// v8 (#2149): parseShadowCalls now returns explicit counting buckets on the
+// shadowCalls aggregate — `counted`/`synthetic`/`skipped`/`live`/`replay` — and
+// redefines `total` to the full ledger line count (was the real-row count). The
+// aggregate is baked into the assembled dataset here (assembleDataset →
+// shadowCalls, below), so this is a pure serialized-shape change with NO
+// ~/.claude source-artifact change: an unchanged shadow-calls ledger keeps the
+// same content hash, so without this bump a persisted v7 dataset blob would keep
+// serving the OLD single-`total` shape and the new "Experiments (real)" headline
+// would never ship. This knob (not PARSER_SIG_VERSION / SESSION_BLOB_OUTPUT) is
+// correct: the shadow ledger is a top-level artifact parsed once into the
+// dataset, NOT a per-session transcript/blob signal.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 8;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the

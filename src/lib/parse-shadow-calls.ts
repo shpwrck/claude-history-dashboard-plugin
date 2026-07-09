@@ -8,13 +8,22 @@
  * win, **weighting live evidence above replay** (replay carries cold-start + staleness
  * caveats — see the epic).
  *
- * Pure + text-in (mirrors the other `parse-*.ts`): `parseShadowCalls(jsonlText)`. Malformed
- * lines are skipped. A missing/empty ledger yields a zeroed aggregate, so the detector
- * simply emits nothing.
+ * Pure + text-in (mirrors the other `parse-*.ts`): `parseShadowCalls(jsonlText)`. A
+ * missing/empty ledger yields a zeroed aggregate, so the detector simply emits nothing.
  *
- * Records flagged `synthetic: true` (hand-seeded demo/batch rows, #570) are skipped — they
- * carry no real source task, so counting them would inflate an axis's `samples`/`shadowWins`
- * and skew the recommendation confidence with fabricated evidence.
+ * Counting transparency (#2149): every non-empty ledger line lands in EXACTLY one bucket,
+ * surfaced on the aggregate so nothing is silently dropped or merged into a lossy `total`:
+ *   - `counted`   — real experiments: a valid `axis` AND a valid `mode` (`live`|`replay`).
+ *                   ONLY these feed `byAxis` + the detectors, and split into `live`/`replay`.
+ *   - `synthetic` — `synthetic: true` rows (below).
+ *   - `skipped`   — everything else: `replay-skip`/bad-or-missing mode, no axis, malformed JSON.
+ * The invariant `counted + synthetic + skipped === total` (and `live + replay === counted`)
+ * holds line-for-line, so a viewer can reconcile the headline against the raw ledger size.
+ *
+ * Records flagged `synthetic: true` (hand-seeded demo/batch rows, #570) are excluded from
+ * `counted`/`byAxis` — they carry no real source task, so counting them would inflate an
+ * axis's `samples`/`shadowWins` and skew the recommendation confidence with fabricated
+ * evidence — but are now surfaced in `synthetic` rather than dropped invisibly (#2149).
  *
  * Record shape (subset we read; see ~/.claude/shadow-calls/SCHEMA.md for the full union):
  *   { mode: 'live'|'replay', axis: string, synthetic?: boolean,
@@ -141,7 +150,27 @@ export interface RecsFindingAggregate {
 }
 
 export interface ShadowCallAggregate {
+  /**
+   * Every non-empty ledger line, whatever its disposition — the honest ledger size.
+   * The exclusion buckets are surfaced explicitly (#2149) so the number a viewer reads
+   * equals what actually ran: `counted + synthetic + skipped === total` (no line silently
+   * dropped/merged) and `live + replay === counted`.
+   */
   total: number;
+  /**
+   * Real experiments: a line with a valid `axis` AND a valid `mode` (`live`|`replay`).
+   * ONLY these feed `byAxis` and the detectors — this is the number the old lossy `total`
+   * reported (the headline "Experiments (real)").
+   */
+  counted: number;
+  /** `synthetic: true` seed/demo rows (#570): real-shaped but no source task, so excluded from `counted`. */
+  synthetic: number;
+  /** Lines dropped for any other reason: `replay-skip`/bad-or-missing mode, no axis, or malformed JSON. */
+  skipped: number;
+  /** `counted` rows that ran in `live` mode. */
+  live: number;
+  /** `counted` rows that ran in `replay` mode. */
+  replay: number;
   byAxis: AxisAggregate[];
 }
 
@@ -259,33 +288,65 @@ export function parseShadowCalls(
   jsonlText: string | null | undefined
 ): ShadowCallAggregate {
   const byAxis = new Map<string, AxisAggregate>();
+  // Explicit disposition buckets (#2149): total counts every non-empty line; each line
+  // increments EXACTLY one of counted/synthetic/skipped, so nothing is silently dropped.
   let total = 0;
-  if (!jsonlText) return { total: 0, byAxis: [] };
+  let counted = 0;
+  let synthetic = 0;
+  let skipped = 0;
+  let live = 0;
+  let replay = 0;
+  const empty: ShadowCallAggregate = {
+    total: 0,
+    counted: 0,
+    synthetic: 0,
+    skipped: 0,
+    live: 0,
+    replay: 0,
+    byAxis: [],
+  };
+  if (!jsonlText) return empty;
 
   for (const line of jsonlText.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
+    total++;
     let rec: ShadowRecord;
     try {
       rec = JSON.parse(trimmed) as ShadowRecord;
     } catch {
+      skipped++; // malformed JSON — surfaced in `skipped`, never dropped invisibly (#2149).
       continue;
     }
-    // Skip hand-seeded demo/batch rows (#570): no real source task, so they'd fabricate evidence.
-    if (rec.synthetic === true) continue;
+    // Hand-seeded demo/batch rows (#570): real-shaped but no source task, so they'd
+    // fabricate evidence. Surfaced in `synthetic`, never folded into byAxis/counted.
+    if (rec.synthetic === true) {
+      synthetic++;
+      continue;
+    }
     const axis = typeof rec.axis === 'string' ? rec.axis : null;
     const mode = rec.mode === 'live' || rec.mode === 'replay' ? rec.mode : null;
-    if (!axis || !mode) continue;
+    // replay-skip / no-axis / bad-or-missing mode: real work happened but no comparable
+    // verdict, so excluded from counted — surfaced in `skipped` (#2149).
+    if (!axis || !mode) {
+      skipped++;
+      continue;
+    }
 
-    total++;
+    counted++;
     let a = byAxis.get(axis);
     if (!a) {
       a = emptyAxis(axis);
       byAxis.set(axis, a);
     }
     a.samples++;
-    if (mode === 'live') a.live++;
-    else a.replay++;
+    if (mode === 'live') {
+      a.live++;
+      live++;
+    } else {
+      a.replay++;
+      replay++;
+    }
 
     const winner = rec.judge?.winner;
     if (winner === 'shadow') {
@@ -387,7 +448,7 @@ export function parseShadowCalls(
 
   // Stable, deterministic order (by axis key) so the detector + ETag stay stable.
   const sorted = [...byAxis.values()].sort((x, y) => x.axis.localeCompare(y.axis));
-  return { total, byAxis: sorted };
+  return { total, counted, synthetic, skipped, live, replay, byAxis: sorted };
 }
 
 /** Mean token delta for an axis (shadow − main), or null when no paired token data. */

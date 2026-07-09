@@ -248,7 +248,9 @@ export const detector: Detector = {
   dataDeps: ['shadowCalls'],
   rule(input) {
     const agg = input.shadowCalls;
-    if (!agg || agg.total === 0 || agg.byAxis.length === 0) return null;
+    // `counted` (real rows) is the old `total` semantics; `total` now includes
+    // synthetic/skipped lines and must NOT gate real-evidence detectors (#2149).
+    if (!agg || agg.counted === 0 || agg.byAxis.length === 0) return null;
 
     // The recs axis measures whether INJECTING a recommendation helped (main=injected,
     // shadow=withheld), not whether to adopt a cheaper variation — so it gets a per-finding

@@ -1965,6 +1965,11 @@ function fixtureBank(): Fixture[] {
     input: bankBase({
       shadowCalls: {
         total: 6,
+        counted: 6,
+        synthetic: 0,
+        skipped: 0,
+        live: 6,
+        replay: 0,
         byAxis: [
           {
             axis: 'model',
@@ -1992,6 +1997,11 @@ function fixtureBank(): Fixture[] {
     input: bankBase({
       shadowCalls: {
         total: 6,
+        counted: 6,
+        synthetic: 0,
+        skipped: 0,
+        live: 5,
+        replay: 1,
         byAxis: [
           {
             axis: 'skills',
