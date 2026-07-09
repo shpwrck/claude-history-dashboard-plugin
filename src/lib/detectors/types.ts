@@ -46,6 +46,7 @@ import type { ModelLatencySample, TelemetryEvent } from '../parse-telemetry';
 import type { DebugSessionMetrics } from '../parse-debug';
 import type { WorkflowRun } from '../parse-workflows';
 import type { ReclaimClaim } from '../reclaim';
+import type { TaskClass } from '../task-class';
 import type { RepoMapDataset } from '../parse-repo-map-join';
 import type { OrganizationIdentityDataset } from '../organization-identity';
 import type { OrganizationReviewEventsDataset } from '../organization-review-events';
@@ -304,6 +305,25 @@ export interface PromptAnalysis {
   imperativeTurnCount?: number;
 }
 
+/**
+ * One task class's slice of automation spend + Haiku-swap savings (#2139, epic
+ * #2138). Emitted as an array on `cost.automation-share` (see
+ * {@link Recommendation.taskClassBreakdown}). PARTITIONS the card's total
+ * `autoCost`/`swapSavings`: the per-class `autoCostUsd` sum equals the card's
+ * automation spend and the per-class `swapSavingsUsd` sum equals its swap
+ * savings — no new grand total.
+ */
+export interface TaskClassCostBreakdown {
+  /** `authoring | mechanical | review` (see `src/lib/task-class.ts`). */
+  taskClass: TaskClass;
+  /** Actual estimated spend on this class's unattended (`sdk-*`) sessions. */
+  autoCostUsd: number;
+  /** Estimated Haiku-swap savings recoverable from this class. */
+  swapSavingsUsd: number;
+  /** Distinct unattended sessions assigned to this class. */
+  sessions: number;
+}
+
 export interface Recommendation {
   /** Stable rule id, e.g. "cost.cache-1h-waste". Used as a React key. */
   id: string;
@@ -414,6 +434,13 @@ export interface Recommendation {
    * the figure the proof was (or was not) worth running against.
    */
   premiseUsdPerMo?: number;
+  /**
+   * Per task-class partition of automation spend + Haiku-swap savings (#2139,
+   * epic #2138). Present ONLY on `cost.automation-share`. Additive/optional so
+   * every other consumer is unaffected; the classes sum back to this card's
+   * `autoCost`/`swapSavings` totals exactly (see {@link TaskClassCostBreakdown}).
+   */
+  taskClassBreakdown?: TaskClassCostBreakdown[];
 }
 
 export interface RecommendationInput {

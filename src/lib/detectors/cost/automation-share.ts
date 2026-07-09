@@ -1,13 +1,8 @@
-import type { Detector } from '../types';
-import { automationCostShare, fmtUsd, isHaikuPinned } from '../shared';
-import { isUnattendedEntrypoint } from '../../parse-sessions';
-import {
-  resolveModelPricing,
-  entryCostAtModel,
-  CHEAPEST_MODEL,
-} from '../../pricing';
+import type { Detector, TaskClassCostBreakdown } from '../types';
+import { automationCostShare, automationCostByClass, fmtUsd, isHaikuPinned } from '../shared';
+import { CHEAPEST_MODEL } from '../../pricing';
 import { computeModelPinSavings } from '../../model-pin-savings';
-import { scopeKeyOf, type ReclaimClaim, type PoolId } from '../../reclaim';
+import { type ReclaimClaim, type PoolId } from '../../reclaim';
 
 const ALL_POOLS: PoolId[] = ['input', 'output', 'cacheWrite5m', 'cacheWrite1h', 'cacheRead'];
 
@@ -28,35 +23,22 @@ export const detector: Detector = {
     // Automation view's cost band agree exactly — no duplicated cost math.
     const { autoCost, total, share } = automationCostShare(input.tokenData);
     // Counterfactual: what the automation turns would have cost on the cheapest
-    // model. We sum the per-entry (actual − Haiku) delta using the same swap math
-    // the Tokens view uses (entryCostAtModel), so this reuses the one pricing
-    // table rather than introducing new rate constants. Synthetic (non-billable)
-    // turns are skipped — they have no real cost to recover. Haiku-priced turns
-    // contribute a zero delta, so an all-Haiku automation profile yields $0.
-    let swapSavings = 0;
-    let swapTokens = 0;
-    const sessions = new Set<string>();
-    const scopeKeys = new Set<string>();
-    for (const d of input.tokenData) {
-      if (isUnattendedEntrypoint(d.entrypoint)) {
-        sessions.add(d.sessionId);
-        for (const entry of d.entries) {
-          const model = entry.model || 'unknown';
-          if (resolveModelPricing(model).isSynthetic) continue;
-          const delta =
-            entryCostAtModel(entry, model) - entryCostAtModel(entry, CHEAPEST_MODEL);
-          if (delta > 0) {
-            swapSavings += delta;
-            scopeKeys.add(scopeKeyOf(d.sessionId, model));
-            swapTokens +=
-              entry.inputTokens +
-              entry.outputTokens +
-              entry.cacheCreationTokens +
-              entry.cacheReadTokens;
-          }
-        }
-      }
-    }
+    // model. The per-entry (actual − Haiku) swap math — skip synthetic turns, sum
+    // only positive deltas, collect reclaim scopes/tokens — now lives in
+    // `automationCostByClass` (#2139) so the grand totals and the per-class split
+    // are one computation and cannot drift. It also PARTITIONS that spend +
+    // savings into `authoring | mechanical | review` (epic #2138): the per-class
+    // figures sum back to `autoCost`/`swapSavings` exactly, so the $7,160
+    // automation reclaim can be read per class instead of as one number.
+    const byClass = automationCostByClass(input.tokenData);
+    const swapSavings = byClass.swapSavings;
+    const sessionCount = byClass.sessionIds.length;
+    const taskClassBreakdown: TaskClassCostBreakdown[] = byClass.classes.map((c) => ({
+      taskClass: c.taskClass,
+      autoCostUsd: c.autoCost,
+      swapSavingsUsd: c.swapSavings,
+      sessions: c.sessions,
+    }));
     // Reclaim claim (model right-sizing): reprice the unattended-automation scopes
     // onto the cheapest model across every pool. Placed LAST in the structural
     // block (orderKey 80, doc §7.1 "model-swap last") so a reprice never discounts
@@ -67,9 +49,9 @@ export const detector: Detector = {
       category: 'cost',
       orderKey: 80,
       ownedPools: ALL_POOLS,
-      scopeKeys: [...scopeKeys],
+      scopeKeys: byClass.scopeKeys,
       counterfactual: { kind: 'reprice', toModel: CHEAPEST_MODEL },
-      evidenceTokens: swapTokens,
+      evidenceTokens: byClass.swapTokens,
     };
     const measuredSavings = input.modelPinSavings
       ? computeModelPinSavings({
@@ -91,12 +73,21 @@ export const detector: Detector = {
       swapSavings >= 0.01
         ? ` Running those automation turns on Haiku instead would have cost about ${fmtUsd(swapSavings)} less.`
         : '';
+    // Per-class breakdown (#2139): name where the automation spend actually sits.
+    // Mechanical (pickers/classify/status-writes/log-only replay) is the safest
+    // to down-model; authoring (code writes) the riskiest. These partition the
+    // `autoCost` above — they sum back to it exactly.
+    const byC = byClass.byClass;
+    const classSentence =
+      autoCost > 0
+        ? ` By task class: ${fmtUsd(byC.mechanical.autoCost)} mechanical, ${fmtUsd(byC.authoring.autoCost)} authoring, ${fmtUsd(byC.review.autoCost)} review.`
+        : '';
     return {
       id: 'cost.automation-share',
       category: 'cost',
       severity: 'info',
       title: 'Automation drives a large share of spend',
-      detail: `Automated (sdk-*) sessions account for ${fmtUsd(autoCost)} (${share.toFixed(0)}% of total) across ${sessions.size} session(s).${savingsSentence}`,
+      detail: `Automated (sdk-*) sessions account for ${fmtUsd(autoCost)} (${share.toFixed(0)}% of total) across ${sessionCount} session(s).${savingsSentence}${classSentence}`,
       action: haikuPinned
         ? 'Keep automated runs on the cheapest model that meets the quality bar; the observed before/after savings are shown on this card.'
         : 'Confirm automated runs use the cheapest model that meets the quality bar — Haiku/Sonnet often suffice for scripted work.',
@@ -104,10 +95,13 @@ export const detector: Detector = {
       // automation spend — you can't recover spend you'd still pay on Haiku.
       estSavingsUsd: swapSavings,
       reclaim,
+      // Per-class partition of autoCost + swapSavings (#2139, epic #2138). The
+      // classes sum back to the card's totals exactly; nothing is dropped.
+      taskClassBreakdown,
       ...(measuredSavings?.attribution
         ? { savingsAttribution: measuredSavings.attribution }
         : {}),
-      affected: sessions.size,
+      affected: sessionCount,
       view: 'cost',
       ...(haikuPinned
         ? {}

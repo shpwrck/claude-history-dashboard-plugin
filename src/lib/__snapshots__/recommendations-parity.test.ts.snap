@@ -345,7 +345,7 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "action": "Confirm automated runs use the cheapest model that meets the quality bar — Haiku/Sonnet often suffice for scripted work.",
     "affected": 1,
     "category": "cost",
-    "detail": "Automated (sdk-*) sessions account for $100.00 (89% of total) across 1 session(s). Running those automation turns on Haiku instead would have cost about $80.00 less.",
+    "detail": "Automated (sdk-*) sessions account for $100.00 (89% of total) across 1 session(s). Running those automation turns on Haiku instead would have cost about $80.00 less. By task class: $0.00 mechanical, $100.00 authoring, $0.00 review.",
     "estSavingsUsd": 80,
     "fix": {
       "label": "Default automation to Haiku",
@@ -377,6 +377,26 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
       ],
     },
     "severity": "info",
+    "taskClassBreakdown": [
+      {
+        "autoCostUsd": 100,
+        "sessions": 1,
+        "swapSavingsUsd": 80,
+        "taskClass": "authoring",
+      },
+      {
+        "autoCostUsd": 0,
+        "sessions": 0,
+        "swapSavingsUsd": 0,
+        "taskClass": "mechanical",
+      },
+      {
+        "autoCostUsd": 0,
+        "sessions": 0,
+        "swapSavingsUsd": 0,
+        "taskClass": "review",
+      },
+    ],
     "title": "Automation drives a large share of spend",
     "view": "cost",
   },

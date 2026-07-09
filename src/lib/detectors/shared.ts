@@ -12,6 +12,9 @@
 import type { LiveConfig, LiveSettings, SessionTokenData } from '../../types';
 import type { AppliedMarkers, RecSeverity } from './types';
 import { estimateCost, isUnattendedEntrypoint } from '../parse-sessions';
+import { classifyTaskClass, TASK_CLASSES, type TaskClass } from '../task-class';
+import { resolveModelPricing, entryCostAtModel, CHEAPEST_MODEL } from '../pricing';
+import { scopeKeyOf } from '../reclaim';
 
 /** Higher = surfaced first. Drives the primary sort in `buildRecommendations`. */
 export const SEVERITY_RANK: Record<RecSeverity, number> = {
@@ -381,6 +384,103 @@ export function automationCostShare(tokenData: SessionTokenData[]): {
   }
   const share = total > 0 ? (autoCost / total) * 100 : 0;
   return { autoCost, total, share };
+}
+
+/** One task class's slice of the automation partition (internal helper shape). */
+export interface AutomationClassCost {
+  taskClass: TaskClass;
+  /** Actual estimated spend on this class's unattended sessions. */
+  autoCost: number;
+  /** Estimated Haiku-swap savings recoverable from this class. */
+  swapSavings: number;
+  /** Distinct unattended sessions assigned to this class. */
+  sessions: number;
+}
+
+export interface AutomationCostByClass {
+  /** Grand automation spend — identical to {@link automationCostShare}().autoCost. */
+  autoCost: number;
+  /** Grand Haiku-swap savings — identical to the automation-share detector total. */
+  swapSavings: number;
+  /** Billable tokens behind the positive swap deltas (feeds the reclaim). */
+  swapTokens: number;
+  /** Distinct unattended session ids across all classes. */
+  sessionIds: string[];
+  /** `scopeKeyOf(sessionId, model)` for every positive-delta entry (reclaim scope). */
+  scopeKeys: string[];
+  /** Per-class partition, keyed by class. */
+  byClass: Record<TaskClass, AutomationClassCost>;
+  /** Per-class partition in the stable {@link TASK_CLASSES} order. */
+  classes: AutomationClassCost[];
+}
+
+/**
+ * Task-class segmentation of automation cost (#2139, epic #2138). PARTITIONS
+ * the exact figures {@link automationCostShare} and the `cost.automation-share`
+ * detector already compute: every unattended (`sdk-*`) session is assigned to
+ * exactly one class via {@link classifyTaskClass} (from its `entrypoint` +
+ * `opener`), so the returned per-class `autoCost` sums back to
+ * `automationCostShare().autoCost` and the per-class `swapSavings` sums back to
+ * the detector's swap-savings total — by construction, nothing is dropped and
+ * no new grand total is introduced.
+ *
+ * The swap-savings math here is the SAME per-entry counterfactual the detector
+ * used inline (skip synthetic models, sum only positive actual−Haiku deltas via
+ * {@link entryCostAtModel}), lifted into one place so the totals and the
+ * per-class split cannot drift. The detector now derives its totals from this
+ * helper.
+ */
+export function automationCostByClass(
+  tokenData: SessionTokenData[]
+): AutomationCostByClass {
+  const byClass: Record<TaskClass, AutomationClassCost> = {
+    authoring: { taskClass: 'authoring', autoCost: 0, swapSavings: 0, sessions: 0 },
+    mechanical: { taskClass: 'mechanical', autoCost: 0, swapSavings: 0, sessions: 0 },
+    review: { taskClass: 'review', autoCost: 0, swapSavings: 0, sessions: 0 },
+  };
+  const sessionIds = new Set<string>();
+  const scopeKeys = new Set<string>();
+  let autoCost = 0;
+  let swapSavings = 0;
+  let swapTokens = 0;
+
+  for (const d of tokenData) {
+    if (!isUnattendedEntrypoint(d.entrypoint)) continue;
+    const bucket = byClass[classifyTaskClass({ entrypoint: d.entrypoint, opener: d.opener })];
+    // Count every unattended session (matches the detector's `sessions` set,
+    // which is populated before the per-entry loop) so nothing is dropped.
+    sessionIds.add(d.sessionId);
+    bucket.sessions += 1;
+    const c = estimateCost(d);
+    autoCost += c;
+    bucket.autoCost += c;
+    for (const entry of d.entries) {
+      const model = entry.model || 'unknown';
+      if (resolveModelPricing(model).isSynthetic) continue;
+      const delta =
+        entryCostAtModel(entry, model) - entryCostAtModel(entry, CHEAPEST_MODEL);
+      if (delta > 0) {
+        swapSavings += delta;
+        bucket.swapSavings += delta;
+        scopeKeys.add(scopeKeyOf(d.sessionId, model));
+        swapTokens +=
+          entry.inputTokens +
+          entry.outputTokens +
+          entry.cacheCreationTokens +
+          entry.cacheReadTokens;
+      }
+    }
+  }
+
+  return {
+    autoCost,
+    swapSavings,
+    swapTokens,
+    sessionIds: [...sessionIds],
+    scopeKeys: [...scopeKeys],
+    byClass,
+    classes: TASK_CLASSES.map((c) => byClass[c]),
+  };
 }
 
 // ── Quote- and heredoc-aware command splitting (ported from cwd-anchor-guard) ──
