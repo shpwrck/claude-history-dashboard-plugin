@@ -319,6 +319,50 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     input: baseInput({ memoryStores: memoryHygieneStore() }),
     now: 0,
   }),
+  'workflow.procedural-memory': () => {
+    // The same contiguous 3-step Bash procedure recurs across 3 sessions with a
+    // present-but-empty skill inventory (liveConfig is REQUIRED — the finding
+    // asserts "no backing skill") → an uncaptured procedural-memory finding with
+    // cited recurrence provenance.
+    const proc = ['git pull', 'npm run build', 'docker push app:latest'];
+    const sess = (id: string) => ({
+      sessionId: id,
+      calls: proc.map((command) => ({
+        timestamp: 't',
+        toolName: 'Bash',
+        input: { command },
+        toolUseId: 'u',
+        // Completed successfully — only isError===false continues a procedure run (:277).
+        isError: false,
+        resultBytes: 0,
+      })),
+    });
+    const toolData = [
+      sess('pm-a'),
+      sess('pm-b'),
+      sess('pm-c'),
+    ] as unknown as RecommendationInput['toolData'];
+    // Same-project recurrence: the detector now buckets unresolved-project sessions
+    // uniquely, so map all three to ONE project (:547).
+    const sessions = [
+      { sessionId: 'pm-a', project: '/repo/pm' },
+      { sessionId: 'pm-b', project: '/repo/pm' },
+      { sessionId: 'pm-c', project: '/repo/pm' },
+    ] as unknown as RecommendationInput['sessions'];
+    const liveConfig = {
+      settings: {},
+      claudeMd: { global: null, perProject: {} },
+      plugins: [],
+      mcpServers: [],
+      skills: [],
+      subagents: [],
+      commands: [],
+    } as unknown as RecommendationInput['liveConfig'];
+    return {
+      input: baseInput({ toolData, sessions, liveConfig }),
+      now: Date.parse('2026-07-09T00:00:00Z'),
+    };
+  },
   'activity.activity-trend': () => ({
     input: activityInput(makeCache(12576, 2373)),
     now: Date.parse('2026-06-04T00:00:00Z'),

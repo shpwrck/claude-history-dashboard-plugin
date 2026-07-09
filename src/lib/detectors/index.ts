@@ -101,6 +101,7 @@ import { detector as humanInputLeverage } from './workflow/human-input-leverage'
 import { detector as midTurnInterruptSteering } from './workflow/mid-turn-interrupt-steering';
 import { detector as conversationalAvailability } from './workflow/conversational-availability';
 import { detector as reclaimWaitWindows } from './workflow/reclaim-wait-windows';
+import { detector as proceduralMemory } from './workflow/procedural-memory';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -403,6 +404,14 @@ export const DETECTORS: Detector[] = [
   // work. The live enforcer Stop-hook that consumes the ruleset is the `meta`
   // sibling child (mirrored to shpwrck/claude).
   reclaimWaitWindows,
+
+  // ── #2250 (epic #2265) — procedural-memory extraction ──────────────────────
+  // Spots UN-captured procedural memory: a contiguous multi-step Bash procedure
+  // (e.g. `git pull → npm run build → docker push`) that recurs ad-hoc across
+  // >=3 sessions with no backing skill. Suppressed when an installed skill's
+  // id/description already covers the procedure; demoted to "as of <date>" when
+  // the latest recurrence is stale. Non-validated (illustrative) skill scaffold.
+  proceduralMemory,
 
   // ── #1882 (epic #1910) — rolling "last N runs" maintenance audit ───────────
   // Orders sessions chronologically, compares the most recent N runs' mean peak

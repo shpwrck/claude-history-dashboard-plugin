@@ -2921,6 +2921,39 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // workflow.procedural-memory: the SAME contiguous 3-step Bash procedure recurs
+  // across 3 distinct sessions with no covering skill in liveConfig.
+  {
+    const proc = ['git pull', 'npm run build', 'docker push app:latest'];
+    // Completed calls (isError:false) — only a proven-succeeded call continues a
+    // procedure run (:277); the shared `call` helper leaves isError null.
+    const pmSession = (sessionId: string): ToolUsageData => ({
+      sessionId,
+      calls: proc.map((command) => ({
+        timestamp: 't',
+        toolName: 'Bash',
+        input: { command },
+        toolUseId: 'u',
+        isError: false,
+        resultBytes: 0,
+      })),
+    });
+    out.push({
+      now,
+      input: bankBase({
+        toolData: [pmSession('pm-a'), pmSession('pm-b'), pmSession('pm-c')],
+        // Same-project recurrence: the detector buckets unresolved-project sessions
+        // uniquely, so map all three to ONE project (:547).
+        sessions: [
+          { sessionId: 'pm-a', project: '/repo/pm' },
+          { sessionId: 'pm-b', project: '/repo/pm' },
+          { sessionId: 'pm-c', project: '/repo/pm' },
+        ] as unknown as RecommendationInput['sessions'],
+        liveConfig: liveConfigShell(),
+      }),
+    });
+  }
+
   return out;
 }
 
