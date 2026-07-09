@@ -5,6 +5,8 @@ import {
   parseMemoryIndex,
   buildMemoryStores,
   countMemories,
+  projectPathToSlug,
+  memoriesMatchProject,
   type MemoriesResponse,
 } from './parse-memories';
 
@@ -214,5 +216,35 @@ describe('buildMemoryStores', () => {
   it('returns [] for null/empty input', () => {
     expect(buildMemoryStores(null)).toEqual([]);
     expect(buildMemoryStores({ projects: [] })).toEqual([]);
+  });
+});
+
+describe('projectPathToSlug / memoriesMatchProject', () => {
+  it('slugs a cwd path like Claude Code does (non-alnum -> "-")', () => {
+    expect(projectPathToSlug('/home/dev/acme-web')).toBe('-home-dev-acme-web');
+    expect(projectPathToSlug('/home/dev/my.app')).toBe('-home-dev-my-app');
+    expect(projectPathToSlug('/work/alpha')).toBe('-work-alpha');
+  });
+
+  it('joins a slug-format memory key to a cwd-path filter selection', () => {
+    // parser output shape: `project` is the on-disk slug.
+    const grouped = parseMemories({
+      projects: [
+        { slug: '-work-alpha', files: [{ name: 'a.md', content: 'alpha' }] },
+        { slug: '-work-beta', files: [{ name: 'b.md', content: 'beta' }] },
+      ],
+    });
+    const kept = grouped.filter((g) => memoriesMatchProject(g.project, '/work/alpha'));
+    expect(kept.map((g) => g.project)).toEqual(['-work-alpha']);
+  });
+
+  it('drops a non-matching canonical slug', () => {
+    expect(memoriesMatchProject('-work-beta', '/work/alpha')).toBe(false);
+  });
+
+  it('keeps rather than drops when the stored key is not a canonical slug', () => {
+    // Defensive: a legacy path-shaped key is uncertain, so keep it.
+    expect(memoriesMatchProject('/work/alpha', '/work/alpha')).toBe(true);
+    expect(memoriesMatchProject('/work/other', '/work/alpha')).toBe(true);
   });
 });

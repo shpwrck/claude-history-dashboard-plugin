@@ -1,1 +1,0 @@
-import{kn as e}from"./index-DA4bTTYL.js";var t=({prefix:t=`pf-random-id-`,children:n})=>n(e(t));t.displayName=`GenerateId`;export{t};

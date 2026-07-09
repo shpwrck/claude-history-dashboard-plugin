@@ -177,6 +177,8 @@ export function countMemories(grouped: ProjectMemories[]): number {
   return grouped.reduce((n, p) => n + p.memories.length, 0);
 }
 
+export { projectPathToSlug, memoriesMatchProject } from './project-slug';
+
 /** Is this the per-project memory index file (case-insensitive)? */
 function isIndexFile(name: string): boolean {
   return name.toLowerCase() === 'memory.md';

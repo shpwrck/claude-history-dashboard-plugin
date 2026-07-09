@@ -219,7 +219,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: ClipboardCheckIcon,
     domain: 'home',
     description:
-      'Tracks surfaced recommendations through marker-confirmed config adoption.',
+      'Tracks surfaced recommendations through marker-confirmed config adoption. Ignores global time/project filters.',
     requires: 'serverData',
   },
   {
@@ -230,13 +230,22 @@ export const NAV_ITEMS: readonly NavItem[] = [
     domain: 'home',
     requires: 'liveServer',
     description:
-      'Launch and manage remote agent sessions on your cluster so you can run work outside your local machine.',
+      'Launch and manage remote agent sessions on your cluster. Ignores global time/project filters.',
   },
   // liveServer (not serverData): the Diary fetches its daily digest from the
   // server (`fetchDigest` -> /api/digest) with no client-side fallback, so it has
   // no data to render on the sample/upload builds — hide it there rather than
   // ship an empty day (#1889).
-  { view: 'diary', contract: 'raw', label: 'Diary', icon: CalendarAltIcon, domain: 'home', requires: 'liveServer' },
+  {
+    view: 'diary',
+    contract: 'raw',
+    label: 'Diary',
+    icon: CalendarAltIcon,
+    domain: 'home',
+    requires: 'liveServer',
+    description:
+      'A live day-by-day journal. Use the date picker; global time/project filters do not narrow this view.',
+  },
   {
     view: 'permissions',
     contract: 'action',
@@ -376,7 +385,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     domain: 'workflow-hygiene',
     requires: 'serverData',
     description:
-      'Review the shadow A/B experiments run against your tasks so you can see which alternative approaches beat your default and fed the recommendation engine.',
+      'Review shadow A/B experiments against your tasks. Ignores global time/project filters.',
   },
   { view: 'patterns', contract: 'evidence', label: 'Session Patterns', icon: ThLargeIcon, domain: 'workflow-hygiene' },
   {
@@ -435,7 +444,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     domain: 'raw',
     requires: 'serverData',
     description:
-      'Week-over-week activity trend from stats-cache.json — how hot this week ran versus last, with no re-aggregation.',
+      'Week-over-week activity trend from stats-cache.json. Stats-cache panels ignore global time/project filters.',
   },
 ] as const;
 
@@ -499,7 +508,7 @@ export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
     icon: BrainIcon,
     domain: 'workflow-hygiene',
     description:
-      'Browse the memory files Claude has saved per project so you can review, prune, or correct what the agent remembers about your work.',
+      'Read memory files Claude has saved per project. Read-only; the project filter applies but the global time window does not.',
   },
   {
     view: 'tasks',
@@ -508,7 +517,7 @@ export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
     icon: TasksIcon,
     domain: 'workflow-hygiene',
     description:
-      'Track task completion rates and cold-session risk so you can catch work that stalls or gets dropped between sessions.',
+      'Track task completion rates and cold-session risk. Task artifacts ignore global time/project filters.',
     requires: 'serverData',
   },
   {
@@ -519,7 +528,7 @@ export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
     domain: 'workflow-hygiene',
     requires: 'serverData',
     description:
-      'See how your multi-agent teams hand off work so you can spot stalled members and coordination bottlenecks.',
+      'Show how multi-agent teams hand off work and where handoffs stall. Team artifacts ignore global time/project filters.',
   },
   {
     view: 'plans',
@@ -529,7 +538,7 @@ export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
     domain: 'workflow-hygiene',
     requires: 'serverData',
     description:
-      'Inspect the plans your agents wrote and how their shapes evolved, so you can see how work was scoped and broken down across sessions.',
+      'Inspect saved agent plans, shape clusters, and how their shapes evolved. Plan artifacts ignore global time/project filters.',
   },
   {
     view: 'workflows',
@@ -538,7 +547,7 @@ export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
     icon: ProjectDiagramIcon,
     domain: 'workflow-hygiene',
     description:
-      'Inspect completed Workflow-tool runs so you can see how multi-agent orchestrations fanned out and where they spent time or failed.',
+      'Inspect completed Workflow-tool runs. The global time and project filters apply.',
   },
 ] as const;
 

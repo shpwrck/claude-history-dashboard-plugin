@@ -7,6 +7,7 @@ import {
   shouldShowFilteredEmptyState,
   VIEW_ANCHORS,
   VIEW_RENDERERS,
+  VIEW_DATA_FILTER_POLICIES,
   type ViewData,
 } from './view-registry';
 import {
@@ -28,6 +29,7 @@ import type {
 } from '../types';
 import { ALL_PROJECTS, type DashboardFilter } from './routing';
 import { groupByProjects } from './parse-history';
+import { parseMemories, projectPathToSlug } from './parse-memories';
 
 const HOUR = 60 * 60 * 1000;
 
@@ -679,6 +681,53 @@ describe('project-scoped view data filtering', () => {
           agents: [],
         },
       ],
+      fileHistory: [
+        {
+          sessionId: 'alpha-1',
+          churn: 3,
+          spanMin: 12.5,
+          burstRate: 0.24,
+          reworkScore: 3.7,
+          firstMs: 950,
+          lastMs: 1050,
+        },
+        {
+          sessionId: 'beta-1',
+          churn: 2,
+          spanMin: 4.5,
+          burstRate: 0.44,
+          reworkScore: 2.9,
+          firstMs: 1950,
+          lastMs: 2050,
+        },
+      ],
+      // Build via the real parser so `project` carries the on-disk SLUG the
+      // parser produces (e.g. `-work-alpha`), not the cwd path — this is the
+      // shape the project filter must join against (adversarial review, #2426).
+      memories: parseMemories({
+        projects: [
+          {
+            slug: projectPathToSlug(alphaProject),
+            files: [
+              {
+                name: 'alpha.md',
+                content:
+                  '---\nname: alpha-note\ndescription: alpha memory\nmetadata:\n  type: project\n---\nalpha body\n',
+              },
+            ],
+          },
+          {
+            slug: projectPathToSlug(betaProject),
+            files: [
+              {
+                name: 'beta.md',
+                content:
+                  '---\nname: beta-note\ndescription: beta memory\nmetadata:\n  type: project\n---\nbeta body\n',
+              },
+            ],
+          },
+        ],
+      }),
     });
 
     const filtered = filterViewDataByProject(data, {
@@ -729,6 +778,33 @@ describe('project-scoped view data filtering', () => {
     expect(filtered.promptAnalysis.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.deceitSignals.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.workflows.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    expect(filtered.fileHistory.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    // The path-format `ctx.project` must join to the slug-format memory key.
+    expect(filtered.memories.map((item) => item.project)).toEqual([
+      projectPathToSlug(alphaProject),
+    ]);
+    expect(
+      filtered.memories.flatMap((item) => item.memories.map((m) => m.name))
+    ).toEqual(['alpha-note']);
+  });
+
+  it('records explicit filter-policy decisions for audited fields', () => {
+    expect(VIEW_DATA_FILTER_POLICIES.workflows).toMatchObject({
+      time: 'filtered',
+      project: 'filtered',
+    });
+    expect(VIEW_DATA_FILTER_POLICIES.fileHistory).toMatchObject({
+      time: 'filtered',
+      project: 'filtered',
+    });
+    expect(VIEW_DATA_FILTER_POLICIES.memories).toMatchObject({
+      time: 'global',
+      project: 'filtered',
+    });
+    expect(VIEW_DATA_FILTER_POLICIES.plans).toMatchObject({
+      time: 'global',
+      project: 'global',
+    });
   });
 });
 
@@ -867,6 +943,65 @@ describe('filterViewDataByTime', () => {
         ],
       },
     ],
+    workflows: [
+      {
+        runId: 'wf-old',
+        workflowName: 'Old WF',
+        status: 'completed',
+        startTime: older,
+        durationMs: 10,
+        agentCount: 1,
+        totalTokens: 10,
+        totalToolCalls: 1,
+        defaultModel: 'sonnet',
+        sessionId: 'old',
+        phases: [],
+        agents: [],
+      },
+      {
+        runId: 'wf-recent',
+        workflowName: 'Recent WF',
+        status: 'completed',
+        startTime: within24h,
+        durationMs: 20,
+        agentCount: 1,
+        totalTokens: 12,
+        totalToolCalls: 2,
+        defaultModel: 'sonnet',
+        sessionId: 'recent',
+        phases: [],
+        agents: [],
+      },
+    ],
+    fileHistory: [
+      {
+        sessionId: 'old',
+        churn: 2,
+        spanMin: 6,
+        burstRate: 0.2,
+        reworkScore: 2.1,
+        firstMs: older - 120_000,
+        lastMs: older + 60_000,
+      },
+      {
+        sessionId: 'recent',
+        churn: 3,
+        spanMin: 8,
+        burstRate: 0.2,
+        reworkScore: 1.2,
+        firstMs: within24h - 120_000,
+        lastMs: within24h + 120_000,
+      },
+      {
+        sessionId: 'missing',
+        churn: 10,
+        spanMin: 20,
+        burstRate: 1,
+        reworkScore: 5,
+        firstMs: older - 120_000,
+        lastMs: within7d,
+      },
+    ],
   });
 
   it('preserves all data for the all-time preset', () => {
@@ -911,6 +1046,8 @@ describe('filterViewDataByTime', () => {
       'recent',
       'registry-recent',
     ]);
+    expect(filtered.workflows.map((row) => row.runId)).toEqual(['wf-recent']);
+    expect(filtered.fileHistory.map((row) => row.sessionId)).toEqual(['recent']);
   });
 
   it('uses the same dataset anchor for wider presets', () => {
