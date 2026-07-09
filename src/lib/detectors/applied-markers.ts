@@ -129,6 +129,12 @@ export const MARKERS_HUMAN_INPUT_LEVERAGE: AppliedMarkers = {
   headings: [/^##\s+(?:Ask(?:ing)? upfront|Human input|Value of human input|Upfront questions)\b/i],
   bodyPhrases: ['ask the human upfront'],
 };
+export const MARKERS_VALUE_OF_AGENT_HANDOFF: AppliedMarkers = {
+  headings: [
+    /^##\s+(?:Agent handoff|Handoff artifacts|Durable state handoff|Runbooks for durable state)\b/i,
+  ],
+  bodyPhrases: ['durable external state changes need a handoff artifact'],
+};
 
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
@@ -149,6 +155,7 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['context.compaction-hot-sessions', MARKERS_COMPACTION_HOT_SESSIONS],
   ['workflow.correction-mining', MARKERS_CORRECTIONS],
   ['workflow.human-input-leverage', MARKERS_HUMAN_INPUT_LEVERAGE],
+  ['workflow.value-of-agent-handoff', MARKERS_VALUE_OF_AGENT_HANDOFF],
   ['context.over-window', MARKERS_OVER_WINDOW],
   ['context.compaction-large-tool-outputs', MARKERS_COMPACTION_LARGE_TOOL_OUTPUTS],
   ['cost.web-search-spend', MARKERS_WEB_SEARCH_SPEND],

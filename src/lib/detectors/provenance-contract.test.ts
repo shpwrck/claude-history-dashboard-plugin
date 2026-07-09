@@ -363,6 +363,56 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now: Date.parse('2026-07-09T00:00:00Z'),
     };
   },
+  'workflow.value-of-agent-handoff': () => {
+    const toolData = [
+      {
+        sessionId: 'handoff-setup',
+        calls: [
+          {
+            timestamp: '2026-07-01T00:00:00.000Z',
+            toolName: 'Bash',
+            input: {
+              command:
+                "ssh deploy@app 'sudo tee /etc/app/config.yaml >/dev/null && sudo systemctl restart app'",
+            },
+            toolUseId: 'handoff-tool-1',
+            isError: false,
+            resultBytes: 1200,
+          },
+        ],
+      },
+    ] as unknown as RecommendationInput['toolData'];
+    const sessions = [
+      { sessionId: 'handoff-setup', project: '/repo/handoff' },
+    ] as unknown as RecommendationInput['sessions'];
+    const tokenData = [
+      {
+        sessionId: 'handoff-setup',
+        project: '/repo/handoff',
+        entries: [
+          {
+            timestamp: '2026-07-01T00:00:00.000Z',
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheCreation1hTokens: 0,
+            cacheReadTokens: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+            model: 'claude-opus-4-8',
+            toolUseIds: ['handoff-tool-1'],
+            toolResultBytes: 1200,
+          },
+        ],
+        contextToolResultTokensSum: 4000,
+        compactionEvents: [],
+      },
+    ] as unknown as RecommendationInput['tokenData'];
+    return {
+      input: baseInput({ toolData, sessions, tokenData }),
+      now: Date.parse('2026-07-09T00:00:00Z'),
+    };
+  },
   'activity.activity-trend': () => ({
     input: activityInput(makeCache(12576, 2373)),
     now: Date.parse('2026-06-04T00:00:00Z'),

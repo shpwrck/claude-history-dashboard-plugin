@@ -200,6 +200,30 @@ describe('parseSessionTimeline', () => {
     expect(entries[3].interrupted).toBeUndefined()
   })
 
+  it('flags rediscovery-of-durable-state turns and survives slimming (#2312)', () => {
+    const filler = 'A long preamble describing the investigation in some detail. '.repeat(6) // > 200 chars
+    const text = [
+      // User asking where durable state lives — a rediscovery hit.
+      line({ type: 'user', timestamp: '2026-01-01', message: { content: 'where is the remote config for this service?' } }),
+      // Assistant rediscovery language past the ~200-char summary cutoff.
+      line({ type: 'assistant', timestamp: '2026-01-02', message: { content: [{ type: 'text', text: `${filler}which template created the deployed config?` }] } }),
+      // Ordinary chatter with no durable-state noun — NOT a rediscovery hit.
+      line({ type: 'user', timestamp: '2026-01-03', message: { content: 'where is the bug in this function?' } }),
+    ].join('\n')
+    const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+    expect(entries[0].rediscovery).toBe(true)
+    expect(entries[1].rediscovery).toBe(true) // detected on full text past the summary cutoff
+    expect(entries[1].summary).not.toContain('template')
+    expect(entries[2].rediscovery).toBeUndefined() // no durable-state noun
+
+    // The flag survives slimSessionTimeline (which strips summary) — the only
+    // signal the server-side detector has on the bulk dataset.
+    const slim = slimSessionTimeline(parseSessionTimeline(text, 's.jsonl')!)
+    expect(slim.entries[0].summary).toBeUndefined()
+    expect(slim.entries[0].rediscovery).toBe(true)
+    expect(slim.entries[1].rediscovery).toBe(true)
+  })
+
   it('records an unknown line type as an "other" entry summarized by its type', () => {
     const text = line({ type: 'system', timestamp: '2026-01-01' })
     expect(parseSessionTimeline(text, 's.jsonl')!.entries[0]).toMatchObject({ kind: 'other', summary: 'system' })

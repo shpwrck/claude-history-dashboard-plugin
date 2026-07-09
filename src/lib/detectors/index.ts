@@ -102,6 +102,7 @@ import { detector as midTurnInterruptSteering } from './workflow/mid-turn-interr
 import { detector as conversationalAvailability } from './workflow/conversational-availability';
 import { detector as reclaimWaitWindows } from './workflow/reclaim-wait-windows';
 import { detector as proceduralMemory } from './workflow/procedural-memory';
+import { detector as valueOfAgentHandoff } from './workflow/value-of-agent-handoff';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -412,6 +413,13 @@ export const DETECTORS: Detector[] = [
   // id/description already covers the procedure; demoted to "as of <date>" when
   // the latest recurrence is stale. Non-validated (illustrative) skill scaffold.
   proceduralMemory,
+
+  // ── #2312 (epic #2281) — value of agent handoff ──────────────────────────
+  // Detects durable external state established with no runbook/handoff artifact,
+  // plus later early-turn rediscovery of that setup. Emits a conservative
+  // human-minute hypothesis backed by accounting observations; the published
+  // calibrated rec class is deferred to the sibling profiling receipt.
+  valueOfAgentHandoff,
 
   // ── #1882 (epic #1910) — rolling "last N runs" maintenance audit ───────────
   // Orders sessions chronologically, compares the most recent N runs' mean peak

@@ -106,6 +106,20 @@ export interface TimelineEntry {
    * call that was NOT backgrounded yet blocked the turn is recoverable wait.
    */
   backgroundableKind?: boolean;
+  /**
+   * When `kind === 'user'` or `'assistant'`: the turn text is rediscovery
+   * language about durable external state — "where is the remote config", "how
+   * was this deployed", "which template created the config" — classified from
+   * the *full* untruncated block text by {@link isRediscoveryText} (rediscovery
+   * verb co-occurring with a durable-state noun). Like `waitLanguage` /
+   * `interrupted` / `backgroundableKind`, this is a derived boolean set at parse
+   * time so it survives `slimSessionTimeline` (which strips `summary`), keeping
+   * the signal recoverable on the slim bulk/server dataset where the text is
+   * gone. Feeds the `workflow.value-of-agent-handoff` detector (#2312): a burst
+   * of rediscovery turns early in a session is billed back to the prior
+   * durable-state session that left no handoff. Absent ⇒ not rediscovery.
+   */
+  rediscovery?: boolean;
 }
 
 export interface SessionTimeline extends SessionDimensions {
@@ -284,6 +298,28 @@ export function classifyWaitClass(text: string): WaitClass {
 export function isInterruptSentinel(text: string | undefined): boolean {
   if (!text) return false;
   return text.startsWith('[Request interrupted by user');
+}
+
+/**
+ * Rediscovery language about durable external state — a later session asking
+ * "where is the remote config", "how was this set up/deployed", "which template
+ * created the config", "reverse-engineer the setup". Requires BOTH a rediscovery
+ * verb/phrase AND a durable-state noun so ordinary "where is the bug" chatter
+ * does not match. Matched on the *full* untruncated turn text (not the ~200-char
+ * `summary`) so the classification is baked into the entry before
+ * `slimSessionTimeline` strips the summary. Exported so the
+ * `workflow.value-of-agent-handoff` detector (#2312) can reuse the same matcher
+ * for client-parsed timelines and its tests assert against the parser's flag.
+ */
+const REDISCOVERY_RE =
+  /\b(?:where\s+(?:is|are|was|were|do|does|did)|how\s+(?:was|were|is|are|do|does|did)\s+[^?!.]{0,60}\b(?:set\s*up|configured|installed|deployed|wired)|what\s+(?:config|template|state|secret|service|host|path)|which\s+(?:config|template|state|secret|service|host|path)|find\s+(?:the\s+)?(?:config|template|state|secret|service|host|path|setup)|rediscover|re-discover|reverse[- ]engineer)\b/i;
+
+const DURABLE_NOUN_RE =
+  /\b(?:config|template|state|secret|service|host|remote|server|deploy|deployment|install|setup|runbook|handoff|env|environment|volume|cluster|namespace)\b/i;
+
+export function isRediscoveryText(text: string | undefined): boolean {
+  if (!text) return false;
+  return REDISCOVERY_RE.test(text) && DURABLE_NOUN_RE.test(text);
 }
 
 /**
@@ -477,6 +513,7 @@ export function parseSessionTimeline(
           kind: 'user',
           summary: summarize(msg.content),
           ...(isInterruptSentinel(msg.content) ? { interrupted: true } : {}),
+          ...(isRediscoveryText(msg.content) ? { rediscovery: true } : {}),
         }));
       } else if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
@@ -495,6 +532,7 @@ export function parseSessionTimeline(
               kind: 'user',
               summary: summarize(block.text ?? ''),
               ...(isInterruptSentinel(block.text) ? { interrupted: true } : {}),
+              ...(isRediscoveryText(block.text) ? { rediscovery: true } : {}),
             }));
           }
         }
@@ -513,6 +551,7 @@ export function parseSessionTimeline(
             ...(hasWaitLanguage(text)
               ? { waitLanguage: true, waitClass: classifyWaitClass(text) }
               : {}),
+            ...(isRediscoveryText(text) ? { rediscovery: true } : {}),
           }));
         } else if (block.type === 'thinking') {
           entries.push(timelineEntry({

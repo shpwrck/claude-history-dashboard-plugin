@@ -39,6 +39,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'reliability.discovery-freshness',
   'workflow.procedural-memory',
   'workflow.human-input-leverage',
+  'workflow.value-of-agent-handoff',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */
