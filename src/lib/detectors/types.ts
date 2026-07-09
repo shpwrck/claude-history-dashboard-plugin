@@ -56,6 +56,7 @@ import type {
 } from '../parse-external-guidance';
 import type { ModelEvalSummary } from '../model-eval-ingest';
 import type { GitOutcome } from '../parse-git-outcome';
+import type { DocGraph } from '../parse-docs';
 import type { EvidenceRef } from '../evidence';
 // RecCategory and SavingsAttributionTier are defined in a dependency-free leaf
 // (#1582) so the parsers this module pulls types from (reclaim,
@@ -630,6 +631,20 @@ export interface RecommendationInput {
    * unavailable) means downstream detectors emit nothing.
    */
   gitOutcomes?: GitOutcome[] | null;
+  /**
+   * SCIP-style graph over the repository's own Markdown docs (#2257, epic
+   * #2256), dataset key `docGraph`. A non-signal aggregate (like `memoryStores`
+   * / `externalGuidance`): `nodes` (slug, path, category, frontmatter, headings,
+   * gitMtime) + typed `edges` (`md-link`/`issue-ref`/`src-ref`), plus the three
+   * declared partial indices (REFERENCES parser table, competitive-analysis
+   * tracker, ADR numeric ordering) flagged via `indexKind`/`ordinal`. Built at
+   * ingest time by `buildDocGraph` (parse-docs) from a local repo-docs walk —
+   * zero network, zero Anthropic egress. SIGNAL ONLY this slice: NO detector
+   * reads it yet; the doc-hygiene detector is a follow-up child of #2256.
+   * Optional: `undefined`/`null`/empty (no docs, or the SPA/upload dataset)
+   * means downstream detectors emit nothing.
+   */
+  docGraph?: DocGraph | null;
 }
 
 /**

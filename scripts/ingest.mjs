@@ -589,6 +589,12 @@ const { buildMemoryStores } = await import(join(LIB, 'parse-memories.ts'));
 // runtime import guard); the live `gh`/GitHub-API fetch that feeds it happens
 // HERE, server-side, in readGitOutcomes() below.
 const { buildGitOutcomes } = await import(join(LIB, 'parse-git-outcome.ts'));
+// Repo doc graph (#2257, epic #2256). buildDocGraph walks this repo's own
+// Markdown (root *.md + docs/**) into a SCIP-style node/edge graph the future
+// doc-hygiene detector reads off `RecommendationInput.docGraph`. Pure over the
+// project root — a LOCAL repo-docs walk, no network — so it is safe under the
+// zero-deps runtime import guard (node:fs/child_process only, like parse-tasks).
+const { buildDocGraph } = await import(join(LIB, 'parse-docs.ts'));
 const EXTERNAL_GUIDANCE_DIR = join(PROJECT_DIR, 'data', 'external-guidance');
 // Read fresh on every assemble — NOT memoized. The ingest() content-hash gate
 // hashes this dir so a refreshed snapshot (git pull / drift-PR merge under a
@@ -661,6 +667,22 @@ function readMemoryStores() {
     return buildMemoryStores({ projects });
   } catch {
     return [];
+  }
+}
+
+// Build the repo doc graph (#2257, epic #2256) over this dashboard's OWN
+// Markdown docs (root *.md + docs/**), the seam the future doc-hygiene detector
+// reads off `RecommendationInput.docGraph`. Mirrors readMemoryStores: a
+// non-signal aggregate, built fresh per assemble from a LOCAL repo walk (no
+// network, no Anthropic egress), tolerant by design — buildDocGraph itself never
+// throws (unreadable files are skipped, a missing root yields an empty graph),
+// and this wrapper degrades any surprise to an empty graph so it never sinks the
+// dataset endpoint. Root is PROJECT_DIR (the dashboard repo), not ~/.claude.
+function readDocGraph() {
+  try {
+    return buildDocGraph(PROJECT_DIR);
+  } catch {
+    return { nodes: [], edges: [] };
   }
 }
 
@@ -2917,6 +2939,11 @@ function assembleRecommendationContext(options = {}) {
     // assembleDataset (opt-in `gh` fetch + pure classify). SIGNAL ONLY — no
     // detector reads it yet; empty unless CHD_GIT_OUTCOMES names a repo.
     gitOutcomes: dataset.gitOutcomes,
+    // Repo doc graph (#2257): non-signal aggregate, the seam the future
+    // doc-hygiene detector (epic #2256) reads. Built fresh from a LOCAL walk of
+    // this repo's own Markdown; empty on the SPA/upload dataset or when docs are
+    // absent, so any detector simply emits nothing there. SIGNAL ONLY this slice.
+    docGraph: readDocGraph(),
   });
   return { input, sessions };
 }
