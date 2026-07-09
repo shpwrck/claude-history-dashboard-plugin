@@ -15,6 +15,7 @@ import {
   getNavItem,
   isValidView,
   resolveViewRedirect,
+  REDIRECTED_VIEW_TAB,
   domainForView,
 } from './nav-prefs';
 import type {
@@ -252,14 +253,24 @@ const allProjectsFilter: DashboardFilter = {
 };
 
 describe('view registry ↔ nav catalog parity', () => {
-  it('has exactly one renderer for every catalog view, and vice versa', () => {
+  it('has a renderer for every catalog view, plus one per absorbed composite tab', () => {
     const catalog = new Set(NAV_ITEMS.map((i) => i.view));
     const renderers = new Set(Object.keys(VIEW_RENDERERS) as View[]);
     // Every catalog view is renderable…
     for (const v of catalog) expect(renderers.has(v)).toBe(true);
-    // …and every renderer maps to a real catalog view (no orphans).
-    for (const v of renderers) expect(catalog.has(v)).toBe(true);
-    expect(renderers.size).toBe(catalog.size);
+    // …and every renderer maps to a catalog view OR an absorbed composite-tab
+    // id (#2351) whose delegating renderer forces the right tab for any direct
+    // render path (normal routing resolves these ids via REDIRECTED_VIEWS).
+    const absorbed = new Set(Object.keys(REDIRECTED_VIEW_TAB) as View[]);
+    for (const v of renderers) {
+      expect(
+        catalog.has(v) || absorbed.has(v),
+        `renderer '${v}' must be a catalog view or an absorbed composite tab`
+      ).toBe(true);
+    }
+    // Every absorbed id keeps its delegating renderer.
+    for (const v of absorbed) expect(renderers.has(v)).toBe(true);
+    expect(renderers.size).toBe(catalog.size + absorbed.size);
   });
 
   it('lists each view exactly once in the catalog', () => {
@@ -287,15 +298,18 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(
       NAV_ITEMS.find((item) => item.view === 'permissions')?.description
     ).toMatch(/permission modes/);
-    expect(NAV_ITEMS.find((item) => item.view === 'agents')?.description).toMatch(
+    // Absorbed composite-tab views (#2351) keep their explainers reachable via
+    // getNavItem (their tab content still renders its own PageHeader).
+    expect(getNavItem('agents')?.description).toMatch(
       /subagents, skills, and MCP/
     );
     expect(
-      NAV_ITEMS.find((item) => item.view === 'automation')?.description
-    ).toMatch(/unattended SDK and CLI/);
+      NAV_ITEMS.find((item) => item.view === 'capabilities')?.description
+    ).toMatch(/tool usage and effectiveness/i);
     expect(
-      NAV_ITEMS.find((item) => item.view === 'workflows')?.description
-    ).toMatch(/Workflow-tool runs/);
+      NAV_ITEMS.find((item) => item.view === 'automation')?.description
+    ).toMatch(/SDK\/CLI runs, task health/);
+    expect(getNavItem('workflows')?.description).toMatch(/Workflow-tool runs/);
     expect(NAV_ITEMS.find((item) => item.view === 'errors')?.description).toMatch(
       /errors and retries/
     );
@@ -305,12 +319,10 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(
       NAV_ITEMS.find((item) => item.view === 'evaluator')?.description
     ).toMatch(/response speed and throughput/);
-    expect(
-      NAV_ITEMS.find((item) => item.view === 'memories')?.description
-    ).toMatch(/memory files Claude has saved/);
-    expect(NAV_ITEMS.find((item) => item.view === 'tasks')?.description).toMatch(
-      /task completion rates/
+    expect(getNavItem('memories')?.description).toMatch(
+      /memory files Claude has saved/
     );
+    expect(getNavItem('tasks')?.description).toMatch(/task completion rates/);
     expect(NAV_ITEMS.find((item) => item.view === 'search')?.description).toMatch(
       /Search across loaded sessions/
     );
@@ -320,12 +332,10 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(
       NAV_ITEMS.find((item) => item.view === 'projects')?.description
     ).toMatch(/Break activity down by project/);
-    expect(NAV_ITEMS.find((item) => item.view === 'teams')?.description).toMatch(
+    expect(getNavItem('teams')?.description).toMatch(
       /multi-agent teams hand off work/
     );
-    expect(NAV_ITEMS.find((item) => item.view === 'plans')?.description).toMatch(
-      /how their shapes evolved/
-    );
+    expect(getNavItem('plans')?.description).toMatch(/how their shapes evolved/);
     expect(
       NAV_ITEMS.find((item) => item.view === 'context')?.description
     ).toMatch(/context window your sessions consume/);
@@ -348,6 +358,37 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(isValidView('forensics')).toBe(true);
     expect(resolveViewRedirect('forensics')).toBe('timeline');
     expect(VIEW_RENDERERS.forensics).toBeUndefined();
+  });
+
+  it('absorbs the workflow-hygiene peers into composites with tab-preserving redirects (#2351)', () => {
+    const expected: Array<[View, View, string]> = [
+      ['tools', 'capabilities', 'tools'],
+      ['agents', 'capabilities', 'agents'],
+      ['prompts', 'capabilities', 'prompts'],
+      ['memories', 'capabilities', 'memories'],
+      ['tasks', 'automation', 'tasks'],
+      ['teams', 'automation', 'teams'],
+      ['plans', 'automation', 'plans'],
+      ['workflows', 'automation', 'workflows'],
+    ];
+    for (const [absorbed, composite, tab] of expected) {
+      // Out of the sidebar catalog…
+      expect(
+        NAV_ITEMS.some((item) => item.view === absorbed),
+        `${absorbed} must not be a sidebar destination`
+      ).toBe(false);
+      // …but old deep links still parse and land on the composite's tab…
+      expect(isValidView(absorbed)).toBe(true);
+      expect(resolveViewRedirect(absorbed)).toBe(composite);
+      expect(REDIRECTED_VIEW_TAB[absorbed]).toBe(tab);
+      // …and a direct render path still resolves (delegating renderer).
+      expect(VIEW_RENDERERS[absorbed]).toBeDefined();
+    }
+    // The composites themselves are catalog views with renderers.
+    expect(NAV_ITEMS.some((item) => item.view === 'capabilities')).toBe(true);
+    expect(NAV_ITEMS.some((item) => item.view === 'automation')).toBe(true);
+    expect(VIEW_RENDERERS.capabilities).toBeDefined();
+    expect(VIEW_RENDERERS.automation).toBeDefined();
   });
 
   it('every renderer key is a valid view', () => {

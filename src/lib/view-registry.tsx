@@ -230,6 +230,12 @@ const SessionProvisioning = lazy(() =>
     default: m.SessionProvisioningPf,
   }))
 );
+// Composite tab shell for the consolidated workflow-hygiene destinations (#2351).
+const CompositeTabsView = lazy(() =>
+  import('../components/CompositeTabsView').then((m) => ({
+    default: m.CompositeTabsView,
+  }))
+);
 // Keep the admin-only live-server view out of the upload-only SPA bundle.
 const EnterpriseAdminUnavailable = () => null;
 const EnterpriseAdmin =
@@ -580,6 +586,164 @@ function renderCostAttributionView(
   );
 }
 
+// ── #2351 composite tab renderers ───────────────────────────────────────────
+// The workflow-hygiene consolidation: `capabilities` (Tools / Agents & Skills /
+// Prompts / Memories) and `automation` (Runs / Tasks / Teams / Plans /
+// Workflows) render one CompositeTabsView each. The per-tab render closures
+// are the verbatim prop wiring the absorbed views' standalone renderers used.
+// Tab gating mirrors each absorbed view's former NAV_ITEMS `requires`
+// (tasks/teams/plans: serverData, `covered` when the upload carries the
+// artifact — the composite-tab equivalent of `uploadAvailableViews`).
+
+function renderCapabilitiesView(ctx: ViewContext, forcedTab?: string): ReactNode {
+  const { data: d, nav: n, filter, routeFilter, serverAvailable } = ctx;
+  return (
+    <CompositeTabsView
+      title="Capabilities"
+      serverAvailable={serverAvailable}
+      activeTab={forcedTab ?? routeFilter.tab}
+      onTabChange={(tab) =>
+        n.navigateWithFilter('capabilities', { ...routeFilter, tab })
+      }
+      tabs={[
+        {
+          id: 'tools',
+          label: 'Tools',
+          render: () => (
+            <ToolUsage
+              toolData={d.toolData}
+              apiErrors={d.apiErrors}
+              timelines={d.timelines}
+              toolInventories={d.toolInventories}
+              sessions={d.sessions}
+              liveConfig={d.liveConfig}
+              onOpenSession={n.openSession}
+              routeFilter={routeFilter}
+              activeFilter={filter}
+              onNavigateWithFilter={n.navigateWithFilter}
+            />
+          ),
+        },
+        {
+          id: 'agents',
+          label: 'Agents & Skills',
+          render: () => (
+            <AgentSkill
+              toolData={d.toolData}
+              agentSettings={d.agentSettings}
+              attribution={d.attribution}
+              runtimeEvents={d.runtimeEvents}
+              tokenData={d.tokenData}
+              sessions={d.sessions}
+              routeFilter={routeFilter}
+              onOpenSession={n.openSession}
+              onNavigate={n.navigateWithFilter}
+            />
+          ),
+        },
+        {
+          id: 'prompts',
+          label: 'Prompts',
+          render: () => (
+            <PromptAnalyzer
+              promptAnalysis={d.promptAnalysis}
+              timelines={d.timelines}
+              apiErrors={d.apiErrors}
+              onDrillThrough={(target) =>
+                navigateDrillThroughWithFilter(n.navigateWithFilter, target)
+              }
+            />
+          ),
+        },
+        {
+          id: 'memories',
+          label: 'Memories',
+          render: () => (
+            <Memories memories={d.memories} serverAvailable={serverAvailable} />
+          ),
+        },
+      ]}
+    />
+  );
+}
+
+function renderAutomationView(ctx: ViewContext, forcedTab?: string): ReactNode {
+  const { data: d, nav: n, filter, routeFilter, serverAvailable } = ctx;
+  return (
+    <CompositeTabsView
+      title="Automation"
+      serverAvailable={serverAvailable}
+      activeTab={forcedTab ?? routeFilter.tab}
+      onTabChange={(tab) =>
+        n.navigateWithFilter('automation', { ...routeFilter, tab })
+      }
+      tabs={[
+        {
+          id: 'runs',
+          label: 'Runs',
+          render: () => (
+            <AutomationView
+              sessions={d.sessions}
+              tokenData={d.tokenData}
+              toolData={d.toolData}
+              timelines={d.timelines}
+              apiErrors={d.apiErrors}
+              activeFilter={filter}
+              routeFilter={routeFilter}
+              onActiveSessionChange={n.setActiveSessionId}
+              onOpenSession={n.openSession}
+              onNavigate={n.navigateWithFilter}
+            />
+          ),
+        },
+        {
+          id: 'tasks',
+          label: 'Tasks',
+          requires: 'serverData',
+          covered: d.tasks.length > 0,
+          render: () => (
+            <TaskHealth
+              tasks={d.tasks}
+              serverAvailable={serverAvailable}
+              sessions={d.sessions}
+              onOpenSession={n.openSession}
+            />
+          ),
+        },
+        {
+          id: 'teams',
+          label: 'Teams',
+          requires: 'serverData',
+          covered: d.teams.length > 0,
+          render: () => (
+            <TeamCoordination teams={d.teams} serverAvailable={serverAvailable} />
+          ),
+        },
+        {
+          id: 'plans',
+          label: 'Plans',
+          requires: 'serverData',
+          covered: d.plans.length > 0,
+          render: () => (
+            <PlanShapes plans={d.plans} serverAvailable={serverAvailable} />
+          ),
+        },
+        {
+          id: 'workflows',
+          label: 'Workflows',
+          render: () => (
+            <WorkflowList
+              workflows={d.workflows}
+              serverAvailable={serverAvailable}
+              onOpenSession={n.openSession}
+            />
+          ),
+        },
+      ]}
+    />
+  );
+}
+
 export const VIEW_RENDERERS: Partial<
   Record<View, (ctx: ViewContext) => ReactNode>
 > = {
@@ -657,20 +821,15 @@ export const VIEW_RENDERERS: Partial<
       liveConfig={d.liveConfig}
     />
   ),
-  tools: ({ data: d, nav: n, routeFilter, filter }) => (
-    <ToolUsage
-      toolData={d.toolData}
-      apiErrors={d.apiErrors}
-      timelines={d.timelines}
-      toolInventories={d.toolInventories}
-      sessions={d.sessions}
-      liveConfig={d.liveConfig}
-      onOpenSession={n.openSession}
-      routeFilter={routeFilter}
-      activeFilter={filter}
-      onNavigateWithFilter={n.navigateWithFilter}
-    />
-  ),
+  // #2351: the consolidated workflow-hygiene composites. The absorbed ids keep
+  // delegating renderers with their tab forced — normal routing resolves them
+  // to the composite via REDIRECTED_VIEWS/REDIRECTED_VIEW_TAB, but any direct
+  // render path (belt and braces) still lands on the right tab content.
+  capabilities: (ctx) => renderCapabilitiesView(ctx),
+  tools: (ctx) => renderCapabilitiesView(ctx, 'tools'),
+  agents: (ctx) => renderCapabilitiesView(ctx, 'agents'),
+  prompts: (ctx) => renderCapabilitiesView(ctx, 'prompts'),
+  memories: (ctx) => renderCapabilitiesView(ctx, 'memories'),
   files: ({ data: d, nav: n }) => (
     <FileImpact
       toolData={d.toolData}
@@ -716,37 +875,11 @@ export const VIEW_RENDERERS: Partial<
       navigateWithFilter={n.navigateWithFilter}
     />
   ),
-  automation: ({ data: d, nav: n, filter, routeFilter }) => (
-    <AutomationView
-      sessions={d.sessions}
-      tokenData={d.tokenData}
-      toolData={d.toolData}
-      timelines={d.timelines}
-      apiErrors={d.apiErrors}
-      activeFilter={filter}
-      routeFilter={routeFilter}
-      onActiveSessionChange={n.setActiveSessionId}
-      onOpenSession={n.openSession}
-      onNavigate={n.navigateWithFilter}
-    />
-  ),
-  workflows: ({ data: d, nav: n, serverAvailable }) => (
-    <WorkflowList
-      workflows={d.workflows}
-      serverAvailable={serverAvailable}
-      onOpenSession={n.openSession}
-    />
-  ),
-  prompts: ({ data: d, nav: n }) => (
-    <PromptAnalyzer
-      promptAnalysis={d.promptAnalysis}
-      timelines={d.timelines}
-      apiErrors={d.apiErrors}
-      onDrillThrough={(target) =>
-        navigateDrillThroughWithFilter(n.navigateWithFilter, target)
-      }
-    />
-  ),
+  automation: (ctx) => renderAutomationView(ctx),
+  workflows: (ctx) => renderAutomationView(ctx, 'workflows'),
+  tasks: (ctx) => renderAutomationView(ctx, 'tasks'),
+  teams: (ctx) => renderAutomationView(ctx, 'teams'),
+  plans: (ctx) => renderAutomationView(ctx, 'plans'),
   errors: ({ data: d, nav: n, routeFilter }) => (
     <ErrorRetry
       toolData={d.toolData}
@@ -770,22 +903,6 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
       onNavigate={n.navigateWithFilter}
     />
-  ),
-  agents: ({ data: d, nav: n, routeFilter }) => (
-    <AgentSkill
-      toolData={d.toolData}
-      agentSettings={d.agentSettings}
-      attribution={d.attribution}
-      runtimeEvents={d.runtimeEvents}
-      tokenData={d.tokenData}
-      sessions={d.sessions}
-      routeFilter={routeFilter}
-      onOpenSession={n.openSession}
-      onNavigate={n.navigateWithFilter}
-    />
-  ),
-  memories: ({ data: d, serverAvailable }) => (
-    <Memories memories={d.memories} serverAvailable={serverAvailable} />
   ),
   context: ({ data: d, nav: n, routeFilter }) => (
     <ContextHealth
@@ -848,20 +965,6 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
     />
-  ),
-  tasks: ({ data: d, nav: n, serverAvailable }) => (
-    <TaskHealth
-      tasks={d.tasks}
-      serverAvailable={serverAvailable}
-      sessions={d.sessions}
-      onOpenSession={n.openSession}
-    />
-  ),
-  teams: ({ data: d, serverAvailable }) => (
-    <TeamCoordination teams={d.teams} serverAvailable={serverAvailable} />
-  ),
-  plans: ({ data: d, serverAvailable }) => (
-    <PlanShapes plans={d.plans} serverAvailable={serverAvailable} />
   ),
   pulse: ({ data: d, serverAvailable }) => (
     <UsagePulse

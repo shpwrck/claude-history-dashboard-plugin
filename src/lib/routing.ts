@@ -20,7 +20,7 @@
  */
 import { useEffect, useRef } from 'react';
 import type { View } from '../types';
-import { isValidView } from './nav-prefs';
+import { isValidView, resolveViewRedirect, REDIRECTED_VIEW_TAB } from './nav-prefs';
 
 export const TIME_PRESETS = ['24h', '7d', '30d', 'all'] as const;
 export type TimePreset = (typeof TIME_PRESETS)[number];
@@ -49,6 +49,7 @@ export const ROUTE_FILTER_KEYS = [
   'from',
   'to',
   'sort',
+  'tab',
 ] as const;
 export type RouteFilterKey = (typeof ROUTE_FILTER_KEYS)[number];
 export type RouteFilter = Partial<Record<RouteFilterKey, string>>;
@@ -222,7 +223,16 @@ export function parseRoute(
     viewFilter: parseRouteFilter(params),
     filter: parseDashboardFilter(params, options),
   };
-  if (path && isValidView(path)) out.view = path;
+  if (path && isValidView(path)) {
+    // Funnel retired/absorbed route ids through the redirect map (#14, #2351)
+    // at parse time, so both the read side (hashchange → navigate) and the
+    // write side (canonical-hash rewrite) agree on the survivor view. An
+    // absorbed composite-tab id (`#/tools`, `#/tasks`, …) additionally injects
+    // its tab into the view filter so the composite lands on the right tab.
+    out.view = resolveViewRedirect(path);
+    const tab = REDIRECTED_VIEW_TAB[path];
+    if (tab && !out.viewFilter.tab) out.viewFilter.tab = tab;
+  }
   if (query) {
     const session = params.get('session');
     if (session) out.session = session;

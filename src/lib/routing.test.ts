@@ -43,6 +43,43 @@ describe('parseRoute', () => {
     });
   });
 
+  it('resolves a retired view id to its survivor (#14)', () => {
+    expect(parseRoute('#/stats')).toEqual({
+      view: 'activity',
+      viewFilter: {},
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+  });
+
+  it('resolves an absorbed composite-tab id to the composite with its tab (#2351)', () => {
+    expect(parseRoute('#/tools')).toEqual({
+      view: 'capabilities',
+      viewFilter: { tab: 'tools' },
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+    expect(parseRoute('#/tasks')).toEqual({
+      view: 'automation',
+      viewFilter: { tab: 'tasks' },
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+  });
+
+  it('keeps other evidence filters while injecting the redirect tab (#2351)', () => {
+    expect(parseRoute('#/tools?tool=Bash')).toEqual({
+      view: 'capabilities',
+      viewFilter: { tool: 'Bash', tab: 'tools' },
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+  });
+
+  it('does not override an explicit tab param on a composite hash (#2351)', () => {
+    expect(parseRoute('#/capabilities?tab=agents')).toEqual({
+      view: 'capabilities',
+      viewFilter: { tab: 'agents' },
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+  });
+
   it('returns empty for an empty hash', () => {
     expect(parseRoute('')).toEqual({
       viewFilter: {},

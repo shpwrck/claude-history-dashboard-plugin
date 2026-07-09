@@ -186,10 +186,11 @@ export interface NavItem {
 /**
  * The contract class a view declares. The `evidence` fallback applies only to
  * non-catalog views (retired/redirected ids) — every NAV_ITEMS entry carries
- * an explicit class, enforced by the type.
+ * an explicit class, enforced by the type. Absorbed composite-tab views
+ * ({@link ABSORBED_VIEW_ITEMS}) keep the class they declared as standalone views.
  */
 export function getViewContract(view: View): PageContract {
-  return NAV_ITEMS.find((i) => i.view === view)?.contract ?? 'evidence';
+  return getNavItem(view)?.contract ?? 'evidence';
 }
 
 export const NAV_ITEMS: readonly NavItem[] = [
@@ -344,15 +345,19 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'See how your conversations flow turn by turn — message lengths, back-and-forth rhythm, and tool cadence — so you can spot where exchanges get inefficient.',
   },
-  { view: 'tools', contract: 'evidence', label: 'Tool Usage', icon: ToolsIcon, domain: 'workflow-hygiene' },
+  // #2351: the workflow-hygiene group consolidated from 11 peer views to 4
+  // destinations. `capabilities` and `automation` are composite tab views; the
+  // absorbed ids (tools/agents/prompts/memories, tasks/teams/plans/workflows)
+  // live on as redirects + composite tabs (see {@link REDIRECTED_VIEWS} and
+  // {@link ABSORBED_VIEW_ITEMS}).
   {
-    view: 'agents',
+    view: 'capabilities',
     contract: 'evidence',
-    label: 'Agents',
-    icon: UsersIcon,
+    label: 'Capabilities',
+    icon: ToolsIcon,
     domain: 'workflow-hygiene',
     description:
-      'See how often subagents, skills, and MCP tools are invoked and how well they perform so you can decide which to lean on and which to retire.',
+      'See what your agent works with — tool usage and effectiveness, subagents and skills, prompt quality, and the memories Claude keeps per project.',
   },
   {
     view: 'automation',
@@ -361,18 +366,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: RobotIcon,
     domain: 'workflow-hygiene',
     description:
-      'Review your unattended SDK and CLI runs so you can confirm scheduled and headless agents are doing what you expect.',
+      'Review unattended and orchestrated work — SDK/CLI runs, task health, team coordination, task plans, and Workflow-tool executions.',
   },
-  {
-    view: 'workflows',
-    contract: 'evidence',
-    label: 'Workflows',
-    icon: ProjectDiagramIcon,
-    domain: 'workflow-hygiene',
-    description:
-      'Inspect completed Workflow-tool runs so you can see how multi-agent orchestrations fanned out and where they spent time or failed.',
-  },
-  { view: 'prompts', contract: 'evidence', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
   {
     view: 'shadow-calls',
     contract: 'evidence',
@@ -384,48 +379,6 @@ export const NAV_ITEMS: readonly NavItem[] = [
       'Review the shadow A/B experiments run against your tasks so you can see which alternative approaches beat your default and fed the recommendation engine.',
   },
   { view: 'patterns', contract: 'evidence', label: 'Session Patterns', icon: ThLargeIcon, domain: 'workflow-hygiene' },
-  // Not serverOnly: like Workflows, Memories accepts the user's own uploaded
-  // `memory/*.md` in the SPA/upload build (#538) and shows a data-aware
-  // "needs a server" placeholder only when empty (see Memories.tsx).
-  {
-    view: 'memories',
-    contract: 'raw',
-    label: 'Memories',
-    icon: BrainIcon,
-    domain: 'workflow-hygiene',
-    description:
-      'Browse the memory files Claude has saved per project so you can review, prune, or correct what the agent remembers about your work.',
-  },
-  {
-    view: 'tasks',
-    contract: 'evidence',
-    label: 'Task Health',
-    icon: TasksIcon,
-    domain: 'workflow-hygiene',
-    description:
-      'Track task completion rates and cold-session risk so you can catch work that stalls or gets dropped between sessions.',
-    requires: 'serverData',
-  },
-  {
-    view: 'teams',
-    contract: 'evidence',
-    label: 'Team Coordination',
-    icon: SitemapIcon,
-    domain: 'workflow-hygiene',
-    requires: 'serverData',
-    description:
-      'See how your multi-agent teams hand off work so you can spot stalled members and coordination bottlenecks.',
-  },
-  {
-    view: 'plans',
-    contract: 'evidence',
-    label: 'Task Plans',
-    icon: ClipboardListIcon,
-    domain: 'workflow-hygiene',
-    requires: 'serverData',
-    description:
-      'Inspect the plans your agents wrote and how their shapes evolved, so you can see how work was scoped and broken down across sessions.',
-  },
   {
     view: 'search',
     contract: 'evidence',
@@ -508,8 +461,86 @@ export const NAV_ITEMS: readonly NavItem[] = [
  * - activity-history -> Activity for historical trends and stale-project evidence.
  */
 export function getNavItem(view: View): NavItem | undefined {
-  return NAV_ITEMS.find((item) => item.view === view);
+  return (
+    NAV_ITEMS.find((item) => item.view === view) ??
+    ABSORBED_VIEW_ITEMS.find((item) => item.view === view)
+  );
 }
+
+/**
+ * Metadata for the workflow-hygiene views absorbed into the `capabilities` and
+ * `automation` composites (#2351). These are NOT sidebar destinations — they do
+ * not appear in NAV_ITEMS, VALID_VIEWS, or the Settings checklist — but each
+ * one still renders as a composite tab whose content keeps its own PageHeader,
+ * so its label/description/contract survive here for {@link getNavItem}
+ * consumers (the tab components read their explainer text through it). Routing
+ * to these ids resolves through {@link REDIRECTED_VIEWS} +
+ * {@link REDIRECTED_VIEW_TAB}.
+ */
+export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
+  { view: 'tools', contract: 'evidence', label: 'Tool Usage', icon: ToolsIcon, domain: 'workflow-hygiene' },
+  {
+    view: 'agents',
+    contract: 'evidence',
+    label: 'Agents',
+    icon: UsersIcon,
+    domain: 'workflow-hygiene',
+    description:
+      'See how often subagents, skills, and MCP tools are invoked and how well they perform so you can decide which to lean on and which to retire.',
+  },
+  { view: 'prompts', contract: 'evidence', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
+  // Not serverOnly: like Workflows, Memories accepts the user's own uploaded
+  // `memory/*.md` in the SPA/upload build (#538) and shows a data-aware
+  // "needs a server" placeholder only when empty (see Memories.tsx).
+  {
+    view: 'memories',
+    contract: 'raw',
+    label: 'Memories',
+    icon: BrainIcon,
+    domain: 'workflow-hygiene',
+    description:
+      'Browse the memory files Claude has saved per project so you can review, prune, or correct what the agent remembers about your work.',
+  },
+  {
+    view: 'tasks',
+    contract: 'evidence',
+    label: 'Task Health',
+    icon: TasksIcon,
+    domain: 'workflow-hygiene',
+    description:
+      'Track task completion rates and cold-session risk so you can catch work that stalls or gets dropped between sessions.',
+    requires: 'serverData',
+  },
+  {
+    view: 'teams',
+    contract: 'evidence',
+    label: 'Team Coordination',
+    icon: SitemapIcon,
+    domain: 'workflow-hygiene',
+    requires: 'serverData',
+    description:
+      'See how your multi-agent teams hand off work so you can spot stalled members and coordination bottlenecks.',
+  },
+  {
+    view: 'plans',
+    contract: 'evidence',
+    label: 'Task Plans',
+    icon: ClipboardListIcon,
+    domain: 'workflow-hygiene',
+    requires: 'serverData',
+    description:
+      'Inspect the plans your agents wrote and how their shapes evolved, so you can see how work was scoped and broken down across sessions.',
+  },
+  {
+    view: 'workflows',
+    contract: 'evidence',
+    label: 'Workflows',
+    icon: ProjectDiagramIcon,
+    domain: 'workflow-hygiene',
+    description:
+      'Inspect completed Workflow-tool runs so you can see how multi-agent orchestrations fanned out and where they spent time or failed.',
+  },
+] as const;
 
 /** Views needing a rich dataset (sample corpus / covered upload / server). */
 export const SERVER_DATA_VIEWS = new Set<View>(
@@ -549,18 +580,10 @@ export function isNavViewAvailable(
   return true;
 }
 
-/**
- * #610: the dense "Clean workflow" (workflow-hygiene) group holds 9 flat peers —
- * the worst junk drawer in the nav. Surface only the operational triad by
- * default; the rest sit behind an in-group "+ N more" expander (rendered in
- * PFLayout). Order here is the surfaced order. Composes with the SPA filter
- * (server-only members already drop out) and per-user hidden views.
- */
-export const WORKFLOW_HYGIENE_CORE: readonly View[] = [
-  'tools',
-  'agents',
-  'automation',
-];
+// #610's WORKFLOW_HYGIENE_CORE "+ N more" expander is retired by #2351: with
+// the group consolidated to four destinations (capabilities, automation,
+// shadow-calls, patterns) the junk drawer it worked around no longer exists,
+// so the whole group renders flat in PFLayout.
 
 /**
  * #612: the `discovery` ("Find") group exposed multiple co-equal tabs with no
@@ -588,6 +611,34 @@ export const REDIRECTED_VIEWS: Readonly<Partial<Record<View, View>>> = {
   // #1509: the standalone graph-first surface was folded into Timeline as an
   // evidence overlay. Old `#/forensics` links now land on the merged surface.
   forensics: 'timeline',
+  // #2351: the workflow-hygiene consolidation. Each absorbed view resolves to
+  // its composite; {@link REDIRECTED_VIEW_TAB} names the tab it lands on.
+  tools: 'capabilities',
+  agents: 'capabilities',
+  prompts: 'capabilities',
+  memories: 'capabilities',
+  tasks: 'automation',
+  teams: 'automation',
+  plans: 'automation',
+  workflows: 'automation',
+};
+
+/**
+ * The composite tab an absorbed view id lands on (#2351). Redirect resolution
+ * (the hash parser and App's `navigateTo`/`navigateWithFilter` chokepoints)
+ * injects this as the `tab` route-filter alongside the
+ * {@link REDIRECTED_VIEWS} view rewrite, so `#/tools` and
+ * `navigateWithFilter('tasks', …)` both land on the right composite tab.
+ */
+export const REDIRECTED_VIEW_TAB: Readonly<Partial<Record<View, string>>> = {
+  tools: 'tools',
+  agents: 'agents',
+  prompts: 'prompts',
+  memories: 'memories',
+  tasks: 'tasks',
+  teams: 'teams',
+  plans: 'plans',
+  workflows: 'workflows',
 };
 
 /**
