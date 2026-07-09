@@ -317,6 +317,40 @@ describe('reliability.cwd-drift-execution — historical demotion', () => {
   });
 });
 
+describe('reliability.cwd-drift-execution — evidence ordering', () => {
+  function driftN(id: string, n: number): ToolUsageData {
+    return session(id, Array.from({ length: n }, () => bash('git status')));
+  }
+
+  it('caps evidence at the top 5 sessions by count, earlier session winning ties', () => {
+    // Six drifting sessions: one hot session (3 ops) arrives mid-stream among
+    // five sessions tied at 2 ops. The streaming top-K insert must reproduce
+    // the old stable sort-desc-by-count: hot first, then the tied sessions in
+    // their original toolData order, with the sixth (tied) session cut.
+    const rec = detector.rule(
+      input([
+        driftN('sess-aaa', 2),
+        driftN('sess-bbb', 2),
+        driftN('sess-hot', 3),
+        driftN('sess-ccc', 2),
+        driftN('sess-ddd', 2),
+        driftN('sess-eee', 2),
+      ]),
+      0
+    );
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(13);
+    expect(rec!.evidence).toHaveLength(5);
+    expect(rec!.evidence!.map((line) => line.split(':')[0])).toEqual([
+      'sess-hot',
+      'sess-aaa',
+      'sess-bbb',
+      'sess-ccc',
+      'sess-ddd',
+    ]);
+  });
+});
+
 describe('reliability.cwd-drift-execution — contract', () => {
   const rec = detector.rule(
     input([driftSession('a'), driftSession('b'), driftSession('c')]),

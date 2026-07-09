@@ -2,7 +2,7 @@
 // recommendation input consumes, via a lighter `assembleRecommendationDataset()`
 // that reuses the SAME per-signal builders as the full `assembleDataset()` — so
 // the served recs body is BYTE-IDENTICAL while the rebuild skips the full
-// dataset's promptAnalysis parse, its embedded first-pass 88-detector run, and
+// dataset's promptAnalysis parse, its embedded first-pass detector-catalog run, and
 // the schema/window metadata that no recs detector reads.
 //
 // These tests prove:
@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { DETECTORS } from '../src/lib/detectors/index.ts';
 
 function assistantLine({ text, toolName, toolInput, ts, model }) {
   return JSON.stringify({
@@ -93,6 +94,49 @@ async function loadIngest(home) {
   process.env.HOME = home;
   process.env.CHD_DB_PATH = join(tmpdir(), `chd-2182-db-${randomUUID()}.db`);
   return import(`./ingest.mjs?fixture=${randomUUID()}`);
+}
+
+function countDetectorInvocationsDuring(fn) {
+  let calls = 0;
+  // Per-detector-id invocation tally. Asserting each id fires exactly once (not
+  // just that the aggregate equals DETECTORS.length) defeats a compensating bug
+  // where one detector is skipped and another runs twice — the sum still matches
+  // but the per-id map does not.
+  const perId = new Map(DETECTORS.map((d) => [d.id, 0]));
+  const originals = DETECTORS.map((detector) => ({
+    detector,
+    rule: detector.rule,
+    emitAll: detector.emitAll,
+  }));
+  const bump = (id) => {
+    calls += 1;
+    perId.set(id, (perId.get(id) ?? 0) + 1);
+  };
+  for (const detector of DETECTORS) {
+    if (detector.emitAll) {
+      const original = detector.emitAll;
+      detector.emitAll = (...args) => {
+        bump(detector.id);
+        return original(...args);
+      };
+    } else {
+      const original = detector.rule;
+      detector.rule = (...args) => {
+        bump(detector.id);
+        return original(...args);
+      };
+    }
+  }
+  try {
+    const result = fn();
+    return { calls, perId, result };
+  } finally {
+    for (const { detector, rule, emitAll } of originals) {
+      detector.rule = rule;
+      if (emitAll) detector.emitAll = emitAll;
+      else delete detector.emitAll;
+    }
+  }
 }
 
 // Strip the file-level repoMap `recommendations` cross-link — the ONLY field the
@@ -190,6 +234,53 @@ test('#2182 the recs-context build never triggers the full assembleDataset()', a
       0,
       'assembleDataset() does NOT bump the light counter'
     );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('#2183 the recs path runs the detector catalog exactly one uncached pass', async () => {
+  // NOTE on precision: `buildRecommendations` memoizes per input-object identity
+  // (a WeakMap keyed on the RecommendationInput), so this test proves exactly one
+  // *uncached* catalog pass — a hypothetical duplicate call with the SAME input
+  // object would be served from that cache and never touch a detector, so it is
+  // invisible to this counter. Defeating the memo would mean threading an explicit
+  // `now` (the cache-bypass path in buildRecommendations) through
+  // assembleRecommendationResult -> buildRecommendationResult, which is product
+  // surgery beyond this test's scope; the single-uncached-pass guarantee is the
+  // load-bearing one (no separate dataset-assembly pass + response pass) and is
+  // what we assert here.
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = buildFixtureHome();
+  try {
+    const ingest = await loadIngest(home);
+    ingest.ingest();
+
+    const { calls, perId, result } = countDetectorInvocationsDuring(() =>
+      ingest.assembleRecommendationResult()
+    );
+
+    assert.ok(result.domainCoverage.length > 0, 'result was fully assembled');
+    assert.equal(
+      calls,
+      DETECTORS.length,
+      'the recs path invokes each detector once, not once for dataset assembly and again for the response'
+    );
+    // Per-detector-id: every id fired exactly once. Stronger than the aggregate
+    // count above — it rejects a skip-one/double-another compensation that leaves
+    // the total unchanged.
+    for (const detector of DETECTORS) {
+      assert.equal(
+        perId.get(detector.id),
+        1,
+        `detector ${detector.id} was invoked exactly once`
+      );
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
     if (origHome === undefined) delete process.env.HOME;

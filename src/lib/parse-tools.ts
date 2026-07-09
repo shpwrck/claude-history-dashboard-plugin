@@ -869,6 +869,9 @@ export interface CorrectionFact {
   failed: string;
   /** The argument value on the subsequent successful call. */
   succeeded: string;
+  /** Timestamp of the successful (fix) call — lets time-window joins locate the
+   *  correction within a session (consumed by human-input-leverage). */
+  succeededTimestamp: string;
   sessionId: string;
 }
 
@@ -955,6 +958,7 @@ export function mineCorrections(
           toolName: failed.toolName,
           failed: failedArg,
           succeeded: okArg,
+          succeededTimestamp: fix.timestamp,
           sessionId: session.sessionId,
         });
         break; // one correction per failed call

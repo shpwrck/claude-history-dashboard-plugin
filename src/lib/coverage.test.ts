@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { ACTION_DOMAINS } from './digest';
@@ -79,6 +80,21 @@ function coverageFor(input: RecommendationInput, domain: string) {
   expect(coverage).toBeDefined();
   return coverage!;
 }
+
+describe('coverage module imports', () => {
+  it('never references ./digest in any import/export/dynamic-import form (#2390)', () => {
+    // coverage.ts is loaded through the lazy Recommendations chunk, which can be
+    // in flight at Vitest teardown. A static `import`/re-export edge, or even a
+    // dynamic `import('./digest')`, back to digest.ts re-introduces the
+    // EnvironmentTeardownError flake. A source regex over the specifier catches
+    // every form — `import … from './digest'`, `export { X } from './digest'`,
+    // `import('./digest')`, and the `'./digest.ts'` variant — which the previous
+    // ImportDeclaration-only AST walk silently missed. Quotes are required, so the
+    // backtick `digest.ts` mention in coverage.ts's own comments does not match.
+    const source = readFileSync(new URL('./coverage.ts', import.meta.url), 'utf8');
+    expect(source).not.toMatch(/['"]\.\/digest(?:\.ts)?['"]/);
+  });
+});
 
 describe('computeDomainCoverage', () => {
   it('returns one coverage row per digest action domain', () => {

@@ -684,6 +684,95 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     ] as unknown as RecommendationInput['tokenData'];
     return { input: baseInput({ toolData, tokenData }), now: 0 };
   },
+  'workflow.human-input-leverage': () => {
+    // Four typical 10k spans + one 300k excursion that ran > 3x its class median
+    // and carried a late human corrective turn (not accepted) → an auditable
+    // value-of-human-input finding with cited, per-signal provenance.
+    const start = '2026-06-12T10:00:00.000Z';
+    const end = '2026-06-12T11:00:00.000Z';
+    const mid = '2026-06-12T10:30:00.000Z';
+    const steering = (sessionId: string, over: Record<string, unknown> = {}) => ({
+      sessionId,
+      project: '/repo/app',
+      taskIndex: 0,
+      startTime: start,
+      endTime: end,
+      wallClockMs: 3_600_000,
+      costUsd: 1,
+      humanTurns: 1,
+      corrective: 0,
+      clarifyingAnswer: 0,
+      approving: 1,
+      other: 0,
+      interruptions: 0,
+      divergenceRate: 0,
+      ...over,
+    });
+    const tokens = (sessionId: string, total: number) => ({
+      sessionId,
+      entrypoint: 'cli',
+      totalInputTokens: total,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      model: 'claude-opus-4-8',
+      messageCount: 1,
+      entries: [
+        {
+          timestamp: mid,
+          inputTokens: total,
+          outputTokens: 0,
+          cacheCreationTokens: 0,
+          cacheCreation1hTokens: 0,
+          cacheReadTokens: 0,
+          webSearchRequests: 0,
+          webFetchRequests: 0,
+          model: 'claude-opus-4-8',
+        },
+      ],
+      compactionEvents: [],
+      hasUnknownModel: false,
+    });
+    const taskSteering = [
+      steering('hil-typ-0'),
+      steering('hil-typ-1'),
+      steering('hil-typ-2'),
+      steering('hil-typ-3'),
+      steering('hil-exc', { corrective: 2, humanTurns: 2, approving: 0 }),
+    ] as unknown as RecommendationInput['taskSteering'];
+    const taskSuccess = [
+      {
+        sessionId: 'hil-exc',
+        project: '/repo/app',
+        taskIndex: 0,
+        startTime: start,
+        endTime: end,
+        wallClockMs: 3_600_000,
+        verdict: 'correct',
+        agentClaim: 'completed',
+        confidence: 'high',
+        successScore: 0.5,
+        backedByMutation: true,
+        mutatingToolCount: 1,
+        toolCallCount: 4,
+        toolResultCount: 4,
+        toolErrorCount: 0,
+        toolErrorRate: 0,
+        errorPenalty: 0,
+      },
+    ] as unknown as RecommendationInput['taskSuccess'];
+    const tokenData = [
+      tokens('hil-typ-0', 10_000),
+      tokens('hil-typ-1', 10_000),
+      tokens('hil-typ-2', 10_000),
+      tokens('hil-typ-3', 10_000),
+      tokens('hil-exc', 300_000),
+    ] as unknown as RecommendationInput['tokenData'];
+    return {
+      input: baseInput({ taskSteering, taskSuccess, tokenData }),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
 };
 
 function runAllowlistedDetector(id: string): Recommendation {

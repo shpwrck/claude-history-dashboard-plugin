@@ -1,6 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
+  copyFileSync,
   existsSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -100,6 +103,7 @@ const scrubbedHookEnv = {
   CLAUDE_HUB_CACHE_DIR: '',
   CLAUDE_HUB_LOCK_STALE_SECONDS: '',
   CLAUDE_HUB_PUSH_RETRIES: '',
+  CLAUDE_HUB_SCRUB_COUNT_FILE: '',
   CLAUDE_CONFIG_DIR: '',
   CLAUDE_PROJECT_DIR: '',
   GIT_ALLOW_PROTOCOL: 'file:https:http:ssh',
@@ -156,6 +160,11 @@ function hubHasBranch(hub: string): boolean {
 
 function hubCommitCount(hub: string): number {
   return Number(git(['--git-dir', hub, 'rev-list', '--count', 'main'], dirname(hub)));
+}
+
+function scrubCount(path: string): number {
+  if (!existsSync(path)) return 0;
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).length;
 }
 
 function withTemp<T>(name: string, fn: (dir: string) => T): T {
@@ -344,6 +353,134 @@ describe('cloud-capture hook (#689)', () => {
 
       expect(second.status, second.stderr).toBe(0);
       expect(second.stderr).toContain('no transcript changes to publish');
+    });
+  });
+
+  it('reuses cached scrub output for unchanged transcripts across hook runs', () => {
+    withTemp('cloud-capture-scrub-cache-', (dir) => {
+      const source = join(dir, 'source');
+      initSourceRepo(source);
+      const hub = initBareHub(dir);
+      const countFile = join(dir, 'scrub-count.log');
+      const transcript = writeTranscript(source, 'cached secret sk-ant-api03-abcdefghi');
+      const subagent = join(dirname(transcript), 'session-1/subagents/agent-a.jsonl');
+      const env = {
+        CLAUDE_CODE_REMOTE: 'true',
+        CLAUDE_HUB_REMOTE: `file://${hub}`,
+        CLAUDE_HUB_BRANCH: 'main',
+        CLAUDE_PROJECT_DIR: source,
+        CLAUDE_HUB_SCRUB_COUNT_FILE: countFile,
+      };
+
+      const first = runHook({ cwd: source, transcript, env });
+      expect(first.status, first.stderr).toBe(0);
+      expect(scrubCount(countFile)).toBe(2);
+
+      // The mtime+size state is enough to reuse the prior scrubbed bytes. Make
+      // the sources unreadable so a second scrub would fail, while stat still
+      // succeeds and the existing hub copy keeps the run idempotent.
+      chmodSync(transcript, 0o000);
+      chmodSync(subagent, 0o000);
+
+      const second = runHook({ cwd: source, transcript, env });
+      expect(second.status, second.stderr).toBe(0);
+      expect(second.stderr).toContain('no transcript changes to publish');
+      expect(scrubCount(countFile)).toBe(2);
+      expect(hubFile(hub, 'projects/acme-app/session-1.jsonl')).toContain(
+        'sk-ant-REDACTED'
+      );
+    });
+  });
+
+  it('re-scrubs a transcript after it grows (cache miss on appended content)', () => {
+    withTemp('cloud-capture-scrub-append-', (dir) => {
+      const source = join(dir, 'source');
+      initSourceRepo(source);
+      const hub = initBareHub(dir);
+      const countFile = join(dir, 'scrub-count.log');
+      const transcript = writeTranscript(source, 'first turn sk-ant-api03-abcdefghi');
+      const env = {
+        CLAUDE_CODE_REMOTE: 'true',
+        CLAUDE_HUB_REMOTE: `file://${hub}`,
+        CLAUDE_HUB_BRANCH: 'main',
+        CLAUDE_PROJECT_DIR: source,
+        CLAUDE_HUB_SCRUB_COUNT_FILE: countFile,
+      };
+
+      const first = runHook({ cwd: source, transcript, env });
+      expect(first.status, first.stderr).toBe(0);
+      // Parent + subagent scrubbed once each.
+      expect(scrubCount(countFile)).toBe(2);
+
+      // Append a new turn to the PARENT only: its size (and mtime) change, so the
+      // content-derived cache key changes and it must be re-scrubbed. The
+      // untouched subagent stays a cache hit — a stale cache must never
+      // republish under-scrubbed bytes for a transcript that actually grew.
+      appendFileSync(transcript, 'second turn sk-ant-api03-zzzzzzzzz\n');
+
+      const second = runHook({ cwd: source, transcript, env });
+      expect(second.status, second.stderr).toBe(0);
+      // +1 for the re-scrubbed parent only (subagent reused).
+      expect(scrubCount(countFile)).toBe(3);
+      const parent = hubFile(hub, 'projects/acme-app/session-1.jsonl');
+      expect(parent).toContain('second turn');
+      expect(parent).toContain('sk-ant-REDACTED');
+      expect(parent).not.toContain('sk-ant-api03-zzzzzzzzz');
+    });
+  });
+
+  it('invalidates the scrub cache when the hook script content changes', () => {
+    withTemp('cloud-capture-scrub-script-', (dir) => {
+      const source = join(dir, 'source');
+      initSourceRepo(source);
+      const hub = initBareHub(dir);
+      const countFile = join(dir, 'scrub-count.log');
+      const transcript = writeTranscript(source, 'turn sk-ant-api03-abcdefghi');
+
+      // Run a COPY of the hook so its content can be mutated between runs without
+      // touching the shared repo file. The cache key must fold in the scrubber's
+      // own content: a hook whose redaction rules changed (here, stood in for by
+      // a new comment line) must invalidate every cached entry — the exact
+      // symlinked-hook staleness the review flagged.
+      const scriptCopy = join(dir, 'publish-claude.sh');
+      copyFileSync(hookScript, scriptCopy);
+      chmodSync(scriptCopy, 0o755);
+
+      const runCopy = () =>
+        spawnSync('bash', [scriptCopy], {
+          cwd: source,
+          input: JSON.stringify({
+            session_id: 'session-1',
+            transcript_path: transcript,
+            hook_event_name: 'Stop',
+          }),
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ...scrubbedHookEnv,
+            CLAUDE_CODE_REMOTE: 'true',
+            CLAUDE_HUB_REMOTE: `file://${hub}`,
+            CLAUDE_HUB_BRANCH: 'main',
+            CLAUDE_PROJECT_DIR: source,
+            CLAUDE_HUB_SCRUB_COUNT_FILE: countFile,
+          },
+        });
+
+      const first = runCopy();
+      expect(first.status, first.stderr).toBe(0);
+      expect(scrubCount(countFile)).toBe(2);
+
+      // Same sources, same script bytes: a second run reuses the cache (no scrub).
+      const cached = runCopy();
+      expect(cached.status, cached.stderr).toBe(0);
+      expect(scrubCount(countFile)).toBe(2);
+
+      // Change the scrubber's CONTENT. Both cache entries must now miss and
+      // re-scrub even though the sources are byte-identical.
+      appendFileSync(scriptCopy, '\n# new redaction rule added here\n');
+      const afterEdit = runCopy();
+      expect(afterEdit.status, afterEdit.stderr).toBe(0);
+      expect(scrubCount(countFile)).toBe(4);
     });
   });
 
@@ -1208,6 +1345,7 @@ describe('cloud-capture local/sync hardening (#1426)', () => {
       );
 
       // The local writer holds only a stale, smaller snapshot of that session.
+      const countFile = join(dir, 'scrub-count.log');
       const transcript = writeTranscript(home, 'shared first turn');
       const result = runHook({
         cwd: dir,
@@ -1218,10 +1356,12 @@ describe('cloud-capture local/sync hardening (#1426)', () => {
           CLAUDE_HUB_BRANCH: 'main',
           CLAUDE_CONFIG_DIR: join(home, '.claude'),
           CLAUDE_PROJECT_DIR: dir,
+          CLAUDE_HUB_SCRUB_COUNT_FILE: countFile,
         },
       });
 
       expect(result.status, result.stderr).toBe(0);
+      expect(scrubCount(countFile)).toBe(2);
       // The race fired (first push was rejected) ...
       expect(existsSync(join(hub, 'race-done'))).toBe(true);
       // ... and the retry did NOT resurrect the stale smaller snapshot over

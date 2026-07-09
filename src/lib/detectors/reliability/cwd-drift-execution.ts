@@ -67,6 +67,8 @@ const MAX_EVIDENCE = 5;
 // prefixes. Capture group 1 = the family name. Mirrors the guard's GATED_RE but
 // scoped to the repo-resolving families this detector flags.
 const GATED_RE = /^(?:sudo\s+|\w+=\S+\s+)*(git|gh)\b/;
+// Cheap whole-command prefilter before quote/heredoc-aware segmentation.
+const GATED_WORD_RE = /\b(?:git|gh)\b/;
 // `cd <dir>` as a whole segment — anchors later ops in the same compound command.
 const CD_RE = /^cd\s+(?:"[^"]+"|'[^']+'|\S+)\s*$/;
 // `git -C <dir>` right after the verb — an explicit per-op anchor.
@@ -143,6 +145,8 @@ function bashText(call: ToolCall): string | null {
 
 /** Count unanchored git/gh ops in one command string. */
 function countUnanchored(command: string): { count: number; firstExample: string | null } {
+  if (!GATED_WORD_RE.test(command)) return { count: 0, firstExample: null };
+
   let count = 0;
   let firstExample: string | null = null;
   let sawCd = false; // a `cd` earlier in this compound command anchors later ops
@@ -188,6 +192,17 @@ function collectSessionDrift(session: ToolUsageData): SessionDrift | null {
   return count > 0 ? { sessionId: session.sessionId, count, example } : null;
 }
 
+function insertTopSession(top: SessionDrift[], session: SessionDrift): void {
+  const index = top.findIndex((candidate) => session.count > candidate.count);
+  if (index === -1) {
+    if (top.length < MAX_EVIDENCE) top.push(session);
+    return;
+  }
+
+  top.splice(index, 0, session);
+  if (top.length > MAX_EVIDENCE) top.length = MAX_EVIDENCE;
+}
+
 export const detector: Detector = {
   id: 'reliability.cwd-drift-execution',
   category: 'reliability',
@@ -201,17 +216,20 @@ export const detector: Detector = {
     const toolData = input.toolData;
     if (!toolData || toolData.length === 0) return null;
 
-    const perSession: SessionDrift[] = [];
+    const evidenceSessions: SessionDrift[] = [];
+    let totalUnanchored = 0;
+    let sessionsAffected = 0;
+    let maxPerSession = 0;
     for (const session of toolData) {
       const s = collectSessionDrift(session);
-      if (s) perSession.push(s);
+      if (!s) continue;
+      totalUnanchored += s.count;
+      sessionsAffected += 1;
+      maxPerSession = Math.max(maxPerSession, s.count);
+      insertTopSession(evidenceSessions, s);
     }
 
-    const totalUnanchored = perSession.reduce((sum, s) => sum + s.count, 0);
     if (totalUnanchored < MIN_UNANCHORED) return null;
-
-    const sessionsAffected = perSession.length;
-    const maxPerSession = perSession.reduce((m, s) => Math.max(m, s.count), 0);
 
     // Hook-aware historical demotion (#2013, mirroring hook-errors' #1102
     // stale-input demotion). `totalUnanchored` is an all-time cumulative count.
@@ -230,16 +248,13 @@ export const detector: Detector = {
         ? 'warning'
         : 'info';
 
-    const evidence = [...perSession]
-      .sort((a, b) => b.count - a.count)
-      .slice(0, MAX_EVIDENCE)
-      .map(
-        (s) =>
-          `${s.sessionId.slice(0, 8)}: ${s.count} unanchored git/gh command(s) — e.g. \`${truncate(
-            s.example,
-            70
-          )}\``
-      );
+    const evidence = evidenceSessions.map(
+      (s) =>
+        `${s.sessionId.slice(0, 8)}: ${s.count} unanchored git/gh command(s) — e.g. \`${truncate(
+          s.example,
+          70
+        )}\``
+    );
 
     const observations: RecObservation[] = [
       {

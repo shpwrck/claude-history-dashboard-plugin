@@ -187,6 +187,16 @@ interface TurnSlice {
   toolNames: Set<string>;
 }
 
+interface TimedTokenEntry {
+  entry: TokenEntry;
+  ms: number;
+}
+
+interface TimedTokenEntries {
+  entries: TimedTokenEntry[];
+  sortedByTimestamp: boolean;
+}
+
 /**
  * Walk a session's timeline and emit one slice per user turn. The slice
  * window runs from this user message up to (but not including) the next
@@ -259,25 +269,99 @@ function sliceTimeline(timeline: SessionTimeline): TurnSlice[] {
  * timestamp. Tool calls give us the canonical `toolName` set; the timeline
  * counts are kept as a fallback for sessions without tool data.
  */
-function attachToolCalls(slices: TurnSlice[], tools: ToolUsageData | undefined): void {
+function attachToolCalls(
+  slices: TurnSlice[],
+  tools: ToolUsageData | undefined,
+  sortedByStart: boolean
+): void {
   if (!tools || slices.length === 0) return;
   for (const call of tools.calls) {
     const ms = tsMs(call.timestamp);
     if (!ms) continue;
-    const slice = findSliceForMs(slices, ms);
+    const slice = findSliceForMs(slices, ms, sortedByStart);
     if (!slice) continue;
     slice.toolCalls.push(call);
     slice.toolNames.add(call.toolName);
   }
 }
 
-function findSliceForMs(slices: TurnSlice[], ms: number): TurnSlice | null {
-  // Linear scan is fine — even very long sessions have a few hundred turns.
+function slicesSortedByStart(slices: TurnSlice[]): boolean {
+  for (let i = 1; i < slices.length; i++) {
+    if (slices[i].startMs < slices[i - 1].startMs) return false;
+  }
+  return true;
+}
+
+function findSliceForMs(
+  slices: TurnSlice[],
+  ms: number,
+  sortedByStart: boolean
+): TurnSlice | null {
+  if (sortedByStart) {
+    let lo = 0;
+    let hi = slices.length - 1;
+    let best = 0;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (ms >= slices[mid].startMs) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return slices[best] ?? null;
+  }
+
+  // Fallback preserves behavior for malformed timelines with non-monotonic
+  // timestamps: choose the last slice in timeline order whose start is <= ms.
   for (let i = slices.length - 1; i >= 0; i--) {
     const s = slices[i];
     if (ms >= s.startMs) return s;
   }
   return slices[0] ?? null;
+}
+
+function prepareTimedTokenEntries(entries: TokenEntry[]): TimedTokenEntries {
+  const timed: TimedTokenEntry[] = [];
+  let sortedByTimestamp = true;
+  let previous = Number.NEGATIVE_INFINITY;
+  for (const entry of entries) {
+    const ms = tsMs(entry.timestamp);
+    if (ms < previous) sortedByTimestamp = false;
+    previous = ms;
+    timed.push({ entry, ms });
+  }
+  return { entries: timed, sortedByTimestamp };
+}
+
+function collectTokenEntriesForWindow(
+  timed: TimedTokenEntry[],
+  startMs: number,
+  endMs: number,
+  cursor: number
+): { entries: TokenEntry[]; nextCursor: number } {
+  while (cursor < timed.length && timed[cursor].ms < startMs) cursor++;
+
+  const entries: TokenEntry[] = [];
+  let i = cursor;
+  for (; i < timed.length && timed[i].ms < endMs; i++) {
+    entries.push(timed[i].entry);
+  }
+
+  return { entries, nextCursor: i };
+}
+
+function collectTokenEntriesForWindowUnsorted(
+  timed: TimedTokenEntry[],
+  startMs: number,
+  endMs: number
+): TokenEntry[] {
+  const entries: TokenEntry[] = [];
+  for (const item of timed) {
+    if (item.ms >= startMs && item.ms < endMs) entries.push(item.entry);
+  }
+  return entries;
 }
 
 function pickModelForEntry(entries: TokenEntry[]): string {
@@ -313,25 +397,56 @@ export function computeModelRecommendations(
     const slices = sliceTimeline(timeline);
     if (slices.length === 0) continue;
 
-    attachToolCalls(slices, toolsBySession.get(timeline.sessionId));
+    // Computed once per session and shared by the tool-call binder and the
+    // token-window walk — attachToolCalls only pushes into slices, it never
+    // reorders them, so the sortedness verdict stays valid.
+    const slicesSorted = slicesSortedByStart(slices);
+    attachToolCalls(slices, toolsBySession.get(timeline.sessionId), slicesSorted);
 
     const tokens = tokenBySession.get(timeline.sessionId);
+    const timedTokens = tokens ? prepareTimedTokenEntries(tokens.entries) : null;
+    let tokenCursor = 0;
     const sessionAttribution = attrBySession.get(timeline.sessionId);
     const sessionHasAgents =
       !!sessionAttribution && Object.keys(sessionAttribution.agents).length > 0;
 
     const turnRecs: TurnRec[] = [];
+    let trivial = 0;
+    let moderate = 0;
+    let complex = 0;
+    let downgradable = 0;
+    let estimatedSavings = 0;
+    const pricingCache = new Map<string, ModelPricing>();
+    const pricingFor = (model: string): ModelPricing => {
+      const cached = pricingCache.get(model);
+      if (cached) return cached;
+      const pricing = resolveModelPricing(model).pricing;
+      pricingCache.set(model, pricing);
+      return pricing;
+    };
 
     for (let i = 0; i < slices.length; i++) {
       const slice = slices[i];
       const next = slices[i + 1];
       const windowEndMs = next ? next.startMs : Number.POSITIVE_INFINITY;
 
-      const turnEntries: TokenEntry[] = [];
-      if (tokens) {
-        for (const e of tokens.entries) {
-          const ms = tsMs(e.timestamp);
-          if (ms >= slice.startMs && ms < windowEndMs) turnEntries.push(e);
+      let turnEntries: TokenEntry[] = [];
+      if (timedTokens) {
+        if (timedTokens.sortedByTimestamp && slicesSorted) {
+          const collected = collectTokenEntriesForWindow(
+            timedTokens.entries,
+            slice.startMs,
+            windowEndMs,
+            tokenCursor
+          );
+          turnEntries = collected.entries;
+          tokenCursor = collected.nextCursor;
+        } else {
+          turnEntries = collectTokenEntriesForWindowUnsorted(
+            timedTokens.entries,
+            slice.startMs,
+            windowEndMs
+          );
         }
       }
 
@@ -366,27 +481,32 @@ export function computeModelRecommendations(
       // turn out of the trivial bucket.
       const turnHasAgents = sessionHasAgents && branchiness > 0;
       const bucket = classifyTurn(features, turnHasAgents);
+      if (bucket === 'trivial') trivial += 1;
+      else if (bucket === 'moderate') moderate += 1;
+      else complex += 1;
 
       const currentModel = pickModelForEntry(turnEntries) || tokens?.model || 'unknown';
       const recommendedModel = recommendedFor(bucket, currentModel);
+      if (currentModel !== recommendedModel) downgradable += 1;
 
       let actualCost = 0;
       let recommendedCost = 0;
       if (currentModel !== recommendedModel) {
-        const currentPricing = resolveModelPricing(currentModel).pricing;
-        const recPricing = resolveModelPricing(recommendedModel).pricing;
+        const currentPricing = pricingFor(currentModel);
+        const recPricing = pricingFor(recommendedModel);
         for (const e of turnEntries) {
           actualCost += entryCostAt(e, currentPricing);
           recommendedCost += entryCostAt(e, recPricing);
         }
       } else {
-        const pricing = resolveModelPricing(currentModel).pricing;
+        const pricing = pricingFor(currentModel);
         for (const e of turnEntries) {
           actualCost += entryCostAt(e, pricing);
         }
         recommendedCost = actualCost;
       }
       const savings = Math.max(0, actualCost - recommendedCost);
+      estimatedSavings += savings;
 
       turnRecs.push({
         sessionId: timeline.sessionId,
@@ -403,14 +523,6 @@ export function computeModelRecommendations(
         savingsUsd: savings,
       });
     }
-
-    const trivial = turnRecs.filter((t) => t.bucket === 'trivial').length;
-    const moderate = turnRecs.filter((t) => t.bucket === 'moderate').length;
-    const complex = turnRecs.filter((t) => t.bucket === 'complex').length;
-    const downgradable = turnRecs.filter(
-      (t) => t.currentModel !== t.recommendedModel
-    ).length;
-    const estimatedSavings = turnRecs.reduce((s, t) => s + t.savingsUsd, 0);
 
     rows.push({
       session: {

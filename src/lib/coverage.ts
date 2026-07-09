@@ -1,11 +1,12 @@
 import type { ActionDomain } from '../types';
-import { ACTION_DOMAINS } from './digest';
+import { ACTION_DOMAIN_NAMES } from './domain-registry';
 import type { RecommendationInput } from './detectors/types';
 import { aggregateStopHooks } from './parse-runtime-events';
 // Coverage types live in a dependency-free leaf (#1582) so `digest.ts` can import
-// them without a (type-only) cycle back through this module, which imports a value
-// from digest. Re-exported here so every existing `from './coverage'` importer is
-// unaffected.
+// them without a (type-only) cycle back through this module. `coverage.ts` reads
+// the action-domain list from the registry directly so late coverage imports do
+// not pull `digest.ts` in during Vitest teardown (#2390). Re-exported here so
+// every existing `from './coverage'` importer is unaffected.
 import type { DomainCoverage } from './coverage-types';
 export type { DomainCoverage, DomainCoverageStatus } from './coverage-types';
 
@@ -81,7 +82,7 @@ function speedStaleNote(input: RecommendationInput): string | undefined {
 export function computeDomainCoverage(
   input: RecommendationInput
 ): DomainCoverage[] {
-  return ACTION_DOMAINS.map((domain) => {
+  return ACTION_DOMAIN_NAMES.map((domain) => {
     const coreDeps = CORE_DEPS_BY_DOMAIN[domain] ?? [];
     const optionalDeps = OPTIONAL_DEPS_BY_DOMAIN[domain] ?? [];
     const presentCoreDeps = coreDeps.filter((dep) => hasInputValue(input, dep));

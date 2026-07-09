@@ -4,46 +4,50 @@
  * averted a *large* agent excursion. This detector mines that value-of-human-input
  * signal (#2200, keystone of epic #1934).
  *
- * The join (the "Where" two reused signals):
- *  - `workflow.autonomy-over-steered` contributes the *late human correction*
- *    signal — a task span whose human steering was corrective (the human had to
- *    point back at the agent's last action and redirect it; `TaskSteering.corrective`,
- *    the #1751 structural-anchor count), as opposed to mere approval.
- *  - `workflow.runaway-workflow-cost` contributes the *outlier-spend* methodology
- *    — a median baseline, an `OUTLIER_FACTOR` multiple, and an absolute floor so a
- *    set of uniformly-small spans never trips it. Because we attribute the excess
- *    to a specific task class, the baseline is that class's OWN median span (the
- *    global median is only a fallback for classes too thin to have their own),
- *    so a project whose spans are uniformly large is not flagged for its normal
- *    size (a mixed-workload confound).
+ * The join now includes:
+ *  - `workflow.autonomy-over-steered` corrective steering (`TaskSteering.corrective`)
+ *    — the human redirected the assistant after seeing an earlier turn.
+ *  - `workflow.autonomy-over-steered` deliberation steering
+ *    (`TaskSteering.clarifyingAnswer`) — token-burning human clarification points
+ *    where intent was still resolving mid-task.
+ *  - `workflow.correction-mining`'s failed→fixed file-path correction signal —
+ *    repeated wrong-path fixups are one place where a human could disambiguate
+ *    up front.
+ *  - `workflow.mid-turn-interrupt-steering`'s in-flight interruption signal — the
+ *    literal "[Request interrupted by user]" cue when the user had to cut the
+ *    assistant mid-response.
  *
- * An **excursion** is the intersection: a span that ran far (token-spend outlier
- * vs its own class baseline) AND ended in a late human correction. Per *task
- * class* (the span's project) we sum the avoided agent tokens — the excursion's
- * excess over a typical span of that class — and surface ONE auditable
- * recommendation: "task class X is cheaper if you ask the human upfront; ~N
- * tokens saved".
+ * An **excursion** is the intersection: a span that ran far (token-spend outlier)
+ * against its task-class baseline AND carried at least one human-input signal.
+ * Per *task class* (span project) we sum the avoided agent tokens — the
+ * excursion's excess over a typical span of that class — and surface ONE auditable
+ * recommendation: "task class X is cheaper if you ask the human upfront; ~N tokens
+ * saved."
  *
  * Epistemics (ADR 0017 + the auditable-claims contract):
- *  - The MEASUREMENT (these excursions ran far and were corrected) is auditable:
- *    every figure cites `taskSteering` / `tokenData` / `taskSuccess`.
+ *  - The MEASUREMENT (these excursions ran far and carried a steering signal) is
+ *    auditable: every figure cites `taskSteering` / `tokenData` / `taskSuccess`
+ *    and each human-input contribution has its own `provenance` observation.
  *  - The SAVINGS is a CAUSAL counterfactual ("asking upfront WOULD have saved
  *    those tokens"), uncalibrated this release. So `claimClass: 'causal'`,
- *    `proofTier: 'auditable'` (T0) and NO `estSavingsUsd` — we do not assert a
- *    cost win above the accounting tier without experimental backing.
+ *    `proofTier: 'auditable'` (T0) and NO `estSavingsUsd`.
  *  - The interruption-cost threshold (how much asking the human upfront itself
- *    costs) is surfaced as an EXPLICIT named assumption, NOT a silent gate — the
- *    dual of the over-steering knob (#1288). Calibrate once real firings reveal
- *    the distribution.
+ *    costs) is surfaced as an EXPLICIT named assumption, NOT a silent gate.
  *
- * dataDeps: `taskSteering` (correction signal), `taskSuccess` (accept guard),
- * `tokenData` (span token sizing), `liveConfig` (CLAUDE.md suppression). Absent /
- * below the baseline ⇒ silent.
+ * dataDeps: `taskSteering` (correction/deliberation), `taskSuccess` (accept guard),
+ * `tokenData` (span token sizing), `toolData` (correction-mining), `timelines`
+ * (mid-turn interrupts), `liveConfig` (CLAUDE.md suppression). Absent / below
+ * baseline ⇒ silent.
  */
-import type { TaskSteering } from '../../parse-steering';
 import type { SessionTokenData, TokenEntry } from '../../../types';
+import type { RecommendationInput } from '../types';
 import type { AppliedMarkers, Detector, RecObservation } from '../types';
-import { claudeMdMarksApplied, short } from '../shared';
+import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
+import type { TaskSteering } from '../../parse-steering';
+import type { ToolUsageData } from '../../parse-tools';
+import { mineCorrections } from '../../parse-tools';
+import { short } from '../shared';
+import { claudeMdMarksApplied } from '../shared';
 
 // Need at least this many token-sized spans before a median is a meaningful
 // baseline (mirrors runaway-workflow-cost's MIN_RUNS).
@@ -78,21 +82,37 @@ interface Excursion {
   sessionId: string;
   taskIndex: number;
   endMs: number;
-  endDate: string;
   spanTokens: number;
   avoidedTokens: number;
-  corrective: number;
-  clarifying: number;
   ratioToMedian: number;
   /** The baseline this span was judged against (its own class median where the
    *  class has enough spans, else the global median). */
   baseline: number;
+  signals: HumanSignal[];
 }
+
+interface SpanWindow {
+  span: TaskSteering;
+  spanTokens: number;
+  startMs: number;
+  endMs: number;
+  key: string;
+}
+
+type HumanSignal =
+  | 'corrective'
+  | 'deliberation'
+  | 'correction-mining'
+  | 'mid-turn-interrupt';
 
 interface ClassRollup {
   taskClass: string;
   excursions: Excursion[];
   avoidedTokens: number;
+}
+
+interface MidTurnInterrupt {
+  interruptMs: number;
 }
 
 function keyOf(row: { sessionId: string; taskIndex: number }): string {
@@ -114,7 +134,17 @@ function entryTokens(entry: TokenEntry): number {
   );
 }
 
-/** Sorted (by ms) token entries per session, for the span-window join. */
+function humanSignalLabel(signal: HumanSignal): string {
+  if (signal === 'correction-mining') return 'correction-mining';
+  if (signal === 'mid-turn-interrupt') return 'mid-turn interruption';
+  return signal;
+}
+
+function formatSignalPhrase(signals: HumanSignal[]): string {
+  return signals.map((s) => humanSignalLabel(s)).join(', ');
+}
+
+/** Sort tokens per session so span-window joins are deterministic and bounded. */
 function tokenEntriesBySession(
   tokenData: SessionTokenData[]
 ): Map<string, { ms: number; tokens: number }[]> {
@@ -165,38 +195,144 @@ function fmtTokens(n: number): string {
   return Math.round(n).toLocaleString();
 }
 
+// Correction-mining join: reuse the upstream `mineCorrections` miner (single
+// source of truth — no local stem/window/generic-stem mirror to drift) and keep
+// each fact's fix timestamp so it can be located inside a span's time window.
+function correctionMiningBySpan(
+  spans: SpanWindow[],
+  toolData: ToolUsageData[]
+): Set<string> {
+  const hits = new Set<string>();
+  if (spans.length === 0 || toolData.length === 0) return hits;
+
+  const fixMsBySession = new Map<string, number[]>();
+  for (const fact of mineCorrections(toolData)) {
+    const fixedMs = parseMs(fact.succeededTimestamp);
+    if (fixedMs == null) continue;
+    const arr = fixMsBySession.get(fact.sessionId);
+    if (arr) arr.push(fixedMs);
+    else fixMsBySession.set(fact.sessionId, [fixedMs]);
+  }
+  if (fixMsBySession.size === 0) return hits;
+
+  for (const span of spans) {
+    const fixes = fixMsBySession.get(span.span.sessionId);
+    if (!fixes || fixes.length === 0) continue;
+    if (fixes.some((fixedMs) => fixedMs >= span.startMs && fixedMs <= span.endMs)) {
+      hits.add(span.key);
+    }
+  }
+  return hits;
+}
+
+function collectSessionInterrupts(entries: TimelineEntry[]): MidTurnInterrupt[] {
+  const interrupts: MidTurnInterrupt[] = [];
+  if (entries.length === 0) return interrupts;
+
+  let inFlight = false;
+  for (const e of entries) {
+    const ms = parseMs(e.timestamp);
+    if (e.kind === 'user' && !e.interrupted) {
+      inFlight = false;
+      continue;
+    }
+    if (e.kind === 'assistant' || e.kind === 'tool_use' || e.kind === 'thinking') {
+      inFlight = true;
+      continue;
+    }
+    if (e.kind === 'user' && e.interrupted && ms != null) {
+      // The `interrupted` flag is set from the literal "[Request interrupted by
+      // user]" sentinel by the parser; detectors read only the flag (as the
+      // upstream mid-turn-interrupt-steering detector does), because the bulk
+      // timelines the recs engine consumes strip `summary` (parse-timeline
+      // slimSessionTimeline). Re-checking the sentinel text here would make the
+      // signal never fire in production.
+      if (inFlight) interrupts.push({ interruptMs: ms });
+      inFlight = false;
+    }
+  }
+
+  return interrupts;
+}
+
+/** Session-level join of mid-turn interrupts into task-steering spans. */
+function midTurnBySpan(
+  spans: SpanWindow[],
+  timelines: SessionTimeline[] | null
+): Set<string> {
+  const hits = new Set<string>();
+  if (spans.length === 0 || !timelines || timelines.length === 0) return hits;
+
+  const spansBySession = new Map<string, SpanWindow[]>();
+  for (const span of spans) {
+    const arr = spansBySession.get(span.span.sessionId);
+    if (arr) arr.push(span);
+    else spansBySession.set(span.span.sessionId, [span]);
+  }
+
+  for (const timeline of timelines) {
+    const sessionSpans = spansBySession.get(timeline.sessionId);
+    if (!sessionSpans || sessionSpans.length === 0) continue;
+
+    const interrupts = collectSessionInterrupts(timeline.entries);
+    for (const interrupt of interrupts) {
+      for (const span of sessionSpans) {
+        if (interrupt.interruptMs >= span.startMs && interrupt.interruptMs <= span.endMs) {
+          hits.add(span.key);
+          break;
+        }
+      }
+    }
+  }
+  return hits;
+}
+
+function collectSpanSignals(
+  span: SpanWindow,
+  correctionMiningSignals: Set<string>,
+  midTurnSignals: Set<string>
+): HumanSignal[] {
+  const signals: HumanSignal[] = [];
+  if (span.span.corrective > 0) signals.push('corrective');
+  if (span.span.clarifyingAnswer > 0) signals.push('deliberation');
+  if (correctionMiningSignals.has(span.key)) signals.push('correction-mining');
+  if (midTurnSignals.has(span.key)) signals.push('mid-turn-interrupt');
+  return signals;
+}
+
 export const detector: Detector = {
   id: 'workflow.human-input-leverage',
   category: 'workflow',
-  dataDeps: ['taskSteering', 'taskSuccess', 'tokenData', 'liveConfig'],
+  dataDeps: ['taskSteering', 'taskSuccess', 'tokenData', 'toolData', 'timelines', 'liveConfig'],
   appliedMarkers: MARKERS_HUMAN_INPUT,
-  rule(input, now) {
-    // Adoption suppression: if the user already documented an ask-upfront policy
-    // in CLAUDE.md, this finding is handled — stay silent.
+  rule(input: RecommendationInput, now: number) {
     if (claudeMdMarksApplied(input.liveConfig, MARKERS_HUMAN_INPUT)) return null;
 
     const steeringRows = input.taskSteering ?? [];
     if (steeringRows.length === 0) return null;
+
     const successByTask = new Map(
       (input.taskSuccess ?? []).map((row) => [keyOf(row), row])
     );
     const bySession = tokenEntriesBySession(input.tokenData ?? []);
 
-    // Size every span; the token-sized spans form the outlier baseline.
-    const sized = steeringRows
-      .map((span) => ({ span, spanTokens: spanTokensFor(span, bySession) }))
-      .filter((s) => s.spanTokens > 0);
+    // Size every span with usable timing and token windows.
+    const sized: SpanWindow[] = steeringRows
+      .map((span) => {
+        const spanTokens = spanTokensFor(span, bySession);
+        const startMs = parseMs(span.startTime);
+        const endMs = parseMs(span.endTime);
+        if (spanTokens <= 0 || startMs == null || endMs == null) return null;
+        return { span, spanTokens, startMs, endMs, key: keyOf(span) };
+      })
+      .filter((s): s is SpanWindow => s != null);
     if (sized.length < MIN_BASELINE_SPANS) return null;
 
     const globalMed = median(sized.map((s) => s.spanTokens));
     if (globalMed <= 0) return null;
 
     // Per-class baselines: an excursion's avoidable cost is attributed to its
-    // task class, so it must be judged against *that class's own* typical span,
-    // not a global median. Otherwise a project whose spans are uniformly large
-    // trips a global threshold and reports its normal size as avoidable (a
-    // mixed-workload confound). Use the class median when the class has enough
-    // spans to be meaningful; fall back to the global median for thin classes.
+    // task class, so it must be judged against *that class's own* typical span.
     const sizedByClass = new Map<string, number[]>();
     for (const { span, spanTokens } of sized) {
       const cls = span.project || 'unknown';
@@ -213,37 +349,37 @@ export const detector: Detector = {
       return globalMed;
     };
 
-    // Excursion = ran far past its own class baseline (token outlier) AND ended
-    // in a late human correction.
+    const correctionMiningSignals = correctionMiningBySpan(sized, input.toolData ?? []);
+    const midTurnSignals = midTurnBySpan(sized, input.timelines ?? null);
+
+    // Excursion = run far beyond baseline and carried at least one steering signal.
     const excursions: Excursion[] = [];
-    for (const { span, spanTokens } of sized) {
-      if (span.corrective <= 0) continue; // no late corrective turn ⇒ not this signal
-      const cls = span.project || 'unknown';
+    for (const span of sized) {
+      const signals = collectSpanSignals(span, correctionMiningSignals, midTurnSignals);
+      if (signals.length === 0) continue;
+
+      const cls = span.span.project || 'unknown';
       const baseline = baselineFor(cls);
-      if (spanTokens <= OUTLIER_FACTOR * baseline) continue;
-      if (spanTokens <= ABS_FLOOR_TOKENS) continue;
-      // Accept guard: if the human explicitly ACCEPTED the result, the steering
-      // wasn't a costly misdirection — an upfront input would not have helped.
-      const success = successByTask.get(keyOf(span));
+      if (span.spanTokens <= OUTLIER_FACTOR * baseline) continue;
+      if (span.spanTokens <= ABS_FLOOR_TOKENS) continue;
+
+      const success = successByTask.get(span.key);
       if (success?.verdict === 'accept') continue;
-      const endMs = parseMs(span.endTime) ?? 0;
+
       excursions.push({
         taskClass: cls,
-        sessionId: span.sessionId,
-        taskIndex: span.taskIndex,
-        endMs,
-        endDate: endMs ? isoDate(endMs) : '',
-        spanTokens,
-        avoidedTokens: Math.max(0, spanTokens - baseline),
-        corrective: span.corrective,
-        clarifying: span.clarifyingAnswer,
-        ratioToMedian: spanTokens / baseline,
+        sessionId: span.span.sessionId,
+        taskIndex: span.span.taskIndex,
+        endMs: span.endMs,
+        spanTokens: span.spanTokens,
+        avoidedTokens: Math.max(0, span.spanTokens - baseline),
+        ratioToMedian: span.spanTokens / baseline,
         baseline,
+        signals,
       });
     }
     if (excursions.length === 0) return null;
 
-    // Roll up per task class, ordered by avoided tokens.
     const byClass = new Map<string, ClassRollup>();
     for (const exc of excursions) {
       const roll = byClass.get(exc.taskClass) ?? {
@@ -261,8 +397,6 @@ export const detector: Detector = {
     const totalAvoided = excursions.reduce((s, e) => s + e.avoidedTokens, 0);
     const top = classes[0];
 
-    // Staleness: demote present-tense wording when the most recent excursion is
-    // older than the freshness window.
     const latestMs = Math.max(...excursions.map((e) => e.endMs));
     const asOf = latestMs ? isoDate(latestMs) : undefined;
     const stale = asOf != null && now - latestMs > FRESHNESS_DAYS * DAY_MS;
@@ -273,6 +407,13 @@ export const detector: Detector = {
         ? `task class "${top.taskClass}"`
         : `${classes.length} task classes (top: "${top.taskClass}")`;
 
+    const excursionsBySignal = {
+      corrective: excursions.filter((e) => e.signals.includes('corrective')).length,
+      deliberation: excursions.filter((e) => e.signals.includes('deliberation')).length,
+      correctionMining: excursions.filter((e) => e.signals.includes('correction-mining')).length,
+      midTurnInterrupt: excursions.filter((e) => e.signals.includes('mid-turn-interrupt')).length,
+    };
+
     const evidence = classes.slice(0, 5).map((roll) => {
       const lead = roll.excursions
         .slice()
@@ -282,7 +423,7 @@ export const detector: Detector = {
         `~${fmtTokens(roll.avoidedTokens)} tokens avoidable upfront ` +
         `(e.g. ${short(lead.sessionId)} task ${lead.taskIndex}: ` +
         `${fmtTokens(lead.spanTokens)} tokens, ${lead.ratioToMedian.toFixed(1)}x its ` +
-        `class baseline of ${fmtTokens(lead.baseline)}, ${lead.corrective} corrective turn(s))`
+        `class baseline of ${fmtTokens(lead.baseline)}, signals: ${formatSignalPhrase(lead.signals)})`
       );
     });
 
@@ -291,11 +432,15 @@ export const detector: Detector = {
         claim:
           `${excursions.length} task span(s) across ${classes.length} task class(es) ` +
           `each ran past ${OUTLIER_FACTOR}x its OWN task class's median span spend ` +
-          `(class baseline, falling back to the global median of ` +
-          `${fmtTokens(globalMed)} tokens for thin classes) AND ended in a late ` +
-          `human correction`,
-        source: 'parse-steering + tokenData',
-        field: 'TaskSteering.corrective + tokenData entries within [startTime,endTime]',
+          `(class baseline, falling back to the global median of ${fmtTokens(globalMed)} ` +
+          `tokens for thin classes) and carried at least one of the four join signals: ` +
+          `a human corrective turn, a human clarification turn, a mid-turn user interrupt, ` +
+          `or the agent's own failed→fixed correction-mining pair (the last is an agent ` +
+          `retry, not a human signal, but a place a human could have disambiguated up front)`,
+        source: 'parse-steering + parse-tools + parse-timeline + tokenData',
+        field:
+          'TaskSteering.corrective / TaskSteering.clarifyingAnswer / toolData[].calls[].isError / ' +
+          'TimelineEntry.interrupted, joined to tokenData entries within [startTime,endTime]',
         value: excursions.length,
       },
       {
@@ -303,19 +448,61 @@ export const detector: Detector = {
           `the outlier portion (span tokens over that span's class baseline) sums to ` +
           `~${fmtTokens(totalAvoided)} agent tokens, led by "${top.taskClass}" ` +
           `(~${fmtTokens(top.avoidedTokens)} tokens)`,
-        source: 'tokenData',
+        source: 'parse-sessions',
         field: 'TokenEntry.inputTokens+outputTokens+cacheCreationTokens+cacheReadTokens',
         value: Math.round(totalAvoided),
       },
       {
         claim:
-          `each excursion's span carried a corrective human turn, and none was an ` +
-          `explicit "accept" verdict (accepted spans are excluded)`,
+          `each candidate excursion was not explicitly accepted by the human, ` +
+          `so "accept"-flagged steering was excluded`,
         source: 'parse-task-success',
         field: 'TaskSuccessProxy.verdict',
         value: excursions.length,
       },
     ];
+
+    if (excursionsBySignal.corrective > 0) {
+      observations.push({
+        claim:
+          `${excursionsBySignal.corrective} excursion(s) had late corrective turns ` +
+          `(${excursionsBySignal.corrective}/${excursions.length} total)`,
+        source: 'parse-steering',
+        field: 'TaskSteering.corrective',
+        value: excursionsBySignal.corrective,
+      });
+    }
+    if (excursionsBySignal.deliberation > 0) {
+      observations.push({
+        claim:
+          `${excursionsBySignal.deliberation} excursion(s) had deliberate token-burning ` +
+          `clarification turns (` +
+          'TaskSteering.clarifyingAnswer)',
+        source: 'parse-steering',
+        field: 'TaskSteering.clarifyingAnswer',
+        value: excursionsBySignal.deliberation,
+      });
+    }
+    if (excursionsBySignal.correctionMining > 0) {
+      observations.push({
+        claim:
+          `${excursionsBySignal.correctionMining} excursion(s) aligned with ` +
+          'failed→fixed file-path correction signals',
+        source: 'parse-tools',
+        field: 'toolData[].calls[].isError',
+        value: excursionsBySignal.correctionMining,
+      });
+    }
+    if (excursionsBySignal.midTurnInterrupt > 0) {
+      observations.push({
+        claim:
+          `${excursionsBySignal.midTurnInterrupt} excursion(s) aligned with ` +
+          'mid-turn user interrupts',
+        source: 'parse-timeline',
+        field: 'TimelineEntry.interrupted',
+        value: excursionsBySignal.midTurnInterrupt,
+      });
+    }
 
     return {
       id: 'workflow.human-input-leverage',
@@ -324,9 +511,12 @@ export const detector: Detector = {
       title: 'Ask the human upfront on costly, correction-prone task classes',
       detail:
         `${asOfPrefix}${excursions.length} agent excursion(s) in ${classPhrase} ran more than ` +
-        `${OUTLIER_FACTOR}x their own task class's median span spend AND ended in a late human ` +
-        `correction. Roughly ${fmtTokens(totalAvoided)} agent tokens sit in the outlier ` +
-        `excess that a cheap upfront human input could have averted. This is an ` +
+        `${OUTLIER_FACTOR}x their own task class's median span spend and carried at least one ` +
+        `human-input-leverage signal — a human corrective turn, a human clarification turn, or a ` +
+        `mid-turn user interrupt, or else the agent's OWN failed→fixed correction-mining pair (an ` +
+        `agent retry, not a human signal, but a spot an upfront human answer could have averted). ` +
+        `Roughly ${fmtTokens(totalAvoided)} agent tokens sit in the ` +
+        `outlier excess that a cheap upfront human input could have averted. This is an ` +
         `ESTIMATE: it assumes asking the human upfront (~${fmtTokens(ASSUMED_INTERRUPTION_TOKENS)} ` +
         `tokens for one interruption) costs less than the excursion it averts — an ` +
         `uncalibrated interruption-cost threshold, surfaced here rather than silently ` +
@@ -345,12 +535,12 @@ export const detector: Detector = {
       provenance: {
         observations,
         inference:
-          `An excursion that ran far AND was corrected late is exactly where a small ` +
-          `upfront human input has leverage: the correction the human made at the end ` +
-          `could have steered the task before the excess tokens were spent. The token ` +
-          `figure is the measured outlier excess (auditable); that asking upfront WOULD ` +
-          `have saved it is a causal hypothesis, uncalibrated until the interruption-cost ` +
-          `threshold is measured against real firings.`,
+          `An excursion that ran far and carried downstream human steering is a likely ` +
+          `point where a small upfront input has leverage: what was corrected, clarified, ` +
+          `repaired, or interrupted after-the-fact could have been asked up front.` +
+          ` The token figure is the measured outlier excess (auditable); that asking ` +
+          `upfront WOULD have saved it is a causal hypothesis, uncalibrated until the ` +
+          `interruption-cost threshold is measured against real firings.`,
         ...(asOf ? { asOf } : {}),
         ...(asOf ? { stale } : {}),
       },

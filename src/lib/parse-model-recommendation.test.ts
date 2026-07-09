@@ -468,6 +468,123 @@ describe('computeModelRecommendations — savings math', () => {
   })
 })
 
+// ── Attribution seams: sorted fast path vs unsorted fallback ────────
+//
+// The optimized attribution walks a cursor over timestamp-sorted token
+// entries / turn starts and binary-searches slices for tool calls; any
+// non-monotonic or invalid timestamp trips a fallback that must reproduce
+// the original O(turns × entries) filter exactly. These tests pin both
+// sides of that seam to the pre-optimization behavior.
+
+describe('computeModelRecommendations — attribution fast-path/fallback seams', () => {
+  function twoTurnFixture() {
+    const u1 = nextTs()
+    const mid = nextTs()
+    const u2 = nextTs()
+    const after = nextTs()
+    const tl = timeline('s-seam', [
+      userEntry('first', u1),
+      userEntry('second', u2),
+    ])
+    return { u1, mid, u2, after, tl }
+  }
+
+  function outputsFor(tl: SessionTimeline, entries: TokenEntry[]): number[] {
+    const tok = tokenData(tl.sessionId, 'claude-opus-4-8', entries)
+    return computeModelRecommendations([tok], [], [tl], [])[0].turns.map(
+      (t) => t.features.outputTokens
+    )
+  }
+
+  it('attributes a mid-stream out-of-order token entry identically to sorted input', () => {
+    const { u1, mid, u2, after, tl } = twoTurnFixture()
+    const A = tokenEntry({ timestamp: u1, outputTokens: 10 })
+    const B = tokenEntry({ timestamp: mid, outputTokens: 20 })
+    const C = tokenEntry({ timestamp: u2, outputTokens: 30 })
+    const D = tokenEntry({ timestamp: after, outputTokens: 40 })
+
+    // Sorted input takes the cursor fast path.
+    const sorted = outputsFor(tl, [A, B, C, D])
+    expect(sorted).toEqual([30, 70])
+    // B before A regresses the timestamp mid-stream → unsorted fallback.
+    expect(outputsFor(tl, [B, A, C, D])).toEqual(sorted)
+  })
+
+  it('attributes an out-of-order tail token entry identically to sorted input', () => {
+    const { u1, mid, u2, after, tl } = twoTurnFixture()
+    const A = tokenEntry({ timestamp: u1, outputTokens: 10 })
+    const B = tokenEntry({ timestamp: mid, outputTokens: 20 })
+    const C = tokenEntry({ timestamp: u2, outputTokens: 30 })
+    const D = tokenEntry({ timestamp: after, outputTokens: 40 })
+
+    // B moved to the tail regresses the timestamp at the very end → fallback.
+    expect(outputsFor(tl, [A, C, D, B])).toEqual([30, 70])
+  })
+
+  it('assigns entries stamped exactly at the next turn start to the NEXT turn on both paths', () => {
+    const { u1, u2, tl } = twoTurnFixture()
+    const A = tokenEntry({ timestamp: u1, outputTokens: 10 })
+    const X = tokenEntry({ timestamp: u2, outputTokens: 5 })
+    const Y = tokenEntry({ timestamp: u2, outputTokens: 7 })
+
+    // Turn windows are [start, nextStart): an entry at exactly next.startMs
+    // belongs to the next turn, never the current one.
+    // Sorted (equal timestamps are still non-decreasing) → fast path.
+    expect(outputsFor(tl, [A, X, Y])).toEqual([10, 12])
+    // X before A trips the fallback; the boundary rule must not change.
+    expect(outputsFor(tl, [X, A, Y])).toEqual([10, 12])
+  })
+
+  it('drops invalid-timestamp entries (ms 0) from every turn via the fallback', () => {
+    const { u1, u2, tl } = twoTurnFixture()
+    const A = tokenEntry({ timestamp: u1, outputTokens: 10 })
+    const B = tokenEntry({ timestamp: u2, outputTokens: 20 })
+    const bad = tokenEntry({ timestamp: 'not-a-date', outputTokens: 999 })
+
+    // An unparseable timestamp maps to ms 0, which regresses below any real
+    // timestamp → unsorted fallback; ms 0 predates every turn window, so the
+    // entry is attributed nowhere (same as the pre-optimization filter).
+    expect(outputsFor(tl, [A, bad, B])).toEqual([10, 20]) // mid-stream
+    expect(outputsFor(tl, [A, B, bad])).toEqual([10, 20]) // at the tail
+  })
+
+  it('binds tool calls via the timeline-order linear scan when turn starts are non-monotonic', () => {
+    // Malformed timeline: the turn listed FIRST starts LATER. findSliceForMs
+    // must take the backward linear scan (not binary search): the last slice
+    // in timeline order whose start <= call time wins, and a call predating
+    // every turn lands on slices[0].
+    const before = nextTs() // predates both turns
+    const tEarly = nextTs() // start of the turn listed second
+    const midCall = nextTs() // between the two starts
+    const tLate = nextTs() // start of the turn listed first
+    const lateCall = nextTs() // after both starts
+    const tl = timeline('s-unsorted-slices', [
+      userEntry('later turn listed first', tLate),
+      userEntry('earlier turn listed second', tEarly),
+    ])
+    const calls = [
+      toolCall('Read', before), // matches no slice → falls to slices[0]
+      toolCall('Bash', midCall), // >= tEarly only → second slice
+      toolCall('Grep', lateCall), // >= both, backward scan hits second slice first
+    ]
+    const tok = tokenData('s-unsorted-slices', 'claude-opus-4-8', [
+      tokenEntry({ timestamp: midCall, outputTokens: 15 }),
+      tokenEntry({ timestamp: lateCall, outputTokens: 40 }),
+    ])
+    const turns = computeModelRecommendations(
+      [tok],
+      [toolUsage('s-unsorted-slices', calls)],
+      [tl],
+      []
+    )[0].turns
+    expect(turns).toHaveLength(2)
+    expect(turns.map((t) => t.features.toolCount)).toEqual([1, 2])
+    // Token windows follow timeline order too: turn 0's window [tLate, tEarly)
+    // is empty, so every entry lands in turn 1's open-ended [tEarly, ∞).
+    expect(turns.map((t) => t.features.outputTokens)).toEqual([0, 55])
+  })
+})
+
 // ── Session roll-up ─────────────────────────────────────────────────
 
 describe('computeModelRecommendations — session aggregation', () => {
@@ -610,5 +727,111 @@ describe('estimateMonthlySavings', () => {
     const total = rows.reduce((s, r) => s + r.session.estimatedSavingsUsd, 0)
     expect(total).toBeGreaterThan(0)
     expect(estimateMonthlySavings(rows)).toBeCloseTo((total / 5) * 30, 9)
+  })
+})
+
+// ── Fallback-semantics parity regressions (ported from PR #2427) ─
+//
+// These four cases pin the fallback classes the adversarial review of the
+// competing #2185 branch reproduced as divergences: empty token windows,
+// pre-first-slice tool calls, synthetic-only windows, and array-order model
+// picks. They must hold on any rewrite of computeModelRecommendations.
+//
+// The hot-detector rewrite of `computeModelRecommendations` must stay
+// byte-identical to master. These four cases pin the divergence classes the
+// review reproduced: each would silently change output if the fast path drifted
+// from the old array-order / fallback semantics.
+describe('computeModelRecommendations — perf-refactor parity regressions', () => {
+  it('empty token window resolves to "unknown" (not tokens.model) → Opus, downgradable', () => {
+    // Turn 0 owns the only token entry; turn 1's window [t1, ∞) is empty even
+    // though the session's model is a real Opus id. The old code returned the
+    // truthy string "unknown" for an empty window instead of falling through to
+    // tokens.model — so a complex empty-window turn recommends Opus and counts
+    // as downgradable.
+    const t0 = nextTs()
+    const t1 = nextTs()
+    const longPrompt = 'x'.repeat(2500) // > MODERATE_PROMPT_CHARS → complex
+    const tl = timeline('s-empty-window', [
+      userEntry('first turn', t0),
+      userEntry(longPrompt, t1),
+    ])
+    const tok = tokenData('s-empty-window', 'claude-opus-4-8', [
+      // Only entry lands in turn 0's window, so turn 1 sees zero tokens.
+      tokenEntry({ timestamp: t0, inputTokens: 1000, outputTokens: 50 }),
+    ])
+
+    const turns = computeModelRecommendations([tok], [], [tl], [])[0].turns
+    expect(turns).toHaveLength(2)
+    const emptyTurn = turns[1]
+    expect(emptyTurn.features.outputTokens).toBe(0)
+    expect(emptyTurn.currentModel).toBe('unknown')
+    expect(emptyTurn.bucket).toBe('complex')
+    expect(emptyTurn.recommendedModel).toBe(REC_OPUS)
+    // downgradable: currentModel ("unknown") differs from the recommendation.
+    expect(emptyTurn.currentModel).not.toBe(emptyTurn.recommendedModel)
+    expect(emptyTurn.actualCostUsd).toBe(0)
+  })
+
+  it('attaches a tool call timestamped before the first slice to slice 0 (not dropped)', () => {
+    // The pre-first-slice call must fall back to slices[0], matching the old
+    // findSliceForMs behaviour, rather than being silently dropped.
+    const tPre = nextTs() // tool call — earlier than any prompt
+    const t0 = nextTs() // first (only) user prompt
+    const tl = timeline('s-pre-slice', [userEntry('short prompt', t0)])
+    const tok = tokenData('s-pre-slice', 'claude-opus-4-8', [
+      tokenEntry({ timestamp: t0, outputTokens: 10 }),
+    ])
+    const calls = [toolCall('Edit', tPre)]
+
+    const turn = computeModelRecommendations(
+      [tok],
+      [toolUsage('s-pre-slice', calls)],
+      [tl],
+      []
+    )[0].turns[0]
+    // Dropped → toolCount 0; attached to slice 0 → toolCount 1, fileEdits 1.
+    expect(turn.features.toolCount).toBe(1)
+    expect(turn.features.fileEdits).toBe(1)
+  })
+
+  it('an all-synthetic window keeps currentModel "<synthetic>" → zero cost, downgradable', () => {
+    // Synthetic entries must contribute nothing: currentModel resolves to
+    // "<synthetic>" (zero pricing), NOT the session's real Opus model. The old
+    // code priced these at zero and still counted the turn downgradable.
+    const t0 = nextTs()
+    const tl = timeline('s-synthetic', [userEntry('short prompt', t0)])
+    const tok = tokenData('s-synthetic', 'claude-opus-4-8', [
+      tokenEntry({
+        timestamp: t0,
+        model: '<synthetic>',
+        inputTokens: 1_000_000,
+        outputTokens: 10,
+      }),
+    ])
+
+    const turn = computeModelRecommendations([tok], [], [tl], [])[0].turns[0]
+    expect(turn.currentModel).toBe('<synthetic>')
+    expect(turn.actualCostUsd).toBe(0)
+    expect(turn.savingsUsd).toBe(0)
+    // Still counted downgradable: "<synthetic>" differs from the recommendation.
+    expect(turn.currentModel).not.toBe(turn.recommendedModel)
+  })
+
+  it('picks the model in array order when a window has an inverted timestamp', () => {
+    // The window's first entry in ARRAY (insertion) order is Opus but carries a
+    // later timestamp than the second (Sonnet) entry. Sorting the window by
+    // timestamp would wrongly pick Sonnet; the old array-order pick keeps Opus.
+    const t0 = nextTs() // prompt
+    const tEarly = nextTs() // smaller ms, listed SECOND in the array
+    const tLate = nextTs() // larger ms, listed FIRST in the array
+    const tl = timeline('s-inverted', [userEntry('short prompt', t0)])
+    const tok = tokenData('s-inverted', 'claude-sonnet-4-5', [
+      tokenEntry({ timestamp: tLate, model: 'claude-opus-4-8', outputTokens: 5 }),
+      tokenEntry({ timestamp: tEarly, model: 'claude-sonnet-4-5', outputTokens: 5 }),
+    ])
+
+    const turn = computeModelRecommendations([tok], [], [tl], [])[0].turns[0]
+    // Array-order first non-synthetic model wins, regardless of timestamp order.
+    expect(turn.currentModel).toBe('claude-opus-4-8')
   })
 })

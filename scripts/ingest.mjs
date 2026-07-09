@@ -2978,7 +2978,7 @@ export function assembleDataset() {
 // full-only work the recs input never consumes:
 //   * `parsePromptAnalysis(entries)` — recs never pass promptAnalysis (the
 //     workflow.prompt-clarity detector gets null on this path);
-//   * the embedded first-pass `buildRecommendations()` 88-detector pass whose
+//   * the embedded first-pass `buildRecommendations()` detector-catalog pass whose
 //     ONLY output is repoMap.files[].recommendations — a cross-link NO served
 //     detector reads (verified), so omitting it leaves the served recs body
 //     byte-identical while dropping a full detector pass from the rebuild;

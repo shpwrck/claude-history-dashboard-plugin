@@ -318,6 +318,7 @@ describe('mineCorrections', () => {
         toolName: 'Read',
         failed: 'axion-formats/src/FirstClassEntity.java',
         succeeded: 'axion-scala-common/src/FirstClassEntity.scala',
+        succeededTimestamp: 't',
         sessionId: 's1',
       },
     ])

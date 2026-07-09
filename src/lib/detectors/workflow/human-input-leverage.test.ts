@@ -5,6 +5,8 @@ import type { RecommendationInput } from '../types';
 import type { TaskSteering } from '../../parse-steering';
 import type { TaskSuccessProxy } from '../../parse-task-success';
 import type { LiveConfig, SessionTokenData } from '../../../types';
+import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
+import type { ToolUsageData } from '../../parse-tools';
 
 const START = '2026-06-12T10:00:00.000Z';
 const END = '2026-06-12T11:00:00.000Z';
@@ -55,11 +57,7 @@ function success(overrides: Partial<TaskSuccessProxy> = {}): TaskSuccessProxy {
 }
 
 /** One token-data session carrying `tokens` inside the [START,END] window. */
-function tokens(
-  sessionId: string,
-  total: number,
-  ts = MID
-): SessionTokenData {
+function tokens(sessionId: string, total: number, ts = MID): SessionTokenData {
   return {
     sessionId,
     entrypoint: 'cli',
@@ -91,11 +89,14 @@ function input(parts: {
   steering: TaskSteering[];
   success?: TaskSuccessProxy[];
   tokenData: SessionTokenData[];
+  toolData?: ToolUsageData[];
+  timelines?: SessionTimeline[];
   liveConfig?: LiveConfig | null;
 }): RecommendationInput {
   return {
     tokenData: parts.tokenData,
-    toolData: [],
+    toolData: parts.toolData ?? [],
+    timelines: parts.timelines,
     sessions: [],
     projects: [],
     permissionRows: [],
@@ -106,13 +107,63 @@ function input(parts: {
   } as RecommendationInput;
 }
 
-// Four typical small spans (10k each) + one large corrected excursion (300k).
-// Median over the five sized spans is 10k, so the excursion clears 3x + the
-// 50k floor.
+function timeline(sessionId: string, entries: TimelineEntry[]): SessionTimeline {
+  return {
+    sessionId,
+    startTime: entries[0]?.timestamp ?? START,
+    endTime: entries[entries.length - 1]?.timestamp ?? END,
+    entries,
+  };
+}
+
+const user = (ms: string, summary = 'go'): TimelineEntry => ({ timestamp: ms, kind: 'user', summary });
+const assistant = (ms: string, summary = 'Working on it…'): TimelineEntry => ({
+  timestamp: ms,
+  kind: 'assistant',
+  summary,
+});
+const toolUse = (ms: string): TimelineEntry => ({ timestamp: ms, kind: 'tool_use', toolName: 'Read', summary: '{}' });
+const interrupt = (ms: string): TimelineEntry => ({
+  timestamp: ms,
+  kind: 'user',
+  interrupted: true,
+  summary: '[Request interrupted by user]',
+});
+
+function failedThenSuccessFix(sessionId: string): ToolUsageData {
+  return {
+    sessionId,
+    calls: [
+      {
+        timestamp: '2026-06-12T10:05:00.000Z',
+        toolName: 'Read',
+        input: { file_path: 'packages/core/src/FooType.java' },
+        toolUseId: 'u-fail',
+        isError: true,
+        resultBytes: 0,
+      },
+      {
+        timestamp: '2026-06-12T10:20:00.000Z',
+        toolName: 'Read',
+        input: { file_path: 'packages/lib/src/FooType.scala' },
+        toolUseId: 'u-fix',
+        isError: false,
+        resultBytes: 0,
+      },
+    ],
+  };
+}
+
+// Four typical small spans (10k each) + one large excursion (300k by default).
 function corpusWith(
   excursion: Partial<TaskSteering>,
   excursionTokens = 300_000,
-  opts: { excursionSuccess?: Partial<TaskSuccessProxy>; end?: string } = {}
+  opts: {
+    excursionSuccess?: Partial<TaskSuccessProxy>;
+    end?: string;
+    toolData?: ToolUsageData[];
+    timelines?: SessionTimeline[];
+  } = {}
 ) {
   const steeringRows: TaskSteering[] = [];
   const successRows: TaskSuccessProxy[] = [];
@@ -123,8 +174,6 @@ function corpusWith(
     tokenData.push(tokens(sessionId, 10_000));
   }
   const exSession = excursion.sessionId ?? 'sess-excursion';
-  // When the excursion is dated (stale test), shift the whole window so start
-  // precedes end and the token entry lands inside it.
   const exStart = opts.end
     ? new Date(Date.parse(opts.end) - 60 * 60_000).toISOString()
     : START;
@@ -155,7 +204,13 @@ function corpusWith(
       opts.end ? new Date(Date.parse(opts.end) - 30 * 60_000).toISOString() : MID
     )
   );
-  return input({ steering: steeringRows, success: successRows, tokenData });
+  return input({
+    steering: steeringRows,
+    success: successRows,
+    tokenData,
+    toolData: opts.toolData,
+    timelines: opts.timelines,
+  });
 }
 
 describe('workflow.human-input-leverage', () => {
@@ -168,6 +223,9 @@ describe('workflow.human-input-leverage', () => {
     // No dollar claim: a causal cost win above the accounting tier is not asserted.
     expect(rec?.estSavingsUsd).toBeUndefined();
     expect(rec?.affected).toBe(1);
+    expect(
+      rec?.provenance?.observations.some((o) => o.source === 'parse-steering')
+    ).toBe(true);
   });
 
   it('cites the outlier excess in evidence and provenance (auditable)', () => {
@@ -176,8 +234,7 @@ describe('workflow.human-input-leverage', () => {
     expect(rec?.evidence?.[0]).toContain('tokens avoidable upfront');
     const obs = rec?.provenance?.observations ?? [];
     expect(obs.length).toBeGreaterThan(0);
-    expect(obs.some((o) => o.field?.includes('corrective'))).toBe(true);
-    expect(obs.some((o) => o.source === 'tokenData')).toBe(true);
+    expect(obs.some((o) => o.source === 'parse-sessions')).toBe(true);
     expect(rec?.provenance?.inference).toMatch(/causal hypothesis/i);
   });
 
@@ -197,6 +254,167 @@ describe('workflow.human-input-leverage', () => {
     expect(rec).toBeNull();
   });
 
+  it('fires from correction-mining even when no corrective steering turn exists', () => {
+    const rec = detector.rule(
+      corpusWith(
+        { corrective: 0, clarifyingAnswer: 0, approving: 1, humanTurns: 1 },
+        300_000,
+        { toolData: [failedThenSuccessFix('sess-excursion')] }
+      ),
+      NOW
+    );
+    expect(rec?.id).toBe('workflow.human-input-leverage');
+    expect(rec?.evidence?.[0]).toContain('correction-mining');
+    expect(
+      rec?.provenance?.observations.some(
+        (o) => o.source === 'parse-tools' && o.field === 'toolData[].calls[].isError'
+      )
+    ).toBe(true);
+  });
+
+  it('fires from a mid-turn interrupt even when other steering signals are absent', () => {
+    const rec = detector.rule(
+      corpusWith(
+        { corrective: 0, clarifyingAnswer: 0, approving: 1, humanTurns: 1 },
+        300_000,
+        {
+          timelines: [
+            timeline('sess-excursion', [
+              user('2026-06-12T10:00:10.000Z'),
+              assistant('2026-06-12T10:10:00.000Z'),
+              toolUse('2026-06-12T10:10:10.000Z'),
+              interrupt('2026-06-12T10:20:00.000Z'),
+            ]),
+          ],
+        }
+      ),
+      NOW
+    );
+    expect(rec?.id).toBe('workflow.human-input-leverage');
+    expect(
+      rec?.provenance?.observations.some(
+        (o) => o.source === 'parse-timeline' && o.field === 'TimelineEntry.interrupted'
+      )
+    ).toBe(true);
+    expect(rec?.evidence?.[0]).toContain('mid-turn interruption');
+  });
+
+  it('fires on a slim-shape interrupt entry (interrupted flag, no summary)', () => {
+    // The recs engine consumes bulk timelines where `summary` is stripped
+    // (parse-timeline slimSessionTimeline; asserted by
+    // session-blob-cache-parity). The signal must fire from `interrupted` alone,
+    // never re-checking sentinel text — otherwise it never fires in production.
+    const slimInterrupt = (ms: string): TimelineEntry => ({
+      timestamp: ms,
+      kind: 'user',
+      interrupted: true,
+    });
+    const rec = detector.rule(
+      corpusWith(
+        { corrective: 0, clarifyingAnswer: 0, approving: 1, humanTurns: 1 },
+        300_000,
+        {
+          timelines: [
+            timeline('sess-excursion', [
+              user('2026-06-12T10:00:10.000Z'),
+              assistant('2026-06-12T10:10:00.000Z'),
+              toolUse('2026-06-12T10:10:10.000Z'),
+              slimInterrupt('2026-06-12T10:20:00.000Z'),
+            ]),
+          ],
+        }
+      ),
+      NOW
+    );
+    expect(rec?.id).toBe('workflow.human-input-leverage');
+    expect(
+      rec?.provenance?.observations.some(
+        (o) => o.source === 'parse-timeline' && o.field === 'TimelineEntry.interrupted'
+      )
+    ).toBe(true);
+    expect(rec?.evidence?.[0]).toContain('mid-turn interruption');
+  });
+
+  it('fires from token-burning deliberation when no corrective turn is present', () => {
+    const rec = detector.rule(
+      corpusWith(
+        { corrective: 0, clarifyingAnswer: 1, approving: 0, humanTurns: 2 },
+        300_000
+      ),
+      NOW
+    );
+    expect(rec?.id).toBe('workflow.human-input-leverage');
+    expect(rec?.evidence?.[0]).toContain('deliberation');
+    expect(
+      rec?.provenance?.observations.some(
+        (o) => o.source === 'parse-steering' && o.field === 'TaskSteering.clarifyingAnswer'
+      )
+    ).toBe(true);
+  });
+
+  it('adds new signal joins without reducing base corrective coverage', () => {
+    const steeringRows: TaskSteering[] = [];
+    const successRows: TaskSuccessProxy[] = [];
+    const tokenData: SessionTokenData[] = [];
+    const toolData: ToolUsageData[] = [];
+
+    for (let i = 0; i < 4; i += 1) {
+      const sessionId = `base-${i}`;
+      steeringRows.push(steering({ sessionId, taskIndex: 0 }));
+      tokenData.push(tokens(sessionId, 10_000));
+    }
+
+    steeringRows.push(
+      steering({
+        sessionId: 'exc-core',
+        taskIndex: 0,
+        corrective: 2,
+        approving: 0,
+      }),
+      steering({
+        sessionId: 'exc-mining',
+        taskIndex: 0,
+        corrective: 0,
+        clarifyingAnswer: 0,
+        approving: 1,
+        humanTurns: 1,
+      } as Partial<TaskSteering>)
+    );
+    successRows.push(
+      success({ sessionId: 'exc-core', taskIndex: 0, verdict: 'correct' }),
+      success({ sessionId: 'exc-mining', taskIndex: 0, verdict: 'correct' })
+    );
+    tokenData.push(
+      tokens('exc-core', 300_000),
+      tokens('exc-mining', 300_000)
+    );
+    toolData.push(failedThenSuccessFix('exc-mining'));
+
+    const rec = detector.rule(
+      input({
+        steering: steeringRows,
+        success: successRows,
+        tokenData,
+        toolData,
+      }),
+      NOW
+    );
+
+    expect(rec?.id).toBe('workflow.human-input-leverage');
+    expect(rec?.evidence?.[0]).toContain('/repo/app');
+    // One old-path corrective excursion, one correction-mining-only excursion.
+    expect(rec?.affected).toBe(2);
+    expect(
+      rec?.provenance?.observations.some((o) => o.source === 'parse-tools')
+    ).toBe(true);
+    expect(
+      rec?.provenance?.observations.some((o) => o.source === 'parse-steering' && o.field.includes('corrective'))
+    ).toBe(true);
+    expect(
+      rec?.provenance?.observations.some((o) => o.source === 'parse-timeline')
+    ).toBe(false);
+  });
+
   it('stays silent when the span is not a token outlier', () => {
     // Excursion tokens just above the typical median but below 3x + the floor.
     const rec = detector.rule(corpusWith({}, 12_000), NOW);
@@ -214,10 +432,7 @@ describe('workflow.human-input-leverage', () => {
   it('stays silent below the baseline span count (median not meaningful)', () => {
     const rec = detector.rule(
       input({
-        steering: [
-          steering({ sessionId: 'a', corrective: 2 }),
-          steering({ sessionId: 'b' }),
-        ],
+        steering: [steering({ sessionId: 'a', corrective: 2 }), steering({ sessionId: 'b' })],
         tokenData: [tokens('a', 300_000), tokens('b', 10_000)],
       }),
       NOW
@@ -277,12 +492,16 @@ describe('workflow.human-input-leverage', () => {
     }
     // A genuine class-local outlier: 500k (> 3x the 120k class median) + corrected.
     steeringRows.push(
-      steering({ sessionId: 'big-exc', project: '/repo/big', corrective: 2, humanTurns: 2, approving: 0 })
+      steering({
+        sessionId: 'big-exc',
+        project: '/repo/big',
+        corrective: 2,
+        humanTurns: 2,
+        approving: 0,
+      })
     );
     tokenData.push(tokens('big-exc', 500_000));
-    const successRows = [
-      success({ sessionId: 'big-exc', project: '/repo/big', verdict: 'correct' }),
-    ];
+    const successRows = [success({ sessionId: 'big-exc', project: '/repo/big', verdict: 'correct' })];
     const rec = detector.rule(
       input({ steering: steeringRows, success: successRows, tokenData }),
       NOW
@@ -297,10 +516,11 @@ describe('workflow.human-input-leverage', () => {
   // ── Stale-data handling ────────────────────────────────────────────────────
   it('demotes present-tense wording to "as of <date>" when the excursion is stale', () => {
     const staleEnd = '2026-04-01T11:00:00.000Z'; // > 30 days before NOW
-    const rec = detector.rule(corpusWith({}, 300_000, { end: staleEnd }), NOW);
-    expect(rec?.detail).toMatch(/^As of 2026-04-01,/);
-    expect(rec?.provenance?.asOf).toBe('2026-04-01');
-    expect(rec?.provenance?.stale).toBe(true);
+    const rec = corpusWith({}, 300_000, { end: staleEnd });
+    const result = detector.rule(rec, NOW);
+    expect(result?.detail).toMatch(/^As of 2026-04-01,/);
+    expect(result?.provenance?.asOf).toBe('2026-04-01');
+    expect(result?.provenance?.stale).toBe(true);
   });
 
   it('does not demote a fresh excursion', () => {
@@ -338,26 +558,31 @@ describe('workflow.human-input-leverage', () => {
       // taskIndex 0: small, not corrected.
       steering({ sessionId: session, taskIndex: 0, ...w0 }),
       // taskIndex 1: the corrected excursion.
-      steering({ sessionId: session, taskIndex: 1, corrective: 2, humanTurns: 2, approving: 0, ...w1 }),
-    ];
-    const tokenData: SessionTokenData[] = [
-      tokens('f0', 10_000),
-      tokens('f1', 10_000),
-      tokens('f2', 10_000),
-      // Two entries in the SAME session, one per window.
-      {
-        ...tokens(session, 0),
-        entries: [
-          { ...tokens(session, 10_000).entries[0], timestamp: '2026-06-12T10:30:00.000Z', inputTokens: 10_000 },
-          { ...tokens(session, 300_000).entries[0], timestamp: '2026-06-12T11:30:00.000Z', inputTokens: 300_000 },
-        ],
-      } as unknown as SessionTokenData,
+      steering({
+        sessionId: session,
+        taskIndex: 1,
+        corrective: 2,
+        humanTurns: 2,
+        approving: 0,
+        ...w1,
+      }),
     ];
     const rec = detector.rule(
       input({
         steering: steeringRows,
         success: [success({ sessionId: session, taskIndex: 1, ...w1, verdict: 'correct' })],
-        tokenData,
+        tokenData: [
+          tokens('f0', 10_000),
+          tokens('f1', 10_000),
+          tokens('f2', 10_000),
+          {
+            ...tokens(session, 0),
+            entries: [
+              { ...tokens(session, 10_000).entries[0], timestamp: '2026-06-12T10:30:00.000Z', inputTokens: 10_000 },
+              { ...tokens(session, 300_000).entries[0], timestamp: '2026-06-12T11:30:00.000Z', inputTokens: 300_000 },
+            ],
+          } as unknown as SessionTokenData,
+        ],
       }),
       NOW
     );
