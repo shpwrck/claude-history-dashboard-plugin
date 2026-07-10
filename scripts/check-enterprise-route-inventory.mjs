@@ -184,6 +184,8 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'prefix', value: '/api/sessions/', access: 'session-dispatch' },
   { kind: 'regex', value: '^\\/api\\/ingest\\/([^/]+)\\/artifacts$', access: 'session-ingest' },
   { kind: 'exact', value: '/api/dataset.json', access: 'scoped-or-admin-data' },
+  { kind: 'exact', value: '/api/dataset/boot', access: 'scoped-or-admin-data' },
+  { kind: 'prefix', value: '/api/dataset/slice/', access: 'scoped-or-admin-data' },
   {
     kind: 'exact',
     value: '/api/recommendations.json',

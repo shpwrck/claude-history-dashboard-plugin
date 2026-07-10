@@ -170,10 +170,16 @@ const { safeJsonStringify } = await import(
 const { buildDatasetBody } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'dataset-body.ts')
 );
+// Boot/slice split for the Tier-3 instant-load path (#2443): a tiny boot payload
+// (metadata + server-computed aggregates + per-slice counts) and per-heavy-key
+// lazy slices, so the client paints from the boot without the ~98 MB monolith.
+const { splitDataset, isSliceKey } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'dataset-boot.ts')
+);
 // Restores the zero-valued tokenData numerics that buildDatasetBody slims out of
 // the wire (#2107), for the one server path that re-parses the slimmed cache JSON
 // instead of the full in-memory dataset (the LLM-audit route below).
-const { rehydrateDataset } = await import(
+const { rehydrateDataset, slimDataset } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'dataset-slim.ts')
 );
 // Server LLM calls are registered and enforced through this chokepoint (#931).
@@ -1179,6 +1185,13 @@ function datasetState(apiPromise, key = 'global') {
     digestBuilds: new Map(),
     searchCache: new Map(),
     searchBuilds: new Map(),
+    // Boot payload + per-heavy-key slices for the instant-load data plane (#2443),
+    // same stat-gated + single-flight machinery as digest/search. The boot map
+    // holds one entry; the slice map holds one per opened heavy key.
+    bootCache: new Map(),
+    bootBuilds: new Map(),
+    sliceCache: new Map(),
+    sliceBuilds: new Map(),
     // Source signature from the last full ingest() (#182). Lets the dataset
     // handler skip the O(files) ingest walk when a cheap stat signature is
     // unchanged. null until the first ingest runs.
@@ -2613,6 +2626,62 @@ function buildDigestPayload(state, api, date) {
     },
     date
   );
+}
+
+// Serialize + precompress a JSON body once per content-change (#2443). Returned
+// value is cached by the stat-gate, so the (potentially multi-MB) compression
+// runs once per corpus change, not per request. brotli/gzip go async on the
+// libuv threadpool — a heavy slice (timelines is multi-MB) must NOT block the
+// event loop, exactly as buildDatasetCache does for the monolith (#1015).
+// `version` is the dataset contentHash, echoed to the client so boot + slices
+// are never mixed across a content change.
+async function compressedPayload(value, version) {
+  const json = safeJsonStringify(value);
+  // Same response-size safety valve buildDatasetCache applies to the monolith:
+  // measure the serialized length BEFORE materializing the Buffer / compressing,
+  // so a single oversized slice (or a low DASHBOARD_DATASET_RESPONSE_MAX_BYTES)
+  // returns 413 instead of dominating request/process memory (#2443 review).
+  const responseBytes = Buffer.byteLength(json);
+  if (responseBytes > DATASET_RESPONSE_MAX_BYTES) {
+    const err = new Error(`Dataset response exceeds ${DATASET_RESPONSE_MAX_BYTES} byte limit`);
+    err.code = 'DATASET_RESPONSE_TOO_LARGE';
+    err.maxBytes = DATASET_RESPONSE_MAX_BYTES;
+    err.actualBytes = responseBytes;
+    throw err;
+  }
+  const buf = Buffer.from(json);
+  const [brBuf, gzBuf] = await Promise.all([
+    brotliAsync(buf, DATASET_BROTLI_QUALITY),
+    gzipAsync(buf, { level: 6 }),
+  ]);
+  return { json, etag: datasetEtagFrom(json), brBuf, gzBuf, version };
+}
+
+// Build the /api/dataset/boot payload: the tiny metadata + aggregates + counts
+// half of the split (the ~98 MB heavy slices are dropped). Reuses the assembled
+// dataset per contentHash (#2071) so it shares the recs/dataset assembly.
+async function buildBootPayload(state, api) {
+  const stats = api.ingest();
+  const ds = memoizedAssembleDataset(state, api, stats.contentHash);
+  const boot = splitDataset(ds).boot;
+  boot.version = stats.contentHash;
+  return compressedPayload(boot, stats.contentHash);
+}
+
+// Build one /api/dataset/slice/<key> payload — a single heavy dataset array,
+// fetched only when its view is opened. Same per-contentHash assembly reuse.
+async function buildSlicePayload(state, api, key) {
+  const stats = api.ingest();
+  const ds = memoizedAssembleDataset(state, api, stats.contentHash);
+  const raw = ds && typeof ds === 'object' ? ds[key] ?? [] : [];
+  // Ship each slice in the SAME wire shape /api/dataset.json uses: slimDataset
+  // drops zero-valued TokenEntry numerics from `tokenData` (#2107 — several MB of
+  // pure wire overhead) and is a pass-through for every other key. The client
+  // restores the dropped zeros via rehydrateDataset at the slice-merge seam, so
+  // the lazy tokenData slice is never larger than the monolith's equivalent.
+  const slimmed = slimDataset({ [key]: raw });
+  const value = slimmed && typeof slimmed === 'object' ? slimmed[key] ?? raw : raw;
+  return compressedPayload(value, stats.contentHash);
 }
 
 // Build the /api/search payload for one (query, project, limit), reusing the
@@ -7631,6 +7700,8 @@ function enterpriseOrganizationDataPath(pathname) {
 function enterpriseScopedDataPath(pathname) {
   return (
     pathname === '/api/dataset.json' ||
+    pathname === '/api/dataset/boot' ||
+    pathname.startsWith('/api/dataset/slice/') ||
     pathname === '/api/recommendations.json' ||
     pathname === '/api/search' ||
     pathname === '/api/digest' ||
@@ -8295,6 +8366,84 @@ async function handleDatasetJson(req, res) {
   });
 }
 
+// Serve a stat-gated, precompressed payload (boot or slice) with the same ETag
+// revalidation as /api/dataset.json. `value` is { json, etag, brBuf, gzBuf }.
+function sendDatasetSplitPayload(req, res, value) {
+  res.setHeader('X-Source', 'live');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', revalidatingLiveCacheControl());
+  if (value.version) res.setHeader('X-Dataset-Version', value.version);
+  if (etagMatches(req, value.etag)) {
+    res.setHeader('ETag', value.etag);
+    appendVary(res, 'Accept-Encoding');
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
+  sendBody(req, res, value.json, {
+    etag: value.etag,
+    precompressed: { br: value.brBuf, gz: value.gzBuf },
+  });
+}
+
+// /api/dataset/boot (#2443): the tiny boot half of the split — metadata +
+// aggregates + per-slice counts — so the Tier-3 client paints the landing shell
+// without the ~98 MB monolith. Same stat-gated cache + ETag revalidation as
+// /api/dataset.json; the heavy detail arrives lazily via /api/dataset/slice/<key>.
+async function handleDatasetBoot(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET or HEAD' });
+  }
+  const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+    useCache: true,
+  });
+  let value;
+  try {
+    ({ value } = await statGatedResponseCache(ingestApi, {
+      cacheMap: ingestState.bootCache,
+      buildsMap: ingestState.bootBuilds,
+      key: 'boot',
+      max: 1,
+      build: (api) => buildBootPayload(ingestState, api),
+    }));
+  } catch (err) {
+    if (isDatasetResponseTooLargeError(err)) return sendDatasetResponseTooLarge(res, err);
+    throw err;
+  }
+  sendDatasetSplitPayload(req, res, value);
+}
+
+// /api/dataset/slice/<key> (#2443): one heavy per-view dataset array, fetched
+// only when its view is opened. `key` must be a known sliceable key; anything
+// else 404s so the surface is a fixed allowlist, not arbitrary dataset access.
+async function handleDatasetSlice(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET or HEAD' });
+  }
+  const pathname = requestPathname(req);
+  const key = pathname.slice('/api/dataset/slice/'.length);
+  if (!isSliceKey(key)) {
+    return sendJson(res, 404, { ok: false, error: `Unknown dataset slice: ${key}` });
+  }
+  const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+    useCache: true,
+  });
+  let value;
+  try {
+    ({ value } = await statGatedResponseCache(ingestApi, {
+      cacheMap: ingestState.sliceCache,
+      buildsMap: ingestState.sliceBuilds,
+      key: `slice:${key}`,
+      max: 32,
+      build: (api) => buildSlicePayload(ingestState, api, key),
+    }));
+  } catch (err) {
+    if (isDatasetResponseTooLargeError(err)) return sendDatasetResponseTooLarge(res, err);
+    throw err;
+  }
+  sendDatasetSplitPayload(req, res, value);
+}
+
 async function handleDigest(req, res) {
   if (req.method !== 'GET') {
     return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
@@ -8497,6 +8646,7 @@ async function handleExperimentsJson(req, res) {
 // short-circuits in handleDigest/handleSearch still run before any ingest work.
 const DATASET_ROUTES = new Map([
   ['/api/dataset.json', handleDatasetJson],
+  ['/api/dataset/boot', handleDatasetBoot],
   ['/api/recommendations.json', handleRecommendationsJson],
   ['/api/digest', handleDigest],
   ['/api/search', handleSearch],
@@ -8668,6 +8818,12 @@ const server = createServer(async (req, res) => {
     const datasetRoute = DATASET_ROUTES.get(pathname);
     if (datasetRoute) {
       return datasetRoute(req, res);
+    }
+
+    // Lazy per-view dataset slices (#2443): /api/dataset/slice/<key>. The handler
+    // allowlists <key> against the known heavy dataset keys.
+    if (pathname.startsWith('/api/dataset/slice/')) {
+      return handleDatasetSlice(req, res);
     }
 
     if (pathname === '/api/memories') {
