@@ -19,7 +19,7 @@
 
 import { createServer } from 'node:http';
 import { appendFile, chmod, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, normalize, resolve, extname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -91,6 +91,7 @@ import {
 } from './read-workflows.mjs';
 import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
 import { resolveStatGatedCache } from './lib/stat-gated-cache.mjs';
+import { readJsonlTailCappedSync } from './lib/host-producer.mjs';
 
 const PROJECT_DIR = join(fileURLToPath(import.meta.url), '..', '..');
 const { resolveSources } = await import(
@@ -128,6 +129,11 @@ const { parseEnrollmentLedger } = await import(
 );
 const { evaluateExperiments } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'experiments', 'evaluator.ts')
+);
+// Shadow-calls per-experiment rows (#2152/#2153): the flat ledger read behind
+// /api/shadow-experiments.json, pure like the other .ts parsers.
+const { parseShadowCallRows } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'shadow-experiments.ts')
 );
 // Policy write-back core (#625) lives in src/lib/policy-writer.ts — the pure
 // validate/merge/dedupe steps + the backup/write contract for the one route
@@ -284,6 +290,12 @@ const PROJECT_ROOTS = uniqueProjectsRoots([
   ...projectsRootsFromEnv('CLAUDE_HUB_DIR', true),
 ]);
 const SHADOW_CALLS_DIR = join(CLAUDE, 'shadow-calls');
+// Shadow-calls experiment ledger (#2152): the append-only JSONL the shadow
+// engine writes, served row-by-row at /api/shadow-experiments.json. Read live
+// per request (like EXPERIMENT_LEDGER below); CLAUDE_SHADOW_CALLS_LEDGER
+// overrides the path (tests / custom deploys).
+const SHADOW_CALLS_LEDGER =
+  process.env.CLAUDE_SHADOW_CALLS_LEDGER || join(SHADOW_CALLS_DIR, 'ledger.jsonl');
 // Experiment-axis enrollment ledger (#2242): the append-only JSONL the
 // `/experiment-enroll` skill writes. Read live like the shadow-calls ledger;
 // CLAUDE_EXPERIMENT_LEDGER overrides the path (tests / custom deploys). The
@@ -7711,6 +7723,7 @@ function enterpriseScopedDataPath(pathname) {
     pathname === '/api/memories' ||
     pathname === '/api/workflows' ||
     pathname === '/api/experiments.json' ||
+    pathname === '/api/shadow-experiments.json' ||
     /^\/api\/session\/[^/]+\/timeline$/.test(pathname) ||
     /^\/api\/session\/[^/]+\/tools$/.test(pathname) ||
     pathname.startsWith('/projects/')
@@ -8640,6 +8653,101 @@ async function handleExperimentsJson(req, res) {
   return sendJson(res, 200, { axes });
 }
 
+// GET /api/shadow-experiments.json — per-experiment drill-down feed for the
+// Shadow Calls view (#2152, epic #2147). Serves the flat row log straight from
+// the shadow-calls ledger (no ingest, no dataset assemble), so experiment data
+// is reachable without the multi-MB /api/dataset.json blob. The parse sits
+// behind the same stat-gated single-flight cache as /api/digest//api/search: a
+// cheap statSync signature gates it, so an APPENDED record moves the signature
+// and the very next fetch reparses (the staleness contract), while pagination
+// over an unchanged ledger reuses one cached parse instead of re-reading up to
+// ARTIFACT_FILE_MAX_BYTES per page. Integrity: every bound is SURFACED, never
+// silent — an over-cap ledger reads its newest tail (`ledgerTruncated`), the
+// row bound reports `rowsDropped`, and counted/synthetic/skipped are
+// WHOLE-LEDGER counts (they reconcile to `total` even when rows are a suffix).
+const SHADOW_EXPERIMENTS_ROWS_KEPT = 20_000;
+const shadowExperimentsCache = new Map();
+const shadowExperimentsBuilds = new Map();
+
+// The ledger path is per-REQUESTER: a scoped enterprise principal reads the
+// shadow-calls ledger under their own data root, never the process default —
+// experiment rows carry task/variation/judge text that must not leak across
+// roots. The CLAUDE_SHADOW_CALLS_LEDGER override applies to the default root
+// only (tests / custom deploys); scoped roots always derive their own path.
+function shadowLedgerPathFor(req) {
+  const root = enterpriseRequestClaudeRoot(req);
+  if (root === CLAUDE) return SHADOW_CALLS_LEDGER;
+  return join(root, 'shadow-calls', 'ledger.jsonl');
+}
+
+function shadowLedgerSignature(ledgerPath) {
+  try {
+    const s = statSync(ledgerPath);
+    return `${s.mtimeMs}:${s.size}`;
+  } catch {
+    return 'absent';
+  }
+}
+
+async function handleShadowExperimentsJson(req, res) {
+  if (req.method !== 'GET') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
+  }
+  const params = new URL(req.url, 'http://localhost').searchParams;
+  const limit = parseBoundedSearchInt(params, 'limit', 500, 1, 2000);
+  const offset = parseBoundedSearchInt(params, 'offset', 0, 0, 1_000_000);
+  const ledgerPath = shadowLedgerPathFor(req);
+
+  const { value: parsed, cache } = await resolveStatGatedCache({
+    sourceSignature: () => shadowLedgerSignature(ledgerPath),
+    cacheMap: shadowExperimentsCache,
+    buildsMap: shadowExperimentsBuilds,
+    // Keyed by the resolved path so scoped roots never share a cache entry.
+    key: ledgerPath,
+    max: 8,
+    build: () => {
+      // Fail-open ledger read (like /api/experiments.json): missing/unreadable
+      // ⇒ an empty log, never an error — the view then shows its zero state.
+      let ledger = { text: '', truncated: false, totalBytes: 0 };
+      if (existsSync(ledgerPath)) {
+        try {
+          ledger = readJsonlTailCappedSync(ledgerPath, ARTIFACT_FILE_MAX_BYTES);
+        } catch {
+          ledger = { text: '', truncated: false, totalBytes: 0 };
+        }
+      }
+      return {
+        result: parseShadowCallRows(ledger.text, { maxRows: SHADOW_EXPERIMENTS_ROWS_KEPT }),
+        ledgerTruncated: ledger.truncated,
+      };
+    },
+  });
+
+  const { result, ledgerTruncated } = parsed;
+  // Newest-first pagination without copying/reversing the whole retained
+  // array: index the requested page from the tail, then reverse just the page.
+  const rows = result.rows;
+  const end = Math.max(0, rows.length - offset);
+  const pageStart = Math.max(0, end - limit);
+  const page = rows.slice(pageStart, end).reverse();
+
+  res.setHeader('X-Source', 'live');
+  res.setHeader('X-Shadow-Experiments-Cache', cache);
+  res.setHeader('Cache-Control', 'no-store');
+  return sendJson(res, 200, {
+    total: result.total,
+    counted: result.counted,
+    synthetic: result.synthetic,
+    skipped: result.skipped,
+    ledgerTruncated,
+    rowsDropped: result.dropped,
+    offset,
+    limit,
+    returned: page.length,
+    rows: page,
+  });
+}
+
 // Pathname -> Handler map for the dataset-bearing routes. The dispatcher does a
 // single Map lookup and delegates; each handler resolves its own ingest state
 // via loadIngestedDataset() at the same point it did inline, so the validation
@@ -8859,6 +8967,14 @@ const server = createServer(async (req, res) => {
       // enrollment ledger + the measured BFC metric and returns per-axis
       // verdicts. handleExperimentsJson fails open (no ledger -> { axes: [] }).
       await handleExperimentsJson(req, res);
+      return;
+    }
+
+    if (pathname === '/api/shadow-experiments.json') {
+      // Shadow-calls per-experiment drill-down feed (#2152). Fresh tail-capped
+      // ledger read per request; every bound surfaced (ledgerTruncated /
+      // rowsDropped), newest-first limit/offset pagination.
+      await handleShadowExperimentsJson(req, res);
       return;
     }
 

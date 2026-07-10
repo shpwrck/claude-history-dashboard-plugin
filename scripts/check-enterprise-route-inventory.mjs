@@ -206,6 +206,7 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'exact', value: '/api/memories', access: 'scoped-data' },
   { kind: 'exact', value: '/api/workflows', access: 'scoped-data' },
   { kind: 'exact', value: '/api/experiments.json', access: 'scoped-data' },
+  { kind: 'exact', value: '/api/shadow-experiments.json', access: 'scoped-data' },
   { kind: 'exact', value: '/api/usage', access: 'organization-data' },
   { kind: 'exact', value: '/api/audit.json', access: 'organization-data' },
   { kind: 'exact', value: '/api/live', access: 'scoped-or-admin-data' },

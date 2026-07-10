@@ -27,7 +27,7 @@
 // `src/lib/artifact-source.ts`; this file is its runtime producer half and the
 // JSDoc `@typedef` below mirrors that type for the `.mjs` callers.
 
-import { closeSync, opendirSync, openSync, readFileSync, readSync } from 'node:fs';
+import { closeSync, fstatSync, opendirSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Reader chunk size, matching ingest's streaming cap reader. */
@@ -132,6 +132,51 @@ export function readArtifactTextCappedSync(filePath, maxBytes = ARTIFACT_FILE_MA
  *  producer uses for `~/.claude.json` and per-root repo-map artifacts. */
 export function readArtifactJsonCappedSync(filePath, maxBytes = ARTIFACT_FILE_MAX_BYTES) {
   return JSON.parse(readArtifactTextCappedSync(filePath, maxBytes));
+}
+
+/**
+ * Bounded read of an append-only JSONL ledger that DEGRADES instead of refusing
+ * (#2152, epic #2147). {@link readArtifactTextCappedSync} throws on an oversized
+ * file — the right call for one JSON artifact, but for a growing ledger the
+ * caller would swallow the throw and serve NOTHING, silently zeroing a view that
+ * had months of evidence a byte earlier. Here an oversized ledger instead yields
+ * its newest `maxBytes` tail: seek to `size - maxBytes`, drop the first
+ * (possibly partial) line, and flag `truncated: true` so every consumer surfaces
+ * the cut instead of hiding it. The tail keeps the NEWEST records — the right
+ * degradation for an append-only experiment stream.
+ *
+ * Returns `{ text, truncated, totalBytes }`.
+ */
+export function readJsonlTailCappedSync(filePath, maxBytes = ARTIFACT_FILE_MAX_BYTES) {
+  const fd = openSync(filePath, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    if (size <= maxBytes) {
+      return { text: readFileSync(fd, 'utf8'), truncated: false, totalBytes: size };
+    }
+    // Read ONE extra byte before the window: if it is '\n', the window starts
+    // exactly on a record boundary and its first line is a complete record —
+    // dropping it would silently lose one intact newest-window row.
+    const start = size - maxBytes - 1;
+    const tail = Buffer.allocUnsafe(maxBytes + 1);
+    let done = 0;
+    while (done < tail.length) {
+      const n = readSync(fd, tail, done, tail.length - done, start + done);
+      if (n === 0) break;
+      done += n;
+    }
+    let text = tail.subarray(0, done).toString('utf8');
+    if (text.startsWith('\n')) {
+      text = text.slice(1); // boundary-aligned: keep the whole window
+    } else {
+      // Drop the first (mid-record) partial line.
+      const firstNewline = text.indexOf('\n');
+      text = firstNewline === -1 ? '' : text.slice(firstNewline + 1);
+    }
+    return { text, truncated: true, totalBytes: size };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**

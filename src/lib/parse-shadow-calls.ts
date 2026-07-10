@@ -25,8 +25,15 @@
  * axis's `samples`/`shadowWins` and skew the recommendation confidence with fabricated
  * evidence — but are now surfaced in `synthetic` rather than dropped invisibly (#2149).
  *
+ * Source taxonomy (#2150, epic #2147): every counted record is classified into a
+ * first-class `source` (provenance) dimension and aggregated uniformly per
+ * (source, axis) cell in `bySourceAxis` — so per-window replays, model-eval batches,
+ * proof-batch runs, live `/race` arms, and config-scoping all report through ONE path
+ * and a new experiment kind needs no bespoke aggregate field. See
+ * {@link classifyExperimentSource} for the classification rule.
+ *
  * Record shape (subset we read; see ~/.claude/shadow-calls/SCHEMA.md for the full union):
- *   { mode: 'live'|'replay', axis: string, synthetic?: boolean,
+ *   { mode: 'live'|'replay', axis: string, synthetic?: boolean, source?: string,
  *     judge?: { winner?: 'main'|'shadow'|'tie' },
  *     main?: { tokens?: number }, shadow?: { tokens?: number } }
  */
@@ -72,12 +79,13 @@ export interface AxisAggregate {
    */
   byFinding?: Record<string, RecsFindingAggregate>;
   /**
-   * Atomic-vs-monolith verdict sub-aggregate, populated ONLY for the `config-scoping`
-   * axis (#1663, epic #1264). Lifted from each record's top-level `configScoping` triple
-   * (SCHEMA.md, #1662): monolith = MAIN arm, atomized = SHADOW arm. Undefined for every
-   * other axis and absent when no config-scoping record carried the triple, so the detector
-   * degrades to its existing per-axis behaviour. Data-driven: only sums/counts what the
-   * records actually contain — never fabricates a delta.
+   * Atomic-vs-monolith verdict sub-aggregate (#1663, epic #1264). Lifted from each
+   * record's top-level `configScoping` triple (SCHEMA.md, #1662): monolith = MAIN arm,
+   * atomized = SHADOW arm. Populated for any axis whose records carry the triple —
+   * gated on the BLOCK's presence, not the axis name (#2150) — which in practice is
+   * only the `config-scoping` runner. Absent when no record carried the triple, so the
+   * detector degrades to its existing per-axis behaviour. Data-driven: only sums/counts
+   * what the records actually contain — never fabricates a delta.
    */
   configScoping?: ConfigScopingAggregate;
 }
@@ -149,6 +157,103 @@ export interface RecsFindingAggregate {
   replay: number;
 }
 
+/**
+ * The known experiment sources (#2150). This is the documented taxonomy, NOT an
+ * enum lockout: {@link classifyExperimentSource} passes an explicit `source` stamp
+ * through verbatim, so a new experiment kind starts reporting the moment its writer
+ * stamps records — no parser change, no new aggregate field.
+ *   - `live`           — organic rotation shadow fired alongside real work (unstamped fallback)
+ *   - `replay`         — idle-window replay of a past task (unstamped fallback)
+ *   - `race-live`      — live `/race` run (explicit stamp)
+ *   - `model-eval`     — model-eval batch runner (explicit stamp, #2138)
+ *   - `proof`          — proof-batch runner (explicit stamp)
+ *   - `config-scoping` — atomic-vs-monolith config experiment (its runner predates
+ *                        source stamping, so unstamped rows on that axis classify here)
+ */
+export const KNOWN_EXPERIMENT_SOURCES = [
+  'live',
+  'replay',
+  'race-live',
+  'model-eval',
+  'proof',
+  'config-scoping',
+] as const;
+
+/**
+ * Classify one ledger record into its experiment source (#2150). An explicit
+ * `source` stamp always wins (free-form tolerant — see
+ * {@link KNOWN_EXPERIMENT_SOURCES}); unstamped records fall back to the taxonomy
+ * rule: config-scoping-axis rows were written by that dedicated runner before
+ * stamping existed, everything else is the organic engine, split by `mode`.
+ */
+export function classifyExperimentSource(rec: {
+  source?: unknown;
+  axis?: unknown;
+  mode?: unknown;
+}): string {
+  if (typeof rec.source === 'string' && rec.source.trim()) {
+    // Free-form tolerant but bounded: a runaway writer must not mint
+    // arbitrarily long aggregation keys.
+    return rec.source.trim().slice(0, 64);
+  }
+  if (rec.axis === 'config-scoping') return 'config-scoping';
+  return rec.mode === 'replay' ? 'replay' : 'live';
+}
+
+/**
+ * Cardinality bound on the (source, axis) cells (#2150): a buggy writer that
+ * stamps a per-run unique `source` (a uuid, a timestamp) must not mint one
+ * aggregate cell per ledger row. Past the cap, new sources fold into
+ * `(other)` so totals still reconcile — bounded, never silently dropped.
+ */
+export const MAX_SOURCE_AXIS_CELLS = 100;
+
+/**
+ * The ONE statement of the #2149 counting rule, shared by the aggregate parser
+ * here and the per-row log parser (`shadow-experiments.ts`) so the drill-down
+ * log can never silently disagree with the headline about which rows count.
+ */
+export function classifyShadowRecord(rec: {
+  synthetic?: unknown;
+  axis?: unknown;
+  mode?: unknown;
+}): {
+  axis: string | null;
+  mode: 'live' | 'replay' | null;
+  disposition: 'counted' | 'synthetic' | 'skipped';
+  skipReason: 'no-axis' | 'bad-mode' | null;
+} {
+  const axis = typeof rec.axis === 'string' ? rec.axis : null;
+  const mode = rec.mode === 'live' || rec.mode === 'replay' ? rec.mode : null;
+  if (rec.synthetic === true) return { axis, mode, disposition: 'synthetic', skipReason: null };
+  if (!axis) return { axis, mode, disposition: 'skipped', skipReason: 'no-axis' };
+  if (!mode) return { axis, mode, disposition: 'skipped', skipReason: 'bad-mode' };
+  return { axis, mode, disposition: 'counted', skipReason: null };
+}
+
+/**
+ * One (source, axis) cell of the uniform provenance aggregate (#2150). Every
+ * experiment kind — replay, race, model-eval, proof, config-scoping, anything
+ * future writers stamp — reports through this SAME shape, so no source ever
+ * needs a bespoke bolt-on aggregate field again.
+ */
+export interface SourceAxisAggregate {
+  source: string;
+  axis: string;
+  samples: number;
+  live: number;
+  replay: number;
+  shadowWins: number;
+  mainWins: number;
+  ties: number;
+  /** Σ(shadow.tokens − main.tokens) over records where both are known. */
+  tokenDeltaSum: number;
+  tokenDeltaCount: number;
+  /** Σ(shadow.costUsd − main.costUsd) over records where both are known (#536). */
+  costDeltaSum: number;
+  costDeltaCount: number;
+}
+
 export interface ShadowCallAggregate {
   /**
    * Every non-empty ledger line, whatever its disposition — the honest ledger size.
@@ -172,12 +277,28 @@ export interface ShadowCallAggregate {
   /** `counted` rows that ran in `replay` mode. */
   replay: number;
   byAxis: AxisAggregate[];
+  /**
+   * Uniform (source, axis) provenance cells over the `counted` rows (#2150) —
+   * the one path every experiment kind reports through. Sorted by (source, axis)
+   * so the detector + ETag stay stable. `Σ cells.samples === counted`.
+   */
+  bySourceAxis: SourceAxisAggregate[];
+  /**
+   * True when the ledger exceeded the artifact byte cap and only its newest tail
+   * was parsed (#2152): the counts above then cover a SUFFIX of the ledger, not
+   * all of it. Set by the reader (the parser itself is pure text-in), absent
+   * (never false) otherwise, and surfaced by every consumer — a capped ledger
+   * must read as "truncated", not as a smaller corpus.
+   */
+  truncated?: boolean;
 }
 
 interface ShadowRecord {
   mode?: unknown;
   axis?: unknown;
   synthetic?: unknown;
+  /** Explicit experiment-source stamp (#2150); absent on rows from older writers. */
+  source?: unknown;
   judge?: { winner?: unknown; adherenceRegressions?: unknown } | null;
   main?: { tokens?: unknown; costUsd?: unknown } | null;
   shadow?: { tokens?: unknown; costUsd?: unknown } | null;
@@ -284,10 +405,28 @@ function emptyAxis(axis: string): AxisAggregate {
   };
 }
 
+function emptySourceAxis(source: string, axis: string): SourceAxisAggregate {
+  return {
+    source,
+    axis,
+    samples: 0,
+    live: 0,
+    replay: 0,
+    shadowWins: 0,
+    mainWins: 0,
+    ties: 0,
+    tokenDeltaSum: 0,
+    tokenDeltaCount: 0,
+    costDeltaSum: 0,
+    costDeltaCount: 0,
+  };
+}
+
 export function parseShadowCalls(
   jsonlText: string | null | undefined
 ): ShadowCallAggregate {
   const byAxis = new Map<string, AxisAggregate>();
+  const bySourceAxis = new Map<string, SourceAxisAggregate>();
   // Explicit disposition buckets (#2149): total counts every non-empty line; each line
   // increments EXACTLY one of counted/synthetic/skipped, so nothing is silently dropped.
   let total = 0;
@@ -304,6 +443,7 @@ export function parseShadowCalls(
     live: 0,
     replay: 0,
     byAxis: [],
+    bySourceAxis: [],
   };
   if (!jsonlText) return empty;
 
@@ -313,25 +453,34 @@ export function parseShadowCalls(
     total++;
     let rec: ShadowRecord;
     try {
-      rec = JSON.parse(trimmed) as ShadowRecord;
+      const parsed: unknown = JSON.parse(trimmed);
+      // A line of valid-but-non-object JSON (`null`, `5`, `"x"`) is just as
+      // malformed as unparseable text — without this guard a bare `null` line
+      // would throw on the property reads below and sink the WHOLE parse.
+      if (typeof parsed !== 'object' || parsed === null) {
+        skipped++;
+        continue;
+      }
+      rec = parsed as ShadowRecord;
     } catch {
       skipped++; // malformed JSON — surfaced in `skipped`, never dropped invisibly (#2149).
       continue;
     }
-    // Hand-seeded demo/batch rows (#570): real-shaped but no source task, so they'd
-    // fabricate evidence. Surfaced in `synthetic`, never folded into byAxis/counted.
-    if (rec.synthetic === true) {
+    // The shared #2149 counting rule: synthetic rows (#570) surface in
+    // `synthetic` (real-shaped but no source task — counting them would
+    // fabricate evidence); replay-skip / no-axis / bad-or-missing mode surface
+    // in `skipped` (real work, no comparable verdict).
+    const cls = classifyShadowRecord(rec);
+    if (cls.disposition === 'synthetic') {
       synthetic++;
       continue;
     }
-    const axis = typeof rec.axis === 'string' ? rec.axis : null;
-    const mode = rec.mode === 'live' || rec.mode === 'replay' ? rec.mode : null;
-    // replay-skip / no-axis / bad-or-missing mode: real work happened but no comparable
-    // verdict, so excluded from counted — surfaced in `skipped` (#2149).
-    if (!axis || !mode) {
+    if (cls.disposition === 'skipped') {
       skipped++;
       continue;
     }
+    const axis = cls.axis!;
+    const mode = cls.mode!;
 
     counted++;
     let a = byAxis.get(axis);
@@ -339,23 +488,42 @@ export function parseShadowCalls(
       a = emptyAxis(axis);
       byAxis.set(axis, a);
     }
+    // Uniform provenance cell (#2150): the same counters, keyed (source, axis),
+    // so every experiment kind reports through one path with no bespoke fields.
+    let source = classifyExperimentSource(rec);
+    let cellKey = `${source}\u0000${axis}`;
+    if (!bySourceAxis.has(cellKey) && bySourceAxis.size >= MAX_SOURCE_AXIS_CELLS) {
+      source = '(other)';
+      cellKey = `${source}\u0000${axis}`;
+    }
+    let cell = bySourceAxis.get(cellKey);
+    if (!cell) {
+      cell = emptySourceAxis(source, axis);
+      bySourceAxis.set(cellKey, cell);
+    }
     a.samples++;
+    cell.samples++;
     if (mode === 'live') {
       a.live++;
+      cell.live++;
       live++;
     } else {
       a.replay++;
+      cell.replay++;
       replay++;
     }
 
     const winner = rec.judge?.winner;
     if (winner === 'shadow') {
       a.shadowWins++;
+      cell.shadowWins++;
       if (mode === 'live') a.liveShadowWins++;
     } else if (winner === 'main') {
       a.mainWins++;
+      cell.mainWins++;
     } else if (winner === 'tie') {
       a.ties++;
+      cell.ties++;
     }
 
     // Per-task adherence-regression dimension (#1269/#1270): a distinct judged count the
@@ -388,11 +556,17 @@ export function parseShadowCalls(
       }
     }
 
-    // Atomic-vs-monolith verdict triple, config-scoping axis only (#1663). Additive: lifted
-    // verbatim from the record's `configScoping` block (#1662) — we only sum finite numbers
-    // and tally named-arm winners, so a partial/absent triple degrades gracefully.
+    // Atomic-vs-monolith verdict triple (#1663). Additive: lifted verbatim from the
+    // record's `configScoping` block (#1662) — we only sum finite numbers and tally
+    // named-arm winners, so a partial/absent triple degrades gracefully. Gated on the
+    // BLOCK's presence, not the axis name (#2150): only the config-scoping runner
+    // writes the triple, so output is unchanged, but the parser no longer carries a
+    // per-source axis-name branch.
+    // Object-shape guard: a truthy non-object (`configScoping: true`) must not
+    // attach a zeroed aggregate to the axis — the view picks its verdict card
+    // by this field's presence, so garbage here would displace the real one.
     const cs = rec.configScoping;
-    if (axis === 'config-scoping' && cs) {
+    if (cs && typeof cs === 'object') {
       if (!a.configScoping) a.configScoping = emptyConfigScoping();
       const cfg = a.configScoping;
 
@@ -436,6 +610,8 @@ export function parseShadowCalls(
     if (typeof ms === 'number' && typeof ss === 'number') {
       a.tokenDeltaSum += ss - ms;
       a.tokenDeltaCount++;
+      cell.tokenDeltaSum += ss - ms;
+      cell.tokenDeltaCount++;
     }
 
     const mc = rec.main?.costUsd;
@@ -443,21 +619,44 @@ export function parseShadowCalls(
     if (typeof mc === 'number' && typeof sc === 'number') {
       a.costDeltaSum += sc - mc;
       a.costDeltaCount++;
+      cell.costDeltaSum += sc - mc;
+      cell.costDeltaCount++;
     }
   }
 
-  // Stable, deterministic order (by axis key) so the detector + ETag stay stable.
+  // Stable, deterministic order (by axis key / source+axis key) so the detector +
+  // ETag stay stable.
   const sorted = [...byAxis.values()].sort((x, y) => x.axis.localeCompare(y.axis));
-  return { total, counted, synthetic, skipped, live, replay, byAxis: sorted };
+  const sortedCells = [...bySourceAxis.values()].sort(
+    (x, y) => x.source.localeCompare(y.source) || x.axis.localeCompare(y.axis)
+  );
+  return {
+    total,
+    counted,
+    synthetic,
+    skipped,
+    live,
+    replay,
+    byAxis: sorted,
+    bySourceAxis: sortedCells,
+  };
 }
 
-/** Mean token delta for an axis (shadow − main), or null when no paired token data. */
-export function avgTokenDelta(a: AxisAggregate): number | null {
+/** The paired-delta counters shared by AxisAggregate and SourceAxisAggregate (#2150). */
+export interface PairedDeltas {
+  tokenDeltaSum: number;
+  tokenDeltaCount: number;
+  costDeltaSum: number;
+  costDeltaCount: number;
+}
+
+/** Mean token delta (shadow − main), or null when no paired token data. */
+export function avgTokenDelta(a: PairedDeltas): number | null {
   return a.tokenDeltaCount > 0 ? a.tokenDeltaSum / a.tokenDeltaCount : null;
 }
 
-/** Mean $ cost delta for an axis (shadow − main), or null when no paired cost data (#536). */
-export function avgCostDelta(a: AxisAggregate): number | null {
+/** Mean $ cost delta (shadow − main), or null when no paired cost data (#536). */
+export function avgCostDelta(a: PairedDeltas): number | null {
   return a.costDeltaCount > 0 ? a.costDeltaSum / a.costDeltaCount : null;
 }
 
@@ -465,7 +664,7 @@ export function avgCostDelta(a: AxisAggregate): number | null {
  * Is the shadow variation cheaper for this axis? Price-aware ($) when available (#536),
  * else falls back to raw tokens. Returns null when neither signal is present.
  */
-export function shadowCheaper(a: AxisAggregate): boolean | null {
+export function shadowCheaper(a: PairedDeltas): boolean | null {
   const cost = avgCostDelta(a);
   if (cost !== null) return cost < 0;
   const tok = avgTokenDelta(a);

@@ -416,6 +416,10 @@ export async function fetchLive(): Promise<unknown> {
   return null;
 }
 
+export async function serverFetch(): Promise<Response> {
+  throw new Error('serverFetch is unavailable in the SPA build');
+}
+
 export async function fetchMemories(): Promise<MemoriesResponse> {
   return { projects: [] };
 }

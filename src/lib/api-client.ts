@@ -407,7 +407,14 @@ function rememberEnterpriseSessionForCache(session: EnterpriseSession): void {
   }
 }
 
-function serverFetch(
+/**
+ * The shared request primitive every backend call goes through — exported so
+ * satellite seam modules (lazy-chunk clients like `@shadow-experiments-client`)
+ * delegate here instead of re-implementing auth/header/failure behavior. This
+ * keeps api-client the single owner of HOW requests are made even when a URL
+ * literal lives in a lazy seam for shell-budget reasons (ADR 0016, #2371).
+ */
+export function serverFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
   token: string | null = getEnterpriseAuthToken()

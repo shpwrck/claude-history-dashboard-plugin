@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseShadowCalls,
+  classifyExperimentSource,
   avgTokenDelta,
   avgCostDelta,
   shadowCheaper,
@@ -63,6 +64,7 @@ describe('parseShadowCalls', () => {
     live: 0,
     replay: 0,
     byAxis: [],
+    bySourceAxis: [],
   };
 
   it('returns a zeroed aggregate for empty/null input', () => {
@@ -196,6 +198,120 @@ describe('parseShadowCalls', () => {
     expect(model.replay).toBe(1);
     expect(model.shadowWins).toBe(1);
     expect(model.mainWins).toBe(1);
+  });
+});
+
+describe('parseShadowCalls — first-class experiment source taxonomy (#2150)', () => {
+  it('classifyExperimentSource: explicit stamp wins, config-scoping axis falls back, else mode', () => {
+    expect(classifyExperimentSource({ source: 'model-eval', axis: 'model', mode: 'replay' })).toBe('model-eval');
+    expect(classifyExperimentSource({ source: '  race-live ', mode: 'live' })).toBe('race-live');
+    expect(classifyExperimentSource({ source: '', axis: 'model', mode: 'replay' })).toBe('replay');
+    expect(classifyExperimentSource({ axis: 'config-scoping', mode: 'live' })).toBe('config-scoping');
+    expect(classifyExperimentSource({ axis: 'model', mode: 'replay' })).toBe('replay');
+    expect(classifyExperimentSource({ axis: 'model', mode: 'live' })).toBe('live');
+  });
+
+  it('aggregates uniformly per (source, axis) cell — no per-source bespoke field', () => {
+    const jsonl = [
+      // organic engine rows (unstamped): source falls back to the mode
+      line('model', 'live', 'shadow', 1000, 200),
+      line('model', 'replay', 'main', 900, 300),
+      // model-eval batch stamps its source explicitly (same axis as the organic rows)
+      JSON.stringify({ mode: 'replay', axis: 'model', source: 'model-eval', judge: { winner: 'shadow' }, main: { tokens: 500, costUsd: 0.3 }, shadow: { tokens: 400, costUsd: 0.1 } }),
+      // a proof-batch row on another axis
+      JSON.stringify({ mode: 'live', axis: 'skills', source: 'proof', judge: { winner: 'tie' } }),
+      // config-scoping rows classify as their own source without a stamp
+      JSON.stringify({ mode: 'live', axis: 'config-scoping', judge: { winner: 'shadow' } }),
+    ].join('\n');
+    const agg = parseShadowCalls(jsonl);
+
+    // Cells are sorted by (source, axis) and every counted row lands in exactly one.
+    expect(agg.bySourceAxis.map((c) => [c.source, c.axis])).toEqual([
+      ['config-scoping', 'config-scoping'],
+      ['live', 'model'],
+      ['model-eval', 'model'],
+      ['proof', 'skills'],
+      ['replay', 'model'],
+    ]);
+    expect(agg.bySourceAxis.reduce((sum, c) => sum + c.samples, 0)).toBe(agg.counted);
+
+    const evalCell = agg.bySourceAxis.find((c) => c.source === 'model-eval')!;
+    expect(evalCell.samples).toBe(1);
+    expect(evalCell.replay).toBe(1);
+    expect(evalCell.shadowWins).toBe(1);
+    expect(evalCell.tokenDeltaSum).toBe(-100);
+    expect(evalCell.costDeltaSum).toBeCloseTo(-0.2);
+
+    // The per-axis aggregate still folds ALL sources of an axis together (unchanged).
+    const model = agg.byAxis.find((a) => a.axis === 'model')!;
+    expect(model.samples).toBe(3);
+  });
+
+  it('an unknown future source stamp flows through with no parser change', () => {
+    const agg = parseShadowCalls(
+      JSON.stringify({ mode: 'live', axis: 'prompt', source: 'window-replay-v2', judge: { winner: 'shadow' } })
+    );
+    expect(agg.bySourceAxis).toHaveLength(1);
+    expect(agg.bySourceAxis[0].source).toBe('window-replay-v2');
+    expect(agg.bySourceAxis[0].samples).toBe(1);
+  });
+
+  it('synthetic and skipped rows never reach a source cell (consistent with #2149)', () => {
+    const agg = parseShadowCalls([
+      JSON.stringify({ mode: 'live', axis: 'model', source: 'proof', synthetic: true, judge: { winner: 'shadow' } }),
+      JSON.stringify({ mode: 'replay-skip', axis: 'model', source: 'proof' }),
+    ].join('\n'));
+    expect(agg.synthetic).toBe(1);
+    expect(agg.skipped).toBe(1);
+    expect(agg.bySourceAxis).toEqual([]);
+  });
+
+  it('a JSON `null` line counts as skipped and never crashes the parse', () => {
+    const agg = parseShadowCalls(['null', line('model', 'live', 'shadow', 100, 50)].join('\n'));
+    expect(agg.total).toBe(2);
+    expect(agg.skipped).toBe(1);
+    expect(agg.counted).toBe(1);
+  });
+
+  it('caps (source, axis) cell cardinality: past the cap new sources fold into (other), totals still reconcile', () => {
+    const lines = Array.from({ length: 120 }, (_, i) =>
+      JSON.stringify({ mode: 'live', axis: 'model', source: `uuid-${i}`, judge: { winner: 'shadow' } })
+    );
+    const agg = parseShadowCalls(lines.join('\n'));
+    expect(agg.bySourceAxis.length).toBeLessThanOrEqual(101); // cap + the (other) fold
+    const other = agg.bySourceAxis.find((c) => c.source === '(other)')!;
+    expect(other.samples).toBe(20); // rows 100..119 folded, not dropped
+    expect(agg.bySourceAxis.reduce((sum, c) => sum + c.samples, 0)).toBe(agg.counted);
+  });
+
+  it('a truthy non-object configScoping value attaches no verdict aggregate', () => {
+    const agg = parseShadowCalls(
+      JSON.stringify({ mode: 'live', axis: 'model', judge: { winner: 'shadow' }, configScoping: true })
+    );
+    expect(agg.byAxis[0].configScoping).toBeUndefined();
+  });
+
+  it('config-scoping parity: the verdict triple aggregates exactly as before (block-gated, not axis-gated)', () => {
+    // Same triple-carrying record as the #1663 fixtures — the de-special-cased
+    // parser (gate on the block, not the axis name) must produce identical output.
+    const rec = JSON.stringify({
+      mode: 'live',
+      axis: 'config-scoping',
+      judge: { winner: 'shadow' },
+      configScoping: {
+        speed: { monolithWallMs: 1000, atomizedWallMs: 600, winner: 'atomized' },
+        cost: { monolithTokens: 500, atomizedTokens: 400, monolithCostUsd: 0.3, atomizedCostUsd: 0.2, winner: 'atomized' },
+        accuracy: { gateWinner: 'tie', monolithAdherence: 10, atomizedAdherence: 9 },
+      },
+    });
+    const a = parseShadowCalls(rec).byAxis.find((x) => x.axis === 'config-scoping')!;
+    expect(a.configScoping).toBeDefined();
+    expect(a.configScoping!.speed.pairedCount).toBe(1);
+    expect(a.configScoping!.speed.atomizedWins).toBe(1);
+    expect(a.configScoping!.cost.costPairedCount).toBe(1);
+    expect(a.configScoping!.accuracy.gate.ties).toBe(1);
+    // And it reports through the uniform source path too — one config-scoping cell.
+    expect(parseShadowCalls(rec).bySourceAxis.map((c) => c.source)).toEqual(['config-scoping']);
   });
 });
 

@@ -41,6 +41,7 @@ import {
   resolveRepoMapArtifactMaxEntries,
   readArtifactTextCappedSync,
   readArtifactJsonCappedSync,
+  readJsonlTailCappedSync,
   claudeJsonProjectRoots as discoverClaudeJsonProjectRoots,
   repoMapArtifactRoots as discoverRepoMapArtifactRoots,
 } from './lib/host-producer.mjs';
@@ -422,7 +423,16 @@ function mergeStatsCaches(caches) {
   };
 }
 
-const SHADOW_CALLS_LEDGER = join(CLAUDE, 'shadow-calls', 'ledger.jsonl');
+// CLAUDE_SHADOW_CALLS_LEDGER must move BOTH readers together — this aggregate
+// path and the server's /api/shadow-experiments.json row path — or the Shadow
+// Calls view would compose two different ledgers on one page (#2152). The
+// override is GLOBAL-ingest only: a scoped enterprise ingest (CHD_SCOPED_INGEST,
+// CLAUDE swapped to the principal's data root) must derive its own root's
+// ledger, or the process-wide env value would leak the default root's
+// experiment history into a scoped member's aggregate.
+const SHADOW_CALLS_LEDGER =
+  (!SCOPED_INGEST && process.env.CLAUDE_SHADOW_CALLS_LEDGER) ||
+  join(CLAUDE, 'shadow-calls', 'ledger.jsonl');
 // `~/.claude/usage-data` holds the repo-map artifacts we ingest (REPO_MAP_DIR).
 const USAGE_DATA = join(CLAUDE, 'usage-data');
 const REPO_MAP_DIR = join(USAGE_DATA, 'repo-map');
@@ -1040,7 +1050,12 @@ export const PARSER_SIG_VERSION = 'v4';
 // would never ship. This knob (not PARSER_SIG_VERSION / SESSION_BLOB_OUTPUT) is
 // correct: the shadow ledger is a top-level artifact parsed once into the
 // dataset, NOT a per-session transcript/blob signal.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 8;
+// v9 (#2150): parseShadowCalls adds the uniform (source, axis) provenance cells
+// (`bySourceAxis`) to the shadowCalls aggregate. Same reasoning as v8: a pure
+// serialized-shape change with NO ~/.claude source-artifact change, so without
+// this bump a persisted v8 dataset blob would keep serving an aggregate with no
+// source dimension and the by-source rollup would never ship.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 9;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the
@@ -2659,10 +2674,22 @@ function assembleDatasetCore() {
 
   // Shadow-calls experiment ledger (epic #513). Optional file; absent/malformed
   // ⇒ a zeroed aggregate, so the shadow-axis-wins detector simply emits nothing.
+  // Tail-capped read (#2152): an oversized ledger degrades to its newest tail
+  // with `truncated: true` surfaced on the aggregate, instead of the old capped
+  // read throwing and this catch silently serving a ZEROED aggregate — months of
+  // experiment evidence must never vanish without a visible flag.
   let shadowCalls = parseShadowCalls(null);
   if (existsSync(SHADOW_CALLS_LEDGER)) {
     try {
-      shadowCalls = parseShadowCalls(readArtifactTextCappedSync(SHADOW_CALLS_LEDGER));
+      const ledger = readJsonlTailCappedSync(SHADOW_CALLS_LEDGER);
+      shadowCalls = parseShadowCalls(ledger.text);
+      if (ledger.truncated) {
+        shadowCalls.truncated = true;
+        console.warn(
+          `[ingest] shadow-calls ledger exceeds the ${ARTIFACT_FILE_MAX_BYTES}-byte artifact cap ` +
+            `(${ledger.totalBytes} bytes); parsed only the newest tail and flagged the aggregate truncated`
+        );
+      }
     } catch {
       /* ignore unreadable ledger */
     }

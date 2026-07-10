@@ -20,6 +20,7 @@ import { join } from 'node:path';
 const {
   readArtifactTextCappedSync,
   readArtifactJsonCappedSync,
+  readJsonlTailCappedSync,
   isArtifactFileTooLargeError,
   unwrapHostArtifactRoot,
   claudeJsonProjectRoots,
@@ -50,6 +51,47 @@ test('capped read throws ERR_DASHBOARD_ARTIFACT_FILE_TOO_LARGE past the cap (the
       () => readArtifactJsonCappedSync(big, 1024),
       (err) => isArtifactFileTooLargeError(err)
     );
+  });
+});
+
+test('tail-capped JSONL read returns the whole file untruncated within the cap (#2152)', () => {
+  withTmp((dir) => {
+    const f = join(dir, 'ledger.jsonl');
+    const lines = ['{"a":1}', '{"a":2}', '{"a":3}'].join('\n') + '\n';
+    writeFileSync(f, lines);
+    const out = readJsonlTailCappedSync(f, 1 << 20);
+    assert.equal(out.text, lines);
+    assert.equal(out.truncated, false);
+    assert.equal(out.totalBytes, Buffer.byteLength(lines));
+  });
+});
+
+test('tail-capped JSONL read DEGRADES past the cap: newest whole lines + truncated flag, never a throw (#2152)', () => {
+  withTmp((dir) => {
+    const f = join(dir, 'ledger.jsonl');
+    // 100 fixed-width numbered lines so the cap cuts mid-line deterministically.
+    const line = (i) => `{"n":"${String(i).padStart(7, '0')}"}`;
+    const lines = Array.from({ length: 100 }, (_, i) => line(i));
+    writeFileSync(f, lines.join('\n') + '\n');
+    // Cap of 256 = exactly 16 of the 16-byte lines: the window is record-aligned,
+    // so ALL 16 whole lines survive (an intact first line must not be dropped).
+    const aligned = readJsonlTailCappedSync(f, 256);
+    assert.equal(aligned.truncated, true);
+    const keptAligned = aligned.text.split('\n').filter(Boolean);
+    assert.equal(keptAligned.length, 16);
+    for (const k of keptAligned) assert.doesNotThrow(() => JSON.parse(k));
+    assert.equal(keptAligned[0], line(84));
+    assert.equal(keptAligned[keptAligned.length - 1], line(99));
+
+    // Cap of 250 lands mid-record: the partial first line is dropped, whole
+    // newest lines survive.
+    const unaligned = readJsonlTailCappedSync(f, 250);
+    assert.equal(unaligned.truncated, true);
+    const keptUnaligned = unaligned.text.split('\n').filter(Boolean);
+    assert.equal(keptUnaligned.length, 15);
+    for (const k of keptUnaligned) assert.doesNotThrow(() => JSON.parse(k));
+    assert.equal(keptUnaligned[0], line(85));
+    assert.equal(keptUnaligned[keptUnaligned.length - 1], line(99));
   });
 });
 
