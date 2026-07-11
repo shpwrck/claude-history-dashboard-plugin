@@ -103,6 +103,7 @@ import { detector as conversationalAvailability } from './workflow/conversationa
 import { detector as reclaimWaitWindows } from './workflow/reclaim-wait-windows';
 import { detector as proceduralMemory } from './workflow/procedural-memory';
 import { detector as valueOfAgentHandoff } from './workflow/value-of-agent-handoff';
+import { detector as sessionRestartRetype } from './workflow/session-restart-retype';
 
 // ── SAFETY ──────────────────────────────────────────────────────────────
 import { detector as dangerousBypass } from './safety/dangerous-bypass';
@@ -423,6 +424,14 @@ export const DETECTORS: Detector[] = [
   // human-minute hypothesis backed by accounting observations; the published
   // calibrated rec class is deferred to the sibling profiling receipt.
   valueOfAgentHandoff,
+
+  // ── #2505 (epic #2199) — session-restart retype (cross-session re-explain) ──
+  // The prompt-level sibling of cross-session-reread (files) and procedural-memory
+  // (Bash procedures): near-duplicate OPENERS across DISTINCT same-project sessions
+  // within a 7-day window — re-explaining the task instead of `claude --resume`.
+  // Excludes short/slash-command openers and sdk-* automation (deliberate reuse);
+  // accounting-tier, non-validated CLAUDE.md fix. Dark on an opener-less dataset.
+  sessionRestartRetype,
 
   // ── #1882 (epic #1910) — rolling "last N runs" maintenance audit ───────────
   // Orders sessions chronologically, compares the most recent N runs' mean peak

@@ -539,6 +539,51 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now: Date.parse('2026-07-09T00:00:00Z'),
     };
   },
+  'workflow.session-restart-retype': () => {
+    // Two DISTINCT same-project sessions whose long human openers are
+    // near-identical (well above the token-shingle floor), one day apart.
+    const mkTok = (
+      sessionId: string,
+      opener: string,
+      ts: string
+    ): RecommendationInput['tokenData'][number] =>
+      ({
+        sessionId,
+        project: '/repo/app',
+        entrypoint: 'cli',
+        opener,
+        entries: [
+          {
+            timestamp: ts,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheCreation1hTokens: 0,
+            cacheReadTokens: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+            model: 'claude-opus-4-8',
+          },
+        ],
+        compactionEvents: [],
+      }) as unknown as RecommendationInput['tokenData'][number];
+    const tokenData = [
+      mkTok(
+        'retype-a',
+        'Continue implementing the OAuth login flow for the dashboard and wire up the session cookie and the redirect handler and cover it with tests',
+        '2026-07-07T00:00:00.000Z'
+      ),
+      mkTok(
+        'retype-b',
+        'Continue implementing the OAuth login flow for the dashboard and wire up the session cookie and the redirect handler and finish the tests',
+        '2026-07-08T00:00:00.000Z'
+      ),
+    ];
+    return {
+      input: baseInput({ tokenData }),
+      now: Date.parse('2026-07-09T00:00:00Z'),
+    };
+  },
   'activity.activity-trend': () => ({
     input: activityInput(makeCache(12576, 2373)),
     now: Date.parse('2026-06-04T00:00:00Z'),

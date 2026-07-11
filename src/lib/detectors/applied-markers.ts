@@ -135,6 +135,10 @@ export const MARKERS_VALUE_OF_AGENT_HANDOFF: AppliedMarkers = {
   ],
   bodyPhrases: ['durable external state changes need a handoff artifact'],
 };
+export const MARKERS_SESSION_RESTART_RETYPE: AppliedMarkers = {
+  headings: [/^##\s+Resume prior sessions instead of re-?typing\b/i],
+  bodyPhrases: ['resume the prior session instead of re-explaining the task'],
+};
 
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
@@ -156,6 +160,7 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['workflow.correction-mining', MARKERS_CORRECTIONS],
   ['workflow.human-input-leverage', MARKERS_HUMAN_INPUT_LEVERAGE],
   ['workflow.value-of-agent-handoff', MARKERS_VALUE_OF_AGENT_HANDOFF],
+  ['workflow.session-restart-retype', MARKERS_SESSION_RESTART_RETYPE],
   ['context.over-window', MARKERS_OVER_WINDOW],
   ['context.compaction-large-tool-outputs', MARKERS_COMPACTION_LARGE_TOOL_OUTPUTS],
   ['cost.web-search-spend', MARKERS_WEB_SEARCH_SPEND],

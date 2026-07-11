@@ -3052,6 +3052,54 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // workflow.session-restart-retype (#2505): two DISTINCT same-project sessions
+  // whose long human openers are near-identical, one day apart → cross-session
+  // re-explanation of the same task.
+  {
+    const retypeTok = (
+      sessionId: string,
+      opener: string,
+      ts: string
+    ): SessionTokenData =>
+      ({
+        sessionId,
+        project: '/repo/app',
+        entrypoint: 'cli',
+        opener,
+        entries: [
+          {
+            timestamp: ts,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheCreation1hTokens: 0,
+            cacheReadTokens: 0,
+            webSearchRequests: 0,
+            webFetchRequests: 0,
+            model: 'claude-opus-4-8',
+          },
+        ],
+        compactionEvents: [],
+      }) as unknown as SessionTokenData;
+    out.push({
+      now,
+      input: bankBase({
+        tokenData: [
+          retypeTok(
+            'retype-a',
+            'Continue implementing the OAuth login flow for the dashboard and wire up the session cookie and the redirect handler and cover it with tests',
+            new Date(now - 24 * 60 * 60 * 1000).toISOString()
+          ),
+          retypeTok(
+            'retype-b',
+            'Continue implementing the OAuth login flow for the dashboard and wire up the session cookie and the redirect handler and finish the tests',
+            new Date(now).toISOString()
+          ),
+        ],
+      }),
+    });
+  }
+
   return out;
 }
 
