@@ -151,6 +151,7 @@ import { detector as activityTrend } from './activity/activity-trend';
 // ── MAINTENANCE ───────────────────────────────────────────────────────────
 // Upkeep of the agent's own durable state (#1965 category foundation).
 import { detector as memoryHygiene } from './maintenance/memory-hygiene';
+import { detector as docHygiene } from './maintenance/doc-hygiene';
 
 // ── Registered detectors ────────────────────────────────────────────────
 // Emit order is LOAD-BEARING: `buildRecommendations` evaluates these in array
@@ -434,6 +435,13 @@ export const DETECTORS: Detector[] = [
   // dangling index link, unindexed file, dangling wikilink — grouped into one
   // recommend-only card. Dark on a memory-store-free dataset (SPA/upload).
   memoryHygiene,
+
+  // ── #2258 (epic #2256) — doc-artifact hygiene: the docs analogue of the
+  // memory-store audit. Reads the repo doc graph (#2257 buildDocGraph) and emits
+  // three deterministic signals — broken internal links, orphaned docs, and
+  // dangling `src/…` references (cross-checked against the repo-map inventory) —
+  // grouped into one recommend-only card. Dark on a doc-graph-free dataset.
+  docHygiene,
 ];
 
 /**

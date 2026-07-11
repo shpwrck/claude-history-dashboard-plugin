@@ -319,6 +319,24 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     input: baseInput({ memoryStores: memoryHygieneStore() }),
     now: 0,
   }),
+  'maintenance.doc-hygiene': () => {
+    // A doc whose in-scope `md-link` resolves to a slug with no node on disk →
+    // broken-internal-link (structural), with cited docGraph provenance.
+    const docGraph = {
+      nodes: [
+        {
+          slug: 'docs/guide',
+          path: 'docs/guide.md',
+          category: 'doc',
+          frontmatter: {},
+          headings: [],
+          gitMtimeIso: null,
+        },
+      ],
+      edges: [{ from: 'docs/guide', to: 'docs/missing', kind: 'md-link' }],
+    } as unknown as RecommendationInput['docGraph'];
+    return { input: baseInput({ docGraph }), now: 0 };
+  },
   'workflow.procedural-memory': () => {
     // The same contiguous 3-step Bash procedure recurs across 3 sessions with a
     // present-but-empty skill inventory (liveConfig is REQUIRED — the finding

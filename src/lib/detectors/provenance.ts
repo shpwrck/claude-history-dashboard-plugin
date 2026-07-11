@@ -36,6 +36,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'context.last-n-runs-audit',
   'context.reclaim-potential',
   'maintenance.memory-hygiene',
+  'maintenance.doc-hygiene',
   'reliability.discovery-freshness',
   'workflow.procedural-memory',
   'workflow.human-input-leverage',

@@ -2779,6 +2779,26 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ memoryStores }) });
   }
 
+  // ── maintenance.doc-hygiene (#2258): a doc whose in-scope `md-link` resolves
+  // to a slug with no node on disk (broken-internal-link, one of the three
+  // deterministic signals over the #2257 doc graph).
+  {
+    const docGraph = {
+      nodes: [
+        {
+          slug: 'docs/guide',
+          path: 'docs/guide.md',
+          category: 'doc',
+          frontmatter: {},
+          headings: [],
+          gitMtimeIso: null,
+        },
+      ],
+      edges: [{ from: 'docs/guide', to: 'docs/missing', kind: 'md-link' }],
+    } as unknown as RecommendationInput['docGraph'];
+    out.push({ now, input: bankBase({ docGraph }) });
+  }
+
   // ── reliability.cwd-drift-execution (#1870): unanchored git/gh reads
   // (`git log origin/master`, `gh pr view`) with no `-C`/`cd`/`-R` anchor.
   {

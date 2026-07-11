@@ -22,15 +22,18 @@ import type { RecommendationViews } from './recommendations';
 
 /**
  * Engine-consumed fields the client envelope does not supply. `gitOutcomes`,
- * `memoryStores`, and `organizationIdentity` are server-side ingest artifacts
- * no client dataset carries. `modelPinSavings` is different: not supplied
- * here, but `assembleRecommendationInput` derives it from `tokenData`, so its
- * detectors still run on every surface (it is excluded from
- * `listOmittedEngineSignals` for exactly that reason).
+ * `memoryStores`, `docGraph`, and `organizationIdentity` are server-side ingest
+ * artifacts no client dataset carries (`docGraph` is built at ingest from a
+ * local repo-docs walk, #2258, and omitted in SPA/upload datasets).
+ * `modelPinSavings` is different: not supplied here, but
+ * `assembleRecommendationInput` derives it from `tokenData`, so its detectors
+ * still run on every surface (it is excluded from `listOmittedEngineSignals`
+ * for exactly that reason).
  */
 export const CLIENT_ABSENT_ENGINE_FIELDS: readonly string[] = [
   'gitOutcomes',
   'memoryStores',
+  'docGraph',
   'modelPinSavings',
   'organizationIdentity',
 ];
