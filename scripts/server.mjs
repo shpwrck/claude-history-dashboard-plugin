@@ -1231,11 +1231,28 @@ function enterpriseDataRootKey(dataRoot) {
 }
 
 function scopedIngestDbPath(dataRoot) {
-  return join(
+  const destinationPath = join(
     CHD_CACHE_DIR,
     'enterprise-roots',
     `${enterpriseDataRootKey(dataRoot)}.db`
   );
+  const legacyPath = join(
+    PROJECT_DIR,
+    '.cache',
+    'enterprise-roots',
+    `${enterpriseDataRootKey(dataRoot)}.db`
+  );
+  // A SQLite database may have live WAL/SHM sidecars, so moving its files one
+  // at a time is not atomic. Prefer the relocated DB once it exists; otherwise
+  // keep the complete legacy bundle in place instead of silently rebuilding it.
+  if (
+    destinationPath !== legacyPath &&
+    !existsSync(destinationPath) &&
+    existsSync(legacyPath)
+  ) {
+    return legacyPath;
+  }
+  return destinationPath;
 }
 
 function restoreEnvValue(name, value) {

@@ -75,7 +75,9 @@ async function readPid() {
   try {
     const raw = await readFile(pidFile(), 'utf8');
     const n = parseInt(raw.trim(), 10);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    // POSIX kill(-1, signal) targets every process the caller may signal, not
+    // process group 1. Never allow corrupted state to reach that special case.
+    return Number.isFinite(n) && n > 1 ? n : null;
   } catch {
     return null;
   }
@@ -106,6 +108,23 @@ function isRunning(pid) {
     // ESRCH means no such process.
     return err.code === 'EPERM';
   }
+}
+
+/**
+ * Detached children own a process group on POSIX, so lifecycle signals must
+ * target the group rather than only its leader. Windows does not support
+ * negative process-group PIDs through process.kill().
+ */
+function managedTarget(pid) {
+  return process.platform === 'win32' ? pid : -pid;
+}
+
+function isManagedTargetRunning(pid) {
+  return isRunning(managedTarget(pid));
+}
+
+function signalManagedTarget(pid, signal) {
+  process.kill(managedTarget(pid), signal);
 }
 
 /** Find a free TCP port by letting the OS pick one on 127.0.0.1. */
@@ -165,6 +184,18 @@ async function cmdStart() {
     return;
   }
 
+  // A detached descendant can outlive the server leader on POSIX. Keep the
+  // group id in the state file so `stop` can still reap it instead of silently
+  // abandoning that group and starting a second server.
+  if (existingPid !== null && isManagedTargetRunning(existingPid)) {
+    process.stderr.write(
+      `plugin-ctl: dashboard pid ${existingPid} exited but its process group is still active.\n` +
+        `  Run \`node scripts/plugin-ctl.mjs stop\` before starting again.\n`
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   // Clean up stale state files from a dead process.
   if (existingPid !== null) {
     await rm(pidFile(), { force: true });
@@ -197,6 +228,18 @@ async function cmdStart() {
     }
   );
 
+  try {
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+  } catch (err) {
+    closeSync(outFd);
+    process.stderr.write(`plugin-ctl: failed to start dashboard: ${err.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
   // Close the fds in the parent -- the child inherits them.
   closeSync(outFd);
 
@@ -218,7 +261,7 @@ async function cmdStop() {
     process.stdout.write('Dashboard is not running (no pid file).\n');
     return;
   }
-  if (!isRunning(pid)) {
+  if (!isManagedTargetRunning(pid)) {
     process.stdout.write(`Dashboard (pid ${pid}) is already gone.\n`);
     await rm(pidFile(), { force: true });
     await rm(portFile(), { force: true });
@@ -226,21 +269,28 @@ async function cmdStop() {
   }
 
   try {
-    process.kill(pid, 'SIGTERM');
+    signalManagedTarget(pid, 'SIGTERM');
   } catch (err) {
     if (err.code !== 'ESRCH') throw err;
   }
 
-  // Wait up to 5 s for the process to exit.
+  // Windows implements SIGTERM as TerminateProcess rather than a graceful
+  // signal, but termination can still complete asynchronously while I/O drains.
   const deadline = Date.now() + 5000;
-  while (Date.now() < deadline && isRunning(pid)) {
+  while (Date.now() < deadline && isManagedTargetRunning(pid)) {
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  if (isRunning(pid)) {
-    // Force-kill if graceful shutdown didn't happen.
+  if (isManagedTargetRunning(pid)) {
+    if (process.platform === 'win32') {
+      process.stderr.write(`plugin-ctl: dashboard pid ${pid} did not finish terminating.\n`);
+      process.exitCode = 1;
+      return;
+    }
+
+    // POSIX SIGTERM is graceful; force-kill any remaining children and leader.
     try {
-      process.kill(pid, 'SIGKILL');
+      signalManagedTarget(pid, 'SIGKILL');
     } catch {
       /* already gone */
     }
@@ -258,6 +308,12 @@ async function cmdStatus() {
     return;
   }
   if (!isRunning(pid)) {
+    if (isManagedTargetRunning(pid)) {
+      process.stdout.write(
+        `stopped (pid ${pid} not found; descendant process remains -- run stop to clean up)\n`
+      );
+      return;
+    }
     process.stdout.write(`stopped (pid ${pid} not found; stale pid file)\n`);
     await rm(pidFile(), { force: true });
     await rm(portFile(), { force: true });

@@ -42,9 +42,9 @@ async function fileMode(path) {
   }
 }
 
-function scopedCacheDbPath(dataRoot) {
+function scopedCacheDbPath(dataRoot, cacheDir = join(PROJECT_DIR, '.cache')) {
   const key = createHash('sha256').update(dataRoot).digest('hex').slice(0, 24);
-  return join(PROJECT_DIR, '.cache', 'enterprise-roots', `${key}.db`);
+  return join(cacheDir, 'enterprise-roots', `${key}.db`);
 }
 
 async function freePort() {
@@ -203,7 +203,11 @@ async function startServer(extraEnv = {}) {
     distDir,
     auditLog,
     async stop() {
-      proc.kill();
+      if (proc.exitCode === null) {
+        const exited = new Promise((resolve) => proc.once('exit', resolve));
+        proc.kill();
+        await exited;
+      }
       await rm(claudeDir, { recursive: true, force: true });
       await rm(distDir, { recursive: true, force: true });
     },
@@ -2094,6 +2098,38 @@ try {
   );
 } finally {
   await server.stop();
+}
+
+const relocatedScopedCache = await mkdtemp(join(tmpdir(), 'enterprise-scoped-cache-'));
+check(
+  'enterprise scoped cache legacy db exists before relocation',
+  (await fileMode(scopedCacheDbPath(scopedRootA))) === 0o600
+);
+server = await startServer({
+  DASHBOARD_AUTH_MODE: 'enterprise',
+  DASHBOARD_AUTH_TOKENS: scopedCacheTokenConfig(scopedRootA, scopedRootB),
+  DASHBOARD_ORG_ID: 'acme',
+  DASHBOARD_ORG_NAME: 'Acme',
+  CHD_CACHE_DIR: relocatedScopedCache,
+});
+try {
+  const r = await fetch(`${server.base}/api/dataset.json`, {
+    headers: { Authorization: 'Bearer enterprise-member-a-token' },
+  });
+  const bodyText = await r.text();
+  check('enterprise relocated scoped cache dataset -> 200', r.status === 200, `got ${r.status}`);
+  check('enterprise relocated scoped cache reads root A', bodyText.includes('/tenant/a'));
+  check(
+    'enterprise scoped cache keeps using legacy db fallback',
+    (await fileMode(scopedCacheDbPath(scopedRootA))) === 0o600
+  );
+  check(
+    'enterprise scoped cache does not silently rebuild relocated db',
+    (await fileMode(scopedCacheDbPath(scopedRootA, relocatedScopedCache))) === -1
+  );
+} finally {
+  await server.stop();
+  await rm(relocatedScopedCache, { recursive: true, force: true });
   await rm(scopedRootA, { recursive: true, force: true });
   await rm(scopedRootB, { recursive: true, force: true });
 }
