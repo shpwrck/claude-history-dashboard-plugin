@@ -61,7 +61,8 @@ check(
   'mcp-shim.mjs declares all four expected tools',
   shimSrc.includes('dashboard_status') &&
     shimSrc.includes('get_recommendations') &&
-    shimSrc.includes('top_frictions'),
+    shimSrc.includes('top_frictions') &&
+    shimSrc.includes('doc_neighborhood'),
   'Missing one or more tool names in mcp-shim.mjs'
 );
 
