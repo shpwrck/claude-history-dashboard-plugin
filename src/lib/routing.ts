@@ -48,6 +48,13 @@ export const ROUTE_FILTER_KEYS = [
   // per-entry) hands off with matching entry-level semantics — unlike `mode`,
   // which substring-matches whole sessions on their last-model-wins fields.
   'family',
+  // Rec-focus drill (#2437): the Recommendations view scrolls to / focuses the
+  // recommendation card whose id matches (via its `rec-<id>` data-signal-id
+  // anchor). A Reclaim Compass lever row's "Open recommendation evidence"
+  // button carries its `leverId` here — the leverId IS a recommendation id
+  // (e.g. `cost.output-verbosity`) — so the per-lever button lands scoped
+  // instead of on the unscoped Recommendations list.
+  'rec',
   'entrypoint',
   'pattern',
   'table',

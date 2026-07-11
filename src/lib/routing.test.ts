@@ -166,6 +166,16 @@ describe('parseRoute', () => {
       filter: { time: '30d', project: 'All projects' },
     });
   });
+
+  it('parses a rec-focus filter for the Recommendations view (#2437)', () => {
+    expect(
+      parseRoute('#/recommendations?rec=cost.output-verbosity')
+    ).toEqual({
+      view: 'recommendations',
+      viewFilter: { rec: 'cost.output-verbosity' },
+      filter: DEFAULT_DASHBOARD_FILTER,
+    });
+  });
 });
 
 describe('routeToHash', () => {
@@ -218,6 +228,16 @@ describe('routeToHash', () => {
     ).toBe(
       '#/permissions?entrypoint=unattended&pattern=rm+-rf&table=policy'
     );
+  });
+
+  it('round-trips a rec-focus filter through parseRoute (#2437)', () => {
+    const hash = routeToHash('recommendations', {
+      viewFilter: { rec: 'cost.output-verbosity' },
+    });
+    expect(hash).toBe('#/recommendations?rec=cost.output-verbosity');
+    expect(parseRoute(hash).viewFilter).toEqual({
+      rec: 'cost.output-verbosity',
+    });
   });
 });
 

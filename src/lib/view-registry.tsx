@@ -1026,11 +1026,12 @@ export const VIEW_RENDERERS: Partial<
       onActiveDomains={n.onActiveDomains}
     />
   ),
-  recommendations: ({ data: d, nav: n, filter, serverAvailable }) => (
+  recommendations: ({ data: d, nav: n, filter, routeFilter, serverAvailable }) => (
     <Recommendations
       {...recommendationViewsFromViewData(d)}
       serverAvailable={serverAvailable}
       activeFilter={filter}
+      routeFilter={routeFilter}
       onNavigate={n.navigateWithFilter}
       navigateWithFilter={n.navigateWithFilter}
       onOpenSession={n.openSession}
