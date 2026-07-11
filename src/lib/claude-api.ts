@@ -10,13 +10,19 @@
  * (Anthropic refuses browser-origin requests without it).
  */
 
-const API_KEY_STORAGE = 'claude-history-dashboard:anthropic-api-key';
 const MODEL_STORAGE = 'claude-history-dashboard:anthropic-default-model';
 
 import {
   ANTHROPIC_PICKER_MODELS,
   CURRENT_MODEL_IDS,
 } from './model-registry';
+// API-key custody lives in the dependency-free `api-key` module (#2371) so the
+// eager first-paint shell can read the key without dragging this file — and the
+// model-registry tables above — into the `index` chunk. Imported here for the
+// internal `chat()` default AND re-exported so existing consumers of
+// `getApiKey`/`setApiKey`/`clearApiKey` from `claude-api` keep working.
+import { getApiKey, setApiKey, clearApiKey } from './api-key';
+export { getApiKey, setApiKey, clearApiKey };
 
 export const ANTHROPIC_MODELS = ANTHROPIC_PICKER_MODELS;
 
@@ -27,45 +33,6 @@ export const DEFAULT_MODEL: AnthropicModelId = CURRENT_MODEL_IDS.sonnet;
 
 const ANTHROPIC_BASE = 'https://api.anthropic.com/v1';
 const ANTHROPIC_VERSION = '2023-06-01';
-
-// The Ask-Claude key lives in sessionStorage, not localStorage (#2063): it is
-// cleared on tab close and not shared across tabs, shrinking the window in which
-// a script in the origin could read it, and matching where the enterprise auth
-// token is held. getApiKey migrates a key written by an older localStorage-based
-// build so users don't have to re-enter it once.
-export function getApiKey(): string | null {
-  try {
-    const current = sessionStorage.getItem(API_KEY_STORAGE);
-    if (current !== null) return current;
-    const legacy = localStorage.getItem(API_KEY_STORAGE);
-    if (legacy !== null) {
-      sessionStorage.setItem(API_KEY_STORAGE, legacy);
-      localStorage.removeItem(API_KEY_STORAGE);
-      return legacy;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-export function setApiKey(key: string): void {
-  try {
-    sessionStorage.setItem(API_KEY_STORAGE, key);
-  } catch {
-    /* sessionStorage may be disabled (private mode etc.) — silently fail */
-  }
-}
-
-export function clearApiKey(): void {
-  try {
-    sessionStorage.removeItem(API_KEY_STORAGE);
-    // Also drop any key left by an older localStorage-based build.
-    localStorage.removeItem(API_KEY_STORAGE);
-  } catch {
-    /* see setApiKey */
-  }
-}
 
 export function getDefaultModel(): AnthropicModelId {
   try {
