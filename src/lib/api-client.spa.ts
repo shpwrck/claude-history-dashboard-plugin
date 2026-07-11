@@ -19,6 +19,7 @@ import type { SteerRuleTelemetry } from './steer-telemetry-types';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
+import type { LocalAnalyzeResult } from './local-analyze';
 
 /** False in the SPA build — gates all server-only UI off. */
 export const SERVER_AVAILABLE = false;
@@ -516,6 +517,20 @@ export async function writePolicy(): Promise<PolicyWriteResult> {
 export type RejectSignalWriteResult = { ok: true } | { ok: false; error: string };
 export async function postRejectSignal(): Promise<RejectSignalWriteResult> {
   return { ok: false, error: UNAVAILABLE };
+}
+
+// Tier A "Analyze locally" (#2319) needs the server (it fronts the local model);
+// the upload-only SPA has no server, so this degrades to a deterministic result
+// with no recommendations rather than erroring — matching the real client's
+// graceful-degradation contract. Carries no `/api/` literal.
+export async function analyzeLocal(): Promise<LocalAnalyzeResult> {
+  return {
+    source: 'deterministic',
+    recommendations: [],
+    analysis: null,
+    model: null,
+    reason: UNAVAILABLE,
+  };
 }
 
 // Session provisioning (#1251) is a server-tier feature; the upload-only SPA cannot reach a cluster.

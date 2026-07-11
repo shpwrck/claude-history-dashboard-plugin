@@ -70,6 +70,21 @@ export const ENTERPRISE_ROUTE_ACCESS_POLICIES = {
     transcriptExposure: 'none',
     mutating: true,
   },
+  // Tier A "Analyze locally" (#2319, ADR 0018). POST, so the runtime gate treats
+  // it as privileged (canWritePolicy) — admin-only under enterprise auth. It is
+  // NON-mutating: it reads the deterministic recommendations and runs a LOCAL
+  // model over them. Egress is loopback-only (assertLoopbackEndpoint) with NO
+  // Anthropic API call and no external fallback, so no ADR-0008 governance surface
+  // attaches to it (ADR 0018 §Consequences).
+  'local-analyze': {
+    allowedPrincipals: ADMIN_PRINCIPALS,
+    requiredCapability: 'canWritePolicy',
+    scopePosture: 'org:read (POST-gated) — local-model analysis, no external egress',
+    dataBoundary:
+      'local-model analysis over organization-derived recommendations; egress is loopback-only (ADR 0018), no Anthropic API call',
+    transcriptExposure: 'derived recommendation evidence only',
+    mutating: false,
+  },
   'session-dispatch': {
     allowedPrincipals: ADMIN_PRINCIPALS,
     requiredCapability: 'canWritePolicy',
@@ -179,6 +194,7 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'exact', value: '/api/policy/write', access: 'policy-write' },
   { kind: 'exact', value: '/api/adoption/receipts', access: 'organization-data' },
   { kind: 'exact', value: '/api/recommendations/reject', access: 'policy-write' },
+  { kind: 'exact', value: '/api/analyze/local', access: 'local-analyze' },
   { kind: 'exact', value: '/api/steer-telemetry', access: 'organization-data' },
   { kind: 'exact', value: '/api/sessions', access: 'session-dispatch' },
   { kind: 'prefix', value: '/api/sessions/', access: 'session-dispatch' },

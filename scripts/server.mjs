@@ -195,6 +195,17 @@ const { callAnthropic, callAnthropicMessages, egressScrub } = await import(
 const { getLlmUsageEntry } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'llm-registry.ts')
 );
+// Tier A "Analyze locally" (#2319, ADR 0018): a LOCAL-model analysis surface over
+// the deterministic recommendation call sites. The transport is loopback-pinned
+// (local-model-client) so this NEVER egresses to a third-party API, and there is
+// no Anthropic fallback wired — an unset/unreachable endpoint degrades to the
+// deterministic engine result. NOT the removed "insights" button; never mimics
+// the CLI /insights report.
+const { callLocalModel, readLocalModelConfig } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'local-model-client.ts')
+);
+const { buildLocalAnalyzePrompt, degradedResult, extractRecommendations } =
+  await import(join(PROJECT_DIR, 'src', 'lib', 'local-analyze.ts'));
 // Tier-3 judge-audit harness (#605/#738) lives in src/lib/audit/judge.ts.
 // The route injects a governed chat function rather than letting the audit core
 // own network egress, so the SPA bundle and browser client stay decoupled.
@@ -4190,6 +4201,118 @@ async function handleRejectSignalWrite(req, res) {
   // — so a future fallible change here can never silently serve a stale body.
   invalidateRecommendationsCaches();
   return sendJson(res, 200, result);
+}
+
+// POST /api/analyze/local — Tier A "Analyze locally" (#2319, ADR 0018).
+//
+// Runs a LOCAL model over the SAME deterministic recommendation call sites as
+// /api/recommendations.json. This is a user-initiated, seconds-latency surface
+// (NOT the session-critical path), and it is explicitly NOT the removed
+// "Re-generate insights with Claude" button — it never mimics the CLI /insights
+// report.
+//
+// GOVERNANCE (ADR 0018 hard guardrails, enforced here + in local-model-client):
+//  - Egress is LOOPBACK-ONLY. callLocalModel routes through assertLoopbackEndpoint,
+//    which refuses any non-loopback host, so this route cannot reach a third-party
+//    API. There is NO Anthropic fallback wired in v0.6.0.
+//  - The default path makes ZERO network calls: an unset endpoint
+//    (CHD_LOCAL_MODEL_ENDPOINT) short-circuits to the deterministic result.
+//  - Graceful degradation: an unset/unreachable/refused endpoint — or even a
+//    failed deterministic build — returns HTTP 200 with the deterministic engine
+//    result (source: 'deterministic'), never a 5xx.
+async function handleAnalyzeLocal(req, res) {
+  // Optional JSON body { project?: string }; a missing/invalid body analyzes the
+  // global scope. Reading it also drains the request stream before ingest.
+  let project = null;
+  try {
+    const raw = await readRequestBody(req);
+    if (raw && raw.trim()) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && typeof parsed.project === 'string') {
+        project = parsed.project;
+      }
+    }
+  } catch {
+    // Body is optional; ignore framing/parse errors and analyze the global scope.
+  }
+
+  // Deterministic recommendations over the SAME assemble path the recs route uses
+  // (#2196/#2182): ingest -> memoized recommendation dataset -> assembleRecommendations.
+  // Built directly (not through the recs response cache) so this route never
+  // touches that route's single-flight/stale-while-revalidate slots.
+  let recommendations = [];
+  try {
+    const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+      useCache: true,
+    });
+    const stats = ingestApi.ingest();
+    const dataset = memoizedAssembleRecommendationDataset(
+      ingestState,
+      ingestApi,
+      stats.contentHash
+    );
+    const rejectedFindingIds = await ingestApi.readRejectedFindingIds(
+      ADOPTION_RECEIPTS
+    );
+    const organizationIdentity = enterpriseRecommendationIdentity(req);
+    const recs = ingestApi.assembleRecommendations(project || undefined, {
+      organizationIdentity,
+      dataset,
+      rejectedFindingIds,
+    });
+    recommendations = extractRecommendations(recs);
+  } catch (err) {
+    // Even the deterministic build failed — still answer (no throw), empty recs.
+    return sendJson(
+      res,
+      200,
+      degradedResult(
+        [],
+        `Recommendation engine unavailable: ${err?.message || err}`
+      )
+    );
+  }
+
+  // Local endpoint unset => operator has not opted in => degrade with zero calls.
+  const config = readLocalModelConfig();
+  if (!config) {
+    return sendJson(
+      res,
+      200,
+      degradedResult(
+        recommendations,
+        'Local model endpoint not configured (set CHD_LOCAL_MODEL_ENDPOINT to a loopback OpenAI-compatible endpoint)'
+      )
+    );
+  }
+
+  const { system, user } = buildLocalAnalyzePrompt(recommendations);
+  try {
+    const result = await callLocalModel({
+      endpoint: config.endpoint,
+      model: config.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      maxTokens: 512,
+    });
+    return sendJson(res, 200, {
+      source: 'local-model',
+      recommendations,
+      analysis: result.text,
+      model: result.model,
+      reason: null,
+    });
+  } catch (err) {
+    // Loopback-guard refusal, unreachable endpoint, timeout, non-OK, bad JSON —
+    // all degrade to the deterministic engine result WITHOUT erroring.
+    return sendJson(
+      res,
+      200,
+      degradedResult(recommendations, `Local model unavailable: ${err?.message || err}`)
+    );
+  }
 }
 
 // --- Session dispatch (#1251, Slice 1) ------------------------------------------------------------
@@ -8916,6 +9039,15 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
       }
       return handleRejectSignalWrite(req, res);
+    }
+
+    // Tier A "Analyze locally" (#2319): local-model analysis over the recs call
+    // sites. POST-only; loopback-only egress; degrades to the deterministic result.
+    if (pathname === '/api/analyze/local') {
+      if (req.method !== 'POST') {
+        return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
+      }
+      return handleAnalyzeLocal(req, res);
     }
 
     // Session dispatch (#1251, Slice 1): list/create/delete RemoteSession CRs.

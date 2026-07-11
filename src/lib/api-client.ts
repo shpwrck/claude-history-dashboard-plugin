@@ -38,6 +38,7 @@ import type { SteerRuleTelemetry } from './steer-telemetry-types';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
+import type { LocalAnalyzeResult } from './local-analyze';
 import { parseHistoryJsonl } from './parse-history';
 
 /** True in the server build; the SPA stub exports `false`. */
@@ -1025,6 +1026,49 @@ export async function postRejectSignal(
     return {
       ok: false,
       error: err instanceof Error ? err.message : 'Network error while recording reject signal',
+    };
+  }
+}
+
+/**
+ * Tier A "Analyze locally" (#2319, ADR 0018). POST the current recommendation
+ * scope to the server, which runs a LOCAL model over the SAME deterministic
+ * recommendation call sites. The `/api/analyze/local` literal is owned ONLY here
+ * so the SPA build (aliased to api-client.spa.ts) carries no server string — the
+ * spa-boundary gate depends on it.
+ *
+ * Governance: the server route's only egress is a loopback local model; there is
+ * NO Anthropic fallback. Never rejects — a down server or an unreachable local
+ * model both collapse to a `source: 'deterministic'` result so the surface
+ * degrades gracefully instead of erroring.
+ */
+export async function analyzeLocal(
+  options: { project?: string | null; signal?: AbortSignal } = {}
+): Promise<LocalAnalyzeResult> {
+  try {
+    const res = await serverFetch('/api/analyze/local', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ project: options.project ?? null }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!res.ok) {
+      return {
+        source: 'deterministic',
+        recommendations: [],
+        analysis: null,
+        model: null,
+        reason: `Analyze request failed (HTTP ${res.status})`,
+      };
+    }
+    return (await res.json()) as LocalAnalyzeResult;
+  } catch (err) {
+    return {
+      source: 'deterministic',
+      recommendations: [],
+      analysis: null,
+      model: null,
+      reason: err instanceof Error ? err.message : 'Network error while analyzing',
     };
   }
 }
