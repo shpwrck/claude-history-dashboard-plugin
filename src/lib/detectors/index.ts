@@ -346,7 +346,8 @@ export const DETECTORS: Detector[] = [
 
   // ── #1873 (epic #1910) — passive-wait stalls (reliability) ────────────────
   // Flags assistant turn-ends that end on wait/monitor language with no
-  // harness-backed background mechanism (run_in_background / Task / Workflow), so
+  // harness-backed background mechanism (explicit run_in_background or a
+  // deliberate Monitor/ScheduleWakeup poll), so
   // the session can't self-resume and a real human prompt (never a tool_result)
   // is forced — weighted by the silence gap. Reads parse-timeline's per-turn
   // waitLanguage/backgrounded flags; dark on a transcript-free dataset.
@@ -393,9 +394,9 @@ export const DETECTORS: Detector[] = [
   // air): foreground tool calls fired mid-turn that were eligible to be
   // backgrounded (long-running Bash build/test/install/deploy, or an un-detached
   // Agent/Workflow) but ran synchronously, blocking the human's thread past a
-  // 10s floor. Reads parse-timeline's per-entry kind/backgrounded/toolName/
-  // timestamp; sub-second reads never clear the floor. Dark on a slim/transcript-
-  // free dataset (the Bash-kind test reads the stripped `summary`).
+  // 10s floor. Reads parse-timeline's per-entry backgroundableKind/backgrounded/
+  // toolUseId/toolName/timestamp flags; sub-second reads never clear the floor,
+  // and the flags survive slim timelines. Dark only on a transcript-free dataset.
   conversationalAvailability,
 
   // ── #1880 (epic #867) — wait-class reclaim ruleset ─────────────────────────

@@ -29,9 +29,10 @@
 //     - PARSER_SIG_VERSION          -> the per-session TRANSCRIPT cache
 //                                      (sigOf/getTranscript) + folded into the
 //                                      dataset schema key.
-//     - DATASET_ASSEMBLY_SCHEMA_VERSION -> the SERIALIZED DATASET shape produced
-//                                      by assembleDataset(), independent of any
-//                                      single parser's output.
+//     - DATASET_ASSEMBLY_SCHEMA_VERSION -> the SERIALIZED DATASET contract
+//                                      produced by assembleDataset(). It remains a
+//                                      separate cache key, but must also move when
+//                                      changed parser semantics alter that body.
 //   Those are listed in `RELATED_INVALIDATION_KNOBS` below for discoverability,
 //   but they are NOT folded into the entries here: this seam unifies the two
 //   "a parser's output shape changed" knobs, not every cache in the pipeline.
@@ -61,7 +62,7 @@
 export const SESSION_BLOB_OUTPUT = {
   // History of prior values is documented in scripts/session-blob-row.mjs next
   // to where this is consumed; keep new rationale there AND bump here.
-  version: 'timeline-backgroundable-kind-v8',
+  version: 'timeline-background-truth-v9',
   contract: [
     'token_json',
     'tool_json',
@@ -112,5 +113,5 @@ export const RELATED_INVALIDATION_KNOBS = Object.freeze({
   PARSER_SIG_VERSION:
     'scripts/ingest.mjs — gates the per-session TRANSCRIPT cache (sigOf/getTranscript); also folded into the dataset schema key. NOT a parser-output-shape knob for the session_blob signal columns.',
   DATASET_ASSEMBLY_SCHEMA_VERSION:
-    'scripts/ingest.mjs — gates the SERIALIZED DATASET shape from assembleDataset(), independent of any single parser output.',
+    'scripts/ingest.mjs — gates the SERIALIZED DATASET contract from assembleDataset(); also bump it when a changed parser output alters the persisted body without changing source artifacts.',
 });

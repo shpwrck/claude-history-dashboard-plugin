@@ -1032,10 +1032,10 @@ const DATASET_CACHE_KEEP = 3;
 // together but NOT collapsed — they invalidate distinct caches.
 export const PARSER_SIG_VERSION = 'v4';
 
-// Bump when assembleDataset() or downstream serialized dataset shape changes
-// without necessarily changing any ~/.claude source artifact. The compressed
-// dataset cache is persisted across deploys, so source-content hashes alone can
-// otherwise reuse JSON assembled by older code.
+// Bump when assembleDataset() or an upstream parser changes the serialized
+// dataset's shape or meaning without necessarily changing any ~/.claude source
+// artifact. The compressed dataset cache is persisted across deploys, so
+// source-content hashes alone can otherwise reuse JSON assembled by older code.
 // v4 (#2129): PromptAnalysis now serializes filePathTurnCount. The field landed
 // while the key was already at v3 (bumped by #2047 for an unrelated signal), so
 // a persisted v3 blob assembled before the field exists would be reused for
@@ -1079,17 +1079,20 @@ export const PARSER_SIG_VERSION = 'v4';
 // receipts, model-eval batches) merge into bySourceAxis with the new `external`
 // counter. An unchanged ledger keeps its content hash, so without this bump a
 // persisted v9 blob would keep serving the old attribution + trust weighting.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 10;
+// v11 (#2246): parseSessionTimeline changes the meaning of `backgrounded` for
+// Agent/Task/Workflow calls. SESSION_BLOB_OUTPUT v9 reparses timeline_json, but a
+// restart can load and serve a persisted dataset assembled from v8 rows before
+// that reparse finishes. Turn over this downstream cache so the old v10 body is
+// never accepted as current.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 11;
 
-// The dataset-cache gate (sourceSignature) must also turn over when the
-// per-session PARSER output changes, because that output is folded into the
-// assembled dataset (e.g. dangerous-command signals → recommendations). The two
-// version knobs were decoupled before (#2036 follow-up): bumping
-// PARSER_SIG_VERSION reparsed session blobs but, with transcript mtimes
-// unchanged, sourceSignature() stayed constant so the persisted dataset_cache
-// kept serving JSON assembled by the OLD parser. Folding PARSER_SIG_VERSION into
-// this key makes any parser bump invalidate the dataset cache too, so the recipe
-// "bump PARSER_SIG_VERSION" is once again sufficient on its own.
+// The dataset-cache gate (sourceSignature) must also turn over when upstream
+// per-session parsed output changes, because that output is folded into the
+// assembled dataset (e.g. dangerous-command signals → recommendations). Folding
+// PARSER_SIG_VERSION into this key keeps transcript-cache changes coupled. The
+// separate SESSION_BLOB_OUTPUT version gates parsed signal rows; when its output
+// meaning changes without a source-file change, pair that bump with this dataset
+// schema version so a restart cannot serve an old assembled body while reparsing.
 export function datasetAssemblySchemaKey() {
   return `dataset-schema:v${DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${PARSER_SIG_VERSION}`;
 }

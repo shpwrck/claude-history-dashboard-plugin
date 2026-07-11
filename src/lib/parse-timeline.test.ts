@@ -5,6 +5,7 @@ import {
   isBackgroundableBashCommand,
   type SessionTimeline,
 } from './parse-timeline'
+import { collectSessionBfcs } from './experiments/conversational-availability-metric'
 
 const line = (o: Record<string, unknown>) => JSON.stringify(o)
 
@@ -125,16 +126,18 @@ describe('parseSessionTimeline', () => {
         content: [
           { type: 'tool_use', id: 'a', name: 'Bash', input: { command: 'sleep 600', run_in_background: true } },
           { type: 'tool_use', id: 'b', name: 'Bash', input: { command: 'ls' } },
-          { type: 'tool_use', id: 'c', name: 'Workflow', input: {} },
+          { type: 'tool_use', id: 'c', name: 'Workflow', input: { run_in_background: true } },
           { type: 'tool_use', id: 'd', name: 'Task', input: {} },
+          { type: 'tool_use', id: 'e', name: 'Monitor', input: {} },
         ],
       },
     })
     const byId = new Map(parseSessionTimeline(text, 's.jsonl')!.entries.map((e) => [e.toolUseId, e]))
     expect(byId.get('a')!.backgrounded).toBe(true) // run_in_background Bash
     expect(byId.get('b')!.backgrounded).toBeUndefined() // foreground Bash
-    expect(byId.get('c')!.backgrounded).toBe(true) // Workflow self-resumes
-    expect(byId.get('d')!.backgrounded).toBe(true) // Task self-resumes
+    expect(byId.get('c')!.backgrounded).toBe(true) // explicitly backgrounded Workflow
+    expect(byId.get('d')!.backgrounded).toBeUndefined() // foreground Task blocks
+    expect(byId.get('e')!.backgrounded).toBe(true) // Monitor self-resumes
   })
 
   it('flags backgroundableKind for long Bash invocations and Agent/Workflow, orthogonal to backgrounded (#2238)', () => {
@@ -152,9 +155,6 @@ describe('parseSessionTimeline', () => {
           { type: 'tool_use', id: 'status', name: 'Bash', input: { command: 'git status' } },
           { type: 'tool_use', id: 'lsbuild', name: 'Bash', input: { command: 'ls build/' } },
           // Foreground Agent -> backgroundableKind without backgrounded (the new countable cost).
-          // (Agent/Task/Workflow are in BOTH the self-resuming and backgroundable-kind sets, so the
-          // parser marks them backgrounded too; the foreground/blocking case is exercised by the
-          // detector test where backgrounded is explicitly absent.)
           { type: 'tool_use', id: 'agent', name: 'Agent', input: { description: 'fan out' } },
         ],
       },
@@ -168,6 +168,47 @@ describe('parseSessionTimeline', () => {
     expect(byId.get('status')!.backgroundableKind).toBeUndefined() // git status is not backgroundable
     expect(byId.get('lsbuild')!.backgroundableKind).toBeUndefined() // `build` is an argument, not the command
     expect(byId.get('agent')!.backgroundableKind).toBe(true) // Agent is a backgroundable kind
+    expect(byId.get('agent')!.backgrounded).toBeUndefined() // foreground Agent is countable
+  })
+
+  it('keeps a foreground parent Agent countable when a merged child assistant speaks first (#2246)', () => {
+    // Production ingest concatenates parent + subagent JSONL before parsing, then
+    // parseSessionTimeline sorts the merged entries by timestamp. Keep the child
+    // line appended after the parent transcript here to exercise that real seam.
+    const parentText = [
+      line({
+        type: 'assistant', timestamp: '2026-01-01T00:00:00.000Z',
+        message: { content: [{ type: 'tool_use', id: 'agent-1', name: 'Agent', input: { description: 'work' } }] },
+      }),
+      line({
+        type: 'user', timestamp: '2026-01-01T00:00:30.000Z',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'agent-1', content: 'done' }] },
+      }),
+      line({
+        type: 'assistant', timestamp: '2026-01-01T00:00:31.000Z',
+        message: { content: [{ type: 'text', text: 'done' }] },
+      }),
+    ].join('\n')
+    const subagentText = line({
+      type: 'assistant',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      isSidechain: true,
+      message: { content: [{ type: 'text', text: 'child still working' }] },
+    })
+    const timeline = parseSessionTimeline(`${parentText}\n${subagentText}`, 'foreground-agent.jsonl')!
+
+    // The child assistant really is the first later assistant entry. It must not
+    // truncate the parent Agent's block window below the 10-second floor.
+    expect(timeline.entries.slice(0, 4).map((entry) => entry.kind)).toEqual([
+      'tool_use',
+      'assistant',
+      'tool_result',
+      'assistant',
+    ])
+
+    expect(collectSessionBfcs(timeline)).toEqual([
+      { sessionId: 'foreground-agent', toolName: 'Agent', blockedMs: 31_000 },
+    ])
   })
 
   it('isBackgroundableBashCommand matches invocations, not bare-word arguments', () => {

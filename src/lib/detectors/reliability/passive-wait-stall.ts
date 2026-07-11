@@ -8,8 +8,8 @@ import type { SessionTimeline, TimelineEntry, WaitClass } from '../../parse-time
  * report when it finishes", "I'll surface the rollup when the watcher fires") with
  * **no** harness-backed background mechanism, so the session cannot resume on its
  * own and the next actor is forced to be the human. Measured over the local
- * corpus the separation is clean: backgrounded work (run_in_background Bash /
- * Task / Workflow) forced 0 human turns — it always self-resumed — while passive
+ * corpus the separation is clean: explicitly backgrounded work and deliberate
+ * Monitor/ScheduleWakeup polls forced 0 human turns — they self-resumed — while passive
  * waits forced a human re-engagement, often after minutes of silence.
  *
  * The per-turn classification lives in `parse-timeline.ts` (which alone sees the
@@ -182,7 +182,7 @@ export const detector: Detector = {
       category: 'reliability',
       severity,
       title: 'Turns end on passive waits that stall the session',
-      detail: `${stalls.length} assistant turn-end(s) across ${sessions} session(s) ended on wait/monitor language ("I'll wait", "I'll report when it finishes") with no harness-backed background mechanism, so the session could not resume on its own and a human was forced to re-engage (median silence ${fmtGap(median)}, p90 ${fmtGap(p90)}; ${highConf.length} over 5 min). Harness-backed background work (run_in_background / Task / Workflow) never showed this — it always self-resumed.`,
+      detail: `${stalls.length} assistant turn-end(s) across ${sessions} session(s) ended on wait/monitor language ("I'll wait", "I'll report when it finishes") with no harness-backed background mechanism, so the session could not resume on its own and a human was forced to re-engage (median silence ${fmtGap(median)}, p90 ${fmtGap(p90)}; ${highConf.length} over 5 min). Explicitly backgrounded work and Monitor/ScheduleWakeup polls never showed this — they self-resumed.`,
       action:
         'Background trackable work via run_in_background so completion auto-wakes the session; for untrackable external state (CI/deploy/remote queue) poll deliberately (Monitor until-loop / ScheduleWakeup) instead of ending the turn. Never "launch then stop."',
       affected: stalls.length,
@@ -192,7 +192,7 @@ export const detector: Detector = {
       provenance: {
         observations,
         inference:
-          'Passive turn-ends that force a human re-engagement are recoverable: backgrounding the same work through the harness (run_in_background / Task / Workflow) self-resumed every time, so the forced human turns are avoidable wait, not unavoidable.',
+          'Passive turn-ends that force a human re-engagement are recoverable: explicitly backgrounded work and deliberate Monitor/ScheduleWakeup polls self-resumed, so the forced human turns are avoidable wait, not unavoidable.',
       },
     };
   },

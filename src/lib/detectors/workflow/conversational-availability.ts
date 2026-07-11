@@ -14,10 +14,11 @@ import {
  * detector measures the OTHER half: foreground tool calls fired IN the middle of
  * a turn that were eligible to be backgrounded but weren't, so the human's
  * conversational thread blocked on a long synchronous call (a `npm run build`, a
- * `vitest` run, a `compose up`) that `run_in_background` / Agent / Workflow could
- * have detached. These are two distinct angles on the same lever — keep the human
- * unblocked — so they never double-count: passive-wait keys on `waitLanguage`
- * turn-ends, this one keys on in-turn `tool_use` block time.
+ * `vitest` run, a `compose up`, or a foreground Agent/Workflow) that an explicit
+ * `run_in_background` dispatch could have detached. These are two distinct
+ * angles on the same lever — keep the human unblocked — so they never double-count:
+ * passive-wait keys on `waitLanguage` turn-ends, this one keys on in-turn
+ * `tool_use` block time.
  *
  * A Backgroundable-Foreground Call (BFC) is a `tool_use` entry that:
  *   (a) is of a backgroundable KIND (`entries[].backgroundableKind` true) — a
@@ -26,12 +27,12 @@ import {
  *       parse-timeline), so it survives `slimSessionTimeline` and is computed
  *       WITHOUT the command `summary`; AND
  *   (b) was NOT actually backgrounded (`entries[].backgrounded` falsy) — a
- *       `run_in_background` Bash or a self-resuming Agent/Workflow already detached,
+ *       explicitly `run_in_background` call or a Monitor/ScheduleWakeup already detached,
  *       so it cost no foreground wait. The two flags are orthogonal: a
  *       foreground/blocking Agent or Workflow has `backgroundableKind:true` AND
- *       `backgrounded:false`, and IS counted here; AND
+ *       a falsy `backgrounded`, and IS counted here; AND
  *   (c) imposed real BLOCK time — the wall-clock gap from this `tool_use`
- *       timestamp to the NEXT assistant entry exceeds {@link BLOCK_FLOOR_MS}.
+ *       timestamp to its parent-turn continuation exceeds {@link BLOCK_FLOOR_MS}.
  *
  * The block floor is the false-positive guard the issue calls for: a sub-second
  * foreground Read/Grep/Glob or a quick `git status` never clears it, so only calls
@@ -98,7 +99,7 @@ export const detector: Detector = {
           BLOCK_FLOOR_MS / 1000
         )}s before the assistant turn resumed; ${totalBlockedMin} minute(s) of foreground block time total`,
         source: 'parse-timeline',
-        field: 'entries[].timestamp',
+        field: 'entries[].timestamp / entries[].toolUseId',
         value: totalBlockedMin,
       },
     ];
@@ -116,7 +117,7 @@ export const detector: Detector = {
         worst[0].blockedMs
       )}). These are long/slow calls (build/test/install/deploy or an un-detached Agent/Workflow) that run_in_background would have detached so the human's thread stayed free. This is the during-work complement to reliability.passive-wait-stall (which measures turn-END dead-air).`,
       action:
-        'Default long or slow calls — builds, test runs, installs, deploys, watchers, and sub-agent fan-outs — to run_in_background (or an Agent / Workflow), so the call detaches and the session keeps moving instead of blocking on a synchronous foreground wait. Reserve foreground for fast, sub-second tool calls (Read/Grep/Glob, quick status).',
+        'Default long or slow calls — builds, test runs, installs, deploys, watchers, and sub-agent fan-outs — to run_in_background, so the call detaches and the session keeps moving instead of blocking on a synchronous foreground wait. For Agent/Task/Workflow fan-outs, set run_in_background: true explicitly; choosing the tool kind alone does not detach the call. Reserve foreground for fast, sub-second tool calls (Read/Grep/Glob, quick status).',
       affected: bfcs.length,
       estTimeReclaimedMin: totalBlockedMin,
       view: 'timeline',
@@ -124,7 +125,7 @@ export const detector: Detector = {
       provenance: {
         observations,
         inference:
-          'A non-backgrounded tool call of a backgroundable kind that held the turn for over the block floor is recoverable wait: the same call dispatched via run_in_background / Agent / Workflow self-resumes the session, so the foreground block time is avoidable rather than intrinsic to the work.',
+          'A non-backgrounded tool call of a backgroundable kind that held the turn for over the block floor is recoverable wait: dispatching the same call with run_in_background lets the harness self-resume, so the foreground block time is avoidable rather than intrinsic to the work.',
       },
     };
   },

@@ -86,8 +86,8 @@ export interface TimelineEntry {
   interrupted?: boolean;
   /**
    * When `kind === 'tool_use'`: the call dispatches harness-backed work that
-   * auto-wakes the session on completion (`run_in_background` Bash, or a
-   * Task / Workflow / ScheduleWakeup / Monitor call). The clean-separation control
+   * auto-wakes the session on completion (an explicit `run_in_background` call,
+   * or a ScheduleWakeup / Monitor call). The clean-separation control
    * for the passive-wait-stall detector (#1873): a turn carrying one of these is
    * never a passive stall, because the session resumes on its own rather than
    * forcing a human turn.
@@ -99,7 +99,7 @@ export interface TimelineEntry {
    * build|compose, classified by {@link isBackgroundableBashCommand}), or an
    * Agent/Task/Workflow/Monitor/ScheduleWakeup call. ORTHOGONAL to `backgrounded`
    * ("was actually run in the background"): a foreground/blocking Agent or Workflow
-   * carries `backgroundableKind: true` AND `backgrounded: false`. Set at parse time
+   * carries `backgroundableKind: true` with `backgrounded` absent. Set at parse time
    * (when the raw command is still available) as a derived boolean so it survives
    * `slimSessionTimeline`, which strips the command `summary`. Feeds the
    * `workflow.conversational-availability` detector (#2238): a backgroundable-kind
@@ -326,13 +326,11 @@ export function isRediscoveryText(text: string | undefined): boolean {
  * Harness mechanisms that resume the session on their own after a turn ends —
  * the clean-separation control for the passive-wait-stall detector (#1873). A
  * turn that dispatches one of these never strands the session waiting on a human:
- * `run_in_background` Bash auto-wakes on exit, Task/Workflow re-invoke on
- * completion, and ScheduleWakeup/Monitor are deliberate self-resuming polls.
+ * `run_in_background` calls auto-wake on exit, while ScheduleWakeup/Monitor are
+ * deliberate self-resuming polls. A foreground Agent/Task/Workflow blocks the
+ * turn and must not be inferred as backgrounded from its tool kind alone.
  */
-const SELF_RESUMING_TOOLS: ReadonlySet<string> = new Set([
-  'Task',
-  'Agent',
-  'Workflow',
+const ALWAYS_SELF_RESUMING_TOOLS: ReadonlySet<string> = new Set([
   'ScheduleWakeup',
   'Monitor',
 ]);
@@ -346,7 +344,7 @@ export function isBackgroundedToolUse(name: string | undefined, input: unknown):
   ) {
     return true;
   }
-  return name ? SELF_RESUMING_TOOLS.has(name) : false;
+  return name ? ALWAYS_SELF_RESUMING_TOOLS.has(name) : false;
 }
 
 /**
@@ -354,10 +352,10 @@ export function isBackgroundedToolUse(name: string | undefined, input: unknown):
  * foreground — a sub-agent fan-out / long-running orchestration call that
  * `run_in_background` (or its own self-resuming nature) could have detached. This
  * is the KIND set, NOT the "was actually backgrounded" set: `isBackgroundedToolUse`
- * already flags the self-resuming ones, so a foreground/blocking Agent or Workflow
- * carries `backgroundableKind: true` AND `backgrounded: false` — the real
+ * flags actual background dispatch, so a foreground/blocking Agent or Workflow
+ * carries `backgroundableKind: true` with a falsy `backgrounded` — the real
  * availability cost the `workflow.conversational-availability` detector (#2238)
- * counts. Mirrors `SELF_RESUMING_TOOLS` so the two stay in lockstep.
+ * counts. This kind set is intentionally broader than `ALWAYS_SELF_RESUMING_TOOLS`.
  */
 const BACKGROUNDABLE_TOOL_KINDS: ReadonlySet<string> = new Set([
   'Task',

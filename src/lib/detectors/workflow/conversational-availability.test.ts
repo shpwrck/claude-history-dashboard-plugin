@@ -106,6 +106,9 @@ describe('workflow.conversational-availability — fires', () => {
     expect(rec?.category).toBe('workflow');
     expect(rec?.affected).toBe(3);
     expect(rec?.view).toBe('timeline');
+    expect(rec?.action).toContain('set run_in_background: true explicitly');
+    expect(rec?.action).toContain('choosing the tool kind alone does not detach');
+    expect(rec?.action).not.toContain('(or an Agent / Workflow)');
     // Evidence is block-ranked: the 60s compose call leads, with its session prefix.
     expect(rec?.evidence?.[0]).toContain('cccccccc');
     expect(rec?.evidence?.[0]).toContain('60s');

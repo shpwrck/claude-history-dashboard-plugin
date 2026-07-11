@@ -162,7 +162,7 @@ test('seam keeps the genuinely-distinct knobs separate, not folded into a parser
   );
   assert.ok(
     'DATASET_ASSEMBLY_SCHEMA_VERSION' in RELATED_INVALIDATION_KNOBS,
-    'DATASET_ASSEMBLY_SCHEMA_VERSION must stay documented as a separate dataset-shape knob'
+    'DATASET_ASSEMBLY_SCHEMA_VERSION must stay documented as a separate dataset-contract knob'
   );
   // The two parser-output entries gate different artifacts and have different
   // encodings (string vs number) — they are not interchangeable keys.

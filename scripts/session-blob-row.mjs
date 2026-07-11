@@ -58,8 +58,16 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       conversational-availability detector stays dark on live data (and blind to
 //       blocking Agent/Workflow calls). timeline_json gates the dataset's
 //       input.timelines, which is what the recs detector reads — so THIS is the
-//       knob to bump, not PARSER_SIG_VERSION (transcript view only) or
-//       DATASET_ASSEMBLY_SCHEMA_VERSION (serialized assembleDataset shape).
+//       knob that forces session_blob reparsing, not PARSER_SIG_VERSION (the
+//       transcript-view cache). Because those rows also feed the separately
+//       persisted dataset body, a meaning change must turn over that downstream
+//       cache too.
+//   'timeline-background-truth-v9' (#2246): Agent/Task/Workflow now set
+//       `backgrounded` only from an explicit run_in_background flag; foreground
+//       calls remain backgroundableKind=true but become countable blocking work.
+//       Reparse timeline_json so cached v8 blobs do not preserve the old
+//       tool-kind inference and keep conversational-availability dark. Dataset
+//       schema v11 turns over persisted bodies assembled from those v8 rows.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));

@@ -150,3 +150,52 @@ test('loadLatestDatasetCache returns null when only a foreign-schema row exists 
     else process.env.CHD_DB_PATH = origDb;
   }
 });
+
+test('v9 session-blob semantics reject a persisted dataset assembled from v8 rows (#2246)', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = join(tmpdir(), `chd-2246-home-${randomUUID()}`);
+  mkdirSync(join(home, '.claude', 'projects'), { recursive: true });
+
+  try {
+    const ingest = await loadIngest(home);
+    const dbPath = process.env.CHD_DB_PATH;
+    // Before #2246 both the base and PR head used this exact dataset key, even
+    // after SESSION_BLOB_OUTPUT moved v8 -> v9. A restart could therefore serve
+    // this v8-derived body while the signal rows reparsed in the background.
+    const oldV8DatasetKey = `dataset-schema:v10:parser-${ingest.PARSER_SIG_VERSION}`;
+    assert.notEqual(
+      ingest.datasetAssemblySchemaKey(),
+      oldV8DatasetKey,
+      'the dataset cache key must turn over with the v9 timeline semantics'
+    );
+
+    const body = '{"timelineSessionBlobVersion":"timeline-backgroundable-kind-v8"}';
+    const raw = new DatabaseSync(dbPath);
+    raw
+      .prepare(
+        'INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        'v8-dataset',
+        '"v8"',
+        brotliCompressSync(body),
+        gzipSync(body),
+        5_000,
+        oldV8DatasetKey
+      );
+    raw.close();
+
+    assert.equal(
+      ingest.loadLatestDatasetCache(),
+      null,
+      'a v8-derived dataset body must miss so the server rebuilds from v9 rows'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+  }
+});
