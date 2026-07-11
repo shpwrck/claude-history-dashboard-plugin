@@ -180,8 +180,13 @@ try {
     await check('unknown source id is not served', () => assert.equal(missing.status, 404));
   }
 } finally {
-  proc.kill('SIGTERM');
-  await new Promise((resolve) => proc.once('exit', resolve));
+  // A server that died before waitUp succeeded has already emitted 'exit' —
+  // waiting on the listener then would hang the CI step instead of failing
+  // with the captured logs.
+  if (proc.exitCode === null) {
+    proc.kill('SIGTERM');
+    await new Promise((resolve) => proc.once('exit', resolve));
+  }
   await rm(claudeDir, { recursive: true, force: true });
   await rm(distDir, { recursive: true, force: true });
   await rm(cacheDir, { recursive: true, force: true });
