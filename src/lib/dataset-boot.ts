@@ -73,6 +73,19 @@ export interface DatasetBootAggregates {
   models: number;
 }
 
+/**
+ * The three headline counts the masthead renders. On the boot-first path the
+ * heavy `entries`/`tokenData` arrays are still empty when the shell paints, so
+ * the client shows these server-computed numbers instead of `0` until the
+ * slices backfill (#2450). Derived from {@link DatasetBootAggregates} + counts:
+ * `sessions`/`entries` from aggregates, `tokenData` from the per-key counts.
+ */
+export interface DatasetShellCounts {
+  sessions: number;
+  entries: number;
+  tokenData: number;
+}
+
 export interface DatasetBoot {
   /**
    * Dataset content version (the ingest contentHash). Slices carry the same
