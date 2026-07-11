@@ -38,6 +38,9 @@ export interface RepoSymbol {
 export interface RepoFile {
   /** Path relative to the project root, POSIX-separated. */
   path: string;
+  /** Source-file mtime captured host-side with the structure. Optional for
+   *  backward compatibility with older/uploaded repo-map artifacts. */
+  mtimeMs?: number;
   symbols: RepoSymbol[];
   imports: string[];
 }

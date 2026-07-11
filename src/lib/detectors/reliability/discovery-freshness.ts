@@ -15,26 +15,22 @@ import type { RepoMapDataset } from '../../parse-repo-map-join';
  * The FILE-READ sibling of `reliability.stale-state-assertion` (#1871). Where
  * #1871 owns the git-ref-QUERY flavor — reading `origin/master`/`master` from a
  * local tree with no prior `git fetch` — this detector owns the distinct
- * file-READ flavor: the agent `Read` a source file, the working tree then MOVED
- * under it (a `git checkout`/`switch`/`restore`/`pull`/`merge`/`rebase`/`reset`/
- * `cherry-pick`/`revert`/`stash` ran), and the agent went on to `Edit`/`Write`
- * that same file WITHOUT re-reading it — so the edit was applied against content
- * the ref moved past. This is the recurring pain behind the
+ * file-READ flavor: the agent `Read` a source file, the file then changed (a
+ * repo-map `mtimeMs` falls inside the read-to-edit interval) OR the working tree
+ * moved under it, and the agent went on to `Edit`/`Write` that same file WITHOUT
+ * re-reading it. This is the recurring pain behind the
  * `fetch-before-checking-master` / `gh-api-edits-fetch-from-master` memory notes,
  * on the FILE side rather than the git-query side.
  *
- * Honest-signal note (auditability, epic #866). The issue's first-draft heuristic
- * assumed the repo-map join carries a per-file `mtime`/`hash` and that each Read
- * records the git sha it was against. Neither exists in the dataset: the only
- * freshness anchor on `RecommendationInput.repoMap` is the PROJECT-level
- * `generatedAtGitSha` (`parse-repo-map-join.ts`), and `toolData` records no
- * per-read sha. So "the ref moved past the read" is anchored on a CONCRETE,
- * observable event — an intervening working-tree-mutating `git` command between
- * the read and the edit — rather than a phantom mtime comparison. That keeps the
- * claim reproducible from fields that actually exist, and it is deliberately
- * STRICTER than "read-then-edit without a re-read" (which is the normal editing
- * flow and would be a false positive on legitimate behaviour — the exact misfire
- * epic #1868 exists to eliminate). Emitted as a HYPOTHESIS
+ * Honest-signal note (auditability, epic #866). New repo-map artifacts carry a
+ * host-captured per-file `mtimeMs`. A direct finding requires that timestamp to
+ * be strictly newer than the Read and no later than the acting Edit/Write; merely
+ * being newer than the Read is insufficient because the edit itself (or a later
+ * change) may have produced the current mtime. The concrete observed proxy — an
+ * intervening working-tree-mutating git command — remains alongside it because a
+ * later snapshot mtime cannot disprove an earlier change.
+ * Both paths are deliberately stricter than plain read-then-edit, the normal
+ * editing flow. Emitted as a HYPOTHESIS
  * (`claimClass:'causal'` held at `proofTier:'observational'`), never a proven miss.
  *
  * Boundary with #1871 (never double-counts). The COUNTED unit here is a
@@ -44,9 +40,8 @@ import type { RepoMapDataset } from '../../parse-repo-map-join';
  * intervening tree-move as CONTEXT — it never counts a `Bash` command as a
  * finding (that stays #1871's territory).
  *
- * Substrate gate. Returns null when `repoMap` is absent/null or carries no
- * project with a non-null `generatedAtGitSha` — the structural snapshot is the
- * current-state anchor the finding cites, and without it there is nothing to say.
+ * Substrate gate. Returns null when `repoMap` is absent/null or carries neither
+ * a usable per-file mtime nor a non-null project generation sha.
  * Reads `toolData` (file + Bash calls), `repoMap` (tracked-path oracle +
  * generation sha), and `liveConfig` (self-suppression). Dark on a dataset with
  * no tool calls or no repo-map.
@@ -167,48 +162,59 @@ function repoRelativeUnder(path: string, root: string): string | null {
 
 interface ProjectAnchor {
   root: string;
-  sha: string;
-  files: Set<string>;
+  sha: string | null;
+  files: Map<string, number | undefined>;
 }
 
 /**
- * Projects that carry a non-null generation sha, each with its repo-relative
- * tracked-path set. A read only counts when it maps to one of these (so a read
- * of a non-repo-mapped path — `/tmp/x`, a scratch file — is never flagged).
+ * Projects with a generation sha (tree-mover proxy) or a usable per-file
+ * mtime (direct signal). A read only counts when it maps to one of these.
  */
 function projectAnchors(repoMap: RepoMapDataset): ProjectAnchor[] {
   const anchors: ProjectAnchor[] = [];
   for (const project of repoMap.projects) {
-    if (typeof project.generatedAtGitSha !== 'string' || project.generatedAtGitSha.length === 0) {
-      continue;
-    }
+    const sha =
+      typeof project.generatedAtGitSha === 'string' && project.generatedAtGitSha.length > 0
+        ? project.generatedAtGitSha
+        : null;
+    const files = new Map(
+      project.files.map((file) => [
+        file.path,
+        typeof file.mtimeMs === 'number' && Number.isFinite(file.mtimeMs) && file.mtimeMs >= 0
+          ? file.mtimeMs
+          : undefined,
+      ] as const)
+    );
+    if (sha === null && ![...files.values()].some((mtimeMs) => mtimeMs !== undefined)) continue;
     anchors.push({
       root: project.root,
-      sha: project.generatedAtGitSha,
-      files: new Set(project.files.map((f) => f.path)),
+      sha,
+      files,
     });
   }
   return anchors;
 }
 
-/** The project root + generation sha for a read of `filePath`, when it maps to a tracked file. */
+/** Project freshness fields for a read of `filePath`, when it maps to a tracked file. */
 function anchorFor(
   filePath: string,
   anchors: ProjectAnchor[]
-): { root: string; sha: string } | null {
+): { root: string; sha: string | null; mtimeMs?: number } | null {
   // A raw repo-relative tool path (rare — Read/Edit normally record absolute
   // paths) falls back to a direct membership check against the map's repo-relative
   // keys, so those sessions aren't silently under-counted (#2335).
   const relKey = normalizeSlashes(filePath).replace(/^\.\//, '');
-  let best: { root: string; sha: string } | null = null;
+  let best: { root: string; sha: string | null; mtimeMs?: number } | null = null;
   let bestLen = -1;
   for (const a of anchors) {
     const rel = repoRelativeUnder(filePath, a.root);
-    if (!(rel !== null ? a.files.has(rel) : a.files.has(relKey))) continue;
+    const key = rel !== null ? rel : relKey;
+    if (!a.files.has(key)) continue;
     // prefer the NEAREST (longest) containing root when maps nest (/repo, /repo/sub)
     const len = rel !== null ? normalizeSlashes(a.root).replace(/\/+$/, '').length : 0;
     if (len > bestLen) {
-      best = { root: a.root, sha: a.sha };
+      const mtimeMs = a.files.get(key);
+      best = { root: a.root, sha: a.sha, ...(mtimeMs !== undefined ? { mtimeMs } : {}) };
       bestLen = len;
     }
   }
@@ -246,18 +252,17 @@ function chronological(calls: ToolCall[]): ToolCall[] {
 interface StaleRead {
   sessionId: string;
   path: string;
-  sha: string;
+  sha: string | null;
+  signal: 'mtime' | 'tree-move';
+  mtimeMs?: number;
   /** ms of the acting Edit/Write — the moment the stale content was applied. */
   actedMs: number;
 }
 
 /**
  * Walk one session in chronological order and collect stale-read acts: a `Read`
- * of a tracked path, a tree-move afterwards, then an `Edit`/`Write` of the same
- * path with no re-`Read` in between. Uses a move-epoch counter — a read taken at
- * epoch E is stale at an edit iff the epoch has advanced (a tree-move happened)
- * and no later read reset it. A re-read refreshes the path (resets its epoch), so
- * `read → move → read → edit` is NOT flagged.
+ * of a tracked path, direct mtime or tree-mover evidence that it went stale,
+ * then an `Edit`/`Write` of the same path with no re-`Read` in between.
  */
 function collectSessionStale(
   session: ToolUsageData,
@@ -275,8 +280,12 @@ function collectSessionStale(
   const epochByRoot = new Map<string, number>();
   const epochOf = (root: string) => epochByRoot.get(root) ?? 0;
   const bump = (root: string) => epochByRoot.set(root, epochOf(root) + 1);
-  // path -> { root, epoch at last read, sha }. A pending read waiting to be acted on.
-  const pending = new Map<string, { root: string; epoch: number; sha: string }>();
+  // A pending read waiting to be acted on. The read timestamp brackets the
+  // direct mtime test; the epoch preserves the tree-mover proxy.
+  const pending = new Map<
+    string,
+    { root: string; epoch: number; sha: string | null; mtimeMs?: number; readMs: number }
+  >();
 
   for (const call of chronological(session.calls)) {
     if (READ_TOOLS.has(call.toolName)) {
@@ -285,7 +294,14 @@ function collectSessionStale(
       const anchor = anchorFor(path, anchors);
       if (anchor === null) continue; // not a repo-mapped tracked file
       // (re-)read refreshes the path to its project's current epoch
-      pending.set(path, { root: anchor.root, epoch: epochOf(anchor.root), sha: anchor.sha });
+      const readMs = Date.parse(call.timestamp);
+      pending.set(path, {
+        root: anchor.root,
+        epoch: epochOf(anchor.root),
+        sha: anchor.sha,
+        ...(anchor.mtimeMs !== undefined ? { mtimeMs: anchor.mtimeMs } : {}),
+        readMs: Number.isFinite(readMs) ? readMs : Number.NaN,
+      });
       continue;
     }
 
@@ -307,12 +323,23 @@ function collectSessionStale(
       if (!path) continue;
       const p = pending.get(path);
       if (!p) continue;
-      if (p.epoch < epochOf(p.root)) {
-        const actedMs = Date.parse(call.timestamp);
+      const actedMs = Date.parse(call.timestamp);
+      const directMtime =
+        p.mtimeMs !== undefined &&
+        Number.isFinite(p.readMs) &&
+        Number.isFinite(actedMs) &&
+        p.mtimeMs > p.readMs &&
+        p.mtimeMs < actedMs;
+      // A current snapshot mtime outside this interval cannot disprove an
+      // earlier observed tree move, so retain the existing proxy independently.
+      const treeMoved = p.sha !== null && p.epoch < epochOf(p.root);
+      if (directMtime || treeMoved) {
         out.push({
           sessionId: session.sessionId,
           path,
           sha: p.sha,
+          signal: directMtime ? 'mtime' : 'tree-move',
+          ...(directMtime ? { mtimeMs: p.mtimeMs } : {}),
           actedMs: Number.isFinite(actedMs) ? actedMs : Number.NaN,
         });
       }
@@ -337,7 +364,7 @@ export const detector: Detector = {
     const repoMap = input.repoMap;
     if (!repoMap || repoMap.projects.length === 0) return null;
     const anchors = projectAnchors(repoMap);
-    if (anchors.length === 0) return null; // no non-null generation sha → no anchor
+    if (anchors.length === 0) return null; // no mtime and no generation sha
 
     const stale: StaleRead[] = [];
     for (const session of toolData) stale.push(...collectSessionStale(session, anchors));
@@ -370,54 +397,89 @@ export const detector: Detector = {
         ? 'warning'
         : 'info';
 
-    const shaShort = stale[0].sha.slice(0, SHA_SHORT);
+    const directCount = stale.filter((s) => s.signal === 'mtime').length;
+    const treeMoveCount = totalStale - directCount;
+    const shaShort = stale.find((s) => s.sha !== null)?.sha?.slice(0, SHA_SHORT);
 
     const evidence = [...stale]
       .slice(0, MAX_EVIDENCE)
-      .map(
-        (s) =>
-          `${s.sessionId.slice(0, 8)}: read \`${basename(s.path)}\`, then a git checkout/pull/rebase moved the tree, then edited it without re-reading (repo-map @ ${s.sha.slice(0, SHA_SHORT)})`
+      .map((s) =>
+        s.signal === 'mtime'
+          ? `${s.sessionId.slice(0, 8)}: read \`${basename(s.path)}\`, its repo-map mtime advanced inside the read-to-edit interval (${Math.round(s.mtimeMs as number)} ms), then it was edited without re-reading`
+          : `${s.sessionId.slice(0, 8)}: read \`${basename(s.path)}\`, then a git checkout/pull/rebase moved the tree, then edited it without re-reading (repo-map @ ${(s.sha as string).slice(0, SHA_SHORT)})`
       );
 
     const observations: RecObservation[] = [
       {
-        claim: `${totalStale} file read(s) across ${sessionsAffected} session(s) were followed by a working-tree-moving git command (checkout/switch/restore/pull/merge/rebase/reset/cherry-pick/revert/stash) and then an Edit/Write of the SAME path with no intervening re-Read`,
+        claim: `${totalStale} file read(s) across ${sessionsAffected} session(s) had freshness evidence before an Edit/Write of the SAME path with no intervening re-Read`,
         source: 'parse-tools',
-        field: 'toolData[].calls[] (Read.timestamp / input.file_path; Bash input.command; Edit/Write)',
+        field: 'toolData[].calls[] (Read.timestamp / input.file_path; Edit/Write.timestamp)',
         value: totalStale,
       },
-      {
-        claim: `Reads are scoped to repo-map-tracked files; the current-state anchor is the repo-map generation sha ${shaShort}`,
+    ];
+    if (directCount > 0) {
+      observations.push({
+        claim: `${directCount} read(s) had a host-captured per-file mtime strictly after the Read timestamp and before the acting Edit/Write`,
+        source: 'parse-repo-map-join',
+        field: 'repoMap.projects[].files[].mtimeMs',
+        value: directCount,
+      });
+    }
+    if (treeMoveCount > 0) {
+      observations.push({
+        claim: `${treeMoveCount} read(s) had the tree-mover proxy: an observed working-tree-moving git command occurred before the Edit/Write`,
+        source: 'parse-tools',
+        field: 'toolData[].calls[] (Bash input.command / commandPreview)',
+        value: treeMoveCount,
+      });
+    }
+    if (shaShort) {
+      observations.push({
+        claim: `Reads are scoped to repo-map-tracked files; a repo-map generation sha is ${shaShort}`,
         source: 'parse-repo-map-join',
         field: 'repoMap.projects[].generatedAtGitSha / files[].path',
         value: shaShort,
-      },
-    ];
+      });
+    }
 
     const provenance: RecProvenance = {
       observations,
       inference:
-        'A file read before a working-tree-moving git op and edited after it with no re-read may have been applied against content the ref moved past — re-reading the target after a checkout/pull/rebase keeps the edit current. Observational (the intervening op is observed; that this specific file changed is not proven), so this is a hypothesis, not a proven miss.',
+        'A per-file mtime inside the read-to-edit interval is direct metadata evidence that the file changed after the read; an intervening working-tree-moving git op remains an observed proxy when the snapshot mtime is absent or inconclusive. Editing without re-reading may therefore have acted on stale content, but the downstream error is not proven, so this remains an observational hypothesis.',
       ...(asOf ? { asOf } : {}),
       ...(asOf ? { stale: isStale } : {}),
     };
 
     const lead = isStale ? `As of ${asOf}, ` : '';
+    const signalSummary = [
+      directCount > 0
+        ? `${directCount} had a repo-map file mtime after the Read and before the Edit/Write`
+        : null,
+      treeMoveCount > 0
+        ? `${treeMoveCount} had the observed tree-mover proxy`
+        : null,
+    ]
+      .filter((part): part is string => part !== null)
+      .join('; ');
+    const fallbackOnly = directCount === 0;
 
     return {
       id: 'reliability.discovery-freshness',
       category: 'reliability',
       severity,
       title: isStale
-        ? 'Files were edited after the tree moved past the read (historical)'
-        : 'Files edited after the tree moved past the read',
-      detail:
-        `${lead}${totalStale} file read(s) across ${sessionsAffected} session(s) were followed by a working-tree-moving git command ` +
-        `(checkout/switch/restore/pull/merge/rebase/reset/cherry-pick/revert/stash) and then an Edit/Write of the same file with no re-Read in ` +
-        `between, so the edit may have been applied against content the ref moved past. Anchored on the repo-map snapshot @ ${shaShort}; ` +
-        `git-ref reads (origin/master with no fetch) are the sibling reliability.stale-state-assertion's concern, not this one.`,
-      action:
-        're-read the target after the ref moved (a git checkout, pull, rebase, merge, or reset) before acting on it, rather than editing from a read taken before the move.',
+        ? 'Files were edited after freshness signals (historical)'
+        : 'Files edited after freshness signals',
+      detail: fallbackOnly
+        ? `${lead}${totalStale} file read(s) across ${sessionsAffected} session(s) were followed by a working-tree-moving git command ` +
+          `(checkout/switch/restore/pull/merge/rebase/reset/cherry-pick/revert/stash) and then an Edit/Write of the same file with no re-Read in ` +
+          `between, so the edit may have been applied against content the ref moved past. Anchored on the repo-map snapshot @ ${shaShort}; ` +
+          `git-ref reads (origin/master with no fetch) are the sibling reliability.stale-state-assertion's concern, not this one.`
+        : `${lead}${totalStale} file read(s) across ${sessionsAffected} session(s) were edited without a re-Read after freshness evidence appeared: ${signalSummary}. ` +
+          `The edit may therefore have acted on stale content; git-ref reads (origin/master with no fetch) remain reliability.stale-state-assertion's concern.`,
+      action: fallbackOnly
+        ? 're-read the target after the ref moved (a git checkout, pull, rebase, merge, or reset) before acting on it, rather than editing from a read taken before the move.'
+        : 're-read the target after its file metadata or working tree changes before acting on it, rather than editing from the earlier read.',
       affected: totalStale,
       view: 'tools',
       evidence,

@@ -36,7 +36,8 @@ const session = (sessionId: string, calls: ToolCall[]): ToolUsageData => ({ sess
 
 function dataset(
   paths: string[] = TRACKED,
-  sha: string | null = SHA
+  sha: string | null = SHA,
+  mtimeMs?: number
 ): RecommendationInput['repoMap'] {
   return {
     projects: [
@@ -48,6 +49,7 @@ function dataset(
         text: '',
         files: paths.map((path) => ({
           path,
+          ...(mtimeMs !== undefined ? { mtimeMs } : {}),
           symbols: [],
           imports: [],
           configSections: [],
@@ -164,6 +166,24 @@ describe('reliability.discovery-freshness — fires', () => {
     );
     expect(rec?.affected).toBe(4);
   });
+
+  it('fires from a per-file mtime inside the read-to-edit interval without a tree-mover or sha', () => {
+    const plain = (id: string) =>
+      session(id, [read(1000, ABS('src/lib/reclaim.ts')), edit(3000, ABS('src/lib/reclaim.ts'))]);
+    const repoMap = dataset(TRACKED, null, T0 + 2000);
+    const rec = detector.rule(input([plain('a'), plain('b'), plain('c')], repoMap), NOW_FRESH);
+
+    expect(rec?.affected).toBe(3);
+    expect(rec?.evidence[0]).toContain('repo-map mtime advanced');
+    expect(rec?.evidence[0]).not.toContain('git checkout');
+    expect(rec?.provenance?.observations).toContainEqual(
+      expect.objectContaining({
+        source: 'parse-repo-map-join',
+        field: 'repoMap.projects[].files[].mtimeMs',
+        value: 3,
+      })
+    );
+  });
 });
 
 describe('reliability.discovery-freshness — false-positive guards', () => {
@@ -171,6 +191,41 @@ describe('reliability.discovery-freshness — false-positive guards', () => {
     const plain = (id: string) =>
       session(id, [read(1000, ABS('src/lib/reclaim.ts')), edit(3000, ABS('src/lib/reclaim.ts'))]);
     expect(detector.rule(input([plain('a'), plain('b'), plain('c')]), NOW_FRESH)).toBeNull();
+  });
+
+  it('does NOT treat an equal, older, edit-time, or post-edit mtime as an intervening change', () => {
+    const plain = (id: string) =>
+      session(id, [read(1000, ABS('src/lib/reclaim.ts')), edit(3000, ABS('src/lib/reclaim.ts'))]);
+    const calls = [plain('a'), plain('b'), plain('c')];
+
+    expect(detector.rule(input(calls, dataset(TRACKED, null, T0 + 1000)), NOW_FRESH)).toBeNull();
+    expect(detector.rule(input(calls, dataset(TRACKED, null, T0 + 500)), NOW_FRESH)).toBeNull();
+    expect(detector.rule(input(calls, dataset(TRACKED, null, T0 + 3000)), NOW_FRESH)).toBeNull();
+    expect(detector.rule(input(calls, dataset(TRACKED, null, T0 + 4000)), NOW_FRESH)).toBeNull();
+  });
+
+  it('retains the tree-mover proxy when a later snapshot mtime is inconclusive', () => {
+    const repoMap = dataset(TRACKED, SHA, T0 + 4000);
+    const rec = detector.rule(
+      input([staleChain('a'), staleChain('b'), staleChain('c')], repoMap),
+      NOW_FRESH
+    );
+
+    expect(rec?.affected).toBe(3);
+    expect(rec!.evidence![0]).toContain('moved the tree');
+  });
+
+  it('refreshes the direct mtime discriminator when a later re-Read intervenes', () => {
+    const refreshed = (id: string) =>
+      session(id, [
+        read(1000, ABS('src/lib/reclaim.ts')),
+        read(2500, ABS('src/lib/reclaim.ts')),
+        edit(3000, ABS('src/lib/reclaim.ts')),
+      ]);
+    const repoMap = dataset(TRACKED, null, T0 + 2000);
+    expect(
+      detector.rule(input([refreshed('a'), refreshed('b'), refreshed('c')], repoMap), NOW_FRESH)
+    ).toBeNull();
   });
 
   it('does NOT count a read of a non-repo-mapped path', () => {

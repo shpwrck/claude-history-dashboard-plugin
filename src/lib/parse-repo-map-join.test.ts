@@ -12,6 +12,7 @@ const map: RepoMap = {
   files: [
     {
       path: 'src/api.ts',
+      mtimeMs: 1_700_000_000_000,
       symbols: [
         {
           name: 'fetchDataset',
@@ -109,6 +110,7 @@ describe('buildRepoMapDataset', () => {
     expect(project.configAttribution).toHaveLength(1);
     expect(project.files[0]).toMatchObject({
       path: 'src/api.ts',
+      mtimeMs: 1_700_000_000_000,
       reread: {
         sessions: 1,
         totalReads: 4,
@@ -122,6 +124,7 @@ describe('buildRepoMapDataset', () => {
       configSections: ['/repo/AGENTS.md#key-files'],
       recommendations: ['context.pin-api'],
     });
+    expect(project.files[1]).not.toHaveProperty('mtimeMs');
   });
 
   it('does not include source bodies or config bodies in the join', () => {

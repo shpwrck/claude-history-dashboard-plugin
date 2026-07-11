@@ -199,8 +199,11 @@ export async function generateRepoMap(
   const files: RepoFile[] = [];
   for (const abs of absFiles) {
     let source: string;
+    let mtimeMs: number;
     try {
-      if (statSync(abs).size > MAX_FILE_BYTES) continue;
+      const stat = statSync(abs);
+      if (stat.size > MAX_FILE_BYTES) continue;
+      mtimeMs = stat.mtimeMs;
       source = readFileSync(abs, 'utf8');
     } catch {
       continue;
@@ -213,6 +216,7 @@ export async function generateRepoMap(
     }
     files.push({
       path: relPosix(root, abs),
+      mtimeMs,
       symbols: structure.symbols,
       imports: structure.imports,
     });

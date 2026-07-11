@@ -16,6 +16,8 @@ interface RecommendationLike {
 export interface RepoMapFileJoin {
   /** Repo-root-relative path from the structural map. */
   path: string;
+  /** Host-captured source-file mtime. Absent on older/uploaded artifacts. */
+  mtimeMs?: number;
   symbols: RepoSymbol[];
   imports: string[];
   reread?: {
@@ -158,6 +160,11 @@ export function buildRepoMapDataset({
         .map((rec) => rec.id);
       return {
         path: file.path,
+        ...(typeof file.mtimeMs === 'number' &&
+        Number.isFinite(file.mtimeMs) &&
+        file.mtimeMs >= 0
+          ? { mtimeMs: file.mtimeMs }
+          : {}),
         symbols: file.symbols,
         imports: file.imports,
         ...(rereadByPath.has(file.path)

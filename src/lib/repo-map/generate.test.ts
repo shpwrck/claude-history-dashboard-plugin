@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateRepoMap, renderRepoMap } from './generate';
@@ -81,6 +81,12 @@ describe('generateRepoMap', () => {
   it('records the staleness stamp it is given', async () => {
     const map = await generateRepoMap(root, { parseFile: fakeParse, gitSha: 'abc123' });
     expect(map.generatedAtGitSha).toBe('abc123');
+  });
+
+  it('captures each source file mtime host-side', async () => {
+    const map = await generateRepoMap(root, { parseFile: fakeParse });
+    const a = map.files.find((file) => file.path === 'a.ts');
+    expect(a?.mtimeMs).toBe(statSync(join(root, 'a.ts')).mtimeMs);
   });
 
   it('never persists a source body (privacy invariant)', async () => {
