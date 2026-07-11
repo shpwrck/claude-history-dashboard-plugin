@@ -2,7 +2,9 @@
 // Verify the MCP shim isolation contract:
 //
 // 1. scripts/server.mjs must NOT import scripts/mcp-shim.mjs (not in its
-//    boot graph at all).
+//    boot graph at all). Bare-package isolation for the full transitive server
+//    graph is exercised by server-runtime-import-guard.test.mjs; a source grep
+//    here cannot prove that contract.
 // 2. scripts/mcp-shim.mjs MUST import @modelcontextprotocol/sdk (it's the
 //    shim's sole reason for existence as a separate process).
 // 3. .mcp.json must declare the shim as a stdio server so Claude Code can
@@ -37,12 +39,6 @@ check(
   'server.mjs does not import mcp-shim.mjs',
   !serverSrc.includes('mcp-shim'),
   'Found "mcp-shim" reference inside server.mjs -- the shim must stay isolated'
-);
-
-check(
-  'server.mjs does not import @modelcontextprotocol/sdk',
-  !serverSrc.includes('@modelcontextprotocol/sdk'),
-  'Found MCP SDK import inside server.mjs -- the SDK must only appear in mcp-shim.mjs'
 );
 
 // ---------------------------------------------------------------------------
