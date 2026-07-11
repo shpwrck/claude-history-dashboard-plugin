@@ -152,6 +152,7 @@ import { detector as activityTrend } from './activity/activity-trend';
 // Upkeep of the agent's own durable state (#1965 category foundation).
 import { detector as memoryHygiene } from './maintenance/memory-hygiene';
 import { detector as docHygiene } from './maintenance/doc-hygiene';
+import { detector as skillHookIntegrity } from './maintenance/skill-hook-integrity';
 
 // ── Registered detectors ────────────────────────────────────────────────
 // Emit order is LOAD-BEARING: `buildRecommendations` evaluates these in array
@@ -443,6 +444,14 @@ export const DETECTORS: Detector[] = [
   // dangling `src/…` references (cross-checked against the repo-map inventory) —
   // grouped into one recommend-only card. Dark on a doc-graph-free dataset.
   docHygiene,
+
+  // ── #2500 (epic #2241) — skill/hook reference integrity ─────────────────────
+  // The reference-integrity member of artifact hygiene. Reads liveConfig's
+  // ingest-time reference-existence annotations (config-loader #2500) and flags a
+  // settings hook whose referenced script is missing and a skill whose SKILL.md
+  // points at a removed bundled path. Point-in-time ("as of ingest") wording;
+  // recommend-only. Dark on a liveConfig-free dataset (SPA/upload).
+  skillHookIntegrity,
 ];
 
 /**

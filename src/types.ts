@@ -503,9 +503,36 @@ export type ActionDomain =
  * is optional because the file is user-edited and may be partial or missing
  * entirely; a malformed file degrades to an empty object.
  */
+/**
+ * One filesystem path token referenced by a hook `command`, with whether it
+ * existed at ingest time (#2500). Existence is evaluated HOST-SIDE at ingest
+ * (detectors are pure and cannot stat); `path` is the token exactly as written
+ * in the command (e.g. `~/.claude/hooks/foo.mjs`) so the finding cites what the
+ * user typed. Only tokens whose absolute location is verifiable are captured —
+ * a token with an unresolvable `$VAR` other than `$HOME`/`$CLAUDE_PROJECT_DIR`
+ * is skipped, never recorded. Absent ⇒ the command referenced no verifiable path.
+ */
+export interface HookReferencedPath {
+  /** The path token as written in the hook command (display + provenance). */
+  path: string;
+  /** Whether the resolved absolute path existed when the dataset was ingested. */
+  exists: boolean;
+}
+
 export interface LiveSettingsHook {
   matcher?: string;
-  hooks?: { type?: string; command?: string }[];
+  hooks?: {
+    type?: string;
+    command?: string;
+    /**
+     * Verifiable filesystem path tokens referenced by `command`, each with its
+     * ingest-time existence (#2500). Populated host-side at ingest; absent when
+     * the command references no verifiable absolute/`~`/`$HOME`/
+     * `$CLAUDE_PROJECT_DIR` path. Optional so older datasets and the SPA degrade
+     * cleanly. Read by `maintenance.skill-hook-integrity`.
+     */
+    referencedPaths?: HookReferencedPath[];
+  }[];
   source?: 'global' | 'local';
 }
 
@@ -548,6 +575,16 @@ export interface LiveResource {
    *  discovery-failure detector (#136). Absent for file-resources
    *  (agents/commands) and when the manifest/field is missing or unreadable. */
   description?: string;
+  /**
+   * For skills (dir-as-resource): relative file references in the skill's
+   * `SKILL.md` (markdown links / backtick bundled-resource paths) that did NOT
+   * resolve inside the skill dir at ingest (#2500) — dangling pointers to
+   * removed bundled resources. Computed host-side at ingest; absent when the
+   * resource isn't a skill, `SKILL.md` is unreadable, or nothing dangles.
+   * Optional so older datasets and the SPA degrade cleanly. Read by
+   * `maintenance.skill-hook-integrity`.
+   */
+  danglingRefs?: string[];
 }
 
 /** A plugin's bundled artifacts so phase 2 can roll up "any used" to "plugin

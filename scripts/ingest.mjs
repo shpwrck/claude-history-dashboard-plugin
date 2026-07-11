@@ -1084,7 +1084,14 @@ export const PARSER_SIG_VERSION = 'v4';
 // restart can load and serve a persisted dataset assembled from v8 rows before
 // that reparse finishes. Turn over this downstream cache so the old v10 body is
 // never accepted as current.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 11;
+// v12 (#2500): assembleLiveConfig now annotates each hook command with its
+// ingest-time `referencedPaths` (existence) and each skill with `danglingRefs`,
+// feeding maintenance.skill-hook-integrity. These are a pure serialized-shape
+// change with NO ~/.claude source-artifact change — an unchanged settings.json /
+// SKILL.md keeps its content hash, so without this bump a persisted v11 blob
+// would keep serving liveConfig with no reference-integrity fields and the new
+// detector would never fire on deployed data.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 12;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

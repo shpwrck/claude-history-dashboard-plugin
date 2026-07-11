@@ -36,6 +36,8 @@ export interface LiveConfigPathOptions {
 
 interface LiveConfigPaths {
   claudeDir: string;
+  /** The user's home directory — the target for `~` / `$HOME` expansion. */
+  homeDir: string;
   settingsGlobal: string;
   settingsLocal: string;
   claudeMdGlobal: string;
@@ -123,6 +125,7 @@ function liveConfigPaths(opts: LiveConfigPathOptions = {}): LiveConfigPaths {
   const homeDir = opts.homeDir || dirname(claudeDir);
   return {
     claudeDir,
+    homeDir,
     settingsGlobal: join(claudeDir, 'settings.json'),
     settingsLocal: join(claudeDir, 'settings.local.json'),
     claudeMdGlobal: join(claudeDir, 'CLAUDE.md'),
@@ -563,6 +566,186 @@ function readProjectSettings(
   return out;
 }
 
+// ── Reference integrity (#2500) ────────────────────────────────────────────
+// Existence of a hook's referenced script and a skill's bundled resources MUST
+// be evaluated host-side at ingest — detectors are pure and cannot stat. These
+// helpers annotate the assembled bundle with per-hook `referencedPaths` and
+// per-skill `danglingRefs` so `maintenance.skill-hook-integrity` can flag a hook
+// or skill that points at a path removed off disk.
+
+/** Cap on tokens scanned per hook command — a bound, not a semantic limit. */
+const HOOK_COMMAND_MAX_TOKENS = 64;
+
+/**
+ * Resolve a shell token to a verifiable ABSOLUTE path, or `null` when it is not
+ * a verifiable path reference. Only `~`, `$HOME`/`${HOME}`, a resolvable
+ * `$CLAUDE_PROJECT_DIR`/`${CLAUDE_PROJECT_DIR}` (when `projectDir` is known), and
+ * a leading `/` are verifiable. Any remaining `$VAR`, glob (`*`/`?`), or brace
+ * expansion leaves the target unknowable → `null` (skipped, never flagged).
+ */
+function resolveVerifiablePath(
+  tok: string,
+  homeDir: string,
+  projectDir: string | undefined
+): string | null {
+  let resolved: string;
+  let m: RegExpMatchArray | null;
+  if (tok === '~') {
+    resolved = homeDir;
+  } else if (tok.startsWith('~/')) {
+    resolved = join(homeDir, tok.slice(2));
+  } else if ((m = tok.match(/^\$\{?HOME\}?(?=\/|$)/))) {
+    resolved = homeDir + tok.slice(m[0].length);
+  } else if ((m = tok.match(/^\$\{?CLAUDE_PROJECT_DIR\}?(?=\/|$)/))) {
+    if (!projectDir) return null; // no known project root → unverifiable
+    resolved = projectDir + tok.slice(m[0].length);
+  } else if (tok.startsWith('/')) {
+    resolved = tok;
+  } else {
+    return null; // not a path token
+  }
+  // Any unresolved var / glob / brace expansion makes the target unknowable.
+  if (/[$*?{}]/.test(resolved)) return null;
+  if (!isAbsolute(resolved)) return null;
+  return resolved;
+}
+
+/**
+ * Extract the verifiable filesystem path tokens a hook `command` references,
+ * each with its ingest-time existence. Conservative: whitespace-tokenized,
+ * redirect targets (`> file`) are ignored (they are outputs, not references),
+ * and only tokens `resolveVerifiablePath` accepts are recorded. `path` is the
+ * token exactly as written for display/provenance.
+ */
+function extractHookReferencedPaths(
+  command: string,
+  homeDir: string,
+  projectDir: string | undefined
+): { path: string; exists: boolean }[] {
+  const out: { path: string; exists: boolean }[] = [];
+  const seen = new Set<string>();
+  const tokens = command.split(/\s+/).slice(0, HOOK_COMMAND_MAX_TOKENS);
+  let expectRedirectTarget = false;
+  for (const raw of tokens) {
+    if (raw === '') continue;
+    const redir = raw.match(/^[0-9]*&?[<>]+/);
+    if (redir) {
+      // A bare redirect operator makes the NEXT token an output target; an
+      // operator with an attached target (`>/tmp/x`) consumes it inline.
+      if (raw.slice(redir[0].length) === '') expectRedirectTarget = true;
+      continue;
+    }
+    if (expectRedirectTarget) {
+      expectRedirectTarget = false;
+      continue;
+    }
+    const tok = raw
+      .replace(/^['"`]+/, '')
+      .replace(/['"`]+$/, '')
+      .replace(/^\(+/, '')
+      .replace(/[;,)]+$/, '');
+    if (tok === '' || seen.has(tok)) continue;
+    const resolved = resolveVerifiablePath(tok, homeDir, projectDir);
+    if (resolved === null) continue;
+    seen.add(tok);
+    out.push({ path: tok, exists: existsSync(resolved) });
+  }
+  return out;
+}
+
+/** Annotate every hook command in a merged settings object with its
+ *  ingest-time `referencedPaths` (only when it references a verifiable path). */
+function annotateHookReferencedPaths(
+  settings: Obj,
+  homeDir: string,
+  projectDir: string | undefined
+): void {
+  const hooks = settings && typeof settings.hooks === 'object' ? (settings.hooks as Obj) : null;
+  if (!hooks) return;
+  for (const event of Object.keys(hooks)) {
+    const groups = hooks[event];
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      if (!group || typeof group !== 'object') continue;
+      const inner = (group as Obj).hooks;
+      if (!Array.isArray(inner)) continue;
+      for (const h of inner) {
+        if (!h || typeof h !== 'object') continue;
+        const cmd = (h as Obj).command;
+        if (typeof cmd !== 'string') continue;
+        const refs = extractHookReferencedPaths(cmd, homeDir, projectDir);
+        if (refs.length > 0) (h as Obj).referencedPaths = refs;
+      }
+    }
+  }
+}
+
+/** A markdown-link target that is a checkable relative bundled-resource ref, or
+ *  `null`. Relative + no scheme/anchor + no `$VAR`/glob + a file extension. */
+function checkableMdLinkRef(raw: string): string | null {
+  let t = raw.trim().replace(/^<+/, '').replace(/>+$/, '');
+  const hash = t.indexOf('#');
+  if (hash >= 0) t = t.slice(0, hash);
+  const q = t.indexOf('?');
+  if (q >= 0) t = t.slice(0, q);
+  if (t === '') return null;
+  if (t.startsWith('/') || t.startsWith('~') || t.startsWith('#')) return null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(t)) return null; // scheme (http:, mailto:, …)
+  if (/[$*?\s]/.test(t)) return null;
+  const last = t.split('/').pop() ?? '';
+  if (!/\.[A-Za-z0-9]+$/.test(last)) return null; // must name a file
+  return t;
+}
+
+/** A backtick inline-code token that is a checkable relative bundled-resource
+ *  path (≥1 `/`, path-safe chars, a file extension), or `null`. Stricter than
+ *  markdown links to avoid treating prose/commands as file refs. */
+function checkableBacktickRef(raw: string): string | null {
+  const t = raw.trim();
+  if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+$/.test(t)) return null;
+  const last = t.split('/').pop() ?? '';
+  if (!/\.[A-Za-z0-9]+$/.test(last)) return null;
+  return t;
+}
+
+/** Relative refs in a skill's `SKILL.md` that don't resolve inside the skill
+ *  dir. A `../`-escaping ref (e.g. a shared helper) is intentional → skipped. */
+function skillDanglingRefs(skillDir: string, maxBytes: number): string[] {
+  let text: string;
+  try {
+    text = readTextFileCappedSync(join(skillDir, 'SKILL.md'), maxBytes);
+  } catch {
+    return [];
+  }
+  const candidates = new Set<string>();
+  for (const m of text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)) {
+    const c = checkableMdLinkRef(m[1]);
+    if (c) candidates.add(c);
+  }
+  for (const m of text.matchAll(/`([^`\n]+)`/g)) {
+    const c = checkableBacktickRef(m[1]);
+    if (c) candidates.add(c);
+  }
+  const dangling: string[] = [];
+  for (const ref of candidates) {
+    const resolved = resolve(skillDir, ref);
+    // Must stay inside the skill dir; an escaping ref points elsewhere and
+    // cannot be judged a broken bundled reference.
+    if (resolved !== skillDir && !resolved.startsWith(skillDir + sep)) continue;
+    if (!existsSync(resolved)) dangling.push(ref);
+  }
+  return dangling;
+}
+
+/** Annotate each skill resource with its `danglingRefs` (only when non-empty). */
+function annotateSkillDanglingRefs(skills: Resource[], maxBytes: number): void {
+  for (const skill of skills) {
+    if (!skill || typeof skill.path !== 'string') continue;
+    const refs = skillDanglingRefs(skill.path, maxBytes);
+    if (refs.length > 0) (skill as Resource & { danglingRefs?: string[] }).danglingRefs = refs;
+  }
+}
+
 // Build the full liveConfig bundle. Every section degrades to empty/null on
 // missing source so the dataset endpoint stays alive even when ~/.claude is
 // partially configured.
@@ -571,12 +754,36 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
   const claudeJson = asObj(readJsonOrNull(paths.claudeJson, paths.configFileMaxBytes));
   const projectRoots = readableProjectRoots(paths, claudeJson);
   const settings = readLiveSettings(paths);
+  // #2500: capture each global/local hook command's referenced-path existence.
+  annotateHookReferencedPaths(settings, paths.homeDir, undefined);
   // Validate the raw ~/.claude/settings.json bytes (#167). Display path uses
   // ~ so the UI shows the canonical location rather than the container path.
   const settingsHealth = validateSettingsJson(
     '~/.claude/settings.json',
     readTextOrNull(paths.settingsGlobal, paths.configFileMaxBytes)
   );
+  // #2500: project-scoped hooks resolve `$CLAUDE_PROJECT_DIR` against their root.
+  const projectSettings = readProjectSettings(projectRoots, paths.configFileMaxBytes);
+  for (const [root, ps] of Object.entries(projectSettings)) {
+    annotateHookReferencedPaths(ps, paths.homeDir, root);
+  }
+  const skills = [
+    ...listResources(
+      paths.skillsDir,
+      'directory',
+      paths.configFileMaxBytes,
+      paths.configResourceMaxEntries
+    ),
+    ...listProjectResources(
+      projectRoots,
+      'skills',
+      'directory',
+      paths.configFileMaxBytes,
+      paths.configResourceMaxEntries
+    ),
+  ].slice(0, paths.configResourceMaxEntries);
+  // #2500: flag SKILL.md references to bundled resources no longer on disk.
+  annotateSkillDanglingRefs(skills, paths.configFileMaxBytes);
   return {
     settings,
     settingsHealth,
@@ -584,24 +791,10 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
       global: readTextOrNull(paths.claudeMdGlobal, paths.configFileMaxBytes),
       perProject: readPerProjectClaudeMd(projectRoots, paths.configFileMaxBytes),
     },
-    projectSettings: readProjectSettings(projectRoots, paths.configFileMaxBytes),
+    projectSettings,
     plugins: readPlugins(paths, asObj(settings.enabledPlugins)),
     mcpServers: readMcpServers(paths, claudeJson),
-    skills: [
-      ...listResources(
-        paths.skillsDir,
-        'directory',
-        paths.configFileMaxBytes,
-        paths.configResourceMaxEntries
-      ),
-      ...listProjectResources(
-        projectRoots,
-        'skills',
-        'directory',
-        paths.configFileMaxBytes,
-        paths.configResourceMaxEntries
-      ),
-    ].slice(0, paths.configResourceMaxEntries),
+    skills,
     subagents: [
       ...listResources(
         paths.agentsDir,

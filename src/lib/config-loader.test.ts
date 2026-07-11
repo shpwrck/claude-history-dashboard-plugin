@@ -281,4 +281,123 @@ describe('assembleLiveConfig', () => {
     expect(liveConfig.claudeMd.perProject).toEqual({});
     expect(liveConfig.projectSettings).toEqual({});
   });
+
+  // ── #2500 reference integrity: host-side existence at ingest ──────────────
+
+  it('annotates hook commands with each referenced path and its existence (#2500)', () => {
+    mkdirSync(join(claudeDir, 'hooks'), { recursive: true });
+    writeFileSync(join(claudeDir, 'hooks', 'present.mjs'), '// hook\n');
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          Stop: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command:
+                    'node ~/.claude/hooks/present.mjs && node ~/.claude/hooks/gone.mjs',
+                },
+              ],
+            },
+          ],
+        },
+      })
+    );
+
+    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const refs = liveConfig.settings.hooks?.Stop?.[0]?.hooks?.[0]?.referencedPaths;
+    expect(refs).toEqual([
+      { path: '~/.claude/hooks/present.mjs', exists: true },
+      { path: '~/.claude/hooks/gone.mjs', exists: false },
+    ]);
+  });
+
+  it('does not annotate unverifiable ($VAR-opaque) hook commands (#2500)', () => {
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            // $MY_TOOL is opaque; $CLAUDE_PROJECT_DIR is unresolvable in GLOBAL
+            // settings (no project root) — both must be skipped, never flagged.
+            { hooks: [{ type: 'command', command: '"$MY_TOOL" $CLAUDE_PROJECT_DIR/x.sh' }] },
+          ],
+        },
+      })
+    );
+
+    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    expect(
+      liveConfig.settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.referencedPaths
+    ).toBeUndefined();
+  });
+
+  it('resolves $CLAUDE_PROJECT_DIR for project-scoped hooks against the project root (#2500)', () => {
+    const projectRoot = join(root, 'repo-hooks');
+    mkdirSync(join(projectRoot, '.claude', 'hooks'), { recursive: true });
+    writeFileSync(join(projectRoot, '.claude', 'hooks', 'present.sh'), '# hook\n');
+    writeFileSync(
+      join(root, '.claude.json'),
+      JSON.stringify({ projects: { [projectRoot]: {} } })
+    );
+    writeFileSync(
+      join(projectRoot, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              hooks: [
+                { type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/hooks/present.sh' },
+                { type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/hooks/gone.sh' },
+              ],
+            },
+          ],
+        },
+      })
+    );
+
+    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const group = liveConfig.projectSettings?.[projectRoot]?.hooks?.PostToolUse?.[0];
+    expect(group?.hooks?.[0]?.referencedPaths).toEqual([
+      { path: '$CLAUDE_PROJECT_DIR/.claude/hooks/present.sh', exists: true },
+    ]);
+    expect(group?.hooks?.[1]?.referencedPaths).toEqual([
+      { path: '$CLAUDE_PROJECT_DIR/.claude/hooks/gone.sh', exists: false },
+    ]);
+  });
+
+  it('flags a skill SKILL.md reference to a removed bundled path, keeping present ones (#2500)', () => {
+    mkdirSync(join(claudeDir, 'skills', 'my-skill', 'references'), { recursive: true });
+    writeFileSync(join(claudeDir, 'skills', 'my-skill', 'references', 'here.md'), 'ok\n');
+    writeFileSync(
+      join(claudeDir, 'skills', 'my-skill', 'SKILL.md'),
+      [
+        '---',
+        'description: Test skill',
+        '---',
+        'See [the guide](references/here.md) and run `scripts/gone.py`.',
+        'Also read [missing](references/gone.md).',
+        'External [link](https://example.com/x.md) must be ignored.',
+      ].join('\n')
+    );
+
+    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const found = liveConfig.skills.find((s) => s.id === 'my-skill');
+    expect(found?.danglingRefs?.sort()).toEqual(['references/gone.md', 'scripts/gone.py']);
+  });
+
+  it('leaves danglingRefs absent for a skill whose references all resolve (#2500)', () => {
+    mkdirSync(join(claudeDir, 'skills', 'clean-skill', 'scripts'), { recursive: true });
+    writeFileSync(join(claudeDir, 'skills', 'clean-skill', 'scripts', 'run.sh'), '# ok\n');
+    writeFileSync(
+      join(claudeDir, 'skills', 'clean-skill', 'SKILL.md'),
+      '---\ndescription: Clean skill\n---\nRun `scripts/run.sh`.\n'
+    );
+
+    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const found = liveConfig.skills.find((s) => s.id === 'clean-skill');
+    expect(found?.danglingRefs).toBeUndefined();
+  });
 });

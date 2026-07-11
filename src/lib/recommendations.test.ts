@@ -2799,6 +2799,30 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ docGraph }) });
   }
 
+  // ── maintenance.skill-hook-integrity (#2500): a settings hook whose referenced
+  // script did not exist at ingest (dangling-hook-script). Existence is annotated
+  // host-side at ingest, so the bank fixture supplies referencedPaths directly.
+  {
+    const liveConfig = liveConfigShell({
+      settings: {
+        hooks: {
+          Stop: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'node ~/.claude/hooks/gone.mjs',
+                  referencedPaths: [{ path: '~/.claude/hooks/gone.mjs', exists: false }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    out.push({ now, input: bankBase({ liveConfig }) });
+  }
+
   // ── reliability.cwd-drift-execution (#1870): unanchored git/gh reads
   // (`git log origin/master`, `gh pr view`) with no `-C`/`cd`/`-R` anchor.
   {

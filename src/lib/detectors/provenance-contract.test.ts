@@ -417,6 +417,34 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     } as unknown as RecommendationInput['docGraph'];
     return { input: baseInput({ docGraph }), now: 0 };
   },
+  'maintenance.skill-hook-integrity': () => {
+    // A Stop hook whose referenced script did not exist at ingest →
+    // dangling-hook-script (structural), with cited liveConfig provenance.
+    const liveConfig = {
+      settings: {
+        hooks: {
+          Stop: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'node ~/.claude/hooks/gone.mjs',
+                  referencedPaths: [{ path: '~/.claude/hooks/gone.mjs', exists: false }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+      claudeMd: { global: null, perProject: {} },
+      plugins: [],
+      mcpServers: [],
+      skills: [],
+      subagents: [],
+      commands: [],
+    } as unknown as RecommendationInput['liveConfig'];
+    return { input: baseInput({ liveConfig }), now: 0 };
+  },
   'workflow.procedural-memory': () => {
     // The same contiguous 3-step Bash procedure recurs across 3 sessions with a
     // present-but-empty skill inventory (liveConfig is REQUIRED — the finding
