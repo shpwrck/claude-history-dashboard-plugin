@@ -1209,7 +1209,7 @@ export const VIEW_RENDERERS: Partial<
     <ShadowCalls shadowCalls={d.shadowCalls} serverAvailable={serverAvailable} />
   ),
   // ── #539 artifact views ────────────────────────────────────────────────
-  'report-card': ({ data: d, serverAvailable }) => (
+  'report-card': ({ data: d, nav: n, serverAvailable }) => (
     <AgentReportCard
       sessions={d.sessions}
       tokenData={d.tokenData}
@@ -1217,6 +1217,7 @@ export const VIEW_RENDERERS: Partial<
       telemetry={d.telemetry}
       debugLogs={d.debugLogs}
       serverAvailable={serverAvailable}
+      onOpenSession={n.openSession}
     />
   ),
   'review-queue': ({ data: d, nav: n, serverAvailable }) => (

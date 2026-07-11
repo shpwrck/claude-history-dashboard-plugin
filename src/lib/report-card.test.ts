@@ -254,4 +254,42 @@ describe('buildReportCard — blended verdict (#572)', () => {
     expect(card.projects).toEqual([]);
     expect(card.tally).toEqual({ KEEP: 0, FLAG: 0, MOVE: 0 });
   });
+
+  it('surfaces contributing sessions per project, signal-bearing first (#2477)', () => {
+    const reg = ['a', 'b', 'c', 'd'].map((id) => sess('/repo/keep', id, 'cli'));
+    // Only 'c' carries a reliability (debug) signal.
+    const card = buildReportCard(reg, [], [dbg('c', 800)]);
+    const p = card.projects.find((x) => x.cwd === '/repo/keep')!;
+    expect(p.contributingSessions).toHaveLength(4);
+    const bySession = new Map(
+      p.contributingSessions.map((s) => [s.sessionId, s])
+    );
+    expect(bySession.get('c')!.hasReliabilitySignal).toBe(true);
+    expect(bySession.get('c')!.entrypoint).toBe('cli');
+    expect(bySession.get('a')!.hasReliabilitySignal).toBe(false);
+    // Signal-bearing session sorts to the front so the verdict is drillable.
+    expect(p.contributingSessions[0].sessionId).toBe('c');
+    expect(
+      p.contributingSessions.every((s) => s.recoveredFromTranscript === false)
+    ).toBe(true);
+  });
+
+  it('flags transcript-recovered contributing sessions (#2477)', () => {
+    const reg = ['a', 'b', 'c', 'd'].map((id) =>
+      sess('/repo/recovered-debug', id, 'cli')
+    );
+    const card = buildReportCard(
+      reg,
+      [],
+      [dbg('debug-only', 7000, 3)],
+      [ctx('debug-only', '/repo/recovered-debug', 'sdk-cli')]
+    );
+    const p = card.projects.find((x) => x.cwd === '/repo/recovered-debug')!;
+    const recovered = p.contributingSessions.find(
+      (s) => s.sessionId === 'debug-only'
+    )!;
+    expect(recovered.recoveredFromTranscript).toBe(true);
+    expect(recovered.hasReliabilitySignal).toBe(true);
+    expect(recovered.entrypoint).toBe('sdk-cli');
+  });
 });

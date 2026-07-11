@@ -69,6 +69,27 @@ export interface ReportCardSessionContext {
   version?: string;
 }
 
+/**
+ * One session that contributed to a project's verdict. Surfaced so the report
+ * card's action-class KEEP/FLAG/MOVE decision can be drilled to the runs behind
+ * it (#2477). The join onto reliability signals is already done in
+ * buildReportCard — this just carries the per-session rows forward.
+ */
+export interface ReportCardContributingSession {
+  /** Session UUID — the drill key into the Sessions view. */
+  sessionId: string;
+  /** Launch entrypoint (attribution dimension), e.g. "cli" / "sdk-cli". */
+  entrypoint: string;
+  /** Unix epoch ms the session started (0 when unknown). */
+  startedAt: number;
+  /** CLI version string, when known. */
+  version: string;
+  /** This session carried a telemetry or debug reliability signal. */
+  hasReliabilitySignal: boolean;
+  /** Recovered via transcript context (no live session-registry row). */
+  recoveredFromTranscript: boolean;
+}
+
 /** One joined project row: attribution + reliability + blended verdict. */
 export interface ReportCardProject {
   /** Absolute working directory — the project key. */
@@ -115,6 +136,12 @@ export interface ReportCardProject {
   verdict: ReportCardVerdict;
   /** One-line, screenshot-and-argue explanation of the verdict. */
   verdictReason: string;
+  /**
+   * The sessions that contributed to this verdict, sorted signal-bearing first
+   * then most-recent. Consumed by the view to drill each verdict to its runs
+   * (#2477). Never null — a project always has at least one contributing row.
+   */
+  contributingSessions: ReportCardContributingSession[];
 }
 
 /** The whole fleet card: per-project rows + a fleet tally. */
@@ -319,13 +346,24 @@ export function buildReportCard(
     let debugSessionCount = 0;
     let ttfbSampleCount = 0;
     let maxAttemptSourceCount = 0;
+    const contributingSessions: ReportCardContributingSession[] = [];
     for (const entry of p.rawEntries) {
       const rel = relBySession.get(entry.sessionId);
       const dbg = debugBySession.get(entry.sessionId);
-      if (rel || dbg) sessionsWithSignal += 1;
-      if (rel || dbg) {
-        if (recoveredSessionIds.has(entry.sessionId)) recoveredFromTranscriptCount += 1;
+      const hasReliabilitySignal = Boolean(rel || dbg);
+      const recoveredFromTranscript = recoveredSessionIds.has(entry.sessionId);
+      if (hasReliabilitySignal) sessionsWithSignal += 1;
+      if (hasReliabilitySignal && recoveredFromTranscript) {
+        recoveredFromTranscriptCount += 1;
       }
+      contributingSessions.push({
+        sessionId: entry.sessionId,
+        entrypoint: entry.entrypoint,
+        startedAt: entry.startedAt,
+        version: entry.version,
+        hasReliabilitySignal,
+        recoveredFromTranscript,
+      });
       if (rel) {
         stormEvents += rel.stormEvents;
         totalEvents += rel.totalEvents;
@@ -343,6 +381,16 @@ export function buildReportCard(
         fastModeLostCount += dbg.fastModeLostCount;
       }
     }
+    // Signal-bearing sessions first (they shaped the reliability verdict), then
+    // most-recent, then by id for a stable order.
+    contributingSessions.sort((a, b) => {
+      if (a.hasReliabilitySignal !== b.hasReliabilitySignal) {
+        return a.hasReliabilitySignal ? -1 : 1;
+      }
+      if (a.startedAt !== b.startedAt) return b.startedAt - a.startedAt;
+      return a.sessionId.localeCompare(b.sessionId);
+    });
+
     const retryStormPct =
       totalEvents > 0 ? Math.round((100 * stormEvents) / totalEvents) : 0;
 
@@ -386,6 +434,7 @@ export function buildReportCard(
       dragBucket,
       verdict,
       verdictReason: reason,
+      contributingSessions,
     };
   });
 
