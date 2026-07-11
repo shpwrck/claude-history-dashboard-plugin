@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   parseShadowCalls,
   classifyExperimentSource,
+  parseProofReceiptCells,
+  modelEvalSourceCell,
+  mergeExternalSourceCells,
+  LIVE_TRUST_SOURCES,
   avgTokenDelta,
   avgCostDelta,
   shadowCheaper,
@@ -856,5 +860,99 @@ describe('config-scoping atomic-vs-monolith verdict triple (#1663)', () => {
     expect(configScopingSpeedDelta(a)).toBeNull();
     expect(configScopingCostDelta(a)).toBeNull();
     expect(configScopingTokenDelta(a)).toBeNull();
+  });
+});
+
+describe('experiment-source ingest wiring (#2151)', () => {
+  /** An unstamped ledger line as `finalizeRace` writes it: mode live + raceGoal, no source. */
+  const raceLine = (axis: string, winner: 'main' | 'shadow' | 'tie'): string =>
+    JSON.stringify({
+      mode: 'live', axis, raceGoal: 'GOAL: refactor the parser',
+      judge: { winner }, main: { tokens: 900 }, shadow: { tokens: 700 },
+    });
+
+  it('classifies unstamped race records race-live via the raceGoal signature', () => {
+    expect(classifyExperimentSource({ mode: 'live', axis: 'skills', raceGoal: 'GOAL: x' })).toBe('race-live');
+    // Explicit stamp still wins; blank raceGoal falls through to the mode rule.
+    expect(classifyExperimentSource({ mode: 'live', source: 'replay', raceGoal: 'GOAL: x' })).toBe('replay');
+    expect(classifyExperimentSource({ mode: 'live', axis: 'skills', raceGoal: '  ' })).toBe('live');
+  });
+
+  it('race records land in a race-live cell and KEEP live trust (a /race is in-the-loop)', () => {
+    const agg = parseShadowCalls([raceLine('skills', 'shadow'), line('skills', 'live', 'shadow')].join('\n'));
+    expect(agg.bySourceAxis.map((c) => [c.source, c.axis, c.samples])).toEqual([
+      ['live', 'skills', 1],
+      ['race-live', 'skills', 1],
+    ]);
+    const a = agg.byAxis[0];
+    expect(a.liveShadowWins).toBe(2); // both sources are live-trust
+    expect(LIVE_TRUST_SOURCES.has('race-live')).toBe(true);
+  });
+
+  it('benchmark-tier sources never buy live trust by stamping mode:live (weighting)', () => {
+    const agg = parseShadowCalls(
+      [
+        JSON.stringify({ mode: 'live', axis: 'model', source: 'model-eval', judge: { winner: 'shadow' } }),
+        JSON.stringify({ mode: 'live', axis: 'model', source: 'proof', judge: { winner: 'shadow' } }),
+      ].join('\n')
+    );
+    const a = agg.byAxis[0];
+    expect(a.shadowWins).toBe(2); // wins still count…
+    expect(a.live).toBe(2); // …and the mode mix stays honest…
+    expect(a.liveShadowWins).toBe(0); // …but detector trust stays replay-tier
+  });
+
+  it('parseProofReceiptCells: one sample per receipt, verdict→winner, costUsd→delta, junk→skipped', () => {
+    const receipt = (wastePattern: string, verdict: 'proven' | 'refuted' | 'null', costUsd?: number): string =>
+      JSON.stringify({
+        kind: 'PROOF',
+        observed: { wastePattern },
+        result: { verdict, perDimensionDeltas: costUsd === undefined ? {} : { costUsd } },
+      });
+    const { cells, receipts, skipped } = parseProofReceiptCells(
+      [
+        receipt('repo-map-context-waste', 'proven', -0.4),
+        receipt('repo-map-context-waste', 'null'),
+        receipt('another-pattern', 'refuted', 0.1),
+        JSON.stringify({ kind: 'DRAFT' }), // wrong kind
+        '{not json',
+      ].join('\n')
+    );
+    expect(receipts).toBe(3);
+    expect(skipped).toBe(2);
+    expect(cells.map((c) => [c.source, c.axis, c.samples])).toEqual([
+      ['proof', 'another-pattern', 1],
+      ['proof', 'repo-map-context-waste', 2],
+    ]);
+    const rm = cells[1];
+    expect([rm.shadowWins, rm.mainWins, rm.ties]).toEqual([1, 0, 1]); // proven→shadow, null→tie
+    expect([rm.costDeltaSum, rm.costDeltaCount]).toEqual([-0.4, 1]);
+    expect([rm.live, rm.replay]).toEqual([0, 0]); // a batch proof run is neither
+    expect(cells[0].mainWins).toBe(1); // refuted→main
+  });
+
+  it('modelEvalSourceCell: volume-only provenance cell; absent pipeline adds nothing', () => {
+    expect(modelEvalSourceCell(null)).toBeNull();
+    expect(modelEvalSourceCell({ runCount: 0 })).toBeNull();
+    const cell = modelEvalSourceCell({ runCount: 7 })!;
+    expect([cell.source, cell.axis, cell.samples]).toEqual(['model-eval', 'model', 7]);
+    expect(cell.shadowWins + cell.mainWins + cell.ties).toBe(0); // verdicts stay in the eval surface
+  });
+
+  it('mergeExternalSourceCells: cells re-sort, external reconciles, ledger invariants untouched', () => {
+    const agg = parseShadowCalls([line('skills', 'live', 'shadow'), line('model', 'replay', 'main')].join('\n'));
+    const { cells } = parseProofReceiptCells(
+      JSON.stringify({ kind: 'PROOF', observed: { wastePattern: 'w' }, result: { verdict: 'proven' } })
+    );
+    const evalCell = modelEvalSourceCell({ runCount: 3 })!;
+    const merged = mergeExternalSourceCells(agg, [...cells, evalCell]);
+    expect(merged.external).toBe(4);
+    expect(merged.counted).toBe(2); // ledger counting untouched (#2149)
+    const cellSum = merged.bySourceAxis.reduce((s, c) => s + c.samples, 0);
+    expect(cellSum).toBe(merged.counted + merged.external!); // documented reconciliation
+    // Sorted by (source, axis) including the merged-in cells.
+    expect(merged.bySourceAxis.map((c) => c.source)).toEqual(['live', 'model-eval', 'proof', 'replay']);
+    // Empty merge is a strict no-op (same reference), so unchanged ledgers keep their ETag path.
+    expect(mergeExternalSourceCells(agg, [])).toBe(agg);
   });
 });

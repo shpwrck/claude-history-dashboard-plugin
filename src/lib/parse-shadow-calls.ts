@@ -164,7 +164,9 @@ export interface RecsFindingAggregate {
  * stamps records — no parser change, no new aggregate field.
  *   - `live`           — organic rotation shadow fired alongside real work (unstamped fallback)
  *   - `replay`         — idle-window replay of a past task (unstamped fallback)
- *   - `race-live`      — live `/race` run (explicit stamp)
+ *   - `race-live`      — live `/race` run (explicit stamp, or unstamped fallback: the
+ *                        record carries `raceGoal`, which only the race writer emits —
+ *                        `finalizeRace` predates source stamping, #2151)
  *   - `model-eval`     — model-eval batch runner (explicit stamp, #2138)
  *   - `proof`          — proof-batch runner (explicit stamp)
  *   - `config-scoping` — atomic-vs-monolith config experiment (its runner predates
@@ -190,15 +192,30 @@ export function classifyExperimentSource(rec: {
   source?: unknown;
   axis?: unknown;
   mode?: unknown;
+  raceGoal?: unknown;
 }): string {
   if (typeof rec.source === 'string' && rec.source.trim()) {
     // Free-form tolerant but bounded: a runaway writer must not mint
     // arbitrarily long aggregation keys.
     return rec.source.trim().slice(0, 64);
   }
+  // Only the race writer (`finalizeRace`) emits `raceGoal`, and it predates
+  // source stamping — so an unstamped row carrying it is a live `/race` (#2151).
+  if (typeof rec.raceGoal === 'string' && rec.raceGoal.trim()) return 'race-live';
   if (rec.axis === 'config-scoping') return 'config-scoping';
   return rec.mode === 'replay' ? 'replay' : 'live';
 }
+
+/**
+ * Sources whose `mode:'live'` rows may increment `liveShadowWins` — the counter
+ * that lifts the shadow-axis-wins recommendation from info to warning (#2151).
+ * Organic rotation shadows and `/race` runs are real, in-the-loop experiments;
+ * everything else (model-eval batches, proof-batch, config-scoping, unknown
+ * future writers) is batch/benchmark-tier evidence that must never buy live
+ * trust just by stamping `mode:'live'` — it still counts toward samples/wins,
+ * but caps at replay-tier confidence.
+ */
+export const LIVE_TRUST_SOURCES: ReadonlySet<string> = new Set(['live', 'race-live']);
 
 /**
  * Cardinality bound on the (source, axis) cells (#2150): a buggy writer that
@@ -278,11 +295,23 @@ export interface ShadowCallAggregate {
   replay: number;
   byAxis: AxisAggregate[];
   /**
-   * Uniform (source, axis) provenance cells over the `counted` rows (#2150) —
-   * the one path every experiment kind reports through. Sorted by (source, axis)
-   * so the detector + ETag stay stable. `Σ cells.samples === counted`.
+   * Uniform (source, axis) provenance cells (#2150) — the one path every
+   * experiment kind reports through. Sorted by (source, axis) so the detector +
+   * ETag stay stable. Ledger-derived cells sum to `counted`; artifact-derived
+   * cells (proof receipts, model-eval batches — merged in by
+   * {@link mergeExternalSourceCells}, #2151) sum to `external`, so the full
+   * reconciliation is `Σ cells.samples === counted + (external ?? 0)`.
    */
   bySourceAxis: SourceAxisAggregate[];
+  /**
+   * Samples contributed by artifact-derived cells (#2151): experiments whose
+   * records live OUTSIDE the ledger (proof receipts in `data/proof-receipts.jsonl`,
+   * model-eval result artifacts). Kept separate from `counted` so the #2149
+   * line-for-line ledger reconciliation (`counted + synthetic + skipped === total`)
+   * still holds against the raw ledger. Absent (never 0) when no external
+   * source contributed.
+   */
+  external?: number;
   /**
    * True when the ledger exceeded the artifact byte cap and only its newest tail
    * was parsed (#2152): the counts above then cover a SUFFIX of the ledger, not
@@ -299,6 +328,8 @@ interface ShadowRecord {
   synthetic?: unknown;
   /** Explicit experiment-source stamp (#2150); absent on rows from older writers. */
   source?: unknown;
+  /** Race-writer-only field (`finalizeRace`) — the unstamped race-live signature (#2151). */
+  raceGoal?: unknown;
   judge?: { winner?: unknown; adherenceRegressions?: unknown } | null;
   main?: { tokens?: unknown; costUsd?: unknown } | null;
   shadow?: { tokens?: unknown; costUsd?: unknown } | null;
@@ -490,7 +521,9 @@ export function parseShadowCalls(
     }
     // Uniform provenance cell (#2150): the same counters, keyed (source, axis),
     // so every experiment kind reports through one path with no bespoke fields.
-    let source = classifyExperimentSource(rec);
+    // The raw (pre-cap) source also drives the live-trust gate below (#2151).
+    const rawSource = classifyExperimentSource(rec);
+    let source = rawSource;
     let cellKey = `${source}\u0000${axis}`;
     if (!bySourceAxis.has(cellKey) && bySourceAxis.size >= MAX_SOURCE_AXIS_CELLS) {
       source = '(other)';
@@ -517,7 +550,9 @@ export function parseShadowCalls(
     if (winner === 'shadow') {
       a.shadowWins++;
       cell.shadowWins++;
-      if (mode === 'live') a.liveShadowWins++;
+      // Live trust is gated on the SOURCE, not just the mode (#2151): a batch
+      // writer stamping mode:'live' must not lift detector confidence.
+      if (mode === 'live' && LIVE_TRUST_SOURCES.has(rawSource)) a.liveShadowWins++;
     } else if (winner === 'main') {
       a.mainWins++;
       cell.mainWins++;
@@ -716,6 +751,127 @@ export function configScopingTokenDelta(a: AxisAggregate): number | null {
 export function configScopingCostDelta(a: AxisAggregate): number | null {
   const c = a.configScoping;
   return c ? meanDelta(c.cost.monolithCostUsdSum, c.cost.atomizedCostUsdSum, c.cost.costPairedCount) : null;
+}
+
+/**
+ * Subset of a PROOF receipt we read (#2151). Written by `scripts/proof-batch.mjs`
+ * to `data/proof-receipts.jsonl` — one JSON line per finalized matched-pairs
+ * experiment. `result.verdict` is proven|null|refuted; `perDimensionDeltas.costUsd`
+ * is the median per-pair $ delta (injected − control; negative ⇒ injected cheaper),
+ * which maps directly onto the aggregate's (shadow − main) delta convention
+ * because the injected arm is the variation.
+ */
+interface ProofReceipt {
+  kind?: unknown;
+  observed?: { wastePattern?: unknown } | null;
+  result?: {
+    verdict?: unknown;
+    perDimensionDeltas?: { costUsd?: unknown } | null;
+  } | null;
+}
+
+/**
+ * Fold `data/proof-receipts.jsonl` into (source, axis) provenance cells (#2151):
+ * source `proof`, axis = the receipt's `observed.wastePattern` (what the
+ * experiment was about), one SAMPLE per receipt. Verdict mapping: `proven` ⇒
+ * shadow win (the injected variation demonstrably helped), `refuted` ⇒ main win,
+ * `null` ⇒ tie. `live`/`replay` stay 0 — a batch proof run is neither, and per
+ * {@link LIVE_TRUST_SOURCES} it can never buy live-tier detector confidence.
+ * Pure text-in like the ledger parser; malformed or non-PROOF lines are counted
+ * in `skipped`, never silently dropped (#2149 discipline).
+ */
+export function parseProofReceiptCells(jsonlText: string | null | undefined): {
+  cells: SourceAxisAggregate[];
+  receipts: number;
+  skipped: number;
+} {
+  const byAxis = new Map<string, SourceAxisAggregate>();
+  let receipts = 0;
+  let skipped = 0;
+  if (jsonlText) {
+    for (const line of jsonlText.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let rec: ProofReceipt;
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (typeof parsed !== 'object' || parsed === null) {
+          skipped++;
+          continue;
+        }
+        rec = parsed as ProofReceipt;
+      } catch {
+        skipped++;
+        continue;
+      }
+      if (rec.kind !== 'PROOF') {
+        skipped++;
+        continue;
+      }
+      const pattern = rec.observed?.wastePattern;
+      const axis =
+        typeof pattern === 'string' && pattern.trim() ? pattern.trim().slice(0, 64) : 'unknown';
+      let cell = byAxis.get(axis);
+      if (!cell) {
+        cell = emptySourceAxis('proof', axis);
+        byAxis.set(axis, cell);
+      }
+      receipts++;
+      cell.samples++;
+      const verdict = rec.result?.verdict;
+      if (verdict === 'proven') cell.shadowWins++;
+      else if (verdict === 'refuted') cell.mainWins++;
+      else if (verdict === 'null') cell.ties++;
+      const costUsd = num(rec.result?.perDimensionDeltas?.costUsd);
+      if (costUsd !== null) {
+        cell.costDeltaSum += costUsd;
+        cell.costDeltaCount++;
+      }
+    }
+  }
+  const cells = [...byAxis.values()].sort((x, y) => x.axis.localeCompare(y.axis));
+  return { cells, receipts, skipped };
+}
+
+/**
+ * The model-eval provenance cell (#2151): volume + provenance ONLY. The
+ * model-eval pipeline (#1085/#1242) already carries its own verdict surface —
+ * per-model rollups, vetoes, and routing recommendations consumed by the
+ * Model Evals view and the #2138 detectors — so re-deriving shadow-win verdicts
+ * from those rollups here would fabricate a comparability the underlying runs
+ * never measured (recs are auditable claims). The cell makes the batch volume
+ * visible in the uniform (source, axis) surface; its verdicts stay where they
+ * are attributable. Axis is `model`: a model eval is definitionally the model
+ * axis. Returns null when there are no runs, so an absent pipeline adds nothing.
+ */
+export function modelEvalSourceCell(
+  summary: { runCount?: number } | null | undefined
+): SourceAxisAggregate | null {
+  const runs = summary?.runCount;
+  if (typeof runs !== 'number' || !Number.isFinite(runs) || runs <= 0) return null;
+  const cell = emptySourceAxis('model-eval', 'model');
+  cell.samples = Math.floor(runs);
+  return cell;
+}
+
+/**
+ * Merge artifact-derived provenance cells (proof receipts, model-eval batches)
+ * into a ledger aggregate (#2151). Returns a NEW aggregate: `bySourceAxis` is
+ * re-sorted with the extra cells appended and `external` carries their sample
+ * sum, so the documented reconciliation `Σ cells.samples === counted + external`
+ * holds and the #2149 ledger invariants (`counted + synthetic + skipped ===
+ * total`) are untouched. A no-op (same aggregate back) for an empty cell list.
+ */
+export function mergeExternalSourceCells(
+  agg: ShadowCallAggregate,
+  cells: SourceAxisAggregate[]
+): ShadowCallAggregate {
+  if (cells.length === 0) return agg;
+  const merged = [...agg.bySourceAxis, ...cells].sort(
+    (x, y) => x.source.localeCompare(y.source) || x.axis.localeCompare(y.axis)
+  );
+  const external = (agg.external ?? 0) + cells.reduce((sum, c) => sum + c.samples, 0);
+  return { ...agg, bySourceAxis: merged, external };
 }
 
 /**

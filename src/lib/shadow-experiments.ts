@@ -102,6 +102,8 @@ interface RawRecord {
   axis?: unknown;
   synthetic?: unknown;
   source?: unknown;
+  /** Race-writer-only field — classifyExperimentSource attributes unstamped race rows by it (#2151). */
+  raceGoal?: unknown;
   task?: unknown;
   variation?: unknown;
   judge?: { winner?: unknown; basis?: unknown; rationale?: unknown; reason?: unknown } | null;

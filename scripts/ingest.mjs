@@ -433,6 +433,10 @@ function mergeStatsCaches(caches) {
 const SHADOW_CALLS_LEDGER =
   (!SCOPED_INGEST && process.env.CLAUDE_SHADOW_CALLS_LEDGER) ||
   join(CLAUDE, 'shadow-calls', 'ledger.jsonl');
+// Proof-batch receipts (#2151): finalized PROOF receipts appended by
+// scripts/proof-batch.mjs, one JSON line each. Repo-tracked (data/, not
+// ~/.claude) — the runner writes them next to the preregistration they answer.
+const PROOF_RECEIPTS_PATH = join(PROJECT_DIR, 'data', 'proof-receipts.jsonl');
 // `~/.claude/usage-data` holds the repo-map artifacts we ingest (REPO_MAP_DIR).
 const USAGE_DATA = join(CLAUDE, 'usage-data');
 const REPO_MAP_DIR = join(USAGE_DATA, 'repo-map');
@@ -581,7 +585,12 @@ const { appendAdoptionReceipt, readAdoptionReceiptIndex, readRejectedFindingIds 
 export { readRejectedFindingIds };
 // Shadow-calls experiment ledger (epic #513) — per-axis aggregate feeds the
 // workflow.shadow-axis-wins detector (#518/#523).
-const { parseShadowCalls } = await import(join(LIB, 'parse-shadow-calls.ts'));
+const {
+  parseShadowCalls,
+  parseProofReceiptCells,
+  modelEvalSourceCell,
+  mergeExternalSourceCells,
+} = await import(join(LIB, 'parse-shadow-calls.ts'));
 const { parseWorkflows } = await import(join(LIB, 'parse-workflows.ts'));
 // External guidance snapshots (#1302, epic #656) — repo-committed, static
 // reference docs the engine attaches to fired recs as "Learn More" links.
@@ -1055,7 +1064,12 @@ export const PARSER_SIG_VERSION = 'v4';
 // serialized-shape change with NO ~/.claude source-artifact change, so without
 // this bump a persisted v8 dataset blob would keep serving an aggregate with no
 // source dimension and the by-source rollup would never ship.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 9;
+// v10 (#2151): unstamped race records reclassify live→race-live, benchmark-tier
+// sources stop incrementing liveShadowWins, and artifact-derived cells (proof
+// receipts, model-eval batches) merge into bySourceAxis with the new `external`
+// counter. An unchanged ledger keeps its content hash, so without this bump a
+// persisted v9 blob would keep serving the old attribution + trust weighting.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 10;
 
 // The dataset-cache gate (sourceSignature) must also turn over when the
 // per-session PARSER output changes, because that output is folded into the
@@ -2183,6 +2197,13 @@ export function ingest() {
   // must be in the gate or new experiments would never invalidate the recs cache.
   hash.update('shadow-calls\n');
   hashFileSig(SHADOW_CALLS_LEDGER, hash);
+  // Proof receipts feed the shadow-calls (source, axis) cells (#2151): a new
+  // receipt must invalidate the dataset cache or the cells serve stale. Guarded
+  // so the absent-file case keeps the hash input byte-identical to before.
+  if (existsSync(PROOF_RECEIPTS_PATH)) {
+    hash.update('proof-receipts\n');
+    hashFileSig(PROOF_RECEIPTS_PATH, hash);
+  }
   // Section 4: liveConfig bundle. Every source the bundle assembles from goes
   // in the gate so any edit (settings.json, CLAUDE.md, plugin install,
   // ~/.claude.json mcpServers change, new skill/agent/command file) forces a
@@ -2733,6 +2754,26 @@ function assembleDatasetCore() {
     configBackups,
   } = assembleArtifacts();
   const externalGuidance = readExternalGuidance();
+
+  // Artifact-derived experiment sources (#2151): proof receipts + model-eval
+  // batches join the ledger's uniform (source, axis) cells so every experiment
+  // kind reports through ONE surface (epic #2147). Their samples land in
+  // `external`, never `counted`, so the #2149 line-for-line ledger
+  // reconciliation stays exact. Race records need no wiring here: they append
+  // to the ledger itself and the parser now classifies them `race-live`.
+  try {
+    const externalCells = [];
+    if (existsSync(PROOF_RECEIPTS_PATH)) {
+      externalCells.push(
+        ...parseProofReceiptCells(readFileSync(PROOF_RECEIPTS_PATH, 'utf8')).cells
+      );
+    }
+    const modelEvalCell = modelEvalSourceCell(modelEvalSummary);
+    if (modelEvalCell) externalCells.push(modelEvalCell);
+    shadowCalls = mergeExternalSourceCells(shadowCalls, externalCells);
+  } catch {
+    /* ignore — unreadable receipts degrade to ledger-only cells, never sink ingest */
+  }
 
   const roots = projectRootsFrom(entries, tokenData);
   const maps = roots.map(readRepoMapArtifact).filter(Boolean);

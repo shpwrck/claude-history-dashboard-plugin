@@ -1,1 +1,0 @@
-import{Mn as e}from"./index-lENX10Zt.js";var t=({prefix:t=`pf-random-id-`,children:n})=>n(e(t));t.displayName=`GenerateId`;export{t};
