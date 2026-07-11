@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // Release-gate check: a MINOR release cannot be cut until its standing review
-// epics are closed.
+// epics are closed and the milestone has no unfinished non-gate work.
 //
 // Every minor release (milestone vX.Y) is seeded with standing `release-gate`
 // epics — a performance review and an architecture review, from v0.3 onward a
 // security review too (#698), and from v0.6 onward a data-integrity review
 // (#2130) (see docs/RELEASING.md). This script is the hard gate: it FAILS
-// (non-zero exit) if the target milestone has no gating epics seeded, or if any
-// of them are still open. The pass/fail rule is generic ("every release-gate
-// epic in the milestone is closed"), so it already covers the later epics;
-// only the "expected set" messaging is version-aware (#698, #2130). Run it
+// (non-zero exit) if the target milestone lacks the expected number or distinct
+// domains of gating epics, if any gate is open, or if non-gate work remains.
+// The expected cardinality and domain labels are version-aware (#698, #2130).
+// Open work may be
+// deliberately exempted only with the explicit `release-deferred` label; normal
+// deferral should move the issue to a later milestone. Run this
 // before `gh release create`, and in CI on tag push.
 //
 // PATCH / hotfix releases (`x.y.z`, z>0) are EXEMPT: the perf/architecture/
@@ -34,6 +36,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const GATE_LABEL = 'release-gate';
+const DEFERRED_LABEL = 'release-deferred';
 
 function gh(args) {
   const repo = process.env.GH_REPO;
@@ -88,12 +91,102 @@ export function expectsDataIntegrityGate(milestone) {
   return major > 0 || minor >= 6;
 }
 
-// The number of standing gate epics a milestone is expected to carry: the
-// perf+architecture pair, plus security (>= v0.3) and data-integrity (>= v0.6)
-// as they roll in. The pass/fail rule below stays generic ("every release-gate
-// epic is closed"); this only drives the version-aware "expected set" warning.
+// Domain labels for the standing set. These match seed-release-gates.mjs: the
+// architecture concern intentionally uses the repository's `tech-debt` label.
+export function expectedGateLabels(milestone) {
+  const labels = ['performance', 'tech-debt'];
+  if (expectsSecurityGate(milestone)) labels.push('security');
+  if (expectsDataIntegrityGate(milestone)) labels.push('data-integrity');
+  return labels;
+}
+
+// The number of distinct standing gate domains expected for the milestone.
 export function expectedGateCount(milestone) {
-  return 2 + (expectsSecurityGate(milestone) ? 1 : 0) + (expectsDataIntegrityGate(milestone) ? 1 : 0);
+  return expectedGateLabels(milestone).length;
+}
+
+function labelNames(issue) {
+  return (issue.labels || []).map((entry) => entry.name || entry);
+}
+
+function versionTuple(value) {
+  const match = String(value).match(/v(\d+)\.(\d+)(?:\.(\d+))?/i);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3] || 0)] : null;
+}
+
+function hasDeferralAudit(issue, milestone) {
+  // The audit lives in the issue body, which `gh issue list --json body` returns
+  // without the GraphQL comments(first: 100) truncation boundary.
+  const body = String(issue.body || '');
+  const destination = body.match(/\bdestination\s*:\s*(v\d+\.\d+(?:\.\d+)?)\b/i)?.[1];
+  const target = versionTuple(milestone);
+  const next = versionTuple(destination);
+  if (!target || !next || !/\brationale\s*:\s*\S/i.test(body)) return false;
+  return next.some((part, index) => part !== target[index]
+    && part > target[index]
+    && next.slice(0, index).every((prior, priorIndex) => prior === target[priorIndex]));
+}
+
+// Maximum bipartite matching: each expected domain must be covered by a
+// different gate epic. A single epic carrying every label can satisfy only one
+// domain, so label stacking cannot mask missing standing reviews.
+export function missingDistinctGateLabels(expectedLabels, gateIssues) {
+  const matchedDomainByIssue = new Map();
+  function assign(domain, visited) {
+    for (let index = 0; index < gateIssues.length; index += 1) {
+      if (visited.has(index) || !labelNames(gateIssues[index]).includes(domain)) continue;
+      visited.add(index);
+      const previous = matchedDomainByIssue.get(index);
+      if (previous === undefined || assign(previous, visited)) {
+        matchedDomainByIssue.set(index, domain);
+        return true;
+      }
+    }
+    return false;
+  }
+  return expectedLabels.filter((domain) => !assign(domain, new Set()));
+}
+
+// Pure release-state policy used by the CLI and its tests. A minor release is
+// open only when the standing gate count is complete, every gate is closed, and
+// no non-gate milestone issue remains. `release-deferred` is an explicit escape
+// hatch: it stays visible in the result/output rather than disappearing silently.
+export function assessReleaseState(milestone, gateIssues, milestoneIssues, milestonePullRequests = []) {
+  const expectedLabels = expectedGateLabels(milestone);
+  const missingGateLabels = missingDistinctGateLabels(expectedLabels, gateIssues);
+  const expectedCount = expectedLabels.length;
+  const missingGateEpicCount = Math.max(0, expectedCount - gateIssues.length);
+  const missingGateCount = Math.max(missingGateEpicCount, missingGateLabels.length);
+  const openGates = gateIssues.filter((issue) => String(issue.state).toLowerCase() === 'open');
+  const openMilestoneIssues = milestoneIssues.filter(
+    (issue) => String(issue.state).toLowerCase() === 'open',
+  );
+  const deferred = openMilestoneIssues.filter(
+    (issue) => labelNames(issue).includes(DEFERRED_LABEL) && hasDeferralAudit(issue, milestone),
+  );
+  const invalidDeferred = openMilestoneIssues.filter(
+    (issue) => labelNames(issue).includes(DEFERRED_LABEL) && !hasDeferralAudit(issue, milestone),
+  );
+  const openIssues = openMilestoneIssues.filter((issue) => {
+    const labels = labelNames(issue);
+    return !labels.includes(GATE_LABEL) && !deferred.includes(issue);
+  });
+  const openPullRequests = milestonePullRequests.filter(
+    (pull) => String(pull.state).toLowerCase() === 'open',
+  );
+  const openWork = [...openIssues, ...openPullRequests];
+  return {
+    ok: missingGateEpicCount === 0 && missingGateLabels.length === 0 && openGates.length === 0 && openWork.length === 0,
+    expectedCount,
+    missingGateCount,
+    missingGateEpicCount,
+    missingGateLabels,
+    openGates,
+    openWork,
+    openPullRequests,
+    deferred,
+    invalidDeferred,
+  };
 }
 
 // Human-readable description of the standing set expected for a milestone.
@@ -166,7 +259,7 @@ function main() {
         '--label', GATE_LABEL,
         '--state', 'all',
         '--limit', '200',
-        '--json', 'number,title,state',
+        '--json', 'number,title,state,labels',
       ]);
       gateIssues = JSON.parse(out);
       resolved = name;
@@ -192,29 +285,81 @@ function main() {
     );
   }
 
-  const open = gateIssues.filter((i) => i.state.toLowerCase() === 'open');
+  let milestoneIssues;
+  try {
+    milestoneIssues = JSON.parse(gh([
+      'issue', 'list',
+      '--milestone', resolved,
+      '--state', 'open',
+      '--limit', '1000',
+      '--json', 'number,title,state,labels,body',
+    ]));
+  } catch (err) {
+    fail(`could not inspect unfinished work in milestone "${resolved}" via gh (${(err?.stderr || err?.message || '').toString().trim()}).`);
+    return;
+  }
+
+  let milestonePullRequests;
+  try {
+    milestonePullRequests = JSON.parse(gh([
+      'pr', 'list',
+      '--state', 'open',
+      '--search', `milestone:${resolved}`,
+      '--limit', '1000',
+      '--json', 'number,title,state,labels',
+    ]));
+  } catch (err) {
+    fail(`could not inspect open pull requests in milestone "${resolved}" via gh (${(err?.stderr || err?.message || '').toString().trim()}).`);
+    return;
+  }
+
+  const assessment = assessReleaseState(resolved, gateIssues, milestoneIssues, milestonePullRequests);
   const closed = gateIssues.filter((i) => i.state.toLowerCase() === 'closed');
 
-  const expectedCount = expectedGateCount(resolved);
-  if (gateIssues.length < expectedCount) {
-    // Fewer gating epics than the standing set for this milestone. Warn loudly;
-    // the open check below still governs pass/fail.
-    console.error(
-      `! Warning: ${resolved} has only ${gateIssues.length} ${GATE_LABEL} epic(s) — ` +
-      `expected ${expectedCount} (${expectedSet(resolved)}).`,
+  if (assessment.missingGateCount > 0) {
+    const shortages = [];
+    if (assessment.missingGateEpicCount > 0) {
+      shortages.push(
+        `${resolved} has only ${gateIssues.length} ${GATE_LABEL} epic(s); expected ${assessment.expectedCount}.`,
+      );
+    }
+    if (assessment.missingGateLabels.length > 0) {
+      shortages.push(
+        `${resolved} is missing required ${GATE_LABEL} domain label(s): ${assessment.missingGateLabels.join(', ')}.`,
+      );
+    }
+    fail(
+      `${shortages.join('\n')}\n` +
+      `  Expected distinct coverage for ${expectedSet(resolved)}.\n` +
+      `  Seed the missing standing gate${assessment.missingGateCount === 1 ? '' : 's'} before cutting ${resolved}.`,
     );
   }
 
-  if (open.length > 0) {
-    const list = open.map((i) => `    #${i.number}  ${i.title}`).join('\n');
+  if (assessment.openGates.length > 0) {
+    const list = assessment.openGates.map((i) => `    #${i.number}  ${i.title}`).join('\n');
     fail(
-      `${open.length} of ${gateIssues.length} ${GATE_LABEL} epic(s) for ${resolved} still OPEN:\n${list}\n\n` +
+      `${assessment.openGates.length} of ${gateIssues.length} ${GATE_LABEL} epic(s) for ${resolved} still OPEN:\n${list}\n\n` +
       `  Close them (or move them to a later milestone) before cutting ${resolved}.`,
     );
   }
 
+  if (assessment.openWork.length > 0) {
+    const list = assessment.openWork.map((i) => `    #${i.number}  ${i.title}`).join('\n');
+    const invalidNote = assessment.invalidDeferred.length
+      ? `\n  Invalid ${DEFERRED_LABEL} exception(s) need issue-body fields "Destination: <later vX.Y.Z>" and "Rationale: ...".`
+      : '';
+    fail(
+      `${assessment.openWork.length} unfinished non-gate issue(s) remain in ${resolved}:\n${list}\n\n` +
+      `  Close them, move them to a later milestone, or explicitly label audited exceptions "${DEFERRED_LABEL}".` +
+      invalidNote,
+    );
+  }
+
   const list = closed.map((i) => `    #${i.number}  ${i.title}`).join('\n');
-  console.log(`\n✓ Release gate OPEN for ${resolved} — all ${closed.length} ${GATE_LABEL} epic(s) closed:\n${list}\n`);
+  const deferredNote = assessment.deferred.length
+    ? `\n  Explicitly deferred (${DEFERRED_LABEL}):\n${assessment.deferred.map((i) => `    #${i.number}  ${i.title}`).join('\n')}\n`
+    : '';
+  console.log(`\n✓ Release gate OPEN for ${resolved} — all ${closed.length} ${GATE_LABEL} epic(s) closed and non-gate work drained:\n${list}\n${deferredNote}`);
   process.exit(0);
 }
 

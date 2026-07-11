@@ -32,7 +32,12 @@
 
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { classifyTarget, expectsSecurityGate, expectsDataIntegrityGate } from './check-release-gate.mjs';
+import {
+  classifyTarget,
+  expectsSecurityGate,
+  expectsDataIntegrityGate,
+  missingDistinctGateLabels,
+} from './check-release-gate.mjs';
 
 const API_ROOT = 'https://api.github.com';
 const GATE_LABEL = 'release-gate';
@@ -167,16 +172,16 @@ function labelNames(issue) {
 // (open or closed) in the milestone. An issue covers a domain when it carries
 // both the gate label and that domain's label.
 export function missingGateDomains(existingIssues, milestoneTitle) {
-  const present = new Set();
-  for (const issue of existingIssues || []) {
-    if (issue.pull_request) continue; // the issues API lists PRs too
-    const labels = labelNames(issue);
-    if (!labels.includes(GATE_LABEL)) continue;
-    for (const domain of GATE_DOMAINS) {
-      if (labels.includes(domain.label)) present.add(domain.key);
-    }
-  }
-  return expectedGateDomains(milestoneTitle).filter((d) => !present.has(d.key));
+  const gates = (existingIssues || []).filter((issue) => {
+    if (issue.pull_request) return false; // the issues API lists PRs too
+    return labelNames(issue).includes(GATE_LABEL);
+  });
+  const expected = expectedGateDomains(milestoneTitle);
+  const missingLabels = new Set(missingDistinctGateLabels(
+    expected.map((domain) => domain.label),
+    gates,
+  ));
+  return expected.filter((domain) => missingLabels.has(domain.label));
 }
 
 // Seed the standing gate epics for `target`. Pure of process.* so the test can

@@ -193,6 +193,28 @@ test('re-running on a fully seeded milestone is a no-op', async () => {
   assert.equal(github.created.length, 0);
 });
 
+test('one multi-labelled gate cannot satisfy multiple standing domains', async () => {
+  const stacked = gateIssue('performance', 9, 'closed');
+  stacked.labels.push(
+    { name: 'tech-debt' },
+    { name: 'security' },
+    { name: 'data-integrity' },
+  );
+  const github = fakeGitHub({
+    milestones: [{ title: 'v0.6', number: 9 }],
+    gateIssues: [stacked],
+  });
+
+  const result = await seed('v0.6', github);
+
+  assert.equal(result.created.length, 3);
+  assert.equal(result.existing.length, 1);
+  assert.deepEqual(
+    result.created.map((created) => created.domain).sort(),
+    ['architecture', 'data-integrity', 'security'],
+  );
+});
+
 test('non-vX.Y milestone names are a logged no-op, never an API call', async () => {
   const logs = [];
   const result = await seedReleaseGates('Future', {
