@@ -15,73 +15,21 @@
 // manual-upload path.
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
-const DB_NAME = 'claude-history-dashboard-dataset';
-const STORE_NAME = 'dataset';
+import {
+  readCachedDatasetStore,
+  writeCachedDatasetStore,
+} from './dataset-cache-store';
+
 const CACHE_KEY = 'live';
 
-interface CachedDataset {
-  etag: string;
-  data: unknown;
-}
-
 interface DatasetRequest {
-  url: string;
+  url?: string;
   headers?: Record<string, string>;
   cacheKey?: string | null;
+  operation?: 'fetch' | 'read' | 'write';
+  data?: unknown;
 }
 
-function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error('IndexedDB request failed'));
-  });
-}
-
-function openCacheDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore(STORE_NAME);
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
-  });
-}
-
-async function readCachedDataset(cacheKey: string | null): Promise<CachedDataset | null> {
-  if (!cacheKey || !('indexedDB' in ctx)) return null;
-  let db: IDBDatabase | null = null;
-  try {
-    db = await openCacheDb();
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const cached = await requestToPromise<CachedDataset | undefined>(
-      tx.objectStore(STORE_NAME).get(cacheKey)
-    );
-    return cached?.etag ? cached : null;
-  } catch {
-    return null;
-  } finally {
-    db?.close();
-  }
-}
-
-async function writeCachedDataset(
-  cacheKey: string | null,
-  cached: CachedDataset
-): Promise<void> {
-  if (!cacheKey || !('indexedDB' in ctx)) return;
-  let db: IDBDatabase | null = null;
-  try {
-    db = await openCacheDb();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    await requestToPromise(tx.objectStore(STORE_NAME).put(cached, cacheKey));
-  } catch {
-    // Quota/private-mode failures should not break live loading; they only
-    // disable the fast reload path.
-  } finally {
-    db?.close();
-  }
-}
 
 // Stale-while-revalidate protocol (#1015). When a cached dataset exists, post
 // it immediately as `{ type: 'cached' }` so the caller paints instantly (no
@@ -93,10 +41,23 @@ async function writeCachedDataset(
 ctx.onmessage = async (e: MessageEvent<string | DatasetRequest>) => {
   const request =
     typeof e.data === 'string' ? { url: e.data, cacheKey: CACHE_KEY } : e.data;
-  const url = request.url;
   try {
     const cacheKey = request.cacheKey ?? null;
-    const cached = await readCachedDataset(cacheKey);
+    if (request.operation === 'read') {
+      const cached = await readCachedDatasetStore(cacheKey);
+      ctx.postMessage(cached
+        ? { type: 'cached', data: cached.data }
+        : { type: 'empty' });
+      return;
+    }
+    if (request.operation === 'write') {
+      await writeCachedDatasetStore(cacheKey, { data: request.data });
+      ctx.postMessage({ type: 'written' });
+      return;
+    }
+    const url = request.url;
+    if (!url) throw new Error('dataset worker request missing url');
+    const cached = await readCachedDatasetStore(cacheKey);
     if (cached) {
       ctx.postMessage({ type: 'cached', data: cached.data });
     }
@@ -114,7 +75,7 @@ ctx.onmessage = async (e: MessageEvent<string | DatasetRequest>) => {
     const data = await resp.json();
     const etag = resp.headers.get('etag');
     if (etag) {
-      await writeCachedDataset(cacheKey, { etag, data });
+      await writeCachedDatasetStore(cacheKey, { etag, data });
     }
     ctx.postMessage({ type: 'fresh', data });
   } catch (err) {

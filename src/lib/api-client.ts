@@ -594,7 +594,7 @@ async function stableDatasetCacheKey(source: string): Promise<string | null> {
   }
 }
 
-async function datasetCacheKey(token: string | null): Promise<string | null> {
+export async function datasetCacheKey(token: string | null): Promise<string | null> {
   if (token) return stableDatasetCacheKey(`bearer:${token}`);
   if (enterpriseDatasetCacheKeyHint) {
     return stableDatasetCacheKey(`session:${enterpriseDatasetCacheKeyHint}`);

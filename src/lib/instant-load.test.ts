@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Unit-tests the boot-first orchestration in loadServerDataset: the #2450 shell
 // counts (set on the shell paint, always cleared on exit), #2449 preserve-on-
@@ -11,9 +11,27 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // are observable.
 
 const fetchDatasetMock = vi.hoisted(() => vi.fn());
+const readCachedDatasetMock = vi.hoisted(() => vi.fn());
+const persistCachedDatasetMock = vi.hoisted(() => vi.fn());
+const resolveDatasetCacheKeyMock = vi.hoisted(() => vi.fn());
+const cacheReadCancelMock = vi.hoisted(() => vi.fn());
+const authTokenMock = vi.hoisted(() => vi.fn());
 vi.mock('@api-client', () => ({
-  fetchDataset: (onFresh?: (d: unknown) => void) => fetchDatasetMock(onFresh),
-  getEnterpriseAuthToken: () => null,
+  getEnterpriseAuthToken: () => authTokenMock(),
+}));
+vi.mock('./dataset-cache-client', () => ({
+  resolveDatasetCacheKey: (token: string | null) => resolveDatasetCacheKeyMock(token),
+  readCachedDataset: (cacheKey: string | null) => ({
+    promise: readCachedDatasetMock(cacheKey),
+    cancel: cacheReadCancelMock,
+  }),
+  persistCachedDataset: (cacheKey: string | null, data: unknown) =>
+    persistCachedDatasetMock(cacheKey, data),
+  fetchDatasetForIdentity: (
+    token: string | null,
+    cacheKey: string | null,
+    onFresh?: (data: unknown) => void,
+  ) => fetchDatasetMock(token, cacheKey, onFresh),
 }));
 
 import { loadServerDataset } from './instant-load';
@@ -33,7 +51,8 @@ function jsonRes(body: unknown, { status = 200, version }: ResOpts = {}): Respon
 
 type Routes = Record<string, () => Response | Promise<Response>>;
 function installFetch(routes: Routes) {
-  const fn = vi.fn(async (input: RequestInfo | URL) => {
+  const fn = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    void _init;
     const url = String(input);
     const route = routes[url];
     if (!route) throw new TypeError(`unexpected fetch: ${url}`);
@@ -96,9 +115,21 @@ function installIndexedDb(events: string[]) {
   return { clear, indexedDb };
 }
 
+beforeEach(() => {
+  authTokenMock.mockReturnValue(null);
+  resolveDatasetCacheKeyMock.mockResolvedValue('cache-a');
+  readCachedDatasetMock.mockResolvedValue(null);
+  persistCachedDatasetMock.mockResolvedValue(undefined);
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   fetchDatasetMock.mockReset();
+  readCachedDatasetMock.mockReset();
+  persistCachedDatasetMock.mockReset();
+  resolveDatasetCacheKeyMock.mockReset();
+  cacheReadCancelMock.mockReset();
+  authTokenMock.mockReset();
 });
 
 describe('loadServerDataset', () => {
@@ -122,6 +153,7 @@ describe('loadServerDataset', () => {
     expect(full.tokenData).toEqual([{ model: 'm' }]);
 
     expect(fetchDatasetMock).not.toHaveBeenCalled();
+    expect(persistCachedDatasetMock).toHaveBeenCalledWith('cache-a', full);
     expect(setBusy).toHaveBeenNthCalledWith(1, true);
     expect(setBusy).toHaveBeenLastCalledWith(false);
   });
@@ -160,6 +192,134 @@ describe('loadServerDataset', () => {
     expect(events).toEqual([]);
   });
 
+  it('paints a cached repeat dataset before a delayed boot response', async () => {
+    let resolveBoot: ((response: Response) => void) | undefined;
+    const bootResponse = new Promise<Response>((resolve) => { resolveBoot = resolve; });
+    installFetch({
+      ...okRoutes(),
+      '/api/dataset/boot': () => bootResponse,
+    });
+    const cached = { entries: [{ sessionId: 'cached' }], tokenData: [] };
+    readCachedDatasetMock.mockResolvedValue(cached);
+    const apply = vi.fn();
+
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn());
+    await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(cached));
+    expect(resolveBoot).toBeDefined();
+    resolveBoot?.(jsonRes(BOOT, { version: 'v1' }));
+    await loading;
+
+    expect((apply.mock.calls.at(-1)?.[0] as Record<string, unknown>).entries).toEqual([
+      { sessionId: 'a' },
+    ]);
+  });
+
+  it('retains a cached last-good dataset when a slice and monolith both fail', async () => {
+    const routes = okRoutes();
+    routes['/api/dataset/slice/entries'] = () => jsonRes({}, { status: 500 });
+    installFetch(routes);
+    const cached = { entries: [{ sessionId: 'cached' }], tokenData: [] };
+    readCachedDatasetMock.mockResolvedValue(cached);
+    fetchDatasetMock.mockRejectedValue(new Error('monolith unavailable'));
+    const apply = vi.fn();
+
+    await loadServerDataset(apply, vi.fn(), vi.fn());
+
+    expect(apply).toHaveBeenCalledWith(cached);
+    expect(persistCachedDatasetMock).not.toHaveBeenCalled();
+  });
+
+  it('applies a delayed cached dataset after fast slice and monolith failures', async () => {
+    const routes = okRoutes();
+    routes['/api/dataset/slice/entries'] = () => jsonRes({}, { status: 500 });
+    installFetch(routes);
+    let resolveCache: ((data: unknown) => void) | undefined;
+    readCachedDatasetMock.mockImplementation(() => new Promise((resolve) => {
+      resolveCache = resolve;
+    }));
+    fetchDatasetMock.mockRejectedValue(new Error('monolith unavailable'));
+    const cached = { entries: [{ sessionId: 'delayed-cache' }], tokenData: [] };
+    const apply = vi.fn();
+
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn());
+    await vi.waitFor(() => expect(resolveCache).toBeDefined());
+    await vi.waitFor(() => expect(fetchDatasetMock).toHaveBeenCalledTimes(1));
+    resolveCache?.(cached);
+    await loading;
+
+    expect(apply).toHaveBeenLastCalledWith(cached);
+    expect(persistCachedDatasetMock).not.toHaveBeenCalled();
+  });
+
+  it('does not let a hung cache read stall successful progressive loading', async () => {
+    installFetch(okRoutes());
+    readCachedDatasetMock.mockReturnValue(new Promise(() => {}));
+    const apply = vi.fn();
+
+    const outcome = await Promise.race([
+      loadServerDataset(apply, vi.fn(), vi.fn()).then(() => 'completed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 50)),
+    ]);
+
+    expect(outcome).toBe('completed');
+    expect((apply.mock.calls.at(-1)?.[0] as Record<string, unknown>).entries).toEqual([
+      { sessionId: 'a' },
+    ]);
+    expect(cacheReadCancelMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('binds boot, slices, cache read, and persistence to one auth identity', async () => {
+    authTokenMock.mockReturnValue('token-a');
+    resolveDatasetCacheKeyMock.mockResolvedValue('principal-a');
+    let resolveBoot: ((response: Response) => void) | undefined;
+    const bootResponse = new Promise<Response>((resolve) => { resolveBoot = resolve; });
+    const fetchMock = installFetch({
+      ...okRoutes(),
+      '/api/dataset/boot': () => bootResponse,
+    });
+
+    const loading = loadServerDataset(vi.fn(), vi.fn(), vi.fn());
+    await vi.waitFor(() => expect(resolveBoot).toBeDefined());
+    authTokenMock.mockReturnValue('token-b');
+    resolveBoot?.(jsonRes(BOOT, { version: 'v1' }));
+    await loading;
+
+    expect(resolveDatasetCacheKeyMock).toHaveBeenCalledTimes(1);
+    expect(resolveDatasetCacheKeyMock).toHaveBeenCalledWith('token-a');
+    expect(readCachedDatasetMock).toHaveBeenCalledWith('principal-a');
+    expect(persistCachedDatasetMock).toHaveBeenCalledWith(
+      'principal-a',
+      expect.any(Object),
+    );
+    for (const [, init] of fetchMock.mock.calls) {
+      expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer token-a' });
+    }
+  });
+
+  it('binds monolith fallback to the auth identity captured before loading', async () => {
+    authTokenMock.mockReturnValue('token-a');
+    resolveDatasetCacheKeyMock.mockResolvedValue('principal-a');
+    const routes = okRoutes();
+    routes['/api/dataset/boot'] = () => {
+      authTokenMock.mockReturnValue('token-b');
+      return jsonRes(BOOT, { version: 'v1' });
+    };
+    routes['/api/dataset/slice/entries'] = () => jsonRes({}, { status: 500 });
+    const fetchMock = installFetch(routes);
+    fetchDatasetMock.mockResolvedValue({ entries: [], tokenData: [] });
+
+    await loadServerDataset(vi.fn(), vi.fn(), vi.fn());
+
+    expect(fetchDatasetMock).toHaveBeenCalledWith(
+      'token-a',
+      'principal-a',
+      expect.any(Function),
+    );
+    for (const [, init] of fetchMock.mock.calls) {
+      expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer token-a' });
+    }
+  });
+
   it('falls back to the monolith on a mid-load version skew', async () => {
     const routes = okRoutes();
     routes['/api/dataset/slice/entries'] = () =>
@@ -173,6 +333,31 @@ describe('loadServerDataset', () => {
 
     expect(fetchDatasetMock).toHaveBeenCalledTimes(1);
     expect(apply).toHaveBeenLastCalledWith(monolith);
+  });
+
+  it('suppresses an in-flight stale cache read after version skew', async () => {
+    const routes = okRoutes();
+    routes['/api/dataset/slice/entries'] = () =>
+      jsonRes([{ sessionId: 'slice' }], { version: 'v2' });
+    installFetch(routes);
+    let resolveCache: ((data: unknown) => void) | undefined;
+    readCachedDatasetMock.mockImplementation(() => new Promise((resolve) => {
+      resolveCache = resolve;
+    }));
+    const monolith = { entries: [{ sessionId: 'atomic' }], tokenData: [] };
+    fetchDatasetMock.mockResolvedValue(monolith);
+    installIndexedDb([]);
+    const apply = vi.fn();
+
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn());
+    await vi.waitFor(() => expect(fetchDatasetMock).toHaveBeenCalledTimes(1));
+    resolveCache?.({ entries: [{ sessionId: 'stale-cache' }], tokenData: [] });
+    await loading;
+
+    expect(apply).toHaveBeenLastCalledWith(monolith);
+    expect(apply).not.toHaveBeenCalledWith(
+      expect.objectContaining({ entries: [{ sessionId: 'stale-cache' }] }),
+    );
   });
 
   it('falls back to the monolith when boot fails (no shell paint)', async () => {
@@ -211,7 +396,7 @@ describe('loadServerDataset', () => {
     expect(apply).toHaveBeenLastCalledWith(monolith);
   });
 
-  it('clears a stale monolith cache before slice-failure fallback', async () => {
+  it('preserves the last-good monolith cache before slice-failure fallback', async () => {
     const events: string[] = [];
     const routes = okRoutes();
     routes['/api/dataset/slice/entries'] = () => jsonRes({}, { status: 404 });
@@ -225,7 +410,7 @@ describe('loadServerDataset', () => {
 
     await loadServerDataset(vi.fn(), vi.fn(), vi.fn());
 
-    expect(events).toEqual(['clear-cache', 'fetch-monolith']);
+    expect(events).toEqual(['fetch-monolith']);
   });
 
   it('falls back immediately on the first worker slice error', async () => {

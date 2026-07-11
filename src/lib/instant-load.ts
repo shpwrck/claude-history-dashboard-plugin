@@ -11,7 +11,15 @@
 // chokepoint, justified because the code must be a standalone lazy chunk and the
 // chunk is physically absent from the SPA bundle.
 
-import { fetchDataset, getEnterpriseAuthToken } from '@api-client';
+import {
+  getEnterpriseAuthToken,
+} from '@api-client';
+import {
+  fetchDatasetForIdentity,
+  persistCachedDataset,
+  readCachedDataset,
+  resolveDatasetCacheKey,
+} from './dataset-cache-client';
 import { mergeDataset } from './dataset-boot';
 import type { DatasetBoot, DatasetShellCounts } from './dataset-boot';
 
@@ -36,21 +44,20 @@ export interface LoadServerDatasetOptions {
 }
 
 // Same credentials + enterprise-auth header the api-client `serverFetch` applies.
-function authHeaders(): Record<string, string> {
-  const token = getEnterpriseAuthToken();
+function authHeaders(token: string | null): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
 
-function authFetch(url: string): Promise<Response> {
-  return fetch(url, { credentials: 'same-origin', headers: authHeaders() });
+function authFetch(url: string, token: string | null): Promise<Response> {
+  return fetch(url, { credentials: 'same-origin', headers: authHeaders(token) });
 }
 
 const sliceUrl = (key: string) => `/api/dataset/slice/${encodeURIComponent(key)}`;
 
-async function fetchBoot(): Promise<DatasetBoot> {
-  const res = await authFetch('/api/dataset/boot');
+async function fetchBoot(token: string | null): Promise<DatasetBoot> {
+  const res = await authFetch('/api/dataset/boot', token);
   if (!res.ok) throw new Error(`dataset boot failed: ${res.status}`);
   return (await res.json()) as DatasetBoot;
 }
@@ -59,8 +66,11 @@ async function fetchBoot(): Promise<DatasetBoot> {
 // (unit tests run under node/jsdom; ancient browsers) or the worker errors — and
 // it is the path the unit tests exercise, so the orchestration (skew, fallback,
 // preserve-data) is covered without a real worker.
-async function fetchSliceOnMainThread(key: string): Promise<DatasetSliceResult> {
-  const res = await authFetch(sliceUrl(key));
+async function fetchSliceOnMainThread(
+  key: string,
+  token: string | null,
+): Promise<DatasetSliceResult> {
+  const res = await authFetch(sliceUrl(key), token);
   if (!res.ok) throw new Error(`dataset slice '${key}' failed: ${res.status}`);
   return {
     key,
@@ -142,7 +152,10 @@ function decodeSlicesViaWorker(
 // worker-INFRA crash (couldn't construct / runtime crash) retries on the main
 // thread. A genuine slice error propagates so loadServerDataset falls straight to
 // the monolith, rather than re-downloading every slice here first (#2448 review).
-async function fetchSlices(sliceKeys: string[]): Promise<DatasetSliceResult[]> {
+async function fetchSlices(
+  sliceKeys: string[],
+  token: string | null,
+): Promise<DatasetSliceResult[]> {
   if (sliceKeys.length === 0) return [];
   const requests: DatasetSliceRequest[] = sliceKeys.map((key) => ({
     key,
@@ -150,13 +163,13 @@ async function fetchSlices(sliceKeys: string[]): Promise<DatasetSliceResult[]> {
   }));
   if (typeof Worker !== 'undefined') {
     try {
-      return await decodeSlicesViaWorker(requests, authHeaders());
+      return await decodeSlicesViaWorker(requests, authHeaders(token));
     } catch (err) {
       if (!(err instanceof SliceWorkerCrashError)) throw err;
       // Worker infra failed — fall through to the main thread.
     }
   }
-  return Promise.all(requests.map((r) => fetchSliceOnMainThread(r.key)));
+  return Promise.all(requests.map((r) => fetchSliceOnMainThread(r.key, token)));
 }
 
 /** The masthead's headline counts, straight from the boot payload (#2450). */
@@ -179,14 +192,15 @@ function shellCountsFromBoot(boot: DatasetBoot): DatasetShellCounts {
  * `/api/dataset.json` instead so a render never mixes snapshots.
  */
 async function fetchDatasetProgressive(
-  onPartial: (data: unknown, counts: DatasetShellCounts) => void
+  onPartial: (data: unknown, counts: DatasetShellCounts) => void,
+  token: string | null,
 ): Promise<unknown | null> {
-  const boot = await fetchBoot();
+  const boot = await fetchBoot(token);
   const meta = boot.meta ?? {};
   // Instant shell: the full Dataset shape with heavy slices still empty, plus the
   // real session/entry/token counts so the masthead shows true numbers now.
   onPartial(mergeDataset(meta, {}), shellCountsFromBoot(boot));
-  const fetched = await fetchSlices(boot.sliceKeys ?? []);
+  const fetched = await fetchSlices(boot.sliceKeys ?? [], token);
   const skew = fetched.some(
     (r) => boot.version && r.version && r.version !== boot.version
   );
@@ -196,12 +210,10 @@ async function fetchDatasetProgressive(
   return mergeDataset(meta, slices);
 }
 
-// The dataset worker (dataset-worker.ts) is the ONLY writer of the IndexedDB
-// monolith cache, and the boot-first path never invokes it — so after a corpus
-// change that cache would go stale and a later fallback to /api/dataset.json
-// could paint an old snapshot before revalidating (#2443 review). Invalidate it
-// on every boot-first success so the rare monolith fallback always fetches fresh.
-// A no-op ONLY where indexedDB itself is unavailable.
+// Explicit version skew proves the cached atomic snapshot stale. Clear it before
+// falling back to the monolith; successful boot/slice hydration instead persists
+// its assembled full dataset through dataset-cache-client, while transient slice
+// failures retain the last-good snapshot. A no-op only where IndexedDB is absent.
 const DATASET_CACHE_DB = 'claude-history-dashboard-dataset';
 const DATASET_CACHE_STORE = 'dataset';
 // MUST match dataset-worker.ts's `indexedDB.open(DB_NAME, 1)` + store name: opening
@@ -276,16 +288,29 @@ export async function loadServerDataset(
   setShellCounts: (counts: DatasetShellCounts | null) => void,
   opts: LoadServerDatasetOptions = {}
 ): Promise<void> {
-  const hasExistingData = opts.hasExistingData ?? false;
-  let bootLoaded = false;
+  let visibleData = opts.hasExistingData ?? false;
+  let suppressCachePaint = false;
   setBusy(true);
+  const token = getEnterpriseAuthToken();
+  const cacheKey = await resolveDatasetCacheKey(token);
+  // Restore the pre-split instant repeat paint without starting the monolith
+  // network request: a cache-only worker read races boot/slices. A late cache
+  // result never overwrites a completed progressive load.
+  const cacheRead = visibleData ? null : readCachedDataset(cacheKey);
+  const cachePaint = cacheRead?.promise
+    .then((cached) => {
+      if (cached === null || suppressCachePaint) return;
+      visibleData = true;
+      apply(cached);
+      setShellCounts(null);
+    })
+    .catch(() => {});
   try {
     const full = await fetchDatasetProgressive((partial, counts) => {
-      bootLoaded = true;
       // #2449: on a reload with data already loaded, don't wipe the screen to the
       // empty boot shell — keep the existing data visible and just swap in the
       // full dataset when it lands (and keep the old data if everything fails).
-      if (hasExistingData) return;
+      if (visibleData) return;
       apply(partial);
       setShellCounts(counts); // #2450: real counts stand in for the empty arrays
       // The interaction lock (busy) is deliberately NOT cleared here — it stays up
@@ -294,32 +319,62 @@ export async function loadServerDataset(
       // start mid-backfill and then be overwritten when this load's apply(full)
       // resolved (#2446 review). The shell is already painted (content + real
       // counts visible), so holding the lock only keeps the spinner spinning.
-    });
+    }, token);
     if (full) {
+      suppressCachePaint = true;
+      cacheRead?.cancel();
       apply(full);
-      // A successful slice load does not prove the monolith cache unusable.
-      // Keep that last-good snapshot so a later boot outage can still paint it;
-      // fetchDataset will revalidate it by ETag before replacing it. We only
-      // invalidate below when skew/failure proves the snapshot stale.
+      // Keep the fallback snapshot coherent with the fresh slices. This cache
+      // entry deliberately has no monolith ETag, so fetchDataset paints it then
+      // performs a full revalidation the next time fallback is needed.
+      try {
+        await persistCachedDataset(cacheKey, full);
+      } catch {
+        // Cache/quota/private-mode failures do not invalidate the live dataset.
+      }
       return;
     }
+    // Version skew proves the cache stale. Suppress the already-started
+    // cache-only read before invalidation so its structured-clone reply cannot
+    // race back in and overwrite the atomic fallback.
+    suppressCachePaint = true;
+    cacheRead?.cancel();
     // Version skew — the corpus changed mid-load, so the cached monolith is stale.
     // Invalidate it BEFORE the fetch (awaited) so the SWR fallback paints fresh,
     // not the old snapshot on the exact path where the snapshot changed (#2448 review).
     await invalidateMonolithCache();
-    apply(await fetchDataset((fresh) => apply(fresh)));
+    apply(await fetchDatasetForIdentity(token, cacheKey, (fresh) => apply(fresh)));
   } catch {
+    // A delayed cache-only read remains valid on failure and continues in the
+    // background, but never blocks the monolith fallback.
     // Boot/slice path threw — fall back to the monolith before giving up.
     try {
-      // A slice can fail after boot has proved the corpus changed. Clear the
-      // prior monolith snapshot before SWR fallback so stale cached data cannot
-      // replace the fresh shell / last-good dataset while revalidation runs.
-      if (bootLoaded) await invalidateMonolithCache();
-      apply(await fetchDataset((fresh) => apply(fresh)));
+      // A transient slice failure does not prove the cached atomic snapshot is
+      // stale. Let fetchDataset paint/revalidate that last-good fallback; only
+      // the explicit version-skew branch above invalidates it.
+      const fallback = await fetchDatasetForIdentity(
+        token,
+        cacheKey,
+        (fresh) => apply(fresh),
+      );
+      suppressCachePaint = true;
+      cacheRead?.cancel();
+      apply(fallback);
     } catch {
       // Backend unreachable and no monolith: leave whatever is on screen — the
       // last-good data when hasExistingData (#2449), the manual-upload path
       // otherwise.
+      if (cachePaint) {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          cachePaint,
+          new Promise<void>((resolve) => {
+            timeout = setTimeout(resolve, 1000);
+          }),
+        ]);
+        if (timeout) clearTimeout(timeout);
+      }
+      cacheRead?.cancel();
     }
   } finally {
     // Drop the boot stand-in on every exit: a successful full/monolith apply has
