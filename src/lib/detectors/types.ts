@@ -305,6 +305,16 @@ export interface RecommendationSavingsAttribution {
    * confidence claim is only honest when this is fresh.
    */
   asOf?: string;
+  /**
+   * True when a once-measured proof has been demoted because its {@link asOf} is
+   * older than the detector's freshness threshold (#2142). Model versions move,
+   * so an expired "cheaper model held the bar" before/after can no longer be
+   * asserted as current confidence — the demotion drops the measured `tier`/
+   * `confidence`/`realizedSavingsUsd`/`judgeAgreement` and sets this flag so a
+   * renderer shows the figure "as of <date>" instead of a live claim. Mirrors
+   * {@link RecProvenance.stale}; may only be `true` alongside an `asOf`.
+   */
+  stale?: boolean;
 }
 
 export interface ModelPinSavingsConfig {

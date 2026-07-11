@@ -21,8 +21,15 @@ import {
   validateRecObservation,
   validateRecProvenance,
   validateRecommendationProvenance,
+  isAsOfStale,
+  demoteStaleAttribution,
 } from './provenance';
-import type { Recommendation, RecommendationInput, RecProvenance } from './types';
+import type {
+  Recommendation,
+  RecommendationInput,
+  RecProvenance,
+  RecommendationSavingsAttribution,
+} from './types';
 import { detector as activityTrend } from './activity/activity-trend';
 import type { LiveConfig } from '../../types';
 import type { RuntimeEvents } from '../parse-runtime-events';
@@ -88,6 +95,79 @@ describe('validateRecProvenance', () => {
   });
   it('rejects stale=true without an asOf to demote against', () => {
     expect(validateRecProvenance({ observations: [goodObs], stale: true }).length).toBeGreaterThan(0);
+  });
+});
+
+// ── Stale-input freshness + demotion (#2142, #1102 path) ──────────────────
+
+describe('isAsOfStale', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const asOf = '2026-05-10';
+  const asOfMs = Date.parse('2026-05-10T00:00:00.000Z');
+
+  it('is false inside the freshness window', () => {
+    expect(isAsOfStale(asOf, asOfMs + 10 * DAY_MS, 30)).toBe(false);
+  });
+  it('is true past the freshness window', () => {
+    expect(isAsOfStale(asOf, asOfMs + 40 * DAY_MS, 30)).toBe(true);
+  });
+  it('treats an absent or malformed date as not stale (only demote against a readable date)', () => {
+    expect(isAsOfStale(undefined, asOfMs + 999 * DAY_MS, 30)).toBe(false);
+    expect(isAsOfStale('2026-05-10T00:00:00Z', asOfMs + 999 * DAY_MS, 30)).toBe(false);
+    expect(isAsOfStale('nonsense', asOfMs + 999 * DAY_MS, 30)).toBe(false);
+  });
+});
+
+describe('demoteStaleAttribution', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const asOfMs = Date.parse('2026-05-10T00:00:00.000Z');
+  const measured = (): RecommendationSavingsAttribution => ({
+    interventionKey: 'cost.automation-share',
+    signatureId: 'automation-model-pin.mechanical',
+    tier: 'tier-1-before-after',
+    predictedSavingsUsd: 12,
+    realizedSavingsUsd: 9,
+    confidence: 'medium',
+    sampleSize: 7,
+    window: { comparison: { start: 'a', end: 'b' } },
+    asOf: '2026-05-10',
+  });
+
+  it('demotes a stale measured proof to a dated estimate, dropping the confidence fields', () => {
+    const out = demoteStaleAttribution(measured(), asOfMs + 100 * DAY_MS, 30);
+    expect(out.tier).toBe('tier-0-estimate');
+    expect(out.stale).toBe(true);
+    expect(out.confidence).toBeUndefined();
+    expect(out.realizedSavingsUsd).toBeUndefined();
+    expect(out.window).toBeUndefined();
+    // Auditable metadata survives so the reader still sees "as of <date>".
+    expect(out.asOf).toBe('2026-05-10');
+    expect(out.sampleSize).toBe(7);
+    expect(out.predictedSavingsUsd).toBe(12);
+    expect(out.interventionKey).toBe('cost.automation-share');
+    expect(out.signatureId).toBe('automation-model-pin.mechanical');
+  });
+
+  it('leaves a fresh measured proof unchanged (still a live claim)', () => {
+    const attr = measured();
+    const out = demoteStaleAttribution(attr, asOfMs + 5 * DAY_MS, 30);
+    expect(out).toBe(attr); // same reference — untouched
+    expect(out.tier).toBe('tier-1-before-after');
+    expect(out.stale).toBeUndefined();
+  });
+
+  it('leaves an already-honest tier-0 estimate unchanged even when its date is old', () => {
+    const attr: RecommendationSavingsAttribution = {
+      interventionKey: 'cost.automation-share',
+      signatureId: 'automation-model-pin.authoring',
+      tier: 'tier-0-estimate',
+      predictedSavingsUsd: 3,
+      sampleSize: 2,
+      asOf: '2026-05-10',
+    };
+    const out = demoteStaleAttribution(attr, asOfMs + 100 * DAY_MS, 30);
+    expect(out).toBe(attr);
+    expect(out.stale).toBeUndefined();
   });
 });
 

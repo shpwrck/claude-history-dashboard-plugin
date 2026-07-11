@@ -11,7 +11,12 @@
  * Deliberately dependency-light (imports only the leaf types) so it can sit
  * anywhere in the detector import graph without a cycle.
  */
-import type { RecProvenance, RecObservation, Recommendation } from './types';
+import type {
+  RecProvenance,
+  RecObservation,
+  Recommendation,
+  RecommendationSavingsAttribution,
+} from './types';
 
 /**
  * Detectors that have adopted the provenance contract and MUST emit a
@@ -45,6 +50,66 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * True when an ISO `YYYY-MM-DD` `asOf` date is older than `thresholdDays`
+ * relative to `now` (ms). The generic #1102 freshness test, extracted here so
+ * every detector demotes a time-derived claim against the SAME rule (the module
+ * is already the single source of truth for the `asOf`/`stale` contract).
+ *
+ * A missing or malformed `asOf` returns `false`: we can only demote against a
+ * date we can read — this mirrors the contract that `stale=true` requires an
+ * `asOf`, so an undatable claim is never silently flagged stale.
+ */
+export function isAsOfStale(
+  asOf: string | undefined,
+  now: number,
+  thresholdDays: number
+): boolean {
+  if (asOf === undefined || !ISO_DATE.test(asOf)) return false;
+  const asOfMs = Date.parse(asOf);
+  if (!Number.isFinite(asOfMs)) return false;
+  return now - asOfMs > thresholdDays * DAY_MS;
+}
+
+/**
+ * Demote a stale savings attribution (#2142, reusing the #1102 stale-input
+ * demotion path). A MEASURED proof (`tier-1-before-after` / `tier-2-ablation`)
+ * whose {@link RecommendationSavingsAttribution.asOf} is older than
+ * `thresholdDays` can no longer be asserted as current confidence — model
+ * versions have moved since it was observed — so it is demoted to a dated
+ * estimate: the identity (`interventionKey`/`signatureId`), the predicted
+ * figure, the sample size, and the `asOf` are kept, but the measured-confidence
+ * fields (`tier` is reset to `tier-0-estimate`; `confidence`,
+ * `realizedSavingsUsd`, `judgeAgreement`, and `window` are dropped) and `stale`
+ * is set so a renderer shows "as of <date>" rather than a live claim.
+ *
+ * A `tier-0-estimate` is already honest, and an attribution with no readable
+ * `asOf` cannot be judged stale — both are returned unchanged. Pure data
+ * transform (leaf-type only) so server, SPA, and tests can reuse it.
+ */
+export function demoteStaleAttribution(
+  attr: RecommendationSavingsAttribution,
+  now: number,
+  thresholdDays: number
+): RecommendationSavingsAttribution {
+  if (attr.tier === 'tier-0-estimate') return attr;
+  if (!isAsOfStale(attr.asOf, now, thresholdDays)) return attr;
+  const demoted: RecommendationSavingsAttribution = {
+    interventionKey: attr.interventionKey,
+    signatureId: attr.signatureId,
+    tier: 'tier-0-estimate',
+    stale: true,
+  };
+  if (attr.predictedSavingsUsd !== undefined) {
+    demoted.predictedSavingsUsd = attr.predictedSavingsUsd;
+  }
+  if (attr.sampleSize !== undefined) demoted.sampleSize = attr.sampleSize;
+  if (attr.asOf !== undefined) demoted.asOf = attr.asOf;
+  return demoted;
+}
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;

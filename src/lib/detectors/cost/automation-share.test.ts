@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detector } from './automation-share';
+import { detector, DOWN_MODEL_PROOF_FRESHNESS_DAYS } from './automation-share';
 import { automationCostShare } from '../shared';
 import { CHEAPEST_MODEL } from '../../pricing';
 import type { RecommendationInput } from '../types';
@@ -241,5 +241,82 @@ describe('cost.automation-share per-class measured tier-1 before/after (#2140)',
     expect(review?.tier).toBe('tier-0-estimate');
     expect(review?.sampleSize).toBe(0);
     expect(review?.realizedSavingsUsd).toBeUndefined();
+  });
+});
+
+describe('cost.automation-share stale down-model proof decay (#2142)', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  // Same shape as the #2140 fixture: mechanical migrated Opus -> Haiku in-window
+  // (asOf = its freshest turn, 2026-05-10), producing a MEASURED tier-1
+  // before/after. Authoring stayed on Opus (honest tier-0 estimate).
+  const tokenData = [
+    session('mech-before', 'sdk-cli', 'route-loose classify picker', [
+      entry('claude-opus-4-8', 4_000_000, 800_000, '2026-05-02T00:00:00.000Z'),
+    ]),
+    session('mech-after', 'sdk-cli', 'route-loose classify picker', [
+      entry(CHEAPEST_MODEL, 4_000_000, 800_000, '2026-05-09T00:00:00.000Z'),
+      entry(CHEAPEST_MODEL, 4_000_000, 800_000, '2026-05-10T00:00:00.000Z'),
+    ]),
+    session('auth-1', 'sdk-cli', 'coder: implement issue #2142', [
+      entry('claude-opus-4-8', 3_000_000, 600_000, '2026-05-03T00:00:00.000Z'),
+      entry('claude-opus-4-8', 3_000_000, 600_000, '2026-05-11T00:00:00.000Z'),
+    ]),
+  ];
+  const asOfMs = Date.parse('2026-05-10T00:00:00.000Z');
+
+  it('keeps a measured proof a live tier-1 claim when it is still fresh', () => {
+    // now = 10 days after the proof's asOf — well inside the freshness window.
+    const now = asOfMs + 10 * DAY_MS;
+    const rec = detector.rule(input({ tokenData }), now);
+    const mech = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    ).mechanical.savingsAttribution;
+    // A fresh before/after stays a present-tense confidence claim.
+    expect(mech?.tier).toBe('tier-1-before-after');
+    expect(mech?.confidence).toBe('medium');
+    expect(mech?.realizedSavingsUsd).toBeGreaterThan(0);
+    expect(mech?.stale).toBeFalsy();
+    expect(mech?.asOf).toBe('2026-05-10');
+  });
+
+  it('demotes a measured proof past the freshness window to a dated estimate, not counted as current confidence', () => {
+    // now = well past the 90-day freshness horizon, so a model generation has
+    // shipped since the proof was observed.
+    const now = asOfMs + (DOWN_MODEL_PROOF_FRESHNESS_DAYS + 24) * DAY_MS;
+    const rec = detector.rule(input({ tokenData }), now);
+    const mech = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    ).mechanical.savingsAttribution;
+
+    // Decayed back to a dated estimate: the measured-confidence fields are gone,
+    // so it is NOT counted as current confidence (auditable-claims contract).
+    expect(mech?.tier).toBe('tier-0-estimate');
+    expect(mech?.stale).toBe(true);
+    expect(mech?.confidence).toBeUndefined();
+    expect(mech?.realizedSavingsUsd).toBeUndefined();
+    expect(mech?.judgeAgreement).toBeUndefined();
+    expect(mech?.window).toBeUndefined();
+    // ...but the dated, auditable metadata survives so the reader still sees
+    // "as of <date>" and the sample it rested on.
+    expect(mech?.asOf).toBe('2026-05-10');
+    expect(mech?.sampleSize).toBe(3);
+    // The predicted figure is preserved (the measured comparison window here is
+    // already the cheapest model, so its premium-above-cheapest is 0).
+    expect(typeof mech?.predictedSavingsUsd).toBe('number');
+    // The identity is preserved so the class still resolves to its intervention.
+    expect(mech?.interventionKey).toBe('cost.automation-share');
+    expect(mech?.signatureId).toBe('automation-model-pin.mechanical');
+  });
+
+  it('leaves an honest tier-0 estimate untouched even when its data is old', () => {
+    // Authoring is already a tier-0 estimate (no in-window migration); a stale
+    // asOf must not spuriously flag it — there is no measured claim to demote.
+    const now = asOfMs + (DOWN_MODEL_PROOF_FRESHNESS_DAYS + 24) * DAY_MS;
+    const rec = detector.rule(input({ tokenData }), now);
+    const auth = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    ).authoring.savingsAttribution;
+    expect(auth?.tier).toBe('tier-0-estimate');
+    expect(auth?.stale).toBeFalsy();
   });
 });

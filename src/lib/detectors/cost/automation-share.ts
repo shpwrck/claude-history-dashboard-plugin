@@ -11,6 +11,7 @@ import {
   type AutomationClassCost,
 } from '../shared';
 import { CHEAPEST_MODEL } from '../../pricing';
+import { demoteStaleAttribution } from '../provenance';
 import {
   computeModelPinSavings,
   deriveModelPinSavingsConfig,
@@ -20,6 +21,17 @@ import type { SessionTokenData } from '../../../types';
 import { type ReclaimClaim, type PoolId } from '../../reclaim';
 
 const ALL_POOLS: PoolId[] = ['input', 'output', 'cacheWrite5m', 'cacheWrite1h', 'cacheRead'];
+
+/**
+ * Freshness horizon (days) for a per-class down-model proof (#2142). Anthropic
+ * ships a new model generation on the order of one-to-three months, so a
+ * measured "the cheaper model held the bar" before/after older than a quarter
+ * spans at least one model version — the tradeoff it measured may no longer
+ * hold. Beyond this window a measured proof is demoted to a dated estimate
+ * (`demoteStaleAttribution`) so it is not asserted as CURRENT confidence; a
+ * re-validation with fresher turns refreshes the `asOf` and restores the tier.
+ */
+export const DOWN_MODEL_PROOF_FRESHNESS_DAYS = 90;
 
 /**
  * The honest, always-available per-class attribution: pure token-accounting, so
@@ -106,7 +118,7 @@ export const detector: Detector = {
   id: 'cost.automation-share',
   category: 'cost',
   dataDeps: ['tokenData', 'liveConfig', 'modelPinSavings'],
-  rule(input) {
+  rule(input, now) {
     // The fix is "default automation to Haiku" via settings.json. If the user has
     // already pinned Haiku globally, estimate-only findings are suppressed; a
     // measured before/after win still renders so the user can verify the effect.
@@ -134,12 +146,23 @@ export const detector: Detector = {
     // `realizedSavingsUsd` + `confidence` (see the helper). Either way we surface
     // the sample size (billable turns behind the figure) and the data's `asOf`
     // freshness so a reader or auto-router can gate on the evidence.
+    //
+    // Stale-proof decay (#2142, reusing the #1102 provenance path): a measured
+    // before/after older than DOWN_MODEL_PROOF_FRESHNESS_DAYS is demoted back to a
+    // dated `tier-0-estimate` with `stale: true` — model versions move, so an
+    // expired "cheaper model held the bar" verdict must not be counted as current
+    // confidence. A re-validation with fresher turns refreshes the `asOf` and
+    // restores the measured tier.
     const taskClassBreakdown: TaskClassCostBreakdown[] = byClass.classes.map((c) => ({
       taskClass: c.taskClass,
       autoCostUsd: c.autoCost,
       swapSavingsUsd: c.swapSavings,
       sessions: c.sessions,
-      savingsAttribution: classSavingsAttribution(c, input.tokenData),
+      savingsAttribution: demoteStaleAttribution(
+        classSavingsAttribution(c, input.tokenData),
+        now,
+        DOWN_MODEL_PROOF_FRESHNESS_DAYS
+      ),
     }));
     // Reclaim claim (model right-sizing): reprice the unattended-automation scopes
     // onto the cheapest model across every pool. Placed LAST in the structural
