@@ -607,7 +607,9 @@ const { buildMemoryStores } = await import(join(LIB, 'parse-memories.ts'));
 // in parse-git-outcome.ts (no network, so it stays safe under the zero-deps
 // runtime import guard); the live `gh`/GitHub-API fetch that feeds it happens
 // HERE, server-side, in readGitOutcomes() below.
-const { buildGitOutcomes } = await import(join(LIB, 'parse-git-outcome.ts'));
+const { buildGitOutcomes, gitOutcomesReposFromEnv } = await import(
+  join(LIB, 'parse-git-outcome.ts')
+);
 // Repo doc graph (#2257, epic #2256). buildDocGraph walks this repo's own
 // Markdown (root *.md + docs/**) into a SCIP-style node/edge graph the future
 // doc-hygiene detector reads off `RecommendationInput.docGraph`. Pure over the
@@ -715,10 +717,10 @@ function readDocGraph() {
 // `[]` and never sinks the dataset endpoint. The CLASSIFICATION is pure
 // (parse-git-outcome.ts, unit-tested without network); only the PR FETCH lives
 // here, server-side, and never reaches the Anthropic API.
-const GIT_OUTCOMES_REPOS = String(process.env.CHD_GIT_OUTCOMES || '')
-  .split(/[,\s]+/)
-  .map((part) => part.trim())
-  .filter((part) => /^[\w.-]+\/[\w.-]+$/.test(part));
+// UNSET / empty ⇒ [] ⇒ readGitOutcomes short-circuits with ZERO `gh` calls, so
+// the default dataset is byte-identical (#2510). Parsing centralized in the pure
+// module so the flag-off gate is unit-testable (gitOutcomesReposFromEnv).
+const GIT_OUTCOMES_REPOS = gitOutcomesReposFromEnv(process.env.CHD_GIT_OUTCOMES);
 
 function fetchPullRequestsForRepo(repo) {
   // One bounded `gh` call per repo: recent PRs with the fields the pure
@@ -742,10 +744,12 @@ function fetchPullRequestsForRepo(repo) {
   );
   const list = JSON.parse(raw);
   if (!Array.isArray(list)) return [];
-  // `gh` exposes merge state via `state: 'MERGED'`; the revert/fix-up signals
-  // are not on the list payload, so they stay undefined here. A later slice may
-  // enrich them by scanning merge-commit trailers — until then a merged PR with
-  // no later revert/fix reads as `merged-clean`, which is the honest default.
+  // `gh` exposes merge state via `state: 'MERGED'` / `OPEN` / `CLOSED`; the
+  // revert/fix-up signals are not on the list payload, so they stay undefined
+  // here. A later slice may enrich them by scanning merge-commit trailers —
+  // until then a merged PR with no later revert/fix reads as `merged-clean`,
+  // the honest default. OPEN PRs enter this pool (`--state all`) but the pure
+  // classifier skips them (#2510), so an in-flight PR is never labeled.
   return list.map((pr) => ({
     number: pr.number,
     headRefName: pr.headRefName,
@@ -767,6 +771,11 @@ function readGitOutcomes(sessions) {
     }
   }
   if (pullRequests.length === 0) return [];
+  // Stamp every row with the ISO `YYYY-MM-DD` fetch date so a snapshot classified
+  // now is not asserted as the repo's current state months later (#2510). The
+  // pure classifier reads this off `options.asOf`; stale-demotion is left to the
+  // consumer (relative to WHEN it runs) via `demoteStaleGitOutcome`.
+  const asOf = new Date().toISOString().slice(0, 10);
   try {
     return buildGitOutcomes(
       sessions.map((s) => ({
@@ -774,7 +783,8 @@ function readGitOutcomes(sessions) {
         project: s.project,
         gitBranch: s.gitBranch,
       })),
-      pullRequests
+      pullRequests,
+      { asOf }
     );
   } catch {
     return [];

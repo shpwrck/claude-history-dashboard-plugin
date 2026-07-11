@@ -670,6 +670,17 @@ export interface RecommendationInput {
    * harness are deferred to a Future child of #1911. Optional:
    * `undefined`/`null`/empty (no PR join, the SPA/upload dataset, or `gh`
    * unavailable) means downstream detectors emit nothing.
+   *
+   * AUDITABLE-CLAIMS CONTRACT for consumers (#2510):
+   *  - An OPEN, in-flight PR yields NO row — `abandoned` is reserved for a PR
+   *    CLOSED-without-merge, never for unfinished work.
+   *  - Every row's `provenance.asOf` is the ISO `YYYY-MM-DD` PR-snapshot fetch
+   *    date. A row older than `GIT_OUTCOME_FRESHNESS_DAYS` is a STALE snapshot,
+   *    not a live claim: a consumer MUST run it through `demoteStaleGitOutcome`
+   *    (parse-git-outcome) — which sets `provenance.stale` — and present a
+   *    demoted label "as of <date>", never as the repo's current state. This
+   *    mirrors `RecommendationSavingsAttribution.stale` (#2142) and the generic
+   *    `RecProvenance.asOf`/`stale` path (#1102), so #2044 reuses one rule.
    */
   gitOutcomes?: GitOutcome[] | null;
   /**

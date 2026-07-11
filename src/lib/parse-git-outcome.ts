@@ -42,10 +42,27 @@
  *   - `merged-then-fixed`     — PR merged, then a later commit/PR fixed it
  *                               (a hotfix/follow-up that references the merge)
  *                               without a full revert. Churn, not failure.
- *   - `abandoned`             — PR closed without merging, or the branch's work
+ *   - `abandoned`             — PR CLOSED without merging, or the branch's work
  *                               never landed.
  * `merged-then-reverted` dominates `merged-then-fixed` when both signals are
  * present: a revert is the stronger statement that the change did not hold.
+ *
+ * An OPEN, in-flight PR has no delivery outcome yet, so it produces NO row
+ * (#2510) — labeling unfinished work `abandoned` would be a false ground-truth
+ * label, exactly the invented-label the module's own contract forbids. Only a
+ * CLOSED-without-merge PR is `abandoned`. (The ingest fetch pulls `--state all`,
+ * so OPEN PRs enter the pool; the classifier drops them.)
+ *
+ * ── As-of / staleness ───────────────────────────────────────────────────────
+ * Each row's provenance carries `asOf` — the ISO `YYYY-MM-DD` fetch date of the
+ * PR snapshot it was classified from (supplied by the ingest step). A snapshot
+ * ages: an OPEN PR skipped today may since have merged, a `merged-clean` may
+ * since have been reverted. So a row older than {@link GIT_OUTCOME_FRESHNESS_DAYS}
+ * must be presented "as of <date>", never as the repo's CURRENT state — the same
+ * stale-demotion convention as #2142 (`RecommendationSavingsAttribution.stale`)
+ * and the generic #1102 `RecProvenance.asOf`/`stale` path. {@link isGitOutcomeStale}
+ * and {@link demoteStaleGitOutcome} ship the threshold + demotion here so
+ * consumers (#2044) reuse one rule instead of reinventing it.
  */
 
 /**
@@ -104,6 +121,22 @@ export interface GitOutcomeProvenance {
   attribution: GitOutcomeAttribution;
   /** Short human-readable evidence rows (branch, PR ref/title). */
   evidence: string[];
+  /**
+   * ISO `YYYY-MM-DD` fetch date of the PR snapshot this row was classified from
+   * (stamped by the ingest step). Drives the stale-demotion below: a label
+   * fetched long ago is a snapshot, not a live claim. Optional only for callers
+   * that don't supply it; the ingest path always sets it (#2510).
+   */
+  asOf?: string;
+  /**
+   * True when {@link asOf} is older than the freshness threshold, so a consumer
+   * demotes the label to "as of <date>" rather than the repo's current state.
+   * Mirrors {@link RecProvenance.stale}/`RecommendationSavingsAttribution.stale`
+   * (#2142): only ever `true` alongside an `asOf`. Set by
+   * {@link demoteStaleGitOutcome}, not at build time (staleness is relative to
+   * WHEN the row is consumed).
+   */
+  stale?: boolean;
 }
 
 /** One per-session delivery-outcome row. */
@@ -152,16 +185,26 @@ function bodyReferencesIssue(body: string | undefined, issueNumber: number): boo
 /**
  * Classify a single PR's delivery outcome. Pure; the revert/fix-up signals are
  * supplied on the PR record by the ingest step.
+ *
+ * Returns `undefined` for an OPEN, in-flight PR: it has no delivery outcome yet,
+ * so the signal emits NO row rather than inventing `abandoned` for unfinished
+ * work (#2510). A CLOSED-without-merge PR still classifies as `abandoned`.
  */
 export function classifyPullRequestOutcome(
   pr: GitOutcomePullRequest
-): GitOutcomeLabel {
-  const merged = pr.merged === true || pr.state?.toUpperCase() === 'MERGED';
-  if (!merged) return 'abandoned';
-  // A revert is the stronger statement than a follow-up fix, so it wins the tie.
-  if (pr.reverted) return 'merged-then-reverted';
-  if (pr.fixedUp) return 'merged-then-fixed';
-  return 'merged-clean';
+): GitOutcomeLabel | undefined {
+  const state = pr.state?.toUpperCase();
+  const merged = pr.merged === true || state === 'MERGED';
+  if (merged) {
+    // A revert is the stronger statement than a follow-up fix, so it wins the tie.
+    if (pr.reverted) return 'merged-then-reverted';
+    if (pr.fixedUp) return 'merged-then-fixed';
+    return 'merged-clean';
+  }
+  // OPEN, in-flight PR: not finished, not a delivery outcome — no label.
+  if (state === 'OPEN') return undefined;
+  // Closed without merging (or a stateless deleted-branch record): did not land.
+  return 'abandoned';
 }
 
 /**
@@ -203,15 +246,22 @@ export function attributeBranchToPullRequest(
  * Build the `gitOutcomes` signal: one delivery-outcome row per session whose
  * `gitBranch` grounds a PR. Sessions on a trunk branch, with no branch, or whose
  * branch matches no PR are skipped — the signal never invents an ungrounded
- * label.
+ * label. A branch that grounds an OPEN, in-flight PR is likewise skipped
+ * (`classifyPullRequestOutcome` returns `undefined`): unfinished work has no
+ * outcome yet (#2510).
  *
  * @param sessions     Sessions carrying `gitBranch` (from `SessionDimensions`).
  * @param pullRequests PR records fetched by the ingest step (network-side).
+ * @param options.asOf ISO `YYYY-MM-DD` fetch date of the PR snapshot, stamped on
+ *                     every emitted row's provenance for stale-demotion (#2510).
+ *                     The ingest path always supplies it.
  */
 export function buildGitOutcomes(
   sessions: GitOutcomeSession[],
-  pullRequests: GitOutcomePullRequest[]
+  pullRequests: GitOutcomePullRequest[],
+  options: { asOf?: string } = {}
 ): GitOutcome[] {
+  const { asOf } = options;
   const outcomes: GitOutcome[] = [];
   for (const session of sessions) {
     const branch = session.gitBranch?.trim();
@@ -222,6 +272,8 @@ export function buildGitOutcomes(
 
     const { pr, attribution } = match;
     const label = classifyPullRequestOutcome(pr);
+    // OPEN PR → no outcome yet; emit no row rather than a false `abandoned`.
+    if (label === undefined) continue;
     const issueNumber = issueNumberFromBranch(branch);
     const evidence = [
       `branch ${branch}`,
@@ -238,8 +290,84 @@ export function buildGitOutcomes(
         prNumber: pr.number,
         attribution,
         evidence,
+        ...(asOf !== undefined ? { asOf } : {}),
       },
     });
   }
   return outcomes;
+}
+
+/** A GitHub `owner/repo` slug, e.g. `shpwrck/claude-history-dashboard`. */
+const REPO_SLUG_RE = /^[\w.-]+\/[\w.-]+$/;
+
+/**
+ * Parse the `CHD_GIT_OUTCOMES` opt-in env value into the list of `owner/repo`
+ * slugs whose PRs the ingest step may fetch. UNSET / empty / whitespace / no
+ * valid slug ⇒ `[]`, which IS the flag-OFF contract: `readGitOutcomes` returns
+ * `[]` on an empty list without a single `gh` call, so the default dataset is
+ * byte-identical and makes zero external calls (#2510, restating the #1757
+ * opt-in). Kept here as a pure, unit-testable function so the gate is not buried
+ * in an un-testable ingest env read.
+ */
+export function gitOutcomesReposFromEnv(value: string | undefined): string[] {
+  return String(value ?? '')
+    .split(/[,\s]+/)
+    .map((part) => part.trim())
+    .filter((part) => REPO_SLUG_RE.test(part));
+}
+
+/** ISO `YYYY-MM-DD`. Strict so a full timestamp or garbage is rejected. */
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Freshness threshold (days) for a git delivery-outcome row. A row whose `asOf`
+ * fetch date is older than this can no longer be asserted as the repo's CURRENT
+ * state — an OPEN PR skipped then may since have merged, a `merged-clean` may
+ * since have been reverted — so consumers must present it "as of <date>", never
+ * as a live claim (the #2142 stale-demotion convention, applied to this signal).
+ * 30 days is deliberately tighter than the down-model proof's 90: PR state
+ * churns far faster than a model generation.
+ */
+export const GIT_OUTCOME_FRESHNESS_DAYS = 30;
+
+/**
+ * True when a git-outcome `asOf` date is older than `thresholdDays` relative to
+ * `now` (ms). Mirrors the generic #1102/#2142 freshness test (`isAsOfStale`): a
+ * missing or malformed `asOf` returns `false`, because a row can only be demoted
+ * against a date it can read — an undatable row is never silently flagged stale
+ * (the same contract as `stale=true` requiring an `asOf`).
+ */
+export function isGitOutcomeStale(
+  asOf: string | undefined,
+  now: number,
+  thresholdDays: number = GIT_OUTCOME_FRESHNESS_DAYS
+): boolean {
+  if (asOf === undefined || !ISO_DATE.test(asOf)) return false;
+  const asOfMs = Date.parse(asOf);
+  if (!Number.isFinite(asOfMs)) return false;
+  return now - asOfMs > thresholdDays * DAY_MS;
+}
+
+/**
+ * Demote a stale git-outcome row (#2510, reusing the #2142 stale-demotion
+ * convention). A row whose `provenance.asOf` is older than `thresholdDays` is
+ * flagged `provenance.stale = true` so a consumer (#2044) presents its label
+ * "as of <date>" rather than as the repo's current state. Fresh rows, and rows
+ * with no readable `asOf`, are returned UNCHANGED (referentially identical), so
+ * this is safe to `map` over a whole `gitOutcomes` array. Pure transform —
+ * never mutates its input.
+ */
+export function demoteStaleGitOutcome(
+  outcome: GitOutcome,
+  now: number,
+  thresholdDays: number = GIT_OUTCOME_FRESHNESS_DAYS
+): GitOutcome {
+  if (!isGitOutcomeStale(outcome.provenance.asOf, now, thresholdDays)) {
+    return outcome;
+  }
+  return {
+    ...outcome,
+    provenance: { ...outcome.provenance, stale: true },
+  };
 }
