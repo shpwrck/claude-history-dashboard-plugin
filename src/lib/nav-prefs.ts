@@ -202,7 +202,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: TachometerAltIcon,
     domain: 'home',
     description:
-      'Your highest-priority findings across cost, speed, success, safety, context, and workflow, ranked so you can act on what matters most first.',
+      'Your highest-priority findings across cost, speed, success, safety, context, and workflow, ranked so you can act on what matters most first. Server-side engine artifacts are computed over all data; the global time/project filters scope the rest of the page.',
   },
   {
     view: 'recommendations',
@@ -211,7 +211,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: StarIcon,
     domain: 'home',
     description:
-      'Prioritized fixes and habits from cost, context, workflow, safety, and reliability signals.',
+      'Prioritized fixes and habits from cost, context, workflow, safety, and reliability signals. Server-side engine artifacts are computed over all data; the global time/project filters scope the rest of the page.',
   },
   {
     view: 'adoption',
