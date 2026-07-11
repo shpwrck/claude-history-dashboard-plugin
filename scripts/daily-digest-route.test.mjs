@@ -188,8 +188,10 @@ try {
     });
   }
 } finally {
-  proc.kill('SIGTERM');
-  await new Promise((resolve) => proc.once('exit', resolve));
+  if (proc.exitCode === null) {
+    proc.kill('SIGTERM');
+    await new Promise((resolve) => proc.once('exit', resolve));
+  }
   await rm(claudeDir, { recursive: true, force: true });
   await rm(distDir, { recursive: true, force: true });
   await rm(cacheDir, { recursive: true, force: true });

@@ -237,6 +237,14 @@ const CompositeTabsView = lazy(() =>
     default: m.CompositeTabsView,
   }))
 );
+// Human doc-relationship view over the #2263 neighborhood (#2323, epic #2262).
+// SPA-safe: it renders a client-computed SAMPLE neighborhood (no server, no
+// ~/.claude), so it demos with real hygiene flags in every build.
+const DocRelationshipView = lazy(() =>
+  import('../components/DocRelationshipView').then((m) => ({
+    default: m.DocRelationshipViewSample,
+  }))
+);
 // Keep the admin-only live-server view out of the upload-only SPA bundle.
 const EnterpriseAdminUnavailable = () => null;
 const EnterpriseAdmin =
@@ -1256,6 +1264,11 @@ export const VIEW_RENDERERS: Partial<
   provisioning: ({ serverAvailable }) => (
     <SessionProvisioning serverAvailable={serverAvailable} />
   ),
+  // Human doc-relationship view (#2323). Renders a client-computed sample
+  // neighborhood; no ViewData wiring yet (the doc graph is a server-only ingest
+  // artifact no client dataset carries), so the surface demos the retrieval +
+  // view + checkpoint end-to-end from a bundled sample.
+  'doc-relationships': () => <DocRelationshipView />,
   enterprise: ({ data: d, serverAvailable }) => (
     <EnterpriseAdmin
       serverAvailable={serverAvailable}

@@ -38,6 +38,7 @@ import ChartPieIcon from '@patternfly/react-icons/dist/esm/icons/chart-pie-icon'
 import CalendarAltIcon from '@patternfly/react-icons/dist/esm/icons/calendar-alt-icon';
 import FlaskIcon from '@patternfly/react-icons/dist/esm/icons/flask-icon';
 import ServerIcon from '@patternfly/react-icons/dist/esm/icons/server-icon';
+import NetworkIcon from '@patternfly/react-icons/dist/esm/icons/network-icon';
 import type { View, ActionDomain } from '../types';
 import type { ViewRequirement, VariantCapabilities } from './variant-capabilities';
 import { ALL_DOMAINS, DOMAIN_OUTCOME_VERB } from './domain-registry';
@@ -445,6 +446,19 @@ export const NAV_ITEMS: readonly NavItem[] = [
     requires: 'serverData',
     description:
       'Week-over-week activity trend from stats-cache.json. Stats-cache panels ignore global time/project filters.',
+  },
+  // Doc-comprehension routing (epic #2262, #2323): the human reader's view over
+  // the #2263 doc neighborhood — relationships + per-node hygiene, plus a preview
+  // of how the cluster is surfaced at an AskUserQuestion checkpoint. Reachable in
+  // every build (renders a sample neighborhood client-side; no server needed).
+  {
+    view: 'doc-relationships',
+    contract: 'evidence',
+    label: 'Doc Relationships',
+    icon: NetworkIcon,
+    domain: 'context-health',
+    description:
+      'Map how your docs, ADRs, and conventions link to each other, with hygiene flags for stale, conflicting, and broken links — and preview the doc cluster a human sees when an agent asks them to decide.',
   },
 ] as const;
 
