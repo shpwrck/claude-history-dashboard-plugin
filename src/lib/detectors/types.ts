@@ -284,6 +284,27 @@ export interface RecommendationSavingsAttribution {
   realizedSavingsUsd?: number;
   confidence?: SavingsAttributionConfidence;
   window?: SavingsAttributionWindow;
+  /**
+   * Sample size behind the attribution — the count of observations (e.g. priced
+   * automation turns) the tier/estimate is computed over (#2141). Lets a reader
+   * or auto-router gate on how much evidence backs the number; a large recovered
+   * dollar figure over `n === 2` is weaker than the same figure over `n === 500`.
+   */
+  sampleSize?: number;
+  /**
+   * Judge agreement as a fraction in `[0, 1]` when a Tier 2 ablation was scored
+   * by a panel of judges (#2141). Present ONLY for a genuinely judged tier —
+   * a Tier 0 estimate or a Tier 1 accounting before/after has no judge, so it is
+   * left undefined rather than fabricated. Renderers show it only when present.
+   */
+  judgeAgreement?: number;
+  /**
+   * As-of date (ISO `YYYY-MM-DD`) of the underlying data behind this attribution
+   * (#2141) — the freshest observation feeding the estimate/measurement. Drives
+   * the same stale-input honesty as {@link RecProvenance.asOf}: a present-tense
+   * confidence claim is only honest when this is fresh.
+   */
+  asOf?: string;
 }
 
 export interface ModelPinSavingsConfig {
@@ -323,6 +344,16 @@ export interface TaskClassCostBreakdown {
   swapSavingsUsd: number;
   /** Distinct unattended sessions assigned to this class. */
   sessions: number;
+  /**
+   * Confidence accounting for this class's down-model estimate (#2141): proof
+   * tier, sample size (`n`), judge agreement (when a judged tier produced it),
+   * and `asOf` freshness. Reuses the {@link RecommendationSavingsAttribution}
+   * carrier so a class exposes the same auditable fields as the card-level
+   * `savingsAttribution`. A class whose figure is pure token accounting renders
+   * honestly as `tier-0-estimate` with no `confidence`/`judgeAgreement`; nothing
+   * is fabricated. Additive and optional.
+   */
+  savingsAttribution?: RecommendationSavingsAttribution;
 }
 
 export interface Recommendation {

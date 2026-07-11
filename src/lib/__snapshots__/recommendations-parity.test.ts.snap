@@ -380,18 +380,39 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "taskClassBreakdown": [
       {
         "autoCostUsd": 100,
+        "savingsAttribution": {
+          "interventionKey": "cost.automation-share",
+          "predictedSavingsUsd": 80,
+          "sampleSize": 1,
+          "signatureId": "automation-model-pin.authoring",
+          "tier": "tier-0-estimate",
+        },
         "sessions": 1,
         "swapSavingsUsd": 80,
         "taskClass": "authoring",
       },
       {
         "autoCostUsd": 0,
+        "savingsAttribution": {
+          "interventionKey": "cost.automation-share",
+          "predictedSavingsUsd": 0,
+          "sampleSize": 0,
+          "signatureId": "automation-model-pin.mechanical",
+          "tier": "tier-0-estimate",
+        },
         "sessions": 0,
         "swapSavingsUsd": 0,
         "taskClass": "mechanical",
       },
       {
         "autoCostUsd": 0,
+        "savingsAttribution": {
+          "interventionKey": "cost.automation-share",
+          "predictedSavingsUsd": 0,
+          "sampleSize": 0,
+          "signatureId": "automation-model-pin.review",
+          "tier": "tier-0-estimate",
+        },
         "sessions": 0,
         "swapSavingsUsd": 0,
         "taskClass": "review",

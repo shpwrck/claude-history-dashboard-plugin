@@ -125,3 +125,59 @@ describe('cost.automation-share task-class breakdown (#2139, epic #2138)', () =>
     expect(rec?.detail).toMatch(/authoring/);
   });
 });
+
+describe('cost.automation-share per-class down-model confidence (#2141)', () => {
+  // Two dated authoring turns and one mechanical turn, so sample size and asOf
+  // are per-class distinguishable.
+  const tokenData = [
+    session('author', 'sdk-cli', 'coder: implement issue #2141', [
+      entry('claude-opus-4-8', 4_000_000, 800_000, '2026-06-01T00:00:00.000Z'),
+      entry('claude-opus-4-8', 4_000_000, 800_000, '2026-06-03T00:00:00.000Z'),
+    ]),
+    session('mech', 'sdk-cli', 'route-loose classify + groom-pick dry-run', [
+      entry('claude-opus-4-8', 2_000_000, 400_000, '2026-06-02T00:00:00.000Z'),
+    ]),
+  ];
+
+  it('attaches an estimate-tier attribution to every class, with no fabricated confidence', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const breakdown = rec?.taskClassBreakdown ?? [];
+    expect(breakdown.length).toBe(3);
+    for (const c of breakdown) {
+      const attr = c.savingsAttribution;
+      expect(attr).toBeDefined();
+      // Pure token accounting: every class is honestly tier-0-estimate.
+      expect(attr?.tier).toBe('tier-0-estimate');
+      // No before/after or ablation exists per class, so nothing is fabricated.
+      expect(attr?.confidence).toBeUndefined();
+      expect(attr?.judgeAgreement).toBeUndefined();
+      expect(attr?.realizedSavingsUsd).toBeUndefined();
+      expect(attr?.interventionKey).toBe('cost.automation-share');
+      expect(attr?.signatureId).toBe(`automation-model-pin.${c.taskClass}`);
+      expect(attr?.predictedSavingsUsd).toBeCloseTo(c.swapSavingsUsd, 10);
+    }
+  });
+
+  it('reports the per-class sample size (billable turns) as n', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const by = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    );
+    // authoring saw two billable turns, mechanical one; review saw none.
+    expect(by.authoring.savingsAttribution?.sampleSize).toBe(2);
+    expect(by.mechanical.savingsAttribution?.sampleSize).toBe(1);
+    expect(by.review.savingsAttribution?.sampleSize).toBe(0);
+  });
+
+  it('surfaces the freshest billable turn as an ISO asOf date, omitting it for empty classes', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const by = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    );
+    // authoring's freshest turn is 2026-06-03; mechanical's is 2026-06-02.
+    expect(by.authoring.savingsAttribution?.asOf).toBe('2026-06-03');
+    expect(by.mechanical.savingsAttribution?.asOf).toBe('2026-06-02');
+    // A class with no billable turn has no dated data, so asOf is absent.
+    expect(by.review.savingsAttribution?.asOf).toBeUndefined();
+  });
+});

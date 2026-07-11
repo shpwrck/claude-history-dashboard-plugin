@@ -395,6 +395,18 @@ export interface AutomationClassCost {
   swapSavings: number;
   /** Distinct unattended sessions assigned to this class. */
   sessions: number;
+  /**
+   * Billable (non-synthetic) automation turns counted for this class — the
+   * sample size `n` behind its cost/swap estimate (#2141). Synthetic turns are
+   * excluded, exactly as they are from the swap math.
+   */
+  sampleSize: number;
+  /**
+   * Freshest billable-turn timestamp (epoch ms) seen in this class, or `null`
+   * when the class has no dated billable turn (#2141). The detector renders this
+   * as the `asOf` date so a reader can gate on data freshness.
+   */
+  latestTimestampMs: number | null;
 }
 
 export interface AutomationCostByClass {
@@ -433,10 +445,18 @@ export interface AutomationCostByClass {
 export function automationCostByClass(
   tokenData: SessionTokenData[]
 ): AutomationCostByClass {
+  const mkClass = (taskClass: TaskClass): AutomationClassCost => ({
+    taskClass,
+    autoCost: 0,
+    swapSavings: 0,
+    sessions: 0,
+    sampleSize: 0,
+    latestTimestampMs: null,
+  });
   const byClass: Record<TaskClass, AutomationClassCost> = {
-    authoring: { taskClass: 'authoring', autoCost: 0, swapSavings: 0, sessions: 0 },
-    mechanical: { taskClass: 'mechanical', autoCost: 0, swapSavings: 0, sessions: 0 },
-    review: { taskClass: 'review', autoCost: 0, swapSavings: 0, sessions: 0 },
+    authoring: mkClass('authoring'),
+    mechanical: mkClass('mechanical'),
+    review: mkClass('review'),
   };
   const sessionIds = new Set<string>();
   const scopeKeys = new Set<string>();
@@ -457,6 +477,17 @@ export function automationCostByClass(
     for (const entry of d.entries) {
       const model = entry.model || 'unknown';
       if (resolveModelPricing(model).isSynthetic) continue;
+      // Every billable (non-synthetic) turn is an observation behind this
+      // class's estimate — its sample size (#2141). Track the freshest dated
+      // turn so the detector can render an honest `asOf`.
+      bucket.sampleSize += 1;
+      const ts = new Date(entry.timestamp).getTime();
+      if (Number.isFinite(ts)) {
+        bucket.latestTimestampMs =
+          bucket.latestTimestampMs === null
+            ? ts
+            : Math.max(bucket.latestTimestampMs, ts);
+      }
       const delta =
         entryCostAtModel(entry, model) - entryCostAtModel(entry, CHEAPEST_MODEL);
       if (delta > 0) {

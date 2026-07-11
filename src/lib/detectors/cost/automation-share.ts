@@ -33,11 +33,27 @@ export const detector: Detector = {
     const byClass = automationCostByClass(input.tokenData);
     const swapSavings = byClass.swapSavings;
     const sessionCount = byClass.sessionIds.length;
+    // Per-class confidence accounting (#2141). The per-class swap savings is a
+    // pure token-accounting estimate — there is no per-class before/after window
+    // or judged ablation — so each class is honestly `tier-0-estimate` with NO
+    // fabricated confidence/judgeAgreement. We still surface the sample size
+    // (billable turns behind the estimate) and the data's `asOf` freshness so a
+    // reader or auto-router can gate on how much evidence backs the class figure.
     const taskClassBreakdown: TaskClassCostBreakdown[] = byClass.classes.map((c) => ({
       taskClass: c.taskClass,
       autoCostUsd: c.autoCost,
       swapSavingsUsd: c.swapSavings,
       sessions: c.sessions,
+      savingsAttribution: {
+        interventionKey: 'cost.automation-share',
+        signatureId: `automation-model-pin.${c.taskClass}`,
+        tier: 'tier-0-estimate' as const,
+        predictedSavingsUsd: c.swapSavings,
+        sampleSize: c.sampleSize,
+        ...(c.latestTimestampMs !== null
+          ? { asOf: new Date(c.latestTimestampMs).toISOString().slice(0, 10) }
+          : {}),
+      },
     }));
     // Reclaim claim (model right-sizing): reprice the unattended-automation scopes
     // onto the cheapest model across every pool. Placed LAST in the structural
