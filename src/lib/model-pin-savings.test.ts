@@ -230,3 +230,66 @@ describe('deriveModelPinSavingsConfig', () => {
     expect(deriveModelPinSavingsConfig({ tokenData })).toBeNull();
   });
 });
+
+describe('sessionFilter parameterization (#2140)', () => {
+  it('narrows computeModelPinSavings window math to sessions passing the predicate', () => {
+    const keepOpus = entry('2026-05-02T12:00:00Z', 'claude-opus-4-8');
+    const keepHaiku = entry('2026-05-09T12:00:00Z', CHEAPEST_MODEL);
+    const dropOpus = entry('2026-05-10T12:00:00Z', 'claude-opus-4-8');
+
+    const withFilter = computeModelPinSavings({
+      tokenData: [
+        session('keep', 'sdk-cli', [keepOpus, keepHaiku]),
+        session('drop', 'sdk-cli', [dropOpus]),
+      ],
+      baseline,
+      comparison,
+      sessionFilter: (s) => s.sessionId === 'keep',
+    });
+
+    // Only `keep` contributes — one baseline turn, one comparison turn — even
+    // though `drop` is also unattended automation inside the comparison window.
+    expect(withFilter?.baseline.entries).toBe(1);
+    expect(withFilter?.comparison.entries).toBe(1);
+    expect(withFilter?.realizedSavingsUsd).toBeCloseTo(
+      entryCostAtModel(keepOpus, 'claude-opus-4-8') -
+        entryCostAtModel(keepOpus, CHEAPEST_MODEL),
+      6
+    );
+  });
+
+  it('lets deriveModelPinSavingsConfig infer a per-slice window the aggregate would miss', () => {
+    const tokenData = [
+      // The `keep` slice migrated Opus -> Haiku cleanly.
+      session('keep', 'sdk-cli', [
+        entry('2026-05-02T12:00:00Z', 'claude-opus-4-8'),
+        entry('2026-05-09T12:00:00Z', CHEAPEST_MODEL),
+      ]),
+      // The `drop` slice stayed on Opus, dragging the aggregate comparison side
+      // below the target-priced share threshold if it were counted.
+      session('drop', 'sdk-cli', [
+        entry('2026-05-09T13:00:00Z', 'claude-opus-4-8'),
+        entry('2026-05-10T12:00:00Z', 'claude-opus-4-8'),
+      ]),
+    ];
+
+    // Aggregate (no filter) cannot find a credible before/after: the comparison
+    // side is mostly Opus, so the target-priced share is below threshold.
+    expect(deriveModelPinSavingsConfig({ tokenData })).toBeNull();
+
+    // The `keep` slice on its own DID migrate, so the filtered derive surfaces it.
+    const keepConfig = deriveModelPinSavingsConfig({
+      tokenData,
+      sessionFilter: (s) => s.sessionId === 'keep',
+    });
+    expect(keepConfig).not.toBeNull();
+    expect(keepConfig?.targetModel).toBe(CHEAPEST_MODEL);
+    expect(
+      computeModelPinSavings({
+        tokenData,
+        ...keepConfig!,
+        sessionFilter: (s) => s.sessionId === 'keep',
+      })?.realizedSavingsUsd
+    ).toBeGreaterThan(0);
+  });
+});

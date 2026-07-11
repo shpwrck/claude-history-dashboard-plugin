@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './automation-share';
 import { automationCostShare } from '../shared';
+import { CHEAPEST_MODEL } from '../../pricing';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData, TokenEntry } from '../../../types';
 
@@ -179,5 +180,66 @@ describe('cost.automation-share per-class down-model confidence (#2141)', () => 
     expect(by.mechanical.savingsAttribution?.asOf).toBe('2026-06-02');
     // A class with no billable turn has no dated data, so asOf is absent.
     expect(by.review.savingsAttribution?.asOf).toBeUndefined();
+  });
+});
+
+describe('cost.automation-share per-class measured tier-1 before/after (#2140)', () => {
+  // Mechanical automation migrated Opus -> Haiku in-window (an early Opus turn,
+  // then two Haiku turns) — a real per-class before/after. Authoring stayed on
+  // Opus the whole window, so it has no in-window model change to measure. Review
+  // has no sessions at all.
+  const tokenData = [
+    session('mech-before', 'sdk-cli', 'route-loose classify picker', [
+      entry('claude-opus-4-8', 4_000_000, 800_000, '2026-05-02T00:00:00.000Z'),
+    ]),
+    session('mech-after', 'sdk-cli', 'route-loose classify picker', [
+      entry(CHEAPEST_MODEL, 4_000_000, 800_000, '2026-05-09T00:00:00.000Z'),
+      entry(CHEAPEST_MODEL, 4_000_000, 800_000, '2026-05-10T00:00:00.000Z'),
+    ]),
+    session('auth-1', 'sdk-cli', 'coder: implement issue #2140', [
+      entry('claude-opus-4-8', 3_000_000, 600_000, '2026-05-03T00:00:00.000Z'),
+      entry('claude-opus-4-8', 3_000_000, 600_000, '2026-05-11T00:00:00.000Z'),
+    ]),
+  ];
+
+  it('upgrades a class that migrated model in-window to a measured tier-1 result', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const by = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    );
+    const mech = by.mechanical.savingsAttribution;
+    // The Opus -> Haiku migration is a genuine before/after, so it is measured.
+    expect(mech?.tier).toBe('tier-1-before-after');
+    expect(mech?.realizedSavingsUsd).toBeGreaterThan(0);
+    // confidence is only present because a real before/after produced it.
+    expect(mech?.confidence).toBe('medium');
+    expect(mech?.signatureId).toBe('automation-model-pin.mechanical');
+    expect(mech?.window?.baseline).toBeDefined();
+    expect(mech?.window?.comparison).toBeDefined();
+    // sampleSize reflects the priced turns behind the measurement (1 + 2).
+    expect(mech?.sampleSize).toBe(3);
+    // asOf is the class's freshest billable turn.
+    expect(mech?.asOf).toBe('2026-05-10');
+  });
+
+  it('keeps a class with no in-window model change at tier-0-estimate (no fabricated confidence)', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const by = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    );
+    // Authoring ran on Opus throughout — recoverable spend exists (swapSavings > 0)
+    // but there is no before/after migration, so it stays an honest estimate.
+    expect(by.authoring.swapSavingsUsd).toBeGreaterThan(0);
+    const auth = by.authoring.savingsAttribution;
+    expect(auth?.tier).toBe('tier-0-estimate');
+    expect(auth?.realizedSavingsUsd).toBeUndefined();
+    expect(auth?.confidence).toBeUndefined();
+    expect(auth?.judgeAgreement).toBeUndefined();
+
+    // A class with no automation at all is trivially estimate-only.
+    const review = by.review.savingsAttribution;
+    expect(review?.tier).toBe('tier-0-estimate');
+    expect(review?.sampleSize).toBe(0);
+    expect(review?.realizedSavingsUsd).toBeUndefined();
   });
 });

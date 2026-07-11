@@ -11,6 +11,17 @@ import {
   resolveModelPricing,
 } from './pricing';
 
+/**
+ * Optional per-session predicate that narrows the before/after window math to a
+ * SLICE of the automation history — e.g. one task class (#2140). When omitted,
+ * all unattended sessions contribute (the default, aggregate behaviour). The
+ * predicate is applied on top of the always-on `isUnattendedEntrypoint` gate, so
+ * it can only ever narrow the automation set, never widen it to interactive
+ * turns. The caller supplies the class predicate; this module stays free of any
+ * task-class knowledge.
+ */
+export type ModelPinSessionFilter = (session: SessionTokenData) => boolean;
+
 export interface ModelPinSavingsInput {
   tokenData: SessionTokenData[];
   baseline: SavingsAttributionPeriod;
@@ -18,6 +29,8 @@ export interface ModelPinSavingsInput {
   targetModel?: string;
   interventionKey?: string;
   signatureId?: string;
+  /** Narrow the window math to a slice of automation sessions (e.g. a class). */
+  sessionFilter?: ModelPinSessionFilter;
 }
 
 export interface ModelPinSavingsDerivationInput {
@@ -29,6 +42,8 @@ export interface ModelPinSavingsDerivationInput {
   minComparisonEntries?: number;
   /** Required share of comparison entries already priced at or below target. */
   minComparisonTargetShare?: number;
+  /** Narrow the inferred window to a slice of automation sessions (e.g. a class). */
+  sessionFilter?: ModelPinSessionFilter;
 }
 
 export interface ModelPinWindowSummary {
@@ -88,7 +103,11 @@ export function deriveModelPinSavingsConfig(
   const minBaselineEntries = input.minBaselineEntries ?? 1;
   const minComparisonEntries = input.minComparisonEntries ?? 1;
   const minComparisonTargetShare = input.minComparisonTargetShare ?? 0.5;
-  const entries = collectTimestampedEntries(input.tokenData, targetModel);
+  const entries = collectTimestampedEntries(
+    input.tokenData,
+    targetModel,
+    input.sessionFilter
+  );
   if (entries.length < minBaselineEntries + minComparisonEntries) return null;
 
   let best: { index: number; realizedSavingsUsd: number } | null = null;
@@ -128,6 +147,7 @@ export function deriveModelPinSavingsConfig(
   return computeModelPinSavings({
     tokenData: input.tokenData,
     ...config,
+    sessionFilter: input.sessionFilter,
   })?.realizedSavingsUsd
     ? config
     : null;
@@ -140,12 +160,14 @@ export function computeModelPinSavings(
   const baselineEntries = collectWindowEntries(
     input.tokenData,
     input.baseline,
-    targetModel
+    targetModel,
+    input.sessionFilter
   );
   const comparisonEntries = collectWindowEntries(
     input.tokenData,
     input.comparison,
-    targetModel
+    targetModel,
+    input.sessionFilter
   );
 
   if (baselineEntries.length === 0 || comparisonEntries.length === 0) {
@@ -183,12 +205,14 @@ export function computeModelPinSavings(
 
 function collectTimestampedEntries(
   tokenData: SessionTokenData[],
-  targetModel: string
+  targetModel: string,
+  sessionFilter?: ModelPinSessionFilter
 ): TimestampedPricedEntry[] {
   const entries: TimestampedPricedEntry[] = [];
 
   for (const session of tokenData) {
     if (!isUnattendedEntrypoint(session.entrypoint)) continue;
+    if (sessionFilter && !sessionFilter(session)) continue;
     for (const entry of session.entries) {
       const timestampMs = new Date(entry.timestamp).getTime();
       if (!Number.isFinite(timestampMs)) continue;
@@ -220,12 +244,14 @@ function sumPremium(entries: PricedEntry[]): number {
 function collectWindowEntries(
   tokenData: SessionTokenData[],
   period: SavingsAttributionPeriod,
-  targetModel: string
+  targetModel: string,
+  sessionFilter?: ModelPinSessionFilter
 ): PricedEntry[] {
   const entries: PricedEntry[] = [];
 
   for (const session of tokenData) {
     if (!isUnattendedEntrypoint(session.entrypoint)) continue;
+    if (sessionFilter && !sessionFilter(session)) continue;
 
     for (const entry of session.entries) {
       if (!isInPeriod(entry.timestamp, period)) continue;

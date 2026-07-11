@@ -1,10 +1,102 @@
-import type { Detector, TaskClassCostBreakdown } from '../types';
-import { automationCostShare, automationCostByClass, fmtUsd, isHaikuPinned } from '../shared';
+import type {
+  Detector,
+  TaskClassCostBreakdown,
+  RecommendationSavingsAttribution,
+} from '../types';
+import {
+  automationCostShare,
+  automationCostByClass,
+  fmtUsd,
+  isHaikuPinned,
+  type AutomationClassCost,
+} from '../shared';
 import { CHEAPEST_MODEL } from '../../pricing';
-import { computeModelPinSavings } from '../../model-pin-savings';
+import {
+  computeModelPinSavings,
+  deriveModelPinSavingsConfig,
+} from '../../model-pin-savings';
+import { classifyTaskClass } from '../../task-class';
+import type { SessionTokenData } from '../../../types';
 import { type ReclaimClaim, type PoolId } from '../../reclaim';
 
 const ALL_POOLS: PoolId[] = ['input', 'output', 'cacheWrite5m', 'cacheWrite1h', 'cacheRead'];
+
+/**
+ * The honest, always-available per-class attribution: pure token-accounting, so
+ * `tier-0-estimate` with NO fabricated confidence/judgeAgreement (#2141). We
+ * still surface the sample size (billable turns) and `asOf` freshness so a reader
+ * or auto-router can gate on how much evidence backs the class figure.
+ */
+function estimateClassAttribution(
+  c: AutomationClassCost
+): RecommendationSavingsAttribution {
+  return {
+    interventionKey: 'cost.automation-share',
+    signatureId: `automation-model-pin.${c.taskClass}`,
+    tier: 'tier-0-estimate',
+    predictedSavingsUsd: c.swapSavings,
+    sampleSize: c.sampleSize,
+    ...(c.latestTimestampMs !== null
+      ? { asOf: new Date(c.latestTimestampMs).toISOString().slice(0, 10) }
+      : {}),
+  };
+}
+
+/**
+ * Per-class down-model savings attribution (#2140). Upgrades a class's honest
+ * `tier-0-estimate` to a measured `tier-1-before-after` ONLY when that class's
+ * automation actually migrated to a cheaper model IN-WINDOW.
+ *
+ * The measured tier reuses the exact before/after window math the card level
+ * already runs (`deriveModelPinSavingsConfig` + `computeModelPinSavings`), now
+ * PARAMETERIZED by a per-class session predicate — no new framework. Each class
+ * derives its OWN before/after boundary independently of the aggregate window,
+ * so a class-specific migration the aggregate blurs out (e.g. mechanical went
+ * Opus→Haiku while authoring stayed on Opus) still surfaces as a real
+ * measurement instead of being averaged away.
+ *
+ * `deriveModelPinSavingsConfig` only returns a config when the comparison side is
+ * mostly target-priced AND the priced premium dropped — i.e. the class genuinely
+ * moved to the cheaper model in-window. A class with NO in-window model change
+ * yields `null` and stays `tier-0-estimate` (honest tier, never upgraded without
+ * data — AGENTS.md: recommendations are auditable claims).
+ */
+function classSavingsAttribution(
+  c: AutomationClassCost,
+  tokenData: SessionTokenData[]
+): RecommendationSavingsAttribution {
+  const estimate = estimateClassAttribution(c);
+  // A class with no premium spend never ran on a costlier-than-Haiku model, so
+  // there is no before/after model change to measure — stays an honest estimate.
+  // (Cheap guard: skips the O(n^2) window search for all-cheapest classes.)
+  if (c.swapSavings <= 0) return estimate;
+
+  const classFilter = (s: SessionTokenData): boolean =>
+    classifyTaskClass({ entrypoint: s.entrypoint, opener: s.opener }) === c.taskClass;
+
+  const config = deriveModelPinSavingsConfig({ tokenData, sessionFilter: classFilter });
+  if (!config) return estimate;
+
+  const measured = computeModelPinSavings({
+    tokenData,
+    ...config,
+    sessionFilter: classFilter,
+    signatureId: `automation-model-pin.${c.taskClass}`,
+  });
+  if (!measured?.attribution) return estimate;
+
+  // Measured before/after for this class. `realizedSavingsUsd` + `confidence`
+  // come from the observed premium drop (`computeModelPinSavings`); we carry the
+  // class's own `sampleSize`/`asOf` so the auditable metadata matches the tier-0
+  // rows and a reader can still gate on evidence depth and freshness.
+  return {
+    ...measured.attribution,
+    sampleSize: measured.baseline.entries + measured.comparison.entries,
+    ...(c.latestTimestampMs !== null
+      ? { asOf: new Date(c.latestTimestampMs).toISOString().slice(0, 10) }
+      : {}),
+  };
+}
 
 /**
  * Cost incurred by automation (any `sdk-*` entrypoint) vs interactive use. Large
@@ -33,27 +125,21 @@ export const detector: Detector = {
     const byClass = automationCostByClass(input.tokenData);
     const swapSavings = byClass.swapSavings;
     const sessionCount = byClass.sessionIds.length;
-    // Per-class confidence accounting (#2141). The per-class swap savings is a
-    // pure token-accounting estimate — there is no per-class before/after window
-    // or judged ablation — so each class is honestly `tier-0-estimate` with NO
-    // fabricated confidence/judgeAgreement. We still surface the sample size
-    // (billable turns behind the estimate) and the data's `asOf` freshness so a
-    // reader or auto-router can gate on how much evidence backs the class figure.
+    // Per-class confidence accounting (#2141 estimate floor, #2140 measured
+    // tier). The per-class swap savings is a pure token-accounting estimate, so a
+    // class is honestly `tier-0-estimate` with NO fabricated
+    // confidence/judgeAgreement — UNLESS that class's automation actually
+    // migrated to a cheaper model in-window, in which case `classSavingsAttribution`
+    // upgrades it to a measured `tier-1-before-after` with a real
+    // `realizedSavingsUsd` + `confidence` (see the helper). Either way we surface
+    // the sample size (billable turns behind the figure) and the data's `asOf`
+    // freshness so a reader or auto-router can gate on the evidence.
     const taskClassBreakdown: TaskClassCostBreakdown[] = byClass.classes.map((c) => ({
       taskClass: c.taskClass,
       autoCostUsd: c.autoCost,
       swapSavingsUsd: c.swapSavings,
       sessions: c.sessions,
-      savingsAttribution: {
-        interventionKey: 'cost.automation-share',
-        signatureId: `automation-model-pin.${c.taskClass}`,
-        tier: 'tier-0-estimate' as const,
-        predictedSavingsUsd: c.swapSavings,
-        sampleSize: c.sampleSize,
-        ...(c.latestTimestampMs !== null
-          ? { asOf: new Date(c.latestTimestampMs).toISOString().slice(0, 10) }
-          : {}),
-      },
+      savingsAttribution: classSavingsAttribution(c, input.tokenData),
     }));
     // Reclaim claim (model right-sizing): reprice the unattended-automation scopes
     // onto the cheapest model across every pool. Placed LAST in the structural
