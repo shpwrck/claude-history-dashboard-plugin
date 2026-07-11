@@ -584,6 +584,29 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now: Date.parse('2026-07-09T00:00:00Z'),
     };
   },
+  'security.secrets-at-rest': () => ({
+    // A session whose transcript carried secret-shaped values (counts + coords
+    // only — the parser never stored the value). No cleanupPeriodDays set, so
+    // the retention-bounding fix is not self-suppressed.
+    input: baseInput({
+      secretsAtRest: [
+        {
+          sessionId: 'leaky-1',
+          totalCount: 3,
+          countsByKind: { 'anthropic-key': 2, 'aws-access-key-id': 1 },
+          evidenceRefs: [
+            {
+              sessionId: 'leaky-1',
+              entryIndex: 4,
+              timestamp: '2026-07-08T00:00:00.000Z',
+            },
+          ],
+          lastObserved: '2026-07-08T00:00:00.000Z',
+        },
+      ] as unknown as RecommendationInput['secretsAtRest'],
+    }),
+    now: Date.parse('2026-07-09T00:00:00Z'),
+  }),
   'activity.activity-trend': () => ({
     input: activityInput(makeCache(12576, 2373)),
     now: Date.parse('2026-06-04T00:00:00Z'),

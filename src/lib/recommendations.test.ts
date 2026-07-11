@@ -813,6 +813,7 @@ describe('assembleRecommendationInput (#411/#468 — single data-source seam)', 
       'liveConfig',
       'assistantFeatures',
       'deceitSignals',
+      'secretsAtRest',
       'timelines',
       'agentSettings',
       'attribution',
@@ -2498,6 +2499,30 @@ function fixtureBank(): Fixture[] {
           claimSnippets: ['all tests pass', 'I ran the suite'],
         },
       ] as unknown as RecommendationInput['deceitSignals'],
+    }),
+  });
+
+  // security.secrets-at-rest (#2504): a session whose transcript carried
+  // secret-shaped values (counts + coords only — never the value) with no
+  // cleanupPeriodDays bound → the detector fires.
+  out.push({
+    now,
+    input: bankBase({
+      secretsAtRest: [
+        {
+          sessionId: 'leaky-1',
+          totalCount: 2,
+          countsByKind: { 'anthropic-key': 1, 'aws-access-key-id': 1 },
+          evidenceRefs: [
+            {
+              sessionId: 'leaky-1',
+              entryIndex: 4,
+              timestamp: '2026-07-08T00:00:00.000Z',
+            },
+          ],
+          lastObserved: '2026-07-08T00:00:00.000Z',
+        },
+      ] as unknown as RecommendationInput['secretsAtRest'],
     }),
   });
 

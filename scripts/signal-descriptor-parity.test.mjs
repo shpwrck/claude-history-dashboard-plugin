@@ -77,6 +77,19 @@ const FIXTURES = [
       inventory: { mcp: ['github'], builtin: ['Read'] },
       assistantFeatures: { sessionId: 'sess-1', thinkingTurns: 2 },
       deceit: { sessionId: 'sess-1', unbackedClaimCount: 1 },
+      secretsAtRest: {
+        sessionId: 'sess-1',
+        totalCount: 2,
+        countsByKind: { 'anthropic-key': 2 },
+        evidenceRefs: [
+          {
+            sessionId: 'sess-1',
+            entryIndex: 3,
+            timestamp: '2026-06-01T00:00:00.000Z',
+          },
+        ],
+        lastObserved: '2026-06-01T00:00:00.000Z',
+      },
       churnGeometry: {
         sessionId: 'sess-1',
         files: [{ filePath: 'src/a.ts', grossLines: 42, netLines: 0 }],
@@ -106,6 +119,7 @@ const FIXTURES = [
       inventory: null,
       assistantFeatures: null,
       deceit: null,
+      secretsAtRest: null,
       churnGeometry: null,
       taskSuccess: null,
       valueFlow: null,
@@ -145,6 +159,12 @@ const FIXTURES = [
       inventory: null,
       assistantFeatures: { sessionId: 'sess-3', thinkingTurns: 0 },
       deceit: { sessionId: 'sess-3', unbackedClaimCount: 0 },
+      secretsAtRest: {
+        sessionId: 'sess-3',
+        totalCount: 0,
+        countsByKind: {},
+        evidenceRefs: [],
+      },
       churnGeometry: { sessionId: 'sess-3', files: [] },
       taskSuccess: [{ sessionId: 'sess-3', taskIndex: 0, successScore: 0.5 }],
       valueFlow: { sessionId: 'sess-3', edges: [], hypotheses: [] },
@@ -169,6 +189,7 @@ function stubParsersFor(fx) {
     parseToolInventory: () => r.inventory,
     parseAssistantFeatures: () => r.assistantFeatures,
     parseDeceitSignals: () => r.deceit,
+    parseSecretsAtRest: () => r.secretsAtRest,
     parseChurnGeometry: () => r.churnGeometry,
     parseTaskSuccess: () => r.taskSuccess,
     parseValueFlow: () => r.valueFlow,
@@ -194,6 +215,7 @@ function goldenIngest(fx) {
   const runtime = r.runtime ?? null;
   const assistantFeatures = r.assistantFeatures;
   const deceit = r.deceit;
+  const secretsAtRest = r.secretsAtRest;
   const churnGeometry = r.churnGeometry ?? null;
   const taskSuccess = r.taskSuccess ?? [];
   const valueFlow = r.valueFlow ?? null;
@@ -212,6 +234,7 @@ function goldenIngest(fx) {
   const inventoryJson = JSON.stringify(inventory);
   const assistantFeaturesJson = JSON.stringify(assistantFeatures);
   const deceitJson = JSON.stringify(deceit);
+  const secretsAtRestJson = JSON.stringify(secretsAtRest);
   const churnGeometryJson = JSON.stringify(churnGeometry);
   const taskSuccessJson = JSON.stringify(taskSuccess);
   const valueFlowJson = JSON.stringify(valueFlow);
@@ -237,6 +260,7 @@ function goldenIngest(fx) {
     churnGeometryJson,
     taskSuccessJson,
     valueFlowJson,
+    secretsAtRestJson,
   ]) {
     ch.update(part);
     ch.update('\0');
@@ -267,6 +291,7 @@ function goldenIngest(fx) {
       churn_geometry_json: churnGeometryJson,
       task_success_json: taskSuccessJson,
       value_flow_json: valueFlowJson,
+      secrets_at_rest_json: secretsAtRestJson,
     },
   };
 }
@@ -319,6 +344,7 @@ function descriptorIngest(fx) {
     churn_geometry_json: json.churnGeometry,
     task_success_json: json.taskSuccess,
     value_flow_json: json.valueFlow,
+    secrets_at_rest_json: json.secretsAtRest,
   };
   return { contentHash, row };
 }
@@ -339,6 +365,7 @@ function goldenAssemble(rows) {
   const runtimeEvents = [];
   const assistantFeatures = [];
   const deceitSignals = [];
+  const secretsAtRest = [];
   const churnGeometry = [];
   const taskSuccess = [];
   const valueFlow = [];
@@ -369,6 +396,10 @@ function goldenAssemble(rows) {
       ? JSON.parse(r.deceit_signals_json)
       : null;
     if (ds) deceitSignals.push(ds);
+    const sar = r.secrets_at_rest_json
+      ? JSON.parse(r.secrets_at_rest_json)
+      : null;
+    if (sar) secretsAtRest.push(sar);
     const cg = r.churn_geometry_json
       ? JSON.parse(r.churn_geometry_json)
       : null;
@@ -392,6 +423,7 @@ function goldenAssemble(rows) {
     runtimeEvents,
     assistantFeatures,
     deceitSignals,
+    secretsAtRest,
     churnGeometry,
     taskSuccess,
     valueFlow,
@@ -415,6 +447,7 @@ function descriptorAssemble(rows) {
   const runtimeEvents = [];
   const assistantFeatures = [];
   const deceitSignals = [];
+  const secretsAtRest = [];
   const churnGeometry = [];
   const taskSuccess = [];
   const valueFlow = [];
@@ -430,6 +463,7 @@ function descriptorAssemble(rows) {
     runtimeEvents,
     assistantFeatures,
     deceitSignals,
+    secretsAtRest,
     churnGeometry,
     taskSuccess,
     valueFlow,
@@ -472,6 +506,7 @@ function descriptorAssemble(rows) {
     runtimeEvents,
     assistantFeatures,
     deceitSignals,
+    secretsAtRest,
     churnGeometry,
     taskSuccess,
     valueFlow,
@@ -496,7 +531,7 @@ test('content_hash: descriptor === pre-refactor inline, per row', () => {
   }
 });
 
-test('content_hash part order is project, title, then the 15 signals', () => {
+test('content_hash part order is project, title, then the 16 signals', () => {
   const ids = makeSessionSignals(stubParsersFor(FIXTURES[0])).map((s) => s.id);
   assert.deepEqual(ids, [
     'token',
@@ -514,6 +549,7 @@ test('content_hash part order is project, title, then the 15 signals', () => {
     'churnGeometry',
     'taskSuccess',
     'valueFlow',
+    'secretsAtRest',
   ]);
 });
 
@@ -615,6 +651,27 @@ test('assembleDataset read-back matches frozen golden snapshot', () => {
         hypotheses: [],
       },
       { sessionId: 'sess-3', edges: [], hypotheses: [] },
+    ],
+    secretsAtRest: [
+      {
+        sessionId: 'sess-1',
+        totalCount: 2,
+        countsByKind: { 'anthropic-key': 2 },
+        evidenceRefs: [
+          {
+            sessionId: 'sess-1',
+            entryIndex: 3,
+            timestamp: '2026-06-01T00:00:00.000Z',
+          },
+        ],
+        lastObserved: '2026-06-01T00:00:00.000Z',
+      },
+      {
+        sessionId: 'sess-3',
+        totalCount: 0,
+        countsByKind: {},
+        evidenceRefs: [],
+      },
     ],
   });
 });

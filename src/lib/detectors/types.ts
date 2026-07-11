@@ -31,6 +31,7 @@ import type { TaskSuccessProxy } from '../parse-task-success';
 import type { ToolInventory } from '../parse-tool-inventory';
 import type { ShadowCallAggregate } from '../parse-shadow-calls';
 import type { ValueFlowSession } from '../parse-value-flow';
+import type { SecretsAtRestSignal } from '../parse-secrets-at-rest';
 // ── #539 ingest artifacts (per-artifact child issues #559–#569, #572) ──────
 import type { TaskRecord } from '../parse-tasks';
 import type { ProjectMemoryStore } from '../parse-memories';
@@ -531,6 +532,16 @@ export interface RecommendationInput {
    * dataset with no flagged sessions) simply means it emits nothing.
    */
   deceitSignals?: DeceitSignals[] | null;
+  /**
+   * Per-session secrets-at-rest signal derived at ingest (#2504, epic #2199) —
+   * counts, by {@link SECRET_PATTERNS} kind, of secret-shaped values sitting in
+   * PLAINTEXT in user prompts + tool-result payloads, plus EvidenceRef
+   * coordinates. The matched value itself is NEVER stored, exported, or
+   * displayed (the #1 rule of #2504); this field carries only counts + coords.
+   * Optional: `undefined`/`null` (or a transcript-free dataset with no matches)
+   * simply means the `security.secrets-at-rest` detector emits nothing.
+   */
+  secretsAtRest?: SecretsAtRestSignal[] | null;
   // ── Additional parsed signals (epic #411, #468) ─────────────────────────
   // Each of the fields below is an existing `parse-*.ts` output that the
   // dataset already computes (see scripts/ingest.mjs `assembleDataset`). They

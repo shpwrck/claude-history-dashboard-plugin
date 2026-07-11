@@ -62,7 +62,7 @@
 export const SESSION_BLOB_OUTPUT = {
   // History of prior values is documented in scripts/session-blob-row.mjs next
   // to where this is consumed; keep new rationale there AND bump here.
-  version: 'timeline-background-truth-v9',
+  version: 'secrets-at-rest-v10',
   contract: [
     'token_json',
     'tool_json',
@@ -79,6 +79,7 @@ export const SESSION_BLOB_OUTPUT = {
     'churn_geometry_json',
     'task_success_json',
     'value_flow_json',
+    'secrets_at_rest_json',
   ],
   consumedBy:
     'scripts/session-blob-row.mjs sessionFileSignature() (parser:<version> prefix)',

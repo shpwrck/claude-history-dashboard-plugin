@@ -76,6 +76,9 @@ const OLD_ALTER_COLUMNS = [
   'churn_geometry_json TEXT',
   'task_success_json TEXT',
   'value_flow_json TEXT',
+  // Appended when the secrets-at-rest signal landed (#2504) — a real new signal
+  // grows this golden additively, exactly like the ones above.
+  'secrets_at_rest_json TEXT',
 ];
 
 const OLD_UPSERT_SQL = `
@@ -84,8 +87,8 @@ const OLD_UPSERT_SQL = `
      apierrors_json, perm_json, agents_json, entries_json,
      attribution_json, runtime_json, title, inventory_json, content_hash,
      assistant_features_json, deceit_signals_json, churn_geometry_json,
-     task_success_json, value_flow_json)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     task_success_json, value_flow_json, secrets_at_rest_json)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(session_id) DO UPDATE SET
     sig=excluded.sig, project=excluded.project, token_json=excluded.token_json,
     tool_json=excluded.tool_json, timeline_json=excluded.timeline_json,
@@ -98,7 +101,8 @@ const OLD_UPSERT_SQL = `
     deceit_signals_json=excluded.deceit_signals_json,
     churn_geometry_json=excluded.churn_geometry_json,
     task_success_json=excluded.task_success_json,
-    value_flow_json=excluded.value_flow_json
+    value_flow_json=excluded.value_flow_json,
+    secrets_at_rest_json=excluded.secrets_at_rest_json
 `;
 
 // The OLD positional arg order matching OLD_UPSERT_SQL's col list, in terms of
@@ -108,16 +112,19 @@ const OLD_UPSERT_COL_ORDER = [
   'apierrors_json', 'perm_json', 'agents_json', 'entries_json',
   'attribution_json', 'runtime_json', 'title', 'inventory_json', 'content_hash',
   'assistant_features_json', 'deceit_signals_json', 'churn_geometry_json',
-  'task_success_json', 'value_flow_json',
+  'task_success_json', 'value_flow_json', 'secrets_at_rest_json',
 ];
 
-const FULL_20 = [
+// The complete frozen column set — 21 columns as of #2504 (was 20 pre-#2504;
+// the secrets-at-rest signal grows it additively, like every prior new signal).
+const FULL_COLUMNS = [
   'session_id', 'sig', 'project', 'token_json', 'tool_json', 'timeline_json',
   'apierrors_json', 'perm_json', 'agents_json', 'entries_json',
   'attribution_json', 'runtime_json', 'title', 'inventory_json', 'content_hash',
   'assistant_features_json', 'deceit_signals_json', 'churn_geometry_json',
-  'task_success_json', 'value_flow_json',
+  'task_success_json', 'value_flow_json', 'secrets_at_rest_json',
 ];
+const FULL_COUNT = FULL_COLUMNS.length;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -190,8 +197,8 @@ test('(1) fresh DB: generated DDL reaches the SAME column SET as the old literal
 
     // And both must be exactly the frozen 20 columns by name.
     const names = setA.map((s) => s.split('|')[0]).sort();
-    assert.deepEqual(names, [...FULL_20].sort());
-    assert.equal(names.length, 20);
+    assert.deepEqual(names, [...FULL_COLUMNS].sort());
+    assert.equal(names.length, FULL_COUNT);
 
     // Spot-check the load-bearing constraints survived: session_id is the PK,
     // sig is NOT NULL, in BOTH.
@@ -255,7 +262,7 @@ test('(2) old-era DB: additive migration upgrades to full 20 without data loss',
     const names = columnSet(db)
       .map((s) => s.split('|')[0])
       .sort();
-    assert.deepEqual(names, [...FULL_20].sort());
+    assert.deepEqual(names, [...FULL_COLUMNS].sort());
 
     // (iii) the pre-existing row's data is intact; new columns are NULL.
     const row = db
@@ -282,6 +289,7 @@ test('(2) old-era DB: additive migration upgrades to full 20 without data loss',
     assert.equal(row.churn_geometry_json, null);
     assert.equal(row.task_success_json, null);
     assert.equal(row.value_flow_json, null);
+    assert.equal(row.secrets_at_rest_json, null);
   } finally {
     db.close();
     cleanup(path);
@@ -360,7 +368,7 @@ test('(2c) divergent-affinity + extra-column DB: migration converges to full 20,
       columnSet(db).map((s) => s.split('|')[0])
     );
     // All 20 frozen columns present.
-    for (const c of FULL_20) {
+    for (const c of FULL_COLUMNS) {
       assert.ok(present.has(c), `frozen column present: ${c}`);
     }
     // Extra column tolerated, not dropped.
@@ -387,6 +395,7 @@ test('(2c) divergent-affinity + extra-column DB: migration converges to full 20,
     assert.equal(row.churn_geometry_json, null);
     assert.equal(row.task_success_json, null);
     assert.equal(row.value_flow_json, null);
+    assert.equal(row.secrets_at_rest_json, null);
   } finally {
     db.close();
     cleanup(path);
@@ -446,8 +455,8 @@ test('(2d) partially-migrated DB: re-applying the full migration converges idemp
     }
     // Mid-state: strictly fewer than 20 columns so far (a partial migration).
     assert.ok(
-      columnSet(db).length < 20,
-      'partial migration left fewer than 20 columns'
+      columnSet(db).length < FULL_COUNT,
+      'partial migration left fewer than the full column set'
     );
 
     // Now re-run the FULL migration — must skip the already-added columns via
@@ -457,7 +466,7 @@ test('(2d) partially-migrated DB: re-applying the full migration converges idemp
     const names = columnSet(db)
       .map((s) => s.split('|')[0])
       .sort();
-    assert.deepEqual(names, [...FULL_20].sort());
+    assert.deepEqual(names, [...FULL_COLUMNS].sort());
 
     // Row intact through the two-phase migration.
     const row = db
@@ -470,7 +479,11 @@ test('(2d) partially-migrated DB: re-applying the full migration converges idemp
 
     // Fully idempotent: a THIRD application is still a no-op (all duplicates).
     assert.doesNotThrow(() => applyGeneratedMigration(db));
-    assert.equal(columnSet(db).length, 20, 'still exactly 20 after re-run');
+    assert.equal(
+      columnSet(db).length,
+      FULL_COUNT,
+      'still exactly the full column set after re-run'
+    );
   } finally {
     db.close();
     cleanup(path);
@@ -486,7 +499,7 @@ test('(3) round-trip: every column reads back the distinct sentinel passed FOR T
     applyGeneratedSchema(db);
 
     const cols = upsertColumns(SIGNALS);
-    assert.equal(cols.length, 20, 'upsert drives all 20 columns');
+    assert.equal(cols.length, FULL_COUNT, 'upsert drives all columns');
 
     // Distinct sentinel per column.
     const sentinel = {};

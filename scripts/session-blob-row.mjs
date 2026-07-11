@@ -68,6 +68,12 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       Reparse timeline_json so cached v8 blobs do not preserve the old
 //       tool-kind inference and keep conversational-availability dark. Dataset
 //       schema v11 turns over persisted bodies assembled from those v8 rows.
+//   'secrets-at-rest-v10' (#2504): a NEW signal column (secrets_at_rest_json)
+//       is appended in src/lib/signals/index.ts — the shared SECRET_PATTERNS run
+//       over user prompts + tool-result payloads, emitting per-kind counts +
+//       EvidenceRef coordinates (never the value). Without this bump the cached
+//       blobs keep the old 15-column parse and the secrets-at-rest column stays
+//       NULL, so the detector ships inert on deploy.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
@@ -77,6 +83,9 @@ const { parseAssistantFeatures } = await import(
 );
 const { parseDeceitSignals } = await import(
   join(LIB, 'parse-deceit-signals.ts')
+);
+const { parseSecretsAtRest } = await import(
+  join(LIB, 'parse-secrets-at-rest.ts')
 );
 const { parseTaskSuccess } = await import(join(LIB, 'parse-task-success.ts'));
 const { parseToolInventory } = await import(join(LIB, 'parse-tool-inventory.ts'));
@@ -197,6 +206,7 @@ export const SESSION_SIGNALS = makeSessionSignals({
   parseToolInventory,
   parseAssistantFeatures,
   parseDeceitSignals,
+  parseSecretsAtRest,
   parseTaskSuccess: (merged, topText, name, fallbackProject, title) =>
     parseTaskSuccess(merged, name, { topText, fallbackProject, title }),
   deriveEntries,

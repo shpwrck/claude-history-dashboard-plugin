@@ -118,6 +118,7 @@ import { detector as unattendedSessions } from './safety/unattended-sessions';
 
 // ── SECURITY ────────────────────────────────────────────────────────────
 import { detector as modelDeceit } from './security/model-deceit';
+import { detector as secretsAtRest } from './security/secrets-at-rest';
 
 // ── RELIABILITY ─────────────────────────────────────────────────────────
 import { detector as toolErrors } from './reliability/tool-errors';
@@ -274,6 +275,14 @@ export const DETECTORS: Detector[] = [
   // Reads the Slice-A ingest feature (deceitSignals, #685); dark on the
   // transcript-free SPA dataset where that field is empty.
   modelDeceit,
+
+  // ── #2504 (epic #2199) — secrets at rest in plaintext transcripts ─────────
+  // Reads the ingest-time secretsAtRest signal (parse-secrets-at-rest): the
+  // shared SECRET_PATTERNS run over user prompts + tool-result payloads, with
+  // ONLY per-kind counts + EvidenceRef coordinates recorded — the matched value
+  // is NEVER stored/exported/displayed. Self-suppresses once cleanupPeriodDays
+  // bounds retention. Dark on a dataset with no matched secret shapes.
+  secretsAtRest,
 
   // ── Epic #708 — speed domain, the clock (ADR 0006) ────────────────────────
   // The first clock-lever detector (#710): slow synchronous Stop hooks adding

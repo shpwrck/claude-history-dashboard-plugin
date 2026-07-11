@@ -94,6 +94,7 @@ export interface SignalParsers {
   parseToolInventory: (merged: string, name: string) => unknown;
   parseAssistantFeatures: (merged: string, name: string) => unknown;
   parseDeceitSignals: (merged: string, name: string) => unknown;
+  parseSecretsAtRest: (merged: string, name: string) => unknown;
   parseTaskSuccess: (
     merged: string,
     topText: string,
@@ -248,6 +249,18 @@ export function makeSessionSignals(p: SignalParsers): SessionSignal[] {
       aggregate: 'push-truthy',
       parseGuard: 'guarded',
       datasetKey: 'valueFlow',
+    },
+    {
+      // Secrets-at-rest signal (#2504, epic #2199). Appended so the existing
+      // content_hash part order stays stable. Counts of secret-shaped values in
+      // plaintext user prompts + tool-result payloads, by SECRET_PATTERNS kind,
+      // plus EvidenceRef coordinates — the matched value is NEVER stored.
+      id: 'secretsAtRest',
+      column: 'secrets_at_rest_json',
+      parse: (c) => p.parseSecretsAtRest(c.merged, c.name),
+      aggregate: 'push-truthy',
+      parseGuard: 'guarded',
+      datasetKey: 'secretsAtRest',
     },
   ];
 }

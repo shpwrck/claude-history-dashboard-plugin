@@ -21,7 +21,7 @@
  *    randomness), so it composes with the ingest content-hash gate.
  */
 
-interface SecretPattern {
+export interface SecretPattern {
   kind: string;
   re: RegExp;
 }
@@ -30,7 +30,12 @@ interface SecretPattern {
 // pattern that matches a given span wins because matches are applied
 // sequentially and a replaced span can't be re-matched by a later pattern.
 // All regexes are global so every occurrence in a string is replaced.
-const SECRET_PATTERNS: SecretPattern[] = [
+//
+// Exported (#2504) so the `security.secrets-at-rest` signal parser
+// (`parse-secrets-at-rest.ts`) counts the SAME credential shapes this scrubber
+// redacts — one pattern list, no divergent loose regexes. That parser records
+// only COUNTS + evidence coordinates; the matched value is never stored.
+export const SECRET_PATTERNS: SecretPattern[] = [
   // Anthropic API keys — the canonical case this dashboard cares about.
   { kind: 'anthropic-key', re: /sk-ant-[A-Za-z0-9_-]{16,}/g },
   // OpenAI-style keys (sk-..., sk-proj-...). Kept after the Anthropic rule so

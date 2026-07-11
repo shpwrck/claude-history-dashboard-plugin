@@ -1091,7 +1091,13 @@ export const PARSER_SIG_VERSION = 'v4';
 // SKILL.md keeps its content hash, so without this bump a persisted v11 blob
 // would keep serving liveConfig with no reference-integrity fields and the new
 // detector would never fire on deployed data.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 12;
+// v13 (#2504): assembleDataset now ships a `secretsAtRest` signal array (per-kind
+// counts of secret-shaped values in plaintext transcripts + EvidenceRef coords;
+// the matched value is never stored). Paired with the SESSION_BLOB_OUTPUT
+// 'secrets-at-rest-v10' bump that forces the session_blob reparse — turn over
+// this downstream cache so a persisted v12 body (without secretsAtRest) is never
+// accepted as current and the detector stays inert on deployed data.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 13;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2584,6 +2590,7 @@ function assembleDatasetCore() {
   const churnGeometry = [];
   const assistantFeatures = [];
   const deceitSignals = [];
+  const secretsAtRest = [];
   const taskSuccess = [];
   const valueFlow = [];
   const entries = [];
@@ -2607,6 +2614,7 @@ function assembleDatasetCore() {
     churnGeometry,
     assistantFeatures,
     deceitSignals,
+    secretsAtRest,
     taskSuccess,
     valueFlow,
   };
@@ -2825,6 +2833,7 @@ function assembleDatasetCore() {
       churnGeometry,
       assistantFeatures,
       deceitSignals,
+      secretsAtRest,
       taskSuccess,
       valueFlow,
     }[s.datasetKey];
@@ -2842,6 +2851,7 @@ function assembleDatasetCore() {
     churnGeometry,
     assistantFeatures,
     deceitSignals,
+    secretsAtRest,
     taskSuccess,
     valueFlow,
     // Special signals
@@ -2901,6 +2911,7 @@ export function assembleDataset() {
     churnGeometry,
     assistantFeatures,
     deceitSignals,
+    secretsAtRest,
     taskSuccess,
     valueFlow,
     entries,
@@ -3034,6 +3045,7 @@ export function assembleDataset() {
     liveConfig,
     assistantFeatures,
     deceitSignals,
+    secretsAtRest,
     taskSuccess,
     valueFlow,
     shadowCalls,
@@ -3102,6 +3114,7 @@ export function assembleRecommendationDataset() {
     churnGeometry: core.churnGeometry,
     assistantFeatures: core.assistantFeatures,
     deceitSignals: core.deceitSignals,
+    secretsAtRest: core.secretsAtRest,
     taskSuccess: core.taskSuccess,
     valueFlow: core.valueFlow,
     permissionRows: core.permissionRows,
