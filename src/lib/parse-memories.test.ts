@@ -70,6 +70,29 @@ b`;
     expect(m.description).toBe('');
     expect(m.type).toBe('other');
   });
+
+  it('threads mtimeMs through to lastModifiedMs when the payload carries it (#2495)', () => {
+    const withMtime = parseMemoryFile({
+      name: 'groom-means-stop-at-submit.md',
+      content: FULL,
+      mtimeMs: 1_700_000_000_000,
+    });
+    expect(withMtime.lastModifiedMs).toBe(1_700_000_000_000);
+
+    // Same on the no-frontmatter path (whole file treated as body).
+    const noFrontmatter = parseMemoryFile({
+      name: 'MEMORY.md',
+      content: '# Index',
+      mtimeMs: 1_650_000_000_000,
+    });
+    expect(noFrontmatter.lastModifiedMs).toBe(1_650_000_000_000);
+  });
+
+  it('degrades lastModifiedMs to undefined when the payload lacks mtimeMs (SPA/upload path) (#2495)', () => {
+    // SPA upload path and older cached payloads carry no mtimeMs — must not throw.
+    const noMtime = parseMemoryFile({ name: 'x.md', content: FULL });
+    expect(noMtime.lastModifiedMs).toBeUndefined();
+  });
 });
 
 describe('parseMemories', () => {
@@ -216,6 +239,30 @@ describe('buildMemoryStores', () => {
   it('returns [] for null/empty input', () => {
     expect(buildMemoryStores(null)).toEqual([]);
     expect(buildMemoryStores({ projects: [] })).toEqual([]);
+  });
+
+  it('carries per-file lastModifiedMs onto store records, tolerating mixed payloads (#2495)', () => {
+    const stores = buildMemoryStores({
+      projects: [
+        {
+          slug: '-home-u-mix',
+          files: [
+            // Server path: carries mtimeMs.
+            {
+              name: 'a.md',
+              content: '---\nname: ay\nmetadata:\n  type: user\n---\nbody',
+              mtimeMs: 1_700_000_000_000,
+            },
+            // SPA/upload path: no mtimeMs — must degrade to undefined, not throw.
+            { name: 'b.md', content: '---\nname: bee\nmetadata:\n  type: project\n---\nbody' },
+          ],
+        },
+      ],
+    });
+    expect(stores).toHaveLength(1);
+    const byName = Object.fromEntries(stores[0].memories.map((m) => [m.name, m.lastModifiedMs]));
+    expect(byName.ay).toBe(1_700_000_000_000);
+    expect(byName.bee).toBeUndefined();
   });
 });
 

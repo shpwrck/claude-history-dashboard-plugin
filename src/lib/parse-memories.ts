@@ -34,6 +34,13 @@ export interface AgentMemory {
   body: string;
   /** Source filename, e.g. `groom-means-stop-at-submit.md`. */
   file: string;
+  /**
+   * File last-modified time in epoch ms (#2495), from the server's `fs.stat`
+   * at walk time. `undefined` when the payload carried no `mtimeMs` — the SPA
+   * upload path and older cached payloads — so age-derived signals (#2235/#2244)
+   * can degrade cleanly rather than assume the field is present.
+   */
+  lastModifiedMs?: number;
 }
 
 /** Memories for one project, grouped under its on-disk slug. */
@@ -81,6 +88,12 @@ export interface ProjectMemoryStore {
 export interface RawMemoryFile {
   name: string;
   content: string;
+  /**
+   * File last-modified time in epoch ms (#2495), set by the server walk's
+   * `fs.stat`. Optional: absent on the SPA upload path and in older cached
+   * payloads, so consumers must tolerate its absence.
+   */
+  mtimeMs?: number;
 }
 export interface RawProjectMemories {
   slug: string;
@@ -120,6 +133,7 @@ export function parseMemoryFile(file: RawMemoryFile): AgentMemory {
       type: 'other',
       body: file.content.trim(),
       file: file.name,
+      lastModifiedMs: file.mtimeMs,
     };
   }
   const [, frontmatter, body] = m;
@@ -144,6 +158,7 @@ export function parseMemoryFile(file: RawMemoryFile): AgentMemory {
     type: normalizeType(type),
     body: body.trim(),
     file: file.name,
+    lastModifiedMs: file.mtimeMs,
   };
 }
 

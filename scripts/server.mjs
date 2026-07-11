@@ -3331,9 +3331,13 @@ async function readMemories(projectsRoot = PROJECTS) {
           responseLimitReached = true;
           continue;
         }
+        // Structural metadata only (#2495): the file's last-modified time, so
+        // the parser can derive a last-edited-age signal. No new content surface.
+        // Undefined (stat failure) drops out of the JSON payload cleanly.
+        const memStat = await stat(realFull).catch(() => null);
         contentBytes += bytes;
         returnedFiles += 1;
-        files.push({ name, content: text });
+        files.push({ name, content: text, mtimeMs: memStat?.mtimeMs });
         if (returnedFiles >= DASHBOARD_MEMORY_MAX_FILES) {
           truncated = true;
           fileLimitReached = true;
