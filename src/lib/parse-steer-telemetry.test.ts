@@ -102,6 +102,92 @@ describe('aggregateSteerTelemetry — counts + tags + sort', () => {
   });
 });
 
+describe('aggregateSteerTelemetry — misfire analytics (#2490)', () => {
+  const tagged = (ruleId: string, tag: string, ts: string) =>
+    JSON.stringify({ event: 'declined', ruleId, ts, misfireTag: tag });
+
+  it('counts per-tag misfires ordered by count desc then tag asc', () => {
+    const records = parseSteerTelemetryLines(
+      [
+        tagged('r', 'wrong-scale', '2026-06-10T00:00:00Z'),
+        tagged('r', 'wrong-scale', '2026-06-10T00:01:00Z'),
+        tagged('r', 'wrong-scale', '2026-06-10T00:02:00Z'),
+        tagged('r', 'gap', '2026-06-10T00:03:00Z'),
+        tagged('r', 'wrong-prescription', '2026-06-10T00:04:00Z'),
+      ].join('\n')
+    );
+    const rule = aggregateSteerTelemetry(records)[0];
+    expect(rule.misfireTagCounts).toEqual([
+      { tag: 'wrong-scale', count: 3 },
+      // ties (count 1) break by tag asc.
+      { tag: 'gap', count: 1 },
+      { tag: 'wrong-prescription', count: 1 },
+    ]);
+    // distinct list stays available + sorted for compatibility.
+    expect(rule.misfireTags).toEqual(['gap', 'wrong-prescription', 'wrong-scale']);
+    expect(rule.misfireCount).toBe(5);
+  });
+
+  it('computes misfire rate as misfire-tagged events / fire count', () => {
+    const records = parseSteerTelemetryLines(
+      [
+        delivered('r', '2026-06-10T00:00:00Z'),
+        delivered('r', '2026-06-10T00:01:00Z'),
+        delivered('r', '2026-06-10T00:02:00Z'),
+        delivered('r', '2026-06-10T00:03:00Z'),
+        tagged('r', 'wrong-scale', '2026-06-10T00:04:00Z'),
+      ].join('\n')
+    );
+    const rule = aggregateSteerTelemetry(records)[0];
+    expect(rule.fireCount).toBe(4);
+    expect(rule.misfireCount).toBe(1);
+    expect(rule.misfireRate).toBe(0.25);
+  });
+
+  it('yields no rate (null, never NaN) when there are zero fires', () => {
+    // Tags arrived on declined outcomes but the rule never delivered.
+    const records = parseSteerTelemetryLines(
+      [
+        tagged('r', 'gap', '2026-06-10T00:00:00Z'),
+        tagged('r', 'gap', '2026-06-10T00:01:00Z'),
+      ].join('\n')
+    );
+    const rule = aggregateSteerTelemetry(records)[0];
+    expect(rule.fireCount).toBe(0);
+    expect(rule.misfireCount).toBe(2);
+    expect(rule.misfireRate).toBeNull();
+  });
+
+  it('yields no rate and empty tag analytics when a fired rule has zero tags', () => {
+    const records = parseSteerTelemetryLines(
+      [
+        delivered('r', '2026-06-10T00:00:00Z'),
+        outcome('r', 'accepted', '2026-06-10T00:01:00Z'),
+      ].join('\n')
+    );
+    const rule = aggregateSteerTelemetry(records)[0];
+    expect(rule.fireCount).toBe(1);
+    expect(rule.misfireTagCounts).toEqual([]);
+    expect(rule.misfireCount).toBe(0);
+    // Zero tags on a fired rule is an honest 0/N rate, not a null-denominator.
+    expect(rule.misfireRate).toBe(0);
+  });
+
+  it('drops unknown tags fail-closed, so they never enter the analytics', () => {
+    const records = parseSteerTelemetryLines(
+      [
+        delivered('r', '2026-06-10T00:00:00Z'),
+        tagged('r', 'bogus-not-in-taxonomy', '2026-06-10T00:01:00Z'),
+        tagged('r', 'wrong-scale', '2026-06-10T00:02:00Z'),
+      ].join('\n')
+    );
+    const rule = aggregateSteerTelemetry(records)[0];
+    expect(rule.misfireTagCounts).toEqual([{ tag: 'wrong-scale', count: 1 }]);
+    expect(rule.misfireCount).toBe(1);
+    expect(rule.misfireRate).toBe(1);
+  });
+});
+
 describe('readSteerTelemetry — file IO', () => {
   it('reads + aggregates a real log file', async () => {
     const file = tmpFile([delivered('read-streak', '2026-06-10T00:00:00Z'), outcome('read-streak', 'accepted', '2026-06-10T00:01:00Z')].join('\n'));

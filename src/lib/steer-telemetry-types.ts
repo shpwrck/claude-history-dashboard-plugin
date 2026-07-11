@@ -44,6 +44,12 @@ export interface SteerRecord {
   misfireTag?: MisfireTag;
 }
 
+/** One misfire tag and how many times it was recorded against a rule (#2490). */
+export interface MisfireTagCount {
+  tag: MisfireTag;
+  count: number;
+}
+
 /** Per-rule rollup the dashboard renders: fire-count + followed/ignored + tags. */
 export interface SteerRuleTelemetry {
   ruleId: string;
@@ -55,8 +61,20 @@ export interface SteerRuleTelemetry {
   acceptedCount: number;
   /** Number of `declined` outcomes — the agent ignored the steer. */
   declinedCount: number;
-  /** Distinct misfire tags recorded against this rule (empty until the meta writer ships). */
+  /** Distinct misfire tags recorded against this rule (empty until the meta writer ships).
+   *  Kept for compatibility; derived from `misfireTagCounts` (its keys, sorted). */
   misfireTags: MisfireTag[];
+  /** Per-tag misfire counts, ordered by count desc then tag asc (#2490). Empty
+   *  until the meta writer ships tagging, so an empty array means "no tags yet",
+   *  never "measured zero misfires". */
+  misfireTagCounts: MisfireTagCount[];
+  /** Total misfire-tagged events for this rule (sum of `misfireTagCounts`). */
+  misfireCount: number;
+  /** Misfire rate = `misfireCount / fireCount`, a fact about the log (#2490).
+   *  `null` when `fireCount` is 0 — never a rate off a zero denominator, so the
+   *  panel shows "—" rather than `NaN`/`0-of-0`. May exceed 1 if a rule was
+   *  tagged more often than it fired (a data anomaly surfaced honestly). */
+  misfireRate: number | null;
   /** Most recent event timestamp for this rule (ISO), for "as of" rendering. */
   lastTs: string;
 }
