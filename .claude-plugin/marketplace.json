@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "claude-history-dashboard",
-      "description": "Launch and refresh the Claude History Dashboard from within Claude Code. Serves a live, browsable view of your ~/.claude session history at http://localhost:5173.",
+      "description": "Launch and refresh the Claude History Dashboard from within Claude Code. Serves a live, browsable view of your ~/.claude session history on a local-only URL (port 5173 by default).",
       "author": {
         "name": "Jason Skrzypek",
         "email": "jankoszy@gmail.com"

@@ -26,9 +26,14 @@ import { createServer as createNetServer } from 'node:net';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { openSync, closeSync, constants as fsConstants } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  pluginCacheDir,
+  pluginPortFile,
+  preferredDashboardPort,
+} from './plugin-runtime-state.mjs';
 
 // ---------------------------------------------------------------------------
 // Node >= 24 preflight
@@ -50,8 +55,7 @@ const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
 
 function cacheDir() {
-  if (process.env.CHD_CACHE_DIR) return process.env.CHD_CACHE_DIR;
-  return join(homedir(), '.claude', '.cache', 'chd');
+  return pluginCacheDir(process.env);
 }
 
 function pidFile() {
@@ -59,7 +63,7 @@ function pidFile() {
 }
 
 function portFile() {
-  return join(cacheDir(), 'plugin-ctl.port');
+  return pluginPortFile(process.env);
 }
 
 function logFile() {
@@ -203,7 +207,7 @@ async function cmdStart() {
   }
 
   const host = process.env.HOST || '127.0.0.1';
-  const port = await freePort(5173);
+  const port = await freePort(preferredDashboardPort(process.env));
 
   const [outFd, errFd] = await openLogFds();
 

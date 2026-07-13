@@ -2,8 +2,8 @@
 
 This repository is the **published, installable bundle** of the Claude History
 Dashboard Claude Code plugin: a local, browsable view of your `~/.claude` session
-history — sessions, costs, tool usage, and recommendations — served at
-`http://localhost:5173`.
+history — sessions, costs, tool usage, and recommendations — served on a local
+loopback URL (`http://127.0.0.1:5173` by default).
 
 > **Auto-generated — do not edit here.** The `gh-pages` branch is overwritten on
 > every push to the source project's `master`. This bundle is built and published
@@ -24,8 +24,11 @@ In any Claude Code session:
 /dashboard
 ```
 
-It boots a local server on **http://localhost:5173** and prints the URL — open it
-in your browser. To stop it: `node <plugin-dir>/scripts/plugin-ctl.mjs stop`.
+It boots a local server and prints the exact URL to open. Port 5173 is preferred;
+if it is occupied, the supervisor selects a free port and the MCP tools follow
+the running instance. To stop it today, run
+`node <plugin-dir>/scripts/plugin-ctl.mjs stop`; a dedicated `/dashboard-stop`
+command is tracked in [source issue #2563](https://github.com/shpwrck/claude-history-dashboard/issues/2563).
 
 ## Requirements
 
@@ -51,6 +54,8 @@ node scripts/plugin-ctl.mjs start   # prints the URL; stop with the same script:
 
 ## Agent tools (MCP)
 
-The bundle declares an MCP server (`.mcp.json`) exposing `dashboard_status`,
-`get_recommendations`, and `top_frictions`, so a Claude Code agent can query the
-running dashboard. Start the dashboard first.
+The plugin manifest declares a self-contained MCP server exposing
+`dashboard_status`, `get_recommendations`, `top_frictions`, and
+`doc_neighborhood`. No separate `npm install` is needed. The first three tools
+query the running dashboard; `doc_neighborhood` computes locally from the target
+repository and does not require the dashboard server.

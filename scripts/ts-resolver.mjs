@@ -29,7 +29,7 @@ function isServerRuntimeParent(parentURL) {
   if (
     parentPath.endsWith(`${sep}scripts${sep}register-ts.mjs`) ||
     parentPath.endsWith(`${sep}scripts${sep}ts-resolver.mjs`) ||
-    // mcp-shim.mjs is an isolated stdio process declared in .mcp.json; it
+    // mcp-shim.mjs is an isolated stdio process declared in plugin.json; it
     // intentionally imports @modelcontextprotocol/sdk as a separate process
     // and must NEVER be imported by server.mjs. Exclude it from the guard so
     // running it standalone with DASHBOARD_RUNTIME_IMPORT_GUARD=1 doesn't

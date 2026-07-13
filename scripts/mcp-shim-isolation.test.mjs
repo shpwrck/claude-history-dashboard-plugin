@@ -7,12 +7,12 @@
 //    here cannot prove that contract.
 // 2. scripts/mcp-shim.mjs MUST import @modelcontextprotocol/sdk (it's the
 //    shim's sole reason for existence as a separate process).
-// 3. .mcp.json must declare the shim as a stdio server so Claude Code can
-//    wire it up.
+// 3. The plugin manifest must declare the shim inline so Claude Code can wire
+//    it up without leaving a plugin-only .mcp.json at the repository root.
 //
 // Run with: node scripts/mcp-shim-isolation.test.mjs
 
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -69,38 +69,57 @@ check(
 );
 
 // ---------------------------------------------------------------------------
-// 3. .mcp.json must declare the shim as a stdio server
+// 3. plugin.json must declare the shim inline; repo root must stay clean
 // ---------------------------------------------------------------------------
 
-let mcpJson;
+let pluginManifest;
 try {
-  const raw = await readFile(join(PROJECT_DIR, '.mcp.json'), 'utf8');
-  mcpJson = JSON.parse(raw);
+  const raw = await readFile(
+    join(PROJECT_DIR, '.claude-plugin', 'plugin.json'),
+    'utf8'
+  );
+  pluginManifest = JSON.parse(raw);
 } catch (err) {
-  check('.mcp.json is readable JSON', false, err.message);
+  check('.claude-plugin/plugin.json is readable JSON', false, err.message);
   process.exit(failures > 0 ? 1 : 0);
 }
 
-check('.mcp.json has mcpServers object', typeof mcpJson?.mcpServers === 'object');
+check(
+  'plugin.json has inline mcpServers object',
+  typeof pluginManifest?.mcpServers === 'object' &&
+    !Array.isArray(pluginManifest.mcpServers)
+);
 
-const shimEntry = mcpJson?.mcpServers?.['claude-history-dashboard'];
+const shimEntry = pluginManifest?.mcpServers?.['claude-history-dashboard'];
 
 check(
-  '.mcp.json declares claude-history-dashboard server',
+  'plugin.json declares claude-history-dashboard server',
   shimEntry !== undefined,
   'Expected mcpServers["claude-history-dashboard"] entry'
 );
 
 check(
-  '.mcp.json uses stdio transport type',
-  shimEntry?.type === 'stdio',
-  `Got type: ${shimEntry?.type}`
+  'plugin.json launches the MCP server with Node',
+  shimEntry?.command === 'node',
+  `Got command: ${shimEntry?.command}`
 );
 
 check(
-  '.mcp.json points to mcp-shim.mjs',
+  'plugin.json points to mcp-shim.mjs',
   shimEntry?.args?.some((a) => String(a).includes('mcp-shim.mjs')),
   `args: ${JSON.stringify(shimEntry?.args)}`
+);
+
+let rootMcpExists = true;
+try {
+  await access(join(PROJECT_DIR, '.mcp.json'));
+} catch {
+  rootMcpExists = false;
+}
+check(
+  'repository root has no plugin-only .mcp.json',
+  !rootMcpExists,
+  'A repo-root descriptor is auto-loaded as project config without CLAUDE_PLUGIN_ROOT'
 );
 
 // ---------------------------------------------------------------------------
