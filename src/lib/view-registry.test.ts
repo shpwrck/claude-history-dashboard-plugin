@@ -255,9 +255,12 @@ const allProjectsFilter: DashboardFilter = {
   project: ALL_PROJECTS,
 };
 
-function viewContext(filter: DashboardFilter = allProjectsFilter): ViewContext {
+function viewContext(
+  filter: DashboardFilter = allProjectsFilter,
+  dataOverrides: Partial<ViewData> = {}
+): ViewContext {
   return {
-    data: emptyData(),
+    data: emptyData(dataOverrides),
     filter,
     routeFilter: {},
     serverAvailable: true,
@@ -329,6 +332,42 @@ describe('view registry ↔ nav catalog parity', () => {
       throw new Error('Expected local analysis renderer to return an element');
     }
     expect(node.props.project).toBe(expected);
+  });
+
+  it('resolves policy-write capability fail-closed for enterprise and permissive for local mode', () => {
+    const renderedCapability = (
+      authRequired: boolean,
+      canWritePolicy?: boolean,
+      error?: string
+    ): boolean | undefined => {
+      const node = VIEW_RENDERERS.permissions?.(
+        viewContext(allProjectsFilter, {
+          enterpriseSession: {
+            mode: authRequired ? 'enterprise' : 'single-user',
+            authRequired,
+            authenticated: true,
+            configured: true,
+            principal: null,
+            organization: null,
+            capabilities:
+              canWritePolicy === undefined ? {} : { canWritePolicy },
+            ...(error ? { error } : {}),
+          },
+        })
+      );
+
+      expect(isValidElement(node)).toBe(true);
+      if (!isValidElement<{ canWritePolicy?: boolean }>(node)) {
+        throw new Error('Expected Permissions renderer to return an element');
+      }
+      return node.props.canWritePolicy;
+    };
+
+    expect(renderedCapability(true)).toBe(false);
+    expect(renderedCapability(true, false)).toBe(false);
+    expect(renderedCapability(true, true)).toBe(true);
+    expect(renderedCapability(false, false)).toBe(true);
+    expect(renderedCapability(false, false, 'Auth check failed')).toBe(false);
   });
 
   it('demotes Timeline into the raw-data drawer domain', () => {

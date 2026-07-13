@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  createEnterpriseBrowserSession,
   fetchAuditRun,
   fetchAuthSession,
   fetchEnterpriseAuditExport,
@@ -12,6 +13,7 @@ import {
   postCheckpointAnswer as postSpaCheckpointAnswer,
 } from './api-client.spa';
 import { buildCheckpointAnswerRecord } from './checkpoint-instrumentation';
+import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
 
 describe('fetchAuthSession', () => {
   afterEach(() => {
@@ -31,6 +33,341 @@ describe('fetchAuthSession', () => {
     expect(session.authenticated).toBe(false);
     expect(session.configured).toBe(true);
     expect(session.error).toBe('Auth check failed (HTTP 403)');
+  });
+
+  it('preserves enterprise auth while denying policy writes for a rate-limited session probe', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ok: false,
+              authRequired: true,
+              authenticated: false,
+              configured: true,
+              error:
+                'Too many enterprise requests; retry after the rate limit resets',
+              retryAfterSeconds: 30,
+            }),
+            {
+              status: 429,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
+      )
+    );
+
+    const session = await fetchAuthSession(null);
+
+    expect(session.mode).toBe('enterprise');
+    expect(session.authRequired).toBe(true);
+    expect(session.authenticated).toBe(false);
+    expect(session.configured).toBe(true);
+    expect(session.capabilities).toEqual({});
+    expect(
+      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+    ).toBe(false);
+    expect(session.error).toBe(
+      'Too many enterprise requests; retry after the rate limit resets'
+    );
+  });
+
+  it('accepts a complete local/no-auth session response', async () => {
+    const body = {
+      mode: 'single-user',
+      authRequired: false,
+      authenticated: true,
+      configured: true,
+      principal: null,
+      organization: null,
+      capabilities: { canWritePolicy: true },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      )
+    );
+
+    await expect(fetchAuthSession(null)).resolves.toEqual(body);
+  });
+
+  it('preserves a structured GET failure while keeping the session indeterminate', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'server exploded' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      )
+    );
+
+    const session = await fetchAuthSession(null);
+
+    expect(session.authRequired).toBe(false);
+    expect(session.authenticated).toBe(false);
+    expect(session.capabilities).toEqual({});
+    expect(session.error).toBe('server exploded');
+    expect(
+      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+    ).toBe(false);
+  });
+
+  it('falls back to HTTP status text for blank structured failure fields', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ error: '   ', configError: '\n\t' }),
+            {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
+      )
+    );
+
+    const session = await fetchAuthSession(null);
+
+    expect(session.error).toBe('Auth check failed (HTTP 500)');
+    expect(session.configError).toBeUndefined();
+    expect(session.authenticated).toBe(false);
+    expect(session.capabilities).toEqual({});
+  });
+
+  it('bounds structured failure messages before exposing them to the UI', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: `  ${'x'.repeat(2_100)}  ` }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      )
+    );
+
+    const session = await fetchAuthSession(null);
+
+    expect(session.error).toBe('x'.repeat(2_000));
+  });
+
+  it.each([
+    {
+      name: 'complete local',
+      body: {
+        mode: 'single-user',
+        authRequired: false,
+        authenticated: true,
+        configured: true,
+        principal: null,
+        organization: null,
+        capabilities: { canWritePolicy: true },
+      },
+    },
+    {
+      name: 'complete enterprise capability',
+      body: {
+        mode: 'enterprise',
+        authRequired: true,
+        authenticated: true,
+        configured: true,
+        principal: null,
+        organization: { id: 'acme', name: 'Acme' },
+        capabilities: { canWritePolicy: true },
+      },
+    },
+  ])('rejects an HTTP 500 $name session body', async ({ body }) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      )
+    );
+
+    const session = await fetchAuthSession(null);
+
+    expect(session.capabilities).toEqual({});
+    expect(
+      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+    ).toBe(false);
+    expect(session.error).toBe('Auth check failed (HTTP 500)');
+  });
+
+  it('rejects a partial local-looking HTTP 200 session body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              authRequired: false,
+              authenticated: true,
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
+      )
+    );
+
+    const session = await fetchAuthSession(null);
+
+    expect(session.authRequired).toBe(false);
+    expect(session.capabilities).toEqual({});
+    expect(session.error).toBe('Auth check failed (HTTP 200)');
+  });
+
+  it('marks an unreachable auth endpoint as an indeterminate session', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('network unavailable');
+      })
+    );
+
+    const session = await fetchAuthSession(null);
+
+    expect(session.authRequired).toBe(false);
+    expect(session.capabilities).toEqual({});
+    expect(session.error).toBe('Could not reach the dashboard server');
+  });
+});
+
+describe('createEnterpriseBrowserSession', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects a complete writable enterprise session body returned with HTTP 500', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              mode: 'enterprise',
+              authRequired: true,
+              authenticated: true,
+              configured: true,
+              principal: null,
+              organization: { id: 'acme', name: 'Acme' },
+              capabilities: { canWritePolicy: true },
+            }),
+            {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
+      )
+    );
+
+    const session = await createEnterpriseBrowserSession('saved-token');
+
+    expect(session.capabilities).toEqual({});
+    expect(
+      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+    ).toBe(false);
+    expect(session.error).toBe('Auth check failed (HTTP 500)');
+  });
+
+  it('preserves a structured org-mismatch reason while rejecting every other 403 field', async () => {
+    const error =
+      'Forbidden: this principal is outside the configured organization';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              mode: 'single-user',
+              authRequired: false,
+              authenticated: true,
+              configured: false,
+              principal: { userId: 'outside-org' },
+              organization: { id: 'other-org', name: 'Other org' },
+              capabilities: { canWritePolicy: true },
+              error,
+            }),
+            {
+              status: 403,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
+      )
+    );
+
+    const session = await createEnterpriseBrowserSession('outside-org-token');
+
+    expect(session).toEqual({
+      mode: 'enterprise',
+      authRequired: true,
+      authenticated: false,
+      configured: true,
+      principal: null,
+      organization: null,
+      capabilities: {},
+      error,
+    });
+    expect(
+      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+    ).toBe(false);
+  });
+
+  it('preserves a structured configuration error while keeping a rejected session closed', async () => {
+    const configError =
+      'DASHBOARD_AUTH_CONFIG contains a principal outside DASHBOARD_ORG_ID';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              mode: 'enterprise',
+              authRequired: true,
+              authenticated: true,
+              configured: true,
+              principal: { userId: 'admin' },
+              organization: { id: 'acme', name: 'Acme' },
+              capabilities: { canWritePolicy: true },
+              configError,
+            }),
+            {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
+      )
+    );
+
+    const session = await createEnterpriseBrowserSession('admin-token');
+
+    expect(session).toEqual({
+      mode: 'enterprise',
+      authRequired: true,
+      authenticated: false,
+      configured: false,
+      configError,
+      principal: null,
+      organization: null,
+      capabilities: {},
+    });
+    expect(
+      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+    ).toBe(false);
   });
 });
 

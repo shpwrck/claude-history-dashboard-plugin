@@ -429,16 +429,82 @@ export function serverFetch(
 }
 
 function isEnterpriseSession(value: unknown): value is EnterpriseSession {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const session = value as Record<string, unknown>;
+  const capabilities = session.capabilities;
+  const modeIsValid =
+    session.mode === 'single-user' || session.mode === 'enterprise';
+  const modeMatchesAuth =
+    (session.mode === 'single-user' && session.authRequired === false) ||
+    (session.mode === 'enterprise' && session.authRequired === true);
+  const principalIsValid =
+    session.principal === null ||
+    (typeof session.principal === 'object' && !Array.isArray(session.principal));
+  const organizationIsValid =
+    session.organization === null ||
+    (typeof session.organization === 'object' &&
+      !Array.isArray(session.organization));
+  const capabilitiesAreValid =
+    capabilities != null &&
+    typeof capabilities === 'object' &&
+    !Array.isArray(capabilities) &&
+    Object.values(capabilities).every((allowed) => typeof allowed === 'boolean');
   return (
-    value != null &&
-    typeof value === 'object' &&
-    typeof (value as EnterpriseSession).authRequired === 'boolean' &&
-    typeof (value as EnterpriseSession).authenticated === 'boolean'
+    modeIsValid &&
+    modeMatchesAuth &&
+    typeof session.authenticated === 'boolean' &&
+    typeof session.configured === 'boolean' &&
+    principalIsValid &&
+    organizationIsValid &&
+    capabilitiesAreValid &&
+    (session.configError === undefined ||
+      typeof session.configError === 'string') &&
+    (session.error === undefined || typeof session.error === 'string')
   );
 }
 
 function isEnterpriseAuthStatus(status: number): boolean {
-  return status === 401 || status === 403 || status === 503;
+  return status === 401 || status === 403 || status === 429 || status === 503;
+}
+
+const AUTH_FAILURE_MESSAGE_MAX_LENGTH = 2_000;
+
+function rejectedAuthMessage(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  return normalized.slice(0, AUTH_FAILURE_MESSAGE_MAX_LENGTH);
+}
+
+function rejectedAuthSession(
+  body: unknown,
+  status: number,
+  authRequired: boolean
+): EnterpriseSession {
+  const envelope =
+    body != null && typeof body === 'object' && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : null;
+  const error = rejectedAuthMessage(envelope?.error);
+  const configError = rejectedAuthMessage(envelope?.configError);
+
+  return {
+    mode: authRequired ? 'enterprise' : 'single-user',
+    authRequired,
+    authenticated: false,
+    configured: status !== 503,
+    ...(configError === undefined ? {} : { configError }),
+    principal: null,
+    organization: null,
+    capabilities: {},
+    ...(error === undefined && configError === undefined
+      ? { error: `Auth check failed (HTTP ${status})` }
+      : error === undefined
+        ? {}
+        : { error }),
+  };
 }
 
 export async function fetchAuthSession(
@@ -451,21 +517,15 @@ export async function fetchAuthSession(
       token
     );
     const body = (await res.json().catch(() => null)) as unknown;
-    if (isEnterpriseSession(body)) {
+    if (res.ok && isEnterpriseSession(body)) {
       rememberEnterpriseSessionForCache(body);
       return body;
     }
-    const authRequired = isEnterpriseAuthStatus(res.status);
-    return {
-      mode: authRequired ? 'enterprise' : 'single-user',
-      authRequired,
-      authenticated: res.ok,
-      configured: res.status !== 503,
-      principal: null,
-      organization: null,
-      capabilities: {},
-      error: `Auth check failed (HTTP ${res.status})`,
-    };
+    return rejectedAuthSession(
+      body,
+      res.status,
+      isEnterpriseAuthStatus(res.status)
+    );
   } catch {
     return {
       mode: 'single-user',
@@ -493,20 +553,11 @@ export async function createEnterpriseBrowserSession(
       token
     );
     const body = (await res.json().catch(() => null)) as unknown;
-    if (isEnterpriseSession(body)) {
+    if (res.ok && isEnterpriseSession(body)) {
       rememberEnterpriseSessionForCache(body);
       return body;
     }
-    return {
-      mode: 'enterprise',
-      authRequired: true,
-      authenticated: false,
-      configured: res.status !== 503,
-      principal: null,
-      organization: null,
-      capabilities: {},
-      error: `Auth check failed (HTTP ${res.status})`,
-    };
+    return rejectedAuthSession(body, res.status, true);
   } catch {
     return {
       mode: 'enterprise',

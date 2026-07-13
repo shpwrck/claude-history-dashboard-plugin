@@ -24,6 +24,7 @@ import { lazy } from 'react';
 import type { ReactNode } from 'react';
 import { isDashboardFilterActive } from './filtered-empty';
 import { recommendationViewsFromViewData } from './recommendation-view-data';
+import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
 import { navigateDrillThroughWithFilter } from '../components/affordance/DrillThrough';
 import type {
   View,
@@ -1191,6 +1192,10 @@ export const VIEW_RENDERERS: Partial<
       permissionChanges={d.permissionChanges}
       tokenData={d.tokenData}
       liveConfig={d.liveConfig}
+      canWritePolicy={enterpriseCapabilityAllowed(
+        d.enterpriseSession,
+        'canWritePolicy'
+      )}
       configBackups={d.configBackups}
       sessions={d.sessions}
       routeFilter={routeFilter}
