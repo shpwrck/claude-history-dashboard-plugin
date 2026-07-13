@@ -8,6 +8,13 @@ import type { View } from '../types';
 
 vi.mock('@api-client', () => ({
   SERVER_AVAILABLE: false,
+  analyzeLocal: vi.fn().mockResolvedValue({
+    source: 'deterministic',
+    recommendations: [],
+    analysis: null,
+    model: null,
+    reason: 'unavailable',
+  }),
   createRemoteSession: vi.fn().mockResolvedValue({ ok: false, error: 'unavailable' }),
   deleteRemoteSession: vi.fn().mockResolvedValue({ ok: false, error: 'unavailable' }),
   fetchAdoptionReceipts: vi.fn().mockResolvedValue([]),

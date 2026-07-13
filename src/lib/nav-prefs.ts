@@ -215,6 +215,16 @@ export const NAV_ITEMS: readonly NavItem[] = [
       'Prioritized fixes and habits from cost, context, workflow, safety, and reliability signals. Server-side engine artifacts are computed over all data; the global time/project filters scope the rest of the page.',
   },
   {
+    view: 'local-analyze',
+    contract: 'action',
+    label: 'Analyze locally',
+    icon: BrainIcon,
+    domain: 'home',
+    requires: 'liveServer',
+    description:
+      'Ask a model running on this machine for a plain-language read of recommendations in the selected project scope.',
+  },
+  {
     view: 'adoption',
     contract: 'evidence',
     label: 'Adoption',

@@ -8,6 +8,7 @@ import {
   VIEW_ANCHORS,
   VIEW_RENDERERS,
   VIEW_DATA_FILTER_POLICIES,
+  type ViewContext,
   type ViewData,
 } from './view-registry';
 import {
@@ -254,6 +255,30 @@ const allProjectsFilter: DashboardFilter = {
   project: ALL_PROJECTS,
 };
 
+function viewContext(filter: DashboardFilter = allProjectsFilter): ViewContext {
+  return {
+    data: emptyData(),
+    filter,
+    routeFilter: {},
+    serverAvailable: true,
+    nav: {
+      navigateTo: () => {},
+      navigateWithFilter: () => {},
+      scrollToAnchor: () => false,
+      openSession: () => {},
+      openEvidence: () => {},
+      setActiveSessionId: () => {},
+      setActiveProjectId: () => {},
+      focusSessionId: null,
+      focusEvidenceRef: null,
+      consumeFocus: () => {},
+      reloadFromDisk: () => {},
+      onFilterChange: () => {},
+      onActiveDomains: () => {},
+    },
+  };
+}
+
 describe('view registry ↔ nav catalog parity', () => {
   it('has a renderer for every catalog view, plus one per absorbed composite tab', () => {
     const catalog = new Set(NAV_ITEMS.map((i) => i.view));
@@ -278,6 +303,32 @@ describe('view registry ↔ nav catalog parity', () => {
   it('lists each view exactly once in the catalog', () => {
     const views = NAV_ITEMS.map((i) => i.view);
     expect(new Set(views).size).toBe(views.length);
+  });
+
+  it('registers Analyze locally as a live-server action route', () => {
+    expect(NAV_ITEMS.find((item) => item.view === 'local-analyze')).toMatchObject({
+      label: 'Analyze locally',
+      contract: 'action',
+      domain: 'home',
+      requires: 'liveServer',
+    });
+  });
+
+  it.each([
+    ['all projects', allProjectsFilter, null],
+    [
+      'a selected project',
+      { time: '7d', project: '/work/alpha' } satisfies DashboardFilter,
+      '/work/alpha',
+    ],
+  ])('passes %s into the local analysis renderer', (_name, filter, expected) => {
+    const node = VIEW_RENDERERS['local-analyze']?.(viewContext(filter));
+
+    expect(isValidElement(node)).toBe(true);
+    if (!isValidElement<{ project?: string | null }>(node)) {
+      throw new Error('Expected local analysis renderer to return an element');
+    }
+    expect(node.props.project).toBe(expected);
   });
 
   it('demotes Timeline into the raw-data drawer domain', () => {
@@ -409,27 +460,7 @@ describe('view registry ↔ nav catalog parity', () => {
       domain: 'cost',
     });
 
-    const node = VIEW_RENDERERS['reclaim-compass']?.({
-      data: emptyData(),
-      filter: allProjectsFilter,
-      routeFilter: {},
-      serverAvailable: true,
-      nav: {
-        navigateTo: () => {},
-        navigateWithFilter: () => {},
-        scrollToAnchor: () => false,
-        openSession: () => {},
-        openEvidence: () => {},
-        setActiveSessionId: () => {},
-        setActiveProjectId: () => {},
-        focusSessionId: null,
-        focusEvidenceRef: null,
-        consumeFocus: () => {},
-        reloadFromDisk: () => {},
-        onFilterChange: () => {},
-        onActiveDomains: () => {},
-      },
-    });
+    const node = VIEW_RENDERERS['reclaim-compass']?.(viewContext());
 
     expect(isValidElement(node)).toBe(true);
     if (!isValidElement<{ focusSignalId?: string }>(node)) {

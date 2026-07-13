@@ -95,6 +95,11 @@ const Recommendations = lazy(() =>
     default: m.RecommendationsPf,
   }))
 );
+const LocalAnalyze = lazy(() =>
+  import('../components/LocalAnalyze').then((m) => ({
+    default: m.LocalAnalyzePf,
+  }))
+);
 const EvaluatorLanding = lazy(() =>
   import('../components/EvaluatorLanding').then((m) => ({
     default: m.EvaluatorLandingPf,
@@ -1042,6 +1047,11 @@ export const VIEW_RENDERERS: Partial<
       onNavigate={n.navigateWithFilter}
       navigateWithFilter={n.navigateWithFilter}
       onOpenSession={n.openSession}
+    />
+  ),
+  'local-analyze': ({ filter }) => (
+    <LocalAnalyze
+      project={filter.project === ALL_PROJECTS ? null : filter.project}
     />
   ),
   evaluator: ({ data: d, nav: n }) => (
