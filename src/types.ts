@@ -471,7 +471,7 @@ export interface RepoGroup {
   worktrees: RepoChild[];
 }
 
-export type View = 'home' | 'evaluator' | 'recommendations' | 'sessions' | 'projects' | 'search' | 'stats' | 'tokens' | 'tools' | 'files' | 'summary' | 'cost' | 'reclaim-compass' | 'timeline' | 'forensics' | 'activity' | 'capabilities' | 'automation' | 'workflows' | 'errors' | 'permissions' | 'agents' | 'memories' | 'context' | 'conversation' | 'prompts' | 'patterns' | 'shadow-calls' | 'model-evals' | 'report-card' | 'review-queue' | 'tasks' | 'teams' | 'plans' | 'pulse' | 'diary' | 'adoption' | 'provisioning' | 'enterprise' | 'doc-relationships';
+export type View = 'home' | 'evaluator' | 'recommendations' | 'sessions' | 'projects' | 'search' | 'stats' | 'tokens' | 'tools' | 'files' | 'summary' | 'cost' | 'reclaim-compass' | 'timeline' | 'forensics' | 'activity' | 'capabilities' | 'automation' | 'workflows' | 'errors' | 'permissions' | 'agents' | 'memories' | 'context' | 'conversation' | 'prompts' | 'patterns' | 'shadow-calls' | 'model-evals' | 'report-card' | 'review-queue' | 'tasks' | 'teams' | 'plans' | 'pulse' | 'diary' | 'adoption' | 'provisioning' | 'enterprise' | 'doc-relationships' | 'experiment-segment';
 
 /**
  * Action-domain taxonomy (epic #490). The six genuine "what am I trying to do"

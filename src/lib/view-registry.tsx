@@ -245,6 +245,13 @@ const DocRelationshipView = lazy(() =>
     default: m.DocRelationshipViewSample,
   }))
 );
+// Experiment-segment view (#2096, epic #2094): groups tagged sessions by arm and
+// reports the trial metric set. SPA-safe — derives from the parsed dataset.
+const ExperimentSegment = lazy(() =>
+  import('../components/ExperimentSegment').then((m) => ({
+    default: m.ExperimentSegment,
+  }))
+);
 // Keep the admin-only live-server view out of the upload-only SPA bundle.
 const EnterpriseAdminUnavailable = () => null;
 const EnterpriseAdmin =
@@ -1072,6 +1079,16 @@ export const VIEW_RENDERERS: Partial<
       onOpenSession={n.openSession}
       navigateWithFilter={n.navigateWithFilter}
       onActiveProjectChange={n.setActiveProjectId}
+    />
+  ),
+  'experiment-segment': ({ data: d }) => (
+    <ExperimentSegment
+      entries={d.entries}
+      tokenData={d.tokenData}
+      toolData={d.toolData}
+      timelines={d.timelines}
+      apiErrors={d.apiErrors}
+      taskSteering={d.taskSteering}
     />
   ),
   search: ({ data: d, nav: n }) => (

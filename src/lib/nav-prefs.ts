@@ -37,6 +37,7 @@ import ChartLineIcon from '@patternfly/react-icons/dist/esm/icons/chart-line-ico
 import ChartPieIcon from '@patternfly/react-icons/dist/esm/icons/chart-pie-icon';
 import CalendarAltIcon from '@patternfly/react-icons/dist/esm/icons/calendar-alt-icon';
 import FlaskIcon from '@patternfly/react-icons/dist/esm/icons/flask-icon';
+import RandomIcon from '@patternfly/react-icons/dist/esm/icons/random-icon';
 import ServerIcon from '@patternfly/react-icons/dist/esm/icons/server-icon';
 import NetworkIcon from '@patternfly/react-icons/dist/esm/icons/network-icon';
 import type { View, ActionDomain } from '../types';
@@ -459,6 +460,20 @@ export const NAV_ITEMS: readonly NavItem[] = [
     domain: 'context-health',
     description:
       'Map how your docs, ADRs, and conventions link to each other, with hygiene flags for stale, conflicting, and broken links — and preview the doc cluster a human sees when an agent asks them to decide.',
+  },
+  // Experiment-segment view (#2096, epic #2094 — agent-team-structure trial).
+  // Segments tagged sessions by arm from the existing branch/opener parsing; not
+  // requires-gated so it stays reachable on every build (the segmentation reads
+  // only locally-parsed fields). Mirrors Shadow Calls' evidence/workflow-hygiene
+  // placement.
+  {
+    view: 'experiment-segment',
+    contract: 'evidence',
+    label: 'Experiments',
+    icon: RandomIcon,
+    domain: 'workflow-hygiene',
+    description:
+      'Segment tagged experiment sessions by arm (control, specialists, owners, combo) and compare context tokens, rework rate, cost, and wall-clock across arms.',
   },
 ] as const;
 
