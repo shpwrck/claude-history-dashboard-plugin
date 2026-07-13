@@ -233,7 +233,9 @@ export async function buildSnapshot(article, existing, now, fetchImpl) {
     ...(article.extractFacts ? { facts: article.extractFacts(content) } : {}),
     pages,
   };
-  parseExternalGuidanceSnapshot(snapshot);
+  // Validate future-skew against the acquisition clock passed into this build,
+  // not a second wall-clock read (keeps scripted/fake-clock ingestion exact).
+  parseExternalGuidanceSnapshot(snapshot, now.getTime());
   return { changed: true, changedPages, snapshot };
 }
 

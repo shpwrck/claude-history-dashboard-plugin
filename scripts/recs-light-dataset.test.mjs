@@ -2,8 +2,9 @@
 // recommendation input consumes, via a lighter `assembleRecommendationDataset()`
 // that reuses the SAME per-signal builders as the full `assembleDataset()` — so
 // the served recs body is BYTE-IDENTICAL while the rebuild skips the full
-// dataset's promptAnalysis parse, its embedded first-pass detector-catalog run, and
-// the schema/window metadata that no recs detector reads.
+// dataset's embedded first-pass detector-catalog run and the schema/window
+// metadata that no served recs detector reads. The compact promptAnalysis rows
+// ARE included because workflow.prompt-clarity is a served detector.
 //
 // These tests prove:
 //   (1) BYTE-IDENTICAL — `assembleRecommendationResult` over the light dataset
@@ -14,8 +15,8 @@
 //       assembler's call counter and NEVER the full `assembleDataset()` one,
 //       proving the recs path no longer triggers the full dataset build.
 //   (3) LIGHTER SHAPE — the light dataset omits the dataset-only fields
-//       (`promptAnalysis`, `permissionChanges`, `schemaVersion`, `generatedAt`,
-//       `units`, …) the full dataset carries, and its recs-consumed fields are
+//       (`permissionChanges`, `schemaVersion`, `generatedAt`, `units`, …) the
+//       full dataset carries, and its recs-consumed fields are
 //       deep-equal to the full dataset's for every key EXCEPT the repoMap
 //       file-level `recommendations` cross-link (which no served detector reads).
 //
@@ -28,7 +29,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DETECTORS } from '../src/lib/detectors/index.ts';
 
@@ -58,24 +66,68 @@ function userLine(text, ts) {
 }
 
 function sessionJsonl(spec) {
-  return [userLine(spec.prompt, spec.ts), assistantLine(spec)].join('\n') + '\n';
+  const rows = [userLine(spec.prompt, spec.ts), assistantLine(spec)];
+  for (let i = 0; i < (spec.followUpTurns ?? 0); i += 1) {
+    rows.push(
+      userLine(
+        `continue ${i + 1}`,
+        new Date(Date.parse(spec.ts) + (i + 1) * 1_000).toISOString()
+      )
+    );
+  }
+  return `${rows.join('\n')}\n`;
 }
 
 const SESSIONS = {
-  'sess-alpha': {
-    prompt: 'do the alpha thing',
+  'low-alpha': {
+    prompt: 'do the thing',
     text: 'Here is the alpha answer.',
     toolName: 'Read',
     toolInput: { file_path: '/tmp/a.txt' },
     ts: '2026-01-01T00:00:00.000Z',
     model: 'claude-opus-4',
+    followUpTurns: 4,
   },
-  'sess-beta': {
-    prompt: 'do the beta thing',
+  'low-beta': {
+    prompt: 'help me with this',
     text: 'Beta result computed.',
     toolName: 'Bash',
     toolInput: { command: 'ls /tmp' },
     ts: '2026-01-02T00:00:00.000Z',
+    model: 'claude-sonnet-4',
+    followUpTurns: 4,
+  },
+  'low-gamma': {
+    prompt: 'make it better',
+    text: 'Gamma result computed.',
+    toolName: 'Read',
+    toolInput: { file_path: '/tmp/g.txt' },
+    ts: '2026-01-03T00:00:00.000Z',
+    model: 'claude-sonnet-4',
+    followUpTurns: 4,
+  },
+  'specific-alpha': {
+    prompt: 'Update src/a.ts; tests must pass.',
+    text: 'Specific alpha complete.',
+    toolName: 'Read',
+    toolInput: { file_path: '/tmp/a.txt' },
+    ts: '2026-01-04T00:00:00.000Z',
+    model: 'claude-opus-4',
+  },
+  'specific-beta': {
+    prompt: 'Update src/b.ts; tests must pass.',
+    text: 'Specific beta complete.',
+    toolName: 'Read',
+    toolInput: { file_path: '/tmp/b.txt' },
+    ts: '2026-01-05T00:00:00.000Z',
+    model: 'claude-sonnet-4',
+  },
+  'specific-gamma': {
+    prompt: 'Update src/c.ts; tests must pass.',
+    text: 'Specific gamma complete.',
+    toolName: 'Read',
+    toolInput: { file_path: '/tmp/c.txt' },
+    ts: '2026-01-06T00:00:00.000Z',
     model: 'claude-sonnet-4',
   },
 };
@@ -181,6 +233,17 @@ test('#2182 recs body is byte-identical over the light dataset vs the full datas
       overLight,
       overFull,
       'recs built over the light dataset are identical to recs over the full dataset'
+    );
+    const promptClarity = overLight.recommendations.find(
+      (rec) => rec.id === 'workflow.prompt-clarity'
+    );
+    assert.ok(promptClarity, 'light/full parity fixture emits workflow.prompt-clarity');
+    assert.ok(
+      promptClarity.references?.some(
+        (reference) =>
+          reference.url === 'https://code.claude.com/docs/en/prompt-library'
+      ),
+      'served-light prompt-clarity carries the prompt-library reference'
     );
 
     // And the internal fallback (no injected dataset -> assembleRecommendationDataset)
@@ -304,7 +367,6 @@ test('#2182 the light dataset skips dataset-only fields and matches recs-consume
     // (3a) The light dataset OMITS the dataset-only fields the recs input never
     // reads — proving the heavy/full-only work was skipped, not merely re-shaped.
     for (const skipped of [
-      'promptAnalysis',
       'permissionChanges',
       'schemaVersion',
       'generatedAt',
@@ -316,6 +378,15 @@ test('#2182 the light dataset skips dataset-only fields and matches recs-consume
       assert.ok(skipped in full, `full dataset carries ${skipped}`);
       assert.ok(!(skipped in light), `light dataset omits the dataset-only ${skipped}`);
     }
+    assert.ok(
+      Array.isArray(light.promptAnalysis) && light.promptAnalysis.length >= 6,
+      'light dataset includes compact prompt-analysis rows for served detectors'
+    );
+    assert.equal(
+      JSON.stringify(light.promptAnalysis).includes('do the thing'),
+      false,
+      'light prompt analysis retains numeric traits, not prompt prose'
+    );
 
     // (3b) Every recs-consumed field the light dataset DOES expose is deep-equal
     // to the full dataset's — with the sole, bounded exception of the repoMap
@@ -340,5 +411,75 @@ test('#2182 the light dataset skips dataset-only fields and matches recs-consume
     else process.env.HOME = origHome;
     if (origDb === undefined) delete process.env.CHD_DB_PATH;
     else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('#2309 external-guidance cache gates share one bounded top-level JSON surface', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origGuidanceDir = process.env.CHD_EXTERNAL_GUIDANCE_DIR;
+  const home = buildFixtureHome();
+  const guidanceDir = join(home, 'external-guidance');
+  mkdirSync(guidanceDir, { recursive: true });
+  for (let index = 0; index < 256; index += 1) {
+    writeFileSync(
+      join(guidanceDir, `snapshot-${String(index).padStart(3, '0')}.json`),
+      JSON.stringify({ value: `included-${String(index).padStart(3, '0')}` })
+    );
+  }
+
+  try {
+    process.env.CHD_EXTERNAL_GUIDANCE_DIR = guidanceDir;
+    const ingest = await loadIngest(home);
+    const baselineSignature = ingest.sourceSignature();
+    const baselineHash = ingest.ingest().contentHash;
+
+    mkdirSync(join(guidanceDir, 'nested'), { recursive: true });
+    writeFileSync(join(guidanceDir, 'nested', 'ignored.json'), '{"ignored":true}');
+    writeFileSync(join(guidanceDir, 'ignored.txt'), 'ignored');
+    writeFileSync(join(guidanceDir, 'snapshot-256.json'), '{"beyond":"cap"}');
+
+    assert.equal(
+      ingest.sourceSignature(),
+      baselineSignature,
+      'deep, non-JSON, and beyond-cap entries do not churn the cheap signature'
+    );
+    assert.equal(
+      ingest.ingest().contentHash,
+      baselineHash,
+      'deep, non-JSON, and beyond-cap entries do not churn the dataset hash'
+    );
+
+    const includedPath = join(guidanceDir, 'snapshot-000.json');
+    const before = statSync(includedPath);
+    const original = JSON.parse(readFileSync(includedPath, 'utf8'));
+    const replacement = JSON.stringify({ value: original.value.replace('included', 'replaced') });
+    assert.equal(
+      Buffer.byteLength(replacement),
+      before.size,
+      'fixture replacement preserves byte length'
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    writeFileSync(includedPath, replacement);
+    utimesSync(includedPath, before.atime, before.mtime);
+
+    assert.notEqual(
+      ingest.sourceSignature(),
+      baselineSignature,
+      'a restored-mtime equal-length rewrite invalidates the cheap signature'
+    );
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      baselineHash,
+      'the dataset hash follows bounded file content, not restorable metadata'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+    if (origGuidanceDir === undefined) delete process.env.CHD_EXTERNAL_GUIDANCE_DIR;
+    else process.env.CHD_EXTERNAL_GUIDANCE_DIR = origGuidanceDir;
   }
 });

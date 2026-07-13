@@ -88,8 +88,17 @@ export {
 // Static, hand-written barrel of per-file detectors (ADR 0002). As of #507 this
 // is the complete set of recommendations — there are no more in-file rules.
 import { DETECTORS } from './detectors';
-import { externalGuidanceRef } from './external-guidance';
-import type { ExternalGuidance, ExternalGuidanceRef } from './external-guidance';
+import {
+  externalGuidanceCacheValidity,
+  externalGuidanceCacheValidityContains,
+  externalGuidanceClockTransitions,
+  externalGuidanceRef,
+} from './external-guidance';
+import type {
+  ExternalGuidance,
+  ExternalGuidanceCacheValidity,
+  ExternalGuidanceRef,
+} from './external-guidance';
 import { deriveModelPinSavingsConfig } from './model-pin-savings';
 import {
   computeSuppressionTransitions as computeSuppressionTransitionsOver,
@@ -253,7 +262,13 @@ export function assembleRecommendationInput(
   return normalized;
 }
 
-const buildCache: WeakMap<RecommendationInput, Recommendation[]> = new WeakMap();
+interface RecommendationBuildCacheEntry {
+  recommendations: Recommendation[];
+  guidanceCacheValidity: ExternalGuidanceCacheValidity;
+}
+
+const buildCache: WeakMap<RecommendationInput, RecommendationBuildCacheEntry> =
+  new WeakMap();
 
 export interface RecommendationResult {
   recommendations: Recommendation[];
@@ -274,7 +289,8 @@ export interface RecommendationResult {
  */
 export function attachExternalGuidanceReferences(
   recs: Recommendation[],
-  guidance: ExternalGuidance[] | null | undefined
+  guidance: ExternalGuidance[] | null | undefined,
+  now?: number
 ): Recommendation[] {
   if (!guidance || guidance.length === 0) return recs;
   return recs.map((rec) => {
@@ -285,7 +301,7 @@ export function attachExternalGuidanceReferences(
         ? g.target.detectorId === rec.id
         : g.target.category === rec.category;
       if (!matches) continue;
-      const ref = externalGuidanceRef(g);
+      const ref = externalGuidanceRef(g, now);
       if (seenUrls.has(ref.url)) continue;
       seenUrls.add(ref.url);
       references.push(ref);
@@ -336,7 +352,9 @@ export function rankRecommendations(
  * per-detector cost work is already deduped by the `estimateCost` WeakMap memo
  * in `parse-sessions.ts`. See issue #161.
  *
- * Skip cache when the caller pins `now` — those calls are time-keyed.
+ * Skip cache when the caller pins `now` — those calls are time-keyed. Normal
+ * identity-cache entries carry the next external-guidance stale boundary, so
+ * wall-clock movement cannot leave a formerly-current reference undated.
  */
 /**
  * Collapse the duplicate `safety.unattended-sessions` card into the single
@@ -388,11 +406,16 @@ export function buildRecommendations(
   now?: number
 ): Recommendation[] {
   const useCache = now === undefined;
+  const t = now ?? Date.now();
   if (useCache) {
     const cached = buildCache.get(input);
-    if (cached) return cached;
+    if (
+      cached &&
+      externalGuidanceCacheValidityContains(cached.guidanceCacheValidity, t)
+    ) {
+      return cached.recommendations;
+    }
   }
-  const t = now ?? Date.now();
   const recs: Recommendation[] = [];
   for (const d of DETECTORS) {
     if (d.emitAll) {
@@ -404,9 +427,20 @@ export function buildRecommendations(
   }
   collapseUnattendedIntoDangerousBypass(recs);
   const sorted = rankRecommendations(
-    attachExternalGuidanceReferences(recs, input.externalGuidance)
+    attachExternalGuidanceReferences(recs, input.externalGuidance, t)
   );
-  if (useCache) buildCache.set(input, sorted);
+  if (useCache) {
+    const guidanceTransitions = externalGuidanceClockTransitions(
+      input.externalGuidance
+    );
+    buildCache.set(input, {
+      recommendations: sorted,
+      guidanceCacheValidity: externalGuidanceCacheValidity(
+        guidanceTransitions,
+        t
+      ),
+    });
+  }
   return sorted;
 }
 

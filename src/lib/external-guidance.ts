@@ -32,6 +32,12 @@ export const SOURCE_REGISTRY: readonly ExternalGuidanceSource[] = [
     allowedUrlPrefixes: ['https://support.claude.com/en/articles/'],
   },
   {
+    id: 'anthropic-claude-code-docs',
+    label: 'Anthropic Claude Code Docs',
+    trustTier: 'first-party',
+    allowedUrlPrefixes: ['https://code.claude.com/docs/en/'],
+  },
+  {
     // A personal technical blog (#1589) — useful prompt-brevity craft, but not
     // a vendor or first-party source, so it carries the lower-trust `community`
     // tier. Downstream rendering marks community guidance distinctly from
@@ -86,6 +92,36 @@ export interface ExternalGuidanceRef {
   trustTier: ExternalGuidanceTrustTier;
 }
 
+export const EXTERNAL_GUIDANCE_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Snapshot clocks may be slightly ahead of the dashboard host, but more than
+ * 24 hours indicates a bad capture clock or hand-authored provenance. Rejecting
+ * that case prevents a future timestamp from suppressing stale labeling for an
+ * unbounded period while tolerating ordinary timezone/clock skew.
+ */
+export const EXTERNAL_GUIDANCE_MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
+
+export interface ExternalGuidanceClockTransition {
+  guidanceId: string;
+  target: ExternalGuidanceTarget;
+  url: string;
+  currentLabel: string;
+  staleLabel: string;
+  staleAfter: number;
+}
+
+/**
+ * Interval in which cached guidance labels remain correct. `after` is an
+ * exclusive lower bound contributed by labels already rendered stale;
+ * `through` is an inclusive upper bound contributed by labels still current.
+ * Either side is `null` when unbounded.
+ */
+export interface ExternalGuidanceCacheValidity {
+  after: number | null;
+  through: number | null;
+}
+
 export class ExternalGuidanceParseError extends Error {
   constructor(message: string) {
     super(message);
@@ -126,6 +162,70 @@ function requiredString(value: unknown, field: string): string {
 function optionalString(value: unknown, field: string): string | undefined {
   if (value == null) return undefined;
   return requiredString(value, field);
+}
+
+const ISO_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+function isIsoCalendarRoundTrip(timestamp: string): boolean {
+  const match = ISO_TIMESTAMP.exec(timestamp);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[10] === undefined ? 0 : Number(match[10]);
+  const offsetMinute = match[11] === undefined ? 0 : Number(match[11]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 14 ||
+    offsetMinute > 59 ||
+    (offsetHour === 14 && offsetMinute !== 0)
+  ) {
+    return false;
+  }
+
+  // Date.parse normalizes impossible dates on some runtimes (Feb 30 -> Mar 2).
+  // Round-trip the calendar fields independently of the timestamp's offset so
+  // only a real date survives. setUTCFullYear handles years 0000-0099 without
+  // Date.UTC's legacy 1900 offset.
+  const calendar = new Date(0);
+  calendar.setUTCHours(0, 0, 0, 0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  return (
+    calendar.getUTCFullYear() === year &&
+    calendar.getUTCMonth() === month - 1 &&
+    calendar.getUTCDate() === day
+  );
+}
+
+function requiredIsoTimestamp(
+  value: unknown,
+  field: string,
+  now: number
+): string {
+  const timestamp = requiredString(value, field);
+  const parsed = Date.parse(timestamp);
+  if (!isIsoCalendarRoundTrip(timestamp) || !Number.isFinite(parsed)) {
+    throw new ExternalGuidanceParseError(
+      `${field} must be a valid ISO timestamp`
+    );
+  }
+  if (
+    Number.isFinite(now) &&
+    parsed > now + EXTERNAL_GUIDANCE_MAX_FUTURE_SKEW_MS
+  ) {
+    throw new ExternalGuidanceParseError(
+      `${field} is more than 24 hours in the future`
+    );
+  }
+  return timestamp;
 }
 
 function parseTarget(value: unknown): ExternalGuidanceTarget {
@@ -233,7 +333,8 @@ function parsePages(
 }
 
 export function parseExternalGuidanceSnapshot(
-  snapshot: unknown
+  snapshot: unknown,
+  now = Date.now()
 ): ExternalGuidance {
   const raw = asObject(snapshot, 'snapshot');
   const sourceId = requiredString(raw.source, 'source');
@@ -257,7 +358,7 @@ export function parseExternalGuidanceSnapshot(
     source: source.id,
     trustTier: source.trustTier,
     url,
-    fetchedAt: requiredString(raw.fetchedAt, 'fetchedAt'),
+    fetchedAt: requiredIsoTimestamp(raw.fetchedAt, 'fetchedAt', now),
     contentHash: requiredString(raw.contentHash, 'contentHash'),
     suggestion: requiredString(raw.suggestion, 'suggestion'),
     target: parseTarget(raw.target),
@@ -289,15 +390,86 @@ export function trustTierLabel(
 }
 
 export function externalGuidanceRef(
-  guidance: ExternalGuidance
+  guidance: ExternalGuidance,
+  now?: number
 ): ExternalGuidanceRef {
   const source = sourceForExternalGuidance(guidance.source);
+  const baseLabel = guidance.title ?? guidance.suggestion;
+  const transition = externalGuidanceClockTransition(guidance);
+  const stale =
+    transition !== undefined &&
+    typeof now === 'number' &&
+    Number.isFinite(now) &&
+    now > transition.staleAfter;
   return {
-    label: guidance.title ?? guidance.suggestion,
+    label: stale ? transition.staleLabel : baseLabel,
     url: guidance.url,
     source: source?.label ?? guidance.source,
     trustTier: guidance.trustTier,
   };
+}
+
+function externalGuidanceClockTransition(
+  guidance: ExternalGuidance
+): ExternalGuidanceClockTransition | undefined {
+  const fetchedMs = Date.parse(guidance.fetchedAt);
+  const staleAfter = fetchedMs + EXTERNAL_GUIDANCE_STALE_AFTER_MS;
+  if (!Number.isFinite(fetchedMs) || !Number.isFinite(staleAfter)) {
+    return undefined;
+  }
+  const currentLabel = guidance.title ?? guidance.suggestion;
+  const asOf = new Date(fetchedMs).toISOString().slice(0, 10);
+  return {
+    guidanceId: guidance.id,
+    target: guidance.target.detectorId
+      ? { detectorId: guidance.target.detectorId }
+      : { category: guidance.target.category },
+    url: guidance.url,
+    currentLabel,
+    staleLabel: `${currentLabel} (as of ${asOf})`,
+    staleAfter,
+  };
+}
+
+export function externalGuidanceClockTransitions(
+  guidance: readonly ExternalGuidance[] | null | undefined
+): ExternalGuidanceClockTransition[] {
+  if (!guidance) return [];
+  return guidance.flatMap((item) => {
+    const transition = externalGuidanceClockTransition(item);
+    return transition ? [transition] : [];
+  });
+}
+
+/** Build the two-sided validity interval for labels rendered at `now`. */
+export function externalGuidanceCacheValidity(
+  transitions: readonly ExternalGuidanceClockTransition[],
+  now: number
+): ExternalGuidanceCacheValidity {
+  let after = Number.NEGATIVE_INFINITY;
+  let through = Number.POSITIVE_INFINITY;
+  for (const transition of transitions) {
+    if (now > transition.staleAfter) {
+      after = Math.max(after, transition.staleAfter);
+    } else {
+      through = Math.min(through, transition.staleAfter);
+    }
+  }
+  return {
+    after: Number.isFinite(after) ? after : null,
+    through: Number.isFinite(through) ? through : null,
+  };
+}
+
+export function externalGuidanceCacheValidityContains(
+  validity: ExternalGuidanceCacheValidity,
+  now: number
+): boolean {
+  if (!Number.isFinite(now)) return false;
+  return (
+    (validity.after === null || now > validity.after) &&
+    (validity.through === null || now <= validity.through)
+  );
 }
 
 /**

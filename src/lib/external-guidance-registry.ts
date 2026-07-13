@@ -134,7 +134,41 @@ export function extractBrevityFacts(text: string): ExternalGuidanceFacts {
   return facts;
 }
 
+/** First-party meta-patterns summarized by the Claude Code prompt library. */
+export function extractPromptLibraryFacts(text: string): ExternalGuidanceFacts {
+  const normalized = String(text ?? '').toLowerCase();
+  const facts: ExternalGuidanceFacts = {};
+  if (normalized.includes('describe the outcome, not the steps')) {
+    facts.describeOutcome = true;
+  }
+  if (normalized.includes('give it a way to check its own work')) {
+    facts.includeVerification = true;
+  }
+  if (normalized.includes('point at a reference')) {
+    facts.pointAtReference = true;
+  }
+  if (normalized.includes('state the measurable target')) {
+    facts.stateMeasurableTarget = true;
+  }
+  if (normalized.includes('give it the artifact')) {
+    facts.provideArtifact = true;
+  }
+  if (normalized.includes('say how you want the answer')) {
+    facts.requestAnswerFormat = true;
+  }
+  return facts;
+}
+
 export const GUIDANCE_ARTICLES: readonly GuidanceArticle[] = [
+  {
+    id: 'anthropic-claude-code-prompt-library',
+    source: 'anthropic-claude-code-docs',
+    url: 'https://code.claude.com/docs/en/prompt-library',
+    target: { detectorId: 'workflow.prompt-clarity' },
+    suggestion:
+      'Adapt first-party prompt patterns: state the outcome, verification, references, measurable target, source artifact, and desired answer format.',
+    extractFacts: extractPromptLibraryFacts,
+  },
   {
     id: 'anthropic-usage-limits',
     source: 'anthropic-support',

@@ -125,6 +125,30 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
     );
     // The content-derived contentHash must match across the two independent DBs.
     assert.equal(reply.contentHash, ingest.ingest().contentHash, 'contentHash is DB-path-independent');
+    assert.ok(
+      Array.isArray(reply.guidanceTransitions) && reply.guidanceTransitions.length > 0,
+      'worker returns guidance label transitions for parent-side clock refreshes'
+    );
+    assert.ok(
+      reply.guidanceTransitions.every(
+        (transition) =>
+          typeof transition.guidanceId === 'string' &&
+          transition.target &&
+          (typeof transition.target.detectorId === 'string' ||
+            typeof transition.target.category === 'string')
+      ),
+      'worker transition metadata binds each label clock to guidance identity and target'
+    );
+    assert.equal(
+      typeof reply.guidanceCacheValidity,
+      'object',
+      'worker returns two-sided guidance cache validity metadata'
+    );
+    assert.ok(
+      Object.hasOwn(reply.guidanceCacheValidity, 'after') &&
+        Object.hasOwn(reply.guidanceCacheValidity, 'through'),
+      'worker validity includes exclusive lower and inclusive upper bounds'
+    );
   } finally {
     process.env.HOME = origHome;
     process.env.CHD_DB_PATH = origDb;

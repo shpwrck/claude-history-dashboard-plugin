@@ -25,7 +25,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { delimiter, join, dirname, resolve, sep } from 'node:path';
+import { basename, delimiter, join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { gunzipSync, brotliCompressSync, constants as zlibConstants } from 'node:zlib';
@@ -595,7 +595,10 @@ const { parseWorkflows } = await import(join(LIB, 'parse-workflows.ts'));
 // External guidance snapshots (#1302, epic #656) — repo-committed, static
 // reference docs the engine attaches to fired recs as "Learn More" links.
 // Read from the repo's data dir (NOT ~/.claude); never fetched at runtime.
-const { readExternalGuidanceSnapshots } = await import(
+const {
+  externalGuidanceSnapshotPaths,
+  readExternalGuidanceSnapshots,
+} = await import(
   join(LIB, 'parse-external-guidance.ts')
 );
 // Per-project agent memory store + MEMORY.md index (#1965/#1990). Built fresh
@@ -616,7 +619,76 @@ const { buildGitOutcomes, gitOutcomesReposFromEnv } = await import(
 // project root — a LOCAL repo-docs walk, no network — so it is safe under the
 // zero-deps runtime import guard (node:fs/child_process only, like parse-tasks).
 const { buildDocGraph } = await import(join(LIB, 'parse-docs.ts'));
-const EXTERNAL_GUIDANCE_DIR = join(PROJECT_DIR, 'data', 'external-guidance');
+// Local snapshot root. The override is a test/deployment seam for supplying an
+// isolated committed-snapshot mirror; unset keeps the shipped repo path exactly
+// as before. It never fetches or writes guidance.
+const EXTERNAL_GUIDANCE_DIR = resolve(
+  process.env.CHD_EXTERNAL_GUIDANCE_DIR ||
+    join(PROJECT_DIR, 'data', 'external-guidance')
+);
+// This repo ships only a handful of snapshots. Bound both the reader and the
+// per-request metadata signature to the same directory prefix so an accidental
+// or hostile override cannot turn sourceSignature() into an unbounded walk.
+const EXTERNAL_GUIDANCE_MAX_ENTRIES = 256;
+// Keep non-JSON noise in an overridden directory from forcing an unbounded
+// scan while still letting ordinary ignored entries leave the 256-snapshot
+// eligible surface untouched.
+const EXTERNAL_GUIDANCE_MAX_SCANNED_ENTRIES = 4_096;
+
+function externalGuidancePaths() {
+  return externalGuidanceSnapshotPaths(EXTERNAL_GUIDANCE_DIR, {
+    maxEntries: EXTERNAL_GUIDANCE_MAX_ENTRIES,
+    maxScannedEntries: EXTERNAL_GUIDANCE_MAX_SCANNED_ENTRIES,
+  });
+}
+
+function externalGuidanceSourceSignature() {
+  const hash = createHash('sha1');
+  let count = 0;
+  for (const path of externalGuidancePaths()) {
+    try {
+      const s = statSync(path);
+      hash.update(basename(path));
+      hash.update('\0');
+      hash.update(String(s.mtimeMs));
+      hash.update('\0');
+      hash.update(String(s.size));
+      hash.update('\0');
+      // mtime and size are user-restorable. ctime plus inode identity makes an
+      // equal-length in-place rewrite or atomic replacement move this cheap
+      // gate without reading snapshot bodies on every request.
+      hash.update(String(s.ctimeMs));
+      hash.update('\0');
+      hash.update(String(s.ino));
+      hash.update('\n');
+      count += 1;
+    } catch {
+      /* a concurrently replaced snapshot will move the next signature */
+    }
+  }
+  hash.update(`count:${count}`);
+  return `${count}:${hash.digest('hex')}`;
+}
+
+function hashExternalGuidanceContent(hash) {
+  let count = 0;
+  for (const path of externalGuidancePaths()) {
+    hash.update(basename(path));
+    hash.update('\0');
+    try {
+      const content = readTextFileCappedSync(path, CONFIG_FILE_MAX_BYTES);
+      hash.update(String(Buffer.byteLength(content, 'utf8')));
+      hash.update('\0');
+      hash.update(content);
+    } catch (error) {
+      hash.update('unreadable\0');
+      hash.update(String(error?.code || 'error'));
+    }
+    hash.update('\n');
+    count += 1;
+  }
+  hash.update(`count:${count}\n`);
+}
 // Read fresh on every assemble — NOT memoized. The ingest() content-hash gate
 // hashes this dir so a refreshed snapshot (git pull / drift-PR merge under a
 // standing dev server) invalidates the persisted dataset cache; a process-
@@ -625,7 +697,10 @@ const EXTERNAL_GUIDANCE_DIR = join(PROJECT_DIR, 'data', 'external-guidance');
 // JSON files, so the per-call cost is negligible.
 function readExternalGuidance() {
   try {
-    return readExternalGuidanceSnapshots(EXTERNAL_GUIDANCE_DIR);
+    return readExternalGuidanceSnapshots(EXTERNAL_GUIDANCE_DIR, {
+      maxEntries: EXTERNAL_GUIDANCE_MAX_ENTRIES,
+      maxScannedEntries: EXTERNAL_GUIDANCE_MAX_SCANNED_ENTRIES,
+    });
   } catch {
     // Missing/malformed snapshot store degrades to "no references", never
     // sinks the dataset endpoint.
@@ -2104,6 +2179,13 @@ export function sourceSignature() {
     );
   }
   parts.push(`review-events:${reviewEventsSourceSignature()}`);
+  // External-guidance files are read fresh into the dataset/recommendations
+  // inputs. Fold their bounded stat-only signature into this cheap gate as well
+  // as ingest()'s content hash; otherwise a same-process snapshot replacement
+  // can early-hit both response caches forever until another source moves.
+  parts.push(
+    `external-guidance:${EXTERNAL_GUIDANCE_DIR}:${externalGuidanceSourceSignature()}`
+  );
   if (!SCOPED_INGEST) {
     for (const root of liveConfigProjectRoots(repoMapArtifactRoots())) {
       for (const name of ['AGENTS.md', 'CLAUDE.md', 'REFERENCES.md']) {
@@ -2293,7 +2375,7 @@ export function ingest() {
   // but the dataset cache persists in SQLite across restarts, so they must be
   // in the gate or a refreshed snapshot would be served stale.
   hash.update('external-guidance\n');
-  hashTree(EXTERNAL_GUIDANCE_DIR, '', hash);
+  hashExternalGuidanceContent(hash);
   const contentHash = hash.digest('hex');
   return {
     total: sessions.length,
@@ -2556,9 +2638,11 @@ export function assemblyInstrumentation() {
 // /api/dataset.json payload (assembleDataset) and the lighter recommendation
 // dataset (assembleRecommendationDataset) consume — through the SAME per-signal
 // fold and the SAME builders, so their shared fields are byte-identical. The
-// full-only extras (promptAnalysis, the embedded first-pass recommendations that
-// populate repoMap.files[].recommendations, and the schema/window metadata) plus
-// the two divergent repoMap builds stay with each caller below.
+// full-only extras (the embedded first-pass recommendations that populate
+// repoMap.files[].recommendations and the schema/window metadata) plus the two
+// divergent repoMap builds stay with each caller below. Prompt analysis is
+// intentionally caller-owned: both full and served-light paths derive the same
+// compact numeric rows from the shared entries array.
 function assembleDatasetCore() {
   const rows = blobCache.readAllRows();
   const sessionProvenanceById = new Map(
@@ -2972,6 +3056,7 @@ export function assembleDataset() {
       configBackups,
       externalGuidance,
       gitOutcomes,
+      promptAnalysis,
     })
   );
   const repoMap = buildRepoMapDataset({
@@ -3076,8 +3161,6 @@ export function assembleDataset() {
 // the fields `assembleRecommendationContext` reads off the dataset — via the
 // SAME `assembleDatasetCore()` builders as the full dataset — and SKIPS the
 // full-only work the recs input never consumes:
-//   * `parsePromptAnalysis(entries)` — recs never pass promptAnalysis (the
-//     workflow.prompt-clarity detector gets null on this path);
 //   * the embedded first-pass `buildRecommendations()` detector-catalog pass whose
 //     ONLY output is repoMap.files[].recommendations — a cross-link NO served
 //     detector reads (verified), so omitting it leaves the served recs body
@@ -3091,6 +3174,10 @@ export function assembleDataset() {
 export function assembleRecommendationDataset() {
   assemblyCallCounts.recommendation += 1;
   const core = assembleDatasetCore();
+  // Compact numeric rows only: parsePromptAnalysis retains no prompt prose.
+  // workflow.prompt-clarity consumes these on /api/recommendations.json and
+  // /recs, so the served-light path must match the human/full dataset.
+  const promptAnalysis = parsePromptAnalysis(core.entries);
   // repoMap WITHOUT the embedded recommendations: files[].recommendations is
   // empty here (no served detector reads it), every other repoMap field matches
   // the full path, so the served recs are byte-identical.
@@ -3119,6 +3206,7 @@ export function assembleRecommendationDataset() {
     valueFlow: core.valueFlow,
     permissionRows: core.permissionRows,
     taskSteering: core.taskSteering,
+    promptAnalysis,
     liveConfig: core.liveConfig,
     shadowCalls: core.shadowCalls,
     workflows: core.workflows,
@@ -3150,7 +3238,7 @@ export function assembleRecommendationDataset() {
 // groupBySessions -> groupByProjects), then fed to the pure buildRecommendations
 // engine with the same field mapping the UI's Recommendations component uses
 // (tokenData, toolData, sessions, projects, permissionRows, apiErrors,
-// liveConfig). Deterministic in the dataset, so the route can derive a stable
+// promptAnalysis, liveConfig). Deterministic in the dataset, so the route can derive a stable
 // ETag straight from the serialized output.
 //
 // `project` (#330): when set, the global recs are narrowed to those attributable
@@ -3167,9 +3255,9 @@ function assembleRecommendationContext(options = {}) {
   // emit — instead of assembling it twice. Falls back to the LIGHTER
   // recommendation dataset (#2182) when no dataset is supplied: it carries every
   // field consumed below via the SAME builders as assembleDataset() but skips the
-  // dataset-only extras (promptAnalysis, the embedded first-pass recs, schema
-  // metadata), so the served recs are byte-identical while the rebuild drops a
-  // full detector pass. Full assembleDataset() stays available for callers that
+  // dataset-only extras (the embedded first-pass recs and schema metadata), so
+  // the served recs are byte-identical while the rebuild drops a full detector
+  // pass. Full assembleDataset() stays available for callers that
   // inject it (e.g. a request that also serves /api/dataset.json).
   const dataset = options.dataset ?? assembleRecommendationDataset();
   const sessions = groupBySessions(dataset.entries);
@@ -3178,7 +3266,7 @@ function assembleRecommendationContext(options = {}) {
   // (#524 slice 3): each push-truthy/spread signal's `datasetKey` IS its
   // RecommendationInput key and its assembleDataset() output key, so a new
   // detector-consumed signal needs only its descriptor entry + a
-  // RecommendationInput type field — no edit here. The four non-signal fields
+  // RecommendationInput type field — no edit here. The non-signal fields
   // stay explicit: `sessions`/`projects` are derived from entries, `permissionRows`
   // comes from the perm fan-out, and `liveConfig` is assembled separately.
   const signalInput = {};
@@ -3191,6 +3279,9 @@ function assembleRecommendationContext(options = {}) {
     projects,
     permissionRows: dataset.permissionRows,
     liveConfig: dataset.liveConfig,
+    // Compact prompt traits are derived from shared entries in both the full
+    // and served-light datasets; no prompt prose is retained.
+    promptAnalysis: dataset.promptAnalysis,
     // Non-signal aggregate (like liveConfig): the shadow-calls ledger digest
     // is assembled separately, not a per-session SESSION_SIGNAL, so it stays
     // explicit here rather than flowing through `signalInput` (#513).
@@ -3252,7 +3343,7 @@ export function assembleRecommendationResult(project, options = {}) {
   // bill (#944) — NOT the raw, possibly-overlapping detector estimate. Run on
   // the global recs before any project slice so the cascade dedup is computed
   // over the full lever set (dc-reclaim-1).
-  const result = buildRecommendationResult(input);
+  const result = buildRecommendationResult(input, options.now);
   // Drop findings the user explicitly rejected (#2206, epic #1298) BEFORE the
   // reclaim cascade. A REJECTED adoption receipt suppresses its finding from
   // output; reversible via an un-reject (active:false) receipt. The rejected set

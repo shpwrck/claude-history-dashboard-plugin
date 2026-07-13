@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   assembleRecommendationInput,
   automationCostShare,
@@ -900,6 +900,150 @@ describe('workflow.prompt-clarity (#1275)', () => {
     expect(recs[0].severity).toBe('info');
     expect(recs[0].detail).toMatch(/correlation, not causation/i);
     expect(recs[0].detail).toContain('patterns worth noticing');
+  });
+
+  it('attaches the first-party prompt library only when the finding fires and dates stale guidance', () => {
+    const low = ['low-a', 'low-b', 'low-c'];
+    const specific = ['specific-a', 'specific-b', 'specific-c'];
+    const now = Date.parse('2026-03-15T00:00:00Z');
+    const recs = buildRecommendations(baseInput({
+      promptAnalysis: [
+        ...low.map((id) => promptRow(id, 1)),
+        ...specific.map((id) => promptRow(id, 0)),
+      ],
+      timelines: [
+        ...low.map((id) => timeline(id, 5)),
+        ...specific.map((id) => timeline(id, 1)),
+      ],
+      externalGuidance: [{
+        id: 'anthropic-claude-code-prompt-library',
+        source: 'anthropic-claude-code-docs',
+        trustTier: 'first-party',
+        url: 'https://code.claude.com/docs/en/prompt-library',
+        fetchedAt: '2026-01-01T00:00:00Z',
+        contentHash: 'sha256:test',
+        suggestion: 'Adapt first-party prompt patterns.',
+        title: 'Prompt library',
+        target: { detectorId: 'workflow.prompt-clarity' },
+      }],
+    }), now);
+    const promptClarity = recs.find((rec) => rec.id === 'workflow.prompt-clarity');
+    expect(promptClarity?.references).toEqual([{
+      label: 'Prompt library (as of 2026-01-01)',
+      url: 'https://code.claude.com/docs/en/prompt-library',
+      source: 'Anthropic Claude Code Docs',
+      trustTier: 'first-party',
+    }]);
+    for (const rec of recs) {
+      if (rec.id !== 'workflow.prompt-clarity') {
+        expect(rec.references).toBeUndefined();
+      }
+    }
+  });
+
+  it('dates stale prompt guidance against the production clock', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-15T00:00:00Z'));
+    try {
+      const low = ['low-a', 'low-b', 'low-c'];
+      const specific = ['specific-a', 'specific-b', 'specific-c'];
+      const recs = buildRecommendations(baseInput({
+        promptAnalysis: [
+          ...low.map((id) => promptRow(id, 1)),
+          ...specific.map((id) => promptRow(id, 0)),
+        ],
+        timelines: [
+          ...low.map((id) => timeline(id, 5)),
+          ...specific.map((id) => timeline(id, 1)),
+        ],
+        externalGuidance: [{
+          id: 'anthropic-claude-code-prompt-library',
+          source: 'anthropic-claude-code-docs',
+          trustTier: 'first-party',
+          url: 'https://code.claude.com/docs/en/prompt-library',
+          fetchedAt: '2026-01-01T00:00:00Z',
+          contentHash: 'sha256:test',
+          suggestion: 'Adapt first-party prompt patterns.',
+          title: 'Prompt library',
+          target: { detectorId: 'workflow.prompt-clarity' },
+        }],
+      }));
+      expect(recs.find((rec) => rec.id === 'workflow.prompt-clarity')?.references?.[0]?.label)
+        .toBe('Prompt library (as of 2026-01-01)');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('invalidates the identity cache across forward and backward stale-boundary crossings', () => {
+    vi.useFakeTimers();
+    const fetchedAt = '2026-01-01T00:00:00.000Z';
+    const staleBoundary = Date.parse(fetchedAt) + 30 * 24 * 60 * 60 * 1000;
+    try {
+      const low = ['low-a', 'low-b', 'low-c'];
+      const specific = ['specific-a', 'specific-b', 'specific-c'];
+      const input = baseInput({
+        promptAnalysis: [
+          ...low.map((id) => promptRow(id, 1)),
+          ...specific.map((id) => promptRow(id, 0)),
+        ],
+        timelines: [
+          ...low.map((id) => timeline(id, 5)),
+          ...specific.map((id) => timeline(id, 1)),
+        ],
+        externalGuidance: [{
+          id: 'anthropic-claude-code-prompt-library',
+          source: 'anthropic-claude-code-docs',
+          trustTier: 'first-party',
+          url: 'https://code.claude.com/docs/en/prompt-library',
+          fetchedAt,
+          contentHash: 'sha256:test',
+          suggestion: 'Adapt first-party prompt patterns.',
+          title: 'Prompt library',
+          target: { detectorId: 'workflow.prompt-clarity' },
+        }, {
+          // Same URL/title but a later fetch and a DIFFERENT target. Cache
+          // transition identity must not let this record supply the prompt
+          // finding's as-of date during either clock crossing.
+          id: 'same-page-other-target',
+          source: 'anthropic-claude-code-docs',
+          trustTier: 'first-party',
+          url: 'https://code.claude.com/docs/en/prompt-library',
+          fetchedAt: '2026-01-15T00:00:00.000Z',
+          contentHash: 'sha256:other-target',
+          suggestion: 'Adapt first-party prompt patterns.',
+          title: 'Prompt library',
+          target: { detectorId: 'reliability.rate-limits' },
+        }],
+      });
+
+      // The stale predicate is strictly older than 30 days, so the reference
+      // is still current at the exact boundary. This first call populates the
+      // normal WeakMap identity cache.
+      vi.setSystemTime(staleBoundary);
+      const current = buildRecommendations(input);
+      expect(current.find((rec) => rec.id === 'workflow.prompt-clarity')?.references?.[0]?.label)
+        .toBe('Prompt library');
+
+      // Same input object, no artifact mutation: wall-clock movement alone must
+      // bypass the cached result once the reference becomes historical.
+      vi.setSystemTime(staleBoundary + 1);
+      const stale = buildRecommendations(input);
+      expect(stale).not.toBe(current);
+      expect(stale.find((rec) => rec.id === 'workflow.prompt-clarity')?.references?.[0]?.label)
+        .toBe('Prompt library (as of 2026-01-01)');
+
+      // A stale-built cache entry must also carry a lower validity bound. If
+      // the wall clock is corrected backward, the same input identity becomes
+      // current again and the historical suffix must disappear.
+      vi.setSystemTime(staleBoundary);
+      const currentAgain = buildRecommendations(input);
+      expect(currentAgain).not.toBe(stale);
+      expect(currentAgain.find((rec) => rec.id === 'workflow.prompt-clarity')?.references?.[0]?.label)
+        .toBe('Prompt library');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

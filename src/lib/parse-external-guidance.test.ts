@@ -1,9 +1,10 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  EXTERNAL_GUIDANCE_MAX_FUTURE_SKEW_MS,
   ExternalGuidanceParseError,
   externalGuidanceRef,
   isAllowedUrl,
@@ -85,6 +86,38 @@ describe('parseExternalGuidanceSnapshot (#1300)', () => {
     }
   });
 
+  it('reads only the bounded top-level JSON surface', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'external-guidance-surface-'));
+    try {
+      for (const id of ['c', 'a', 'b']) {
+        await writeFile(
+          join(dir, `${id}.json`),
+          JSON.stringify({ ...snapshot, id: `snapshot-${id}` }),
+          'utf8'
+        );
+      }
+      await mkdir(join(dir, 'nested'));
+      await writeFile(
+        join(dir, 'nested', 'ignored.json'),
+        JSON.stringify({ ...snapshot, id: 'nested' }),
+        'utf8'
+      );
+      await writeFile(join(dir, 'ignored.txt'), 'ignored', 'utf8');
+
+      const guidance = readExternalGuidanceSnapshots(dir, {
+        maxEntries: 2,
+        maxScannedEntries: 16,
+      });
+
+      expect(guidance.map((item) => item.id)).toEqual([
+        'snapshot-a',
+        'snapshot-b',
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a source URL outside the registry allowlist', () => {
     expect(() =>
       parseExternalGuidanceSnapshot({
@@ -106,6 +139,50 @@ describe('parseExternalGuidanceSnapshot (#1300)', () => {
         ],
       })
     ).toThrow(ExternalGuidanceParseError);
+  });
+
+  it('rejects a malformed fetchedAt timestamp', () => {
+    expect(() =>
+      parseExternalGuidanceSnapshot({
+        ...snapshot,
+        fetchedAt: 'last Tuesday',
+      })
+    ).toThrow(/fetchedAt must be a valid ISO timestamp/);
+  });
+
+  it('rejects an impossible calendar date instead of accepting Date.parse normalization', () => {
+    expect(() =>
+      parseExternalGuidanceSnapshot({
+        ...snapshot,
+        fetchedAt: '2026-02-30T12:00:00.000Z',
+      })
+    ).toThrow(/fetchedAt must be a valid ISO timestamp/);
+  });
+
+  it('allows bounded clock skew but rejects snapshots fetched too far in the future', () => {
+    const now = Date.parse('2026-06-12T00:00:00.000Z');
+    expect(() =>
+      parseExternalGuidanceSnapshot(
+        {
+          ...snapshot,
+          fetchedAt: new Date(
+            now + EXTERNAL_GUIDANCE_MAX_FUTURE_SKEW_MS
+          ).toISOString(),
+        },
+        now
+      )
+    ).not.toThrow();
+    expect(() =>
+      parseExternalGuidanceSnapshot(
+        {
+          ...snapshot,
+          fetchedAt: new Date(
+            now + EXTERNAL_GUIDANCE_MAX_FUTURE_SKEW_MS + 1
+          ).toISOString(),
+        },
+        now
+      )
+    ).toThrow(/fetchedAt is more than 24 hours in the future/);
   });
 
   it('reads the committed Anthropic usage-limits snapshot with per-page provenance', () => {

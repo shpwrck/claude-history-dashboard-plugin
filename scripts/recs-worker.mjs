@@ -21,7 +21,8 @@
 // Protocol:
 //   parent -> worker: { id, project, organizationIdentity, emitSuppressionTransitions,
 //                       adoptionReceiptsPath, shadowCallsDir }
-//   worker -> parent: { id, ok:true, json, contentHash, sourceSig }
+//   worker -> parent: { id, ok:true, json, contentHash, sourceSig,
+//                       guidanceTransitions, guidanceCacheValidity }
 //                  |  { id, ok:false, error }
 //                  |  { type:'ready' }   (once, after module init)
 //                  |  { type:'log', level, message }
@@ -51,6 +52,10 @@ const {
 const { safeJsonStringify } = await import(
   join(projectDir, 'src', 'lib', 'json-safe.ts')
 );
+const {
+  externalGuidanceCacheValidity,
+  externalGuidanceClockTransitions,
+} = await import(join(projectDir, 'src', 'lib', 'external-guidance.ts'));
 
 parentPort.on('message', async (msg) => {
   if (!msg || typeof msg !== 'object') return;
@@ -68,6 +73,14 @@ parentPort.on('message', async (msg) => {
     // /api/dataset.json payload). Shared by the suppression-transition emit and
     // the recs build below, so a single light assemble serves both (#2071).
     const dataset = assembleRecommendationDataset();
+    const guidanceBuiltAt = Date.now();
+    const guidanceTransitions = externalGuidanceClockTransitions(
+      dataset.externalGuidance
+    );
+    const guidanceCacheValidity = externalGuidanceCacheValidity(
+      guidanceTransitions,
+      guidanceBuiltAt
+    );
     if (emitSuppressionTransitions && adoptionReceiptsPath) {
       // Best-effort, like the inline path: never fail the rebuild on a receipts
       // write error. Reuses the same dataset (no second assemble).
@@ -95,6 +108,7 @@ parentPort.on('message', async (msg) => {
       organizationIdentity: organizationIdentity ?? null,
       dataset,
       rejectedFindingIds,
+      now: guidanceBuiltAt,
     });
     const json = safeJsonStringify(recs);
     parentPort.postMessage({
@@ -102,6 +116,8 @@ parentPort.on('message', async (msg) => {
       ok: true,
       json,
       contentHash: stats.contentHash,
+      guidanceTransitions,
+      guidanceCacheValidity,
       sourceSig: sourceSignature(),
     });
   } catch (err) {

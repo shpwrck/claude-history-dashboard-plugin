@@ -97,6 +97,11 @@ const PROJECT_DIR = join(fileURLToPath(import.meta.url), '..', '..');
 const { resolveSources } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'sources.ts')
 );
+const {
+  externalGuidanceCacheValidity,
+  externalGuidanceCacheValidityContains,
+  externalGuidanceClockTransitions,
+} = await import(join(PROJECT_DIR, 'src', 'lib', 'external-guidance.ts'));
 const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
 const DEFAULT_SOURCE = DATA_SOURCES[0];
 const DATA_SOURCE_BY_ID = new Map(DATA_SOURCES.map((source) => [source.id, source]));
@@ -2367,6 +2372,99 @@ function requestRecsRebuildViaWorker(project, organizationIdentity, emitSuppress
   });
 }
 
+function assertRecommendationsResponseSize(json) {
+  const actualBytes = Buffer.byteLength(json, 'utf8');
+  if (actualBytes <= DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES) return;
+  const err = new Error(
+    `Recommendations response exceeds ${DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES} byte limit`
+  );
+  err.code = 'ERR_DASHBOARD_RECOMMENDATIONS_RESPONSE_TOO_LARGE';
+  err.maxBytes = DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES;
+  err.actualBytes = actualBytes;
+  throw err;
+}
+
+// External-guidance staleness changes only reference labels. When the wall
+// clock crosses a label boundary (forward OR backward), update the already-small
+// cached recommendations JSON and ETag synchronously instead of rerunning the
+// multi-second ingest/assemble/detector pipeline. Returns false only for an
+// entry without usable clock metadata, which the caller treats as a cold miss
+// rather than serving a label it cannot prove current.
+function redecorateCachedGuidanceLabels(entry, now) {
+  if (!Array.isArray(entry.guidanceTransitions)) return false;
+  let recommendations;
+  try {
+    recommendations = JSON.parse(entry.json);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(recommendations)) return false;
+
+  const transitionsByUrl = new Map();
+  for (const transition of entry.guidanceTransitions) {
+    const hasDetectorTarget =
+      typeof transition?.target?.detectorId === 'string' &&
+      transition.target.detectorId.length > 0;
+    const hasCategoryTarget =
+      typeof transition?.target?.category === 'string' &&
+      transition.target.category.length > 0;
+    if (
+      !transition ||
+      typeof transition.guidanceId !== 'string' ||
+      !transition.target ||
+      typeof transition.target !== 'object' ||
+      hasDetectorTarget === hasCategoryTarget ||
+      typeof transition.url !== 'string' ||
+      typeof transition.currentLabel !== 'string' ||
+      typeof transition.staleLabel !== 'string' ||
+      !Number.isFinite(transition.staleAfter)
+    ) {
+      return false;
+    }
+    const matches = transitionsByUrl.get(transition.url) ?? [];
+    matches.push(transition);
+    transitionsByUrl.set(transition.url, matches);
+  }
+
+  let changed = false;
+  for (const recommendation of recommendations) {
+    if (!Array.isArray(recommendation?.references)) continue;
+    for (const reference of recommendation.references) {
+      if (!reference || typeof reference.url !== 'string') continue;
+      const transition = (transitionsByUrl.get(reference.url) ?? []).find(
+        (candidate) =>
+          (candidate.target.detectorId
+            ? recommendation.id === candidate.target.detectorId
+            : recommendation.category === candidate.target.category) &&
+          (reference.label === candidate.currentLabel ||
+            reference.label === candidate.staleLabel)
+      );
+      if (!transition) continue;
+      const label =
+        now > transition.staleAfter
+          ? transition.staleLabel
+          : transition.currentLabel;
+      if (reference.label !== label) {
+        reference.label = label;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    const json = safeJsonStringify(recommendations);
+    assertRecommendationsResponseSize(json);
+    entry.json = json;
+    entry.etag = datasetEtagFrom(json);
+  }
+  entry.guidanceCacheValidity = externalGuidanceCacheValidity(
+    entry.guidanceTransitions,
+    now
+  );
+  entry.lastAccess = now;
+  return true;
+}
+
 // Worker-backed twin of buildRecommendationsCacheEntry: the rebuild runs off the
 // event loop; the main thread only does the cheap size-gate + ETag + cache.set.
 // Reuses the request-time `sourceSig` (like the inline path) so the freshness
@@ -2379,26 +2477,25 @@ async function buildRecommendationsCacheEntryViaWorker(
   project,
   { emitSuppressionTransitions = false, organizationIdentity = null } = {}
 ) {
-  const { json, contentHash } = await requestRecsRebuildViaWorker(
-    project,
-    organizationIdentity,
-    emitSuppressionTransitions
-  );
-  const actualBytes = Buffer.byteLength(json, 'utf8');
-  if (actualBytes > DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES) {
-    const err = new Error(
-      `Recommendations response exceeds ${DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES} byte limit`
+  const {
+    json,
+    contentHash,
+    guidanceTransitions,
+    guidanceCacheValidity,
+  } =
+    await requestRecsRebuildViaWorker(
+      project,
+      organizationIdentity,
+      emitSuppressionTransitions
     );
-    err.code = 'ERR_DASHBOARD_RECOMMENDATIONS_RESPONSE_TOO_LARGE';
-    err.maxBytes = DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES;
-    err.actualBytes = actualBytes;
-    throw err;
-  }
+  assertRecommendationsResponseSize(json);
   const entry = {
     etag: datasetEtagFrom(json),
     json,
     contentHash,
     sourceSig,
+    guidanceTransitions,
+    guidanceCacheValidity,
     lastAccess: Date.now(),
   };
   state.recommendationsCache.set(key, entry);
@@ -2425,6 +2522,17 @@ async function buildRecommendationsCacheEntry(
     api,
     stats.contentHash
   );
+  // Pin one clock instant across label rendering and its cache metadata. A
+  // request that finishes after the interval changes is redecorated before it
+  // is returned below, so even a boundary crossed mid-build cannot leak.
+  const guidanceBuiltAt = Date.now();
+  const guidanceTransitions = externalGuidanceClockTransitions(
+    dataset.externalGuidance
+  );
+  const guidanceCacheValidity = externalGuidanceCacheValidity(
+    guidanceTransitions,
+    guidanceBuiltAt
+  );
   if (emitSuppressionTransitions) {
     api
       .recordSuppressionTransitions(ADOPTION_RECEIPTS, {
@@ -2447,23 +2555,17 @@ async function buildRecommendationsCacheEntry(
     organizationIdentity,
     dataset,
     rejectedFindingIds,
+    now: guidanceBuiltAt,
   });
   const json = safeJsonStringify(recs); // scrub lone surrogates so the export stays strict-parser-valid (#1104)
-  const actualBytes = Buffer.byteLength(json, 'utf8');
-  if (actualBytes > DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES) {
-    const err = new Error(
-      `Recommendations response exceeds ${DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES} byte limit`
-    );
-    err.code = 'ERR_DASHBOARD_RECOMMENDATIONS_RESPONSE_TOO_LARGE';
-    err.maxBytes = DASHBOARD_RECOMMENDATIONS_RESPONSE_MAX_BYTES;
-    err.actualBytes = actualBytes;
-    throw err;
-  }
+  assertRecommendationsResponseSize(json);
   const entry = {
     etag: datasetEtagFrom(json),
     json,
     contentHash: stats.contentHash,
     sourceSig,
+    guidanceTransitions,
+    guidanceCacheValidity,
     lastAccess: Date.now(),
   };
   state.recommendationsCache.set(key, entry);
@@ -2484,21 +2586,41 @@ async function recommendationsResponseCache(
   const sourceSig = api.sourceSignature();
   const identityKey = recommendationIdentityCacheKey(organizationIdentity);
   const key = recommendationsCacheKey(project, identityKey);
-  const cached = state.recommendationsCache.get(key);
+  let cached = state.recommendationsCache.get(key);
+  const now = Date.now();
+  let clockRefreshed = false;
+  if (
+    cached &&
+    (!cached.guidanceCacheValidity ||
+      !externalGuidanceCacheValidityContains(
+        cached.guidanceCacheValidity,
+        now
+      ))
+  ) {
+    if (redecorateCachedGuidanceLabels(cached, now)) {
+      clockRefreshed = true;
+    } else {
+      // Never return an entry whose time-sensitive labels cannot be validated.
+      // Dropping it turns this request into the ordinary synchronous cold path.
+      state.recommendationsCache.delete(key);
+      cached = undefined;
+    }
+  }
   if (cached && cached.sourceSig === sourceSig) {
     cached.lastAccess = Date.now();
-    return { entry: cached, cache: 'hit' };
+    return { entry: cached, cache: clockRefreshed ? 'hit-time' : 'hit' };
   }
   // Content-hash gate (parity with the dataset route's #182 stat-gate). The
   // sourceSignature() above is a CHEAP mtime fingerprint that an active agent
   // session trips on nearly every request (each transcript write bumps the
-  // project-dir mtime) — but the recommendation BODY only changes when the
-  // ingested CONTENT changes. ingest() is incremental (~200ms warm), so when it
-  // reports the same contentHash the cached recs are byte-identical: restamp the
-  // entry's signature and serve it as a hit, skipping the multi-second
-  // assemble+detector rebuild entirely. This is what keeps the dataset route at
-  // ~0.4s under the same churn while the un-gated recs route paid the full
-  // recompute every request (#2184).
+  // project-dir mtime). While the entry's time-sensitive external-guidance
+  // labels remain valid, the recommendation BODY only changes when the ingested
+  // CONTENT changes. ingest() is incremental (~200ms warm), so when it reports
+  // the same contentHash the cached recs are byte-identical: restamp the entry's
+  // signature and serve it as a hit, skipping the multi-second assemble+detector
+  // rebuild entirely. This is what keeps the dataset route at ~0.4s under the
+  // same churn while the un-gated recs route paid the full recompute every
+  // request (#2184).
   if (cached) {
     const stats = api.ingest();
     if (stats.contentHash === cached.contentHash) {
@@ -2610,6 +2732,18 @@ async function recommendationsResponseCache(
     build.lastAccess = Date.now();
   }
   const entry = await build.promise;
+  const completedAt = Date.now();
+  if (
+    !entry.guidanceCacheValidity ||
+    !externalGuidanceCacheValidityContains(entry.guidanceCacheValidity, completedAt)
+  ) {
+    if (!redecorateCachedGuidanceLabels(entry, completedAt)) {
+      state.recommendationsCache.delete(key);
+      throw new Error(
+        'Recommendation guidance cache metadata was invalid after rebuild'
+      );
+    }
+  }
   return { entry, cache: 'miss' };
 }
 
@@ -7424,8 +7558,8 @@ function enterpriseSecurityPosture() {
           `${DASHBOARD_RECOMMENDATIONS_CACHE_MAX_ENTRIES} response(s) per dataset state`,
         'DASHBOARD_RECOMMENDATIONS_CACHE_MAX_ENTRIES bounds ' +
           '/api/recommendations.json response cache cardinality per global or ' +
-          'scoped dataset state. Source-signature checks preserve freshness, ' +
-          'and per-key single-flight builds prevent concurrent org/admin ' +
+          'scoped dataset state. Source-signature checks and two-sided guidance ' +
+          'clock validity preserve freshness, and per-key single-flight builds prevent concurrent org/admin ' +
           'traffic from rerunning ingest and recommendation assembly for the same dataset.'
       ),
       enterpriseSecurityControl(
@@ -8718,9 +8852,9 @@ async function handleRecommendationsJson(req, res) {
   // #330: `?project=<path>` narrows recs to that project; absent → global
   // list, byte-identical to pre-#330. The filtered body is a different
   // string per project, so the ETag derived below stays correct per slice.
-  // Recs are deterministic in the dataset (no per-request timestamp), so the
-  // serialized body is a stable ETag source — If-None-Match 304s work as on
-  // the dataset route.
+  // Recs are deterministic within their external-guidance clock interval. A
+  // boundary crossing redecorates the cached JSON and recomputes this ETag, so
+  // If-None-Match never turns a changed current/as-of label into a false 304.
   res.setHeader('X-Source', 'live');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', revalidatingLiveCacheControl());

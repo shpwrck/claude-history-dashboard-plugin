@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   extractBrevityFacts,
+  extractPromptLibraryFacts,
   extractUsageLimitFacts,
   GUIDANCE_ARTICLES,
   guidanceArticleById,
@@ -68,6 +69,9 @@ describe('guidance registry resolution (#1302 regression)', () => {
   it('guidanceArticleById resolves registered ids and rejects unknown ones', () => {
     expect(guidanceArticleById('anthropic-usage-limits')?.url).toContain(
       'support.claude.com'
+    );
+    expect(guidanceArticleById('anthropic-claude-code-prompt-library')?.url).toBe(
+      'https://code.claude.com/docs/en/prompt-library'
     );
     expect(guidanceArticleById('nope')).toBeUndefined();
   });
@@ -190,5 +194,26 @@ describe('extractBrevityFacts (inline fixtures, decoupled from scraped prose)', 
     expect(extractBrevityFacts('There are four dimensions to consider.')).toEqual(
       {}
     );
+  });
+});
+
+describe('extractPromptLibraryFacts (#2309)', () => {
+  it('extracts all six first-party prompt meta-patterns', () => {
+    expect(extractPromptLibraryFacts(
+      'Describe the outcome, not the steps. Give it a way to check its own work. ' +
+      'Point at a reference. State the measurable target. Give it the artifact. ' +
+      'Say how you want the answer.'
+    )).toEqual({
+      describeOutcome: true,
+      includeVerification: true,
+      pointAtReference: true,
+      stateMeasurableTarget: true,
+      provideArtifact: true,
+      requestAnswerFormat: true,
+    });
+  });
+
+  it('extracts nothing from unrelated prose', () => {
+    expect(extractPromptLibraryFacts('Install Claude Code.')).toEqual({});
   });
 });
