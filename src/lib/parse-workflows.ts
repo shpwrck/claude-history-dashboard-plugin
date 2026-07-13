@@ -28,6 +28,7 @@ export interface WorkflowAgent {
   toolCalls: number | null;
   promptPreview: string | null;
   resultPreview: string | null;
+  error: string | null;
 }
 
 /** A declared phase of a workflow (from the manifest's `phases[]`). */
@@ -69,6 +70,7 @@ export interface RawWorkflowProgress {
   toolCalls?: number | null;
   promptPreview?: string | null;
   resultPreview?: string | null;
+  error?: string | null;
   title?: string | null;
 }
 export interface RawWorkflowRun {
@@ -95,6 +97,10 @@ function num(v: unknown): number | null {
 function str(v: unknown): string | null {
   return typeof v === 'string' ? v : null;
 }
+const PREVIEW_CAP = 280;
+function preview(v: unknown): string | null {
+  return str(v)?.slice(0, PREVIEW_CAP) ?? null;
+}
 
 function toAgent(e: RawWorkflowProgress): WorkflowAgent {
   return {
@@ -109,8 +115,9 @@ function toAgent(e: RawWorkflowProgress): WorkflowAgent {
     durationMs: num(e.durationMs),
     tokens: num(e.tokens),
     toolCalls: num(e.toolCalls),
-    promptPreview: str(e.promptPreview),
-    resultPreview: str(e.resultPreview),
+    promptPreview: preview(e.promptPreview),
+    resultPreview: preview(e.resultPreview),
+    error: preview(e.error),
   };
 }
 

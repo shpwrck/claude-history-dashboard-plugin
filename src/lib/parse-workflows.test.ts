@@ -23,9 +23,9 @@ const RUN: WorkflowRun = {
   sessionId: 's',
   phases: [],
   agents: [
-    { index: 1, label: 'a', phaseIndex: 1, phaseTitle: 'Research', model: null, state: 'done', agentType: null, startedAt: 1000, durationMs: 200, tokens: 100, toolCalls: 3, promptPreview: null, resultPreview: null },
-    { index: 2, label: 'b', phaseIndex: 1, phaseTitle: 'Research', model: null, state: 'done', agentType: null, startedAt: 1100, durationMs: 300, tokens: 200, toolCalls: 6, promptPreview: null, resultPreview: null },
-    { index: 3, label: 'c', phaseIndex: 2, phaseTitle: 'Verify', model: null, state: 'cached', agentType: null, startedAt: null, durationMs: null, tokens: null, toolCalls: null, promptPreview: null, resultPreview: null },
+    { index: 1, label: 'a', phaseIndex: 1, phaseTitle: 'Research', model: null, state: 'done', agentType: null, startedAt: 1000, durationMs: 200, tokens: 100, toolCalls: 3, promptPreview: null, resultPreview: null, error: null },
+    { index: 2, label: 'b', phaseIndex: 1, phaseTitle: 'Research', model: null, state: 'done', agentType: null, startedAt: 1100, durationMs: 300, tokens: 200, toolCalls: 6, promptPreview: null, resultPreview: null, error: null },
+    { index: 3, label: 'c', phaseIndex: 2, phaseTitle: 'Verify', model: null, state: 'cached', agentType: null, startedAt: null, durationMs: null, tokens: null, toolCalls: null, promptPreview: null, resultPreview: null, error: null },
   ],
 };
 
@@ -120,6 +120,31 @@ describe('parseWorkflows', () => {
     expect(cached.toolCalls).toBeNull();
     expect(cached.durationMs).toBeNull();
     expect(cached.agentType).toBeNull();
+    expect(cached.error).toBeNull();
+  });
+
+  it('preserves and bounds externally supplied workflow-agent error text', () => {
+    const longText = 'x'.repeat(400);
+    const parsed = parseWorkflowRun({
+      runId: 'wf_error',
+      workflowProgress: [{
+        type: 'workflow_agent',
+        state: 'error',
+        promptPreview: longText,
+        resultPreview: longText,
+        error: longText,
+      }],
+    });
+
+    expect(parsed!.agents[0].promptPreview).toBe(longText.slice(0, 280));
+    expect(parsed!.agents[0].resultPreview).toBe(longText.slice(0, 280));
+    expect(parsed!.agents[0].error).toBe(longText.slice(0, 280));
+
+    const malformed = parseWorkflowRun({
+      runId: 'wf_malformed_error',
+      workflowProgress: [{ error: 42 as unknown as string }],
+    });
+    expect(malformed!.agents[0].error).toBeNull();
   });
 
   it('drops a run with no runId', () => {

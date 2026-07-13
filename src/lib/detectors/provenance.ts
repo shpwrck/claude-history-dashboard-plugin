@@ -44,6 +44,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'maintenance.doc-hygiene',
   'maintenance.skill-hook-integrity',
   'reliability.discovery-freshness',
+  'reliability.workflow-ratelimit-burst',
   'workflow.procedural-memory',
   'workflow.human-input-leverage',
   'workflow.value-of-agent-handoff',

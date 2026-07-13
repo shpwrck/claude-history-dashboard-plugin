@@ -2071,6 +2071,24 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── reliability.workflow-ratelimit-burst (#2305): a fan-out lost >= 3 agents
+  // to plan/rate-limit exhaustion inside one run.
+  {
+    const rlAgent = (i: number) => ({
+      index: i, label: null, phaseIndex: null, phaseTitle: null, model: null,
+      state: 'error', agentType: null, startedAt: null, durationMs: null,
+      tokens: 41_000, toolCalls: null, promptPreview: null,
+      resultPreview: "You've hit your session limit.",
+    });
+    const burstRun = {
+      runId: 'wf_burst', workflowName: 'adversarial-review', status: 'failed',
+      startTime: 1, durationMs: 1, agentCount: 8, totalTokens: 400_000,
+      totalToolCalls: 1, defaultModel: null, sessionId: 'f8f7788b', phases: [],
+      agents: [rlAgent(0), rlAgent(1), rlAgent(2)],
+    };
+    out.push({ now, input: bankBase({ workflows: [burstRun] as unknown as RecommendationInput['workflows'] }) });
+  }
+
   // ── workflow.unused-installed-subagents (#633) ─────────────────────────
   {
     const sub = (id: string) => ({ id, scope: 'user', path: `/home/u/.claude/agents/${id}` });

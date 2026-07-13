@@ -445,6 +445,26 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     } as unknown as RecommendationInput['liveConfig'];
     return { input: baseInput({ liveConfig }), now: 0 };
   },
+  'reliability.workflow-ratelimit-burst': () => {
+    // One Workflow run that lost 3 agents to plan-limit exhaustion ("You've hit
+    // your session limit") → a rate-limit failure burst with cited
+    // parse-workflows provenance.
+    const rlAgent = (i: number) => ({
+      index: i, label: null, phaseIndex: null, phaseTitle: null, model: null,
+      state: 'error', agentType: null, startedAt: null, durationMs: null,
+      tokens: 41_000, toolCalls: null, promptPreview: null,
+      resultPreview: "You've hit your session limit.",
+    });
+    const workflows = [
+      {
+        runId: 'wf_burst', workflowName: 'adversarial-review', status: 'failed',
+        startTime: 1, durationMs: 1, agentCount: 8, totalTokens: 400_000,
+        totalToolCalls: 1, defaultModel: null, sessionId: 'f8f7788b', phases: [],
+        agents: [rlAgent(0), rlAgent(1), rlAgent(2)],
+      },
+    ] as unknown as RecommendationInput['workflows'];
+    return { input: baseInput({ workflows }), now: 0 };
+  },
   'workflow.procedural-memory': () => {
     // The same contiguous 3-step Bash procedure recurs across 3 sessions with a
     // present-but-empty skill inventory (liveConfig is REQUIRED — the finding

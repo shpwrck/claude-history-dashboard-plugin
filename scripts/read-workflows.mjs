@@ -102,10 +102,9 @@ function trimWorkflowProgressEntry(e) {
     durationMs: boundedScalar(e.durationMs),
     tokens: boundedScalar(e.tokens),
     toolCalls: boundedScalar(e.toolCalls),
-    promptPreview:
-      typeof e.promptPreview === 'string' ? e.promptPreview.slice(0, PREVIEW_CAP) : null,
-    resultPreview:
-      typeof e.resultPreview === 'string' ? e.resultPreview.slice(0, PREVIEW_CAP) : null,
+    promptPreview: boundedString(e.promptPreview, null, PREVIEW_CAP),
+    resultPreview: boundedString(e.resultPreview, null, PREVIEW_CAP),
+    error: boundedString(e.error, null, PREVIEW_CAP),
   };
 }
 

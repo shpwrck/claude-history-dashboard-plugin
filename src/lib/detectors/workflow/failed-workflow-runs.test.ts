@@ -6,7 +6,7 @@ import type { WorkflowRun, WorkflowAgent } from '../../parse-workflows';
 const agent = (state: string | null): WorkflowAgent => ({
   index: 0, label: null, phaseIndex: null, phaseTitle: null, model: null,
   state, agentType: null, startedAt: null, durationMs: null, tokens: null,
-  toolCalls: null, promptPreview: null, resultPreview: null,
+  toolCalls: null, promptPreview: null, resultPreview: null, error: null,
 });
 
 const run = (over: Partial<WorkflowRun>): WorkflowRun => ({

@@ -1179,7 +1179,11 @@ export const PARSER_SIG_VERSION = 'v4';
 // 'secrets-at-rest-v10' bump that forces the session_blob reparse — turn over
 // this downstream cache so a persisted v12 body (without secretsAtRest) is never
 // accepted as current and the detector stays inert on deployed data.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 13;
+// v14 (#2541): parseWorkflows now preserves bounded workflow-agent `error`
+// text in normalized `agents[]`, feeding the workflow rate-limit detector.
+// Workflow manifests can be unchanged while a persisted v13 assembled body
+// still omits that field, so turn over the downstream dataset cache.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 14;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

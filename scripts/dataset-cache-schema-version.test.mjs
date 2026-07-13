@@ -33,7 +33,11 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
   try {
     const ingest = await loadIngest(home);
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
-    assert.ok(ingest.DATASET_ASSEMBLY_SCHEMA_VERSION > 0);
+    assert.equal(
+      ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
+      14,
+      'normalized workflow-agent error output must turn over persisted v13 datasets'
+    );
 
     const key = ingest.datasetAssemblySchemaKey();
     // The key folds in BOTH the dataset-assembly schema version AND the per-session
@@ -44,6 +48,11 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       key,
       `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`
+    );
+    assert.notEqual(
+      key,
+      `dataset-schema:v13:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-error-field dataset cache key must not remain current'
     );
     assert.match(
       ingest.sourceSignature(),

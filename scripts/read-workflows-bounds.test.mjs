@@ -71,6 +71,34 @@ function projectedWorkflowFixture() {
   return { root, projectsRoot: join(root, 'projects') };
 }
 
+function projectedWorkflowErrorFixture() {
+  const root = join(tmpdir(), `chd-workflow-error-projection-${randomUUID()}`);
+  const workflows = join(root, 'projects', 'proj-a', 'sess-a', 'workflows');
+  const longText = 'x'.repeat(400);
+  mkdirSync(workflows, { recursive: true });
+  writeFileSync(
+    join(workflows, 'wf_error.json'),
+    JSON.stringify({
+      runId: 'wf-error',
+      workflowName: 'error-run',
+      status: 'failed',
+      startTime: 1767225600000,
+      workflowProgress: [
+        {
+          type: 'workflow_agent',
+          index: 1,
+          state: 'error',
+          promptPreview: longText,
+          resultPreview: longText,
+          error: longText,
+        },
+        { type: 'workflow_agent', index: 2, state: 'error', error: { nested: longText } },
+      ],
+    })
+  );
+  return { root, projectsRoot: join(root, 'projects') };
+}
+
 test('readWorkflows and readWorkflowsSync honor the workflow run cap', async () => {
   const fx = workflowFixture();
   const origCap = process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
@@ -128,6 +156,26 @@ test('readWorkflows and readWorkflowsSync bound projected workflow payloads', as
     else process.env.DASHBOARD_WORKFLOW_PROGRESS_MAX_ENTRIES = origProgressCap;
     if (origFieldCap === undefined) delete process.env.DASHBOARD_WORKFLOW_FIELD_MAX_CHARS;
     else process.env.DASHBOARD_WORKFLOW_FIELD_MAX_CHARS = origFieldCap;
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test('readWorkflows and readWorkflowsSync preserve bounded workflow-agent errors', async () => {
+  const fx = projectedWorkflowErrorFixture();
+  try {
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+
+    for (const result of [
+      await workflows.readWorkflows(fx.projectsRoot),
+      workflows.readWorkflowsSync(fx.projectsRoot),
+    ]) {
+      const progress = result.runs[0].workflowProgress[0];
+      assert.equal(progress.promptPreview.length, 280);
+      assert.equal(progress.resultPreview.length, 280);
+      assert.equal(progress.error.length, 280);
+      assert.equal(result.runs[0].workflowProgress[1].error, null);
+    }
+  } finally {
     rmSync(fx.root, { recursive: true, force: true });
   }
 });

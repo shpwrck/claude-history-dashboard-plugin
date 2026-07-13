@@ -138,6 +138,7 @@ import { detector as passiveWaitStall } from './reliability/passive-wait-stall';
 import { detector as cwdDriftExecution } from './reliability/cwd-drift-execution';
 import { detector as staleStateAssertion } from './reliability/stale-state-assertion';
 import { detector as discoveryFreshness } from './reliability/discovery-freshness';
+import { detector as workflowRatelimitBurst } from './reliability/workflow-ratelimit-burst';
 
 // ── SPEED ───────────────────────────────────────────────────────────────
 // The clock (ADR 0006) — wall-clock/latency levers.
@@ -470,6 +471,17 @@ export const DETECTORS: Detector[] = [
   // points at a removed bundled path. Point-in-time ("as of ingest") wording;
   // recommend-only. Dark on a liveConfig-free dataset (SPA/upload).
   skillHookIntegrity,
+
+  // ── #2305 (epic #2199) — workflow rate-limit failure bursts ────────────────
+  // The rate-limit-cause sibling of workflow.failed-workflow-runs: >= 3 agent
+  // failures in ONE Workflow run whose error text matches plan/rate-limit
+  // exhaustion ("hit your session limit", "usage limit", 429-style). Warning for
+  // a small burst; critical when a large fraction of a big fan-out died (the
+  // observed 68-agent/24-failure incident). Points at the pre-launch window
+  // gate + fan-out shape caps + completed agent transcript salvage from
+  // subagents/workflows/<runId>/agent-*.jsonl rather than per-agent retry.
+  // Reads `workflows`; dark on the SPA dataset.
+  workflowRatelimitBurst,
 ];
 
 /**
