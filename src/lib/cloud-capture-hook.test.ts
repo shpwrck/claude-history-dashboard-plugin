@@ -476,11 +476,95 @@ describe('cloud-capture hook (#689)', () => {
       expect(scrubCount(countFile)).toBe(2);
 
       // Change the scrubber's CONTENT. Both cache entries must now miss and
-      // re-scrub even though the sources are byte-identical.
+      // re-scrub even though the sources are byte-identical. The two existing
+      // published destinations are also re-scrubbed before comparison.
       appendFileSync(scriptCopy, '\n# new redaction rule added here\n');
       const afterEdit = runCopy();
       expect(afterEdit.status, afterEdit.stderr).toBe(0);
-      expect(scrubCount(countFile)).toBe(4);
+      expect(scrubCount(countFile)).toBe(6);
+    });
+  });
+
+  it('#2436: re-scrubs a pre-state fuller hub transcript after a tightening shrinks output', () => {
+    withTemp('cloud-capture-published-scrub-state-', (dir) => {
+      const source = join(dir, 'source');
+      initSourceRepo(source);
+      const hub = initBareHub(dir);
+      const secret = `PRIVATE-${'q'.repeat(40)}`;
+      const transcript = writeTranscript(
+        source,
+        `first turn\nsecond turn preserves fuller context around ${secret}`
+      );
+
+      // Run a private copy so this test can tighten the scrubber between runs.
+      const scriptCopy = join(dir, 'publish-claude.sh');
+      copyFileSync(hookScript, scriptCopy);
+      chmodSync(scriptCopy, 0o755);
+      const runCopy = () =>
+        spawnSync('bash', [scriptCopy], {
+          cwd: source,
+          input: JSON.stringify({
+            session_id: 'session-1',
+            transcript_path: transcript,
+            hook_event_name: 'Stop',
+          }),
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ...scrubbedHookEnv,
+            CLAUDE_CODE_REMOTE: 'true',
+            CLAUDE_HUB_REMOTE: `file://${hub}`,
+            CLAUDE_HUB_BRANCH: 'main',
+            CLAUDE_PROJECT_DIR: source,
+          },
+        });
+
+      const first = runCopy();
+      expect(first.status, first.stderr).toBe(0);
+      const before = hubFile(hub, 'projects/acme-app/session-1.jsonl');
+      expect(before).toContain('second turn preserves fuller context');
+      expect(before).toContain(secret);
+      const publishStateDir = join(
+        source,
+        '.git/cloud-capture-hub/.git/cloud-capture-publish-scrub-state/v1'
+      );
+      expect(existsSync(publishStateDir)).toBe(true);
+
+      // Simulate rollout over a pre-state hub (or loss of the local metadata
+      // cache): the fuller published bytes remain, but their scrubber state is
+      // no longer known and must not be blessed without a fresh re-scrub.
+      rmSync(publishStateDir, { recursive: true, force: true });
+      expect(existsSync(publishStateDir)).toBe(false);
+
+      // The local source is now stale/shorter. Tighten the copied scrubber with
+      // a rule whose replacement is shorter than the secret, reproducing the
+      // old keep-larger privacy trap without touching the repository script.
+      writeFileSync(transcript, `first turn ${secret}\n`);
+      const finalRule =
+        "    -e 's#AIza[A-Za-z0-9_-]{30,}#AIza-REDACTED#g'\n";
+      const privateRule =
+        "    -e 's#PRIVATE-[A-Za-z0-9_-]{24,}#PRIVATE-REDACTED#g' \\\n";
+      const originalScript = readFileSync(scriptCopy, 'utf8');
+      expect(originalScript).toContain(finalRule);
+      writeFileSync(
+        scriptCopy,
+        originalScript.replace(finalRule, privateRule + finalRule)
+      );
+
+      const tightened = runCopy();
+      expect(tightened.status, tightened.stderr).toBe(0);
+      expect(tightened.stderr).toContain(
+        're-scrubbed existing acme-app/session-1.jsonl (scrubber state missing or changed)'
+      );
+      expect(tightened.stderr).toContain(
+        'kept larger existing acme-app/session-1.jsonl'
+      );
+
+      const after = hubFile(hub, 'projects/acme-app/session-1.jsonl');
+      expect(after.length).toBeLessThan(before.length);
+      expect(after).toContain('second turn preserves fuller context');
+      expect(after).toContain('PRIVATE-REDACTED');
+      expect(after).not.toContain(secret);
     });
   });
 
@@ -1361,7 +1445,9 @@ describe('cloud-capture local/sync hardening (#1426)', () => {
       });
 
       expect(result.status, result.stderr).toBe(0);
-      expect(scrubCount(countFile)).toBe(2);
+      // Parent + subagent source scrubs, plus one fail-closed re-scrub of the
+      // racing writer's fuller parent (it has no local publish-state record).
+      expect(scrubCount(countFile)).toBe(3);
       // The race fired (first push was rejected) ...
       expect(existsSync(join(hub, 'race-done'))).toBe(true);
       // ... and the retry did NOT resurrect the stale smaller snapshot over
