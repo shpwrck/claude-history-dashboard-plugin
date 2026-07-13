@@ -53,6 +53,12 @@ export type GapNoiseClass = (typeof GAP_NOISE_CLASSES)[number];
 /** Per-run observable signals the six classifiers decide on. */
 export interface GapExclusionSignals {
   runId: string;
+  /**
+   * Noise classes whose required source data was actually available. Omitted
+   * means all classes are evaluable (keeps direct classifier callers simple);
+   * the dataset adapter always supplies the precise subset.
+   */
+  evaluatedNoiseClasses?: GapNoiseClass[];
   durationMs: number;
   /** Sum of inter-entry gaps >= IDLE_GAP_MS (human absence proxy). */
   idleMs: number;
@@ -141,9 +147,11 @@ interface ClassFinding {
 /** Run the six classifiers; returns the classes that fired with evidence. */
 function detectNoise(s: GapExclusionSignals): ClassFinding[] {
   const findings: ClassFinding[] = [];
+  const evaluated = new Set(s.evaluatedNoiseClasses ?? GAP_NOISE_CLASSES);
 
   const idleShare = s.durationMs > 0 ? s.idleMs / s.durationMs : 0;
   if (
+    evaluated.has('human-waiting') &&
     s.durationMs >= HUMAN_WAITING_MIN_DURATION_MS &&
     idleShare >= HUMAN_WAITING_IDLE_SHARE
   ) {
@@ -154,6 +162,7 @@ function detectNoise(s: GapExclusionSignals): ClassFinding[] {
   }
 
   if (
+    evaluated.has('exploration-design-debate') &&
     s.userTurns >= EXPLORATION_MIN_USER_TURNS &&
     s.mutatingToolCalls === 0 &&
     s.toolCalls <= s.userTurns
@@ -166,6 +175,7 @@ function detectNoise(s: GapExclusionSignals): ClassFinding[] {
 
   const failureSignals = s.apiErrors + s.toolErrors;
   if (
+    evaluated.has('external-blocker') &&
     s.externalApiErrors >= EXTERNAL_BLOCKER_MIN_ERRORS &&
     s.externalApiErrors * 2 >= failureSignals
   ) {
@@ -175,14 +185,20 @@ function detectNoise(s: GapExclusionSignals): ClassFinding[] {
     });
   }
 
-  if (s.churnMarkers >= CHURN_MIN_MARKERS) {
+  if (
+    evaluated.has('requirement-churn') &&
+    s.churnMarkers >= CHURN_MIN_MARKERS
+  ) {
     findings.push({
       noiseClass: 'requirement-churn',
       detail: `${s.churnMarkers} direction-changing user turns`,
     });
   }
 
-  if (s.totalTokens >= HARNESS_OVERHEAD_MIN_TOKENS) {
+  if (
+    evaluated.has('harness-overhead') &&
+    s.totalTokens >= HARNESS_OVERHEAD_MIN_TOKENS
+  ) {
     const cacheShare = s.cacheReadTokens / s.totalTokens;
     const outputShare = s.outputTokens / s.totalTokens;
     if (
@@ -197,6 +213,7 @@ function detectNoise(s: GapExclusionSignals): ClassFinding[] {
   }
 
   if (
+    evaluated.has('baseline-build-test-failure') &&
     s.baselineFailureToolErrors > 0 &&
     s.baselineFailureToolErrors * 2 >= s.toolErrors
   ) {
@@ -209,6 +226,29 @@ function detectNoise(s: GapExclusionSignals): ClassFinding[] {
   return findings;
 }
 
+/** Verdict used when no noise class has enough observable data to evaluate. */
+const NO_SIGNALS_REASON =
+  'kept: no exclusion signals available for this run — noise classes could not be evaluated; audit manually';
+
+function evaluatedClasses(s: GapExclusionSignals): GapNoiseClass[] {
+  const supplied = s.evaluatedNoiseClasses;
+  return supplied === undefined
+    ? [...GAP_NOISE_CLASSES]
+    : GAP_NOISE_CLASSES.filter((noiseClass) => supplied.includes(noiseClass));
+}
+
+function coverageSuffix(evaluated: GapNoiseClass[]): string {
+  if (evaluated.length === GAP_NOISE_CLASSES.length) return '';
+  const unavailable = GAP_NOISE_CLASSES.filter(
+    (noiseClass) => !evaluated.includes(noiseClass)
+  );
+  return (
+    `; evaluated ${evaluated.length}/${GAP_NOISE_CLASSES.length} classes` +
+    ` (${evaluated.join(', ') || 'none'})` +
+    `; not evaluated: ${unavailable.join(', ') || 'none'}`
+  );
+}
+
 /**
  * Classify one run. Filtered when any noise class fires; kept otherwise. The
  * reason is always populated and bounded so it survives the eval-result
@@ -217,11 +257,20 @@ function detectNoise(s: GapExclusionSignals): ClassFinding[] {
 export function classifyGapExclusion(
   signals: GapExclusionSignals
 ): GapExclusionVerdict {
+  const evaluated = evaluatedClasses(signals);
+  if (evaluated.length === 0) {
+    return {
+      runId: signals.runId,
+      disposition: 'kept',
+      noiseClasses: [],
+      reason: NO_SIGNALS_REASON,
+    };
+  }
   const findings = detectNoise(signals);
   if (findings.length > 0) {
-    const reason = findings
-      .map((f) => `${f.noiseClass}: ${f.detail}`)
-      .join('; ');
+    const reason =
+      findings.map((f) => `${f.noiseClass}: ${f.detail}`).join('; ') +
+      coverageSuffix(evaluated);
     return {
       runId: signals.runId,
       disposition: 'filtered',
@@ -230,9 +279,13 @@ export function classifyGapExclusion(
     };
   }
   const keptReason =
-    `kept: no human/process noise detected across ${GAP_NOISE_CLASSES.length} classes ` +
-    `(${signals.userTurns} user turns, ${signals.toolCalls} tool calls, ` +
-    `${signals.apiErrors} API errors, idle ${Math.round(signals.idleMs / 1000)}s)`;
+    evaluated.length === GAP_NOISE_CLASSES.length
+      ? `kept: no human/process noise detected across ${GAP_NOISE_CLASSES.length} classes ` +
+        `(${signals.userTurns} user turns, ${signals.toolCalls} tool calls, ` +
+        `${signals.apiErrors} API errors, idle ${Math.round(signals.idleMs / 1000)}s)`
+      : `kept: no human/process noise detected in the available signals` +
+        coverageSuffix(evaluated) +
+        '; audit the unevaluated classes manually';
   return {
     runId: signals.runId,
     disposition: 'kept',
@@ -240,10 +293,6 @@ export function classifyGapExclusion(
     reason: keptReason.slice(0, MAX_REASON_LEN),
   };
 }
-
-/** Verdict used when a candidate has no observable signals to judge on. */
-const NO_SIGNALS_REASON =
-  'kept: no exclusion signals available for this run — noise classes could not be evaluated; audit manually';
 
 /**
  * Classify every gap candidate against its run's signals. Every candidate gets
@@ -390,9 +439,25 @@ export function buildGapExclusionSignals(
           }).length;
 
     const sessionApiErrors = apiErrorsBySession.get(sd.sessionId) ?? [];
+    const evaluatedSet = new Set<GapNoiseClass>(['harness-overhead']);
+    if (tl) evaluatedSet.add('human-waiting');
+    if (tl && input.toolData !== undefined) {
+      evaluatedSet.add('exploration-design-debate');
+    }
+    if (input.apiErrors !== undefined) {
+      evaluatedSet.add('external-blocker');
+    }
+    if (tl && !tl.slim) evaluatedSet.add('requirement-churn');
+    if (baselinePatterns.length > 0 && input.toolData !== undefined) {
+      evaluatedSet.add('baseline-build-test-failure');
+    }
+    const evaluatedNoiseClasses = GAP_NOISE_CLASSES.filter((noiseClass) =>
+      evaluatedSet.has(noiseClass)
+    );
 
     return {
       runId: sd.sessionId,
+      evaluatedNoiseClasses,
       durationMs: durationMsOf(tl),
       idleMs: idleMsOf(tl),
       userTurns: userEntries.length,

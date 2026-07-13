@@ -156,6 +156,15 @@ describe('classifyGapExclusion (six noise classes)', () => {
   it('covers exactly the six classes the epic names', () => {
     expect(GAP_NOISE_CLASSES).toHaveLength(6);
   });
+
+  it('keeps a no-signal run for manual audit without claiming classifiers ran', () => {
+    const verdict = classifyGapExclusion(
+      signals({ evaluatedNoiseClasses: [] })
+    );
+    expect(verdict.disposition).toBe('kept');
+    expect(verdict.reason).toContain('no exclusion signals available');
+    expect(verdict.reason).toContain('audit manually');
+  });
 });
 
 describe('classifyGapExclusions / partitionGapCandidates', () => {
@@ -305,6 +314,7 @@ describe('buildGapExclusionSignals (adapter)', () => {
     expect(s.totalTokens).toBe(9_500);
     expect(s.cacheReadTokens).toBe(8_000);
     expect(s.outputTokens).toBe(500);
+    expect(s.evaluatedNoiseClasses).toEqual(GAP_NOISE_CLASSES);
   });
 
   it('reads zero churn markers off slim timelines (summary stripped)', () => {
@@ -324,15 +334,63 @@ describe('buildGapExclusionSignals (adapter)', () => {
     const [s] = buildGapExclusionSignals({ tokenData, timelines });
     expect(s.churnMarkers).toBe(0);
     expect(s.userTurns).toBe(2);
+    expect(s.evaluatedNoiseClasses).toEqual([
+      'human-waiting',
+      'harness-overhead',
+    ]);
   });
 
-  it('produces signals for sessions with no timeline/tool/error data at all', () => {
+  it('filters API-only external blockers while treating absent tool data as zero errors', () => {
+    const [s] = buildGapExclusionSignals({
+      tokenData: [tokenSession('api-only', [entry('claude-haiku-4-5-20251001')])],
+      apiErrors: [
+        {
+          sessionId: 'api-only',
+          timestamp: '2026-06-01T00:00:00Z',
+          summary: 'rate limited',
+          status: 429,
+        },
+        {
+          sessionId: 'api-only',
+          timestamp: '2026-06-01T00:00:01Z',
+          summary: 'provider overloaded',
+          status: 529,
+        },
+        {
+          sessionId: 'api-only',
+          timestamp: '2026-06-01T00:00:02Z',
+          summary: 'connection reset',
+          causeCode: 'ECONNRESET',
+        },
+      ] as ApiErrorEvent[],
+    });
+
+    expect(s.toolCalls).toBe(0);
+    expect(s.toolErrors).toBe(0);
+    expect(s.apiErrors).toBe(3);
+    expect(s.externalApiErrors).toBe(3);
+    expect(s.evaluatedNoiseClasses).toEqual([
+      'external-blocker',
+      'harness-overhead',
+    ]);
+    const verdict = classifyGapExclusion(s);
+    expect(verdict.disposition).toBe('filtered');
+    expect(verdict.noiseClasses).toEqual(['external-blocker']);
+    expect(verdict.reason).toContain('3/3 API errors');
+  });
+
+  it('reports partial coverage for token-only sessions instead of claiming all six checks ran', () => {
     const [s] = buildGapExclusionSignals({
       tokenData: [tokenSession('bare', [entry('claude-sonnet-4-6')])],
     });
     expect(s.runId).toBe('bare');
     expect(s.durationMs).toBe(0);
     expect(s.userTurns).toBe(0);
-    expect(classifyGapExclusion(s).disposition).toBe('kept');
+    expect(s.evaluatedNoiseClasses).toEqual(['harness-overhead']);
+    const verdict = classifyGapExclusion(s);
+    expect(verdict.disposition).toBe('kept');
+    expect(verdict.reason).toContain('evaluated 1/6 classes');
+    expect(verdict.reason).toContain('not evaluated: human-waiting');
+    expect(verdict.reason).toContain('baseline-build-test-failure');
   });
 });
