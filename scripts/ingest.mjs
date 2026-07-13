@@ -921,10 +921,21 @@ const { artifactPathFor, unwrapPersistedRepoMap } = await import(join(LIB, 'repo
 // It owns the settings.json validator wiring (#167) and the settings/MCP/
 // plugins/resources readers; ingest.mjs just calls assembleLiveConfig().
 const configLoaderModule = await import(join(LIB, 'config-loader.ts'));
-const { assembleLiveConfig, readTextFileCappedSync } = configLoaderModule;
+const {
+  assembleLiveConfig,
+  readTextFileCappedSync,
+  hostEnvironmentObservation,
+  hostEnvironmentObservationSignature,
+} = configLoaderModule;
 export const CONFIG_FILE_MAX_BYTES = configLoaderModule.CONFIG_FILE_MAX_BYTES;
 export const CONFIG_RESOURCE_MAX_ENTRIES =
   configLoaderModule.CONFIG_RESOURCE_MAX_ENTRIES;
+// Capture once: server-side scoped imports temporarily mutate process.env, and
+// the content hash must use the exact same launch snapshot as assembly.
+const LIVE_CONFIG_ENVIRONMENT_OBSERVATION = SCOPED_INGEST
+  ? undefined
+  : hostEnvironmentObservation(process.env);
+
 const GITHUB_REVIEW_SYNC_CONFIG = parseGitHubReviewSyncConfig(process.env, {
   cachePath: REVIEW_EVENTS_CACHE,
 });
@@ -1183,7 +1194,11 @@ export const PARSER_SIG_VERSION = 'v4';
 // text in normalized `agents[]`, feeding the workflow rate-limit detector.
 // Workflow manifests can be unchanged while a persisted v13 assembled body
 // still omits that field, so turn over the downstream dataset cache.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 14;
+// v15 (#2421): liveConfig.settingsHealth now serializes the names-only host
+// environment observation plus findings from both global and local settings,
+// each with per-file provenance. Persisted v14 blobs lack those fields and
+// must not be served during stale-while-revalidate startup.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 15;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2329,6 +2344,12 @@ export function ingest() {
   // dataset cache rebuild on the next request. Tolerant: missing paths just
   // contribute their stat-failure placeholder, identical across calls.
   hash.update('liveConfig\n');
+  hash.update('host-environment-observation\n');
+  hash.update(hostEnvironmentObservationSignature(
+    LIVE_CONFIG_ENVIRONMENT_OBSERVATION,
+    SCOPED_INGEST
+  ));
+  hash.update('\n');
   hashFileSig(SETTINGS_GLOBAL, hash);
   hashFileSig(SETTINGS_LOCAL, hash);
   hashFileSig(CLAUDE_MD_GLOBAL, hash);
@@ -2814,6 +2835,9 @@ function assembleDatasetCore() {
     homeDir: CLAUDE_HOME,
     scoped: SCOPED_INGEST,
     projectRoots: liveConfigRoots,
+    // Enterprise scoped ingest must not expose operator environment names to
+    // tenant datasets. Single-user local mode observes names only.
+    environment: LIVE_CONFIG_ENVIRONMENT_OBSERVATION,
   });
 
   // Shadow-calls experiment ledger (epic #513). Optional file; absent/malformed

@@ -50,6 +50,18 @@ if [ "$REFRESH" -eq 1 ]; then
 fi
 
 COMPOSE=("$ENGINE" compose -f "$DIR/docker-compose.yml" -f "$DIR/docker-compose.local.yml")
+# Pass variable NAMES only into the container so settings diagnostics can match
+# `/doctor` without leaking host environment values. This snapshot describes
+# the environment that launched the current dashboard process. Published-image
+# and --no-refresh deploys must remain usable on hosts without Node, so snapshot
+# capture is best-effort and an empty value explicitly means unavailable.
+if command -v node >/dev/null 2>&1 && \
+  HOST_ENV_NAMES="$(node -e 'process.stdout.write(JSON.stringify(Object.keys(process.env)))')"; then
+  export CHD_HOST_ENV_NAMES="$HOST_ENV_NAMES"
+else
+  export CHD_HOST_ENV_NAMES=''
+  echo "deploy: host environment snapshot unavailable — continuing without settings environment diagnostics" >&2
+fi
 # `${PASS[@]+"${PASS[@]}"}` is the portable empty-array expansion: a bare
 # "${PASS[@]}" trips `set -u` ("unbound variable") on bash < 4.4 (e.g. macOS
 # /bin/bash 3.2) when no passthrough args were given.

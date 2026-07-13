@@ -79,6 +79,40 @@ check('array top level → error', r7.ok === false && r7.findings.some((f) => f.
 const r8 = validateSettingsJson(P, null);
 check('null raw → present:false ok:true', r8.present === false && r8.ok === true && r8.findings.length === 0);
 
+// 9) Host environment observation is names-only and optional. Missing
+// placeholders are tied to their exact dotted/indexed path; settings.env keys
+// and observed host names both satisfy references.
+const r9 = validateSettingsJson(P, JSON.stringify({
+  env: { FROM_SETTINGS: 'configured', CHAINED: '${FROM_HOST}' },
+  hooks: { PreToolUse: [{ command: '${MISSING}/bin/run ${FROM_SETTINGS} $FROM_HOST ${MISSING} \\${LITERAL}' }] },
+}), { source: 'host-launch', definedNames: ['FROM_HOST'] });
+const missing = r9.findings.filter((f) => f.kind === 'missing-env');
+check('missing env → exact path', missing.length === 1 && missing[0].path === 'hooks.PreToolUse[0].command');
+check('missing env → structured name', missing[0]?.environmentVariable === 'MISSING');
+check('missing env → warning only', r9.ok === true && missing[0]?.severity === 'warning');
+check('missing env → no values', !JSON.stringify(r9).includes('configured'));
+
+const r10 = validateSettingsJson(P, JSON.stringify({ hooks: { Stop: [{ command: '$NOT_OBSERVED' }] } }));
+check('absent host observation → suppress missing-env', !r10.findings.some((f) => f.kind === 'missing-env'));
+
+const r11 = validateSettingsJson(P, JSON.stringify({ env: { TOKEN: '${TOKEN}' } }), {
+  source: 'host-launch', definedNames: [],
+});
+check('settings.env self-reference → missing unless host-defined', r11.findings.some(
+  (f) => f.kind === 'missing-env' && f.path === 'env.TOKEN' && f.environmentVariable === 'TOKEN'
+));
+
+const r12 = validateSettingsJson(P, JSON.stringify({
+  env: { A: '${B}', B: '${A}', ROOT: 'literal', CHAIN: '${ROOT}' },
+  hooks: { Stop: [{ command: '${A} ${CHAIN}' }] },
+}), { source: 'host-launch', definedNames: [] });
+check('settings.env cycle → both dependencies remain missing', ['A', 'B'].every(
+  (name) => r12.findings.some((f) => f.kind === 'missing-env' && f.environmentVariable === name)
+));
+check('settings.env literal-root chain → resolves', !r12.findings.some(
+  (f) => f.kind === 'missing-env' && ['ROOT', 'CHAIN'].includes(f.environmentVariable)
+));
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

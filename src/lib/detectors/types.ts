@@ -415,6 +415,11 @@ export interface Recommendation {
   /** A copy-pasteable, ready-to-apply fix, when one genuinely exists. */
   fix?: RecFix;
   /**
+   * Per-finding remediations when one recommendation aggregates several exact
+   * paths. `fix` remains the highest-priority entry for older consumers.
+   */
+  fixes?: RecFix[];
+  /**
    * Structured, auditable provenance (#1049, epic #866 keystone): the observed
    * facts (each citing its artifact/field), the inference drawn from them, and
    * an as-of date for stale-input handling. Additive and optional — detectors

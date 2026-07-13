@@ -42,6 +42,7 @@ import type {
   LivePlugin,
   SettingsHealth,
   SettingsHealthFinding,
+  SettingsEnvironmentObservation,
 } from '../types';
 import type { SessionAttribution } from './parse-agents';
 
@@ -704,17 +705,42 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
+function interpolatedEnvironmentNames(value: string): string[] {
+  const names: string[] = [];
+  for (const match of value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
+    if (match.index > 0 && value[match.index - 1] === '\\') continue;
+    names.push(match[1]);
+  }
+  return names;
+}
+
+/**
+ * Transient effective `settings.env` input for missing-variable validation.
+ * Values are used only to resolve dependency chains and are never returned in
+ * {@link SettingsHealth}; local overrides identify global definitions that no
+ * longer participate in Claude Code's effective configuration.
+ */
+export interface EffectiveSettingsEnvironment {
+  definitions: Readonly<Record<string, unknown>>;
+  localOverrides: readonly string[];
+  /** Display path attached to findings derived from local overrides. */
+  localSourcePath?: string;
+}
+
 /**
  * Validate a raw settings.json string (#167). Returns a {@link SettingsHealth}
- * verdict: a syntax error short-circuits (with line/column/excerpt); otherwise
- * the parsed object is schema-checked — known-key whitelist (unknown ⇒
+ * verdict: a syntax error short-circuits with numeric location metadata when
+ * available; raw parser messages and source excerpts are not retained.
+ * Otherwise the parsed object is schema-checked — known-key whitelist (unknown ⇒
  * warning), value types for the documented keys, and permission-rule shape.
  * `raw === null` (file absent/unreadable) is reported as `present:false`,
  * `ok:true` — nothing to validate is not a failure.
  */
 export function validateSettingsJson(
   filePath: string,
-  raw: string | null
+  raw: string | null,
+  environment?: SettingsEnvironmentObservation,
+  effectiveSettingsEnvironment?: EffectiveSettingsEnvironment
 ): SettingsHealth {
   if (raw === null) {
     return { filePath, present: false, ok: true, findings: [] };
@@ -724,14 +750,12 @@ export function validateSettingsJson(
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const posMatch = /position (\d+)/.exec(msg);
+    const parserMessage = e instanceof Error ? e.message : String(e);
+    const posMatch = /position (\d+)/.exec(parserMessage);
     let line: number | undefined;
     let column: number | undefined;
-    let excerpt: string | undefined;
     if (posMatch) {
       ({ line, column } = offsetToLineCol(raw, Number(posMatch[1])));
-      excerpt = raw.split('\n')[line - 1]?.trim().slice(0, 160);
     }
     return {
       filePath,
@@ -742,10 +766,10 @@ export function validateSettingsJson(
           kind: 'syntax',
           severity: 'error',
           path: '',
-          message: `Invalid JSON — ${msg}`,
+          message: 'Invalid JSON syntax; repair the document and retry.',
+          sourcePath: filePath,
           line,
           column,
-          excerpt,
         },
       ],
     };
@@ -759,12 +783,15 @@ export function validateSettingsJson(
       severity: 'error',
       path: '',
       message: `Top level must be a JSON object, got ${jsonType(parsed)}.`,
+      sourcePath: filePath,
     });
     return { filePath, present: true, ok: false, findings };
   }
 
   const error = (path: string, message: string) =>
-    findings.push({ kind: 'type', severity: 'error', path, message });
+    findings.push({
+      kind: 'type', severity: 'error', path, message, sourcePath: filePath,
+    });
 
   for (const key of Object.keys(parsed)) {
     if (KNOWN_SETTINGS_KEYS.has(key)) continue;
@@ -777,6 +804,7 @@ export function validateSettingsJson(
         severity: 'warning',
         path: key,
         message: `"${key}" looks like a typo of "${near}" — Claude Code will ignore an unrecognized key.`,
+        sourcePath: filePath,
       });
     }
   }
@@ -835,7 +863,8 @@ export function validateSettingsJson(
               kind: 'rule-format',
               severity: 'warning',
               path: `permissions.${bucket}[${i}]`,
-              message: `"${rule}" doesn't look like a permission rule (expected "Tool" or "Tool(specifier)").`,
+              message: 'Permission rule should use "Tool" or "Tool(specifier)" syntax.',
+              sourcePath: filePath,
             });
           }
         });
@@ -847,12 +876,157 @@ export function validateSettingsJson(
             severity: 'warning',
             path: `permissions.${key}`,
             message: `Unknown "permissions" sub-key "${key}" — likely a typo.`,
+            sourcePath: filePath,
           });
         }
       }
     }
   }
 
+  // `/doctor` also reports settings strings that reference variables absent
+  // from the launch environment. The caller supplies a names-only host
+  // observation: this pure validator never reads process.env, and no secret
+  // values enter the dataset. Variables declared by settings.env count as
+  // defined because Claude Code exports them before consuming other settings.
+  if (environment) {
+    const resolvedEnvironmentNames = new Set(environment.definedNames);
+    const environmentDefinitions = effectiveSettingsEnvironment?.definitions
+      ?? (isPlainObject(parsed.env) ? parsed.env : {});
+    if (isPlainObject(environmentDefinitions)) {
+      // Resolve settings.env from literal/host-defined roots with a dependency
+      // worklist. Rescanning every definition once per chain level is quadratic
+      // for reverse-ordered chains; the reverse edges below process each
+      // definition and dependency once while leaving cycles unresolved.
+      const unresolvedDependencyCounts = new Map<string, number>();
+      const dependentsByDependency = new Map<string, string[]>();
+      const ready: string[] = [];
+      for (const [name, value] of Object.entries(environmentDefinitions)) {
+        if (resolvedEnvironmentNames.has(name) || typeof value !== 'string') {
+          continue;
+        }
+        const unresolvedDependencies = new Set(
+          interpolatedEnvironmentNames(value).filter(
+            (dependency) => !resolvedEnvironmentNames.has(dependency)
+          )
+        );
+        unresolvedDependencyCounts.set(name, unresolvedDependencies.size);
+        if (unresolvedDependencies.size === 0) {
+          ready.push(name);
+          continue;
+        }
+        for (const dependency of unresolvedDependencies) {
+          const dependents = dependentsByDependency.get(dependency) ?? [];
+          dependents.push(name);
+          dependentsByDependency.set(dependency, dependents);
+        }
+      }
+      while (ready.length > 0) {
+        const name = ready.pop()!;
+        if (resolvedEnvironmentNames.has(name)) continue;
+        resolvedEnvironmentNames.add(name);
+        for (const dependent of dependentsByDependency.get(name) ?? []) {
+          const remaining = (unresolvedDependencyCounts.get(dependent) ?? 0) - 1;
+          unresolvedDependencyCounts.set(dependent, remaining);
+          if (remaining === 0) ready.push(dependent);
+        }
+      }
+    }
+    // A configured env name satisfies references elsewhere in settings even
+    // when its own definition is unresolved. Its dependency is diagnosed at
+    // env.NAME instead of producing a misleading downstream "set NAME" fix.
+    const downstreamEnvironmentNames = new Set([
+      ...resolvedEnvironmentNames,
+      ...Object.keys(environmentDefinitions),
+    ]);
+    const localOverrides = new Set(
+      effectiveSettingsEnvironment?.localOverrides ?? []
+    );
+    const emitted = new Set<string>();
+    interface PendingSettingsValue {
+      value: unknown;
+      path: string;
+      environmentDefinition: boolean;
+      sourcePath: string;
+    }
+    const scan = (initial: PendingSettingsValue): void => {
+      const pending = [initial];
+      while (pending.length > 0) {
+        const current = pending.pop()!;
+        const { value, path, environmentDefinition, sourcePath } = current;
+        if (typeof value === 'string') {
+          // Only explicit `${NAME}` config interpolation is unambiguous here.
+          // Bare `$NAME` inside hook commands depends on shell quoting/escaping
+          // and cannot be diagnosed safely without a shell parser.
+          const availableNames = environmentDefinition
+            ? resolvedEnvironmentNames
+            : downstreamEnvironmentNames;
+          for (const name of interpolatedEnvironmentNames(value)) {
+            const key = `${path}\0${name}`;
+            if (!availableNames.has(name) && !emitted.has(key)) {
+              emitted.add(key);
+              findings.push({
+                kind: 'missing-env',
+                severity: 'warning',
+                path,
+                environmentVariable: name,
+                message: `"${path}" references environment variable "${name}", which was absent from the dashboard's names-only host launch snapshot; verify it in Claude Code's launch environment.`,
+                sourcePath,
+              });
+            }
+          }
+          continue;
+        }
+        if (Array.isArray(value)) {
+          for (let index = value.length - 1; index >= 0; index -= 1) {
+            pending.push({
+              value: value[index],
+              path: `${path}[${index}]`,
+              environmentDefinition,
+              sourcePath,
+            });
+          }
+          continue;
+        }
+        if (isPlainObject(value)) {
+          const entries = Object.entries(value);
+          for (let index = entries.length - 1; index >= 0; index -= 1) {
+            const [key, entry] = entries[index];
+            // A local env definition shadows the raw global definition. It
+            // participates through the effective traversal below instead.
+            if (path === 'env' && localOverrides.has(key)) continue;
+            pending.push({
+              value: entry,
+              path: path ? `${path}.${key}` : key,
+              environmentDefinition: environmentDefinition || path === 'env',
+              sourcePath,
+            });
+          }
+        }
+      }
+    };
+    // `parsed` is the raw global file, so the traversal below intentionally
+    // skips locally overridden env keys. Traverse their effective values here
+    // so unresolved local dependencies and local-only cycles still produce
+    // path-specific findings. The values remain transient and are never
+    // included in SettingsHealth.
+    for (const [name, value] of Object.entries(environmentDefinitions)) {
+      if (localOverrides.has(name)) {
+        scan({
+          value,
+          path: `env.${name}`,
+          environmentDefinition: true,
+          sourcePath: effectiveSettingsEnvironment?.localSourcePath ?? filePath,
+        });
+      }
+    }
+    scan({
+      value: parsed,
+      path: '',
+      environmentDefinition: false,
+      sourcePath: filePath,
+    });
+  }
+
   const ok = !findings.some((f) => f.severity === 'error');
-  return { filePath, present: true, ok, findings };
+  return { filePath, present: true, ok, findings, environment };
 }

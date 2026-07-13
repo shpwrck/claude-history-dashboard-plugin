@@ -638,6 +638,21 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: 0,
   }),
+  'reliability.settings-json-invalid': () => ({
+    input: baseInput({
+      liveConfig: {
+        settingsHealth: {
+          filePath: '~/.claude/settings.json',
+          present: true,
+          ok: false,
+          findings: [
+            { kind: 'type', severity: 'error', path: 'model', message: 'expected string' },
+          ],
+        },
+      } as unknown as RecommendationInput['liveConfig'],
+    }),
+    now: 0,
+  }),
   'cost.idle-mcp-tools': () => ({
     input: baseInput({
       toolInventories: [

@@ -2,9 +2,268 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assembleLiveConfig } from './config-loader';
+import { performance } from 'node:perf_hooks';
+import {
+  assembleLiveConfig,
+  hostEnvironmentObservation,
+  hostEnvironmentObservationSignature,
+} from './config-loader';
+import { detector as settingsJsonInvalidDetector } from './detectors/reliability/settings-json-invalid';
+import type { RecommendationInput } from './detectors/types';
 
 describe('assembleLiveConfig', () => {
+  it('passes the explicit names-only host environment observation to settings validation', () => {
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      hooks: { Stop: [{ command: '${AVAILABLE} ${MISSING}' }] },
+    }));
+
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: ['AVAILABLE'] },
+    });
+
+    expect(liveConfig.settingsHealth.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'missing-env',
+        path: 'hooks.Stop[0].command',
+        environmentVariable: 'MISSING',
+      }),
+    ]));
+    expect(liveConfig.settingsHealth.environment?.definedNames).toEqual(['AVAILABLE']);
+  });
+
+  it('validates global references against effective local environment definitions', () => {
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      env: {
+        OVERRIDDEN: '${GLOBAL_ONLY_MISSING}',
+        BROKEN_OVERRIDE: 'global-value',
+      },
+      hooks: {
+        Stop: [{
+          command: '${LOCAL_ONLY} ${CHAINED} ${OVERRIDDEN} ${BROKEN_OVERRIDE}',
+        }],
+      },
+    }));
+    writeFileSync(join(claudeDir, 'settings.local.json'), JSON.stringify({
+      env: {
+        LOCAL_ONLY: 'configured-locally',
+        CHAINED: '${HOST_ROOT}',
+        OVERRIDDEN: 'configured-locally',
+        BROKEN_OVERRIDE: '${MISSING_DEPENDENCY}',
+      },
+    }));
+
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: ['HOST_ROOT'] },
+    });
+    const missingFindings = liveConfig.settingsHealth.findings
+      .filter((finding) => finding.kind === 'missing-env');
+    const missingNames = missingFindings
+      .map((finding) => finding.environmentVariable);
+
+    expect(missingFindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: 'env.BROKEN_OVERRIDE',
+        environmentVariable: 'MISSING_DEPENDENCY',
+        sourcePath: '~/.claude/settings.local.json',
+      }),
+    ]));
+    expect(missingNames).not.toEqual(expect.arrayContaining([
+      'GLOBAL_ONLY_MISSING',
+      'LOCAL_ONLY',
+      'CHAINED',
+      'OVERRIDDEN',
+      'BROKEN_OVERRIDE',
+    ]));
+    expect(JSON.stringify(liveConfig.settingsHealth)).not.toContain(
+      'configured-locally'
+    );
+  });
+
+  it('validates every local finding class when global settings also exist', () => {
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      model: 'claude-opus-4-8',
+      env: { GLOBAL_TOKEN: 'configured-globally' },
+    }));
+    writeFileSync(join(claudeDir, 'settings.local.json'), JSON.stringify({
+      model: 42,
+      permisions: {},
+      permissions: { allow: ['not a rule!'] },
+      hooks: {
+        Stop: [{
+          hooks: [{ type: 'command', command: '${LOCAL_HOOK_MISSING}' }],
+        }],
+      },
+    }));
+
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: [] },
+    });
+    const localFindings = liveConfig.settingsHealth.findings.filter(
+      (finding) => finding.sourcePath === '~/.claude/settings.local.json'
+    );
+
+    expect(localFindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'type', path: 'model' }),
+      expect.objectContaining({ kind: 'unknown-key', path: 'permisions' }),
+      expect.objectContaining({
+        kind: 'rule-format',
+        path: 'permissions.allow[0]',
+      }),
+      expect.objectContaining({
+        kind: 'missing-env',
+        path: 'hooks.Stop[0].hooks[0].command',
+        environmentVariable: 'LOCAL_HOOK_MISSING',
+      }),
+    ]));
+  });
+
+  it('sanitizes malformed local settings when global settings also exist', () => {
+    const sentinel = 'local-global-pair-secret-sentinel';
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      model: 'claude-opus-4-8',
+    }));
+    writeFileSync(
+      join(claudeDir, 'settings.local.json'),
+      `{"env":{"TOKEN":"${sentinel}",}}`
+    );
+
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: [] },
+    });
+
+    expect(liveConfig.settingsHealth.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'syntax',
+        sourcePath: '~/.claude/settings.local.json',
+        message: 'Invalid JSON syntax; repair the document and retry.',
+      }),
+    ]));
+    const recommendation = settingsJsonInvalidDetector.rule({
+      tokenData: [],
+      toolData: [],
+      sessions: [],
+      projects: [],
+      permissionRows: [],
+      apiErrors: [],
+      liveConfig,
+    } as RecommendationInput, 0);
+    expect(recommendation).not.toBeNull();
+    expect(JSON.stringify({
+      health: liveConfig.settingsHealth,
+      recommendation,
+    })).not.toContain(sentinel);
+  });
+
+  it('retains unresolved cycles that exist only in local environment definitions', () => {
+    writeFileSync(join(claudeDir, 'settings.local.json'), JSON.stringify({
+      env: {
+        LOCAL_CYCLE_A: '${LOCAL_CYCLE_B}',
+        LOCAL_CYCLE_B: '${LOCAL_CYCLE_A}',
+      },
+    }));
+
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: [] },
+    });
+
+    expect(liveConfig.settingsHealth).toMatchObject({
+      filePath: '~/.claude/settings.local.json',
+      present: true,
+    });
+    expect(liveConfig.settingsHealth.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'missing-env',
+        path: 'env.LOCAL_CYCLE_A',
+        environmentVariable: 'LOCAL_CYCLE_B',
+        sourcePath: '~/.claude/settings.local.json',
+      }),
+      expect.objectContaining({
+        kind: 'missing-env',
+        path: 'env.LOCAL_CYCLE_B',
+        environmentVariable: 'LOCAL_CYCLE_A',
+        sourcePath: '~/.claude/settings.local.json',
+      }),
+    ]));
+  });
+
+  it('keeps the observed environment scan stack-safe for deeply nested settings', () => {
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      `{"futureSetting":${'['.repeat(20_000)}"literal"${']'.repeat(20_000)}}`
+    );
+
+    expect(() => assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: [] },
+    })).not.toThrow();
+  });
+
+  it('resolves a reverse-ordered environment chain within a practical work bound', {
+    timeout: 15_000,
+  }, () => {
+    const env: Record<string, string> = {};
+    for (let index = 2_999; index >= 0; index -= 1) {
+      env[`V${index}`] = index === 0
+        ? '${HOST_ROOT}'
+        : '${V' + (index - 1) + '}';
+    }
+    const raw = JSON.stringify({
+      env,
+      hooks: { Stop: [{ command: '${V2999}' }] },
+    });
+    expect(Buffer.byteLength(raw)).toBeLessThan(1_048_576);
+    writeFileSync(join(claudeDir, 'settings.json'), raw);
+
+    const startedAt = performance.now();
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: ['HOST_ROOT'] },
+    });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(liveConfig.settingsHealth.findings).toEqual([]);
+    expect(elapsedMs).toBeLessThan(1_000);
+  });
+
+  it('serializes environment names without retaining values and suppresses unknown containers', () => {
+    const direct = hostEnvironmentObservation({
+      SAFE_NAME: 'super-secret-value',
+      OTHER_NAME: 'another-secret',
+    });
+    expect(direct?.definedNames).toEqual(['OTHER_NAME', 'SAFE_NAME']);
+    expect(JSON.stringify(direct)).not.toContain('super-secret-value');
+    expect(JSON.stringify(direct)).not.toContain('another-secret');
+
+    expect(hostEnvironmentObservation({ CHD_CONTAINERIZED: '1' })).toBeUndefined();
+    expect(hostEnvironmentObservation({
+      CHD_CONTAINERIZED: '1',
+      CHD_HOST_ENV_NAMES: '["HOST_ONLY","HOST_ONLY","bad-name"]',
+      CONTAINER_SECRET: 'must-not-leak',
+    })?.definedNames).toEqual(['HOST_ONLY']);
+  });
+
+  it('builds a deterministic names-only cache signature with explicit unavailable states', () => {
+    const a = { source: 'host-launch' as const, definedNames: ['ZED', 'ALPHA'] };
+    const b = { source: 'host-launch' as const, definedNames: ['ALPHA', 'ZED'] };
+    expect(hostEnvironmentObservationSignature(a, false)).toBe(
+      hostEnvironmentObservationSignature(b, false)
+    );
+    expect(hostEnvironmentObservationSignature(a, false)).not.toContain('secret-value');
+    expect(hostEnvironmentObservationSignature(undefined, false)).toBe('unavailable');
+    expect(hostEnvironmentObservationSignature(a, true)).toBe('scoped');
+  });
   let root: string;
   let claudeDir: string;
 
@@ -16,6 +275,55 @@ describe('assembleLiveConfig', () => {
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each([
+    {
+      fileName: 'settings.local.json',
+      displayPath: '~/.claude/settings.local.json',
+      raw: '{"env":{"TOKEN":"local-quoted-sentinel",}}',
+      sentinel: 'local-quoted-sentinel',
+    },
+    {
+      fileName: 'settings.local.json',
+      displayPath: '~/.claude/settings.local.json',
+      raw: '{"env":{"TOKEN":LOCAL_UNQUOTED_SENTINEL}}',
+      sentinel: 'LOCAL_UNQUOTED_SENTINEL',
+    },
+    {
+      fileName: 'settings.json',
+      displayPath: '~/.claude/settings.json',
+      raw: '{"env":{"TOKEN":"global-quoted-sentinel",}}',
+      sentinel: 'global-quoted-sentinel',
+    },
+  ])('does not serialize raw input from malformed $fileName', ({
+    fileName,
+    displayPath,
+    raw,
+    sentinel,
+  }) => {
+    writeFileSync(join(claudeDir, fileName), raw);
+
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      environment: { source: 'host-launch', definedNames: [] },
+    });
+    const [finding] = liveConfig.settingsHealth.findings;
+
+    expect(liveConfig.settingsHealth).toMatchObject({
+      filePath: displayPath,
+      present: true,
+      ok: false,
+    });
+    expect(finding).toMatchObject({
+      kind: 'syntax',
+      severity: 'error',
+      message: 'Invalid JSON syntax; repair the document and retry.',
+      sourcePath: displayPath,
+    });
+    expect(finding).not.toHaveProperty('excerpt');
+    expect(JSON.stringify(liveConfig.settingsHealth)).not.toContain(sentinel);
   });
 
   it('skips oversized optional config files while keeping bounded config inputs', () => {

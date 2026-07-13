@@ -633,23 +633,35 @@ export interface LiveMcpServer {
 /**
  * One problem found while validating a raw `settings.json` (#167). `path` is a
  * dotted/indexed location (`permissions.deny[3]`) or `''` for a whole-file
- * syntax error. Syntax findings carry `line`/`column`/`excerpt` to point at the
- * offending spot.
+ * syntax error. Current syntax findings carry only numeric `line`/`column`
+ * location metadata so raw settings content never enters `SettingsHealth`.
  */
 export interface SettingsHealthFinding {
-  kind: 'syntax' | 'type' | 'unknown-key' | 'rule-format';
+  kind: 'syntax' | 'type' | 'unknown-key' | 'rule-format' | 'missing-env';
   severity: 'error' | 'warning';
   path: string;
   message: string;
+  /** Owning settings file; contains a canonical display path, never values. */
+  sourcePath?: string;
   line?: number;
   column?: number;
+  /** Legacy dataset field; current validation never captures raw excerpts. */
   excerpt?: string;
+  /** Variable name only; environment values are never ingested. */
+  environmentVariable?: string;
+}
+
+/** Names-only snapshot of the host environment that launched the dashboard. */
+export interface SettingsEnvironmentObservation {
+  source: 'host-launch';
+  definedNames: readonly string[];
 }
 
 /**
- * Validation verdict for a settings file (#167). `present` is false when the
- * file is absent (nothing to validate — not an error); `ok` is true when there
- * are no error-severity findings (warnings alone still pass).
+ * Aggregate validation verdict for the global and local user settings files
+ * (#167/#2421). `filePath` names the primary source (global when readable,
+ * otherwise local); each finding carries its actual `sourcePath`. `present` is
+ * false only when neither source is readable, and warnings alone still pass.
  */
 export interface SettingsHealth {
   /** Display path, e.g. `~/.claude/settings.json`. */
@@ -657,16 +669,19 @@ export interface SettingsHealth {
   present: boolean;
   ok: boolean;
   findings: SettingsHealthFinding[];
+  /** Names-only input used for missing-variable findings; never contains values. */
+  environment?: SettingsEnvironmentObservation;
 }
 
 export interface LiveConfig {
   /** Merged global + local settings.json. Same shape #166 shipped. */
   settings: LiveSettings;
   /**
-   * Validation verdict for the raw `~/.claude/settings.json` (#167). Computed
-   * at ingest against the raw bytes — the merged `settings` above has already
-   * dropped unknown keys and can't surface syntax errors. `null`/absent when
-   * not computed. Project/local settings validation is a follow-up.
+   * Aggregate validation verdict for raw global + local user settings (#167,
+   * #2421). Computed at ingest against each file's raw bytes — the merged
+   * `settings` above has already dropped unknown keys and cannot surface syntax
+   * errors. Findings retain their owning source path. Project settings
+   * validation is a follow-up.
    */
   settingsHealth?: SettingsHealth | null;
   claudeMd: {

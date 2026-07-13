@@ -16,7 +16,11 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { validateSettingsJson } from './config-hygiene';
+import {
+  validateSettingsJson,
+  type EffectiveSettingsEnvironment,
+} from './config-hygiene';
+import type { SettingsEnvironmentObservation, SettingsHealth } from '../types';
 import { readDirentsBoundedSync } from './bounded-fs';
 
 // Untyped-JSON view: the readers below only ever access fields through
@@ -32,6 +36,7 @@ export interface LiveConfigPathOptions {
   projectRoots?: string[];
   configFileMaxBytes?: number;
   configResourceMaxEntries?: number;
+  environment?: SettingsEnvironmentObservation;
 }
 
 interface LiveConfigPaths {
@@ -53,6 +58,46 @@ interface LiveConfigPaths {
 }
 
 const READ_CHUNK_BYTES = 65_536;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_HOST_ENV_NAMES = 10_000;
+const GLOBAL_SETTINGS_DISPLAY_PATH = '~/.claude/settings.json';
+const LOCAL_SETTINGS_DISPLAY_PATH = '~/.claude/settings.local.json';
+
+/** Build a names-only host observation without retaining any environment values. */
+export function hostEnvironmentObservation(
+  env: Readonly<Record<string, string | undefined>>
+): SettingsEnvironmentObservation | undefined {
+  const serialized = env.CHD_HOST_ENV_NAMES;
+  if (serialized !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(serialized);
+      if (!Array.isArray(parsed) || parsed.length > MAX_HOST_ENV_NAMES) return undefined;
+      return {
+        source: 'host-launch',
+        definedNames: [...new Set(parsed.filter(
+          (name): name is string => typeof name === 'string' && ENV_NAME.test(name)
+        ))].sort(),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+  if (/^(1|true|yes|on)$/i.test(String(env.CHD_CONTAINERIZED || ''))) return undefined;
+  return {
+    source: 'host-launch',
+    definedNames: Object.keys(env).filter((name) => ENV_NAME.test(name)).sort(),
+  };
+}
+
+/** Stable, values-free contribution for the persistent dataset cache key. */
+export function hostEnvironmentObservationSignature(
+  observation: SettingsEnvironmentObservation | undefined,
+  scoped: boolean
+): string {
+  if (scoped) return 'scoped';
+  if (!observation) return 'unavailable';
+  return `host-launch\0${[...observation.definedNames].sort().join('\0')}`;
+}
 
 function parseNonNegativeIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -246,13 +291,66 @@ function mergeLiveSettings(global: unknown, local: unknown): Obj | null {
   return out;
 }
 
-function readLiveSettings(paths: LiveConfigPaths): Obj {
-  return (
-    mergeLiveSettings(
-      readJsonOrNull(paths.settingsGlobal, paths.configFileMaxBytes),
-      readJsonOrNull(paths.settingsLocal, paths.configFileMaxBytes)
-    ) ?? {}
-  );
+function settingsEnvironment(settings: unknown): Obj {
+  const env = asObj(settings).env;
+  return env && typeof env === 'object' && !Array.isArray(env)
+    ? env as Obj
+    : {};
+}
+
+function mergeSettingsEnvironment(
+  global: unknown,
+  local: unknown
+): EffectiveSettingsEnvironment {
+  const globalEnvironment = settingsEnvironment(global);
+  const localEnvironment = settingsEnvironment(local);
+  return {
+    // Claude Code applies local settings at the deeper precedence, so local
+    // env keys replace global keys while unrelated global definitions remain.
+    // These values stay transient and never enter the liveConfig dataset.
+    definitions: { ...globalEnvironment, ...localEnvironment },
+    localOverrides: Object.keys(localEnvironment).sort(),
+    localSourcePath: LOCAL_SETTINGS_DISPLAY_PATH,
+  };
+}
+
+function readLiveSettings(paths: LiveConfigPaths): {
+  settings: Obj;
+  environment: EffectiveSettingsEnvironment;
+} {
+  const global = readJsonOrNull(paths.settingsGlobal, paths.configFileMaxBytes);
+  const local = readJsonOrNull(paths.settingsLocal, paths.configFileMaxBytes);
+  return {
+    settings: mergeLiveSettings(global, local) ?? {},
+    environment: mergeSettingsEnvironment(global, local),
+  };
+}
+
+function mergeSettingsHealth(
+  globalHealth: SettingsHealth,
+  localHealth: SettingsHealth,
+  environment: SettingsEnvironmentObservation | undefined
+): SettingsHealth {
+  const findings = [];
+  const seen = new Set<string>();
+  for (const finding of [...globalHealth.findings, ...localHealth.findings]) {
+    const key = JSON.stringify(finding);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    findings.push(finding);
+  }
+  const primary = globalHealth.present
+    ? globalHealth
+    : localHealth.present
+      ? localHealth
+      : globalHealth;
+  return {
+    filePath: primary.filePath,
+    present: globalHealth.present || localHealth.present,
+    ok: globalHealth.ok && localHealth.ok,
+    findings,
+    ...(environment ? { environment } : {}),
+  };
 }
 
 function readTextOrNull(path: string, maxBytes: number): string | null {
@@ -753,14 +851,35 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
   const paths = liveConfigPaths(opts);
   const claudeJson = asObj(readJsonOrNull(paths.claudeJson, paths.configFileMaxBytes));
   const projectRoots = readableProjectRoots(paths, claudeJson);
-  const settings = readLiveSettings(paths);
+  const {
+    settings,
+    environment: effectiveSettingsEnvironment,
+  } = readLiveSettings(paths);
   // #2500: capture each global/local hook command's referenced-path existence.
   annotateHookReferencedPaths(settings, paths.homeDir, undefined);
-  // Validate the raw ~/.claude/settings.json bytes (#167). Display path uses
-  // ~ so the UI shows the canonical location rather than the container path.
-  const settingsHealth = validateSettingsJson(
-    '~/.claude/settings.json',
-    readTextOrNull(paths.settingsGlobal, paths.configFileMaxBytes)
+  // Validate BOTH raw files before mergeLiveSettings projects their effective
+  // subset. Local syntax/type/unknown/rule/interpolation failures matter even
+  // when settings.json exists, and every finding retains its owning source.
+  const globalHealth = validateSettingsJson(
+    GLOBAL_SETTINGS_DISPLAY_PATH,
+    readTextOrNull(paths.settingsGlobal, paths.configFileMaxBytes),
+    opts.environment,
+    effectiveSettingsEnvironment
+  );
+  // The global pass already scans effective local env overrides so global
+  // references resolve correctly. The local pass traverses its own env values
+  // directly; clear localOverrides to avoid skipping them, then dedupe the
+  // equivalent env findings when the two source verdicts are combined.
+  const localHealth = validateSettingsJson(
+    LOCAL_SETTINGS_DISPLAY_PATH,
+    readTextOrNull(paths.settingsLocal, paths.configFileMaxBytes),
+    opts.environment,
+    { ...effectiveSettingsEnvironment, localOverrides: [] }
+  );
+  const settingsHealth = mergeSettingsHealth(
+    globalHealth,
+    localHealth,
+    opts.environment
   );
   // #2500: project-scoped hooks resolve `$CLAUDE_PROJECT_DIR` against their root.
   const projectSettings = readProjectSettings(projectRoots, paths.configFileMaxBytes);
