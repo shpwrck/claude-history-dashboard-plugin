@@ -1,4 +1,5 @@
 import { parseJsonl, parseMessage } from './parse-utils';
+import { bashCommandFingerprint } from './bash-command-fingerprint';
 import {
   detectRiskyActionPatternName,
   rmRfCertainty,
@@ -364,15 +365,6 @@ const BYPASS_DEFS: Array<{
   },
 ];
 
-function commandFingerprint(command: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < command.length; i += 1) {
-    hash ^= command.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `${(hash >>> 0).toString(36)}:${command.length}`;
-}
-
 function commandPreview(command: string): string {
   const flat = command.replace(/\r?\n/g, ' ');
   return flat.length > MAX_COMMAND_PREVIEW_LEN
@@ -465,7 +457,7 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
   const head = commandHead(command);
   const gitSegments = commandGitSegments(command);
   return {
-    commandFingerprint: commandFingerprint(command),
+    commandFingerprint: bashCommandFingerprint(command),
     commandPreview: commandPreview(command),
     ...(head ? { commandHead: head } : {}),
     ...(gitSegments.length > 0 ? { commandGitSegments: gitSegments } : {}),

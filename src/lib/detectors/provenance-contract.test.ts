@@ -691,6 +691,32 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: 0,
   }),
+  'reliability.ghost-session': () => {
+    const now = Date.parse('2026-06-10T01:00:00Z');
+    const sessionId = 'ghost-session-fixture';
+    const toolData = [{
+      sessionId,
+      calls: Array.from({ length: 5 }, (_, index) => ({
+        timestamp: `2026-06-10T00:0${index}:00.000Z`,
+        toolName: 'Read',
+        input: { file_path: `/repo/src/file-${index}.ts` },
+        toolUseId: `ghost-read-${index}`,
+        isError: false,
+        resultBytes: 100,
+      })),
+    }] as RecommendationInput['toolData'];
+    const timelines: SessionTimeline[] = [{
+      sessionId,
+      startTime: '2026-06-10T00:00:00.000Z',
+      endTime: '2026-06-10T00:10:00.000Z',
+      firstPromptPreview: 'Please implement the parser fix',
+      entries: [
+        { timestamp: '2026-06-10T00:00:00.000Z', kind: 'user', summary: 'Please implement the parser fix' },
+        { timestamp: '2026-06-10T00:10:00.000Z', kind: 'assistant', summary: 'I inspected the files.' },
+      ],
+    }];
+    return { input: baseInput({ toolData, timelines }), now };
+  },
   'workflow.conversational-availability': () => ({
     input: baseInput({
       timelines: [

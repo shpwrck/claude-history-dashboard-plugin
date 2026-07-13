@@ -138,6 +138,7 @@ import { detector as passiveWaitStall } from './reliability/passive-wait-stall';
 import { detector as cwdDriftExecution } from './reliability/cwd-drift-execution';
 import { detector as staleStateAssertion } from './reliability/stale-state-assertion';
 import { detector as discoveryFreshness } from './reliability/discovery-freshness';
+import { detector as ghostSession } from './reliability/ghost-session';
 import { detector as workflowRatelimitBurst } from './reliability/workflow-ratelimit-burst';
 
 // ── SPEED ───────────────────────────────────────────────────────────────
@@ -391,6 +392,13 @@ export const DETECTORS: Detector[] = [
   // an observational hypothesis. Reads toolData + repoMap (tracked-path oracle +
   // generation sha); dark without a repo-map or tool calls.
   discoveryFreshness,
+
+  // ── #2506 (epic #2400) — edit-intent ghost sessions ────────────────────
+  // Conservatively flags completed edit-intent sessions that successfully read
+  // at least five distinct files but recorded no successful native edit.
+  // Requires a matching, uninterrupted timeline and suppresses active,
+  // delegated, potentially mutating, and ambiguous tool activity.
+  ghostSession,
 
   // ── #1754 (epic #1910) — mid-turn user-interrupt steering ─────────────────
   // Dollarizes the in-flight output tokens discarded when a human cuts the

@@ -3103,6 +3103,34 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── reliability.ghost-session (#2506): a completed edit-intent session read
+  // five distinct files but recorded no successful workspace mutation.
+  {
+    const sessionId = 'ghost-bank';
+    const toolData: ToolUsageData[] = [{
+      sessionId,
+      calls: Array.from({ length: 5 }, (_, index) => ({
+        timestamp: `2026-05-01T00:0${index}:00Z`,
+        toolName: 'Read',
+        input: { file_path: `/repo/src/ghost-${index}.ts` },
+        toolUseId: `ghost-${index}`,
+        isError: false,
+        resultBytes: 200,
+      })),
+    }];
+    const timelines: SessionTimeline[] = [{
+      sessionId,
+      startTime: '2026-05-01T00:00:00Z',
+      endTime: '2026-05-01T00:10:00Z',
+      firstPromptPreview: 'Please implement the parser fix',
+      entries: [
+        { timestamp: '2026-05-01T00:00:00Z', kind: 'user', summary: 'Please implement the parser fix' },
+        { timestamp: '2026-05-01T00:10:00Z', kind: 'assistant', summary: 'I inspected the files.' },
+      ],
+    }];
+    out.push({ now, input: bankBase({ toolData, timelines }) });
+  }
+
   // ── context.reclaim-potential (#1758): a large NON-file Bash output
   // re-fetched 3x in one session — duplicate tool-output reclaim, distinct from
   // any file-Read re-ingestion the file detectors own.
