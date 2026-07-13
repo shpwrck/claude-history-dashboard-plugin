@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { isValidElement } from 'react';
 import {
   filterViewDataByProject,
@@ -481,6 +481,73 @@ describe('view registry ↔ nav catalog parity', () => {
     expect(NAV_ITEMS.some((item) => item.view === 'automation')).toBe(true);
     expect(VIEW_RENDERERS.capabilities).toBeDefined();
     expect(VIEW_RENDERERS.automation).toBeDefined();
+  });
+
+  it('wires canonical tasks, filtered sessions, and session navigation into the Teams tab (#2479)', () => {
+    const sessions = [session('session-team', '/work/dashboard', 1000)];
+    const tasks: ViewData['tasks'] = [
+      {
+        id: '1',
+        subject: 'Recover handoff',
+        description: '',
+        activeForm: 'Recovering handoff',
+        owner: 'agent-one',
+        status: 'pending',
+        blocks: [],
+        blockedBy: [],
+        sessionId: 'session-team',
+        mtimeMs: 1000,
+      },
+    ];
+    const teams: ViewData['teams'] = [
+      {
+        teamId: 'team-one',
+        totalAssignments: 1,
+        droppedCount: 1,
+        droppedPct: 100,
+        droppedAssignments: [
+          {
+            agent: 'agent-one',
+            taskId: '1',
+            subject: 'Recover handoff',
+            ageMinutes: 30,
+          },
+        ],
+        stalledAgents: [],
+      },
+    ];
+    const openSession = vi.fn();
+    const ctx = viewContext(allProjectsFilter, { sessions, tasks, teams });
+    ctx.nav.openSession = openSession;
+
+    const composite = VIEW_RENDERERS.teams?.(ctx);
+    expect(isValidElement(composite)).toBe(true);
+    if (
+      !isValidElement<{
+        tabs: Array<{ id: string; render: () => unknown }>;
+      }>(composite)
+    ) {
+      throw new Error('Expected Teams renderer to return CompositeTabsView');
+    }
+
+    const teamsTab = composite.props.tabs.find((tab) => tab.id === 'teams');
+    const teamsView = teamsTab?.render();
+    expect(isValidElement(teamsView)).toBe(true);
+    if (
+      !isValidElement<{
+        teams: ViewData['teams'];
+        tasks: ViewData['tasks'];
+        sessions: Session[];
+        onOpenSession: (sessionId: string) => void;
+      }>(teamsView)
+    ) {
+      throw new Error('Expected Teams tab to render TeamCoordination');
+    }
+
+    expect(teamsView.props.teams).toBe(teams);
+    expect(teamsView.props.tasks).toBe(tasks);
+    expect(teamsView.props.sessions).toBe(sessions);
+    expect(teamsView.props.onOpenSession).toBe(openSession);
   });
 
   it('every renderer key is a valid view', () => {

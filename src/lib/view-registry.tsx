@@ -995,7 +995,13 @@ function renderAutomationView(ctx: ViewContext, forcedTab?: string): ReactNode {
           requires: 'serverData',
           covered: d.teams.length > 0,
           render: () => (
-            <TeamCoordination teams={d.teams} serverAvailable={serverAvailable} />
+            <TeamCoordination
+              teams={d.teams}
+              tasks={d.tasks}
+              sessions={d.sessions}
+              serverAvailable={serverAvailable}
+              onOpenSession={n.openSession}
+            />
           ),
         },
         {
