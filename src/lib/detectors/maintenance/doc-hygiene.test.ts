@@ -4,6 +4,7 @@ import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { DocEdge, DocGraph, DocNode } from '../../parse-docs';
 import type { RepoMapDataset } from '../../parse-repo-map-join';
+import type { DocHygieneArtifact } from '../../doc-hygiene-artifact';
 
 // ── Fixture builders ───────────────────────────────────────────────────────
 
@@ -52,9 +53,68 @@ function repoMap(paths: string[], over: Record<string, unknown> = {}): RepoMapDa
   } as unknown as RepoMapDataset;
 }
 
-function run(docGraph: DocGraph | null | undefined, rm?: RepoMapDataset | null) {
-  const input = { docGraph, repoMap: rm } as unknown as RecommendationInput;
+function run(
+  docGraph: DocGraph | null | undefined,
+  rm?: RepoMapDataset | null,
+  docHygieneArtifact?: DocHygieneArtifact | null
+) {
+  const input = {
+    docGraph,
+    repoMap: rm,
+    docHygieneArtifact,
+  } as unknown as RecommendationInput;
   return detector.rule(input, 0);
+}
+
+function lycheeArtifact(
+  findings: DocHygieneArtifact['findings'] = []
+): DocHygieneArtifact {
+  return {
+    schemaVersion: 1,
+    generatedAt: '2026-07-13T00:00:00.000Z',
+    repo: {
+      identity: 'claude-history-dashboard',
+      root: '/host/claude-history-dashboard',
+      commit: 'abcdef1234567890',
+      markdownFiles: 140,
+    },
+    summary: {
+      score: findings.length ? 0 : 10,
+      findingCount: findings.length,
+      errorCount: 0,
+      warningCount: findings.length,
+    },
+    checks: [
+      {
+        name: 'lychee.local-links',
+        tool: 'lychee',
+        toolVersion: '0.24.2',
+        status: 'completed',
+        score: findings.length ? 0 : 10,
+        reason: findings.length ? 'Local links failed' : 'Local links clean',
+        findingIds: findings.map((finding) => finding.id),
+      },
+    ],
+    findings,
+    skipped: [],
+  };
+}
+
+function localLinkFinding(
+  over: Partial<DocHygieneArtifact['findings'][number]> = {}
+): DocHygieneArtifact['findings'][number] {
+  return {
+    id: 'doc-link:lychee.local-links:abc123',
+    check: 'lychee.local-links',
+    signal: 'broken-internal-link',
+    severity: 'warning',
+    path: 'docs/a.md',
+    line: 17,
+    target: 'docs/gone.md#install',
+    message: 'Cannot find file',
+    source: { tool: 'lychee', field: 'error_map[].span' },
+    ...over,
+  };
 }
 
 // A root/README entry point, used to satisfy the orphan cross-link guard without
@@ -92,7 +152,7 @@ describe('maintenance.doc-hygiene — broken-internal-link (signal 1)', () => {
     expect(rec!.affected).toBe(1);
     expect(rec!.severity).toBe('warning'); // structural breakage
     expect(rec!.evidence![0]).toContain('docs/gone.md');
-    expect(rec!.evidence![0]).toContain('internal doc link to a missing file');
+    expect(rec!.evidence![0]).toContain('broken internal doc link or fragment');
   });
 
   it('does not flag a link that resolves to a real doc (green)', () => {
@@ -108,6 +168,88 @@ describe('maintenance.doc-hygiene — broken-internal-link (signal 1)', () => {
     // — not broken. (No resolved md-link ⇒ orphan detection is also skipped.)
     const g = graph([node('docs/a')], [mdLink('docs/a', 'src/lib/foo')]);
     expect(run(g)).toBeNull();
+  });
+});
+
+describe('maintenance.doc-hygiene — host Lychee artifact merge (#2486)', () => {
+  it('emits an artifact-only local-link finding with its exact line span', () => {
+    const rec = run(null, null, lycheeArtifact([localLinkFinding()]));
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.evidence).toEqual([
+      'docs/a.md:17 -> docs/gone.md#install — broken internal doc link or fragment',
+    ]);
+    expect(rec!.provenance!.observations).toEqual([
+      expect.objectContaining({
+        source: 'doc-hygiene artifact',
+        value: 1,
+      }),
+    ]);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('deduplicates the graph copy in favor of Lychee line evidence', () => {
+    const g = graph([node('docs/a')], [mdLink('docs/a', 'docs/gone')]);
+    const rec = run(g, null, lycheeArtifact([localLinkFinding()]));
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.evidence![0]).toContain('docs/a.md:17');
+    expect(rec!.provenance!.observations.map((row) => row.source)).toEqual([
+      'doc-hygiene artifact',
+    ]);
+  });
+
+  it('deduplicates URI-escaped graph targets against decoded Lychee paths', () => {
+    const g = graph(
+      [node('docs/a')],
+      [mdLink('docs/a', 'docs/gone%20doc')]
+    );
+    const finding = localLinkFinding({ target: 'docs/gone doc.md' });
+    const rec = run(g, null, lycheeArtifact([finding]));
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.evidence).toEqual([
+      'docs/a.md:17 -> docs/gone doc.md — broken internal doc link or fragment',
+    ]);
+    expect(rec!.provenance!.observations.map((row) => row.source)).toEqual([
+      'doc-hygiene artifact',
+    ]);
+  });
+
+  it('reports a fragment-only failure without claiming the target file is missing', () => {
+    const existingTarget = localLinkFinding({
+      id: 'doc-link:lychee.local-links:fragment123',
+      target: 'docs/b.md#missing-heading',
+      message: 'Fragment not found',
+    });
+    const linked = graph(
+      [node('docs/a'), node('docs/b')],
+      [mdLink('docs/a', 'docs/b'), mdLink('docs/b', 'docs/a')]
+    );
+    const rec = run(linked, null, lycheeArtifact([existingTarget]));
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.evidence![0]).toContain('broken internal doc link or fragment');
+    expect(rec!.evidence![0]).not.toContain('missing file');
+  });
+
+  it('stays silent when both graph and normalized artifact are clean', () => {
+    expect(run(null, null, lycheeArtifact())).toBeNull();
+    expect(run(graph([]), null, lycheeArtifact())).toBeNull();
+  });
+
+  it('ignores external and non-local-link artifact findings', () => {
+    const external = localLinkFinding({
+      id: 'doc-link:lychee.external-links:def456',
+      check: 'lychee.external-links',
+      signal: 'broken-external-link',
+      target: 'https://example.invalid',
+    });
+    expect(run(null, null, lycheeArtifact([external]))).toBeNull();
   });
 });
 

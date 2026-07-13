@@ -440,6 +440,7 @@ const PROOF_RECEIPTS_PATH = join(PROJECT_DIR, 'data', 'proof-receipts.jsonl');
 // `~/.claude/usage-data` holds the repo-map artifacts we ingest (REPO_MAP_DIR).
 const USAGE_DATA = join(CLAUDE, 'usage-data');
 const REPO_MAP_DIR = join(USAGE_DATA, 'repo-map');
+const DOC_HYGIENE_DIR = join(USAGE_DATA, 'doc-hygiene');
 // Defaults to CHD_CACHE_DIR/dashboard.db. `CHD_DB_PATH` overrides it so a
 // test can point ingest at a throwaway DB (and a fixture $HOME) without touching
 // the real cache — test-only seam, production behaviour is unchanged when unset.
@@ -626,6 +627,12 @@ const { buildGitOutcomes, gitOutcomesReposFromEnv } = await import(
 // project root — a LOCAL repo-docs walk, no network — so it is safe under the
 // zero-deps runtime import guard (node:fs/child_process only, like parse-tasks).
 const { buildDocGraph } = await import(join(LIB, 'parse-docs.ts'));
+const {
+  DOC_HYGIENE_ARTIFACT_KEY_ENV,
+  DOC_HYGIENE_EXPECTED_COMMIT_ENV,
+  docHygieneArtifactFilename,
+  parseDocHygieneArtifact,
+} = await import(join(LIB, 'doc-hygiene-artifact.ts'));
 // Local snapshot root. The override is a test/deployment seam for supplying an
 // isolated committed-snapshot mirror; unset keeps the shipped repo path exactly
 // as before. It never fetches or writes guidance.
@@ -774,7 +781,7 @@ function readMemoryStores() {
 }
 
 // Build the repo doc graph (#2257, epic #2256) over this dashboard's OWN
-// Markdown docs (root *.md + docs/**), the seam the future doc-hygiene detector
+// Markdown docs (root *.md + docs/**), the seam the doc-hygiene detector
 // reads off `RecommendationInput.docGraph`. Mirrors readMemoryStores: a
 // non-signal aggregate, built fresh per assemble from a LOCAL repo walk (no
 // network, no Anthropic egress), tolerant by design — buildDocGraph itself never
@@ -786,6 +793,86 @@ function readDocGraph() {
     return buildDocGraph(PROJECT_DIR);
   } catch {
     return { nodes: [], edges: [] };
+  }
+}
+
+// Host-produced checker output (#2486, epic #2256). A direct host ingest uses
+// the repo-map producer's collision-safe absolute-root encoder. Canonical
+// deploys instead pass a safe repo-identity key + expected host commit: `/app`
+// cannot reconstruct the host checkout's absolute path (and the runtime image
+// intentionally carries no .git), so that explicit locator bridges namespaces
+// without weakening identity/freshness validation. Missing/malformed/stale
+// artifacts are null and never sink the recommendations endpoint.
+export function readDocHygieneArtifact(
+  root = PROJECT_DIR,
+  artifactDir = DOC_HYGIENE_DIR,
+  options = {}
+) {
+  try {
+    const configuredKey =
+      options.artifactKey ?? process.env[DOC_HYGIENE_ARTIFACT_KEY_ENV];
+    const artifactKey =
+      typeof configuredKey === 'string' && configuredKey.length > 0
+        ? configuredKey
+        : null;
+    const keyedFilename = artifactKey
+      ? docHygieneArtifactFilename(artifactKey)
+      : null;
+    if (artifactKey && !keyedFilename) return null;
+
+    const path = keyedFilename
+      ? join(artifactDir, keyedFilename)
+      : artifactPathFor(artifactDir, root);
+    const raw = readArtifactJsonCappedSync(path);
+
+    let expectedCommit =
+      options.expectedCommit ??
+      process.env[DOC_HYGIENE_EXPECTED_COMMIT_ENV] ??
+      null;
+    if (!expectedCommit && !artifactKey) {
+      try {
+        expectedCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: root,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+        }).trim();
+      } catch {
+        return null;
+      }
+    }
+    if (!expectedCommit) return null;
+
+    if (artifactKey) {
+      // The locator/expected commit come from the host deploy wrapper, while
+      // GIT_SHA is baked into the running image. A published image can differ
+      // from the local checkout that produced the artifact; never merge that
+      // artifact with `/app`'s graph from another commit.
+      const runtimeCommit = options.runtimeCommit ?? process.env.GIT_SHA ?? null;
+      const validCommit = (value) =>
+        typeof value === 'string' && /^[0-9a-f]{7,64}$/i.test(value);
+      if (
+        !validCommit(expectedCommit) ||
+        !validCommit(runtimeCommit) ||
+        !(
+          expectedCommit.toLowerCase().startsWith(runtimeCommit.toLowerCase()) ||
+          runtimeCommit.toLowerCase().startsWith(expectedCommit.toLowerCase())
+        )
+      ) {
+        return null;
+      }
+    }
+    // A keyed path deliberately relaxes absolute-root equality across the
+    // host/container namespace. Matching host, artifact, and runtime commits
+    // are mandatory on that path, so identity and freshness are never relaxed.
+    return parseDocHygieneArtifact(raw, {
+      ...(artifactKey
+        ? { expectedIdentity: artifactKey }
+        : { expectedRoot: root }),
+      expectedCommit,
+    });
+  } catch {
+    return null;
   }
 }
 
@@ -2199,6 +2286,11 @@ export function sourceSignature() {
   } catch {
     parts.push(`${REPO_MAP_DIR}:0`);
   }
+  try {
+    parts.push(`${DOC_HYGIENE_DIR}:${Math.floor(statSync(DOC_HYGIENE_DIR).mtimeMs)}`);
+  } catch {
+    parts.push(`${DOC_HYGIENE_DIR}:0`);
+  }
   for (const artifact of sourceArtifactInputs()) {
     parts.push(
       `source-artifact:${artifact.source.id}:${artifact.relPath}:${artifactSignature(artifact.path)}`
@@ -3358,11 +3450,15 @@ function assembleRecommendationContext(options = {}) {
     // assembleDataset (opt-in `gh` fetch + pure classify). SIGNAL ONLY — no
     // detector reads it yet; empty unless CHD_GIT_OUTCOMES names a repo.
     gitOutcomes: dataset.gitOutcomes,
-    // Repo doc graph (#2257): non-signal aggregate, the seam the future
+    // Repo doc graph (#2257): non-signal aggregate, the seam the
     // doc-hygiene detector (epic #2256) reads. Built fresh from a LOCAL walk of
     // this repo's own Markdown; empty on the SPA/upload dataset or when docs are
-    // absent, so any detector simply emits nothing there. SIGNAL ONLY this slice.
+    // absent, so the detector simply emits nothing there.
     docGraph: readDocGraph(),
+    // Optional host-produced Lychee output. Flag-off runner operation is local
+    // and offline; ingest only reads the persisted JSON and never invokes a
+    // checker or makes an external call.
+    docHygieneArtifact: readDocHygieneArtifact(),
   });
   return { input, sessions };
 }

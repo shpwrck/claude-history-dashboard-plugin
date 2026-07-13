@@ -52,6 +52,10 @@ import type {
 } from '../types';
 import type { DocGraph, DocNode } from '../../parse-docs';
 import type { RepoMapDataset } from '../../parse-repo-map-join';
+import type {
+  DocHygieneArtifact,
+  DocHygieneFinding,
+} from '../../doc-hygiene-artifact';
 
 /** The three deterministic doc-hygiene signals this slice emits. */
 export type DocHygieneSignal =
@@ -66,13 +70,15 @@ export interface DocHygieneItem {
   signal: DocHygieneSignal;
   /** The broken link target / dangling source path, when the signal has one. */
   target?: string;
-  /** Recommend-only suggested action (never an auto-edit). */
-  action: string;
+  /** One-based checker line, when tool-native evidence supplied a span. */
+  line?: number | null;
+  /** Exact local source used to reproduce this item. */
+  origin: 'doc-graph' | 'lychee.local-links';
 }
 
 /** Short label per signal for evidence rows. */
 const SIGNAL_LABEL: Record<DocHygieneSignal, string> = {
-  'broken-internal-link': 'internal doc link to a missing file',
+  'broken-internal-link': 'broken internal doc link or fragment',
   orphan: 'doc has no inbound links',
   'dangling-src-ref': 'source reference no longer exists',
 };
@@ -86,6 +92,16 @@ const STRUCTURAL: ReadonlySet<DocHygieneSignal> = new Set([
 /** Normalise a path for comparison: backslashes → slashes, strip a `./` prefix. */
 function normPath(p: string): string {
   return p.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/** Match URI-escaped graph targets to Lychee's decoded file-URL paths. */
+function canonicalLinkPath(p: string): string {
+  const normalized = normPath(p);
+  try {
+    return decodeURI(normalized);
+  } catch {
+    return normalized;
+  }
 }
 
 /**
@@ -142,7 +158,7 @@ function scanBrokenLinks(
       path: fromPath,
       signal: 'broken-internal-link',
       target,
-      action: `Fix or drop the link to "${target}" in ${fromPath} — no such doc is on disk.`,
+      origin: 'doc-graph',
     });
   }
   return items;
@@ -167,7 +183,7 @@ function scanOrphans(graph: DocGraph): DocHygieneItem[] {
     items.push({
       path: node.path,
       signal: 'orphan',
-      action: `No other doc links to ${node.path} — link it from an index/README or retire it.`,
+      origin: 'doc-graph',
     });
   }
   return items;
@@ -215,28 +231,89 @@ function scanDanglingSrcRefs(
       path: fromPath,
       signal: 'dangling-src-ref',
       target: path,
-      action: `${fromPath} references "${path}", which is not in the repo map — update or remove the reference.`,
+      origin: 'doc-graph',
     });
   }
   return items;
 }
 
+function artifactBrokenLink(finding: DocHygieneFinding): boolean {
+  return (
+    finding.check === 'lychee.local-links' &&
+    finding.signal === 'broken-internal-link'
+  );
+}
+
+/** Tool-native local-link findings, preserving Lychee's one-based line span. */
+function scanArtifactBrokenLinks(
+  artifact: DocHygieneArtifact | null | undefined
+): DocHygieneItem[] {
+  if (!artifact) return [];
+  return artifact.findings.filter(artifactBrokenLink).map((finding) => ({
+    path: normPath(finding.path),
+    signal: 'broken-internal-link',
+    target: normPath(finding.target),
+    line: finding.line,
+    origin: 'lychee.local-links',
+  }));
+}
+
+/**
+ * The graph and Lychee observe the same missing-link fact at different
+ * resolutions. Prefer all line-bearing Lychee occurrences whenever one maps to
+ * a graph edge; retain graph-only edges and every non-link graph signal.
+ */
+function mergeGraphAndArtifactItems(
+  graphItems: DocHygieneItem[],
+  artifactItems: DocHygieneItem[]
+): DocHygieneItem[] {
+  const linkKey = (item: DocHygieneItem): string => {
+    const target = canonicalLinkPath(item.target ?? '').split('#', 1)[0];
+    return `${canonicalLinkPath(item.path)}\u0000${target}`;
+  };
+  const artifactKeys = new Set(artifactItems.map(linkKey));
+  const merged = [
+    ...graphItems.filter(
+      (item) =>
+        item.signal !== 'broken-internal-link' ||
+        !artifactKeys.has(linkKey(item))
+    ),
+    ...artifactItems,
+  ];
+
+  const seen = new Set<string>();
+  return merged.filter((item) => {
+    const key = JSON.stringify([
+      item.signal,
+      normPath(item.path),
+      item.target ? normPath(item.target) : null,
+      item.line ?? null,
+    ]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export const detector: Detector = {
   id: 'maintenance.doc-hygiene',
   category: 'maintenance',
-  dataDeps: ['docGraph', 'repoMap'],
+  dataDeps: ['docGraph', 'repoMap', 'docHygieneArtifact'],
   rule(input: RecommendationInput): Recommendation | null {
     const graph = input.docGraph;
-    if (!graph || graph.nodes.length === 0) return null;
+    const artifactItems = scanArtifactBrokenLinks(input.docHygieneArtifact);
+    let graphItems: DocHygieneItem[] = [];
+    if (graph && graph.nodes.length > 0) {
+      const pathBySlug = new Map(graph.nodes.map((n) => [n.slug, n.path]));
+      const nodeSlugs = new Set(graph.nodes.map((n) => n.slug));
+      graphItems = [
+        ...scanBrokenLinks(graph, nodeSlugs, pathBySlug),
+        ...scanOrphans(graph),
+        ...scanDanglingSrcRefs(graph, input.repoMap, pathBySlug),
+      ];
+    }
 
-    const pathBySlug = new Map(graph.nodes.map((n) => [n.slug, n.path]));
-    const nodeSlugs = new Set(graph.nodes.map((n) => n.slug));
-
-    const items = [
-      ...scanBrokenLinks(graph, nodeSlugs, pathBySlug),
-      ...scanOrphans(graph),
-      ...scanDanglingSrcRefs(graph, input.repoMap, pathBySlug),
-    ];
+    const items = mergeGraphAndArtifactItems(graphItems, artifactItems);
     if (items.length === 0) return null;
 
     // Per-signal counts drive the breakdown and the observations.
@@ -261,23 +338,44 @@ export const detector: Detector = {
     const evidence = [...items]
       .sort(
         (a, b) =>
-          Number(STRUCTURAL.has(b.signal)) - Number(STRUCTURAL.has(a.signal))
+          Number(STRUCTURAL.has(b.signal)) - Number(STRUCTURAL.has(a.signal)) ||
+          a.path.localeCompare(b.path) ||
+          (a.line ?? 0) - (b.line ?? 0)
       )
       .slice(0, 8)
       .map(
         (it) =>
-          `${it.path}${it.target ? ` -> ${it.target}` : ''} — ${SIGNAL_LABEL[it.signal]}`
+          `${it.path}${it.line ? `:${it.line}` : ''}` +
+          `${it.target ? ` -> ${it.target}` : ''} — ${SIGNAL_LABEL[it.signal]}`
       );
 
-    const observations: RecObservation[] = [
-      {
-        claim: `${items.length} deterministic doc-hygiene issue(s) across ${graph.nodes.length} tracked doc(s): ${breakdown}`,
+    const graphItemCount = items.filter((item) => item.origin === 'doc-graph').length;
+    const artifactItemCount = items.filter(
+      (item) => item.origin === 'lychee.local-links'
+    ).length;
+    const trackedDocs = Math.max(
+      graph?.nodes.length ?? 0,
+      input.docHygieneArtifact?.repo.markdownFiles ?? 0
+    );
+    const observations: RecObservation[] = [];
+    if (graphItemCount > 0) {
+      observations.push({
+        claim: `${graphItemCount} deterministic graph-native doc-hygiene issue(s) across ${graph?.nodes.length ?? 0} parsed doc(s)`,
         source: 'parse-docs',
         field:
           'docGraph (buildDocGraph: nodes[].slug/path/category/indexKind + edges[].from/to/kind)',
-        value: items.length,
-      },
-    ];
+        value: graphItemCount,
+      });
+    }
+    if (artifactItemCount > 0) {
+      observations.push({
+        claim: `${artifactItemCount} broken local Markdown link occurrence(s) reported for the artifact's committed repo state`,
+        source: 'doc-hygiene artifact',
+        field:
+          'findings[check=lychee.local-links,signal=broken-internal-link].{id,path,line,target}',
+        value: artifactItemCount,
+      });
+    }
     // Signal 3's existence oracle is the repo map, not the doc graph — cite it.
     if (counts['dangling-src-ref']) {
       observations.push({
@@ -295,7 +393,7 @@ export const detector: Detector = {
       severity,
       title: `Repo docs need cleanup: ${n} hygiene issue${n === 1 ? '' : 's'}`,
       detail:
-        `The repo's tracked markdown has ${n} deterministic hygiene issue${n === 1 ? '' : 's'} — ${breakdown}. ` +
+        `The repo's ${trackedDocs} tracked markdown doc${trackedDocs === 1 ? '' : 's'} have ${n} deterministic hygiene issue${n === 1 ? '' : 's'} — ${breakdown}. ` +
         `Broken links and dead source references rot the doc graph the same way an unmaintained REFERENCES.md does.`,
       action:
         `Review the flagged docs (recommend-only — nothing is edited for you): fix or drop the broken internal links, ` +
@@ -307,8 +405,8 @@ export const detector: Detector = {
       provenance: {
         observations,
         inference:
-          `Each issue is read directly from the parsed doc graph (dead links / orphans read off nodes + edges; ` +
-          `dangling source references cross-checked against the repo-map inventory), so all ${n} are reproducible — ` +
+          `Each issue is read from the parsed doc graph or the commit-bound host Lychee artifact; overlapping missing-link facts prefer Lychee's exact line span, while ` +
+          `dangling source references are cross-checked against the repo-map inventory, so all ${n} are reproducible — ` +
           `a maintenance pass to keep the repo doc corpus linked and its references live.`,
       },
     };

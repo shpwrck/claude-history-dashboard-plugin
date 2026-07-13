@@ -1,23 +1,43 @@
 #!/usr/bin/env bash
 # Deploy/refresh hook for the local dashboard container (#1650, epic #1264).
 #
-# This is the canonical "refresh repo-map artifacts, then (re)deploy" command.
-# Generation of the structural repo map is HOST-SIDE (it needs devDeps + the WASM
-# Tree-sitter grammars, which the zero-node_modules runtime container does not
-# have — ADR 0007, #1013/#1195), so the generator cannot run inside the runtime
-# image and must be triggered around the deploy. This wrapper makes that trigger
-# automatic: it refreshes the artifacts the runtime consumes, then runs the same
+# This is the canonical "refresh host artifacts, then (re)deploy" command.
+# Generation of the structural repo map and doc-hygiene report is HOST-SIDE (the
+# zero-node_modules runtime intentionally ships neither parser devDeps nor
+# Lychee — ADR 0007, #1013/#1195), so neither producer can run in the runtime
+# image. This wrapper makes both triggers automatic, then runs the same
 # `podman compose ... up` documented in the README — so a single deploy command
 # also keeps the `context.repo-map-context-waste` card live on real data.
 #
 # Usage:
-#   scripts/deploy.sh              # refresh repo-map, then build + up -d (from source)
-#   scripts/deploy.sh --pull       # refresh repo-map, then pull + up -d (published image)
-#   scripts/deploy.sh --no-refresh # skip the repo-map refresh, just deploy
+#   scripts/deploy.sh              # refresh host artifacts, then build + up -d
+#   scripts/deploy.sh --pull       # refresh host artifacts, then pull + up -d
+#   scripts/deploy.sh --no-refresh # skip host artifact refresh, just deploy
 # Extra args after the flags are passed through to `compose up`.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Stable host/container identity seam for this repo's doc-hygiene artifact. The
+# host producer records its real checkout root, but `/app` has a different root
+# and no .git. Pass an explicit safe artifact key plus the host commit through
+# base compose so ingest can locate the same read-only file. Ingest separately
+# matches this host commit to the running image's baked GIT_SHA, which suppresses
+# the artifact when `--pull` deploys an image from a different checkout state.
+export CHD_DOC_HYGIENE_ARTIFACT_KEY=claude-history-dashboard
+CHD_DOC_HYGIENE_EXPECTED_COMMIT=''
+if command -v git >/dev/null 2>&1; then
+  CHD_DOC_HYGIENE_EXPECTED_COMMIT="$(git -C "$DIR" rev-parse HEAD 2>/dev/null || true)"
+fi
+if [ -z "$CHD_DOC_HYGIENE_EXPECTED_COMMIT" ] && [ -n "${GIT_SHA:-}" ]; then
+  CHD_DOC_HYGIENE_EXPECTED_COMMIT="$GIT_SHA"
+fi
+export CHD_DOC_HYGIENE_EXPECTED_COMMIT
+# Also fulfill the existing local-build version-stamp contract when the caller
+# did not supply a different stamp explicitly.
+if [ -z "${GIT_SHA:-}" ] && [ -n "$CHD_DOC_HYGIENE_EXPECTED_COMMIT" ]; then
+  export GIT_SHA="$CHD_DOC_HYGIENE_EXPECTED_COMMIT"
+fi
 
 # podman and docker are interchangeable here (README); prefer podman.
 if command -v podman >/dev/null 2>&1; then
@@ -40,13 +60,17 @@ for arg in "$@"; do
   esac
 done
 
-# Refresh the host-side repo-map artifacts before deploying. Best-effort: the
-# driver itself never fails the run on a per-root parse error, but guard the
-# whole step too so a deploy is never blocked by repo-map generation.
+# Refresh host-side artifacts before deploying. Both are best-effort so an
+# optional checker or one malformed project cannot block the dashboard deploy.
 if [ "$REFRESH" -eq 1 ]; then
   echo "deploy: refreshing repo-map artifacts (host-side)…"
   node "$DIR/scripts/repo-map-refresh.mjs" || \
     echo "deploy: repo-map refresh reported a problem — continuing with deploy" >&2
+  echo "deploy: refreshing doc-hygiene artifact (host-side)…"
+  node "$DIR/scripts/doc-hygiene-run.mjs" \
+    --root "$DIR" \
+    --artifact-key "$CHD_DOC_HYGIENE_ARTIFACT_KEY" || \
+    echo "deploy: doc-hygiene refresh reported a problem — continuing with deploy" >&2
 fi
 
 COMPOSE=("$ENGINE" compose -f "$DIR/docker-compose.yml" -f "$DIR/docker-compose.local.yml")

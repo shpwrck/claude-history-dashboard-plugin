@@ -22,7 +22,7 @@ import type { RecommendationViews } from './recommendations';
 
 /**
  * Engine-consumed fields the client envelope does not supply. `gitOutcomes`,
- * `memoryStores`, `docGraph`, and `organizationIdentity` are server-side ingest
+ * `memoryStores`, `docGraph`, `docHygieneArtifact`, and `organizationIdentity` are server-side ingest
  * artifacts no client dataset carries (`docGraph` is built at ingest from a
  * local repo-docs walk, #2258, and omitted in SPA/upload datasets).
  * `modelPinSavings` is different: not supplied here, but
@@ -34,6 +34,7 @@ export const CLIENT_ABSENT_ENGINE_FIELDS: readonly string[] = [
   'gitOutcomes',
   'memoryStores',
   'docGraph',
+  'docHygieneArtifact',
   'modelPinSavings',
   'organizationIdentity',
   // `secretsAtRest` (#2504) is computed at server ingest (the shared

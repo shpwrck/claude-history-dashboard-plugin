@@ -58,6 +58,7 @@ import type {
 import type { ModelEvalSummary } from '../model-eval-ingest';
 import type { GitOutcome } from '../parse-git-outcome';
 import type { DocGraph } from '../parse-docs';
+import type { DocHygieneArtifact } from '../doc-hygiene-artifact';
 import type { EvidenceRef } from '../evidence';
 // RecCategory and SavingsAttributionTier are defined in a dependency-free leaf
 // (#1582) so the parsers this module pulls types from (reclaim,
@@ -707,12 +708,20 @@ export interface RecommendationInput {
    * declared partial indices (REFERENCES parser table, competitive-analysis
    * tracker, ADR numeric ordering) flagged via `indexKind`/`ordinal`. Built at
    * ingest time by `buildDocGraph` (parse-docs) from a local repo-docs walk —
-   * zero network, zero Anthropic egress. SIGNAL ONLY this slice: NO detector
-   * reads it yet; the doc-hygiene detector is a follow-up child of #2256.
+   * zero network, zero Anthropic egress. `maintenance.doc-hygiene` consumes it
+   * alongside the optional host-produced checker artifact.
    * Optional: `undefined`/`null`/empty (no docs, or the SPA/upload dataset)
    * means downstream detectors emit nothing.
    */
   docGraph?: DocGraph | null;
+  /**
+   * Normalized host-side checker output for the repository's committed
+   * Markdown surface (#2486). Produced locally under
+   * `~/.claude/usage-data/doc-hygiene/`; absent, malformed, cross-root, or
+   * stale-commit artifacts are normalized to null. Server-only and omitted
+   * from SPA/upload datasets.
+   */
+  docHygieneArtifact?: DocHygieneArtifact | null;
 }
 
 /**
