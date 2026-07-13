@@ -39,6 +39,7 @@ import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
 import type { LocalAnalyzeResult } from './local-analyze';
+import type { CheckpointAnswerRecord } from './checkpoint-instrumentation';
 import { parseHistoryJsonl } from './parse-history';
 
 /** True in the server build; the SPA stub exports `false`. */
@@ -1026,6 +1027,51 @@ export async function postRejectSignal(
     return {
       ok: false,
       error: err instanceof Error ? err.message : 'Network error while recording reject signal',
+    };
+  }
+}
+
+/** Client-facing outcome of persisting checkpoint answer-time instrumentation. */
+export type CheckpointAnswerWriteResult =
+  | { ok: true; written: true }
+  | { ok: false; error: string };
+
+/**
+ * Persist one sanitized checkpoint answer through the CSRF-protected server
+ * route. The SPA alias no-ops this method and contains no server-route literal.
+ * Resolves a normalized result and never rejects.
+ */
+export async function postCheckpointAnswer(
+  record: CheckpointAnswerRecord
+): Promise<CheckpointAnswerWriteResult> {
+  const token = await csrfToken();
+  if (!token) return { ok: false, error: 'Could not obtain auth token' };
+  try {
+    const response = await serverFetch('/api/checkpoint/answers', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': token,
+      },
+      body: JSON.stringify(record),
+    });
+    const body = (await response.json().catch(() => null)) as {
+      ok?: boolean;
+      error?: string;
+    } | null;
+    if (!response.ok || !body?.ok) {
+      return {
+        ok: false,
+        error: body?.error || `Checkpoint answer write failed (HTTP ${response.status})`,
+      };
+    }
+    return { ok: true, written: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error
+        ? error.message
+        : 'Network error while recording checkpoint answer',
     };
   }
 }

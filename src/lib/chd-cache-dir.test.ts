@@ -47,6 +47,8 @@ function resolveServerPaths(env: Record<string, string | undefined> = {}) {
       env['ADOPTION_RECEIPTS_PATH'] ?? join(cacheDir, 'adoption-receipts.jsonl'),
     adoptionSpool:
       env['ADOPTION_SPOOL_PATH'] ?? join(cacheDir, 'adoption-spool.jsonl'),
+    checkpointAnswers:
+      env['CHECKPOINT_ANSWERS_PATH'] ?? join(cacheDir, 'checkpoint-answers.jsonl'),
     enterpriseAuditLog:
       env['ENTERPRISE_AUDIT_LOG_PATH'] ?? join(cacheDir, 'enterprise-audit.jsonl'),
     reviewEventsCache:
@@ -126,6 +128,11 @@ describe('server.mjs path derivation', () => {
     expect(adoptionSpool).toBe(join(cacheDir, 'adoption-spool.jsonl'));
   });
 
+  it('checkpoint-answers.jsonl defaults under CHD_CACHE_DIR', () => {
+    const { checkpointAnswers, cacheDir } = resolveServerPaths({});
+    expect(checkpointAnswers).toBe(join(cacheDir, 'checkpoint-answers.jsonl'));
+  });
+
   it('enterprise-audit.jsonl defaults under CHD_CACHE_DIR', () => {
     const { enterpriseAuditLog, cacheDir } = resolveServerPaths({});
     expect(enterpriseAuditLog).toBe(join(cacheDir, 'enterprise-audit.jsonl'));
@@ -147,14 +154,17 @@ describe('server.mjs path derivation', () => {
     const custom = '/custom/cache';
     const receiptsOverride = '/custom/receipts.jsonl';
     const spoolOverride = '/custom/spool.jsonl';
-    const { adoptionReceipts, adoptionSpool, cacheDir } = resolveServerPaths({
+    const checkpointOverride = '/custom/checkpoint-answers.jsonl';
+    const { adoptionReceipts, adoptionSpool, checkpointAnswers, cacheDir } = resolveServerPaths({
       CHD_CACHE_DIR: custom,
       ADOPTION_RECEIPTS_PATH: receiptsOverride,
       ADOPTION_SPOOL_PATH: spoolOverride,
+      CHECKPOINT_ANSWERS_PATH: checkpointOverride,
     });
     expect(cacheDir).toBe(custom);
     expect(adoptionReceipts).toBe(receiptsOverride);
     expect(adoptionSpool).toBe(spoolOverride);
+    expect(checkpointAnswers).toBe(checkpointOverride);
   });
 
   it('no path defaults to PROJECT_DIR when CHD_CACHE_DIR is set', () => {
@@ -164,6 +174,7 @@ describe('server.mjs path derivation', () => {
     const allPaths = [
       paths.adoptionReceipts,
       paths.adoptionSpool,
+      paths.checkpointAnswers,
       paths.enterpriseAuditLog,
       paths.reviewEventsCache,
       paths.scopedDbDir,

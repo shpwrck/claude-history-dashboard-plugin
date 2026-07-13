@@ -583,6 +583,13 @@ const {
 const { appendAdoptionReceipt, readAdoptionReceiptIndex, readRejectedFindingIds } =
   await import(join(LIB, 'adoption-receipts.ts'));
 export { readRejectedFindingIds };
+// Durable checkpoint answer-time efficacy reader (#2519). Kept outside the
+// dataset/hash path: this dashboard-owned telemetry is queried explicitly and
+// never changes transcript-derived dataset freshness.
+const { readCheckpointAnswerEfficacy } = await import(
+  join(LIB, 'checkpoint-answer-store.ts')
+);
+export { readCheckpointAnswerEfficacy };
 // Shadow-calls experiment ledger (epic #513) — per-axis aggregate feeds the
 // workflow.shadow-axis-wins detector (#518/#523).
 const {

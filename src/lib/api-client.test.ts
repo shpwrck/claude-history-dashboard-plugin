@@ -5,8 +5,13 @@ import {
   fetchEnterpriseAuditExport,
   fetchEnterpriseOrganization,
   fetchEnterpriseReadinessReceipt,
+  postCheckpointAnswer,
 } from './api-client';
-import { fetchAuditRun as fetchSpaAuditRun } from './api-client.spa';
+import {
+  fetchAuditRun as fetchSpaAuditRun,
+  postCheckpointAnswer as postSpaCheckpointAnswer,
+} from './api-client.spa';
+import { buildCheckpointAnswerRecord } from './checkpoint-instrumentation';
 
 describe('fetchAuthSession', () => {
   afterEach(() => {
@@ -174,6 +179,62 @@ function mockJsonResponse(body: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+describe('postCheckpointAnswer', () => {
+  const record = buildCheckpointAnswerRecord({
+    checkpointId: 'cp-client',
+    shownAt: 1_000,
+    answeredAt: 2_000,
+    answer: 'worktrees',
+    neighborhood: {
+      anchor: { kind: 'doc', slug: 'AGENTS' },
+      seeds: [],
+      nodes: [],
+      ambiguityTrigger: false,
+      ambiguitySources: [],
+    },
+  })!;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('obtains CSRF and posts the record through the server chokepoint', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockJsonResponse({ token: 'csrf' }))
+      .mockResolvedValueOnce(mockJsonResponse({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(postCheckpointAnswer(record)).resolves.toEqual({
+      ok: true,
+      written: true,
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/csrf-token',
+      expect.objectContaining({ headers: expect.any(Headers) })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/checkpoint/answers',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify(record),
+      })
+    );
+  });
+
+  it('is a network-free no-op in the SPA stub', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(postSpaCheckpointAnswer(record)).resolves.toEqual({
+      ok: true,
+      written: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
 
 describe('fetchAuditRun', () => {
   afterEach(() => {

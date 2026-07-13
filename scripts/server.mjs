@@ -79,6 +79,7 @@ import {
   computeLiveSession,
   recordSuppressionTransitions,
   readRejectedFindingIds,
+  readCheckpointAnswerEfficacy,
   refreshReviewEvents,
 } from './ingest.mjs';
 import {
@@ -155,6 +156,9 @@ const {
 } = await import(join(PROJECT_DIR, 'src', 'lib', 'adoption-receipts.ts'));
 const { appendRejectSignal } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'reject-signals.ts')
+);
+const { appendCheckpointAnswer } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'checkpoint-answer-store.ts')
 );
 const { readSteerTelemetry } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-steer-telemetry.ts')
@@ -335,6 +339,11 @@ const ADOPTION_RECEIPTS =
 const REJECT_SIGNALS =
   process.env.REJECT_SIGNALS_PATH ||
   join(CHD_CACHE_DIR, 'reject-signals.jsonl');
+// Append-only human checkpoint answer-time instrumentation (#2519). A path
+// override supports isolated tests and deployments with a dedicated data mount.
+const CHECKPOINT_ANSWERS =
+  process.env.CHECKPOINT_ANSWERS_PATH ||
+  join(CHD_CACHE_DIR, 'checkpoint-answers.jsonl');
 // Read-only PreToolUse-steer delivery/outcome log (#2203). Written by the recs
 // steer hook under ~/.claude/skills/recs; the dashboard only reads + aggregates it.
 const STEER_TELEMETRY_LOG =
@@ -1182,6 +1191,7 @@ const GLOBAL_INGEST_API = {
   computeLiveSession,
   recordSuppressionTransitions,
   readRejectedFindingIds,
+  readCheckpointAnswerEfficacy,
   refreshReviewEvents,
 };
 
@@ -4341,6 +4351,63 @@ async function handleRejectSignalWrite(req, res) {
   return sendJson(res, 200, result);
 }
 
+// POST /api/checkpoint/answers — durable checkpoint answer-time capture
+// (#2519). Same-origin + JSON + CSRF are checked before the body is read; the
+// store re-sanitizes every field and recomputes elapsedMs before append.
+async function handleCheckpointAnswerWrite(req, res) {
+  if (!passesWriteAuth(req, res)) return;
+
+  let raw;
+  try {
+    raw = await readRequestBody(req);
+  } catch (error) {
+    return sendJson(res, 413, {
+      ok: false,
+      error: error?.message || 'Failed to read request body',
+    });
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return sendJson(res, 400, { ok: false, error: 'Body is not valid JSON' });
+  }
+  const result = await appendCheckpointAnswer(CHECKPOINT_ANSWERS, parsed);
+  if (!result.ok) {
+    return sendJson(res, result.status, { ok: false, error: result.error });
+  }
+  return sendJson(res, 200, result);
+}
+
+// GET twin: bounded efficacy aggregate only (no raw log dump). Enterprise GET
+// requires org:read; POST requires org:write plus passesWriteAuth above.
+async function handleCheckpointAnswerRead(req, res) {
+  const ingestApi = await enterpriseRequestIngestApi(req);
+  try {
+    const efficacy = await ingestApi.readCheckpointAnswerEfficacy(
+      CHECKPOINT_ANSWERS
+    );
+    return sendJson(res, 200, efficacy);
+  } catch (error) {
+    if (
+      error?.code === 'CHECKPOINT_ANSWER_READ_BUDGET_EXCEEDED'
+      && error?.provenance
+    ) {
+      return sendJson(res, 503, {
+        ok: false,
+        error: 'Checkpoint answer efficacy log exceeds the bounded read budget',
+        incomplete: true,
+        provenance: error.provenance,
+      });
+    }
+    console.error('checkpoint-answer efficacy read failed:', error?.message || error);
+    return sendJson(res, 500, {
+      ok: false,
+      error: 'Failed to read checkpoint answer efficacy evidence',
+    });
+  }
+}
+
 // POST /api/analyze/local — Tier A "Analyze locally" (#2319, ADR 0018).
 //
 // Runs a LOCAL model over the SAME deterministic recommendation call sites as
@@ -6851,6 +6918,8 @@ function enterpriseCapabilitiesForPrincipal(principal) {
     isAdmin && enterprisePrincipalHasScope(principal, ['org:read']);
   const canReadAuditLog =
     isAdmin && enterprisePrincipalHasScope(principal, ['audit:read', 'org:read']);
+  const canWriteOrganizationData =
+    isAdmin && enterprisePrincipalHasScope(principal, ['org:write']);
   const canWritePolicy =
     isAdmin &&
     enterprisePrincipalHasScope(principal, ['org:write', 'policy:write']);
@@ -6859,6 +6928,7 @@ function enterpriseCapabilitiesForPrincipal(principal) {
     canReadOrganizationRollup: canReadOrganizationData,
     canReadOrganizationData,
     canReadAuditLog,
+    canWriteOrganizationData,
     canReadRawTranscripts:
       (isAdmin || hasDataRoot) &&
       enterprisePrincipalHasScope(principal, [
@@ -7980,6 +8050,7 @@ function enterpriseOrganizationDataPath(pathname) {
     pathname === '/api/dataset.json' ||
     pathname === '/api/recommendations.json' ||
     pathname === '/api/adoption/receipts' ||
+    pathname === '/api/checkpoint/answers' ||
     pathname === '/api/steer-telemetry' ||
     pathname === '/api/usage' ||
     pathname === '/api/audit.json' ||
@@ -8040,6 +8111,11 @@ function enterpriseRouteAllowed(principal, pathname, method = 'GET') {
   // anonymous hole under enterprise auth; the shipper presents the ingest token regardless of mode.
   if (/^\/api\/ingest\/[^/]+\/artifacts$/.test(pathname)) {
     return caps.canWritePolicy;
+  }
+  if (pathname === '/api/checkpoint/answers') {
+    if (method === 'GET') return caps.canReadOrganizationData;
+    if (method === 'POST') return caps.canWriteOrganizationData;
+    return false;
   }
   if (!enterpriseReadMethod(method)) {
     return caps.canWritePolicy;
@@ -9177,6 +9253,15 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
       }
       return handleRejectSignalWrite(req, res);
+    }
+
+    if (pathname === '/api/checkpoint/answers') {
+      if (req.method === 'GET') return handleCheckpointAnswerRead(req, res);
+      if (req.method === 'POST') return handleCheckpointAnswerWrite(req, res);
+      return sendJson(res, 405, {
+        ok: false,
+        error: 'Method not allowed; use GET or POST',
+      });
     }
 
     // Tier A "Analyze locally" (#2319): local-model analysis over the recs call

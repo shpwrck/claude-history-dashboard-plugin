@@ -86,6 +86,51 @@ describe('buildCheckpointAnswerRecord', () => {
     expect(iso!.elapsedMs).toBe(5_000);
   });
 
+  it('accepts real explicit-zone ISO input and emits exact canonical UTC timestamps', () => {
+    const record = buildCheckpointAnswerRecord({
+      checkpointId: 'cp',
+      shownAt: '2024-02-29T23:59:55+01:00',
+      answeredAt: '2024-02-29T23:59:59.123+01:00',
+      answer: 'x',
+      neighborhood: neighborhood(),
+    });
+    expect(record).toMatchObject({
+      shownAtIso: '2024-02-29T22:59:55.000Z',
+      answeredAtIso: '2024-02-29T22:59:59.123Z',
+      elapsedMs: 4_123,
+    });
+  });
+
+  it('fails closed without throwing on non-canonicalizable time inputs', () => {
+    const base = {
+      checkpointId: 'cp',
+      shownAt: '2026-07-13T00:00:00Z',
+      answeredAt: '2026-07-13T00:00:01Z',
+      answer: 'x',
+      neighborhood: neighborhood(),
+    };
+    const invalid = [
+      { shownAt: '07/13/2026 00:00:00' },
+      { shownAt: '2026-02-30T00:00:00Z' },
+      { shownAt: '2026-02-29T00:00:00Z' },
+      { shownAt: '2026-07-13' },
+      { shownAt: '2026-07-13T00:00:00' },
+      { shownAt: ' 2026-07-13T00:00:00Z ' },
+      { shownAt: '2026-07-13T24:00:00Z' },
+      { shownAt: '2026-07-13T23:59:60Z' },
+      { shownAt: '2026-07-13T00:00:00.1234Z' },
+      { shownAt: '+002026-07-13T00:00:00.000Z' },
+      { shownAt: Number.MAX_VALUE },
+      { shownAt: 1.5 },
+      { shownAt: new Date(Number.NaN) },
+    ];
+
+    for (const item of invalid) {
+      expect(() => buildCheckpointAnswerRecord({ ...base, ...item })).not.toThrow();
+      expect(buildCheckpointAnswerRecord({ ...base, ...item })).toBeNull();
+    }
+  });
+
   it('honours a narrower shownSlugs override in provenance', () => {
     const record = buildCheckpointAnswerRecord({
       checkpointId: 'cp',

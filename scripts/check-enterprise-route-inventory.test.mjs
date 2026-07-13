@@ -59,11 +59,36 @@ check('inventory covers the current server route surface', () => {
 
 check('inventory access categories all have explicit policies', () => {
   const inventoryAccess = new Set(
-    ENTERPRISE_ROUTE_INVENTORY.map((route) => route.access)
+    ENTERPRISE_ROUTE_INVENTORY.flatMap((route) => [
+      route.access,
+      ...Object.values(route.methodAccess || {}),
+    ])
   );
   assert.deepEqual(
     [...inventoryAccess].sort(),
     Object.keys(ENTERPRISE_ROUTE_ACCESS_POLICIES).sort()
+  );
+});
+
+check('checkpoint answer inventory distinguishes org read from org write', () => {
+  const route = ENTERPRISE_ROUTE_INVENTORY.find(
+    (candidate) => candidate.kind === 'exact'
+      && candidate.value === '/api/checkpoint/answers'
+  );
+  assert.equal(route?.access, 'organization-data');
+  assert.deepEqual(route?.methodAccess, {
+    POST: 'organization-efficacy-write',
+  });
+  assert.deepEqual(
+    ENTERPRISE_ROUTE_ACCESS_POLICIES['organization-efficacy-write'],
+    {
+      allowedPrincipals: ['admin'],
+      requiredCapability: 'canWriteOrganizationData',
+      scopePosture: 'org:write',
+      dataBoundary: 'organization checkpoint efficacy evidence',
+      transcriptExposure: 'none',
+      mutating: true,
+    }
   );
 });
 
@@ -103,6 +128,20 @@ check('validator rejects unknown access categories', () => {
   assert.match(
     errors.join('\n'),
     /declares unknown access category "surprise-production-access"/
+  );
+});
+
+check('validator rejects unknown method-specific access categories', () => {
+  const route = {
+    kind: 'exact',
+    value: '/api/checkpoint/answers',
+    access: 'organization-data',
+    methodAccess: { POST: 'surprise-write-access' },
+  };
+  const errors = validateEnterpriseRouteInventory([route], [route]);
+  assert.match(
+    errors.join('\n'),
+    /methodAccess\.POST declares unknown access category "surprise-write-access"/
   );
 });
 

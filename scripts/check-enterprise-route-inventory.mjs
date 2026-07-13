@@ -109,6 +109,14 @@ export const ENTERPRISE_ROUTE_ACCESS_POLICIES = {
     transcriptExposure: 'derived evidence',
     mutating: false,
   },
+  'organization-efficacy-write': {
+    allowedPrincipals: ADMIN_PRINCIPALS,
+    requiredCapability: 'canWriteOrganizationData',
+    scopePosture: 'org:write',
+    dataBoundary: 'organization checkpoint efficacy evidence',
+    transcriptExposure: 'none',
+    mutating: true,
+  },
   'scoped-or-admin-data': {
     allowedPrincipals: SCOPED_READ_PRINCIPALS,
     requiredCapability: SCOPED_READ_CAPABILITY,
@@ -194,6 +202,12 @@ export const ENTERPRISE_ROUTE_INVENTORY = [
   { kind: 'exact', value: '/api/policy/write', access: 'policy-write' },
   { kind: 'exact', value: '/api/adoption/receipts', access: 'organization-data' },
   { kind: 'exact', value: '/api/recommendations/reject', access: 'policy-write' },
+  {
+    kind: 'exact',
+    value: '/api/checkpoint/answers',
+    access: 'organization-data',
+    methodAccess: { POST: 'organization-efficacy-write' },
+  },
   { kind: 'exact', value: '/api/analyze/local', access: 'local-analyze' },
   { kind: 'exact', value: '/api/steer-telemetry', access: 'organization-data' },
   { kind: 'exact', value: '/api/sessions', access: 'session-dispatch' },
@@ -339,6 +353,31 @@ export function validateEnterpriseRouteInventory(
       );
     } else {
       usedAccess.add(route.access);
+    }
+    if (
+      route.methodAccess !== undefined
+      && (
+        !route.methodAccess
+        || typeof route.methodAccess !== 'object'
+        || Array.isArray(route.methodAccess)
+      )
+    ) {
+      errors.push(`${routeKey(route)} methodAccess must be an object`);
+    } else {
+      for (const [method, access] of Object.entries(route.methodAccess || {})) {
+        if (!/^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(method)) {
+          errors.push(`${routeKey(route)} declares invalid methodAccess method "${method}"`);
+        }
+        if (typeof access !== 'string' || !access.trim()) {
+          errors.push(`${routeKey(route)} methodAccess.${method} must declare an access category`);
+        } else if (!policyKeys.has(access)) {
+          errors.push(
+            `${routeKey(route)} methodAccess.${method} declares unknown access category "${access}"`
+          );
+        } else {
+          usedAccess.add(access);
+        }
+      }
     }
   }
 

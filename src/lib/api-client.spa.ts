@@ -20,6 +20,7 @@ import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
 import type { LocalAnalyzeResult } from './local-analyze';
+import type { CheckpointAnswerRecord } from './checkpoint-instrumentation';
 
 /** False in the SPA build — gates all server-only UI off. */
 export const SERVER_AVAILABLE = false;
@@ -517,6 +518,18 @@ export async function writePolicy(): Promise<PolicyWriteResult> {
 export type RejectSignalWriteResult = { ok: true } | { ok: false; error: string };
 export async function postRejectSignal(): Promise<RejectSignalWriteResult> {
   return { ok: false, error: UNAVAILABLE };
+}
+
+// Checkpoint answer persistence is server-tier. The upload-only SPA keeps the
+// interactive preview but emits no network call and carries no server literal.
+export type CheckpointAnswerWriteResult =
+  | { ok: true; written: boolean }
+  | { ok: false; error: string };
+export async function postCheckpointAnswer(
+  _record: CheckpointAnswerRecord
+): Promise<CheckpointAnswerWriteResult> {
+  void _record;
+  return { ok: true, written: false };
 }
 
 // Tier A "Analyze locally" (#2319) needs the server (it fronts the local model);
