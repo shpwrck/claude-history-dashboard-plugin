@@ -395,7 +395,12 @@ describe('parseSessionJsonl tool_use_id linkage (#1928)', () => {
   it('concatenates + dedupes ids across streamed lines sharing a message id', () => {
     // Same logical message split across two lines (#457): tool_use blocks arrive
     // on separate lines repeating the id, and one id repeats — it must dedupe.
-    const usage = { input_tokens: 10, output_tokens: 5 }
+    const usage = {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_creation_input_tokens: 7,
+      cache_read_input_tokens: 11,
+    }
     const text = [
       assistantTools([{ id: 'toolu_a', name: 'Read' }], usage, 'shared'),
       assistantTools([{ id: 'toolu_a', name: 'Read' }, { id: 'toolu_c', name: 'Grep' }], usage, 'shared'),
@@ -403,5 +408,11 @@ describe('parseSessionJsonl tool_use_id linkage (#1928)', () => {
     const out = parseSessionJsonl(text, 'stream.jsonl')!
     expect(out.messageCount).toBe(1)
     expect(out.entries[0].toolUseIds).toEqual(['toolu_a', 'toolu_c'])
+    // Repeated streamed snapshots for one message use the per-field maximum;
+    // they are not summed into duplicate token throughput.
+    expect(out.totalInputTokens).toBe(10)
+    expect(out.totalOutputTokens).toBe(5)
+    expect(out.totalCacheCreationTokens).toBe(7)
+    expect(out.totalCacheReadTokens).toBe(11)
   })
 })

@@ -58,23 +58,40 @@ function success(overrides: Partial<TaskSuccessProxy> = {}): TaskSuccessProxy {
 
 /** One token-data session carrying `tokens` inside the [START,END] window. */
 function tokens(sessionId: string, total: number, ts = MID): SessionTokenData {
+  return tokensByPool(sessionId, { input: total }, ts);
+}
+
+function tokensByPool(
+  sessionId: string,
+  parts: {
+    input?: number;
+    output?: number;
+    cacheCreation?: number;
+    cacheRead?: number;
+  },
+  ts = MID
+): SessionTokenData {
+  const inputTokens = parts.input ?? 0;
+  const outputTokens = parts.output ?? 0;
+  const cacheCreationTokens = parts.cacheCreation ?? 0;
+  const cacheReadTokens = parts.cacheRead ?? 0;
   return {
     sessionId,
     entrypoint: 'cli',
-    totalInputTokens: total,
-    totalOutputTokens: 0,
-    totalCacheCreationTokens: 0,
-    totalCacheReadTokens: 0,
+    totalInputTokens: inputTokens,
+    totalOutputTokens: outputTokens,
+    totalCacheCreationTokens: cacheCreationTokens,
+    totalCacheReadTokens: cacheReadTokens,
     model: 'claude-opus-4-8',
     messageCount: 1,
     entries: [
       {
         timestamp: ts,
-        inputTokens: total,
-        outputTokens: 0,
-        cacheCreationTokens: 0,
+        inputTokens,
+        outputTokens,
+        cacheCreationTokens,
         cacheCreation1hTokens: 0,
-        cacheReadTokens: 0,
+        cacheReadTokens,
         webSearchRequests: 0,
         webFetchRequests: 0,
         model: 'claude-opus-4-8',
@@ -231,11 +248,86 @@ describe('workflow.human-input-leverage', () => {
   it('cites the outlier excess in evidence and provenance (auditable)', () => {
     const rec = detector.rule(corpusWith({}), NOW);
     expect(rec?.evidence?.[0]).toContain('/repo/app');
-    expect(rec?.evidence?.[0]).toContain('tokens avoidable upfront');
+    expect(rec?.evidence?.[0]).toContain('non-cache outlier excess');
     const obs = rec?.provenance?.observations ?? [];
     expect(obs.length).toBeGreaterThan(0);
     expect(obs.some((o) => o.source === 'parse-sessions')).toBe(true);
     expect(rec?.provenance?.inference).toMatch(/causal hypothesis/i);
+  });
+
+  it('cannot turn cache-read-only throughput into an avoidable-token headline', () => {
+    const base = corpusWith({});
+    const rec = detector.rule(
+      {
+        ...base,
+        tokenData: base.tokenData.map((row) =>
+          row.sessionId === 'sess-excursion'
+            ? tokensByPool(row.sessionId, {
+                input: 10_000,
+                cacheRead: 10_000_000,
+              })
+            : row
+        ),
+      },
+      NOW
+    );
+    expect(rec).toBeNull();
+  });
+
+  it('reports non-cache excess by component and cache reads as excluded reuse', () => {
+    const base = corpusWith({});
+    const rec = detector.rule(
+      {
+        ...base,
+        tokenData: base.tokenData.map((row) =>
+          row.sessionId === 'sess-excursion'
+            ? tokensByPool(row.sessionId, {
+                input: 150_000,
+                output: 90_000,
+                cacheCreation: 60_000,
+                cacheRead: 5_000_000,
+              })
+            : row
+        ),
+      },
+      NOW
+    );
+    expect(rec?.evidence?.[0]).toContain('290,000 non-cache outlier excess');
+    expect(rec?.evidence?.[0]).toContain(
+      'proportional excess allocation estimate: input 145,000'
+    );
+    expect(rec?.evidence?.[0]).toContain('output 87,000');
+    expect(rec?.evidence?.[0]).toContain('cache creation 58,000');
+    expect(rec?.evidence?.[0]).toContain(
+      'measured excursion throughput: input 150,000, output 90,000, cache creation 60,000'
+    );
+    expect(rec?.evidence?.[0]).toContain(
+      'cache-read context reuse excluded: 5,000,000'
+    );
+    expect(rec?.detail).toContain(
+      '5,000,000 cache-read tokens were measured but explicitly excluded'
+    );
+    expect(
+      rec?.provenance?.observations.find(
+        (observation) => observation.field === 'TokenEntry.cacheReadTokens'
+      )?.value
+    ).toBe(5_000_000);
+    expect(
+      rec?.provenance?.observations.find(
+        (observation) => observation.field === 'TokenEntry.inputTokens'
+      )?.value
+    ).toBe(150_000);
+    expect(
+      rec?.provenance?.observations.find(
+        (observation) => observation.field === 'TokenEntry.outputTokens'
+      )?.value
+    ).toBe(90_000);
+    expect(
+      rec?.provenance?.observations.find(
+        (observation) => observation.field === 'TokenEntry.cacheCreationTokens'
+      )?.value
+    ).toBe(60_000);
+    expect(rec?.provenance?.inference).toContain('proportional allocation');
   });
 
   it('surfaces the interruption-cost threshold as a named, uncalibrated assumption (not a gate)', () => {
@@ -243,7 +335,7 @@ describe('workflow.human-input-leverage', () => {
     expect(rec?.detail).toMatch(/uncalibrated/i);
     expect(rec?.detail).toMatch(/interruption-cost threshold/i);
     // Surfaced, not subtracted: the full outlier excess is still reported.
-    expect(rec?.detail).toMatch(/agent tokens sit in the outlier/i);
+    expect(rec?.detail).toMatch(/290,000 non-cache tokens of outlier excess/i);
   });
 
   it('stays silent when there is no late corrective turn (mere approval)', () => {
@@ -509,7 +601,7 @@ describe('workflow.human-input-leverage', () => {
     expect(rec?.id).toBe('workflow.human-input-leverage');
     expect(rec?.affected).toBe(1);
     // Avoidable = 500k − 120k class baseline = 380k (NOT 500k − global median).
-    expect(rec?.evidence?.[0]).toContain('380,000 tokens avoidable upfront');
+    expect(rec?.evidence?.[0]).toContain('380,000 non-cache outlier excess');
     expect(rec?.evidence?.[0]).toContain('class baseline of 120,000');
   });
 

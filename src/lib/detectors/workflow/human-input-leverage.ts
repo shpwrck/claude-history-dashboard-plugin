@@ -17,12 +17,12 @@
  *    literal "[Request interrupted by user]" cue when the user had to cut the
  *    assistant mid-response.
  *
- * An **excursion** is the intersection: a span that ran far (token-spend outlier)
+ * An **excursion** is the intersection: a span that ran far (non-cache token
+ * throughput outlier)
  * against its task-class baseline AND carried at least one human-input signal.
- * Per *task class* (span project) we sum the avoided agent tokens — the
- * excursion's excess over a typical span of that class — and surface ONE auditable
- * recommendation: "task class X is cheaper if you ask the human upfront; ~N tokens
- * saved."
+ * Per *task class* (span project) we sum only input, output, and cache-creation
+ * excess over a typical span of that class. Cache-read throughput is reported
+ * separately as excluded context reuse, never as avoidable generated work.
  *
  * Epistemics (ADR 0017 + the auditable-claims contract):
  *  - The MEASUREMENT (these excursions ran far and carried a steering signal) is
@@ -84,6 +84,13 @@ interface Excursion {
   endMs: number;
   spanTokens: number;
   avoidedTokens: number;
+  observedInputTokens: number;
+  observedOutputTokens: number;
+  observedCacheCreationTokens: number;
+  allocatedExcessInputTokens: number;
+  allocatedExcessOutputTokens: number;
+  allocatedExcessCacheCreationTokens: number;
+  excludedCacheReadTokens: number;
   ratioToMedian: number;
   /** The baseline this span was judged against (its own class median where the
    *  class has enough spans, else the global median). */
@@ -94,6 +101,7 @@ interface Excursion {
 interface SpanWindow {
   span: TaskSteering;
   spanTokens: number;
+  tokenPools: TokenPools;
   startMs: number;
   endMs: number;
   key: string;
@@ -109,6 +117,20 @@ interface ClassRollup {
   taskClass: string;
   excursions: Excursion[];
   avoidedTokens: number;
+  observedInputTokens: number;
+  observedOutputTokens: number;
+  observedCacheCreationTokens: number;
+  allocatedExcessInputTokens: number;
+  allocatedExcessOutputTokens: number;
+  allocatedExcessCacheCreationTokens: number;
+  excludedCacheReadTokens: number;
+}
+
+interface TokenPools {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
 }
 
 interface MidTurnInterrupt {
@@ -124,14 +146,18 @@ function parseMs(value: string): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function entryTokens(entry: TokenEntry): number {
+function entryTokenPools(entry: TokenEntry): TokenPools {
   // cacheCreation1hTokens is a subset of cacheCreationTokens — don't double-count.
-  return (
-    entry.inputTokens +
-    entry.outputTokens +
-    entry.cacheCreationTokens +
-    entry.cacheReadTokens
-  );
+  return {
+    inputTokens: entry.inputTokens,
+    outputTokens: entry.outputTokens,
+    cacheCreationTokens: entry.cacheCreationTokens,
+    cacheReadTokens: entry.cacheReadTokens,
+  };
+}
+
+function nonCacheTokens(pools: TokenPools): number {
+  return pools.inputTokens + pools.outputTokens + pools.cacheCreationTokens;
 }
 
 function humanSignalLabel(signal: HumanSignal): string {
@@ -147,14 +173,14 @@ function formatSignalPhrase(signals: HumanSignal[]): string {
 /** Sort tokens per session so span-window joins are deterministic and bounded. */
 function tokenEntriesBySession(
   tokenData: SessionTokenData[]
-): Map<string, { ms: number; tokens: number }[]> {
-  const bySession = new Map<string, { ms: number; tokens: number }[]>();
+): Map<string, { ms: number; pools: TokenPools }[]> {
+  const bySession = new Map<string, { ms: number; pools: TokenPools }[]>();
   for (const data of tokenData) {
-    const rows: { ms: number; tokens: number }[] = [];
+    const rows: { ms: number; pools: TokenPools }[] = [];
     for (const entry of data.entries) {
       const ms = parseMs(entry.timestamp);
       if (ms == null) continue;
-      rows.push({ ms, tokens: entryTokens(entry) });
+      rows.push({ ms, pools: entryTokenPools(entry) });
     }
     rows.sort((a, b) => a.ms - b.ms);
     bySession.set(data.sessionId, rows);
@@ -162,23 +188,31 @@ function tokenEntriesBySession(
   return bySession;
 }
 
-/** Agent tokens spent inside a steering span's [startTime, endTime] window. */
-function spanTokensFor(
+/** Token pools observed inside a steering span's [startTime, endTime] window. */
+function spanTokenPoolsFor(
   span: TaskSteering,
-  bySession: Map<string, { ms: number; tokens: number }[]>
-): number {
+  bySession: Map<string, { ms: number; pools: TokenPools }[]>
+): TokenPools {
+  const totals: TokenPools = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+  };
   const rows = bySession.get(span.sessionId);
-  if (!rows || rows.length === 0) return 0;
+  if (!rows || rows.length === 0) return totals;
   const startMs = parseMs(span.startTime);
   const endMs = parseMs(span.endTime);
-  if (startMs == null || endMs == null) return 0;
-  let total = 0;
+  if (startMs == null || endMs == null) return totals;
   for (const row of rows) {
     if (row.ms < startMs) continue;
     if (row.ms > endMs) break;
-    total += row.tokens;
+    totals.inputTokens += row.pools.inputTokens;
+    totals.outputTokens += row.pools.outputTokens;
+    totals.cacheCreationTokens += row.pools.cacheCreationTokens;
+    totals.cacheReadTokens += row.pools.cacheReadTokens;
   }
-  return total;
+  return totals;
 }
 
 function median(nums: number[]): number {
@@ -319,11 +353,19 @@ export const detector: Detector = {
     // Size every span with usable timing and token windows.
     const sized: SpanWindow[] = steeringRows
       .map((span) => {
-        const spanTokens = spanTokensFor(span, bySession);
+        const tokenPools = spanTokenPoolsFor(span, bySession);
+        const spanTokens = nonCacheTokens(tokenPools);
         const startMs = parseMs(span.startTime);
         const endMs = parseMs(span.endTime);
         if (spanTokens <= 0 || startMs == null || endMs == null) return null;
-        return { span, spanTokens, startMs, endMs, key: keyOf(span) };
+        return {
+          span,
+          spanTokens,
+          tokenPools,
+          startMs,
+          endMs,
+          key: keyOf(span),
+        };
       })
       .filter((s): s is SpanWindow => s != null);
     if (sized.length < MIN_BASELINE_SPANS) return null;
@@ -366,13 +408,24 @@ export const detector: Detector = {
       const success = successByTask.get(span.key);
       if (success?.verdict === 'accept') continue;
 
+      const avoidedTokens = Math.max(0, span.spanTokens - baseline);
+      const excessShare = avoidedTokens / span.spanTokens;
+
       excursions.push({
         taskClass: cls,
         sessionId: span.span.sessionId,
         taskIndex: span.span.taskIndex,
         endMs: span.endMs,
         spanTokens: span.spanTokens,
-        avoidedTokens: Math.max(0, span.spanTokens - baseline),
+        avoidedTokens,
+        observedInputTokens: span.tokenPools.inputTokens,
+        observedOutputTokens: span.tokenPools.outputTokens,
+        observedCacheCreationTokens: span.tokenPools.cacheCreationTokens,
+        allocatedExcessInputTokens: span.tokenPools.inputTokens * excessShare,
+        allocatedExcessOutputTokens: span.tokenPools.outputTokens * excessShare,
+        allocatedExcessCacheCreationTokens:
+          span.tokenPools.cacheCreationTokens * excessShare,
+        excludedCacheReadTokens: span.tokenPools.cacheReadTokens,
         ratioToMedian: span.spanTokens / baseline,
         baseline,
         signals,
@@ -386,15 +439,58 @@ export const detector: Detector = {
         taskClass: exc.taskClass,
         excursions: [],
         avoidedTokens: 0,
+        observedInputTokens: 0,
+        observedOutputTokens: 0,
+        observedCacheCreationTokens: 0,
+        allocatedExcessInputTokens: 0,
+        allocatedExcessOutputTokens: 0,
+        allocatedExcessCacheCreationTokens: 0,
+        excludedCacheReadTokens: 0,
       };
       roll.excursions.push(exc);
       roll.avoidedTokens += exc.avoidedTokens;
+      roll.observedInputTokens += exc.observedInputTokens;
+      roll.observedOutputTokens += exc.observedOutputTokens;
+      roll.observedCacheCreationTokens += exc.observedCacheCreationTokens;
+      roll.allocatedExcessInputTokens += exc.allocatedExcessInputTokens;
+      roll.allocatedExcessOutputTokens += exc.allocatedExcessOutputTokens;
+      roll.allocatedExcessCacheCreationTokens +=
+        exc.allocatedExcessCacheCreationTokens;
+      roll.excludedCacheReadTokens += exc.excludedCacheReadTokens;
       byClass.set(exc.taskClass, roll);
     }
     const classes = [...byClass.values()].sort(
       (a, b) => b.avoidedTokens - a.avoidedTokens
     );
     const totalAvoided = excursions.reduce((s, e) => s + e.avoidedTokens, 0);
+    const totalObservedInput = excursions.reduce(
+      (sum, excursion) => sum + excursion.observedInputTokens,
+      0
+    );
+    const totalObservedOutput = excursions.reduce(
+      (sum, excursion) => sum + excursion.observedOutputTokens,
+      0
+    );
+    const totalObservedCacheCreation = excursions.reduce(
+      (sum, excursion) => sum + excursion.observedCacheCreationTokens,
+      0
+    );
+    const totalAllocatedExcessInput = excursions.reduce(
+      (sum, excursion) => sum + excursion.allocatedExcessInputTokens,
+      0
+    );
+    const totalAllocatedExcessOutput = excursions.reduce(
+      (sum, excursion) => sum + excursion.allocatedExcessOutputTokens,
+      0
+    );
+    const totalAllocatedExcessCacheCreation = excursions.reduce(
+      (sum, excursion) => sum + excursion.allocatedExcessCacheCreationTokens,
+      0
+    );
+    const totalExcludedCacheRead = excursions.reduce(
+      (sum, excursion) => sum + excursion.excludedCacheReadTokens,
+      0
+    );
     const top = classes[0];
 
     const latestMs = Math.max(...excursions.map((e) => e.endMs));
@@ -420,10 +516,18 @@ export const detector: Detector = {
         .sort((a, b) => b.avoidedTokens - a.avoidedTokens)[0];
       return (
         `${roll.taskClass}: ${roll.excursions.length} excursion(s), ` +
-        `~${fmtTokens(roll.avoidedTokens)} tokens avoidable upfront ` +
+        `~${fmtTokens(roll.avoidedTokens)} non-cache outlier excess; proportional ` +
+        `excess allocation estimate: input ${fmtTokens(roll.allocatedExcessInputTokens)}, ` +
+        `output ${fmtTokens(roll.allocatedExcessOutputTokens)}, cache creation ` +
+        `${fmtTokens(roll.allocatedExcessCacheCreationTokens)}; measured excursion ` +
+        `throughput: input ${fmtTokens(roll.observedInputTokens)}, output ` +
+        `${fmtTokens(roll.observedOutputTokens)}, cache creation ` +
+        `${fmtTokens(roll.observedCacheCreationTokens)}; cache-read context reuse ` +
+        `excluded: ${fmtTokens(roll.excludedCacheReadTokens)} ` +
         `(e.g. ${short(lead.sessionId)} task ${lead.taskIndex}: ` +
-        `${fmtTokens(lead.spanTokens)} tokens, ${lead.ratioToMedian.toFixed(1)}x its ` +
-        `class baseline of ${fmtTokens(lead.baseline)}, signals: ${formatSignalPhrase(lead.signals)})`
+        `${fmtTokens(lead.spanTokens)} tokens (non-cache), ` +
+        `${lead.ratioToMedian.toFixed(1)}x its class baseline of ` +
+        `${fmtTokens(lead.baseline)}, signals: ${formatSignalPhrase(lead.signals)})`
       );
     });
 
@@ -431,9 +535,10 @@ export const detector: Detector = {
       {
         claim:
           `${excursions.length} task span(s) across ${classes.length} task class(es) ` +
-          `each ran past ${OUTLIER_FACTOR}x its OWN task class's median span spend ` +
+          `each ran past ${OUTLIER_FACTOR}x its OWN task class's median non-cache ` +
+          `span throughput (input + output + cache creation; cache reads excluded) ` +
           `(class baseline, falling back to the global median of ${fmtTokens(globalMed)} ` +
-          `tokens for thin classes) and carried at least one of the four join signals: ` +
+          `non-cache tokens for thin classes) and carried at least one of the four join signals: ` +
           `a human corrective turn, a human clarification turn, a mid-turn user interrupt, ` +
           `or the agent's own failed→fixed correction-mining pair (the last is an agent ` +
           `retry, not a human signal, but a place a human could have disambiguated up front)`,
@@ -446,11 +551,45 @@ export const detector: Detector = {
       {
         claim:
           `the outlier portion (span tokens over that span's class baseline) sums to ` +
-          `~${fmtTokens(totalAvoided)} agent tokens, led by "${top.taskClass}" ` +
+          `~${fmtTokens(totalAvoided)} aggregate non-cache agent tokens; led by ` +
+          `"${top.taskClass}" ` +
           `(~${fmtTokens(top.avoidedTokens)} tokens)`,
         source: 'parse-sessions',
-        field: 'TokenEntry.inputTokens+outputTokens+cacheCreationTokens+cacheReadTokens',
+        field: 'TokenEntry.inputTokens+outputTokens+cacheCreationTokens',
         value: Math.round(totalAvoided),
+      },
+      {
+        claim:
+          `${fmtTokens(totalObservedInput)} input tokens were measured in the ` +
+          `excursion spans before baseline allocation`,
+        source: 'parse-sessions',
+        field: 'TokenEntry.inputTokens',
+        value: Math.round(totalObservedInput),
+      },
+      {
+        claim:
+          `${fmtTokens(totalObservedOutput)} output tokens were measured in the ` +
+          `excursion spans before baseline allocation`,
+        source: 'parse-sessions',
+        field: 'TokenEntry.outputTokens',
+        value: Math.round(totalObservedOutput),
+      },
+      {
+        claim:
+          `${fmtTokens(totalObservedCacheCreation)} cache-creation tokens were measured ` +
+          `in the excursion spans before baseline allocation`,
+        source: 'parse-sessions',
+        field: 'TokenEntry.cacheCreationTokens',
+        value: Math.round(totalObservedCacheCreation),
+      },
+      {
+        claim:
+          `${fmtTokens(totalExcludedCacheRead)} cache-read tokens were observed in ` +
+          `the excursion spans and excluded as context reuse, not counted as ` +
+          `avoidable tokens or savings`,
+        source: 'parse-sessions',
+        field: 'TokenEntry.cacheReadTokens',
+        value: Math.round(totalExcludedCacheRead),
       },
       {
         claim:
@@ -511,12 +650,22 @@ export const detector: Detector = {
       title: 'Ask the human upfront on costly, correction-prone task classes',
       detail:
         `${asOfPrefix}${excursions.length} agent excursion(s) in ${classPhrase} ran more than ` +
-        `${OUTLIER_FACTOR}x their own task class's median span spend and carried at least one ` +
+        `${OUTLIER_FACTOR}x their own task class's median non-cache span throughput and ` +
+        `carried at least one ` +
         `human-input-leverage signal — a human corrective turn, a human clarification turn, or a ` +
         `mid-turn user interrupt, or else the agent's OWN failed→fixed correction-mining pair (an ` +
         `agent retry, not a human signal, but a spot an upfront human answer could have averted). ` +
-        `Roughly ${fmtTokens(totalAvoided)} agent tokens sit in the ` +
-        `outlier excess that a cheap upfront human input could have averted. This is an ` +
+        `The measured non-cache pool totals in those excursions were input ` +
+        `${fmtTokens(totalObservedInput)}, output ${fmtTokens(totalObservedOutput)}, and ` +
+        `cache creation ${fmtTokens(totalObservedCacheCreation)}. Subtracting each span's ` +
+        `aggregate baseline leaves roughly ${fmtTokens(totalAvoided)} non-cache tokens of ` +
+        `outlier excess. Allocating that aggregate excess in proportion to each span's ` +
+        `measured pools estimates input ${fmtTokens(totalAllocatedExcessInput)}, output ` +
+        `${fmtTokens(totalAllocatedExcessOutput)}, and cache creation ` +
+        `${fmtTokens(totalAllocatedExcessCacheCreation)}; these component figures are ` +
+        `allocations, not separately measured savings. Another ` +
+        `${fmtTokens(totalExcludedCacheRead)} cache-read tokens were measured but ` +
+        `explicitly excluded as context reuse — not avoidable tokens or savings. This is an ` +
         `ESTIMATE: it assumes asking the human upfront (~${fmtTokens(ASSUMED_INTERRUPTION_TOKENS)} ` +
         `tokens for one interruption) costs less than the excursion it averts — an ` +
         `uncalibrated interruption-cost threshold, surfaced here rather than silently ` +
@@ -538,7 +687,11 @@ export const detector: Detector = {
           `An excursion that ran far and carried downstream human steering is a likely ` +
           `point where a small upfront input has leverage: what was corrected, clarified, ` +
           `repaired, or interrupted after-the-fact could have been asked up front.` +
-          ` The token figure is the measured outlier excess (auditable); that asking ` +
+          ` Aggregate excess is measured non-cache throughput minus the class baseline. ` +
+          `Because that baseline is combined rather than pool-specific, the component ` +
+          `figures are an explicit proportional allocation: observed pool tokens × ` +
+          `(aggregate excess / observed non-cache tokens). Cache-read context reuse is ` +
+          `reported separately and excluded. The claim that asking ` +
           `upfront WOULD have saved it is a causal hypothesis, uncalibrated until the ` +
           `interruption-cost threshold is measured against real firings.`,
         ...(asOf ? { asOf } : {}),
