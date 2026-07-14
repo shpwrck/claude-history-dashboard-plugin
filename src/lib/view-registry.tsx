@@ -1326,7 +1326,9 @@ const VIEW_FILTERABLE_DATA: Partial<Record<View, FilterableViewDataKey[]>> = {
   cost: ['tokenData', 'toolData'],
   'reclaim-compass': ['tokenData', 'toolData'],
   activity: ['sessions'],
-  automation: ['sessions'],
+  // Automation is a composite: Runs is session-scoped, Workflows has its own
+  // filtered ledger, and Tasks/Teams/Plans are global. Each tab owns its empty
+  // state, so a sessions-only guard must not replace the shared tab shell.
   prompts: ['promptAnalysis'],
   patterns: ['timelines'],
 };

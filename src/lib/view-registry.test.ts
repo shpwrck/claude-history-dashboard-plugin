@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { isValidElement } from 'react';
+import { createElement, isValidElement, Suspense } from 'react';
+import { render, screen } from '@testing-library/react';
 import {
   filterViewDataByProject,
   filterViewDataByTime,
+  renderView,
   shouldShowFilteredEmptyState,
   VIEW_ANCHORS,
   VIEW_RENDERERS,
@@ -1205,6 +1207,56 @@ describe('filterViewDataByTime', () => {
 });
 
 describe('filtered empty-state guard', () => {
+  it('keeps the Automation tabs visible when an active filter removes all sessions', async () => {
+    const latest = Date.parse('2026-06-11T12:00:00.000Z');
+    const old = latest - 10 * 24 * HOUR;
+    const filter: DashboardFilter = { time: '24h', project: ALL_PROJECTS };
+    const ctx = viewContext(filter, {
+      entries: [historyEntry('anchor-session', '/repo/anchor', latest)],
+      sessions: [session('old-session', '/repo/old', old)],
+      workflows: [
+        {
+          runId: 'wf-old',
+          workflowName: 'Old workflow',
+          status: 'completed',
+          startTime: old,
+          durationMs: 10,
+          agentCount: 1,
+          totalTokens: 10,
+          totalToolCalls: 1,
+          defaultModel: 'sonnet',
+          sessionId: 'old-session',
+          phases: [],
+          agents: [],
+        },
+      ],
+    });
+    ctx.routeFilter = { tab: 'workflows' };
+
+    const rendered = render(
+      createElement(
+        Suspense,
+        { fallback: createElement('div', null, 'Loading') },
+        renderView('automation', ctx)
+      )
+    );
+
+    try {
+      const workflowsTab = await screen.findByRole(
+        'tab',
+        { name: 'Workflows' },
+        { timeout: 5000 }
+      );
+      expect(workflowsTab.getAttribute('aria-selected')).toBe('true');
+      expect(
+        await screen.findByRole('heading', { level: 1, name: 'Workflows' })
+      ).toBeTruthy();
+      expect(screen.getByText(/No workflow runs found/i)).toBeTruthy();
+    } finally {
+      rendered.unmount();
+    }
+  });
+
   it('shows a tab-level filtered empty state when the active filter removes all rows for that view', () => {
     const latest = Date.parse('2026-06-11T12:00:00.000Z');
     const old = latest - 10 * 24 * HOUR;
