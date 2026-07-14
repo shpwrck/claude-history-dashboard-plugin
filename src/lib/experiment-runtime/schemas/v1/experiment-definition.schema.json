@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coding-agent-dashboard.dev/schemas/experiment-runtime/v1/experiment-definition.schema.json",
+  "title": "ExperimentDefinition v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "definitionId",
+    "definitionVersion",
+    "contentDigest",
+    "title",
+    "description",
+    "createdAt",
+    "createdBy",
+    "portability",
+    "studyDesign",
+    "workload",
+    "requiredCapabilities",
+    "treatments",
+    "metrics",
+    "checks",
+    "estimatedUsage",
+    "limits",
+    "safeguards",
+    "verdictPolicy",
+    "extensions"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "ExperimentDefinition" },
+    "definitionId": { "$ref": "#/$defs/namespacedId" },
+    "definitionVersion": { "type": "integer", "minimum": 1 },
+    "contentDigest": { "$ref": "#/$defs/digest" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 8192 },
+    "createdAt": { "$ref": "#/$defs/timestamp" },
+    "createdBy": { "$ref": "#/$defs/opaqueId" },
+    "portability": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["class"],
+          "properties": { "class": { "const": "portable" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["class", "allowedHarnesses"],
+          "properties": {
+            "class": { "const": "harness-specific" },
+            "allowedHarnesses": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/harnessId" }
+            }
+          }
+        }
+      ]
+    },
+    "studyDesign": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "paired" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "assignment", "minimumRunsPerTreatment"],
+          "properties": {
+            "kind": { "const": "cohort" },
+            "assignment": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {
+                "kind": { "enum": ["explicit", "randomized"] }
+              }
+            },
+            "minimumRunsPerTreatment": { "type": "integer", "minimum": 1 },
+            "maximumRunsPerTreatment": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector"],
+      "properties": {
+        "selector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "capability", "parameters"],
+          "properties": {
+            "id": { "$ref": "#/$defs/namespacedId" },
+            "version": { "type": "integer", "minimum": 1 },
+            "capability": { "$ref": "#/$defs/capabilityRequirement" },
+            "parameters": { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      }
+    },
+    "requiredCapabilities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/capabilityRequirement" }
+    },
+    "treatments": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "control", "interventions"],
+        "properties": {
+          "id": { "$ref": "#/$defs/localId" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "control": { "type": "boolean" },
+          "interventions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["capability", "operation", "value"],
+              "properties": {
+                "capability": { "$ref": "#/$defs/capabilityRequirement" },
+                "operation": { "$ref": "#/$defs/localId" },
+                "value": { "$ref": "#/$defs/jsonValue" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "unit",
+          "scope",
+          "basis",
+          "semanticsVersion",
+          "collector"
+        ],
+        "properties": {
+          "id": { "$ref": "#/$defs/namespacedId" },
+          "unit": { "$ref": "#/$defs/localId" },
+          "scope": { "enum": ["run", "subject"] },
+          "basis": { "$ref": "#/$defs/namespacedId" },
+          "semanticsVersion": { "type": "integer", "minimum": 1 },
+          "collector": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["capability", "operation", "parameters"],
+            "properties": {
+              "capability": { "$ref": "#/$defs/capabilityRequirement" },
+              "operation": { "$ref": "#/$defs/localId" },
+              "parameters": { "$ref": "#/$defs/jsonObject" }
+            }
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "capability", "operation", "parameters"],
+        "properties": {
+          "id": { "$ref": "#/$defs/namespacedId" },
+          "capability": { "$ref": "#/$defs/capabilityRequirement" },
+          "operation": { "$ref": "#/$defs/localId" },
+          "parameters": { "$ref": "#/$defs/jsonObject" }
+        }
+      }
+    },
+    "estimatedUsage": { "$ref": "#/$defs/usageBounds" },
+    "limits": { "$ref": "#/$defs/usageBounds" },
+    "safeguards": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "relaxationRequests"],
+      "properties": {
+        "policy": { "$ref": "#/$defs/semanticsRef" },
+        "relaxationRequests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["requestId", "safeguard", "requestedValue", "reason"],
+            "properties": {
+              "requestId": { "$ref": "#/$defs/localId" },
+              "safeguard": { "$ref": "#/$defs/namespacedId" },
+              "requestedValue": { "$ref": "#/$defs/jsonValue" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 2048 }
+            }
+          }
+        }
+      }
+    },
+    "verdictPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "contentDigest", "parameters"],
+      "properties": {
+        "id": { "$ref": "#/$defs/namespacedId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "contentDigest": { "$ref": "#/$defs/digest" },
+        "parameters": { "$ref": "#/$defs/jsonObject" }
+      }
+    },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?Z$"
+    },
+    "localId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "namespacedId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*(?:[./][a-z0-9][a-z0-9._-]*)+$"
+    },
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+    },
+    "harnessId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "jsonValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    },
+    "jsonObject": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?/[A-Za-z0-9][A-Za-z0-9._-]*$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+    },
+    "semanticsRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "contentDigest"],
+      "properties": {
+        "id": { "$ref": "#/$defs/namespacedId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "contentDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "capabilityRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticsRef"],
+      "properties": {
+        "semanticsRef": { "$ref": "#/$defs/semanticsRef" }
+      }
+    },
+    "usageBounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wallTimeMs": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 },
+        "turns": { "type": "integer", "minimum": 0 },
+        "toolCalls": { "type": "integer", "minimum": 0 },
+        "costUsd": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

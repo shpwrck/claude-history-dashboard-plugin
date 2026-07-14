@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coding-agent-dashboard.dev/schemas/experiment-runtime/v1/experiment-verdict.schema.json",
+  "title": "ExperimentVerdict v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "verdictId",
+    "trialId",
+    "contentDigest",
+    "definitionRef",
+    "policy",
+    "evidence",
+    "outcome",
+    "policyResult",
+    "evidenceBasis",
+    "primaryEffect",
+    "judge",
+    "createdAt",
+    "updatedAt",
+    "updateReason",
+    "extensions"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "ExperimentVerdict" },
+    "verdictId": { "$ref": "#/$defs/uuid" },
+    "trialId": { "$ref": "#/$defs/uuid" },
+    "contentDigest": { "$ref": "#/$defs/digest" },
+    "definitionRef": { "$ref": "#/$defs/definitionRef" },
+    "policy": { "$ref": "#/$defs/semanticsRef" },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["includedRuns", "excludedRuns"],
+      "properties": {
+        "includedRuns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/runRef" }
+        },
+        "excludedRuns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run", "reason"],
+            "properties": {
+              "run": { "$ref": "#/$defs/runRef" },
+              "reason": { "$ref": "#/$defs/namespacedId" }
+            }
+          }
+        }
+      }
+    },
+    "outcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "winningTreatmentId"],
+          "properties": {
+            "kind": { "const": "winner" },
+            "winningTreatmentId": { "$ref": "#/$defs/localId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "tie" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": { "const": "inconclusive" },
+            "reason": { "$ref": "#/$defs/namespacedId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": { "const": "invalid" },
+            "reason": { "$ref": "#/$defs/namespacedId" }
+          }
+        }
+      ]
+    },
+    "policyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "parameters"],
+      "properties": {
+        "basis": { "$ref": "#/$defs/namespacedId" },
+        "parameters": { "$ref": "#/$defs/jsonObject" }
+      }
+    },
+    "evidenceBasis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceHarness", "satisfiedCapabilitySemantics"],
+      "properties": {
+        "evidenceHarness": { "$ref": "#/$defs/harnessId" },
+        "satisfiedCapabilitySemantics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/semanticsRef" }
+        }
+      }
+    },
+    "primaryEffect": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/primaryEffect" }
+      ]
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["harness", "sessionRef"],
+      "properties": {
+        "harness": { "$ref": "#/$defs/harnessId" },
+        "sessionRef": { "$ref": "#/$defs/sessionRef" }
+      }
+    },
+    "createdAt": { "$ref": "#/$defs/timestamp" },
+    "updatedAt": { "$ref": "#/$defs/timestamp" },
+    "updateReason": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?Z$"
+    },
+    "localId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "namespacedId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*(?:[./][a-z0-9][a-z0-9._-]*)+$"
+    },
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@-]*$"
+    },
+    "harnessId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "jsonValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    },
+    "jsonObject": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?/[A-Za-z0-9][A-Za-z0-9._-]*$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+    },
+    "semanticsRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "contentDigest"],
+      "properties": {
+        "id": { "$ref": "#/$defs/namespacedId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "contentDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "definitionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["definitionId", "definitionVersion", "contentDigest"],
+      "properties": {
+        "definitionId": { "$ref": "#/$defs/namespacedId" },
+        "definitionVersion": { "type": "integer", "minimum": 1 },
+        "contentDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "runRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "contentDigest"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/uuid" },
+        "contentDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "sessionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["harness", "sourceId", "sessionId"],
+      "properties": {
+        "harness": { "$ref": "#/$defs/harnessId" },
+        "sourceId": { "$ref": "#/$defs/opaqueId" },
+        "sessionId": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "primaryEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contrast",
+        "metricRef",
+        "estimator",
+        "scale",
+        "unit",
+        "estimate",
+        "uncertainty",
+        "sampleCounts"
+      ],
+      "properties": {
+        "contrast": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["controlTreatmentId", "treatmentId"],
+          "properties": {
+            "controlTreatmentId": { "$ref": "#/$defs/localId" },
+            "treatmentId": { "$ref": "#/$defs/localId" }
+          }
+        },
+        "metricRef": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "semanticsVersion"],
+          "properties": {
+            "id": { "$ref": "#/$defs/namespacedId" },
+            "semanticsVersion": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "estimator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": { "$ref": "#/$defs/namespacedId" },
+            "version": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "scale": { "enum": ["absolute", "relative"] },
+        "unit": { "$ref": "#/$defs/localId" },
+        "estimate": { "type": "number" },
+        "uncertainty": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "level", "lower", "upper"],
+              "properties": {
+                "kind": { "const": "interval" },
+                "level": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "exclusiveMaximum": 1
+                },
+                "lower": { "type": "number" },
+                "upper": { "type": "number" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "reason"],
+              "properties": {
+                "kind": { "const": "not-estimated" },
+                "reason": { "$ref": "#/$defs/namespacedId" }
+              }
+            }
+          ]
+        },
+        "sampleCounts": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["treatmentId", "n"],
+            "properties": {
+              "treatmentId": { "$ref": "#/$defs/localId" },
+              "n": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+}
