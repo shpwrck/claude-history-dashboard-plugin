@@ -15,6 +15,8 @@ import {
   configScopingCostDelta,
   configScopingTokenDelta,
   configScopingEvidence,
+  MAX_BUFFERED_VARIATION_RECEIPTS,
+  MAX_VARIATION_CELLS,
 } from './parse-shadow-calls';
 import { buildRecommendations } from './recommendations';
 import type { RecommendationInput } from './recommendations';
@@ -69,6 +71,8 @@ describe('parseShadowCalls', () => {
     replay: 0,
     byAxis: [],
     bySourceAxis: [],
+    byVariation: [],
+    variationSkipped: 0,
   };
 
   it('returns a zeroed aggregate for empty/null input', () => {
@@ -205,6 +209,226 @@ describe('parseShadowCalls', () => {
   });
 });
 
+describe('parseShadowCalls — bounded per-variation receipts (#2643)', () => {
+  const receipt = (overrides: Record<string, unknown>): string =>
+    JSON.stringify({
+      mode: 'live',
+      axis: 'prompt',
+      variation: 'structured',
+      judge: { winner: 'shadow' },
+      ...overrides,
+    });
+
+  it('keeps distinct treatments separate and preserves counts, freshness, cost, and proof status', () => {
+    const newerEpoch = Date.parse('2026-07-12T12:30:00Z');
+    const jsonl = [
+      receipt({
+        variation: '  structured  ',
+        ts: '2026-07-10T08:00:00-04:00',
+        revalidationStatus: 'current',
+        main: { costUsd: 0.5 },
+        shadow: { costUsd: 0.2 },
+      }),
+      receipt({
+        mode: 'replay',
+        variation: 'structured',
+        ts: newerEpoch,
+        revalidationStatus: 'stale',
+        judge: { winner: 'main' },
+        main: { costUsd: 0.1 },
+        shadow: { costUsd: 0.25 },
+      }),
+      receipt({
+        mode: 'replay',
+        variation: 'concise',
+        ts: '2026-07-11T00:00:00Z',
+        revalidationStatus: 'revoked',
+        judge: { winner: 'tie' },
+      }),
+      receipt({
+        variation: 'structured',
+        ts: 'not-a-date',
+        revalidationStatus: 'unsupported',
+        judge: {},
+      }),
+    ].join('\n');
+
+    const aggregate = parseShadowCalls(jsonl);
+    expect(aggregate.byVariation.map((cell) => [cell.axis, cell.variation])).toEqual([
+      ['prompt', 'concise'],
+      ['prompt', 'structured'],
+    ]);
+
+    const structured = aggregate.byVariation[1];
+    expect(structured).toEqual({
+      axis: 'prompt',
+      variation: 'structured',
+      samples: 3,
+      live: 2,
+      replay: 1,
+      shadowWins: 1,
+      mainWins: 1,
+      ties: 0,
+      decided: 2,
+      costDeltaSum: -0.15,
+      costDeltaCount: 2,
+      latestTs: '2026-07-12T12:30:00.000Z',
+      untimed: 1,
+      proofStatusCounts: { unknown: 1, current: 1, stale: 1, revoked: 0 },
+    });
+    expect(aggregate.byVariation[0]).toMatchObject({
+      variation: 'concise',
+      samples: 1,
+      ties: 1,
+      decided: 0,
+      proofStatusCounts: { unknown: 0, current: 0, stale: 0, revoked: 1 },
+    });
+    expect(aggregate.variationSkipped).toBe(0);
+    expect(
+      aggregate.byVariation.reduce((sum, cell) => sum + cell.samples, 0) +
+        aggregate.variationSkipped
+    ).toBe(aggregate.counted);
+  });
+
+  it('refuses missing/non-string/over-bound identities without pooling shared prefixes', () => {
+    const accepted = 'x'.repeat(200);
+    const sharedPrefix = 'y'.repeat(200);
+    const aggregate = parseShadowCalls(
+      [
+        receipt({ variation: accepted, revalidationStatus: 'current' }),
+        receipt({ variation: `${sharedPrefix}a` }),
+        receipt({ variation: `${sharedPrefix}b` }),
+        receipt({ variation: '   ' }),
+        receipt({ variation: 42 }),
+        receipt({ variation: undefined }),
+      ].join('\n')
+    );
+
+    expect(aggregate.counted).toBe(6);
+    expect(aggregate.byVariation).toHaveLength(1);
+    expect(aggregate.byVariation[0].variation).toBe(accepted);
+    expect(aggregate.variationSkipped).toBe(5);
+  });
+
+  it('is serialized-shape deterministic under receipt permutation, including floating sums', () => {
+    const lines = [
+      receipt({ ts: '2026-07-03T00:00:00Z', main: { costUsd: 0 }, shadow: { costUsd: 1_000_000 } }),
+      receipt({ ts: '2026-07-01T00:00:00Z', main: { costUsd: 1_000_000 }, shadow: { costUsd: 0 } }),
+      receipt({ ts: '2026-07-02T00:00:00Z', main: { costUsd: 0 }, shadow: { costUsd: 1e-12 } }),
+      receipt({ mode: 'replay', variation: 'concise', judge: { winner: 'main' } }),
+    ];
+    const forward = parseShadowCalls(lines.join('\n'));
+    const permuted = parseShadowCalls([lines[2], lines[0], lines[3], lines[1]].join('\n'));
+
+    expect(permuted).toEqual(forward);
+    expect(JSON.stringify(permuted)).toBe(JSON.stringify(forward));
+    expect(forward.byVariation.find((cell) => cell.variation === 'structured')?.costDeltaSum).toBe(1e-12);
+    expect(forward.byAxis[0].costDeltaSum).toBe(1e-12);
+    expect(forward.bySourceAxis[0].costDeltaSum).toBe(1e-12);
+    expect(permuted.variationSkipped).toBe(forward.variationSkipped);
+    expect(permuted.variationCellsTruncated).toBe(forward.variationCellsTruncated);
+  });
+
+  it('uses a strict Unicode tuple order for distinct canonically-equivalent treatments', () => {
+    const composed = receipt({ variation: 'é' });
+    const decomposed = receipt({ variation: 'e\u0301' });
+    const forward = parseShadowCalls([composed, decomposed].join('\n'));
+    const reversed = parseShadowCalls([decomposed, composed].join('\n'));
+
+    expect(reversed.byVariation).toEqual(forward.byVariation);
+    expect(forward.byVariation.map((cell) => cell.variation)).toEqual(['e\u0301', 'é']);
+  });
+
+  it('refuses negative or over-bound arm costs instead of emitting a non-finite sum', () => {
+    const aggregate = parseShadowCalls(
+      [
+        receipt({ main: { costUsd: 0 }, shadow: { costUsd: Number.MAX_VALUE } }),
+        receipt({ main: { costUsd: -1 }, shadow: { costUsd: 0 } }),
+      ].join('\n')
+    );
+    expect(aggregate.byVariation[0].costDeltaCount).toBe(0);
+    expect(aggregate.byVariation[0].costDeltaSum).toBe(0);
+    expect(Number.isFinite(aggregate.byVariation[0].costDeltaSum)).toBe(true);
+  });
+
+  it('refuses overflowing legacy pooled sums instead of reporting a false zero pair', () => {
+    const extreme = receipt({
+      main: { tokens: 0, costUsd: 0 },
+      shadow: { tokens: Number.MAX_VALUE, costUsd: Number.MAX_VALUE },
+    });
+    const aggregate = parseShadowCalls([extreme, extreme].join('\n'));
+
+    expect(aggregate.byAxis[0].tokenDeltaCount).toBe(0);
+    expect(aggregate.byAxis[0].costDeltaCount).toBe(0);
+    expect(aggregate.bySourceAxis[0].tokenDeltaCount).toBe(0);
+    expect(aggregate.bySourceAxis[0].costDeltaCount).toBe(0);
+    expect(Number.isFinite(aggregate.byAxis[0].tokenDeltaSum)).toBe(true);
+    expect(Number.isFinite(aggregate.bySourceAxis[0].costDeltaSum)).toBe(true);
+  });
+
+  it('chooses latestTs by instant even when an epoch formats with an extended year', () => {
+    const aggregate = parseShadowCalls(
+      [
+        receipt({ ts: '2026-07-12T12:30:00Z' }),
+        receipt({ ts: 8_640_000_000_000_000 }),
+      ].join('\n')
+    );
+    expect(aggregate.byVariation[0].latestTs).toBe('+275760-09-13T00:00:00.000Z');
+  });
+
+  it('caps identities deterministically without an `(other)` treatment bucket', () => {
+    const lines = Array.from({ length: MAX_VARIATION_CELLS + 5 }, (_, index) =>
+      receipt({ variation: `variation-${String(index).padStart(3, '0')}` })
+    );
+    const forward = parseShadowCalls(lines.join('\n'));
+    const reversed = parseShadowCalls([...lines].reverse().join('\n'));
+
+    expect(forward.byVariation).toEqual(reversed.byVariation);
+    expect(forward.byVariation).toHaveLength(MAX_VARIATION_CELLS);
+    expect(forward.byVariation.at(-1)?.variation).toBe('variation-099');
+    expect(forward.byVariation.some((cell) => cell.variation === '(other)')).toBe(false);
+    expect(forward.variationSkipped).toBe(5);
+    expect(forward.variationCellsTruncated).toBe(true);
+  });
+
+  it('keeps the bounded-buffer fallback permutation-stable and reconciled', () => {
+    const lines = Array.from(
+      { length: MAX_BUFFERED_VARIATION_RECEIPTS + 1 },
+      (_, index) =>
+        receipt({
+          mode: index % 2 === 0 ? 'live' : 'replay',
+          variation: index % 3 === 0 ? 'concise' : 'structured',
+          judge: { winner: index % 5 === 0 ? 'main' : 'shadow' },
+          main: { costUsd: 0.2 },
+          shadow: { costUsd: index % 7 === 0 ? 0.1 : 0.3 },
+          ts: `2026-07-${String((index % 14) + 1).padStart(2, '0')}T00:00:00Z`,
+          revalidationStatus: index % 11 === 0 ? 'stale' : 'current',
+        })
+    );
+    const forward = parseShadowCalls(lines.join('\n'));
+    const reversed = parseShadowCalls([...lines].reverse().join('\n'));
+
+    expect(JSON.stringify(reversed.byVariation)).toBe(JSON.stringify(forward.byVariation));
+    expect(
+      forward.byVariation.reduce((sum, cell) => sum + cell.samples, 0) +
+        forward.variationSkipped
+    ).toBe(forward.counted);
+    expect(forward.counted).toBe(MAX_BUFFERED_VARIATION_RECEIPTS + 1);
+  });
+
+  it('does not infer proof freshness from source or judge basis', () => {
+    const aggregate = parseShadowCalls(
+      receipt({ source: 'proof', judge: { winner: 'shadow', basis: 'judge' } })
+    );
+    expect(aggregate.byVariation[0].proofStatusCounts).toEqual({
+      unknown: 1,
+      current: 0,
+      stale: 0,
+      revoked: 0,
+    });
+  });
+});
+
 describe('parseShadowCalls — first-class experiment source taxonomy (#2150)', () => {
   it('classifyExperimentSource: explicit stamp wins, config-scoping axis falls back, else mode', () => {
     expect(classifyExperimentSource({ source: 'model-eval', axis: 'model', mode: 'replay' })).toBe('model-eval');
@@ -277,15 +501,69 @@ describe('parseShadowCalls — first-class experiment source taxonomy (#2150)', 
     expect(agg.counted).toBe(1);
   });
 
-  it('caps (source, axis) cell cardinality: past the cap new sources fold into (other), totals still reconcile', () => {
+  it('caps source cells with permutation-stable selection and an (other) fold', () => {
     const lines = Array.from({ length: 120 }, (_, i) =>
       JSON.stringify({ mode: 'live', axis: 'model', source: `uuid-${i}`, judge: { winner: 'shadow' } })
     );
     const agg = parseShadowCalls(lines.join('\n'));
+    const reversed = parseShadowCalls([...lines].reverse().join('\n'));
+    expect(reversed).toEqual(agg);
+    expect(JSON.stringify(reversed)).toBe(JSON.stringify(agg));
     expect(agg.bySourceAxis.length).toBeLessThanOrEqual(101); // cap + the (other) fold
     const other = agg.bySourceAxis.find((c) => c.source === '(other)')!;
-    expect(other.samples).toBe(20); // rows 100..119 folded, not dropped
+    expect(other.samples).toBe(20);
+    const expectedSelected = Array.from({ length: 120 }, (_, i) => `uuid-${i}`)
+      .sort()
+      .slice(0, 100);
+    expect(
+      agg.bySourceAxis
+        .filter((cell) => cell.source !== '(other)')
+        .map((cell) => cell.source)
+    ).toEqual(expectedSelected);
     expect(agg.bySourceAxis.reduce((sum, c) => sum + c.samples, 0)).toBe(agg.counted);
+  });
+
+  it('stably sums adherence and config-scoping numeric aggregates', () => {
+    const record = (value: number): string =>
+      JSON.stringify({
+        mode: 'live',
+        axis: 'config-scoping',
+        judge: { winner: 'tie', adherenceRegressions: value },
+        configScoping: {
+          speed: { monolithWallMs: value, atomizedWallMs: value },
+          cost: {
+            monolithTokens: value,
+            atomizedTokens: value,
+            monolithCostUsd: value,
+            atomizedCostUsd: value,
+          },
+          accuracy: {
+            monolithAdherence: value,
+            atomizedAdherence: value,
+          },
+        },
+      });
+    const lines = [record(1e16), record(1), record(1)];
+    const forward = parseShadowCalls(lines.join('\n'));
+    const reversed = parseShadowCalls([...lines].reverse().join('\n'));
+
+    expect(reversed).toEqual(forward);
+    expect(JSON.stringify(reversed)).toBe(JSON.stringify(forward));
+    expect(forward.byAxis[0].adherenceRegressionSum).toBe(
+      10_000_000_000_000_002
+    );
+    expect(forward.byAxis[0].configScoping?.speed.monolithSum).toBe(
+      10_000_000_000_000_002
+    );
+
+    const overflow = parseShadowCalls(
+      [record(Number.MAX_VALUE), record(Number.MAX_VALUE)].join('\n')
+    ).byAxis[0];
+    expect(overflow.adherenceRegressionCount).toBe(0);
+    expect(overflow.configScoping?.speed.pairedCount).toBe(0);
+    expect(overflow.configScoping?.cost.tokenPairedCount).toBe(0);
+    expect(overflow.configScoping?.cost.costPairedCount).toBe(0);
+    expect(overflow.configScoping?.accuracy.adherencePairedCount).toBe(0);
   });
 
   it('a truthy non-object configScoping value attaches no verdict aggregate', () => {
@@ -359,6 +637,22 @@ describe('parseShadowCalls — per-finding sub-aggregate for the recs axis (#579
     expect(bar.samples).toBe(1);
     expect(bar.mainWins).toBe(1);
     expect(bar.replay).toBe(1);
+  });
+
+  it('serializes finding keys in strict order independent of receipt order', () => {
+    const lines = [
+      recsLine('workflow.zeta', 'live', 'shadow'),
+      recsLine('context.alpha', 'replay', 'main'),
+    ];
+    const forward = parseShadowCalls(lines.join('\n'));
+    const reversed = parseShadowCalls([...lines].reverse().join('\n'));
+
+    expect(reversed).toEqual(forward);
+    expect(JSON.stringify(reversed)).toBe(JSON.stringify(forward));
+    expect(Object.keys(forward.byAxis[0].byFinding!)).toEqual([
+      'context.alpha',
+      'workflow.zeta',
+    ]);
   });
 
   it('decidedForFinding counts wins but excludes ties (#545 parity)', () => {
@@ -931,6 +1225,28 @@ describe('experiment-source ingest wiring (#2151)', () => {
     expect(cells[0].mainWins).toBe(1); // refuted→main
   });
 
+  it('parseProofReceiptCells is permutation-stable for floating cost deltas', () => {
+    const receipt = (costUsd: number): string =>
+      JSON.stringify({
+        kind: 'PROOF',
+        observed: { wastePattern: 'floating-proof' },
+        result: { verdict: 'proven', perDimensionDeltas: { costUsd } },
+      });
+    const lines = [receipt(1_000_000), receipt(-1_000_000), receipt(1e-12)];
+    const forward = parseProofReceiptCells(lines.join('\n'));
+    const reversed = parseProofReceiptCells([...lines].reverse().join('\n'));
+
+    expect(reversed).toEqual(forward);
+    expect(JSON.stringify(reversed)).toBe(JSON.stringify(forward));
+    expect(forward.cells[0].costDeltaSum).toBe(1e-12);
+
+    const overflow = parseProofReceiptCells(
+      [receipt(Number.MAX_VALUE), receipt(Number.MAX_VALUE)].join('\n')
+    );
+    expect(overflow.cells[0].costDeltaCount).toBe(0);
+    expect(Number.isFinite(overflow.cells[0].costDeltaSum)).toBe(true);
+  });
+
   it('modelEvalSourceCell: volume-only provenance cell; absent pipeline adds nothing', () => {
     expect(modelEvalSourceCell(null)).toBeNull();
     expect(modelEvalSourceCell({ runCount: 0 })).toBeNull();
@@ -952,6 +1268,10 @@ describe('experiment-source ingest wiring (#2151)', () => {
     expect(cellSum).toBe(merged.counted + merged.external!); // documented reconciliation
     // Sorted by (source, axis) including the merged-in cells.
     expect(merged.bySourceAxis.map((c) => c.source)).toEqual(['live', 'model-eval', 'proof', 'replay']);
+    // External PROOF receipts do not name a concrete shadow treatment. Their
+    // experimentRef/wastePattern must never be fabricated into byVariation.
+    expect(merged.byVariation).toEqual(agg.byVariation);
+    expect(merged.byVariation).toEqual([]);
     // Empty merge is a strict no-op (same reference), so unchanged ledgers keep their ETag path.
     expect(mergeExternalSourceCells(agg, [])).toBe(agg);
   });

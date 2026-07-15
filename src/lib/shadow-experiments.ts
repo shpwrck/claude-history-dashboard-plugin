@@ -14,7 +14,14 @@
  * and reports how many older lines were dropped — a bound is never silent.
  */
 
-import { classifyExperimentSource, classifyShadowRecord } from './parse-shadow-calls';
+import {
+  classifyExperimentSource,
+  classifyShadowRecord,
+  normalizeExperimentProofStatus,
+  normalizeExperimentTimestamp,
+  normalizeExperimentVariation,
+  type ExperimentProofStatus,
+} from './parse-shadow-calls';
 
 export interface ExperimentRow {
   /**
@@ -40,6 +47,8 @@ export interface ExperimentRow {
   task: string | null;
   /** The varied thing the shadow arm changed, when carried (SCHEMA.md `variation`). */
   variation: string | null;
+  /** Explicit proof freshness carried by the receipt; never inferred from source/mode. */
+  proofStatus: ExperimentProofStatus | null;
   /** The judge's stated basis/rationale for the verdict, when carried. */
   judgeBasis: string | null;
   mainTokens: number | null;
@@ -83,19 +92,6 @@ function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
-/** Parse a record `ts` (epoch ms number or date string) to ISO-8601, else null. */
-function isoTs(v: unknown): string | null {
-  if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
-    const d = new Date(v);
-    return Number.isNaN(d.getTime()) ? null : d.toISOString();
-  }
-  if (typeof v === 'string' && v.trim()) {
-    const ms = Date.parse(v);
-    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
-  }
-  return null;
-}
-
 interface RawRecord {
   ts?: unknown;
   mode?: unknown;
@@ -106,6 +102,7 @@ interface RawRecord {
   raceGoal?: unknown;
   task?: unknown;
   variation?: unknown;
+  revalidationStatus?: unknown;
   judge?: { winner?: unknown; basis?: unknown; rationale?: unknown; reason?: unknown } | null;
   main?: { tokens?: unknown; costUsd?: unknown } | null;
   shadow?: { tokens?: unknown; costUsd?: unknown } | null;
@@ -146,6 +143,7 @@ export function parseShadowCallRows(
       winner: null,
       task: null,
       variation: null,
+      proofStatus: null,
       judgeBasis: null,
       mainTokens: null,
       shadowTokens: null,
@@ -188,7 +186,7 @@ export function parseShadowCallRows(
 
     const row: ExperimentRow = {
       ...base,
-      ts: isoTs(rec.ts),
+      ts: normalizeExperimentTimestamp(rec.ts),
       source,
       axis: cls.axis,
       mode: typeof rec.mode === 'string' ? rec.mode : null,
@@ -197,7 +195,8 @@ export function parseShadowCallRows(
       winner:
         winner === 'main' || winner === 'shadow' || winner === 'tie' ? winner : null,
       task: str(rec.task, 200),
-      variation: str(rec.variation, 200),
+      variation: normalizeExperimentVariation(rec.variation),
+      proofStatus: normalizeExperimentProofStatus(rec.revalidationStatus),
       judgeBasis:
         str(rec.judge?.basis) ?? str(rec.judge?.rationale) ?? str(rec.judge?.reason),
       mainTokens: num(rec.main?.tokens),

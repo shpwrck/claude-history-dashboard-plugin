@@ -2,7 +2,13 @@ import { appendFile, mkdir, open, stat } from 'node:fs/promises';
 import { createReadStream, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import {
+  normalizeProofRevalidationStatus,
+  type ProofRevalidationStatus,
+} from './proof-revalidation';
 import { REJECT_REASONS, type RejectReason } from './reject-reason';
+
+export type { ProofRevalidationStatus } from './proof-revalidation';
 
 export interface SurfacedReceipt {
   schemaVersion: '1';
@@ -47,13 +53,6 @@ export type ProofVerdict = 'proven' | 'null' | 'refuted';
 
 /** Matched-pair experiment arms. */
 export type ProofArm = 'injected' | 'withheld';
-
-/**
- * Model-version freshness of a proof: every effect is conditional on the model
- * the batch ran against, and decays when that model changes (see
- * `docs/v0.4-proof-engine.md`, "Proof decay").
- */
-export type ProofRevalidationStatus = 'current' | 'stale' | 'revoked';
 
 /**
  * The efficacy half ADR 0005 deferred (see
@@ -147,12 +146,6 @@ const MAX_DELTA_DIMENSIONS = 50;
 
 const PROOF_VERDICTS: readonly ProofVerdict[] = ['proven', 'null', 'refuted'];
 const PROOF_ARMS: readonly ProofArm[] = ['injected', 'withheld'];
-const PROOF_REVALIDATION_STATUSES: readonly ProofRevalidationStatus[] = [
-  'current',
-  'stale',
-  'revoked',
-];
-
 function cleanString(value: unknown, maxLen: number): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -244,10 +237,7 @@ export function sanitizeAdoptionReceipt(
     const rollout = cleanString(raw.rollout, MAX_TEXT_LEN);
     const externalReviewRef = cleanString(raw.externalReviewRef, MAX_ID_LEN);
     const modelVersion = cleanString(raw.modelVersion, MAX_ID_LEN);
-    const revalidationStatus = cleanEnum(
-      raw.revalidationStatus,
-      PROOF_REVALIDATION_STATUSES
-    );
+    const revalidationStatus = normalizeProofRevalidationStatus(raw.revalidationStatus);
     if (
       !experimentRef ||
       !preRegistrationRef ||

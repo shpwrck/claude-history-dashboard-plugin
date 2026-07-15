@@ -119,12 +119,16 @@ describe('parseShadowCallRows (#2152/#2153)', () => {
     const jsonl = [
       counted('model', 'live', { ts: 1709287200000 }), // 2024-03-01T10:00:00Z
       counted('model', 'live', { ts: 'not a date' }),
+      counted('model', 'live', { ts: '2024-03-01T10:00:00' }), // no zone: host-dependent
+      counted('model', 'live', { ts: '2024-02-30T10:00:00Z' }), // impossible date
       counted('model', 'live'),
     ].join('\n');
     const { rows } = parseShadowCallRows(jsonl);
     expect(rows[0].ts).toBe('2024-03-01T10:00:00.000Z');
     expect(rows[1].ts).toBeNull();
     expect(rows[2].ts).toBeNull();
+    expect(rows[3].ts).toBeNull();
+    expect(rows[4].ts).toBeNull();
     expect(rows.every((r) => r.disposition === 'counted')).toBe(true);
   });
 
@@ -133,12 +137,27 @@ describe('parseShadowCallRows (#2152/#2153)', () => {
       counted('model', 'live', {
         task: '  fix the flaky test  ',
         variation: 'haiku instead of opus',
+        revalidationStatus: 'current',
         judge: { winner: 'shadow', rationale: 'same diff, quarter the cost' },
       })
     );
     expect(rows[0].task).toBe('fix the flaky test');
     expect(rows[0].variation).toBe('haiku instead of opus');
+    expect(rows[0].proofStatus).toBe('current');
     expect(rows[0].judgeBasis).toBe('same diff, quarter the cost');
+  });
+
+  it('refuses over-bound treatment identity and unsupported proof metadata', () => {
+    const { rows } = parseShadowCallRows(
+      counted('prompt', 'replay', {
+        variation: 'x'.repeat(201),
+        revalidationStatus: 'observational',
+        source: 'proof',
+        judge: { winner: 'shadow', basis: 'judge' },
+      })
+    );
+    expect(rows[0].variation).toBeNull();
+    expect(rows[0].proofStatus).toBeNull();
   });
 
   it('trends: buckets counted rows into UTC days from a dated fixture ledger (#2154)', () => {

@@ -38,6 +38,12 @@
  *     main?: { tokens?: number }, shadow?: { tokens?: number } }
  */
 
+import {
+  normalizeProofRevalidationStatus,
+  PROOF_REVALIDATION_STATUSES,
+  type ProofRevalidationStatus,
+} from './proof-revalidation';
+
 export interface AxisAggregate {
   axis: string;
   samples: number;
@@ -226,6 +232,90 @@ export const LIVE_TRUST_SOURCES: ReadonlySet<string> = new Set(['live', 'race-li
 export const MAX_SOURCE_AXIS_CELLS = 100;
 
 /**
+ * A concrete treatment is an identity, not display copy. Keep it short enough
+ * to bound the aggregate, and reject overlong values rather than truncating
+ * two distinct treatments onto the same key (#2643).
+ */
+export const MAX_EXPERIMENT_VARIATION_LENGTH = 200;
+
+/** Maximum number of distinct (axis, variation) receipt cells retained. */
+export const MAX_VARIATION_CELLS = 100;
+
+/** Keep the common path single-parse while bounding retained normalized rows. */
+export const MAX_BUFFERED_VARIATION_RECEIPTS = 10_000;
+
+/** Defensive per-arm bound; experiment receipts cannot credibly cost more than $1m. */
+export const MAX_EXPERIMENT_COST_USD = 1_000_000;
+
+/** The only proof-freshness states a source receipt may assert. */
+export const EXPERIMENT_PROOF_STATUSES = PROOF_REVALIDATION_STATUSES;
+export type ExperimentProofStatus = ProofRevalidationStatus;
+
+/**
+ * Canonical treatment identity shared with the flat experiment-row parser.
+ * Invalid/blank/over-bound input is refused; it is never shortened into a
+ * potentially colliding aggregate key.
+ */
+export function normalizeExperimentVariation(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_EXPERIMENT_VARIATION_LENGTH) return null;
+  return trimmed;
+}
+
+/**
+ * Canonical experiment time shared with the flat row parser. Epoch-ms numbers
+ * and bounded parseable date strings normalize to UTC ISO; malformed values
+ * remain unknown rather than borrowing the current clock.
+ */
+export function normalizeExperimentTimestamp(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > 64) return null;
+    // An explicit zone is mandatory: zone-less Date.parse input depends on the
+    // host TZ, and non-standard forms vary across JS runtimes/browsers.
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-](\d{2}):(\d{2}))$/i.exec(
+      trimmed
+    );
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6]);
+    const offsetHour = match[9] === undefined ? 0 : Number(match[9]);
+    const offsetMinute = match[10] === undefined ? 0 : Number(match[10]);
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (
+      year === 0 ||
+      month < 1 ||
+      month > 12 ||
+      day < 1 ||
+      day > daysInMonth[month - 1] ||
+      hour > 23 ||
+      minute > 59 ||
+      second > 59 ||
+      offsetHour > 23 ||
+      offsetMinute > 59
+    ) {
+      return null;
+    }
+    const ms = Date.parse(trimmed);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  }
+  return null;
+}
+
+/** Strict proof-freshness allowlist; source/mode/judge basis never imply proof. */
+export const normalizeExperimentProofStatus = normalizeProofRevalidationStatus;
+
+/**
  * The ONE statement of the #2149 counting rule, shared by the aggregate parser
  * here and the per-row log parser (`shadow-experiments.ts`) so the drill-down
  * log can never silently disagree with the headline about which rows count.
@@ -271,6 +361,44 @@ export interface SourceAxisAggregate {
   costDeltaCount: number;
 }
 
+/**
+ * Proof-freshness coverage carried verbatim by the source ledger receipts.
+ * Missing and refused values stay visible as `unknown`; live/replay/source and
+ * judge basis never upgrade a receipt's proof posture (#2643).
+ */
+export interface VariationProofStatusCounts {
+  unknown: number;
+  current: number;
+  stale: number;
+  revoked: number;
+}
+
+/**
+ * One bounded, auditable (axis, concrete variation) receipt roll-up (#2643).
+ * This is ledger-only: external PROOF artifacts do not name a concrete shadow
+ * treatment and therefore must not be joined onto this surface by inference.
+ */
+export interface VariationAggregate {
+  axis: string;
+  variation: string;
+  samples: number;
+  live: number;
+  replay: number;
+  shadowWins: number;
+  mainWins: number;
+  ties: number;
+  /** Shadow + main wins; ties and missing verdicts are not decided. */
+  decided: number;
+  /** Paired price-aware delta, shadow - main. */
+  costDeltaSum: number;
+  costDeltaCount: number;
+  /** Newest canonical source timestamp, or null when every receipt is undated. */
+  latestTs: string | null;
+  /** Receipts with missing/refused timestamps, surfaced for freshness policy. */
+  untimed: number;
+  proofStatusCounts: VariationProofStatusCounts;
+}
+
 export interface ShadowCallAggregate {
   /**
    * Every non-empty ledger line, whatever its disposition — the honest ledger size.
@@ -304,6 +432,19 @@ export interface ShadowCallAggregate {
    */
   bySourceAxis: SourceAxisAggregate[];
   /**
+   * Bounded per-treatment ledger receipts. Sorted by (axis, variation), never
+   * folded into an `(other)` treatment because that would pool evidence.
+   */
+  byVariation: VariationAggregate[];
+  /**
+   * Counted ledger rows omitted from `byVariation` because variation identity
+   * was missing/refused or its cell fell beyond the deterministic cap.
+   * `sum(byVariation.samples) + variationSkipped === counted`.
+   */
+  variationSkipped: number;
+  /** Present only when more than {@link MAX_VARIATION_CELLS} identities existed. */
+  variationCellsTruncated?: true;
+  /**
    * Samples contributed by artifact-derived cells (#2151): experiments whose
    * records live OUTSIDE the ledger (proof receipts in `data/proof-receipts.jsonl`,
    * model-eval result artifacts). Kept separate from `counted` so the #2149
@@ -323,8 +464,12 @@ export interface ShadowCallAggregate {
 }
 
 interface ShadowRecord {
+  ts?: unknown;
   mode?: unknown;
   axis?: unknown;
+  variation?: unknown;
+  /** Optional additive proof-freshness stamp; never inferred when absent. */
+  revalidationStatus?: unknown;
   synthetic?: unknown;
   /** Explicit experiment-source stamp (#2150); absent on rows from older writers. */
   source?: unknown;
@@ -410,6 +555,14 @@ function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+/** A credible, representable non-negative per-arm experiment cost. */
+function experimentCost(v: unknown): number | null {
+  const value = num(v);
+  return value !== null && value >= 0 && value <= MAX_EXPERIMENT_COST_USD
+    ? value
+    : null;
+}
+
 /** Tally one config-scoping per-metric winner onto a wins block. */
 function tallyWinner(w: ConfigScopingWins, winner: unknown): void {
   if (winner === 'monolith') w.monolithWins++;
@@ -453,11 +606,489 @@ function emptySourceAxis(source: string, axis: string): SourceAxisAggregate {
   };
 }
 
+function emptyVariation(axis: string, variation: string): VariationAggregate {
+  return {
+    axis,
+    variation,
+    samples: 0,
+    live: 0,
+    replay: 0,
+    shadowWins: 0,
+    mainWins: 0,
+    ties: 0,
+    decided: 0,
+    costDeltaSum: 0,
+    costDeltaCount: 0,
+    latestTs: null,
+    untimed: 0,
+    proofStatusCounts: { unknown: 0, current: 0, stale: 0, revoked: 0 },
+  };
+}
+
+interface VariationIdentity {
+  axis: string;
+  variation: string;
+}
+
+interface SourceAxisIdentity {
+  source: string;
+  axis: string;
+}
+
+interface VariationContribution {
+  identity: VariationIdentity;
+  mode: 'live' | 'replay';
+  winner: 'main' | 'shadow' | 'tie' | null;
+  costDelta: number | null;
+  ts: string | null;
+  proofStatus: ExperimentProofStatus | null;
+}
+
+function variationIdentityKey(identity: VariationIdentity): string {
+  // JSON tuple encoding is collision-safe even when either string contains NUL.
+  return JSON.stringify([identity.axis, identity.variation]);
+}
+
+function sourceAxisIdentityKey(identity: SourceAxisIdentity): string {
+  return JSON.stringify([identity.source, identity.axis]);
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareVariationIdentity(a: VariationIdentity, b: VariationIdentity): number {
+  const axisOrder = compareText(a.axis, b.axis);
+  if (axisOrder !== 0) return axisOrder;
+  return compareText(a.variation, b.variation);
+}
+
+function compareSourceAxisIdentity(
+  a: SourceAxisIdentity,
+  b: SourceAxisIdentity
+): number {
+  const sourceOrder = compareText(a.source, b.source);
+  return sourceOrder !== 0 ? sourceOrder : compareText(a.axis, b.axis);
+}
+
+function parsedShadowRecord(line: string): ShadowRecord | null {
+  try {
+    const parsed: unknown = JSON.parse(line);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as ShadowRecord) : null;
+  } catch {
+    return null;
+  }
+}
+
+function variationContribution(
+  rec: ShadowRecord,
+  axis: string,
+  mode: 'live' | 'replay'
+): VariationContribution | null {
+  const variation = normalizeExperimentVariation(rec.variation);
+  if (!variation) return null;
+  const winner = rec.judge?.winner;
+  const mainCost = experimentCost(rec.main?.costUsd);
+  const shadowCost = experimentCost(rec.shadow?.costUsd);
+  return {
+    identity: { axis, variation },
+    mode,
+    winner: winner === 'main' || winner === 'shadow' || winner === 'tie' ? winner : null,
+    costDelta:
+      mainCost !== null && shadowCost !== null ? shadowCost - mainCost : null,
+    ts: normalizeExperimentTimestamp(rec.ts),
+    proofStatus: normalizeExperimentProofStatus(rec.revalidationStatus),
+  };
+}
+
+interface VariationSelection {
+  selected: Map<string, VariationIdentity>;
+  /** Max-heap by the same strict tuple order; root is the current eviction candidate. */
+  greatest: VariationIdentity[];
+  truncated: boolean;
+}
+
+interface SourceAxisSelection {
+  selected: Map<string, SourceAxisIdentity>;
+  /** Max-heap by strict (source, axis) tuple order. */
+  greatest: SourceAxisIdentity[];
+  truncated: boolean;
+}
+
+function maxHeapPush(heap: VariationIdentity[], identity: VariationIdentity): void {
+  heap.push(identity);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareVariationIdentity(heap[parent], heap[index]) >= 0) break;
+    [heap[parent], heap[index]] = [heap[index], heap[parent]];
+    index = parent;
+  }
+}
+
+function maxHeapReplaceRoot(heap: VariationIdentity[], identity: VariationIdentity): void {
+  heap[0] = identity;
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let greatest = index;
+    if (
+      left < heap.length &&
+      compareVariationIdentity(heap[left], heap[greatest]) > 0
+    ) {
+      greatest = left;
+    }
+    if (
+      right < heap.length &&
+      compareVariationIdentity(heap[right], heap[greatest]) > 0
+    ) {
+      greatest = right;
+    }
+    if (greatest === index) return;
+    [heap[index], heap[greatest]] = [heap[greatest], heap[index]];
+    index = greatest;
+  }
+}
+
+function sourceMaxHeapPush(
+  heap: SourceAxisIdentity[],
+  identity: SourceAxisIdentity
+): void {
+  heap.push(identity);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareSourceAxisIdentity(heap[parent], heap[index]) >= 0) break;
+    [heap[parent], heap[index]] = [heap[index], heap[parent]];
+    index = parent;
+  }
+}
+
+function sourceMaxHeapReplaceRoot(
+  heap: SourceAxisIdentity[],
+  identity: SourceAxisIdentity
+): void {
+  heap[0] = identity;
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let greatest = index;
+    if (
+      left < heap.length &&
+      compareSourceAxisIdentity(heap[left], heap[greatest]) > 0
+    ) {
+      greatest = left;
+    }
+    if (
+      right < heap.length &&
+      compareSourceAxisIdentity(heap[right], heap[greatest]) > 0
+    ) {
+      greatest = right;
+    }
+    if (greatest === index) return;
+    [heap[index], heap[greatest]] = [heap[greatest], heap[index]];
+    index = greatest;
+  }
+}
+
+/**
+ * Maintain the lexicographically smallest bounded identity set independent of
+ * ledger order. The main parse calls this while each record is already decoded;
+ * a second pass then aggregates only the final selected cells.
+ */
+function considerVariationIdentity(
+  selection: VariationSelection,
+  identity: VariationIdentity
+): void {
+  const key = variationIdentityKey(identity);
+  if (selection.selected.has(key)) return;
+  if (selection.selected.size < MAX_VARIATION_CELLS) {
+    selection.selected.set(key, identity);
+    maxHeapPush(selection.greatest, identity);
+    return;
+  }
+
+  selection.truncated = true;
+  const greatest = selection.greatest[0];
+  if (compareVariationIdentity(identity, greatest) < 0) {
+    selection.selected.delete(variationIdentityKey(greatest));
+    selection.selected.set(key, identity);
+    maxHeapReplaceRoot(selection.greatest, identity);
+  }
+}
+
+/**
+ * Select the strict lexicographically smallest bounded source cells so the
+ * `(other)` fold is independent of ledger order.
+ */
+function considerSourceAxisIdentity(
+  selection: SourceAxisSelection,
+  identity: SourceAxisIdentity
+): void {
+  const key = sourceAxisIdentityKey(identity);
+  if (selection.selected.has(key)) return;
+  if (selection.selected.size < MAX_SOURCE_AXIS_CELLS) {
+    selection.selected.set(key, identity);
+    sourceMaxHeapPush(selection.greatest, identity);
+    return;
+  }
+
+  selection.truncated = true;
+  const greatest = selection.greatest[0];
+  if (compareSourceAxisIdentity(identity, greatest) < 0) {
+    selection.selected.delete(sourceAxisIdentityKey(greatest));
+    selection.selected.set(key, identity);
+    sourceMaxHeapReplaceRoot(selection.greatest, identity);
+  }
+}
+
+/** Deterministic compensated sum over a finite multiset. */
+function stableFiniteSum(values: number[]): number | null {
+  values.sort((a, b) => a - b);
+  let sum = 0;
+  let correction = 0;
+  for (const value of values) {
+    const next = sum + value;
+    correction +=
+      Math.abs(sum) >= Math.abs(value)
+        ? sum - next + value
+        : value - next + sum;
+    sum = next;
+  }
+  const result = sum + correction;
+  if (!Number.isFinite(result)) return null;
+  return Object.is(result, -0) ? 0 : result;
+}
+
+function stableFinitePair(
+  left: number[],
+  right: number[]
+): { left: number; right: number; count: number } | null {
+  if (left.length !== right.length) return null;
+  const leftSum = stableFiniteSum(left);
+  const rightSum = stableFiniteSum(right);
+  return leftSum === null || rightSum === null
+    ? null
+    : { left: leftSum, right: rightSum, count: left.length };
+}
+
+interface AxisNumericContributions {
+  tokenDeltas: number[];
+  costDeltas: number[];
+  adherenceRegressions: number[];
+  speedMonolith: number[];
+  speedAtomized: number[];
+  costMonolithTokens: number[];
+  costAtomizedTokens: number[];
+  costMonolithUsd: number[];
+  costAtomizedUsd: number[];
+  accuracyMonolithAdherence: number[];
+  accuracyAtomizedAdherence: number[];
+}
+
+function emptyAxisNumericContributions(): AxisNumericContributions {
+  return {
+    tokenDeltas: [],
+    costDeltas: [],
+    adherenceRegressions: [],
+    speedMonolith: [],
+    speedAtomized: [],
+    costMonolithTokens: [],
+    costAtomizedTokens: [],
+    costMonolithUsd: [],
+    costAtomizedUsd: [],
+    accuracyMonolithAdherence: [],
+    accuracyAtomizedAdherence: [],
+  };
+}
+
+/**
+ * Aggregate the bounded source cells in a second pass. Selection is complete
+ * before any row is assigned, so both retained identities and `(other)` folds
+ * are permutation-stable; paired numeric deltas use the same stable sum as the
+ * per-variation surface.
+ */
+function aggregateSourceAxes(
+  lines: string[],
+  selection: SourceAxisSelection
+): SourceAxisAggregate[] {
+  const cells = new Map<string, SourceAxisAggregate>();
+  const deltas = new WeakMap<
+    SourceAxisAggregate,
+    { tokens: number[]; costs: number[] }
+  >();
+
+  for (const line of lines) {
+    const rec = parsedShadowRecord(line);
+    if (!rec) continue;
+    const cls = classifyShadowRecord(rec);
+    if (cls.disposition !== 'counted') continue;
+
+    const axis = cls.axis!;
+    const mode = cls.mode!;
+    const rawSource = classifyExperimentSource(rec);
+    const rawIdentity = { source: rawSource, axis };
+    const source = selection.selected.has(sourceAxisIdentityKey(rawIdentity))
+      ? rawSource
+      : '(other)';
+    const key = sourceAxisIdentityKey({ source, axis });
+    let cell = cells.get(key);
+    if (!cell) {
+      cell = emptySourceAxis(source, axis);
+      cells.set(key, cell);
+      deltas.set(cell, { tokens: [], costs: [] });
+    }
+
+    cell.samples++;
+    if (mode === 'live') cell.live++;
+    else cell.replay++;
+
+    const winner = rec.judge?.winner;
+    if (winner === 'shadow') cell.shadowWins++;
+    else if (winner === 'main') cell.mainWins++;
+    else if (winner === 'tie') cell.ties++;
+
+    const ms = num(rec.main?.tokens);
+    const ss = num(rec.shadow?.tokens);
+    if (ms !== null && ss !== null) {
+      const delta = ss - ms;
+      if (Number.isFinite(delta)) deltas.get(cell)!.tokens.push(delta);
+    }
+    const mc = num(rec.main?.costUsd);
+    const sc = num(rec.shadow?.costUsd);
+    if (mc !== null && sc !== null) {
+      const delta = sc - mc;
+      if (Number.isFinite(delta)) deltas.get(cell)!.costs.push(delta);
+    }
+  }
+
+  for (const cell of cells.values()) {
+    const values = deltas.get(cell)!;
+    const tokenSum = stableFiniteSum(values.tokens);
+    if (tokenSum !== null) {
+      cell.tokenDeltaSum = tokenSum;
+      cell.tokenDeltaCount = values.tokens.length;
+    }
+    const costSum = stableFiniteSum(values.costs);
+    if (costSum !== null) {
+      cell.costDeltaSum = costSum;
+      cell.costDeltaCount = values.costs.length;
+    }
+  }
+  return [...cells.values()].sort(compareSourceAxisIdentity);
+}
+
+/**
+ * Build the strict per-variation enrichment separately from the legacy pooled
+ * aggregates. Identity membership came from the first/main pass. This bounded
+ * second pass retains only paired cost numbers for selected cells, then sorts +
+ * compensated-sums them so input permutation cannot change floating output.
+ */
+function aggregateVariations(
+  lines: string[],
+  selection: VariationSelection,
+  counted: number,
+  buffered: VariationContribution[] | null
+): {
+  byVariation: VariationAggregate[];
+  variationSkipped: number;
+  variationCellsTruncated: boolean;
+} {
+  const cells = new Map<string, VariationAggregate>();
+  const costDeltas = new Map<string, number[]>();
+  let represented = 0;
+
+  const accumulate = (contribution: VariationContribution): void => {
+    const { identity } = contribution;
+    const key = variationIdentityKey(identity);
+    if (!selection.selected.has(key)) return;
+
+    let cell = cells.get(key);
+    if (!cell) {
+      cell = emptyVariation(identity.axis, identity.variation);
+      cells.set(key, cell);
+      costDeltas.set(key, []);
+    }
+    represented++;
+    cell.samples++;
+    if (contribution.mode === 'live') cell.live++;
+    else cell.replay++;
+
+    const { winner } = contribution;
+    if (winner === 'shadow') {
+      cell.shadowWins++;
+      cell.decided++;
+    } else if (winner === 'main') {
+      cell.mainWins++;
+      cell.decided++;
+    } else if (winner === 'tie') {
+      cell.ties++;
+    }
+
+    if (contribution.costDelta !== null) costDeltas.get(key)!.push(contribution.costDelta);
+
+    const { ts } = contribution;
+    if (ts) {
+      if (cell.latestTs === null || Date.parse(ts) > Date.parse(cell.latestTs)) {
+        cell.latestTs = ts;
+      }
+    } else {
+      cell.untimed++;
+    }
+
+    const { proofStatus } = contribution;
+    if (proofStatus) cell.proofStatusCounts[proofStatus]++;
+    else cell.proofStatusCounts.unknown++;
+  };
+
+  if (buffered !== null) {
+    for (const contribution of buffered) accumulate(contribution);
+  } else {
+    // Pathological high-row-count input exceeds the bounded normalized buffer.
+    // Reparse rather than retain unbounded JS objects.
+    for (const line of lines) {
+      const rec = parsedShadowRecord(line);
+      if (!rec) continue;
+      const cls = classifyShadowRecord(rec);
+      if (cls.disposition !== 'counted') continue;
+      const contribution = variationContribution(rec, cls.axis!, cls.mode!);
+      if (contribution) accumulate(contribution);
+    }
+  }
+
+  const byVariation = [...cells.entries()]
+    .map(([key, cell]) => {
+      const deltas = costDeltas.get(key)!;
+      const sum = stableFiniteSum(deltas);
+      if (sum !== null) {
+        cell.costDeltaCount = deltas.length;
+        cell.costDeltaSum = sum;
+      }
+      return cell;
+    })
+    .sort(compareVariationIdentity);
+  return {
+    byVariation,
+    variationSkipped: counted - represented,
+    variationCellsTruncated: selection.truncated,
+  };
+}
+
 export function parseShadowCalls(
   jsonlText: string | null | undefined
 ): ShadowCallAggregate {
   const byAxis = new Map<string, AxisAggregate>();
-  const bySourceAxis = new Map<string, SourceAxisAggregate>();
+  const axisNumeric = new WeakMap<AxisAggregate, AxisNumericContributions>();
+  const numericFor = (axis: AxisAggregate): AxisNumericContributions => {
+    let values = axisNumeric.get(axis);
+    if (!values) {
+      values = emptyAxisNumericContributions();
+      axisNumeric.set(axis, values);
+    }
+    return values;
+  };
   // Explicit disposition buckets (#2149): total counts every non-empty line; each line
   // increments EXACTLY one of counted/synthetic/skipped, so nothing is silently dropped.
   let total = 0;
@@ -475,12 +1106,26 @@ export function parseShadowCalls(
     replay: 0,
     byAxis: [],
     bySourceAxis: [],
+    byVariation: [],
+    variationSkipped: 0,
   };
   if (!jsonlText) return empty;
-
-  for (const line of jsonlText.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+  const lines = jsonlText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const variationSelection: VariationSelection = {
+    selected: new Map(),
+    greatest: [],
+    truncated: false,
+  };
+  const sourceAxisSelection: SourceAxisSelection = {
+    selected: new Map(),
+    greatest: [],
+    truncated: false,
+  };
+  let bufferedVariations: VariationContribution[] | null = [];
+  for (const trimmed of lines) {
     total++;
     let rec: ShadowRecord;
     try {
@@ -514,51 +1159,46 @@ export function parseShadowCalls(
     const mode = cls.mode!;
 
     counted++;
+    const contribution = variationContribution(rec, axis, mode);
+    if (contribution) {
+      considerVariationIdentity(variationSelection, contribution.identity);
+      if (bufferedVariations !== null) {
+        if (bufferedVariations.length < MAX_BUFFERED_VARIATION_RECEIPTS) {
+          bufferedVariations.push(contribution);
+        } else {
+          bufferedVariations = null;
+        }
+      }
+    }
     let a = byAxis.get(axis);
     if (!a) {
       a = emptyAxis(axis);
       byAxis.set(axis, a);
     }
-    // Uniform provenance cell (#2150): the same counters, keyed (source, axis),
-    // so every experiment kind reports through one path with no bespoke fields.
-    // The raw (pre-cap) source also drives the live-trust gate below (#2151).
+    // Source identity membership is selected now, then aggregated after the
+    // bounded set is final so `(other)` assignment cannot depend on row order.
+    // The raw source also drives the live-trust gate below (#2151).
     const rawSource = classifyExperimentSource(rec);
-    let source = rawSource;
-    let cellKey = `${source}\u0000${axis}`;
-    if (!bySourceAxis.has(cellKey) && bySourceAxis.size >= MAX_SOURCE_AXIS_CELLS) {
-      source = '(other)';
-      cellKey = `${source}\u0000${axis}`;
-    }
-    let cell = bySourceAxis.get(cellKey);
-    if (!cell) {
-      cell = emptySourceAxis(source, axis);
-      bySourceAxis.set(cellKey, cell);
-    }
+    considerSourceAxisIdentity(sourceAxisSelection, { source: rawSource, axis });
     a.samples++;
-    cell.samples++;
     if (mode === 'live') {
       a.live++;
-      cell.live++;
       live++;
     } else {
       a.replay++;
-      cell.replay++;
       replay++;
     }
 
     const winner = rec.judge?.winner;
     if (winner === 'shadow') {
       a.shadowWins++;
-      cell.shadowWins++;
       // Live trust is gated on the SOURCE, not just the mode (#2151): a batch
       // writer stamping mode:'live' must not lift detector confidence.
       if (mode === 'live' && LIVE_TRUST_SOURCES.has(rawSource)) a.liveShadowWins++;
     } else if (winner === 'main') {
       a.mainWins++;
-      cell.mainWins++;
     } else if (winner === 'tie') {
       a.ties++;
-      cell.ties++;
     }
 
     // Per-task adherence-regression dimension (#1269/#1270): a distinct judged count the
@@ -566,8 +1206,7 @@ export function parseShadowCalls(
     // Aggregated wherever it appears so the graduation gate can require full coverage.
     const adherence = rec.judge?.adherenceRegressions;
     if (typeof adherence === 'number' && Number.isFinite(adherence) && adherence >= 0) {
-      a.adherenceRegressionSum += adherence;
-      a.adherenceRegressionCount++;
+      numericFor(a).adherenceRegressions.push(adherence);
     }
 
     // Per-finding sub-aggregate, recs axis only (#579). Additive: reuses the same `winner`
@@ -608,25 +1247,22 @@ export function parseShadowCalls(
       const mWall = num(cs.speed?.monolithWallMs);
       const aWall = num(cs.speed?.atomizedWallMs);
       if (mWall !== null && aWall !== null) {
-        cfg.speed.monolithSum += mWall;
-        cfg.speed.atomizedSum += aWall;
-        cfg.speed.pairedCount++;
+        numericFor(a).speedMonolith.push(mWall);
+        numericFor(a).speedAtomized.push(aWall);
       }
       tallyWinner(cfg.speed, cs.speed?.winner);
 
       const mTok = num(cs.cost?.monolithTokens);
       const aTok = num(cs.cost?.atomizedTokens);
       if (mTok !== null && aTok !== null) {
-        cfg.cost.monolithTokenSum += mTok;
-        cfg.cost.atomizedTokenSum += aTok;
-        cfg.cost.tokenPairedCount++;
+        numericFor(a).costMonolithTokens.push(mTok);
+        numericFor(a).costAtomizedTokens.push(aTok);
       }
       const mUsd = num(cs.cost?.monolithCostUsd);
       const aUsd = num(cs.cost?.atomizedCostUsd);
       if (mUsd !== null && aUsd !== null) {
-        cfg.cost.monolithCostUsdSum += mUsd;
-        cfg.cost.atomizedCostUsdSum += aUsd;
-        cfg.cost.costPairedCount++;
+        numericFor(a).costMonolithUsd.push(mUsd);
+        numericFor(a).costAtomizedUsd.push(aUsd);
       }
       tallyWinner(cfg.cost, cs.cost?.winner);
 
@@ -634,36 +1270,112 @@ export function parseShadowCalls(
       const mAdh = num(cs.accuracy?.monolithAdherence);
       const aAdh = num(cs.accuracy?.atomizedAdherence);
       if (mAdh !== null && aAdh !== null) {
-        cfg.accuracy.monolithAdherenceSum += mAdh;
-        cfg.accuracy.atomizedAdherenceSum += aAdh;
-        cfg.accuracy.adherencePairedCount++;
+        numericFor(a).accuracyMonolithAdherence.push(mAdh);
+        numericFor(a).accuracyAtomizedAdherence.push(aAdh);
       }
     }
 
     const ms = rec.main?.tokens;
     const ss = rec.shadow?.tokens;
-    if (typeof ms === 'number' && typeof ss === 'number') {
-      a.tokenDeltaSum += ss - ms;
-      a.tokenDeltaCount++;
-      cell.tokenDeltaSum += ss - ms;
-      cell.tokenDeltaCount++;
+    if (
+      typeof ms === 'number' &&
+      Number.isFinite(ms) &&
+      typeof ss === 'number' &&
+      Number.isFinite(ss)
+    ) {
+      const delta = ss - ms;
+      if (Number.isFinite(delta)) {
+        numericFor(a).tokenDeltas.push(delta);
+      }
     }
 
     const mc = rec.main?.costUsd;
     const sc = rec.shadow?.costUsd;
-    if (typeof mc === 'number' && typeof sc === 'number') {
-      a.costDeltaSum += sc - mc;
-      a.costDeltaCount++;
-      cell.costDeltaSum += sc - mc;
-      cell.costDeltaCount++;
+    if (
+      typeof mc === 'number' &&
+      Number.isFinite(mc) &&
+      typeof sc === 'number' &&
+      Number.isFinite(sc)
+    ) {
+      const delta = sc - mc;
+      if (Number.isFinite(delta)) {
+        numericFor(a).costDeltas.push(delta);
+      }
+    }
+  }
+
+  for (const axis of byAxis.values()) {
+    const values = axisNumeric.get(axis) ?? emptyAxisNumericContributions();
+    const tokenSum = stableFiniteSum(values.tokenDeltas);
+    if (tokenSum !== null) {
+      axis.tokenDeltaSum = tokenSum;
+      axis.tokenDeltaCount = values.tokenDeltas.length;
+    }
+    const costSum = stableFiniteSum(values.costDeltas);
+    if (costSum !== null) {
+      axis.costDeltaSum = costSum;
+      axis.costDeltaCount = values.costDeltas.length;
+    }
+    const adherenceSum = stableFiniteSum(values.adherenceRegressions);
+    if (adherenceSum !== null) {
+      axis.adherenceRegressionSum = adherenceSum;
+      axis.adherenceRegressionCount = values.adherenceRegressions.length;
+    }
+    if (axis.configScoping) {
+      const cfg = axis.configScoping;
+      const speed = stableFinitePair(
+        values.speedMonolith,
+        values.speedAtomized
+      );
+      if (speed) {
+        cfg.speed.monolithSum = speed.left;
+        cfg.speed.atomizedSum = speed.right;
+        cfg.speed.pairedCount = speed.count;
+      }
+      const costTokens = stableFinitePair(
+        values.costMonolithTokens,
+        values.costAtomizedTokens
+      );
+      if (costTokens) {
+        cfg.cost.monolithTokenSum = costTokens.left;
+        cfg.cost.atomizedTokenSum = costTokens.right;
+        cfg.cost.tokenPairedCount = costTokens.count;
+      }
+      const costUsd = stableFinitePair(
+        values.costMonolithUsd,
+        values.costAtomizedUsd
+      );
+      if (costUsd) {
+        cfg.cost.monolithCostUsdSum = costUsd.left;
+        cfg.cost.atomizedCostUsdSum = costUsd.right;
+        cfg.cost.costPairedCount = costUsd.count;
+      }
+      const accuracy = stableFinitePair(
+        values.accuracyMonolithAdherence,
+        values.accuracyAtomizedAdherence
+      );
+      if (accuracy) {
+        cfg.accuracy.monolithAdherenceSum = accuracy.left;
+        cfg.accuracy.atomizedAdherenceSum = accuracy.right;
+        cfg.accuracy.adherencePairedCount = accuracy.count;
+      }
+    }
+    if (axis.byFinding) {
+      axis.byFinding = Object.fromEntries(
+        Object.entries(axis.byFinding).sort(([a], [b]) => compareText(a, b))
+      );
     }
   }
 
   // Stable, deterministic order (by axis key / source+axis key) so the detector +
   // ETag stay stable.
-  const sorted = [...byAxis.values()].sort((x, y) => x.axis.localeCompare(y.axis));
-  const sortedCells = [...bySourceAxis.values()].sort(
-    (x, y) => x.source.localeCompare(y.source) || x.axis.localeCompare(y.axis)
+  const sorted = [...byAxis.values()].sort((x, y) => compareText(x.axis, y.axis));
+  const sortedCells = aggregateSourceAxes(lines, sourceAxisSelection);
+  const variationAggregate = aggregateVariations(
+    lines,
+    variationSelection,
+    counted,
+    bufferedVariations
   );
   return {
     total,
@@ -674,6 +1386,11 @@ export function parseShadowCalls(
     replay,
     byAxis: sorted,
     bySourceAxis: sortedCells,
+    byVariation: variationAggregate.byVariation,
+    variationSkipped: variationAggregate.variationSkipped,
+    ...(variationAggregate.variationCellsTruncated
+      ? { variationCellsTruncated: true as const }
+      : {}),
   };
 }
 
@@ -786,6 +1503,7 @@ export function parseProofReceiptCells(jsonlText: string | null | undefined): {
   skipped: number;
 } {
   const byAxis = new Map<string, SourceAxisAggregate>();
+  const costDeltas = new Map<string, number[]>();
   let receipts = 0;
   let skipped = 0;
   if (jsonlText) {
@@ -815,6 +1533,7 @@ export function parseProofReceiptCells(jsonlText: string | null | undefined): {
       if (!cell) {
         cell = emptySourceAxis('proof', axis);
         byAxis.set(axis, cell);
+        costDeltas.set(axis, []);
       }
       receipts++;
       cell.samples++;
@@ -824,12 +1543,19 @@ export function parseProofReceiptCells(jsonlText: string | null | undefined): {
       else if (verdict === 'null') cell.ties++;
       const costUsd = num(rec.result?.perDimensionDeltas?.costUsd);
       if (costUsd !== null) {
-        cell.costDeltaSum += costUsd;
-        cell.costDeltaCount++;
+        costDeltas.get(axis)!.push(costUsd);
       }
     }
   }
-  const cells = [...byAxis.values()].sort((x, y) => x.axis.localeCompare(y.axis));
+  for (const cell of byAxis.values()) {
+    const values = costDeltas.get(cell.axis) ?? [];
+    const sum = stableFiniteSum(values);
+    if (sum !== null) {
+      cell.costDeltaSum = sum;
+      cell.costDeltaCount = values.length;
+    }
+  }
+  const cells = [...byAxis.values()].sort((x, y) => compareText(x.axis, y.axis));
   return { cells, receipts, skipped };
 }
 
@@ -867,9 +1593,7 @@ export function mergeExternalSourceCells(
   cells: SourceAxisAggregate[]
 ): ShadowCallAggregate {
   if (cells.length === 0) return agg;
-  const merged = [...agg.bySourceAxis, ...cells].sort(
-    (x, y) => x.source.localeCompare(y.source) || x.axis.localeCompare(y.axis)
-  );
+  const merged = [...agg.bySourceAxis, ...cells].sort(compareSourceAxisIdentity);
   const external = (agg.external ?? 0) + cells.reduce((sum, c) => sum + c.samples, 0);
   return { ...agg, bySourceAxis: merged, external };
 }

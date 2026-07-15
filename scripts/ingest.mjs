@@ -1293,7 +1293,12 @@ export const PARSER_SIG_VERSION = 'v4';
 // category before raw Bash commands are stripped. SESSION_BLOB_OUTPUT v12
 // reparses tool_json, while this paired turnover rejects persisted v16 dataset
 // bodies whose wrapped/chained bypasses lost the real executable alias.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 17;
+// v18 (#2643): shadowCalls now carries bounded per-(axis, variation) ledger
+// receipts with freshness/proof coverage. The ledger content can be unchanged
+// while a persisted v17 dataset lacks `byVariation` and `variationSkipped`, so
+// turn over the assembled-dataset cache without changing transcript or ledger
+// schema versions.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 18;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
