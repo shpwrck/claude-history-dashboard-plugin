@@ -178,6 +178,14 @@ await withServerDirs('server-hardening-bind', async ({ env }) => {
 });
 
 const serverSource = await readFile(join(SCRIPTS_DIR, 'server.mjs'), 'utf8');
+const recommendationBuildInitializers = [
+  ...serverSource.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*=\s*\{([^{}]*\bsourceSig\b[^{}]*\bpromise\b[^{}]*)\};/g),
+];
+const recommendationBuildInsertions = [
+  ...serverSource.matchAll(
+    /state\.recommendationsBuilds\.set\(key,\s*([A-Za-z_$][\w$]*)\);\s*pruneRecommendationsBuilds\(state\);/g
+  ),
+];
 check(
   'recommendationsBuilds has a pruning function',
   /function pruneRecommendationsBuilds\(state\)/.test(serverSource)
@@ -190,7 +198,10 @@ check(
 );
 check(
   'new recommendation builds record last access',
-  /build = \{ sourceSig, promise, lastAccess: Date\.now\(\) \};/.test(serverSource)
+  recommendationBuildInitializers.length >= 2 &&
+    recommendationBuildInitializers.every((match) =>
+      /\blastAccess:\s*Date\.now\(\)/.test(match[2])
+    )
 );
 check(
   'reused recommendation builds refresh last access',
@@ -198,9 +209,10 @@ check(
 );
 check(
   'recommendationsBuilds is pruned after insertion',
-  /state\.recommendationsBuilds\.set\(key, build\);\s*pruneRecommendationsBuilds\(state\);/s.test(
-    serverSource
-  )
+  recommendationBuildInsertions.length === recommendationBuildInitializers.length &&
+    recommendationBuildInsertions.every((match) =>
+      recommendationBuildInitializers.some((initializer) => initializer[1] === match[1])
+    )
 );
 
 if (failures > 0) process.exit(1);

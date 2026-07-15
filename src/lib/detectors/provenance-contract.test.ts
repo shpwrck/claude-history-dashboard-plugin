@@ -681,6 +681,21 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: Date.parse('2026-07-09T00:00:00.000Z'),
   }),
+  'speed.hook-overhead': () => {
+    const now = Date.parse('2026-07-14T12:00:00Z');
+    const timedStop = {
+      ...stopHookEvent(false),
+      timestamp: '2026-07-13T12:00:00Z',
+      totalDurationMs: 6000,
+    };
+    return {
+      input: baseInput({
+        runtimeEvents: [runtime(Array.from({ length: 5 }, () => ({ ...timedStop })))],
+        liveConfig: stopHookConfig(),
+      }),
+      now,
+    };
+  },
   'reliability.settings-json-invalid': () => ({
     input: baseInput({
       liveConfig: {

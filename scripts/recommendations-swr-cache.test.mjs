@@ -7,14 +7,17 @@
 //   2. external-guidance validity crossed with unchanged inputs -> `hit-time`:
 //      the cached JSON is immediately redecorated with the correct current or
 //      historical labels, without rerunning the detector catalog.
-//   3. an external-guidance snapshot changed -> `stale`, then a rebuilt body
+//   3. Stop-hook timing freshness crossed with unchanged inputs -> `miss`:
+//      the finding itself is rebuilt immediately because it can appear or
+//      disappear and cannot be safely redecorated.
+//   4. an external-guidance snapshot changed -> `stale`, then a rebuilt body
 //      with the refreshed reference; sourceSignature must not early-hit it.
-//   4. mtime changed but ingest() reports the SAME contentHash -> `hit-content`:
+//   5. mtime changed but ingest() reports the SAME contentHash -> `hit-content`:
 //      the cached body is byte-identical and NO multi-second assemble/detector
 //      rebuild runs. This is the core fix — an active session bumps project-dir
 //      mtimes on nearly every request, but the recs body only changes when the
 //      ingested CONTENT changes.
-//   5. content actually changed -> `stale`: the last-good body is served
+//   6. content actually changed -> `stale`: the last-good body is served
 //      immediately while the rebuild is deferred to the response `finish` event
 //      (so serving stale stays fast), and the cache converges to the fresh body
 //      on a later request.
@@ -23,7 +26,7 @@
 // identity (deterministic), not wall-clock thresholds (which would be flaky).
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
 import {
   cp,
@@ -149,6 +152,51 @@ function waitForChildMessage(proc, expected, timeoutMs = 2_000) {
   });
 }
 
+async function startFifoGate(path, timeoutMs = 5_000) {
+  const gate = spawn(
+    process.execPath,
+    [
+      '-e',
+      [
+        "const fs = require('node:fs');",
+        'const fd = fs.openSync(process.argv[1], \'w\');',
+        "process.send('ready');",
+        "process.once('message', (message) => {",
+        "  if (message !== 'release') return;",
+        "  fs.writeSync(fd, '\\n');",
+        '  fs.closeSync(fd);',
+        '  process.exit(0);',
+        '});',
+      ].join('\n'),
+      path,
+    ],
+    { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }
+  );
+  try {
+    await waitForChildMessage(gate, 'ready', timeoutMs);
+    return gate;
+  } catch (err) {
+    await stopProcess(gate).catch(() => {});
+    throw err;
+  }
+}
+
+async function releaseFifoGate(gate) {
+  gate.send('release');
+  const exited = await waitForProcessExit(gate, 5_000);
+  if (!exited) await stopProcess(gate);
+  assert.equal(exited, true, 'FIFO gate did not exit after release');
+}
+
+async function waitForOutputCount(readOutput, marker, count, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (readOutput().split(marker).length - 1 >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`server did not emit ${marker} ${count} time(s)`);
+}
+
 async function assertStopProcessEscalates() {
   const stubborn = spawn(
     process.execPath,
@@ -173,8 +221,8 @@ async function assertStopProcessEscalates() {
 
 // Fetch recs, returning the cache header + body text. Connection: close so each
 // request uses a fresh socket (avoids keep-alive reuse races in the test).
-async function getRecs(base) {
-  const res = await fetch(`${base}/api/recommendations.json`, {
+async function getRecs(base, query = '') {
+  const res = await fetch(`${base}/api/recommendations.json${query}`, {
     headers: { connection: 'close' },
   });
   const body = await res.text();
@@ -195,7 +243,11 @@ function sessionJsonl(
   id,
   prompt,
   ts,
-  { followUpTurns = 0, apiError = false } = {}
+  {
+    followUpTurns = 0,
+    apiError = false,
+    stopHookTimestamp = null,
+  } = {}
 ) {
   const rows = [
     JSON.stringify({ type: 'custom-title', sessionId: id, customTitle: prompt }),
@@ -236,6 +288,21 @@ function sessionJsonl(
       })
     );
   }
+  if (stopHookTimestamp) {
+    for (let i = 0; i < 5; i += 1) {
+      rows.push(
+        JSON.stringify({
+          type: 'system',
+          subtype: 'stop_hook_summary',
+          timestamp: stopHookTimestamp,
+          hookCount: 1,
+          hookInfos: [{ durationMs: 6_000 }],
+          hookErrors: [],
+          preventedContinuation: false,
+        })
+      );
+    }
+  }
   return `${rows.join('\n')}\n`;
 }
 
@@ -269,21 +336,44 @@ try {
   );
   const staleBoundary =
     Date.parse(usageGuidance.fetchedAt) + 30 * 24 * 60 * 60 * 1000;
+  const hookObservedAt = staleBoundary - 2 * 24 * 60 * 60 * 1000;
+  const hookStaleBoundary = hookObservedAt + 28 * 24 * 60 * 60 * 1000;
   const expectedUsageStaleLabel =
     `${usageGuidance.title} (as of ${usageGuidance.fetchedAt.slice(0, 10)})`;
   const clockFile = join(cacheDir, 'now.txt');
   const clockShim = join(cacheDir, 'clock.mjs');
+  const settingsPath = join(claudeDir, 'settings.json');
+  const projectConfigRoot = join(cacheDir, 'project-config');
+  const projectSettingsPath = join(projectConfigRoot, '.claude', 'settings.json');
+  const adoptionReceiptsPath = join(cacheDir, 'adoption-receipts.jsonl');
+  const stopHookSettings = JSON.stringify({
+    hooks: {
+      Stop: [
+        {
+          hooks: [{ type: 'command', command: 'notify-send done' }],
+        },
+      ],
+    },
+  });
+  const inactiveStopHookSettings = JSON.stringify({
+    padding: 'x'.repeat(
+      Buffer.byteLength(stopHookSettings) - Buffer.byteLength('{"padding":""}')
+    ),
+  });
   const duplicateGuidancePath = join(
     guidanceDir,
     `000-recs-swr-duplicate-${process.pid}.json`
   );
 
   await mkdir(projectDir, { recursive: true });
+  await mkdir(dirname(projectSettingsPath), { recursive: true });
   // Copy every committed snapshot into an isolated fixture root, then add the
   // adversarial duplicate there. The real repo data tree is never mutated.
   await cp(committedGuidanceDir, guidanceDir, { recursive: true });
   await writeFile(join(distDir, 'index.html'), '<!doctype html><main>ok</main>');
   await writeFile(join(claudeDir, 'history.jsonl'), '');
+  await writeFile(settingsPath, stopHookSettings);
+  await writeFile(projectSettingsPath, inactiveStopHookSettings);
   await writeFile(clockFile, String(staleBoundary));
   await writeFile(
     clockShim,
@@ -311,7 +401,11 @@ try {
     })
   );
   const promptClaritySessions = [
-    ['low-a', 'do the first thing', '2024-01-01T14:00:00.000Z', { followUpTurns: 4, apiError: true }],
+    ['low-a', 'do the first thing', '2024-01-01T14:00:00.000Z', {
+      followUpTurns: 4,
+      apiError: true,
+      stopHookTimestamp: new Date(hookObservedAt).toISOString(),
+    }],
     ['low-b', 'help me with this', '2024-01-02T14:00:00.000Z', { followUpTurns: 4 }],
     ['low-c', 'make it better', '2024-01-03T14:00:00.000Z', { followUpTurns: 4 }],
     ['specific-a', 'Update src/a.ts; tests must pass.', '2024-01-04T14:00:00.000Z'],
@@ -342,7 +436,7 @@ try {
         DIST_DIR: distDir,
         CHD_DB_PATH: join(cacheDir, 'dashboard.db'),
         CHD_EXTERNAL_GUIDANCE_DIR: guidanceDir,
-        ADOPTION_RECEIPTS_PATH: join(cacheDir, 'adoption-receipts.jsonl'),
+        ADOPTION_RECEIPTS_PATH: adoptionReceiptsPath,
         ENTERPRISE_AUDIT_LOG_PATH: join(cacheDir, 'enterprise-audit.jsonl'),
         ADOPTION_SPOOL_PATH: join(cacheDir, 'adoption-spool.jsonl'),
         DASHBOARD_REVIEW_EVENTS_CACHE_PATH: join(cacheDir, 'review-events.json'),
@@ -355,6 +449,8 @@ try {
         // Keep the rebuild in this process so the controllable test clock applies
         // to both cache freshness and recommendation rendering.
         CHD_RECS_WORKER: '0',
+        CHD_RECS_CACHE_TEST_EVENTS: '1',
+        DASHBOARD_PROJECT_CONFIG_ROOTS: projectConfigRoot,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     }
@@ -386,6 +482,13 @@ try {
     const currentRateLimit = recommendationsFromBody(cold.body).find(
       (rec) => rec.id === 'reliability.rate-limits'
     );
+    const currentHookOverhead = recommendationsFromBody(cold.body).find(
+      (rec) => rec.id === 'speed.hook-overhead'
+    );
+    await check('fresh Stop-hook timing fixture emits on the cold response', () => {
+      assert.ok(currentHookOverhead, 'fixture did not emit speed.hook-overhead');
+      assert.equal(currentHookOverhead.affected, 5);
+    });
     await check('guidance is undated at the exact 30-day boundary', () => {
       assert.ok(currentRateLimit, 'fixture did not emit reliability.rate-limits');
       assert.equal(
@@ -445,7 +548,235 @@ try {
       assert.ok(rateLimit, 'updated response lost reliability.rate-limits');
       assert.equal(rateLimit.references?.[0]?.label.includes('(as of '), false);
     });
-    let freshBody = rolledBack.body;
+
+    // Move only the server clock past the Stop-event four-week boundary. With
+    // unchanged source/content signatures, the response cache must still do a
+    // cold rebuild because the finding itself disappears (it cannot be safely
+    // redecorated like a guidance label).
+    await writeFile(clockFile, String(hookStaleBoundary + 1));
+    const hookExpired = await getRecs(base);
+    await check('Stop-hook freshness crossing rebuilds and removes the finding', () => {
+      assert.equal(hookExpired.cache, 'miss');
+      assert.equal(
+        recommendationsFromBody(hookExpired.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        ),
+        false
+      );
+    });
+
+    // Correct the clock backward with the exact same source identity. The
+    // stale-built entry carries a lower validity bound, so the finding returns
+    // on the first response rather than remaining suppressed in cache.
+    await writeFile(clockFile, String(staleBoundary));
+    const hookCurrentAgain = await getRecs(base);
+    await check('backward Stop-hook crossing rebuilds and restores the finding', () => {
+      assert.equal(hookCurrentAgain.cache, 'miss');
+      assert.ok(
+        recommendationsFromBody(hookCurrentAgain.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        )
+      );
+    });
+
+    // A config edit is a content change, which generic recommendation SWR would
+    // normally serve once from the old body. Current-hook reconciliation is a
+    // stronger contract: the cheap config-state seam must drop that entry and
+    // rebuild before the first response can repeat the now-false claim.
+    const beforeStopRemoval = await stat(settingsPath);
+    await check('no-Stop fixture preserves the settings byte length', () => {
+      assert.equal(
+        Buffer.byteLength(inactiveStopHookSettings),
+        Buffer.byteLength(stopHookSettings)
+      );
+    });
+    await writeFile(settingsPath, inactiveStopHookSettings);
+    await utimes(
+      settingsPath,
+      beforeStopRemoval.atime,
+      beforeStopRemoval.mtime
+    );
+    const hookRemoved = await getRecs(base);
+    await check('equal-length restored-mtime Stop removal never serves stale', () => {
+      assert.equal(hookRemoved.cache, 'miss');
+      assert.equal(
+        recommendationsFromBody(hookRemoved.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        ),
+        false
+      );
+    });
+
+    const beforeStopRestore = await stat(settingsPath);
+    await writeFile(settingsPath, stopHookSettings);
+    await utimes(
+      settingsPath,
+      beforeStopRestore.atime,
+      beforeStopRestore.mtime
+    );
+    const hookRestored = await getRecs(base);
+    await check('equal-length restored-mtime Stop restore rebuilds immediately', () => {
+      assert.equal(hookRestored.cache, 'miss');
+      assert.ok(
+        recommendationsFromBody(hookRestored.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        )
+      );
+    });
+    let freshBody = hookRestored.body;
+    const raceQuery = '?project=%2Ftmp%2Fdemo';
+    const racePrimed = await getRecs(base, raceQuery);
+    await check('project-scoped race key is primed independently', () => {
+      assert.equal(racePrimed.cache, 'miss');
+    });
+
+    // Hold an SWR rebuild exactly after it captured the old detector metadata:
+    // readRejectedFindingIds opens this FIFO after dataset/clock metadata is
+    // built. While it waits, remove the current Stop hook and issue a second
+    // request. That request must share the background promise, whose post-build
+    // currentness check performs one shared retry before resolving any waiter.
+    await rm(adoptionReceiptsPath, { force: true });
+    const mkfifo = spawnSync('mkfifo', [adoptionReceiptsPath]);
+    await check('SWR race fixture creates its receipts FIFO', () => {
+      assert.equal(mkfifo.status, 0, String(mkfifo.stderr || ''));
+    });
+    await writeFile(
+      join(projectDir, 'hook-cache-race.jsonl'),
+      sessionJsonl(
+        'hook-cache-race',
+        'exercise the recommendation cache race',
+        '2024-01-07T14:00:00.000Z'
+      )
+    );
+    const raceStale = await getRecs(base, raceQuery);
+    await check('content change starts a background SWR rebuild', () => {
+      assert.equal(raceStale.cache, 'stale');
+      assert.equal(raceStale.body, racePrimed.body);
+    });
+
+    const firstFifoGate = await startFifoGate(adoptionReceiptsPath);
+    const beforeRacingRemoval = await stat(settingsPath);
+    await writeFile(settingsPath, inactiveStopHookSettings);
+    await utimes(
+      settingsPath,
+      beforeRacingRemoval.atime,
+      beforeRacingRemoval.mtime
+    );
+    const joinMarker = '[recs-cache-test] joined-existing-build';
+    const joinsBefore = stdout.split(joinMarker).length - 1;
+    const racingRequest = getRecs(base, raceQuery);
+    await waitForOutputCount(() => stdout, joinMarker, joinsBefore + 1);
+    await releaseFifoGate(firstFifoGate);
+
+    // The raw background result is now invalid, so the shared bounded retry
+    // reaches the receipts read a second time. Release that read as well.
+    const retryFifoGate = await startFifoGate(adoptionReceiptsPath);
+    await releaseFifoGate(retryFifoGate);
+    const racedRemoval = await racingRequest;
+    await check('an in-flight background build performs the shared current-state retry', () => {
+      assert.equal(racedRemoval.cache, 'miss');
+    });
+
+    await rm(adoptionReceiptsPath, { force: true });
+    await writeFile(adoptionReceiptsPath, '');
+    const beforeRaceRestore = await stat(settingsPath);
+    await writeFile(settingsPath, stopHookSettings);
+    await utimes(
+      settingsPath,
+      beforeRaceRestore.atime,
+      beforeRaceRestore.mtime
+    );
+    const afterRaceRestore = await getRecs(base, raceQuery);
+    await check('post-race Stop-hook restore rebuilds normally', () => {
+      assert.equal(afterRaceRestore.cache, 'miss');
+    });
+
+    // A project-only Stop hook is just as current as a user-scoped one. First
+    // establish an inactive cached body, then rewrite only the allowlisted
+    // project settings with identical size and restored mtime in both
+    // directions. The cheap gate must invalidate the first response each time.
+    const beforeProjectOnlyBaseline = await stat(settingsPath);
+    await writeFile(settingsPath, inactiveStopHookSettings);
+    await utimes(
+      settingsPath,
+      beforeProjectOnlyBaseline.atime,
+      beforeProjectOnlyBaseline.mtime
+    );
+    const projectOnlyBaseline = await getRecs(base);
+    await check('project-only cache fixture starts with no current Stop hook', () => {
+      assert.equal(projectOnlyBaseline.cache, 'miss');
+      assert.equal(
+        recommendationsFromBody(projectOnlyBaseline.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        ),
+        false
+      );
+    });
+
+    const beforeProjectStopRestore = await stat(projectSettingsPath);
+    await writeFile(projectSettingsPath, stopHookSettings);
+    await utimes(
+      projectSettingsPath,
+      beforeProjectStopRestore.atime,
+      beforeProjectStopRestore.mtime
+    );
+    const projectStopRestored = await getRecs(base);
+    await check('equal-length restored-mtime project Stop restore rebuilds immediately', () => {
+      assert.equal(projectStopRestored.cache, 'miss');
+      assert.ok(
+        recommendationsFromBody(projectStopRestored.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        )
+      );
+    });
+
+    const beforeProjectStopRemoval = await stat(projectSettingsPath);
+    await writeFile(projectSettingsPath, inactiveStopHookSettings);
+    await utimes(
+      projectSettingsPath,
+      beforeProjectStopRemoval.atime,
+      beforeProjectStopRemoval.mtime
+    );
+    const projectStopRemoved = await getRecs(base);
+    await check('equal-length restored-mtime project Stop removal never serves stale', () => {
+      assert.equal(projectStopRemoved.cache, 'miss');
+      assert.equal(
+        recommendationsFromBody(projectStopRemoved.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        ),
+        false
+      );
+    });
+
+    const beforeProjectStopSecondRestore = await stat(projectSettingsPath);
+    await writeFile(projectSettingsPath, stopHookSettings);
+    await utimes(
+      projectSettingsPath,
+      beforeProjectStopSecondRestore.atime,
+      beforeProjectStopSecondRestore.mtime
+    );
+    const projectStopSecondRestore = await getRecs(base);
+    await check('project-only Stop restore remains repeatably cache-visible', () => {
+      assert.equal(projectStopSecondRestore.cache, 'miss');
+      assert.ok(
+        recommendationsFromBody(projectStopSecondRestore.body).some(
+          (rec) => rec.id === 'speed.hook-overhead'
+        )
+      );
+    });
+    freshBody = projectStopSecondRestore.body;
+
+    // Leave subsequent guidance-cache checks in the original user-hook shape.
+    const beforeUserStopCleanup = await stat(settingsPath);
+    const beforeProjectStopCleanup = await stat(projectSettingsPath);
+    await writeFile(settingsPath, stopHookSettings);
+    await writeFile(projectSettingsPath, inactiveStopHookSettings);
+    await utimes(settingsPath, beforeUserStopCleanup.atime, beforeUserStopCleanup.mtime);
+    await utimes(
+      projectSettingsPath,
+      beforeProjectStopCleanup.atime,
+      beforeProjectStopCleanup.mtime
+    );
 
     // Replace an existing snapshot while this same server process is warm. The
     // cheap source signature must notice the file metadata change before its

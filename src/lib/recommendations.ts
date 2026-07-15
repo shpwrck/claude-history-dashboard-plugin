@@ -87,7 +87,12 @@ export {
 // ── Detector catalog ─────────────────────────────────────────────────────
 // Static, hand-written barrel of per-file detectors (ADR 0002). As of #507 this
 // is the complete set of recommendations — there are no more in-file rules.
-import { DETECTORS } from './detectors';
+import {
+  DETECTORS,
+  hookOverheadCacheValidity,
+  hookOverheadCacheValidityContains,
+  type HookOverheadCacheValidity,
+} from './detectors';
 import {
   externalGuidanceCacheValidity,
   externalGuidanceCacheValidityContains,
@@ -265,6 +270,7 @@ export function assembleRecommendationInput(
 interface RecommendationBuildCacheEntry {
   recommendations: Recommendation[];
   guidanceCacheValidity: ExternalGuidanceCacheValidity;
+  hookOverheadCacheValidity: HookOverheadCacheValidity;
 }
 
 const buildCache: WeakMap<RecommendationInput, RecommendationBuildCacheEntry> =
@@ -353,8 +359,9 @@ export function rankRecommendations(
  * in `parse-sessions.ts`. See issue #161.
  *
  * Skip cache when the caller pins `now` — those calls are time-keyed. Normal
- * identity-cache entries carry the next external-guidance stale boundary, so
- * wall-clock movement cannot leave a formerly-current reference undated.
+ * identity-cache entries carry both external-guidance and Stop-hook timing
+ * validity boundaries, so wall-clock movement cannot leave a time-relative
+ * label or finding stale.
  */
 /**
  * Collapse the duplicate `safety.unattended-sessions` card into the single
@@ -411,7 +418,8 @@ export function buildRecommendations(
     const cached = buildCache.get(input);
     if (
       cached &&
-      externalGuidanceCacheValidityContains(cached.guidanceCacheValidity, t)
+      externalGuidanceCacheValidityContains(cached.guidanceCacheValidity, t) &&
+      hookOverheadCacheValidityContains(cached.hookOverheadCacheValidity, t)
     ) {
       return cached.recommendations;
     }
@@ -439,6 +447,7 @@ export function buildRecommendations(
         guidanceTransitions,
         t
       ),
+      hookOverheadCacheValidity: hookOverheadCacheValidity(input, t),
     });
   }
   return sorted;

@@ -147,6 +147,11 @@ import { detector as hookOverhead } from './speed/hook-overhead';
 import { detector as timeMotion } from './speed/time-motion';
 import { detector as modelLatency } from './speed/model-latency';
 import { detector as serialToolGap } from './speed/serial-tool-gap';
+export {
+  hookOverheadCacheValidity,
+  hookOverheadCacheValidityContains,
+  type HookOverheadCacheValidity,
+} from './speed/hook-overhead';
 
 // ── ACTIVITY ────────────────────────────────────────────────────────────
 import { detector as staleProjects } from './activity/stale-projects';

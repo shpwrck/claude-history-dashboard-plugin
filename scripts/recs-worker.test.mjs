@@ -149,6 +149,16 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
         Object.hasOwn(reply.guidanceCacheValidity, 'through'),
       'worker validity includes exclusive lower and inclusive upper bounds'
     );
+    assert.deepEqual(
+      reply.hookOverheadCacheValidity,
+      { after: null, through: null },
+      'worker returns Stop-hook timing cache validity metadata'
+    );
+    assert.equal(
+      reply.hookOverheadConfigState,
+      'inactive',
+      'worker returns the current Stop-hook config gate state'
+    );
   } finally {
     process.env.HOME = origHome;
     process.env.CHD_DB_PATH = origDb;

@@ -60,6 +60,7 @@ import {
   loadLatestDatasetCache,
   saveDatasetCache,
   sourceSignature,
+  stopHookConfigState,
   getTranscript,
   getSessionTimelineDetail,
   getSessionToolDetail,
@@ -103,6 +104,13 @@ const {
   externalGuidanceCacheValidityContains,
   externalGuidanceClockTransitions,
 } = await import(join(PROJECT_DIR, 'src', 'lib', 'external-guidance.ts'));
+const {
+  hookOverheadCacheValidity,
+  hookOverheadCacheValidityContains,
+  hookOverheadConfigState,
+} = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'detectors', 'speed', 'hook-overhead.ts')
+);
 const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
 const DEFAULT_SOURCE = DATA_SOURCES[0];
 const DATA_SOURCE_BY_ID = new Map(DATA_SOURCES.map((source) => [source.id, source]));
@@ -1185,6 +1193,7 @@ const GLOBAL_INGEST_API = {
   loadLatestDatasetCache,
   saveDatasetCache,
   sourceSignature,
+  stopHookConfigState,
   getTranscript,
   getSessionTimelineDetail,
   getSessionToolDetail,
@@ -1210,6 +1219,7 @@ function datasetState(apiPromise, key = 'global') {
     // expensive enough to avoid repeat ingest+assemble work under org traffic.
     recommendationsCache: new Map(),
     recommendationsBuilds: new Map(),
+    recommendationsBuildGeneration: 0,
     // Bounded response caches for /api/digest and /api/search (#1573). Both
     // routes previously ran a full ingest()+assembleDataset() (and, for search,
     // a score+embed over every entry) on the event loop per request with no
@@ -1244,7 +1254,7 @@ function datasetState(apiPromise, key = 'global') {
     // #2182: separate memo for the lighter recommendation dataset (recs-input
     // fields only), so the recs route doesn't build the full payload and doesn't
     // evict the full-dataset memo the digest/dataset routes reuse.
-    assembledRecoMemo: null, // { contentHash, dataset }
+    assembledRecoMemo: null, // { contentHash, hookConfigState, dataset }
   };
 }
 
@@ -2229,15 +2239,21 @@ function memoizedAssembleDataset(state, api, contentHash) {
 // /api/digest and /api/dataset.json routes still need) so neither evicts the
 // other. Shared within one recs request by the suppression emit + recs build
 // (#2071), so a single light assemble serves both.
-function memoizedAssembleRecommendationDataset(state, api, contentHash) {
+function memoizedAssembleRecommendationDataset(
+  state,
+  api,
+  contentHash
+) {
+  const hookConfigState = api.stopHookConfigState();
   if (
     state.assembledRecoMemo &&
-    state.assembledRecoMemo.contentHash === contentHash
+    state.assembledRecoMemo.contentHash === contentHash &&
+    state.assembledRecoMemo.hookConfigState === hookConfigState
   ) {
     return state.assembledRecoMemo.dataset;
   }
   const dataset = api.assembleRecommendationDataset();
-  state.assembledRecoMemo = { contentHash, dataset };
+  state.assembledRecoMemo = { contentHash, hookConfigState, dataset };
   return dataset;
 }
 
@@ -2250,6 +2266,7 @@ function memoizedAssembleRecommendationDataset(state, api, contentHash) {
 // per-principal scoped rebuilds and the cold first-build fall back to the inline
 // path. Set CHD_RECS_WORKER=0 to disable and always build inline.
 const RECS_WORKER_ENABLED = process.env.CHD_RECS_WORKER !== '0';
+const RECS_CACHE_TEST_EVENTS = process.env.CHD_RECS_CACHE_TEST_EVENTS === '1';
 let recsWorker = null;
 let recsWorkerReqId = 0;
 const recsWorkerPending = new Map(); // id -> { resolve, reject }
@@ -2475,8 +2492,22 @@ function redecorateCachedGuidanceLabels(entry, now) {
   return true;
 }
 
+function recommendationsCacheEntryIsCurrent(entry, api, now) {
+  if (
+    !entry.guidanceCacheValidity ||
+    !externalGuidanceCacheValidityContains(entry.guidanceCacheValidity, now)
+  ) {
+    if (!redecorateCachedGuidanceLabels(entry, now)) return false;
+  }
+  return (
+    entry.hookOverheadConfigState === api.stopHookConfigState() &&
+    !!entry.hookOverheadCacheValidity &&
+    hookOverheadCacheValidityContains(entry.hookOverheadCacheValidity, now)
+  );
+}
+
 // Worker-backed twin of buildRecommendationsCacheEntry: the rebuild runs off the
-// event loop; the main thread only does the cheap size-gate + ETag + cache.set.
+// event loop; the main thread only does the cheap size-gate + ETag construction.
 // Reuses the request-time `sourceSig` (like the inline path) so the freshness
 // gate stays consistent; the worker's content-derived contentHash matches the
 // main process's for the same source state (verified path-independent).
@@ -2492,6 +2523,8 @@ async function buildRecommendationsCacheEntryViaWorker(
     contentHash,
     guidanceTransitions,
     guidanceCacheValidity,
+    hookOverheadCacheValidity: hookCacheValidity,
+    hookOverheadConfigState: hookConfigState,
   } =
     await requestRecsRebuildViaWorker(
       project,
@@ -2506,10 +2539,10 @@ async function buildRecommendationsCacheEntryViaWorker(
     sourceSig,
     guidanceTransitions,
     guidanceCacheValidity,
+    hookOverheadCacheValidity: hookCacheValidity,
+    hookOverheadConfigState: hookConfigState,
     lastAccess: Date.now(),
   };
-  state.recommendationsCache.set(key, entry);
-  pruneRecommendationsCache(state);
   return entry;
 }
 
@@ -2522,6 +2555,10 @@ async function buildRecommendationsCacheEntry(
   { emitSuppressionTransitions = false, organizationIdentity = null } = {}
 ) {
   const stats = api.ingest();
+  // `ingest()` fingerprints settings by bounded stat metadata. Fold the cheap
+  // detector-relevant state into this memo key as well: an equal-length rewrite
+  // with restored/coarse mtime can still remove the current Stop hook, and that
+  // change must force a fresh liveConfig assembly rather than reuse stale data.
   // Assemble once and thread the same dataset into both the suppression emit
   // and the recs build (#2071) — each previously called assembleDataset()
   // independently, doubling the synchronous event-loop stall per request. #2182:
@@ -2543,6 +2580,11 @@ async function buildRecommendationsCacheEntry(
     guidanceTransitions,
     guidanceBuiltAt
   );
+  const hookCacheValidity = hookOverheadCacheValidity(
+    dataset,
+    guidanceBuiltAt
+  );
+  const hookConfigState = hookOverheadConfigState(dataset);
   if (emitSuppressionTransitions) {
     api
       .recordSuppressionTransitions(ADOPTION_RECEIPTS, {
@@ -2576,11 +2618,72 @@ async function buildRecommendationsCacheEntry(
     sourceSig,
     guidanceTransitions,
     guidanceCacheValidity,
+    hookOverheadCacheValidity: hookCacheValidity,
+    hookOverheadConfigState: hookConfigState,
     lastAccess: Date.now(),
   };
+  return entry;
+}
+
+function commitRecommendationsCacheEntry(state, key, entry, buildOwner) {
+  entry.buildGeneration = buildOwner.generation;
   state.recommendationsCache.set(key, entry);
   pruneRecommendationsCache(state);
   return entry;
+}
+
+function newerRecommendationsResult(state, key, buildOwner) {
+  const currentBuild = state.recommendationsBuilds.get(key);
+  if (currentBuild && currentBuild !== buildOwner) {
+    return currentBuild.promise;
+  }
+  const cached = state.recommendationsCache.get(key);
+  if (
+    !currentBuild &&
+    Number.isFinite(cached?.buildGeneration) &&
+    cached.buildGeneration > buildOwner.generation
+  ) {
+    return Promise.resolve(cached);
+  }
+  return null;
+}
+
+async function ensureCurrentRecommendationsCacheEntry(
+  state,
+  api,
+  key,
+  buildOwner,
+  entry,
+  retryBuild
+) {
+  let newer = newerRecommendationsResult(state, key, buildOwner);
+  if (newer) return newer;
+
+  if (recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
+    newer = newerRecommendationsResult(state, key, buildOwner);
+    return newer || commitRecommendationsCacheEntry(state, key, entry, buildOwner);
+  }
+
+  // A cold build can span a clock/config boundary. Rebuild once against the
+  // completed state instead of returning a stale body. The owner token keeps an
+  // overtaken build from deleting/restamping a newer build or cache entry.
+  const retrySourceSig = api.sourceSignature();
+  const currentBuild = state.recommendationsBuilds.get(key);
+  if (currentBuild && currentBuild !== buildOwner) {
+    return currentBuild.promise;
+  }
+  if (currentBuild === buildOwner) buildOwner.sourceSig = retrySourceSig;
+  entry = await retryBuild(retrySourceSig);
+
+  newer = newerRecommendationsResult(state, key, buildOwner);
+  if (newer) return newer;
+  if (!recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
+    throw new Error(
+      'Recommendation clock/config metadata changed across the bounded rebuild retry'
+    );
+  }
+  newer = newerRecommendationsResult(state, key, buildOwner);
+  return newer || commitRecommendationsCacheEntry(state, key, entry, buildOwner);
 }
 
 async function recommendationsResponseCache(
@@ -2596,9 +2699,52 @@ async function recommendationsResponseCache(
   const sourceSig = api.sourceSignature();
   const identityKey = recommendationIdentityCacheKey(organizationIdentity);
   const key = recommendationsCacheKey(project, identityKey);
+  const inlineBuild = (buildSourceSig) =>
+    buildRecommendationsCacheEntry(
+      state,
+      api,
+      key,
+      buildSourceSig,
+      project,
+      { emitSuppressionTransitions, organizationIdentity }
+    );
+  const refreshBuild = (buildSourceSig) => {
+    if (!allowWorker || !RECS_WORKER_ENABLED) return inlineBuild(buildSourceSig);
+    return buildRecommendationsCacheEntryViaWorker(
+      state,
+      key,
+      buildSourceSig,
+      project,
+      { emitSuppressionTransitions, organizationIdentity }
+    ).catch((err) => {
+      if (isRecommendationsResponseTooLargeError(err)) throw err;
+      console.warn(
+        '[recs-worker] rebuild failed, falling back to inline:',
+        err?.message || err
+      );
+      return inlineBuild(buildSourceSig);
+    });
+  };
   let cached = state.recommendationsCache.get(key);
   const now = Date.now();
+  const currentHookConfigState = api.stopHookConfigState();
   let clockRefreshed = false;
+  if (
+    cached &&
+    (cached.hookOverheadConfigState !== currentHookConfigState ||
+      !cached.hookOverheadCacheValidity ||
+      !hookOverheadCacheValidityContains(
+        cached.hookOverheadCacheValidity,
+        now
+      ))
+  ) {
+    // Unlike a guidance label, current Stop-hook state or an event entering /
+    // leaving the four-week window can add, remove, or re-rank the whole
+    // finding. Never serve that cached body stale; force the ordinary cold
+    // rebuild even when source/content signatures would otherwise permit SWR.
+    state.recommendationsCache.delete(key);
+    cached = undefined;
+  }
   if (
     cached &&
     (!cached.guidanceCacheValidity ||
@@ -2661,30 +2807,28 @@ async function recommendationsResponseCache(
       return { entry: cached, cache: 'stale', scheduleRefresh: null };
     }
     let settle;
+    const buildOwner = {
+      generation: ++state.recommendationsBuildGeneration,
+      sourceSig,
+      promise: null,
+      lastAccess: Date.now(),
+    };
     const promise = new Promise((resolve, reject) => {
       settle = { resolve, reject };
     }).finally(() => {
       const current = state.recommendationsBuilds.get(key);
-      if (current?.promise === promise) {
+      if (current === buildOwner) {
         state.recommendationsBuilds.delete(key);
       }
     });
+    buildOwner.promise = promise;
     // Mark the reserved promise handled so a failed background rebuild never
     // becomes an unhandled rejection (the cold path below awaits its own build
     // and still surfaces errors through the route try/catch).
     promise.catch(() => {});
-    state.recommendationsBuilds.set(key, {
-      sourceSig,
-      promise,
-      lastAccess: Date.now(),
-    });
+    state.recommendationsBuilds.set(key, buildOwner);
     pruneRecommendationsBuilds(state);
     let fired = false;
-    const inlineBuild = () =>
-      buildRecommendationsCacheEntry(state, api, key, sourceSig, project, {
-        emitSuppressionTransitions,
-        organizationIdentity,
-      });
     const scheduleRefresh = () => {
       if (fired) return;
       fired = true;
@@ -2694,20 +2838,22 @@ async function recommendationsResponseCache(
       // (#2184) when the worker is disabled/unavailable or dies mid-rebuild — a
       // 413 size cap is a real result, not a worker failure, so it is NOT
       // retried inline.
-      const build =
-        allowWorker && RECS_WORKER_ENABLED
-          ? buildRecommendationsCacheEntryViaWorker(state, key, sourceSig, project, {
-              emitSuppressionTransitions,
-              organizationIdentity,
-            }).catch((err) => {
-              if (isRecommendationsResponseTooLargeError(err)) throw err;
-              console.warn(
-                '[recs-worker] rebuild failed, falling back to inline:',
-                err?.message || err
-              );
-              return inlineBuild();
-            })
-          : inlineBuild();
+      const rawBuild = refreshBuild(sourceSig);
+      // The reserved recommendationsBuilds promise covers both the worker or
+      // inline build and this post-build validation/retry. If current config or
+      // event-window membership changes while SWR is in flight, a cold waiter
+      // therefore shares the corrected result instead of receiving the raw
+      // pre-boundary entry.
+      const build = rawBuild.then((entry) =>
+        ensureCurrentRecommendationsCacheEntry(
+          state,
+          api,
+          key,
+          buildOwner,
+          entry,
+          refreshBuild
+        )
+      );
       build.then(settle.resolve, (err) => {
         console.warn(
           '[recommendations] background refresh failed:',
@@ -2722,38 +2868,40 @@ async function recommendationsResponseCache(
   // only path that blocks, and only on the very first request for a key.
   let build = state.recommendationsBuilds.get(key);
   if (!build || build.sourceSig !== sourceSig) {
-    const promise = buildRecommendationsCacheEntry(
-      state,
-      api,
-      key,
+    const buildOwner = {
+      generation: ++state.recommendationsBuildGeneration,
       sourceSig,
-      project,
-      { emitSuppressionTransitions, organizationIdentity }
-    ).finally(() => {
-      const current = state.recommendationsBuilds.get(key);
-      if (current?.promise === promise) {
-        state.recommendationsBuilds.delete(key);
-      }
-    });
-    build = { sourceSig, promise, lastAccess: Date.now() };
-    state.recommendationsBuilds.set(key, build);
+      promise: null,
+      lastAccess: Date.now(),
+    };
+    const promise = inlineBuild(sourceSig)
+      .then((entry) =>
+        ensureCurrentRecommendationsCacheEntry(
+          state,
+          api,
+          key,
+          buildOwner,
+          entry,
+          inlineBuild
+        )
+      )
+      .finally(() => {
+        const current = state.recommendationsBuilds.get(key);
+        if (current === buildOwner) {
+          state.recommendationsBuilds.delete(key);
+        }
+      });
+    buildOwner.promise = promise;
+    build = buildOwner;
+    state.recommendationsBuilds.set(key, buildOwner);
     pruneRecommendationsBuilds(state);
   } else {
     build.lastAccess = Date.now();
-  }
-  const entry = await build.promise;
-  const completedAt = Date.now();
-  if (
-    !entry.guidanceCacheValidity ||
-    !externalGuidanceCacheValidityContains(entry.guidanceCacheValidity, completedAt)
-  ) {
-    if (!redecorateCachedGuidanceLabels(entry, completedAt)) {
-      state.recommendationsCache.delete(key);
-      throw new Error(
-        'Recommendation guidance cache metadata was invalid after rebuild'
-      );
+    if (RECS_CACHE_TEST_EVENTS) {
+      console.log('[recs-cache-test] joined-existing-build');
     }
   }
+  const entry = await build.promise;
   return { entry, cache: 'miss' };
 }
 

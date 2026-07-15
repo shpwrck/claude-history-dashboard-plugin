@@ -1011,6 +1011,7 @@ const configLoaderModule = await import(join(LIB, 'config-loader.ts'));
 const {
   assembleLiveConfig,
   readTextFileCappedSync,
+  readStopHookConfigState,
   hostEnvironmentObservation,
   hostEnvironmentObservationSignature,
 } = configLoaderModule;
@@ -1022,6 +1023,17 @@ export const CONFIG_RESOURCE_MAX_ENTRIES =
 const LIVE_CONFIG_ENVIRONMENT_OBSERVATION = SCOPED_INGEST
   ? undefined
   : hostEnvironmentObservation(process.env);
+
+/** Cheap current-state gate for the recommendations response cache (#2554). */
+export function stopHookConfigState() {
+  return readStopHookConfigState({
+    claudeDir: CLAUDE,
+    homeDir: CLAUDE_HOME,
+    scoped: SCOPED_INGEST,
+    projectRoots: liveConfigProjectRoots(repoMapArtifactRoots()),
+    environment: LIVE_CONFIG_ENVIRONMENT_OBSERVATION,
+  });
+}
 
 const GITHUB_REVIEW_SYNC_CONFIG = parseGitHubReviewSyncConfig(process.env, {
   cachePath: REVIEW_EVENTS_CACHE,

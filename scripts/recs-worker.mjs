@@ -22,7 +22,8 @@
 //   parent -> worker: { id, project, organizationIdentity, emitSuppressionTransitions,
 //                       adoptionReceiptsPath, shadowCallsDir }
 //   worker -> parent: { id, ok:true, json, contentHash, sourceSig,
-//                       guidanceTransitions, guidanceCacheValidity }
+//                       guidanceTransitions, guidanceCacheValidity,
+//                       hookOverheadCacheValidity, hookOverheadConfigState }
 //                  |  { id, ok:false, error }
 //                  |  { type:'ready' }   (once, after module init)
 //                  |  { type:'log', level, message }
@@ -56,6 +57,9 @@ const {
   externalGuidanceCacheValidity,
   externalGuidanceClockTransitions,
 } = await import(join(projectDir, 'src', 'lib', 'external-guidance.ts'));
+const { hookOverheadCacheValidity, hookOverheadConfigState } = await import(
+  join(projectDir, 'src', 'lib', 'detectors', 'speed', 'hook-overhead.ts')
+);
 
 parentPort.on('message', async (msg) => {
   if (!msg || typeof msg !== 'object') return;
@@ -81,6 +85,11 @@ parentPort.on('message', async (msg) => {
       guidanceTransitions,
       guidanceBuiltAt
     );
+    const hookCacheValidity = hookOverheadCacheValidity(
+      dataset,
+      guidanceBuiltAt
+    );
+    const hookConfigState = hookOverheadConfigState(dataset);
     if (emitSuppressionTransitions && adoptionReceiptsPath) {
       // Best-effort, like the inline path: never fail the rebuild on a receipts
       // write error. Reuses the same dataset (no second assemble).
@@ -118,6 +127,8 @@ parentPort.on('message', async (msg) => {
       contentHash: stats.contentHash,
       guidanceTransitions,
       guidanceCacheValidity,
+      hookOverheadCacheValidity: hookCacheValidity,
+      hookOverheadConfigState: hookConfigState,
       sourceSig: sourceSignature(),
     });
   } catch (err) {

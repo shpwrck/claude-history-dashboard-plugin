@@ -1115,15 +1115,22 @@ describe('security.model-deceit (#686, epic #683 slice B)', () => {
 });
 
 describe('speed.hook-overhead (#710, epic #708 — the clock, ADR 0006)', () => {
+  const NOW = Date.parse('2026-07-14T12:00:00Z');
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
   // n stop events, each carrying `overheadMs` of measured per-turn hook time.
-  const slowStops = (n: number, overheadMs: number) =>
+  const slowStops = (
+    n: number,
+    overheadMs: number,
+    timestamp = new Date(NOW - DAY_MS).toISOString()
+  ) =>
     [
       {
         sessionId: 's1',
         turns: [],
         stopHooks: Array.from({ length: n }, () => ({
           sessionId: 's1',
-          timestamp: 't',
+          timestamp,
           hookCount: 1,
           totalDurationMs: overheadMs,
           hadErrors: false,
@@ -1134,35 +1141,255 @@ describe('speed.hook-overhead (#710, epic #708 — the clock, ADR 0006)', () => 
       },
     ] as unknown as RecommendationInput['runtimeEvents'];
 
-  const find = (input: RecommendationInput) =>
-    buildRecommendations(input, 0).find((r) => r.id === 'speed.hook-overhead');
+  const stopConfig = (
+    settingsHealth?: {
+      filePath: string;
+      present: boolean;
+      ok: boolean;
+      findings: [];
+    }
+  ) =>
+    liveConfigShell({
+      settings: {
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: 'notify-send done' }] }],
+        },
+      },
+      ...(settingsHealth ? { settingsHealth } : {}),
+    });
 
-  it('fires (warning) on heavy per-turn overhead, in the speed category, with an actionable fix', () => {
-    const rec = find(baseInput({ runtimeEvents: slowStops(5, 6000) }));
+  const find = (input: RecommendationInput, now = NOW) =>
+    buildRecommendations(input, now).find((r) => r.id === 'speed.hook-overhead');
+
+  const inputWithCurrentStop = (runtimeEvents: RecommendationInput['runtimeEvents']) =>
+    baseInput({ runtimeEvents, liveConfig: stopConfig() });
+
+  it('fires a dated accounting warning on five recent timed events and a current Stop hook', () => {
+    const rec = find(inputWithCurrentStop(slowStops(5, 6000)));
     expect(rec).toBeDefined();
     expect(rec?.category).toBe('speed');
     expect(rec?.severity).toBe('warning');
     expect(rec?.view).toBe('agents');
+    expect(rec?.claimClass).toBe('accounting');
+    expect(rec?.proofTier).toBe('accounting');
+    expect(rec?.detail).toContain('current 4-week freshness filter retains');
+    expect(rec?.detail).toContain('5 timed Stop events');
+    expect(rec?.detail).toContain('latest contributing event was 2026-07-13');
+    expect(rec?.detail).toContain('does not identify which configured hook');
     expect(rec?.fix?.target).toBe('hook');
     expect(rec?.fix?.snippet).toContain('"Stop"');
+    expect(rec?.fix?.fixKind).toBe('illustrative');
+    expect(rec?.provenance?.asOf).toBe('2026-07-13');
+    expect(rec?.provenance?.stale).toBe(false);
+    expect(
+      rec?.provenance?.observations.find(
+        (observation) => observation.field === 'aggregateDatedStopHooks().meanTimedDurationMs'
+      )?.value
+    ).toBe(6000);
+    expect(
+      rec?.provenance?.observations.find(
+        (observation) => observation.field === 'aggregateDatedStopHooks().maxDurationMs'
+      )?.value
+    ).toBe(6000);
+    expect(
+      rec?.provenance?.observations.some(
+        (observation) =>
+          observation.field ===
+          'liveConfig.settings.hooks.Stop / liveConfig.projectSettings[*].hooks.Stop'
+      )
+    ).toBe(true);
   });
 
-  it('fires (info) on a meaningful-but-not-heavy overhead', () => {
-    // 3s mean per turn: above the 2s meaningful bar, below the 5s heavy bar.
-    const rec = find(baseInput({ runtimeEvents: slowStops(6, 3000) }));
+  it('fires when the only readable current Stop hook is project-scoped', () => {
+    const rec = find(
+      baseInput({
+        runtimeEvents: slowStops(5, 6000),
+        liveConfig: liveConfigShell({
+          projectSettings: {
+            '/repo/app': {
+              hooks: {
+                Stop: [{ hooks: [{ type: 'command', command: 'notify-send done' }] }],
+              },
+            },
+          },
+        }),
+      })
+    );
+
     expect(rec).toBeDefined();
-    expect(rec?.severity).toBe('info');
+    expect(rec?.detail).toContain('readable current user or project settings');
+    expect(rec?.evidence).toContain(
+      'Latest contributing event: 2026-07-13; readable current user/project settings hooks.Stop: configured'
+    );
+  });
+
+  it('preserves the exact meaningful and heavy overhead thresholds', () => {
+    expect(find(inputWithCurrentStop(slowStops(5, 1999)))).toBeUndefined();
+    expect(find(inputWithCurrentStop(slowStops(5, 2000)))?.severity).toBe('info');
+    expect(find(inputWithCurrentStop(slowStops(5, 4999)))?.severity).toBe('info');
+    expect(find(inputWithCurrentStop(slowStops(5, 5000)))?.severity).toBe('warning');
+  });
+
+  it('fails closed without readable current settings containing a Stop hook', () => {
+    const events = slowStops(5, 6000);
+    expect(find(baseInput({ runtimeEvents: events, liveConfig: null }))).toBeUndefined();
+    expect(
+      find(baseInput({ runtimeEvents: events, liveConfig: liveConfigShell() }))
+    ).toBeUndefined();
+    expect(
+      find(
+        baseInput({
+          runtimeEvents: events,
+          liveConfig: stopConfig({
+            filePath: '~/.claude/settings.json',
+            present: false,
+            ok: true,
+            findings: [],
+          }),
+        })
+      )
+    ).toBeUndefined();
+    expect(
+      find(
+        baseInput({
+          runtimeEvents: events,
+          liveConfig: stopConfig({
+            filePath: '~/.claude/settings.json',
+            present: true,
+            ok: false,
+            findings: [],
+          }),
+        })
+      )
+    ).toBeUndefined();
+    expect(
+      find(
+        baseInput({
+          runtimeEvents: events,
+          liveConfig: stopConfig({
+            filePath: '~/.claude/settings.local.json',
+            present: true,
+            ok: true,
+            findings: [],
+          }),
+        })
+      )
+    ).toBeDefined();
+  });
+
+  it('suppresses stale, undated, and future timing evidence', () => {
+    const stale = new Date(NOW - 28 * DAY_MS - 1).toISOString();
+    const future = new Date(NOW + 1).toISOString();
+    expect(find(inputWithCurrentStop(slowStops(5, 6000, stale)))).toBeUndefined();
+    expect(find(inputWithCurrentStop(slowStops(5, 6000, 't')))).toBeUndefined();
+    expect(
+      find(inputWithCurrentStop(slowStops(5, 6000, '2026-07-13T12:00:00')))
+    ).toBeUndefined();
+    expect(find(inputWithCurrentStop(slowStops(5, 6000, future)))).toBeUndefined();
+  });
+
+  it('uses only dated timing inside the inclusive four-week window for count, mean, maximum, and as-of', () => {
+    const recent = slowStops(5, 3000, new Date(NOW - DAY_MS).toISOString())![0]!;
+    const boundary = slowStops(1, 7000, new Date(NOW - 28 * DAY_MS).toISOString())![0]!;
+    const stale = slowStops(4, 60000, new Date(NOW - 28 * DAY_MS - 1).toISOString())![0]!;
+    const undated = slowStops(4, 60000, 'unknown')![0]!;
+    const runtimeEvents = [{
+      ...recent,
+      stopHooks: [
+        ...recent.stopHooks,
+        ...boundary.stopHooks,
+        ...stale.stopHooks,
+        ...undated.stopHooks,
+      ],
+    }] as RecommendationInput['runtimeEvents'];
+
+    const rec = find(inputWithCurrentStop(runtimeEvents));
+    expect(rec?.affected).toBe(6);
+    expect(rec?.detail).toContain('3.7s');
+    expect(rec?.detail).toContain('up to 7.0s');
+    expect(rec?.provenance?.asOf).toBe('2026-07-13');
+  });
+
+  it('does not pretend the latest contributing event ends the freshness window', () => {
+    const latest = new Date(NOW - 20 * DAY_MS).toISOString();
+    const rec = find(inputWithCurrentStop(slowStops(5, 3000, latest)));
+    expect(rec?.detail).toContain('current 4-week freshness filter retains');
+    expect(rec?.detail).toContain('latest contributing event was 2026-06-24');
+    expect(rec?.provenance?.asOf).toBe('2026-06-24');
+  });
+
+  it('keeps cached copy and provenance stable while event membership is unchanged', () => {
+    vi.useFakeTimers();
+    const input = inputWithCurrentStop(slowStops(5, 6000));
+    try {
+      vi.setSystemTime(NOW);
+      const first = buildRecommendations(input);
+      vi.setSystemTime(NOW + DAY_MS);
+      const cachedNextDay = buildRecommendations(input);
+      const freshNextDay = buildRecommendations(input, NOW + DAY_MS);
+
+      expect(cachedNextDay).toBe(first);
+      expect(cachedNextDay).toEqual(freshNextDay);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('invalidates the identity cache when the same input crosses the four-week boundary', () => {
+    vi.useFakeTimers();
+    const observedAt = Date.parse('2026-06-16T12:00:00Z');
+    const staleBoundary = observedAt + 28 * DAY_MS;
+    const input = inputWithCurrentStop(
+      slowStops(5, 6000, new Date(observedAt).toISOString())
+    );
+    try {
+      vi.setSystemTime(staleBoundary);
+      const current = buildRecommendations(input);
+      expect(current.some((rec) => rec.id === 'speed.hook-overhead')).toBe(true);
+
+      vi.setSystemTime(staleBoundary + 1);
+      const stale = buildRecommendations(input);
+      expect(stale).not.toBe(current);
+      expect(stale.some((rec) => rec.id === 'speed.hook-overhead')).toBe(false);
+
+      vi.setSystemTime(staleBoundary);
+      const currentAgain = buildRecommendations(input);
+      expect(currentAgain).not.toBe(stale);
+      expect(currentAgain.some((rec) => rec.id === 'speed.hook-overhead')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('invalidates the identity cache when future evidence becomes current', () => {
+    vi.useFakeTimers();
+    const observedAt = Date.parse('2026-07-15T12:00:00Z');
+    const input = inputWithCurrentStop(
+      slowStops(5, 6000, new Date(observedAt).toISOString())
+    );
+    try {
+      vi.setSystemTime(observedAt - 1);
+      const before = buildRecommendations(input);
+      expect(before.some((rec) => rec.id === 'speed.hook-overhead')).toBe(false);
+
+      vi.setSystemTime(observedAt);
+      const current = buildRecommendations(input);
+      expect(current).not.toBe(before);
+      expect(current.some((rec) => rec.id === 'speed.hook-overhead')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stays dark below the meaningful threshold, below the min sample, and on the empty dataset', () => {
     // overhead under 2s → not worth surfacing
-    expect(find(baseInput({ runtimeEvents: slowStops(8, 1500) }))).toBeUndefined();
+    expect(find(inputWithCurrentStop(slowStops(8, 1500)))).toBeUndefined();
     // heavy overhead but only 4 timed events → below MIN_TIMED_EVENTS
-    expect(find(baseInput({ runtimeEvents: slowStops(4, 6000) }))).toBeUndefined();
+    expect(find(inputWithCurrentStop(slowStops(4, 6000)))).toBeUndefined();
     // hooks ran but none carried a measured duration (the ~93% untimed case)
-    expect(find(baseInput({ runtimeEvents: slowStops(20, 0) }))).toBeUndefined();
+    expect(find(inputWithCurrentStop(slowStops(20, 0)))).toBeUndefined();
     // transcript-free SPA dataset
-    expect(find(baseInput({ runtimeEvents: [] }))).toBeUndefined();
+    expect(find(baseInput({ runtimeEvents: [], liveConfig: stopConfig() }))).toBeUndefined();
     expect(find(baseInput({}))).toBeUndefined();
   });
 });
@@ -1838,13 +2065,20 @@ function fixtureBank(): Fixture[] {
 
   // ── speed.hook-overhead (#710): 5 timed stop events, ~6s mean per-turn ─────
   {
-    const slowStop = () => ({ sessionId: 's1', timestamp: 't', hookCount: 1, totalDurationMs: 6000, hadErrors: false, preventedContinuation: false });
+    const slowStop = () => ({ sessionId: 's1', timestamp: new Date(now - 24 * 60 * 60 * 1000).toISOString(), hookCount: 1, totalDurationMs: 6000, hadErrors: false, preventedContinuation: false });
     out.push({
       now,
       input: bankBase({
         runtimeEvents: [
           { sessionId: 's1', turns: [], stopHooks: Array.from({ length: 5 }, slowStop), awaySummaries: [], scheduledFires: [] },
         ] as unknown as RecommendationInput['runtimeEvents'],
+        liveConfig: liveConfigShell({
+          settings: {
+            hooks: {
+              Stop: [{ hooks: [{ type: 'command', command: 'notify-send done' }] }],
+            },
+          },
+        }),
       }),
     });
   }

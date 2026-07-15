@@ -362,6 +362,62 @@ function readTextOrNull(path: string, maxBytes: number): string | null {
   }
 }
 
+export type StopHookConfigState = 'configured' | 'inactive';
+
+/**
+ * Read the merged user and allowlisted project settings files, then return the
+ * current-state bit that gates `speed.hook-overhead`. The recommendations
+ * response cache calls this cheap seam before serving stale JSON, so removing
+ * or invalidating the current Stop hook cannot leak one last false
+ * present-tense finding. It mirrors assembleLiveConfig's settings merge +
+ * readability rules without scanning skills, plugins, or other resources.
+ */
+export function readStopHookConfigState(
+  opts: LiveConfigPathOptions = {}
+): StopHookConfigState {
+  const paths = liveConfigPaths(opts);
+  const { settings, environment: effectiveSettingsEnvironment } =
+    readLiveSettings(paths);
+  const globalHealth = validateSettingsJson(
+    GLOBAL_SETTINGS_DISPLAY_PATH,
+    readTextOrNull(paths.settingsGlobal, paths.configFileMaxBytes),
+    opts.environment,
+    effectiveSettingsEnvironment
+  );
+  const localHealth = validateSettingsJson(
+    LOCAL_SETTINGS_DISPLAY_PATH,
+    readTextOrNull(paths.settingsLocal, paths.configFileMaxBytes),
+    opts.environment,
+    { ...effectiveSettingsEnvironment, localOverrides: [] }
+  );
+  const health = mergeSettingsHealth(
+    globalHealth,
+    localHealth,
+    opts.environment
+  );
+  // A present-but-invalid user settings source makes the effective config
+  // unknowable, even when a project file happens to contain a Stop hook.
+  if (health.present && !health.ok) return 'inactive';
+
+  const userHooks = asObj(settings.hooks);
+  const userConfigured =
+    health.present && Array.isArray(userHooks.Stop) && userHooks.Stop.length > 0;
+  const claudeJson = asObj(
+    readJsonOrNull(paths.claudeJson, paths.configFileMaxBytes)
+  );
+  const projectSettings = readProjectSettings(
+    readableProjectRoots(paths, claudeJson),
+    paths.configFileMaxBytes
+  );
+  const projectConfigured = Object.values(projectSettings).some((project) => {
+    const hooks = asObj(project.hooks);
+    return Array.isArray(hooks.Stop) && hooks.Stop.length > 0;
+  });
+  return userConfigured || projectConfigured
+    ? 'configured'
+    : 'inactive';
+}
+
 // Enumerate one of the resource directories under ~/.claude (skills, agents,
 // commands). `kind` switches between dir-as-resource (skills hold a
 // `<id>/SKILL.md`) and file-as-resource (agents/commands are typically a flat
@@ -655,9 +711,23 @@ function readProjectSettings(
 ): Record<string, Obj> {
   const out: Record<string, Obj> = {};
   for (const projectRoot of projectRoots) {
+    const globalPath = join(projectRoot, '.claude', 'settings.json');
+    const localPath = join(projectRoot, '.claude', 'settings.local.json');
+    const global = readJsonOrNull(globalPath, maxBytes);
+    const local = readJsonOrNull(localPath, maxBytes);
+    // Never project a partial effective config when either present source could
+    // not be read or parsed. Project settings schema validation remains a
+    // follow-up; this is only the fail-closed readability boundary needed by
+    // current-state recommendation claims.
+    if (
+      (existsSync(globalPath) && global === null) ||
+      (existsSync(localPath) && local === null)
+    ) {
+      continue;
+    }
     const merged = mergeLiveSettings(
-      readJsonOrNull(join(projectRoot, '.claude', 'settings.json'), maxBytes),
-      readJsonOrNull(join(projectRoot, '.claude', 'settings.local.json'), maxBytes)
+      global,
+      local
     );
     if (merged) out[projectRoot] = merged;
   }

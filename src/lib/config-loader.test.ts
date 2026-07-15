@@ -7,6 +7,7 @@ import {
   assembleLiveConfig,
   hostEnvironmentObservation,
   hostEnvironmentObservationSignature,
+  readStopHookConfigState,
 } from './config-loader';
 import { detector as settingsJsonInvalidDetector } from './detectors/reliability/settings-json-invalid';
 import type { RecommendationInput } from './detectors/types';
@@ -275,6 +276,38 @@ describe('assembleLiveConfig', () => {
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads the current merged Stop-hook gate without scanning the full config bundle', () => {
+    expect(readStopHookConfigState({ claudeDir, homeDir: root })).toBe('inactive');
+
+    writeFileSync(
+      join(claudeDir, 'settings.local.json'),
+      JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: 'notify' }] }] } })
+    );
+    expect(readStopHookConfigState({ claudeDir, homeDir: root })).toBe('configured');
+
+    writeFileSync(join(claudeDir, 'settings.local.json'), '{invalid');
+    expect(readStopHookConfigState({ claudeDir, homeDir: root })).toBe('inactive');
+  });
+
+  it('includes readable project-only Stop hooks and fails closed on malformed project settings', () => {
+    const projectRoot = join(root, 'repo-stop-hook');
+    const projectClaudeDir = join(projectRoot, '.claude');
+    const projectSettings = join(projectClaudeDir, 'settings.json');
+    mkdirSync(projectClaudeDir, { recursive: true });
+    writeFileSync(
+      projectSettings,
+      JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: 'notify' }] }] } })
+    );
+
+    const options = { claudeDir, homeDir: root, projectRoots: [projectRoot] };
+    expect(readStopHookConfigState(options)).toBe('configured');
+    expect(assembleLiveConfig(options).projectSettings?.[projectRoot]).toBeDefined();
+
+    writeFileSync(projectSettings, '{invalid');
+    expect(readStopHookConfigState(options)).toBe('inactive');
+    expect(assembleLiveConfig(options).projectSettings?.[projectRoot]).toBeUndefined();
   });
 
   it.each([
