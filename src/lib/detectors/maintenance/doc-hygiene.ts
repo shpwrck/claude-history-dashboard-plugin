@@ -30,17 +30,21 @@
  *      absence), and only for file extensions the inventory actually covers (a
  *      `.css` ref against a TS-only map is never flagged).
  *
+ * #2487 adds two checker-native signals from the commit-bound, allowlisted
+ * agents-lint adapter: missing non-source context paths and missing npm scripts.
+ * An adapted `src/…` finding maps to dangling-src-ref and replaces the graph
+ * copy when both identify the same source-doc/target pair, preserving its line.
+ *
  * The higher-signal / lower-certainty signals (staleness, declared-vs-derived,
  * dangling issue-ref) are #2259, a separate slice — not this one.
  *
- * Reads `input.docGraph` (built by `buildDocGraph` in `parse-docs.ts`, #2257) and
- * — only for signal 3 — `input.repoMap`. Recommend-only: the output is advisory
- * and never edits or deletes a doc; a human (or an agent) acts, mirroring the
- * by-hand pass. Every finding is current graph/filesystem state, not a
- * time-derived trend, so it carries structured `provenance` (observations citing
- * the parsed graph / repo map) but needs no `asOf`/staleness demotion.
+ * Reads `input.docGraph` (built by `buildDocGraph` in `parse-docs.ts`, #2257),
+ * `input.repoMap` for signal 3, and `input.docHygieneArtifact` for the host
+ * checkers. Recommend-only: the output is advisory and never edits or deletes a
+ * doc. Every finding is current commit/filesystem state, not a time-derived
+ * trend, so it carries structured `provenance` but needs no staleness demotion.
  *
- * Issue: #2258 (epic #2256 — doc artifact hygiene)
+ * Issues: #2258, #2487 (epic #2256 — doc artifact hygiene)
  */
 
 import type {
@@ -57,11 +61,13 @@ import type {
   DocHygieneFinding,
 } from '../../doc-hygiene-artifact';
 
-/** The three deterministic doc-hygiene signals this slice emits. */
+/** Deterministic graph- and checker-native doc-hygiene signals. */
 export type DocHygieneSignal =
   | 'broken-internal-link'
   | 'orphan'
-  | 'dangling-src-ref';
+  | 'dangling-src-ref'
+  | 'dangling-context-ref'
+  | 'dangling-npm-script';
 
 /** One flagged doc-hygiene item: which doc, which signal, what to do. */
 export interface DocHygieneItem {
@@ -73,7 +79,7 @@ export interface DocHygieneItem {
   /** One-based checker line, when tool-native evidence supplied a span. */
   line?: number | null;
   /** Exact local source used to reproduce this item. */
-  origin: 'doc-graph' | 'lychee.local-links';
+  origin: 'doc-graph' | 'lychee.local-links' | 'agents-lint.context-refs';
 }
 
 /** Short label per signal for evidence rows. */
@@ -81,12 +87,16 @@ const SIGNAL_LABEL: Record<DocHygieneSignal, string> = {
   'broken-internal-link': 'broken internal doc link or fragment',
   orphan: 'doc has no inbound links',
   'dangling-src-ref': 'source reference no longer exists',
+  'dangling-context-ref': 'context file reference no longer exists',
+  'dangling-npm-script': 'npm script no longer exists',
 };
 
 /** Signals that are structural breakage (dead pointers), not just sprawl. */
 const STRUCTURAL: ReadonlySet<DocHygieneSignal> = new Set([
   'broken-internal-link',
   'dangling-src-ref',
+  'dangling-context-ref',
+  'dangling-npm-script',
 ]);
 
 /** Normalise a path for comparison: backslashes → slashes, strip a `./` prefix. */
@@ -244,18 +254,50 @@ function artifactBrokenLink(finding: DocHygieneFinding): boolean {
   );
 }
 
-/** Tool-native local-link findings, preserving Lychee's one-based line span. */
-function scanArtifactBrokenLinks(
+function artifactContextRef(finding: DocHygieneFinding): boolean {
+  const expectedField =
+    finding.signal === 'missing-path'
+      ? 'reports[].results[checker=filesystem].issues[rule=no-missing-path]'
+      : finding.signal === 'missing-npm-script'
+        ? 'reports[].results[checker=npm-scripts].issues[rule=no-missing-script]'
+        : null;
+  return (
+    finding.check === 'agents-lint.context-refs' &&
+    finding.source.tool === 'agents-lint' &&
+    expectedField !== null &&
+    finding.source.field === expectedField
+  );
+}
+
+/** Tool-native findings, preserving each checker's one-based line span. */
+function scanArtifactFindings(
   artifact: DocHygieneArtifact | null | undefined
 ): DocHygieneItem[] {
   if (!artifact) return [];
-  return artifact.findings.filter(artifactBrokenLink).map((finding) => ({
+  const items: DocHygieneItem[] = artifact.findings.filter(artifactBrokenLink).map((finding) => ({
     path: normPath(finding.path),
     signal: 'broken-internal-link',
     target: normPath(finding.target),
     line: finding.line,
     origin: 'lychee.local-links',
   }));
+  for (const finding of artifact.findings.filter(artifactContextRef)) {
+    const target = normPath(finding.target);
+    const signal: DocHygieneSignal =
+      finding.signal === 'missing-npm-script'
+        ? 'dangling-npm-script'
+        : target.startsWith('src/')
+          ? 'dangling-src-ref'
+          : 'dangling-context-ref';
+    items.push({
+      path: normPath(finding.path),
+      signal,
+      target,
+      line: finding.line,
+      origin: 'agents-lint.context-refs',
+    });
+  }
+  return items;
 }
 
 /**
@@ -271,12 +313,23 @@ function mergeGraphAndArtifactItems(
     const target = canonicalLinkPath(item.target ?? '').split('#', 1)[0];
     return `${canonicalLinkPath(item.path)}\u0000${target}`;
   };
-  const artifactKeys = new Set(artifactItems.map(linkKey));
+  const artifactKeys = new Set(
+    artifactItems.filter((item) => item.origin === 'lychee.local-links').map(linkKey),
+  );
+  const contextKey = (item: DocHygieneItem): string =>
+    `${canonicalLinkPath(item.path)}\u0000${canonicalLinkPath(item.target ?? '')}`;
+  const adaptedSrcKeys = new Set(
+    artifactItems
+      .filter(
+        (item) => item.origin === 'agents-lint.context-refs' && item.signal === 'dangling-src-ref',
+      )
+      .map(contextKey),
+  );
   const merged = [
     ...graphItems.filter(
       (item) =>
-        item.signal !== 'broken-internal-link' ||
-        !artifactKeys.has(linkKey(item))
+        (item.signal !== 'broken-internal-link' || !artifactKeys.has(linkKey(item))) &&
+        (item.signal !== 'dangling-src-ref' || !adaptedSrcKeys.has(contextKey(item))),
     ),
     ...artifactItems,
   ];
@@ -287,7 +340,7 @@ function mergeGraphAndArtifactItems(
       item.signal,
       normPath(item.path),
       item.target ? normPath(item.target) : null,
-      item.line ?? null,
+      item.origin === 'agents-lint.context-refs' ? null : (item.line ?? null),
     ]);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -301,7 +354,7 @@ export const detector: Detector = {
   dataDeps: ['docGraph', 'repoMap', 'docHygieneArtifact'],
   rule(input: RecommendationInput): Recommendation | null {
     const graph = input.docGraph;
-    const artifactItems = scanArtifactBrokenLinks(input.docHygieneArtifact);
+    const artifactItems = scanArtifactFindings(input.docHygieneArtifact);
     let graphItems: DocHygieneItem[] = [];
     if (graph && graph.nodes.length > 0) {
       const pathBySlug = new Map(graph.nodes.map((n) => [n.slug, n.path]));
@@ -323,6 +376,8 @@ export const detector: Detector = {
     const order: DocHygieneSignal[] = [
       'broken-internal-link',
       'dangling-src-ref',
+      'dangling-context-ref',
+      'dangling-npm-script',
       'orphan',
     ];
     const breakdown = order
@@ -350,8 +405,12 @@ export const detector: Detector = {
       );
 
     const graphItemCount = items.filter((item) => item.origin === 'doc-graph').length;
-    const artifactItemCount = items.filter(
-      (item) => item.origin === 'lychee.local-links'
+    const artifactItemCount = items.filter((item) => item.origin === 'lychee.local-links').length;
+    const agentsLintItemCount = items.filter(
+      (item) => item.origin === 'agents-lint.context-refs',
+    ).length;
+    const graphDanglingSrcCount = items.filter(
+      (item) => item.origin === 'doc-graph' && item.signal === 'dangling-src-ref',
     ).length;
     const trackedDocs = Math.max(
       graph?.nodes.length ?? 0,
@@ -376,13 +435,21 @@ export const detector: Detector = {
         value: artifactItemCount,
       });
     }
-    // Signal 3's existence oracle is the repo map, not the doc graph — cite it.
-    if (counts['dangling-src-ref']) {
+    if (agentsLintItemCount > 0) {
       observations.push({
-        claim: `${counts['dangling-src-ref']} source reference(s) absent from the repo-map file inventory`,
+        claim: `${agentsLintItemCount} missing governance-doc path or npm-script reference(s) reported for the artifact's committed repo state`,
+        source: 'doc-hygiene artifact',
+        field: 'findings[check=agents-lint.context-refs].{id,signal,path,line,target,source}',
+        value: agentsLintItemCount,
+      });
+    }
+    // Signal 3's existence oracle is the repo map, not the doc graph — cite it.
+    if (graphDanglingSrcCount > 0) {
+      observations.push({
+        claim: `${graphDanglingSrcCount} source reference(s) absent from the repo-map file inventory`,
         source: 'parse-repo-map-join',
         field: 'repoMap.projects[].files[].path',
-        value: counts['dangling-src-ref'],
+        value: graphDanglingSrcCount,
       });
     }
 
@@ -394,10 +461,10 @@ export const detector: Detector = {
       title: `Repo docs need cleanup: ${n} hygiene issue${n === 1 ? '' : 's'}`,
       detail:
         `The repo's ${trackedDocs} tracked markdown doc${trackedDocs === 1 ? '' : 's'} have ${n} deterministic hygiene issue${n === 1 ? '' : 's'} — ${breakdown}. ` +
-        `Broken links and dead source references rot the doc graph the same way an unmaintained REFERENCES.md does.`,
+        `Broken links and dead file or npm-script references rot the doc graph the same way an unmaintained REFERENCES.md does.`,
       action:
         `Review the flagged docs (recommend-only — nothing is edited for you): fix or drop the broken internal links, ` +
-        `update the stale source references, and link or retire the orphaned docs.`,
+        `update stale file and npm-script references, and link or retire the orphaned docs.`,
       affected: n,
       // No honest dollar unit — score on minutes to review each flagged item.
       estTimeReclaimedMin: n,
@@ -405,8 +472,8 @@ export const detector: Detector = {
       provenance: {
         observations,
         inference:
-          `Each issue is read from the parsed doc graph or the commit-bound host Lychee artifact; overlapping missing-link facts prefer Lychee's exact line span, while ` +
-          `dangling source references are cross-checked against the repo-map inventory, so all ${n} are reproducible — ` +
+          `Each issue is read from the parsed doc graph or a commit-bound adapted host-checker artifact; overlapping missing-link and source-reference facts prefer exact checker line spans, while ` +
+          `graph-native source references use the repo-map inventory and adapted source references use the commit-bound host checker, so all ${n} are reproducible — ` +
           `a maintenance pass to keep the repo doc corpus linked and its references live.`,
       },
     };

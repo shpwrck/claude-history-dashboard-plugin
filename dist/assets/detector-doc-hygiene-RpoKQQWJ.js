@@ -1,1 +1,0 @@
-import{t as e}from"./doc-hygiene-Dk-dF5S-.js";export{e as detector};

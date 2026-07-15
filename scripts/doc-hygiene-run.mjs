@@ -3,8 +3,8 @@
  * Host-side Markdown hygiene producer (#2486, epic #2256).
  *
  * The runner enumerates the committed Markdown surface with `git ls-tree`,
- * invokes an optional local `lychee` binary, and persists one normalized
- * Scorecard-shaped artifact per repository under:
+ * invokes optional local Lychee and agents-lint binaries, and persists one
+ * normalized Scorecard-shaped artifact per repository under:
  *
  *   ~/.claude/usage-data/doc-hygiene/<collision-safe-root>.json
  *
@@ -18,8 +18,12 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -34,11 +38,23 @@ import {
   resolve,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  AGENTS_LINT_CHECK,
+  AGENTS_LINT_CONTEXT_FILES,
+  AGENTS_LINT_VERSION,
+  normalizeAgentsLintReports,
+  sanitizeAgentsLintContext,
+} from "./lib/doc-hygiene-agents-lint.mjs";
 
 export const DOC_HYGIENE_SCHEMA_VERSION = 1;
 export const LOCAL_CHECK = "lychee.local-links";
 export const EXTERNAL_CHECK = "lychee.external-links";
 export const EXTERNAL_LINKS_FLAG = "CHD_DOC_HYGIENE_EXTERNAL_LINKS";
+
+const AGENTS_LINT_CONFIG_FILES = Object.freeze([
+  ".agents-lint.json",
+  ".agents-lint.config.json",
+]);
 
 const MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const ENABLED_RE = /^(1|true|yes|on)$/i;
@@ -51,12 +67,13 @@ function text(value) {
   return "";
 }
 
-function execute(spawn, command, args, cwd) {
+function execute(spawn, command, args, cwd, env) {
   return spawn(command, args, {
     cwd,
     encoding: "utf8",
     maxBuffer: MAX_BUFFER_BYTES,
     stdio: ["ignore", "pipe", "pipe"],
+    env,
   });
 }
 
@@ -368,6 +385,210 @@ function lycheeVersion(spawn, root) {
   return match?.[1] ?? output.split(/\s+/).at(-1) ?? "unknown";
 }
 
+function defaultAgentsLintBinary(root) {
+  const executable =
+    process.platform === "win32" ? "agents-lint.cmd" : "agents-lint";
+  const candidate = join(root, "node_modules", ".bin", executable);
+  return existsSync(candidate) ? candidate : null;
+}
+
+function probeAgentsLint(binary, spawn, root) {
+  if (!binary) {
+    return {
+      skipped: {
+        name: AGENTS_LINT_CHECK,
+        reason:
+          "agents-lint 0.5.0 local binary is not installed at node_modules/.bin/agents-lint",
+      },
+    };
+  }
+  const result = execute(spawn, binary, ["--version"], root);
+  if (result.error || result.signal || result.status !== 0) {
+    return {
+      skipped: {
+        name: AGENTS_LINT_CHECK,
+        reason: `agents-lint check unavailable: ${commandFailure(result, "version probe failed")}`,
+      },
+    };
+  }
+  const output = `${text(result.stdout)} ${text(result.stderr)}`.trim();
+  const version = /(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/.exec(output)?.[1];
+  if (version !== AGENTS_LINT_VERSION) {
+    return {
+      skipped: {
+        name: AGENTS_LINT_CHECK,
+        reason:
+          `agents-lint check unavailable: expected local version ${AGENTS_LINT_VERSION}, ` +
+          `found ${version ?? "unknown"}`,
+      },
+    };
+  }
+  return { binary, version };
+}
+
+function nodeOptionPath(path) {
+  return /[\s"\\]/u.test(path) ? JSON.stringify(path) : path;
+}
+
+function agentsLintPermissionEnv(binary, scanRoot) {
+  const toolRoot = resolve(dirname(binary), "..", "agents-lint");
+  return {
+    ...process.env,
+    // The pinned checker uses fs.existsSync on extracted references. Constrain
+    // those reads to the immutable snapshot and its own installed package so an
+    // absolute or `..` reference cannot probe the surrounding host filesystem.
+    NODE_OPTIONS: [
+      "--permission",
+      `--allow-fs-read=${nodeOptionPath(scanRoot)}`,
+      `--allow-fs-read=${nodeOptionPath(binary)}`,
+      `--allow-fs-read=${nodeOptionPath(toolRoot)}`,
+    ].join(" "),
+  };
+}
+
+function snapshotContainsSymlink(root) {
+  const pending = [root];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) return true;
+      if (entry.isDirectory()) pending.push(join(dir, entry.name));
+    }
+  }
+  return false;
+}
+
+function neutralizeAgentsLintConfigs(root) {
+  for (const name of AGENTS_LINT_CONFIG_FILES) {
+    const path = join(root, name);
+    if (!existsSync(path) || !lstatSync(path).isFile()) continue;
+    writeFileSync(path, "{}\n");
+  }
+}
+
+function runAgentsLintCheck({
+  binary,
+  toolVersion,
+  root,
+  markdownFiles,
+  spawn,
+}) {
+  const unavailable = (detail) => ({
+    skipped: {
+      name: AGENTS_LINT_CHECK,
+      reason: stableArtifactText(
+        `agents-lint check unavailable: ${detail}`,
+        root,
+      ),
+    },
+  });
+  const contextFiles = AGENTS_LINT_CONTEXT_FILES.filter((path) =>
+    markdownFiles.includes(path),
+  );
+  if (contextFiles.length === 0) {
+    return {
+      check: {
+        name: AGENTS_LINT_CHECK,
+        tool: "agents-lint",
+        toolVersion,
+        status: "completed-with-adapter",
+        score: 10,
+        reason: "No tracked governance context files found at HEAD",
+        findingIds: [],
+      },
+      findings: [],
+    };
+  }
+
+  // agents-lint resolves every extracted path with fs.existsSync. Sanitize the
+  // exact pinned parser's disallowed captures before invocation, then retain a
+  // Node permission boundary as fail-closed defense if a future capture escapes
+  // the adapter. Skip symlink-bearing snapshots because lexical read grants do
+  // not stop an allowed in-tree symlink from resolving outside the snapshot.
+  // Neutralize only configs that exist in the commit, and only after Lychee has
+  // finished against the byte-faithful snapshot, so checker setup cannot create
+  // or hide a path that the artifact claims belongs to that commit.
+  try {
+    if (snapshotContainsSymlink(root)) {
+      return unavailable("commit snapshot contains symlinks");
+    }
+    neutralizeAgentsLintConfigs(root);
+    for (const contextFile of contextFiles) {
+      const path = join(root, contextFile);
+      const sanitized = sanitizeAgentsLintContext(readFileSync(path, "utf8"));
+      writeFileSync(path, sanitized);
+    }
+  } catch (error) {
+    return unavailable(error instanceof Error ? error.message : String(error));
+  }
+
+  const reports = [];
+  for (const contextFile of contextFiles) {
+    const result = execute(
+      spawn,
+      binary,
+      [
+        join(root, contextFile),
+        "--root",
+        root,
+        "--format",
+        "json",
+        "--no-color",
+      ],
+      root,
+      agentsLintPermissionEnv(binary, root),
+    );
+    if (
+      result.error ||
+      result.signal ||
+      result.status === null ||
+      ![0, 1].includes(result.status)
+    ) {
+      return unavailable(
+        commandFailure(result, `unexpected exit ${result.status ?? "null"}`),
+      );
+    }
+    try {
+      const report = JSON.parse(text(result.stdout));
+      const reportFile =
+        report && typeof report === "object" && typeof report.file === "string"
+          ? report.file.replace(/\\/g, "/").replace(/^\.\//, "")
+          : null;
+      if (reportFile !== null && reportFile !== contextFile) {
+        return unavailable(
+          `report file does not match invoked context ${contextFile}`,
+        );
+      }
+      reports.push(report);
+    } catch {
+      return unavailable("malformed JSON output");
+    }
+  }
+
+  let findings;
+  try {
+    findings = normalizeAgentsLintReports(reports);
+  } catch (error) {
+    return unavailable(error instanceof Error ? error.message : String(error));
+  }
+  const count = findings.length;
+  return {
+    check: {
+      name: AGENTS_LINT_CHECK,
+      tool: "agents-lint",
+      toolVersion,
+      status: "completed-with-adapter",
+      score: Math.max(0, 10 - count),
+      reason:
+        count === 0
+          ? "No governance-doc context reference drift found"
+          : `${count} governance-doc context reference${count === 1 ? "" : "s"} failed`,
+      findingIds: findings.map((finding) => finding.id),
+    },
+    findings,
+  };
+}
+
 /** Command construction is isolated so the flag-off zero-network contract is testable. */
 export function lycheeArgs(markdownFiles, check, config) {
   const common = [
@@ -504,6 +725,7 @@ export function runDocHygiene({
   env = process.env,
   spawn = spawnSync,
   now = () => Date.now(),
+  agentsLintBinary,
 } = {}) {
   const repoRoot = resolve(root);
   const commit = gitCommit(repoRoot, spawn);
@@ -512,11 +734,16 @@ export function runDocHygiene({
   const findings = [];
   const skipped = [];
   const toolVersion = lycheeVersion(spawn, repoRoot);
+  const localAgentsLintBinary =
+    agentsLintBinary === undefined
+      ? defaultAgentsLintBinary(repoRoot)
+      : agentsLintBinary;
+  const agentsLint = probeAgentsLint(localAgentsLintBinary, spawn, repoRoot);
   const externalEnabled = ENABLED_RE.test(
     String(env?.[EXTERNAL_LINKS_FLAG] ?? ""),
   );
   const snapshot =
-    toolVersion && markdownFiles.length > 0
+    (toolVersion || agentsLint.binary) && markdownFiles.length > 0
       ? materializeCommit(repoRoot, commit, spawn)
       : null;
   const checkRoot = snapshot?.root ?? repoRoot;
@@ -563,6 +790,21 @@ export function runDocHygiene({
       if (external.check) checks.push(external.check);
       if (external.findings) findings.push(...external.findings);
       if (external.skipped) skipped.push(external.skipped);
+    }
+
+    if (!agentsLint.binary) {
+      skipped.push(agentsLint.skipped);
+    } else {
+      const contextRefs = runAgentsLintCheck({
+        binary: agentsLint.binary,
+        toolVersion: agentsLint.version,
+        root: checkRoot,
+        markdownFiles,
+        spawn,
+      });
+      if (contextRefs.check) checks.push(contextRefs.check);
+      if (contextRefs.findings) findings.push(...contextRefs.findings);
+      if (contextRefs.skipped) skipped.push(contextRefs.skipped);
     }
   } finally {
     snapshot?.remove();

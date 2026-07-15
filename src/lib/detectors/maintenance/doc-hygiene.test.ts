@@ -117,6 +117,58 @@ function localLinkFinding(
   };
 }
 
+function agentsLintArtifact(findings: DocHygieneArtifact['findings']): DocHygieneArtifact {
+  return {
+    schemaVersion: 1,
+    generatedAt: '2026-07-15T00:00:00.000Z',
+    repo: {
+      identity: 'claude-history-dashboard',
+      root: '/host/claude-history-dashboard',
+      commit: 'abcdef1234567890',
+      markdownFiles: 140,
+    },
+    summary: {
+      score: findings.length ? 8 : 10,
+      findingCount: findings.length,
+      errorCount: findings.filter((finding) => finding.severity === 'error').length,
+      warningCount: findings.filter((finding) => finding.severity === 'warning').length,
+    },
+    checks: [
+      {
+        name: 'agents-lint.context-refs',
+        tool: 'agents-lint',
+        toolVersion: '0.5.0',
+        status: 'completed-with-adapter',
+        score: findings.length ? 8 : 10,
+        reason: findings.length ? 'Context references failed' : 'Context references clean',
+        findingIds: findings.map((finding) => finding.id),
+      },
+    ],
+    findings,
+    skipped: [],
+  };
+}
+
+function agentsLintFinding(
+  over: Partial<DocHygieneArtifact['findings'][number]> = {},
+): DocHygieneArtifact['findings'][number] {
+  return {
+    id: 'context-ref:agents-lint.context-refs:abc123',
+    check: 'agents-lint.context-refs',
+    signal: 'missing-path',
+    severity: 'error',
+    path: 'REFERENCES.md',
+    line: 42,
+    target: 'src/lib/parse-retired.ts',
+    message: 'Path does not exist: "src/lib/parse-retired.ts"',
+    source: {
+      tool: 'agents-lint',
+      field: 'reports[].results[checker=filesystem].issues[rule=no-missing-path]',
+    },
+    ...over,
+  };
+}
+
 // A root/README entry point, used to satisfy the orphan cross-link guard without
 // itself being flagged.
 const readme = () => node('README', { category: 'root', path: 'README.md' });
@@ -250,6 +302,101 @@ describe('maintenance.doc-hygiene — host Lychee artifact merge (#2486)', () =>
       target: 'https://example.invalid',
     });
     expect(run(null, null, lycheeArtifact([external]))).toBeNull();
+  });
+});
+
+describe('maintenance.doc-hygiene — adapted agents-lint context refs (#2487)', () => {
+  it('keeps unique non-src paths and npm-script drift as auditable evidence', () => {
+    const npmFinding = agentsLintFinding({
+      id: 'context-ref:agents-lint.context-refs:def456',
+      signal: 'missing-npm-script',
+      severity: 'warning',
+      path: 'AGENTS.md',
+      line: 73,
+      target: 'npm run missing-script',
+      message: 'Script "missing-script" is mentioned but not found in any package.json',
+      source: {
+        tool: 'agents-lint',
+        field: 'reports[].results[checker=npm-scripts].issues[rule=no-missing-script]',
+      },
+    });
+    const composeFinding = agentsLintFinding({
+      id: 'context-ref:agents-lint.context-refs:ghi789',
+      path: 'CLAUDE.md',
+      line: 21,
+      target: 'docker-compose.retired.yml',
+      message: 'Path does not exist: "docker-compose.retired.yml"',
+    });
+
+    const rec = run(null, null, agentsLintArtifact([npmFinding, composeFinding]));
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(2);
+    expect(rec!.evidence).toEqual([
+      'AGENTS.md:73 -> npm run missing-script — npm script no longer exists',
+      'CLAUDE.md:21 -> docker-compose.retired.yml — context file reference no longer exists',
+    ]);
+    expect(rec!.provenance!.observations).toEqual([
+      expect.objectContaining({
+        source: 'doc-hygiene artifact',
+        field: 'findings[check=agents-lint.context-refs].{id,signal,path,line,target,source}',
+        value: 2,
+      }),
+    ]);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('deduplicates an identical dangling-src-ref in favor of agents-lint line evidence', () => {
+    const refDoc = node('REFERENCES', {
+      category: 'root',
+      path: 'REFERENCES.md',
+      indexKind: 'references',
+    });
+    const g = graph([refDoc], [srcRef('REFERENCES', 'src/lib/parse-retired.ts')]);
+    const rec = run(
+      g,
+      repoMap(['src/lib/parse-docs.ts']),
+      agentsLintArtifact([
+        agentsLintFinding(),
+        agentsLintFinding({
+          id: 'context-ref:agents-lint.context-refs:duplicate',
+          line: 99,
+          target: './src/lib/parse-retired.ts',
+        }),
+      ]),
+    );
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.evidence).toEqual([
+      'REFERENCES.md:42 -> src/lib/parse-retired.ts — source reference no longer exists',
+    ]);
+    expect(rec!.provenance!.observations.map((row) => row.source)).toEqual([
+      'doc-hygiene artifact',
+    ]);
+    expect(rec!.provenance!.inference).toContain(
+      'adapted source references use the commit-bound host checker'
+    );
+    expect(rec!.provenance!.inference).not.toContain(
+      'dangling source references are cross-checked'
+    );
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('ignores unsupported agents-lint advice that bypasses the adapter contract', () => {
+    const unrelated = agentsLintFinding({
+      signal: 'missing-section',
+      target: 'Testing',
+    });
+    expect(run(null, null, agentsLintArtifact([unrelated]))).toBeNull();
+
+    const wrongSourceField = agentsLintFinding({
+      source: {
+        tool: 'agents-lint',
+        field: 'reports[].results[checker=structure].issues[rule=missing-section]',
+      },
+    });
+    expect(run(null, null, agentsLintArtifact([wrongSourceField]))).toBeNull();
   });
 });
 
