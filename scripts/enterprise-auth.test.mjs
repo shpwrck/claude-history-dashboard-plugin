@@ -5185,7 +5185,17 @@ try {
     browserEgressControl?.state === 'disabled'
   );
 
-  const audit = await readAuditLog(server.auditLog, 1);
+  // Audit writes are queued after the response path. Under parallel CI load an
+  // unrelated earlier record can satisfy a minimum-count wait before this
+  // usage-gauge record reaches disk (#2442), so wait for the exact claim below.
+  const audit = await readAuditLogUntil(server.auditLog, ({ events }) =>
+    events.some(
+      (e) =>
+        e.type === 'enterprise.usage_gauge' &&
+        e.outcome === 'skipped' &&
+        e.reason === 'server_usage_gauge_disabled'
+    )
+  );
   check(
     'enterprise usage gauge disabled event is written',
     audit.events.some(
