@@ -48,9 +48,10 @@ describe('buildPolicyCandidates', () => {
     expect(dd?.current).toBe('deny');
   });
 
-  it('dedupes a rule shared by two patterns (dd if= + disk overwrite)', () => {
+  it('does not map a generic disk redirect to the unrelated dd prefix rule', () => {
     const out = buildPolicyCandidates([danger('dd if='), danger('disk overwrite')], []);
     expect(out.filter((c) => c.rule === 'Bash(dd:*)')).toHaveLength(1);
+    expect(out.some((c) => c.detail.includes('disk overwrite'))).toBe(false);
   });
 });
 

@@ -217,11 +217,10 @@ export function dangerousPatternCertainty(pattern: string): DangerousCommandCert
 /**
  * Maps a detected dangerous-command pattern name (see DANGEROUS_PATTERNS) to the
  * canonical `settings.json` rule string(s) that would gate it — the seed for the
- * Policy Builder's deny/ask rows (#133). Kept consistent with the canonical
- * deny block the dangerous-bypass recommendation pastes (`DANGEROUS_DENY_RULES`
- * in recommendations.ts). `fork bomb` is intentionally absent: a `:(){ :|:& };:`
- * payload has no command prefix to match, so no `Bash(prefix:*)` rule can gate
- * it — it produces no row rather than a misleading one.
+ * Policy Builder's deny/ask rows (#133). `fork bomb` is intentionally absent:
+ * a `:(){ :|:& };:` payload has no command prefix to match. `disk overwrite`
+ * is also absent because a redirect such as `echo x > /dev/sda` is not gated
+ * by `Bash(dd:*)`. Both produce evidence without a misleading settings rule.
  */
 export const DANGEROUS_PATTERN_RULES: Record<string, string[]> = {
   'rm -rf': ['Bash(rm -rf:*)', 'Bash(rm -fr:*)'],
@@ -230,7 +229,6 @@ export const DANGEROUS_PATTERN_RULES: Record<string, string[]> = {
   'chmod 777': ['Bash(chmod:*)'],
   'dd if=': ['Bash(dd:*)'],
   mkfs: ['Bash(mkfs:*)'],
-  'disk overwrite': ['Bash(dd:*)'],
   'curl pipe shell': ['Bash(curl:*)', 'Bash(wget:*)'],
   'npm publish': ['Bash(npm publish:*)'],
 };

@@ -29,6 +29,7 @@ import type {
 export const PROVENANCE_DETECTORS: readonly string[] = [
   'activity.activity-trend',
   'reliability.hook-errors',
+  'safety.dangerous-bypass',
   'cost.idle-mcp-tools',
   'workflow.review-bottleneck',
   'workflow.native-bypass',

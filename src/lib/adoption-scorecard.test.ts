@@ -275,21 +275,11 @@ describe('buildAdoptionScorecard', () => {
   });
 
   it('co-adopted findings sharing one section heading each resolve their OWN hunk (#1915)', () => {
-    // safety.dangerous-bypass and reliability.tool-errors (#1783) both key on the
-    // shared `## Claude Coach Adopted Recommendations` heading; adopting each
-    // appends its own copy of that section. The stored markerHeading is identical
-    // for both, so resolving by heading text alone would render the FIRST section
-    // for both rows. Resolution must disambiguate by each finding's body phrase.
+    // safety.dangerous-bypass retired its active marker in #2642 because current
+    // settings, not stale prose, are authoritative. Its suppression-only legacy
+    // signature still disambiguates historical receipts by body phrase.
     const claudeMd = [
       '# Project conventions',
-      '',
-      '## Claude Coach Adopted Recommendations',
-      '',
-      '### Dangerous commands ran under bypassed permissions (`safety.dangerous-bypass`)',
-      '',
-      'Adopted: 2026-06-18T00:00:00.000Z',
-      '',
-      '{ "permissions": { "deny": ["Bash(rm -rf:*)"] } }',
       '',
       '## Claude Coach Adopted Recommendations',
       '',
@@ -298,6 +288,14 @@ describe('buildAdoptionScorecard', () => {
       'Adopted: 2026-06-18T00:00:00.000Z',
       '',
       '{ "hooks": { "PostToolUse": [] } }',
+      '',
+      '## Claude Coach Adopted Recommendations',
+      '',
+      '### Dangerous commands ran under bypassed permissions (`safety.dangerous-bypass`)',
+      '',
+      'Adopted: 2026-06-18T00:00:00.000Z',
+      '',
+      '{ "permissions": { "deny": ["Bash(rm -rf:*)"] } }',
     ].join('\n');
     const receipts: AdoptionReceipt[] = [
       surfaced('2026-06-15T00:00:00.000Z', [
@@ -307,7 +305,11 @@ describe('buildAdoptionScorecard', () => {
       suppressed('2026-06-18T00:00:00.000Z', 'safety.dangerous-bypass', 'Claude Coach Adopted Recommendations'),
       suppressed('2026-06-18T00:00:00.000Z', 'reliability.tool-errors', 'Claude Coach Adopted Recommendations'),
     ];
-    const sc = buildAdoptionScorecard(receipts, config(claudeMd), findingMarkerCatalog());
+    const sc = buildAdoptionScorecard(
+      receipts,
+      config(claudeMd),
+      findingMarkerCatalog()
+    );
     const byId = Object.fromEntries(sc.rows.map((r) => [r.findingId, r]));
 
     const bypass = byId['safety.dangerous-bypass'];
@@ -321,5 +323,21 @@ describe('buildAdoptionScorecard', () => {
     expect(toolErrors.liveHunk).toContain('Tools with high error rates');
     expect(toolErrors.liveHunk).toContain('PostToolUse');
     expect(toolErrors.liveHunk).not.toContain('Dangerous commands ran under bypassed permissions');
+  });
+
+  it('does not use a retired suppression marker to adopt a surfaced-only finding', () => {
+    const claudeMd = [
+      '## Claude Coach Adopted Recommendations',
+      '',
+      '### Dangerous commands ran under bypassed permissions (`safety.dangerous-bypass`)',
+    ].join('\n');
+    const sc = buildAdoptionScorecard(
+      [surfaced('2026-06-15T00:00:00.000Z', ['safety.dangerous-bypass'])],
+      config(claudeMd),
+      findingMarkerCatalog()
+    );
+
+    expect(sc.rows[0].status).toBe('SURFACED');
+    expect(sc.rows[0].liveHunk).toBeNull();
   });
 });

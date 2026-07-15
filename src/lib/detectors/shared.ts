@@ -159,6 +159,7 @@ const DANGEROUS_DENY_STEMS = [
   'chmod', 'chown', 'chgrp', 'kill', 'pkill', 'killall', 'shutdown',
   'reboot', 'halt', 'fdisk', 'parted', 'mkswap', 'git reset --hard',
   'git clean', 'git push --force', 'git push -f', 'git push --force-with-lease',
+  'npm publish',
 ];
 
 /** A Bash deny rule guarding a known-destructive command — never flagged as clutter. */

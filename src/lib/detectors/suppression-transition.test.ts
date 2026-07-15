@@ -233,11 +233,10 @@ describe('computeSuppressionTransitions (#576 — engine-loop FIRING→SUPPRESSE
   });
 });
 
-// ── #1783: the settings.json / hook findings flip via the adopt-block receipt ─
-// safety.dangerous-bypass and reliability.tool-errors are the findings actually
-// surfaced on real data; before #1783 they declared no appliedMarkers, so they
-// could never flip FIRING→SUPPRESSED. These exercise the REAL detectors (not the
-// synthetic stand-ins above) end-to-end through computeSuppressionTransitions.
+// ── #1783: hook findings flip via the adopt-block receipt ───────────────────
+// reliability.tool-errors still uses its adoption receipt. Dangerous-bypass no
+// longer does (#2642): only current structural settings coverage can suppress a
+// newly observed dangerous pattern, so an old prose receipt must leave it firing.
 describe('computeSuppressionTransitions with real settings/hook detectors (#1783)', () => {
   const tc = (toolName: string, isError: boolean, i: number): ToolCall => ({
     timestamp: `2026-06-12T10:00:0${i}.000Z`,
@@ -295,7 +294,7 @@ describe('computeSuppressionTransitions with real settings/hook detectors (#1783
 
   const detectors = [dangerousBypassDetector, toolErrorsDetector];
 
-  it('fires a SUPPRESSED transition for each adopted finding (gated on prior SURFACED)', async () => {
+  it('suppresses the hook finding but leaves dangerous-bypass structurally uncovered', async () => {
     const result = await computeSuppressionTransitions(
       realInput(ADOPT_BLOCK_BOTH),
       {
@@ -306,15 +305,20 @@ describe('computeSuppressionTransitions with real settings/hook detectors (#1783
       1_700_000_000_000
     );
 
-    expect(result.transitions.map((t) => t.findingId).sort()).toEqual([
+    expect(result.transitions.map((t) => t.findingId)).toEqual([
       'reliability.tool-errors',
-      'safety.dangerous-bypass',
     ]);
     for (const t of result.transitions) {
       expect(t.kind).toBe('SUPPRESSED');
       expect(t.markerHeading).toBe('Claude Coach Adopted Recommendations');
       expect(t.contentFingerprint).toMatch(/^(sha256|fnv1a):[0-9a-f]+$/);
     }
+    expect(
+      dangerousBypassDetector.rule(
+        realInput(ADOPT_BLOCK_BOTH),
+        1_700_000_000_000
+      )?.id
+    ).toBe('safety.dangerous-bypass');
   });
 
   it('does not flip when the adopt block is absent (both still firing)', async () => {

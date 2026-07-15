@@ -657,6 +657,30 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: 0,
   }),
+  'safety.dangerous-bypass': () => ({
+    input: baseInput({
+      toolData: [
+        {
+          sessionId: 'dangerous-bypass-1',
+          calls: [
+            {
+              timestamp: '2026-07-08T00:00:00.000Z',
+              toolName: 'Bash',
+              input: { command: 'rm -rf ~' },
+              toolUseId: 'dangerous-bypass-tool-1',
+              isError: null,
+              resultBytes: 0,
+            },
+          ],
+        },
+      ] as RecommendationInput['toolData'],
+      permissionRows: [
+        { sessionId: 'dangerous-bypass-1', mode: 'bypassPermissions' },
+      ],
+      liveConfig: liveConfig(),
+    }),
+    now: Date.parse('2026-07-09T00:00:00.000Z'),
+  }),
   'reliability.settings-json-invalid': () => ({
     input: baseInput({
       liveConfig: {

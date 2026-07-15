@@ -1,45 +1,437 @@
-import type { Detector } from '../types';
-import type { RecSeverity } from '../types';
-import type { AppliedMarkers } from '../types';
+import type {
+  Detector,
+  RecFix,
+  RecObservation,
+  RecProvenance,
+  RecSeverity,
+} from '../types';
 import {
+  allowShadowedByDeny,
   bumpSeverity,
+  permRuleMatchesCall,
   short,
-  permissionsContain,
-  claudeMdMarksApplied,
-  DANGEROUS_DENY_RULES,
-  DANGEROUS_ASK_RULES,
+  STALE_WEEKS,
 } from '../shared';
+import { isAsOfStale } from '../provenance';
 import { isUnattendedEntrypoint } from '../../parse-sessions';
 import {
-  detectDangerousCommands,
   computeSafetyScores,
+  DANGEROUS_PATTERN_RULES,
+  detectDangerousCommands,
 } from '../../parse-permissions';
 import type { DangerousCommand } from '../../parse-permissions';
+import type { LiveConfig } from '../../../types';
+
+const MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
+const RFC3339 =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+type ProtectionMode = 'bypass' | 'warning';
+
+interface ProtectionContext {
+  rules: string[];
+  unmappablePatterns: string[];
+  unmatchedObservedPatterns: string[];
+  settingsAvailable: boolean;
+  settingsUnavailableReason?: 'absent' | 'unhealthy';
+  coveredRules: string[];
+  missingRules: string[];
+}
+
+interface ParserContext {
+  totalCount: number;
+  highCertaintyCount: number;
+}
+
+interface TemporalContext {
+  asOf?: string;
+  stale: boolean;
+  plausibleTimestampCount: number;
+  historyLead: string;
+}
+
+function plausibleRfc3339Ms(
+  timestamp: string,
+  now: number,
+  hasUsableNow: boolean
+): number | null {
+  if (!RFC3339.test(timestamp)) return null;
+  const year = Number(timestamp.slice(0, 4));
+  const month = Number(timestamp.slice(5, 7));
+  const day = Number(timestamp.slice(8, 10));
+  const hour = Number(timestamp.slice(11, 13));
+  const minute = Number(timestamp.slice(14, 16));
+  const second = Number(timestamp.slice(17, 19));
+  const daysInMonth =
+    month >= 1 && month <= 12
+      ? new Date(Date.UTC(year, month, 0)).getUTCDate()
+      : 0;
+  if (
+    day < 1 ||
+    day > daysInMonth ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    return null;
+  }
+  const ms = Date.parse(timestamp);
+  if (!Number.isFinite(ms)) return null;
+  if (hasUsableNow && ms > now + MAX_FUTURE_SKEW_MS) return null;
+  return ms;
+}
 
 function dangerousEvidence(d: DangerousCommand): string {
   return `${short(d.sessionId)}, ${d.pattern}: ${d.command}`;
 }
 
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function configuredRulesCover(
+  settings: LiveConfig['settings'] | null | undefined,
+  bucket: 'ask' | 'deny',
+  requiredRule: string
+): boolean {
+  const configured = settings?.permissions?.[bucket];
+  if (!Array.isArray(configured)) return false;
+  return configured.some(
+    (candidate) =>
+      typeof candidate === 'string' &&
+      // `allowShadowedByDeny(required, configured)` answers the same set
+      // containment question we need here: every command matched by the
+      // required rule is also matched by the configured one. That includes a
+      // broader Bash prefix and a bare Bash rule, not just string equality.
+      allowShadowedByDeny(requiredRule, candidate)
+  );
+}
+
+function observedMappedRules(
+  command: DangerousCommand,
+  toolData: Parameters<typeof detectDangerousCommands>[0]
+): { mapped: boolean; rules: string[] } {
+  const mapped = Object.hasOwn(DANGEROUS_PATTERN_RULES, command.pattern)
+    ? DANGEROUS_PATTERN_RULES[command.pattern]
+    : undefined;
+  if (!Array.isArray(mapped) || mapped.length === 0) {
+    return { mapped: false, rules: [] };
+  }
+
+  const calls =
+    toolData
+      .find((session) => session.sessionId === command.sessionId)
+      ?.calls.filter((candidate) => candidate.toolUseId === command.toolUseId) ?? [];
+  if (calls.length === 0) return { mapped: true, rules: [] };
+
+  return {
+    mapped: true,
+    // A pattern family may have several canonical aliases (`rm -rf`/`rm -fr`,
+    // `curl`/`wget`, `--force`/`-f`). Only propose the member that actually
+    // matches the observed Bash invocation. This also refuses to claim that an
+    // inner command in a wrapper/compound invocation is protected by a prefix
+    // rule that would not match the recorded Bash call.
+    rules: mapped.filter(
+      (rule) => calls.some((call) => permRuleMatchesCall(rule, call) === true)
+    ),
+  };
+}
+
+function patternSummary(commands: DangerousCommand[]): string {
+  const counts = new Map<string, number>();
+  for (const command of commands) {
+    counts.set(command.pattern, (counts.get(command.pattern) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([pattern, count]) => `${pattern}=${count}`)
+    .join(', ');
+}
+
 /**
- * Adoption markers for `safety.dangerous-bypass` (#1783). Unlike the prose
- * detectors (e.g. workflow.redundant-reads), this finding's `fix` pastes a
- * settings.json `permissions.deny` block — NOT CLAUDE.md prose — so there is no
- * snippet text to match in the merged CLAUDE.md. Instead we key on the wrapper
- * the opt-in adopt helper (`adopt-finding.mjs`, shpwrck/claude#95) writes when a
- * finding is adopted: the `## Claude Coach Adopted Recommendations` section plus
- * this finding's title, which the helper emits in its `### <title> (`<id>`)`
- * line. The strict-AND keeps it honest — both the section heading AND this
- * finding's distinctive title must be present, so an unrelated adoption can't
- * credit this one. (We key the body phrase on the title, not the bare `<id>`:
- * the #580 specificity guard requires a >=4-word phrase and the title is the
- * distinctive, co-located discriminator.) The settings-side adoption (adding the
- * deny rules) is still suppressed earlier by the `permissionsContain(..., 'deny',
- * ...)` check; these markers are the CLAUDE.md-receipt path the scorecard credits.
+ * Reconcile only the settings rules mapped from patterns that contributed to
+ * this branch. A bypassed command is covered only by deny; a prompted command
+ * is covered by ask or the stronger deny. An absent live snapshot means
+ * coverage is unknown, not missing.
  */
-const MARKERS_DANGEROUS_BYPASS: AppliedMarkers = {
-  headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
-  bodyPhrases: ['Dangerous commands ran under bypassed permissions'],
-};
+function protectionContext(
+  commands: DangerousCommand[],
+  mode: ProtectionMode,
+  liveConfig: LiveConfig | null | undefined,
+  toolData: Parameters<typeof detectDangerousCommands>[0]
+): ProtectionContext {
+  const rules: string[] = [];
+  const unmappablePatterns: string[] = [];
+  const unmatchedObservedPatterns: string[] = [];
+  for (const command of commands) {
+    const observed = observedMappedRules(command, toolData);
+    if (!observed.mapped) {
+      unmappablePatterns.push(command.pattern);
+      continue;
+    }
+    if (observed.rules.length === 0) {
+      unmatchedObservedPatterns.push(command.pattern);
+      continue;
+    }
+    rules.push(...observed.rules);
+  }
+
+  const dedupedRules = unique(rules);
+  const settingsUnavailableReason =
+    liveConfig == null
+      ? 'absent'
+      : liveConfig.settingsHealth?.ok === false
+        ? 'unhealthy'
+        : undefined;
+  const settingsAvailable = settingsUnavailableReason === undefined;
+  const settings = liveConfig?.settings;
+  const coveredRules = settingsAvailable
+    ? dedupedRules.filter(
+        (rule) =>
+          configuredRulesCover(settings, 'deny', rule) ||
+          (mode === 'warning' &&
+            configuredRulesCover(settings, 'ask', rule))
+      )
+    : [];
+  const covered = new Set(coveredRules);
+  const missingRules = settingsAvailable
+    ? dedupedRules.filter((rule) => !covered.has(rule))
+    : [];
+
+  return {
+    rules: dedupedRules,
+    unmappablePatterns: unique(unmappablePatterns),
+    unmatchedObservedPatterns: unique(unmatchedObservedPatterns),
+    settingsAvailable,
+    ...(settingsUnavailableReason ? { settingsUnavailableReason } : {}),
+    coveredRules,
+    missingRules,
+  };
+}
+
+function temporalContext(
+  commands: DangerousCommand[],
+  now: number
+): TemporalContext {
+  const hasUsableNow = Number.isFinite(now) && now > 0;
+  const plausible = commands
+    .map((command) =>
+      plausibleRfc3339Ms(command.timestamp, now, hasUsableNow)
+    )
+    .filter((ms): ms is number => ms !== null);
+
+  if (plausible.length !== commands.length || plausible.length === 0) {
+    return {
+      stale: false,
+      plausibleTimestampCount: plausible.length,
+      historyLead: 'The available command history recorded',
+    };
+  }
+
+  const newest = Math.max(...plausible);
+  const asOf = new Date(newest).toISOString().slice(0, 10);
+  const stale = hasUsableNow
+    ? isAsOfStale(asOf, now, STALE_WEEKS * 7)
+    : false;
+  return {
+    asOf,
+    stale,
+    plausibleTimestampCount: plausible.length,
+    historyLead: stale
+      ? `As of ${asOf}, the available command history contained`
+      : `Through ${asOf}, the available command history recorded`,
+  };
+}
+
+function coverageDetail(
+  protection: ProtectionContext,
+  mode: ProtectionMode
+): string {
+  if (!protection.settingsAvailable) {
+    return (
+      (protection.settingsUnavailableReason === 'unhealthy'
+        ? 'Current settings coverage was unavailable because settings validation was unhealthy at ingest, so this finding '
+        : 'Current settings coverage was unavailable at ingest, so this finding ') +
+      'does not assert which protections are missing and emits no settings snippet.'
+    );
+  }
+
+  const coverageKind = mode === 'bypass' ? 'deny' : 'ask-or-deny';
+  const mapped = protection.rules.length
+    ? `Current merged settings cover ${protection.coveredRules.length} of ${protection.rules.length} relevant mapped ${coverageKind} rule(s); ${protection.missingRules.length} remain missing.`
+    : protection.unmatchedObservedPatterns.length
+      ? 'No contributing observed Bash invocation has a safely applicable canonical prefix rule.'
+      : 'No contributing pattern has a safe Bash prefix-rule mapping.';
+  const unmappable = protection.unmappablePatterns.length
+    ? ` No safe prefix rule is known for: ${protection.unmappablePatterns.join(', ')}.`
+    : '';
+  const unmatched = protection.unmatchedObservedPatterns.length
+    ? ` No canonical mapped prefix rule matched the observed Bash invocation for: ${protection.unmatchedObservedPatterns.join(', ')}.`
+    : '';
+  return `${mapped}${unmappable}${unmatched}`;
+}
+
+function settingsFix(
+  protection: ProtectionContext,
+  mode: ProtectionMode
+): RecFix | undefined {
+  if (!protection.settingsAvailable || protection.missingRules.length === 0) {
+    return undefined;
+  }
+
+  const bucket = mode === 'bypass' ? 'deny' : 'ask';
+  const coveredNote = protection.coveredRules.length
+    ? ` Current settings already cover: ${protection.coveredRules.join(', ')}.`
+    : '';
+  const broadNotes: string[] = [];
+  if (
+    protection.missingRules.some(
+      (rule) => rule === 'Bash(curl:*)' || rule === 'Bash(wget:*)'
+    )
+  ) {
+    broadNotes.push(
+      'Bash(curl:*) and Bash(wget:*) apply to every invocation, not only pipe-to-shell commands'
+    );
+  }
+  if (protection.missingRules.includes('Bash(chmod:*)')) {
+    broadNotes.push(
+      'Bash(chmod:*) applies to every chmod invocation, not only chmod 777'
+    );
+  }
+  const broadNote = broadNotes.length
+    ? ` These command-prefix rules are broader than the cited evidence: ${broadNotes.join('; ')}. Review them before merging.`
+    : '';
+  const unmappableNote = protection.unmappablePatterns.length
+    ? ` No safe prefix rule exists for ${protection.unmappablePatterns.join(', ')}; this snippet does not claim to protect those observations.`
+    : '';
+  const unmatchedNote = protection.unmatchedObservedPatterns.length
+    ? ` No canonical mapped prefix rule matches the observed Bash invocation for ${protection.unmatchedObservedPatterns.join(', ')}; this snippet does not claim to protect those observations.`
+    : '';
+
+  return {
+    target: 'settings.json',
+    label:
+      mode === 'bypass'
+        ? 'Add missing observed-pattern deny rules'
+        : 'Confirm missing observed dangerous patterns',
+    note:
+      `Manually deep-merge only the listed "${bucket}" rules into the "permissions" object in ~/.claude/settings.json.` +
+      coveredNote +
+      broadNote +
+      unmappableNote +
+      unmatchedNote,
+    snippet: JSON.stringify(
+      { permissions: { [bucket]: protection.missingRules } },
+      null,
+      2
+    ),
+    fixKind: 'manual',
+  };
+}
+
+function provenance(
+  commands: DangerousCommand[],
+  protection: ProtectionContext,
+  temporal: TemporalContext,
+  mode: ProtectionMode,
+  parser: ParserContext,
+  riskySessionCount = 0
+): RecProvenance {
+  const patterns = patternSummary(commands);
+  const observations: RecObservation[] = [
+    {
+      claim: `detectDangerousCommands returned ${parser.totalCount} total record(s); ${parser.highCertaintyCount} passed the certainty=high gate`,
+      source: 'parse-permissions.detectDangerousCommands(toolData)',
+      field:
+        'toolData[].calls[].commandDangerousPattern / commandDangerousCertainty, or input.command classifier fallback',
+      value: `${parser.highCertaintyCount}/${parser.totalCount}`,
+    },
+    {
+      claim: `${commands.length} high-certainty record(s) contributed to this ${mode} branch with pattern values ${patterns}`,
+      source: 'safety.dangerous-bypass branch selection',
+      field:
+        mode === 'bypass'
+          ? 'computeSafetyScores(...).bypassMode / DangerousCommand.sessionId'
+          : 'high-certainty records not handled by the bypass branch',
+      value: commands.length,
+    },
+    {
+      claim: `${temporal.plausibleTimestampCount} of ${commands.length} contributing call timestamp(s) passed the detector's RFC3339/calendar/future-skew check`,
+      source: '~/.claude/projects/<slug>/<sessionId>.jsonl via parse-tools',
+      field: 'toolData[].calls[].timestamp',
+      value: `${temporal.plausibleTimestampCount}/${commands.length}`,
+    },
+  ];
+
+  if (mode === 'bypass') {
+    observations.push({
+      claim: `${riskySessionCount} contributing session(s) had at least one permissionRows mode=bypassPermissions`,
+      source: '~/.claude/projects/<slug>/<sessionId>.jsonl via parse-permissions',
+      field: 'computeSafetyScores(...).bypassMode from permissionRows[].mode',
+      value: riskySessionCount,
+    });
+  }
+  if (protection.settingsAvailable && protection.rules.length > 0) {
+    observations.push({
+      claim: `${protection.coveredRules.length} of ${protection.rules.length} mapped relevant rule string(s) are covered by current ${mode === 'bypass' ? 'deny' : 'ask-or-deny'} arrays`,
+      source: 'merged ~/.claude/settings*.json via liveConfig',
+      field:
+        mode === 'bypass'
+          ? 'settings.permissions.deny'
+          : 'settings.permissions.ask / settings.permissions.deny',
+      value: `${protection.coveredRules.length}/${protection.rules.length}`,
+    });
+  } else if (!protection.settingsAvailable) {
+    observations.push(
+      protection.settingsUnavailableReason === 'unhealthy'
+        ? {
+            claim:
+              'Live settings coverage was not evaluated because settings validation was unhealthy',
+            source: 'liveConfig.settingsHealth',
+            field: 'settingsHealth.ok',
+            value: 'false',
+          }
+        : {
+            claim: 'No liveConfig snapshot was supplied to this detector run',
+            source: 'buildRecommendations RecommendationInput',
+            field: 'liveConfig',
+            value: 'absent',
+          }
+    );
+  }
+  if (protection.unmappablePatterns.length) {
+    observations.push({
+      claim: `No own-property DANGEROUS_PATTERN_RULES entry is registered for pattern values: ${protection.unmappablePatterns.join(', ')}`,
+      source: 'parse-permissions',
+      field: 'DANGEROUS_PATTERN_RULES',
+      value: protection.unmappablePatterns.join(', '),
+    });
+  }
+  if (protection.unmatchedObservedPatterns.length) {
+    observations.push({
+      claim: `Canonical mappings exist but none matched the observed Bash invocation for pattern values: ${protection.unmatchedObservedPatterns.join(', ')}`,
+      source: 'parse-permissions / live toolData',
+      field: 'DANGEROUS_PATTERN_RULES / permRuleMatchesCall',
+      value: protection.unmatchedObservedPatterns.join(', '),
+    });
+  }
+  if (temporal.asOf) {
+    observations.push({
+      claim: `The newest contributing command was recorded on ${temporal.asOf}`,
+      source: '~/.claude/projects/<slug>/<sessionId>.jsonl via parse-tools',
+      field: 'toolData[].calls[].timestamp',
+      value: temporal.asOf,
+    });
+  }
+
+  return {
+    observations,
+    inference:
+      'The classifier treats commandDangerousCertainty=high calls as dangerous evidence. Candidate protections are limited to canonical pattern rules that match the observed Bash invocation under the repository permission matcher. Coverage uses permission-rule containment, so a broader configured prefix or bare Bash rule covers a narrower requirement: deny is required for bypassed commands, while ask or stronger deny covers the warning branch. A missing mapping or a mapped family that does not match the observed invocation is not evidence that a safe prefix rule exists, so those patterns remain visible without a fabricated settings rule.',
+    ...(temporal.asOf
+      ? { asOf: temporal.asOf, stale: temporal.stale }
+      : {}),
+  };
+}
 
 /**
  * Dangerous commands that ran while permission prompts were bypassed.
@@ -51,114 +443,127 @@ const MARKERS_DANGEROUS_BYPASS: AppliedMarkers = {
  */
 export const detector: Detector = {
   id: 'safety.dangerous-bypass',
-  appliedMarkers: MARKERS_DANGEROUS_BYPASS,
   category: 'safety',
   dataDeps: ['toolData', 'tokenData', 'permissionRows', 'liveConfig'],
-  rule(input) {
+  rule(input, now) {
     // Gate on HIGH-certainty (#2011): scoped/reversible rm -rf (./.worktrees,
-    // /tmp scratch, …) is now 'medium' and must not drive this CRITICAL finding
-    // or its `safety.dangerous-commands` sibling. Mirrors session-scorecard's
-    // high-certainty filter. (Also drops the statically-'medium' `dd if=`
-    // pattern, by design — same bar as the scorecard.)
-    const dangerous = detectDangerousCommands(input.toolData).filter(
-      (d) => d.certainty === 'high'
+    // /tmp scratch, …) and the statically-medium `dd if=` pattern do not drive
+    // this CRITICAL finding or its warning sibling.
+    const parsedDangerous = detectDangerousCommands(input.toolData);
+    const dangerous = parsedDangerous.filter(
+      (command) => command.certainty === 'high'
     );
     if (dangerous.length === 0) return null;
-    // If the canonical deny block from the fix is already present in settings,
-    // every recommendation variant this rule emits is satisfied (deny is
-    // strictly stronger than ask). Skip wholesale.
-    if (permissionsContain(input.liveConfig?.settings, 'deny', DANGEROUS_DENY_RULES)) {
-      return null;
-    }
-    // Sessions whose entrypoint is unattended (`sdk-*`). Reuses the canonical
-    // classifier shared with ruleAutomationCost — do NOT re-derive the set (#197).
+
     const unattendedSessions = new Set(
       input.tokenData
-        .filter((d) => isUnattendedEntrypoint(d.entrypoint))
-        .map((d) => d.sessionId)
+        .filter((data) => isUnattendedEntrypoint(data.entrypoint))
+        .map((data) => data.sessionId)
     );
-    // True when ANY of the given dangerous commands ran in an unattended session.
-    const ranUnattended = (cmds: { sessionId: string }[]) =>
-      cmds.some((c) => unattendedSessions.has(c.sessionId));
+    const ranUnattended = (commands: { sessionId: string }[]) =>
+      commands.some((command) => unattendedSessions.has(command.sessionId));
 
     const scores = computeSafetyScores(dangerous, input.permissionRows);
-    const risky = scores.filter((s) => s.bypassMode && s.dangerousCount > 0);
+    const risky = scores.filter(
+      (score) => score.bypassMode && score.dangerousCount > 0
+    );
+    let warningCommands = dangerous;
     if (risky.length > 0) {
-      // Suppress once the finding's fix is adopted via the CLAUDE.md receipt
-      // (#1783). Scoped to this branch only so adopting `safety.dangerous-bypass`
-      // never silences the sibling `safety.dangerous-commands` emit below.
-      if (claudeMdMarksApplied(input.liveConfig, MARKERS_DANGEROUS_BYPASS)) {
-        return null;
-      }
-      const totalDangerous = risky.reduce((s, r) => s + r.dangerousCount, 0);
-      // Contributing commands are those in a risky (bypass-mode) session.
-      const riskySessions = new Set(risky.map((r) => r.sessionId));
-      const riskyDangerous = dangerous.filter((d) => riskySessions.has(d.sessionId));
-      const bumped = ranUnattended(
-        riskyDangerous
+      const riskySessions = new Set(risky.map((score) => score.sessionId));
+      const contributing = dangerous.filter((command) =>
+        riskySessions.has(command.sessionId)
       );
-      // How many of the contributing commands ran in an unattended (`sdk-*`)
-      // session (#2012). Surfaced here so the unattended dimension reads as a
-      // field on this single CRITICAL card; the standalone
-      // `safety.unattended-sessions` card (a subset of these commands) is
-      // collapsed away in recommendations.ts when this finding is present.
-      const unattendedCount = riskyDangerous.filter((d) =>
-        unattendedSessions.has(d.sessionId)
-      ).length;
-      const baseSeverity: RecSeverity = 'critical';
-      const unattendedNote = unattendedCount
-        ? ` ${unattendedCount} of these ran in unattended sdk-* session(s).`
-        : '';
-      return {
-        id: 'safety.dangerous-bypass',
-        category: 'safety',
-        severity: bumped ? bumpSeverity(baseSeverity) : baseSeverity,
-        unattended: bumped,
-        ...(unattendedCount ? { unattendedCount } : {}),
-        title: 'Dangerous commands ran under bypassed permissions',
-        detail: `${totalDangerous} risky command(s) (e.g. rm -rf, git reset --hard, curl|sh) ran in ${risky.length} session(s) that used bypassPermissions.${unattendedNote}`,
-        action:
-          'Reserve bypassPermissions for trusted, reversible work; add an explicit deny-list for destructive patterns.',
-        affected: totalDangerous,
-        evidence: riskyDangerous.slice(0, 5).map(dangerousEvidence),
-        view: 'permissions',
-        fix: {
-          target: 'settings.json',
-          label: 'Add destructive-command deny rules',
-          note: 'Merge into the "permissions" object in .claude/settings.json (deep-merge "deny"), and reserve bypassPermissions for trusted, reversible work. curl|sh cannot be prefix-matched, so curl/wget are denied wholesale — drop them if too broad.',
-          snippet: `{
-  "permissions": {
-    "deny": [
-      "Bash(rm -rf:*)",
-      "Bash(rm -fr:*)",
-      "Bash(git reset --hard:*)",
-      "Bash(git clean -fd:*)",
-      "Bash(git push --force:*)",
-      "Bash(git push -f:*)",
-      "Bash(dd:*)",
-      "Bash(mkfs:*)",
-      "Bash(shred:*)",
-      "Bash(curl:*)",
-      "Bash(wget:*)"
-    ]
-  }
-}`,
-          // Matches the adopt-block wrapper (not this settings.json snippet) so
-          // the suppression-transition receipt can resolve a heading (#1783).
-          appliedMarkers: MARKERS_DANGEROUS_BYPASS,
-        },
-      };
+      const protection = protectionContext(
+        contributing,
+        'bypass',
+        input.liveConfig,
+        input.toolData
+      );
+      const bypassCovered =
+        protection.settingsAvailable &&
+        protection.missingRules.length === 0 &&
+        protection.unmappablePatterns.length === 0 &&
+        protection.unmatchedObservedPatterns.length === 0;
+      if (bypassCovered) {
+        warningCommands = dangerous.filter(
+          (command) => !riskySessions.has(command.sessionId)
+        );
+        if (warningCommands.length === 0) return null;
+      } else {
+        const temporal = temporalContext(contributing, now);
+        const bumped = ranUnattended(contributing);
+        const unattendedCount = contributing.filter((command) =>
+          unattendedSessions.has(command.sessionId)
+        ).length;
+        const baseSeverity: RecSeverity = 'critical';
+        const unattendedNote = unattendedCount
+          ? ` ${unattendedCount} of these ran in unattended sdk-* session(s).`
+          : '';
+        const staleAction = temporal.stale
+          ? 'Re-check whether this historical pattern still applies. '
+          : '';
+        const fix = settingsFix(protection, 'bypass');
+
+        return {
+          id: 'safety.dangerous-bypass',
+          category: 'safety',
+          severity: bumped ? bumpSeverity(baseSeverity) : baseSeverity,
+          unattended: bumped,
+          ...(unattendedCount ? { unattendedCount } : {}),
+          title: 'Dangerous commands ran under bypassed permissions',
+          detail:
+            `${temporal.historyLead} ${contributing.length} high-certainty dangerous command(s) in ${risky.length} session(s) that used bypassPermissions.${unattendedNote} ` +
+            coverageDetail(protection, 'bypass'),
+          action:
+            staleAction +
+            'Reserve bypassPermissions for trusted, reversible work; review the cited commands and verify current protections. ' +
+            (protection.unmappablePatterns.length
+              || protection.unmatchedObservedPatterns.length
+              ? 'Handle unmappable patterns with a reviewed hook or operational control rather than inventing a Bash prefix rule.'
+              : 'Manually add only the missing observed-pattern deny rules, if any.'),
+          affected: contributing.length,
+          evidence: contributing.slice(0, 5).map(dangerousEvidence),
+          view: 'permissions',
+          claimClass: 'accounting',
+          proofTier: 'accounting',
+          provenance: provenance(
+            contributing,
+            protection,
+            temporal,
+            'bypass',
+            {
+              totalCount: parsedDangerous.length,
+              highCertaintyCount: dangerous.length,
+            },
+            risky.length
+          ),
+          ...(fix ? { fix } : {}),
+        };
+      }
     }
-    // Dangerous commands present but not under bypass — still worth a heads-up,
-    // unless the user has already added the canonical ask block (deny was checked
-    // at the top of the rule).
-    if (permissionsContain(input.liveConfig?.settings, 'ask', DANGEROUS_ASK_RULES)) {
+
+    const protection = protectionContext(
+      warningCommands,
+      'warning',
+      input.liveConfig,
+      input.toolData
+    );
+    if (
+      protection.settingsAvailable &&
+      protection.missingRules.length === 0 &&
+      protection.unmappablePatterns.length === 0 &&
+      protection.unmatchedObservedPatterns.length === 0
+    ) {
       return null;
     }
-    // Every detected command contributes to this finding, so any one in an
-    // unattended session bumps it warning → critical (#197).
-    const commandsBumped = ranUnattended(dangerous);
+
+    const temporal = temporalContext(warningCommands, now);
+    const commandsBumped = ranUnattended(warningCommands);
     const commandsBaseSeverity: RecSeverity = 'warning';
+    const staleAction = temporal.stale
+      ? 'Re-check whether this historical pattern still applies. '
+      : '';
+    const fix = settingsFix(protection, 'warning');
     return {
       id: 'safety.dangerous-commands',
       category: 'safety',
@@ -167,31 +572,32 @@ export const detector: Detector = {
         : commandsBaseSeverity,
       unattended: commandsBumped,
       title: 'Dangerous command patterns detected',
-      detail: `${dangerous.length} command(s) matched a destructive pattern (rm -rf, git push --force, dd, …).`,
-      action: 'Spot-check these were intentional; consider a hook that confirms before destructive ops.',
-      affected: dangerous.length,
-      evidence: dangerous.slice(0, 5).map(dangerousEvidence),
+      detail:
+        `${temporal.historyLead} ${warningCommands.length} high-certainty dangerous command(s). ` +
+        coverageDetail(protection, 'warning'),
+      action:
+        staleAction +
+        'Spot-check these were intentional and verify current protections. ' +
+        (protection.unmappablePatterns.length
+          || protection.unmatchedObservedPatterns.length
+          ? 'Handle unmappable patterns with a reviewed hook or operational control rather than inventing a Bash prefix rule.'
+          : 'Manually add only the missing observed-pattern ask rules, if any.'),
+      affected: warningCommands.length,
+      evidence: warningCommands.slice(0, 5).map(dangerousEvidence),
       view: 'permissions',
-      fix: {
-        target: 'settings.json',
-        label: 'Confirm before destructive commands',
-        note: 'Merge into the "permissions" object in .claude/settings.json (deep-merge "ask"). "ask" forces an interactive confirmation rather than blocking outright.',
-        snippet: `{
-  "permissions": {
-    "ask": [
-      "Bash(rm -rf:*)",
-      "Bash(rm -fr:*)",
-      "Bash(git reset --hard:*)",
-      "Bash(git clean -fd:*)",
-      "Bash(git push --force:*)",
-      "Bash(git push -f:*)",
-      "Bash(dd:*)",
-      "Bash(mkfs:*)",
-      "Bash(shred:*)"
-    ]
-  }
-}`,
-      },
+      claimClass: 'accounting',
+      proofTier: 'accounting',
+      provenance: provenance(
+        warningCommands,
+        protection,
+        temporal,
+        'warning',
+        {
+          totalCount: parsedDangerous.length,
+          highCertaintyCount: dangerous.length,
+        }
+      ),
+      ...(fix ? { fix } : {}),
     };
   },
 };

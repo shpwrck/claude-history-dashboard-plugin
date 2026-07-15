@@ -19,6 +19,7 @@
  */
 import type { LiveConfig } from '../types';
 import { claudeMdMarksApplied, mergedClaudeMdText } from './detectors/shared';
+import { RETIRED_SUPPRESSION_MARKER_CATALOG } from './detectors/applied-markers';
 import type { AppliedMarkers } from './detectors/types';
 import type {
   AdoptionReceipt,
@@ -251,15 +252,17 @@ export function buildAdoptionScorecard(
 
     let liveHunk: string | null = null;
     if (suppressed) {
-      // Prefer marker-based resolution (#1915): the stored `markerHeading` can be
-      // a heading several findings share (the #1783 adopt-block section), and
-      // liveClaudeMdHunk would resolve every one of them to the FIRST such
-      // section. Resolving from the finding's own catalog markers disambiguates
-      // by its body phrase; fall back to the stored heading when the finding has
-      // no catalog markers (older receipts / prose findings still resolve fine).
-      liveHunk =
-        liveHunkFromMarkers(liveConfig, findingMarkers?.get(findingId)) ??
-        liveClaudeMdHunk(liveConfig, suppressed.markerHeading);
+      // Prefer marker-based resolution (#1915): the stored `markerHeading` can
+      // be shared by several findings. A retired suppression-only signature
+      // keeps historical receipts disambiguated without making a new SURFACED
+      // finding look adopted (#2642). When a signature is known but absent live,
+      // return null rather than falling back to the first same-heading section.
+      const markers =
+        findingMarkers?.get(findingId) ??
+        RETIRED_SUPPRESSION_MARKER_CATALOG.get(findingId);
+      liveHunk = markers
+        ? liveHunkFromMarkers(liveConfig, markers)
+        : liveClaudeMdHunk(liveConfig, suppressed.markerHeading);
     } else if (surfaced) {
       // SURFACED-only: no stored markerHeading, so resolve the finding's markers
       // from the live detector catalog and read the hunk live (#1785). A
