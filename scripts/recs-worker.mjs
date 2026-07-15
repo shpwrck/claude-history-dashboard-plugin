@@ -11,9 +11,11 @@
 // a fully independent ingest pipeline with its OWN SQLite cache — NO shared-DB
 // handle, no WAL migration, no read-only-mode plumbing. We read the same
 // ~/.claude source files (read-only, like any reader) and write only our own
-// cache DB. Output is byte-identical to the inline build because it runs the
-// SAME assembleRecommendations over the SAME source state (contentHash is
-// content-derived and path-independent — verified).
+// cache DB. For time-stable evidence, output is byte-identical to the inline
+// build because it runs the SAME assembleRecommendations over the SAME source
+// state (contentHash is content-derived and path-independent — verified).
+// Separate real-time builds may honestly carry different timestamps for live
+// host probes such as hook referenced-path checks.
 //
 // Launched with `--import scripts/register-ts.mjs` (via execArgv) so the .ts
 // parsers ingest.mjs dynamically imports resolve, exactly like the server.
@@ -23,7 +25,8 @@
 //                       adoptionReceiptsPath, shadowCallsDir }
 //   worker -> parent: { id, ok:true, json, contentHash, sourceSig,
 //                       guidanceTransitions, guidanceCacheValidity,
-//                       hookOverheadCacheValidity, hookOverheadConfigState }
+//                       hookOverheadCacheValidity, hookOverheadConfigState,
+//                       skillHookIntegrityCacheValidity }
 //                  |  { id, ok:false, error }
 //                  |  { type:'ready' }   (once, after module init)
 //                  |  { type:'log', level, message }
@@ -60,6 +63,16 @@ const {
 const { hookOverheadCacheValidity, hookOverheadConfigState } = await import(
   join(projectDir, 'src', 'lib', 'detectors', 'speed', 'hook-overhead.ts')
 );
+const { skillHookIntegrityCacheValidity } = await import(
+  join(
+    projectDir,
+    'src',
+    'lib',
+    'detectors',
+    'maintenance',
+    'skill-hook-integrity.ts'
+  )
+);
 
 parentPort.on('message', async (msg) => {
   if (!msg || typeof msg !== 'object') return;
@@ -90,6 +103,10 @@ parentPort.on('message', async (msg) => {
       guidanceBuiltAt
     );
     const hookConfigState = hookOverheadConfigState(dataset);
+    const skillHookCacheValidity = skillHookIntegrityCacheValidity(
+      dataset,
+      guidanceBuiltAt
+    );
     if (emitSuppressionTransitions && adoptionReceiptsPath) {
       // Best-effort, like the inline path: never fail the rebuild on a receipts
       // write error. Reuses the same dataset (no second assemble).
@@ -129,6 +146,7 @@ parentPort.on('message', async (msg) => {
       guidanceCacheValidity,
       hookOverheadCacheValidity: hookCacheValidity,
       hookOverheadConfigState: hookConfigState,
+      skillHookIntegrityCacheValidity: skillHookCacheValidity,
       sourceSig: sourceSignature(),
     });
   } catch (err) {

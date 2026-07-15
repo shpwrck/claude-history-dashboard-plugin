@@ -111,6 +111,19 @@ const {
 } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'detectors', 'speed', 'hook-overhead.ts')
 );
+const {
+  skillHookIntegrityCacheValidity,
+  skillHookIntegrityCacheValidityContains,
+} = await import(
+  join(
+    PROJECT_DIR,
+    'src',
+    'lib',
+    'detectors',
+    'maintenance',
+    'skill-hook-integrity.ts'
+  )
+);
 const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
 const DEFAULT_SOURCE = DATA_SOURCES[0];
 const DATA_SOURCE_BY_ID = new Map(DATA_SOURCES.map((source) => [source.id, source]));
@@ -2502,7 +2515,12 @@ function recommendationsCacheEntryIsCurrent(entry, api, now) {
   return (
     entry.hookOverheadConfigState === api.stopHookConfigState() &&
     !!entry.hookOverheadCacheValidity &&
-    hookOverheadCacheValidityContains(entry.hookOverheadCacheValidity, now)
+    hookOverheadCacheValidityContains(entry.hookOverheadCacheValidity, now) &&
+    !!entry.skillHookIntegrityCacheValidity &&
+    skillHookIntegrityCacheValidityContains(
+      entry.skillHookIntegrityCacheValidity,
+      now
+    )
   );
 }
 
@@ -2525,6 +2543,7 @@ async function buildRecommendationsCacheEntryViaWorker(
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
     hookOverheadConfigState: hookConfigState,
+    skillHookIntegrityCacheValidity: skillHookCacheValidity,
   } =
     await requestRecsRebuildViaWorker(
       project,
@@ -2541,6 +2560,7 @@ async function buildRecommendationsCacheEntryViaWorker(
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
     hookOverheadConfigState: hookConfigState,
+    skillHookIntegrityCacheValidity: skillHookCacheValidity,
     lastAccess: Date.now(),
   };
   return entry;
@@ -2585,6 +2605,10 @@ async function buildRecommendationsCacheEntry(
     guidanceBuiltAt
   );
   const hookConfigState = hookOverheadConfigState(dataset);
+  const skillHookCacheValidity = skillHookIntegrityCacheValidity(
+    dataset,
+    guidanceBuiltAt
+  );
   if (emitSuppressionTransitions) {
     api
       .recordSuppressionTransitions(ADOPTION_RECEIPTS, {
@@ -2620,6 +2644,7 @@ async function buildRecommendationsCacheEntry(
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
     hookOverheadConfigState: hookConfigState,
+    skillHookIntegrityCacheValidity: skillHookCacheValidity,
     lastAccess: Date.now(),
   };
   return entry;
@@ -2736,12 +2761,18 @@ async function recommendationsResponseCache(
       !hookOverheadCacheValidityContains(
         cached.hookOverheadCacheValidity,
         now
+      ) ||
+      !cached.skillHookIntegrityCacheValidity ||
+      !skillHookIntegrityCacheValidityContains(
+        cached.skillHookIntegrityCacheValidity,
+        now
       ))
   ) {
-    // Unlike a guidance label, current Stop-hook state or an event entering /
-    // leaving the four-week window can add, remove, or re-rank the whole
-    // finding. Never serve that cached body stale; force the ordinary cold
-    // rebuild even when source/content signatures would otherwise permit SWR.
+    // Unlike a guidance label, current Stop-hook state, an event entering /
+    // leaving the four-week window, or hook-path evidence crossing its stale
+    // boundary can add, remove, or rewrite a whole finding. Never serve that
+    // cached body stale; force the ordinary cold rebuild even when
+    // source/content signatures would otherwise permit SWR.
     state.recommendationsCache.delete(key);
     cached = undefined;
   }

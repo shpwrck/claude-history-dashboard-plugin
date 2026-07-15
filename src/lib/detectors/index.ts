@@ -162,6 +162,11 @@ import { detector as activityTrend } from './activity/activity-trend';
 import { detector as memoryHygiene } from './maintenance/memory-hygiene';
 import { detector as docHygiene } from './maintenance/doc-hygiene';
 import { detector as skillHookIntegrity } from './maintenance/skill-hook-integrity';
+export {
+  skillHookIntegrityCacheValidity,
+  skillHookIntegrityCacheValidityContains,
+  type SkillHookIntegrityCacheValidity,
+} from './maintenance/skill-hook-integrity';
 
 // ── Registered detectors ────────────────────────────────────────────────
 // Emit order is LOAD-BEARING: `buildRecommendations` evaluates these in array

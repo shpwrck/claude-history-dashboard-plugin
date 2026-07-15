@@ -1047,6 +1047,69 @@ describe('workflow.prompt-clarity (#1275)', () => {
   });
 });
 
+describe('skill-hook-integrity identity-cache freshness (#2553)', () => {
+  it('rebuilds across forward and backward hook-evidence stale crossings', () => {
+    vi.useFakeTimers();
+    const checkedAt = '2026-07-10T12:34:56.000Z';
+    const staleBoundary =
+      Date.parse(checkedAt) + 28 * 24 * 60 * 60 * 1000;
+    const input = baseInput({
+      liveConfig: {
+        settings: {
+          hooks: {
+            Stop: [{
+              hooks: [{
+                type: 'command',
+                command: 'node ~/.claude/hooks/gone.mjs',
+                referencedPaths: [{
+                  path: '~/.claude/hooks/gone.mjs',
+                  state: 'missing',
+                  checkedAt,
+                }],
+              }],
+            }],
+          },
+        },
+        claudeMd: { global: null, perProject: {} },
+        plugins: [],
+        mcpServers: [],
+        skills: [],
+        subagents: [],
+        commands: [],
+      },
+    });
+
+    try {
+      vi.setSystemTime(staleBoundary);
+      const fresh = buildRecommendations(input);
+      const freshFinding = fresh.find(
+        (rec) => rec.id === 'maintenance.skill-hook-integrity'
+      );
+      expect(freshFinding?.provenance?.stale).toBeUndefined();
+
+      vi.setSystemTime(staleBoundary + 1);
+      const stale = buildRecommendations(input);
+      const staleFinding = stale.find(
+        (rec) => rec.id === 'maintenance.skill-hook-integrity'
+      );
+      expect(stale).not.toBe(fresh);
+      expect(staleFinding?.provenance?.stale).toBe(true);
+      expect(staleFinding?.detail).toMatch(/stale hook evidence/i);
+
+      vi.setSystemTime(staleBoundary);
+      const freshAgain = buildRecommendations(input);
+      expect(freshAgain).not.toBe(stale);
+      expect(
+        freshAgain.find(
+          (rec) => rec.id === 'maintenance.skill-hook-integrity'
+        )?.provenance?.stale
+      ).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('security.model-deceit (#686, epic #683 slice B)', () => {
   const deceit = (over: Record<string, unknown>) =>
     ({
@@ -3221,7 +3284,7 @@ function fixtureBank(): Fixture[] {
   }
 
   // ── maintenance.skill-hook-integrity (#2500): a settings hook whose referenced
-  // script did not exist at ingest (dangling-hook-script). Existence is annotated
+  // script was recorded missing at ingest (dangling-hook-script). State is annotated
   // host-side at ingest, so the bank fixture supplies referencedPaths directly.
   {
     const liveConfig = liveConfigShell({
@@ -3233,7 +3296,11 @@ function fixtureBank(): Fixture[] {
                 {
                   type: 'command',
                   command: 'node ~/.claude/hooks/gone.mjs',
-                  referencedPaths: [{ path: '~/.claude/hooks/gone.mjs', exists: false }],
+                  referencedPaths: [{
+                    path: '~/.claude/hooks/gone.mjs',
+                    state: 'missing',
+                    checkedAt: new Date(now).toISOString(),
+                  }],
                 },
               ],
             },

@@ -159,6 +159,11 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
       'inactive',
       'worker returns the current Stop-hook config gate state'
     );
+    assert.deepEqual(
+      reply.skillHookIntegrityCacheValidity,
+      { after: null, through: null },
+      'worker returns hook-path evidence cache validity metadata'
+    );
   } finally {
     process.env.HOME = origHome;
     process.env.CHD_DB_PATH = origDb;

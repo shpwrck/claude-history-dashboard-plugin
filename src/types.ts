@@ -504,19 +504,21 @@ export type ActionDomain =
  * entirely; a malformed file degrades to an empty object.
  */
 /**
- * One filesystem path token referenced by a hook `command`, with whether it
- * existed at ingest time (#2500). Existence is evaluated HOST-SIDE at ingest
- * (detectors are pure and cannot stat); `path` is the token exactly as written
- * in the command (e.g. `~/.claude/hooks/foo.mjs`) so the finding cites what the
- * user typed. Only tokens whose absolute location is verifiable are captured —
- * a token with an unresolvable `$VAR` other than `$HOME`/`$CLAUDE_PROJECT_DIR`
- * is skipped, never recorded. Absent ⇒ the command referenced no verifiable path.
+ * One filesystem path token referenced by a hook `command`, with the result and
+ * timestamp of its host-side ingest probe (#2500, #2553). Detectors are pure and
+ * cannot stat. `unverifiable` means the visible filesystem was insufficient to
+ * distinguish absence from an inaccessible symlink target; it must never be
+ * reconstructed as `missing`. `path` is the token exactly as written so the
+ * finding cites what the user typed. Tokens with unresolved variables are
+ * skipped entirely.
  */
 export interface HookReferencedPath {
   /** The path token as written in the hook command (display + provenance). */
   path: string;
-  /** Whether the resolved absolute path existed when the dataset was ingested. */
-  exists: boolean;
+  /** Conservative result of the host-side filesystem probe. */
+  state: 'present' | 'missing' | 'unverifiable';
+  /** Canonical ISO instant at which the path was probed. */
+  checkedAt: string;
 }
 
 export interface LiveSettingsHook {
@@ -526,8 +528,8 @@ export interface LiveSettingsHook {
     command?: string;
     /**
      * Verifiable filesystem path tokens referenced by `command`, each with its
-     * ingest-time existence (#2500). Populated host-side at ingest; absent when
-     * the command references no verifiable absolute/`~`/`$HOME`/
+     * timestamped ingest-time state (#2500, #2553). Populated host-side at
+     * ingest; absent when the command references no verifiable absolute/`~`/`$HOME`/
      * `$CLAUDE_PROJECT_DIR` path. Optional so older datasets and the SPA degrade
      * cleanly. Read by `maintenance.skill-hook-integrity`.
      */

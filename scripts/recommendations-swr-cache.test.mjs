@@ -10,14 +10,17 @@
 //   3. Stop-hook timing freshness crossed with unchanged inputs -> `miss`:
 //      the finding itself is rebuilt immediately because it can appear or
 //      disappear and cannot be safely redecorated.
-//   4. an external-guidance snapshot changed -> `stale`, then a rebuilt body
+//   4. hook-path evidence freshness crossed with unchanged inputs -> `miss`:
+//      the card is rebuilt before the first response; retained evidence is
+//      marked stale, while a new host probe carries a replacement timestamp.
+//   5. an external-guidance snapshot changed -> `stale`, then a rebuilt body
 //      with the refreshed reference; sourceSignature must not early-hit it.
-//   5. mtime changed but ingest() reports the SAME contentHash -> `hit-content`:
+//   6. mtime changed but ingest() reports the SAME contentHash -> `hit-content`:
 //      the cached body is byte-identical and NO multi-second assemble/detector
 //      rebuild runs. This is the core fix — an active session bumps project-dir
 //      mtimes on nearly every request, but the recs body only changes when the
 //      ingested CONTENT changes.
-//   6. content actually changed -> `stale`: the last-good body is served
+//   7. content actually changed -> `stale`: the last-good body is served
 //      immediately while the rebuild is deferred to the response `finish` event
 //      (so serving stale stays fast), and the cache converges to the fresh body
 //      on a later request.
@@ -346,11 +349,12 @@ try {
   const projectConfigRoot = join(cacheDir, 'project-config');
   const projectSettingsPath = join(projectConfigRoot, '.claude', 'settings.json');
   const adoptionReceiptsPath = join(cacheDir, 'adoption-receipts.jsonl');
+  const missingHookPath = join(claudeDir, 'hooks', 'missing.mjs');
   const stopHookSettings = JSON.stringify({
     hooks: {
       Stop: [
         {
-          hooks: [{ type: 'command', command: 'notify-send done' }],
+          hooks: [{ type: 'command', command: `node ${missingHookPath}` }],
         },
       ],
     },
@@ -485,9 +489,20 @@ try {
     const currentHookOverhead = recommendationsFromBody(cold.body).find(
       (rec) => rec.id === 'speed.hook-overhead'
     );
+    const currentHookIntegrity = recommendationsFromBody(cold.body).find(
+      (rec) => rec.id === 'maintenance.skill-hook-integrity'
+    );
     await check('fresh Stop-hook timing fixture emits on the cold response', () => {
       assert.ok(currentHookOverhead, 'fixture did not emit speed.hook-overhead');
       assert.equal(currentHookOverhead.affected, 5);
+    });
+    await check('fresh missing-hook fixture emits on the cold response', () => {
+      assert.ok(
+        currentHookIntegrity,
+        'fixture did not emit maintenance.skill-hook-integrity'
+      );
+      assert.equal(currentHookIntegrity.provenance?.stale, undefined);
+      assert.ok(currentHookIntegrity.evidence?.[0]?.includes(missingHookPath));
     });
     await check('guidance is undated at the exact 30-day boundary', () => {
       assert.ok(currentRateLimit, 'fixture did not emit reliability.rate-limits');
@@ -576,6 +591,81 @@ try {
         recommendationsFromBody(hookCurrentAgain.body).some(
           (rec) => rec.id === 'speed.hook-overhead'
         )
+      );
+    });
+
+    const hookPathBeforeExpiry = recommendationsFromBody(
+      hookCurrentAgain.body
+    ).find((rec) => rec.id === 'maintenance.skill-hook-integrity');
+    const hookPathCheckedAt = hookPathBeforeExpiry?.provenance?.observations
+      ?.find((observation) => observation.field?.endsWith('.checkedAt'))
+      ?.value;
+    await check('hook-path cache fixture exposes its exact check instant', () => {
+      assert.equal(typeof hookPathCheckedAt, 'string');
+      assert.ok(Number.isFinite(Date.parse(hookPathCheckedAt)));
+    });
+    const hookPathStaleBoundary =
+      Date.parse(typeof hookPathCheckedAt === 'string' ? hookPathCheckedAt : '') +
+      28 * 24 * 60 * 60 * 1000;
+
+    // The missing-hook observation remains the same source artifact, but the
+    // old cached body becomes invalid once its four-week evidence window
+    // expires. A cold rebuild may either retain that observation and mark it
+    // stale, or honestly re-probe the host and replace it with a newer fresh
+    // timestamp. The first response must never be the old cached body.
+    await writeFile(clockFile, String(hookPathStaleBoundary + 1));
+    const hookPathExpired = await getRecs(base);
+    const hookPathExpiredFinding = recommendationsFromBody(
+      hookPathExpired.body
+    ).find((rec) => rec.id === 'maintenance.skill-hook-integrity');
+    const hookPathExpiredCheckedAt = hookPathExpiredFinding?.provenance?.observations
+      ?.find((observation) => observation.field?.endsWith('.checkedAt'))
+      ?.value;
+    const hookPathWasRechecked =
+      hookPathExpiredFinding?.provenance?.stale !== true;
+    await check('hook-path freshness crossing never serves the old body', () => {
+      assert.equal(hookPathExpired.cache, 'miss');
+      assert.notEqual(hookPathExpired.body, hookCurrentAgain.body);
+      assert.ok(hookPathExpiredFinding, 'rebuild lost maintenance.skill-hook-integrity');
+      if (hookPathWasRechecked) {
+        assert.equal(typeof hookPathExpiredCheckedAt, 'string');
+        assert.ok(
+          Date.parse(hookPathExpiredCheckedAt) > Date.parse(hookPathCheckedAt)
+        );
+        assert.doesNotMatch(hookPathExpiredFinding.detail, /stale hook evidence/i);
+      } else {
+        assert.equal(hookPathExpiredCheckedAt, hookPathCheckedAt);
+        assert.match(hookPathExpiredFinding.detail, /stale hook evidence/i);
+      }
+    });
+
+    await writeFile(clockFile, String(hookPathStaleBoundary));
+    const hookPathCurrentAgain = await getRecs(base);
+    await check('backward hook-path crossing preserves honest fresh wording', () => {
+      const finding = recommendationsFromBody(hookPathCurrentAgain.body).find(
+        (rec) => rec.id === 'maintenance.skill-hook-integrity'
+      );
+      assert.ok(finding, 'backward crossing lost maintenance.skill-hook-integrity');
+      assert.equal(finding.provenance?.stale, undefined);
+      assert.doesNotMatch(finding.detail, /stale hook evidence/i);
+      if (hookPathWasRechecked) {
+        assert.equal(hookPathCurrentAgain.cache, 'hit');
+        assert.equal(hookPathCurrentAgain.body, hookPathExpired.body);
+      } else {
+        assert.equal(hookPathCurrentAgain.cache, 'miss');
+      }
+    });
+
+    await writeFile(clockFile, String(staleBoundary));
+    const allCurrentAgain = await getRecs(base);
+    await check('clock reset restores all fresh time-sensitive findings', () => {
+      assert.equal(allCurrentAgain.cache, 'miss');
+      const recs = recommendationsFromBody(allCurrentAgain.body);
+      assert.ok(recs.some((rec) => rec.id === 'speed.hook-overhead'));
+      assert.equal(
+        recs.find((rec) => rec.id === 'maintenance.skill-hook-integrity')
+          ?.provenance?.stale,
+        undefined
       );
     });
 
@@ -888,7 +978,7 @@ try {
       assert.equal(ignoredGuidance.body, freshBody);
     });
 
-    // 5) Bump the project dir mtime WITHOUT changing content. sourceSignature()
+    // 6) Bump the project dir mtime WITHOUT changing content. sourceSignature()
     //    changes (mtime) but ingest()'s contentHash does not, so the gate must
     //    serve the byte-identical cached body as `hit-content` — no rebuild.
     const future = new Date(Date.now() + 60_000);
@@ -899,7 +989,7 @@ try {
       assert.equal(contentHit.body, freshBody);
     });
 
-    // 6) Real content change -> stale-while-revalidate: the previous body is
+    // 7) Real content change -> stale-while-revalidate: the previous body is
     //    served immediately as `stale`.
     await writeFile(
       join(projectDir, 'two.jsonl'),

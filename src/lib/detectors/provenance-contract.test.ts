@@ -429,7 +429,11 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
                 {
                   type: 'command',
                   command: 'node ~/.claude/hooks/gone.mjs',
-                  referencedPaths: [{ path: '~/.claude/hooks/gone.mjs', exists: false }],
+                  referencedPaths: [{
+                    path: '~/.claude/hooks/gone.mjs',
+                    state: 'missing',
+                    checkedAt: '1970-01-01T00:00:00.000Z',
+                  }],
                 },
               ],
             },

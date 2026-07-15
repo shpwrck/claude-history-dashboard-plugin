@@ -1,19 +1,25 @@
 import { describe, it, expect } from 'vitest';
-import { detector } from './skill-hook-integrity';
+import {
+  detector,
+  skillHookIntegrityCacheValidity,
+  skillHookIntegrityCacheValidityContains,
+} from './skill-hook-integrity';
 import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { LiveConfig, LiveResource, LiveSettingsHook } from '../../../types';
+
+const CHECKED_AT = '2026-07-10T12:34:56.000Z';
 
 // ── Fixture builders ───────────────────────────────────────────────────────
 
 /** A hook group whose single command references the given path tokens. */
 function hookGroup(
   command: string,
-  referencedPaths?: { path: string; exists: boolean }[]
+  referencedPaths?: unknown[]
 ): LiveSettingsHook {
   return {
     hooks: [{ type: 'command', command, ...(referencedPaths ? { referencedPaths } : {}) }],
-  };
+  } as unknown as LiveSettingsHook;
 }
 
 function skill(id: string, danglingRefs?: string[]): LiveResource {
@@ -55,13 +61,18 @@ describe('maintenance.skill-hook-integrity — silence', () => {
     expect(run(config())).toBeNull();
   });
 
-  it('stays silent when every referenced hook path existed at ingest', () => {
+  it('stays silent for present and unverifiable hook paths', () => {
     const c = config({
       settings: {
         hooks: {
           Stop: [
             hookGroup('node ~/.claude/hooks/ok.mjs', [
-              { path: '~/.claude/hooks/ok.mjs', exists: true },
+              { path: '~/.claude/hooks/ok.mjs', state: 'present', checkedAt: CHECKED_AT },
+              {
+                path: '~/.claude/skills/unmounted/run.mjs',
+                state: 'unverifiable',
+                checkedAt: CHECKED_AT,
+              },
             ]),
           ],
         },
@@ -93,7 +104,7 @@ describe('maintenance.skill-hook-integrity — dangling hook script', () => {
         hooks: {
           Stop: [
             hookGroup('node ~/.claude/hooks/gone.mjs', [
-              { path: '~/.claude/hooks/gone.mjs', exists: false },
+              { path: '~/.claude/hooks/gone.mjs', state: 'missing', checkedAt: CHECKED_AT },
             ]),
           ],
         },
@@ -103,10 +114,23 @@ describe('maintenance.skill-hook-integrity — dangling hook script', () => {
     expect(rec).not.toBeNull();
     expect(rec!.affected).toBe(1);
     expect(rec!.severity).toBe('warning'); // structural breakage
+    expect(rec!.title).toContain('Recorded');
+    expect(rec!.title).not.toContain('broken');
     // Exact settings key path down to the command.
     expect(rec!.evidence![0]).toContain('hooks.Stop[0].hooks[0].command');
     expect(rec!.evidence![0]).toContain('~/.claude/hooks/gone.mjs');
     expect(rec!.evidence![0]).toContain('hook references a missing script');
+    expect(rec!.evidence![0]).toContain(CHECKED_AT);
+    expect(rec!.provenance!.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'liveConfig.settings.hooks.Stop[0].hooks[0].referencedPaths[0].state',
+        value: 'missing',
+      }),
+      expect.objectContaining({
+        field: 'liveConfig.settings.hooks.Stop[0].hooks[0].referencedPaths[0].checkedAt',
+        value: CHECKED_AT,
+      }),
+    ]));
   });
 
   it('flags project-scoped hooks with a projectSettings key path', () => {
@@ -116,7 +140,11 @@ describe('maintenance.skill-hook-integrity — dangling hook script', () => {
           hooks: {
             PostToolUse: [
               hookGroup('$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh', [
-                { path: '$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh', exists: false },
+                {
+                  path: '$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh',
+                  state: 'missing',
+                  checkedAt: CHECKED_AT,
+                },
               ]),
             ],
           },
@@ -128,6 +156,15 @@ describe('maintenance.skill-hook-integrity — dangling hook script', () => {
     expect(rec!.evidence![0]).toContain(
       'projectSettings["/repo/app"].hooks.PostToolUse[0].hooks[0].command'
     );
+    expect(rec!.provenance!.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field:
+          'liveConfig.projectSettings["/repo/app"].hooks.PostToolUse[0].hooks[0].referencedPaths[0].state',
+      }),
+    ]));
+    expect(rec!.provenance!.observations[0].field).toContain(
+      'liveConfig.projectSettings[*].hooks'
+    );
   });
 
   it('does not flag a present path even alongside a missing one', () => {
@@ -136,8 +173,8 @@ describe('maintenance.skill-hook-integrity — dangling hook script', () => {
         hooks: {
           Stop: [
             hookGroup('node ~/.claude/hooks/a.mjs ~/.claude/hooks/b.mjs', [
-              { path: '~/.claude/hooks/a.mjs', exists: true },
-              { path: '~/.claude/hooks/b.mjs', exists: false },
+              { path: '~/.claude/hooks/a.mjs', state: 'present', checkedAt: CHECKED_AT },
+              { path: '~/.claude/hooks/b.mjs', state: 'missing', checkedAt: CHECKED_AT },
             ]),
           ],
         },
@@ -146,6 +183,20 @@ describe('maintenance.skill-hook-integrity — dangling hook script', () => {
     const rec = run(c);
     expect(rec!.affected).toBe(1); // only the missing one
     expect(rec!.evidence![0]).toContain('~/.claude/hooks/b.mjs');
+  });
+
+  it('fails closed for legacy or malformed path-state records', () => {
+    const malformed = [
+      { path: '~/.claude/hooks/legacy.mjs', exists: false },
+      { path: '~/.claude/hooks/no-time.mjs', state: 'missing' },
+      { path: '~/.claude/hooks/bad-time.mjs', state: 'missing', checkedAt: 'yesterday' },
+      { path: 42, state: 'missing', checkedAt: CHECKED_AT },
+      { path: '~/.claude/hooks/bad-state.mjs', state: 'gone', checkedAt: CHECKED_AT },
+    ];
+    const c = config({
+      settings: { hooks: { Stop: [hookGroup('node hook.mjs', malformed)] } },
+    });
+    expect(run(c)).toBeNull();
   });
 });
 
@@ -184,7 +235,7 @@ describe('maintenance.skill-hook-integrity — grouped card + contract', () => {
         hooks: {
           Stop: [
             hookGroup('node ~/.claude/hooks/gone.mjs', [
-              { path: '~/.claude/hooks/gone.mjs', exists: false },
+              { path: '~/.claude/hooks/gone.mjs', state: 'missing', checkedAt: CHECKED_AT },
             ]),
           ],
         },
@@ -200,6 +251,10 @@ describe('maintenance.skill-hook-integrity — grouped card + contract', () => {
     expect(rec!.category).toBe('maintenance');
     expect(rec!.affected).toBe(2); // one hook + one skill
     expect(rec!.severity).toBe('warning');
+    expect(rec!).toMatchObject({
+      claimClass: 'accounting',
+      proofTier: 'accounting',
+    });
     expect(rec!.detail).toContain('1 hook references a missing script');
     expect(rec!.detail).toContain('1 skill references a removed bundled path');
   });
@@ -216,16 +271,77 @@ describe('maintenance.skill-hook-integrity — grouped card + contract', () => {
     expect(validateRecommendationProvenance(rec!)).toEqual([]);
   });
 
-  it('dates the claim to the ingest time and uses point-in-time wording (not stale present-tense)', () => {
+  it('dates the claim to the actual path check instead of detector time', () => {
     const now = Date.parse('2026-07-11T00:00:00Z');
     const rec = run(kitchenSink(), now);
-    // asOf reflects the ingest moment (buildRecommendations runs at ingest).
-    expect(rec!.provenance!.asOf).toBe('2026-07-11');
-    // Honest framing: "as of the last ingest", never a bare present-tense claim
-    // that the path "is currently missing".
-    expect(rec!.detail).toContain('As of the last ingest (2026-07-11)');
+    expect(rec!.provenance!.asOf).toBe('2026-07-10');
+    expect(rec!.detail).toContain(CHECKED_AT);
     expect(rec!.detail).not.toMatch(/is currently missing/i);
-    // asOf-only (fresh at ingest) is valid without a stale flag.
     expect(rec!.provenance!.stale).toBeUndefined();
+  });
+
+  it('marks an old path check stale and keeps stale wording tied to its timestamp', () => {
+    const rec = run(kitchenSink(), Date.parse('2026-09-15T00:00:00Z'));
+    expect(rec!.provenance).toMatchObject({ asOf: '2026-07-10', stale: true });
+    expect(rec!.detail).toContain(CHECKED_AT);
+    expect(rec!.detail).toMatch(/recheck/i);
+  });
+});
+
+describe('maintenance.skill-hook-integrity — cache validity', () => {
+  const input = {
+    liveConfig: config({
+      settings: {
+        hooks: {
+          Stop: [
+            hookGroup('node ~/.claude/hooks/gone.mjs', [
+              {
+                path: '~/.claude/hooks/gone.mjs',
+                state: 'missing',
+                checkedAt: CHECKED_AT,
+              },
+            ]),
+          ],
+        },
+      },
+    }),
+  } as RecommendationInput;
+  const staleAfter =
+    Date.parse(CHECKED_AT) + 28 * 24 * 60 * 60 * 1000;
+
+  it('uses the exact fresh/stale boundary in both clock directions', () => {
+    const fresh = skillHookIntegrityCacheValidity(input, staleAfter);
+    expect(fresh).toEqual({ after: null, through: staleAfter });
+    expect(skillHookIntegrityCacheValidityContains(fresh, staleAfter)).toBe(true);
+    expect(skillHookIntegrityCacheValidityContains(fresh, staleAfter + 1)).toBe(false);
+
+    const stale = skillHookIntegrityCacheValidity(input, staleAfter + 1);
+    expect(stale).toEqual({ after: staleAfter, through: null });
+    expect(skillHookIntegrityCacheValidityContains(stale, staleAfter + 1)).toBe(true);
+    expect(skillHookIntegrityCacheValidityContains(stale, staleAfter)).toBe(false);
+  });
+
+  it('has no clock transition without a valid missing hook observation', () => {
+    const noMissingHook = {
+      liveConfig: config({
+        settings: {
+          hooks: {
+            Stop: [
+              hookGroup('node ~/.claude/hooks/ok.mjs', [
+                {
+                  path: '~/.claude/hooks/ok.mjs',
+                  state: 'present',
+                  checkedAt: CHECKED_AT,
+                },
+              ]),
+            ],
+          },
+        },
+      }),
+    } as RecommendationInput;
+    expect(skillHookIntegrityCacheValidity(noMissingHook, staleAfter)).toEqual({
+      after: null,
+      through: null,
+    });
   });
 });

@@ -10,17 +10,22 @@
 import {
   closeSync,
   existsSync,
+  lstatSync,
   openSync,
   readSync,
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
 import {
   validateSettingsJson,
   type EffectiveSettingsEnvironment,
 } from './config-hygiene';
-import type { SettingsEnvironmentObservation, SettingsHealth } from '../types';
+import type {
+  HookReferencedPath,
+  SettingsEnvironmentObservation,
+  SettingsHealth,
+} from '../types';
 import { readDirentsBoundedSync } from './bounded-fs';
 
 // Untyped-JSON view: the readers below only ever access fields through
@@ -37,6 +42,8 @@ export interface LiveConfigPathOptions {
   configFileMaxBytes?: number;
   configResourceMaxEntries?: number;
   environment?: SettingsEnvironmentObservation;
+  /** Test seam for the synchronous hook-path observation timestamp. */
+  now?: () => Date;
 }
 
 interface LiveConfigPaths {
@@ -735,11 +742,11 @@ function readProjectSettings(
 }
 
 // ── Reference integrity (#2500) ────────────────────────────────────────────
-// Existence of a hook's referenced script and a skill's bundled resources MUST
-// be evaluated host-side at ingest — detectors are pure and cannot stat. These
-// helpers annotate the assembled bundle with per-hook `referencedPaths` and
-// per-skill `danglingRefs` so `maintenance.skill-hook-integrity` can flag a hook
-// or skill that points at a path removed off disk.
+// The state of a hook's referenced script and the existence of a skill's bundled
+// resources MUST be evaluated host-side at ingest — detectors are pure and
+// cannot stat. These helpers annotate the assembled bundle with per-hook
+// `referencedPaths` and per-skill `danglingRefs` so
+// `maintenance.skill-hook-integrity` can flag only reproducible missing paths.
 
 /** Cap on tokens scanned per hook command — a bound, not a semantic limit. */
 const HOOK_COMMAND_MAX_TOKENS = 64;
@@ -780,7 +787,7 @@ function resolveVerifiablePath(
 
 /**
  * Extract the verifiable filesystem path tokens a hook `command` references,
- * each with its ingest-time existence. Conservative: whitespace-tokenized,
+ * each with its timestamped ingest-time state. Conservative: whitespace-tokenized,
  * redirect targets (`> file`) are ignored (they are outputs, not references),
  * and only tokens `resolveVerifiablePath` accepts are recorded. `path` is the
  * token exactly as written for display/provenance.
@@ -788,9 +795,10 @@ function resolveVerifiablePath(
 function extractHookReferencedPaths(
   command: string,
   homeDir: string,
-  projectDir: string | undefined
-): { path: string; exists: boolean }[] {
-  const out: { path: string; exists: boolean }[] = [];
+  projectDir: string | undefined,
+  checkedAt: string
+): HookReferencedPath[] {
+  const out: HookReferencedPath[] = [];
   const seen = new Set<string>();
   const tokens = command.split(/\s+/).slice(0, HOOK_COMMAND_MAX_TOKENS);
   let expectRedirectTarget = false;
@@ -816,9 +824,77 @@ function extractHookReferencedPaths(
     const resolved = resolveVerifiablePath(tok, homeDir, projectDir);
     if (resolved === null) continue;
     seen.add(tok);
-    out.push({ path: tok, exists: existsSync(resolved) });
+    out.push({ path: tok, state: probeHookReferencedPath(resolved), checkedAt });
   }
   return out;
+}
+
+type HookPathState = 'present' | 'missing' | 'unverifiable';
+
+const MISSING_PATH_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
+function fsErrorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object' || !('code' in err)) return undefined;
+  return typeof err.code === 'string' ? err.code : undefined;
+}
+
+/**
+ * Classify one absolute hook path without pretending an inaccessible symlink
+ * target is absent. Prefixes are walked lexically because `realpath` cannot
+ * recover a target outside the visible namespace (#2553).
+ */
+function probeHookReferencedPath(target: string): HookPathState {
+  try {
+    statSync(target);
+    return 'present';
+  } catch {
+    // Inspect below: a failed full stat can mean a normal missing component OR
+    // an ancestor symlink whose target is outside this process's namespace.
+  }
+
+  const absolute = resolve(target);
+  const root = parse(absolute).root;
+  const parts = absolute.slice(root.length).split(sep).filter(Boolean);
+  const reachableSymlinks: string[] = [];
+  let prefix = root;
+
+  for (const part of parts) {
+    prefix = join(prefix, part);
+    let entry;
+    try {
+      entry = lstatSync(prefix);
+    } catch (err) {
+      if (!MISSING_PATH_CODES.has(fsErrorCode(err) ?? '')) return 'unverifiable';
+      // A previously reachable symlink may have disappeared after its first
+      // check. Recheck before making the stronger `missing` claim.
+      for (const symlink of reachableSymlinks) {
+        try {
+          statSync(symlink);
+        } catch {
+          return 'unverifiable';
+        }
+      }
+      return 'missing';
+    }
+
+    if (entry.isSymbolicLink()) {
+      try {
+        statSync(prefix);
+      } catch {
+        return 'unverifiable';
+      }
+      reachableSymlinks.push(prefix);
+    }
+  }
+
+  // The lexical entries existed but the initial target stat failed: retry once
+  // for races, then retain the honest ambiguous result.
+  try {
+    statSync(absolute);
+    return 'present';
+  } catch {
+    return 'unverifiable';
+  }
 }
 
 /** Annotate every hook command in a merged settings object with its
@@ -826,7 +902,8 @@ function extractHookReferencedPaths(
 function annotateHookReferencedPaths(
   settings: Obj,
   homeDir: string,
-  projectDir: string | undefined
+  projectDir: string | undefined,
+  checkedAt: string
 ): void {
   const hooks = settings && typeof settings.hooks === 'object' ? (settings.hooks as Obj) : null;
   if (!hooks) return;
@@ -841,7 +918,7 @@ function annotateHookReferencedPaths(
         if (!h || typeof h !== 'object') continue;
         const cmd = (h as Obj).command;
         if (typeof cmd !== 'string') continue;
-        const refs = extractHookReferencedPaths(cmd, homeDir, projectDir);
+        const refs = extractHookReferencedPaths(cmd, homeDir, projectDir, checkedAt);
         if (refs.length > 0) (h as Obj).referencedPaths = refs;
       }
     }
@@ -925,8 +1002,9 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
     settings,
     environment: effectiveSettingsEnvironment,
   } = readLiveSettings(paths);
-  // #2500: capture each global/local hook command's referenced-path existence.
-  annotateHookReferencedPaths(settings, paths.homeDir, undefined);
+  const hookPathsCheckedAt = (opts.now?.() ?? new Date(Date.now())).toISOString();
+  // #2500/#2553: capture each hook command's conservative referenced-path state.
+  annotateHookReferencedPaths(settings, paths.homeDir, undefined, hookPathsCheckedAt);
   // Validate BOTH raw files before mergeLiveSettings projects their effective
   // subset. Local syntax/type/unknown/rule/interpolation failures matter even
   // when settings.json exists, and every finding retains its owning source.
@@ -954,7 +1032,7 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
   // #2500: project-scoped hooks resolve `$CLAUDE_PROJECT_DIR` against their root.
   const projectSettings = readProjectSettings(projectRoots, paths.configFileMaxBytes);
   for (const [root, ps] of Object.entries(projectSettings)) {
-    annotateHookReferencedPaths(ps, paths.homeDir, root);
+    annotateHookReferencedPaths(ps, paths.homeDir, root, hookPathsCheckedAt);
   }
   const skills = [
     ...listResources(

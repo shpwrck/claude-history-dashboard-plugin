@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -625,7 +625,7 @@ describe('assembleLiveConfig', () => {
 
   // ── #2500 reference integrity: host-side existence at ingest ──────────────
 
-  it('annotates hook commands with each referenced path and its existence (#2500)', () => {
+  it('annotates hook commands with a timestamped present/missing path state (#2553)', () => {
     mkdirSync(join(claudeDir, 'hooks'), { recursive: true });
     writeFileSync(join(claudeDir, 'hooks', 'present.mjs'), '// hook\n');
     writeFileSync(
@@ -647,11 +647,80 @@ describe('assembleLiveConfig', () => {
       })
     );
 
-    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      now: () => new Date('2026-07-15T02:03:04.000Z'),
+    });
     const refs = liveConfig.settings.hooks?.Stop?.[0]?.hooks?.[0]?.referencedPaths;
     expect(refs).toEqual([
-      { path: '~/.claude/hooks/present.mjs', exists: true },
-      { path: '~/.claude/hooks/gone.mjs', exists: false },
+      {
+        path: '~/.claude/hooks/present.mjs',
+        state: 'present',
+        checkedAt: '2026-07-15T02:03:04.000Z',
+      },
+      {
+        path: '~/.claude/hooks/gone.mjs',
+        state: 'missing',
+        checkedAt: '2026-07-15T02:03:04.000Z',
+      },
+    ]);
+  });
+
+  it('distinguishes reachable from unavailable hook-script symlink targets (#2553)', () => {
+    const externalSkill = join(root, '.agents', 'skills', 'hook-tools');
+    mkdirSync(externalSkill, { recursive: true });
+    writeFileSync(join(externalSkill, 'present.mjs'), '// hook\n');
+    mkdirSync(join(claudeDir, 'skills'), { recursive: true });
+    mkdirSync(join(claudeDir, 'hooks'), { recursive: true });
+    symlinkSync('../../.agents/skills/hook-tools', join(claudeDir, 'skills', 'hook-tools'));
+    symlinkSync('../../.agents/skills/unmounted', join(claudeDir, 'skills', 'unmounted'));
+    symlinkSync(
+      join(root, '.agents', 'hooks', 'unmounted.mjs'),
+      join(claudeDir, 'hooks', 'dangling.mjs')
+    );
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          Stop: [{
+            hooks: [{
+              type: 'command',
+              command: [
+                'node ~/.claude/skills/hook-tools/present.mjs',
+                'node ~/.claude/skills/hook-tools/gone.mjs',
+                'node ~/.claude/skills/unmounted/run.mjs',
+                'node ~/.claude/hooks/dangling.mjs',
+              ].join(' && '),
+            }],
+          }],
+        },
+      })
+    );
+
+    const refs = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      now: () => new Date('2026-07-15T02:03:04.000Z'),
+    }).settings.hooks?.Stop?.[0]?.hooks?.[0]?.referencedPaths;
+
+    expect(refs).toEqual([
+      expect.objectContaining({
+        path: '~/.claude/skills/hook-tools/present.mjs',
+        state: 'present',
+      }),
+      expect.objectContaining({
+        path: '~/.claude/skills/hook-tools/gone.mjs',
+        state: 'missing',
+      }),
+      expect.objectContaining({
+        path: '~/.claude/skills/unmounted/run.mjs',
+        state: 'unverifiable',
+      }),
+      expect.objectContaining({
+        path: '~/.claude/hooks/dangling.mjs',
+        state: 'unverifiable',
+      }),
     ]);
   });
 
@@ -669,7 +738,11 @@ describe('assembleLiveConfig', () => {
       })
     );
 
-    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      now: () => new Date('2026-07-15T02:03:04.000Z'),
+    });
     expect(
       liveConfig.settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.referencedPaths
     ).toBeUndefined();
@@ -699,13 +772,25 @@ describe('assembleLiveConfig', () => {
       })
     );
 
-    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      now: () => new Date('2026-07-15T02:03:04.000Z'),
+    });
     const group = liveConfig.projectSettings?.[projectRoot]?.hooks?.PostToolUse?.[0];
     expect(group?.hooks?.[0]?.referencedPaths).toEqual([
-      { path: '$CLAUDE_PROJECT_DIR/.claude/hooks/present.sh', exists: true },
+      {
+        path: '$CLAUDE_PROJECT_DIR/.claude/hooks/present.sh',
+        state: 'present',
+        checkedAt: '2026-07-15T02:03:04.000Z',
+      },
     ]);
     expect(group?.hooks?.[1]?.referencedPaths).toEqual([
-      { path: '$CLAUDE_PROJECT_DIR/.claude/hooks/gone.sh', exists: false },
+      {
+        path: '$CLAUDE_PROJECT_DIR/.claude/hooks/gone.sh',
+        state: 'missing',
+        checkedAt: '2026-07-15T02:03:04.000Z',
+      },
     ]);
   });
 

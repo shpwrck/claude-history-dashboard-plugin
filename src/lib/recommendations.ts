@@ -91,7 +91,10 @@ import {
   DETECTORS,
   hookOverheadCacheValidity,
   hookOverheadCacheValidityContains,
+  skillHookIntegrityCacheValidity,
+  skillHookIntegrityCacheValidityContains,
   type HookOverheadCacheValidity,
+  type SkillHookIntegrityCacheValidity,
 } from './detectors';
 import {
   externalGuidanceCacheValidity,
@@ -271,6 +274,7 @@ interface RecommendationBuildCacheEntry {
   recommendations: Recommendation[];
   guidanceCacheValidity: ExternalGuidanceCacheValidity;
   hookOverheadCacheValidity: HookOverheadCacheValidity;
+  skillHookIntegrityCacheValidity: SkillHookIntegrityCacheValidity;
 }
 
 const buildCache: WeakMap<RecommendationInput, RecommendationBuildCacheEntry> =
@@ -359,9 +363,9 @@ export function rankRecommendations(
  * in `parse-sessions.ts`. See issue #161.
  *
  * Skip cache when the caller pins `now` — those calls are time-keyed. Normal
- * identity-cache entries carry both external-guidance and Stop-hook timing
- * validity boundaries, so wall-clock movement cannot leave a time-relative
- * label or finding stale.
+ * identity-cache entries carry external-guidance, Stop-hook timing, and
+ * hook-path evidence validity boundaries, so wall-clock movement cannot leave
+ * a time-relative label or finding stale.
  */
 /**
  * Collapse the duplicate `safety.unattended-sessions` card into the single
@@ -419,7 +423,11 @@ export function buildRecommendations(
     if (
       cached &&
       externalGuidanceCacheValidityContains(cached.guidanceCacheValidity, t) &&
-      hookOverheadCacheValidityContains(cached.hookOverheadCacheValidity, t)
+      hookOverheadCacheValidityContains(cached.hookOverheadCacheValidity, t) &&
+      skillHookIntegrityCacheValidityContains(
+        cached.skillHookIntegrityCacheValidity,
+        t
+      )
     ) {
       return cached.recommendations;
     }
@@ -448,6 +456,7 @@ export function buildRecommendations(
         t
       ),
       hookOverheadCacheValidity: hookOverheadCacheValidity(input, t),
+      skillHookIntegrityCacheValidity: skillHookIntegrityCacheValidity(input, t),
     });
   }
   return sorted;

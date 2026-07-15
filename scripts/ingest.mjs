@@ -1276,8 +1276,8 @@ export const PARSER_SIG_VERSION = 'v4';
 // restart can load and serve a persisted dataset assembled from v8 rows before
 // that reparse finishes. Turn over this downstream cache so the old v10 body is
 // never accepted as current.
-// v12 (#2500): assembleLiveConfig now annotates each hook command with its
-// ingest-time `referencedPaths` (existence) and each skill with `danglingRefs`,
+// v12 (#2500): assembleLiveConfig began annotating each hook command with its
+// ingest-time `referencedPaths` existence observation and each skill with `danglingRefs`,
 // feeding maintenance.skill-hook-integrity. These are a pure serialized-shape
 // change with NO ~/.claude source-artifact change — an unchanged settings.json /
 // SKILL.md keeps its content hash, so without this bump a persisted v11 blob
@@ -1313,7 +1313,11 @@ export const PARSER_SIG_VERSION = 'v4';
 // v19 (#2663): toolData now carries parser-owned dangerous permission-prefix
 // matches derived before raw Bash bodies are stripped. Reject persisted v18
 // bodies whose previews could otherwise be mistaken for executable-prefix truth.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 19;
+// v20 (#2553): assembleLiveConfig replaces hook referencedPaths' ambiguous
+// Boolean `exists` field with timestamped present/missing/unverifiable states.
+// Unchanged settings sources would otherwise preserve cached false-missing
+// claims from containers that cannot follow host-side skill symlink targets.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 20;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
