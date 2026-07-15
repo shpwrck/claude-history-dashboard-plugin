@@ -105,11 +105,11 @@ test('session-blob version is the value the session_blob cache key actually bake
   assert.equal(typeof SESSION_BLOB_OUTPUT.version, 'string');
 });
 
-test('session-blob version turns over for persisted dangerous-prefix truth (#2663)', () => {
+test('session-blob version turns over for leave-behind and durable-command truth (#2313)', () => {
   assert.equal(
     SESSION_BLOB_OUTPUT.version,
-    'dangerous-prefix-rules-v13',
-    'tool_json now persists commandDangerousRuleMatches; the pre-field v12 cache key must not remain current'
+    'durable-command-kind-v14',
+    'tool_json now persists leaveBehindStructure and commandDurableKind; the pre-field v13 cache key must not remain current'
   );
 });
 

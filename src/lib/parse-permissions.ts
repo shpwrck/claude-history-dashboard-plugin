@@ -7,7 +7,8 @@ import type { ToolUsageData, DangerousCommandCertainty } from './parse-tools-typ
 export type { DangerousCommandCertainty } from './parse-tools-types';
 import { evidenceRefForEntry, type EvidenceRef } from './evidence';
 import type { SessionTimeline } from './parse-timeline';
-import { parseJsonl, type RawSessionEntry } from './parse-utils';
+export { parsePermissionData } from './parse-permission-data';
+export type { PermissionChange } from './parse-permission-data';
 import {
   bashSpec,
   parsePermRule,
@@ -58,18 +59,6 @@ export interface SessionSafetyScore {
   modes: string[];
 }
 
-export interface PermissionChange {
-  sessionId: string;
-  timestamp: string;
-  fromMode: string | null;
-  toMode: string;
-}
-
-// Adds permission-specific fields on top of the shared wire shape.
-type PermissionSessionEntry = RawSessionEntry & {
-  permissionMode?: unknown;
-};
-
 const MAX_COMMAND_LEN = 200;
 
 // ── executable-shell skeleton (#2039) ──────────────────────────────────────
@@ -87,9 +76,287 @@ const MAX_COMMAND_LEN = 200;
 // corpus this targets, and the conservative bias prefers a rare miss over the
 // rampant false positives; revisit if a real `sh -c`-wrapped deletion appears.
 
-/** Remove heredoc bodies: `<<['"]?WORD['"]? … \nWORD`, incl. `<<-`. */
+interface HeredocOpener {
+  delimiter: string;
+  stripLeadingTabs: boolean;
+  quoted: boolean;
+}
+
+export interface ShellHeredoc {
+  commandLine: string;
+  delimiter: string;
+  quoted: boolean;
+  body: string;
+}
+
+function isShellWordSeparator(ch: string): boolean {
+  return /[\s;&|()<>]/.test(ch);
+}
+
+/** Whether a backslash quotes the following character in the active shell
+ * quoting context. POSIX single quotes make every enclosed character literal,
+ * including backslash itself; double quotes only retain backslash escaping for
+ * the shell's small special-character set. */
+function shellBackslashEscapes(
+  quote: "'" | '"' | '`' | null,
+  next: string | undefined
+): boolean {
+  if (quote === "'") return false;
+  if (quote === '"') return next != null && /[$`"\\\n\r]/.test(next);
+  if (quote === '`') return next != null && /[$`\\\n\r]/.test(next);
+  return next != null;
+}
+
+function heredocOpeners(
+  line: string,
+  initialQuote: "'" | '"' | null = null
+): { openers: HeredocOpener[]; quote: "'" | '"' | null } {
+  const openers: HeredocOpener[] = [];
+  let quote = initialQuote;
+  let arithmeticDepth = 0;
+  let arithmeticBracketDepth = 0;
+  let escaped = false;
+  let atWordStart = true;
+  for (let index = 0; index < line.length; index += 1) {
+    const ch = line[index];
+    if (quote === "'") {
+      atWordStart = false;
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (escaped) {
+      if (ch !== '\n' && ch !== '\r') atWordStart = false;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && shellBackslashEscapes(quote, line[index + 1])) {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      atWordStart = false;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (arithmeticDepth > 0) {
+      if (ch === '(') arithmeticDepth += 1;
+      if (ch === ')') arithmeticDepth -= 1;
+      continue;
+    }
+    if (arithmeticBracketDepth > 0) {
+      if (ch === '[') arithmeticBracketDepth += 1;
+      if (ch === ']') arithmeticBracketDepth -= 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      atWordStart = false;
+      continue;
+    }
+    if (ch === '$' && line[index + 1] === '[') {
+      arithmeticBracketDepth = 1;
+      atWordStart = false;
+      index += 1;
+      continue;
+    }
+    if (
+      (ch === '$' && line[index + 1] === '(' && line[index + 2] === '(') ||
+      (ch === '(' && line[index + 1] === '(')
+    ) {
+      arithmeticDepth = 2;
+      atWordStart = false;
+      index += ch === '$' ? 2 : 1;
+      continue;
+    }
+    if (ch === '#' && atWordStart) break;
+    if (
+      ch !== '<' ||
+      line[index - 1] === '<' ||
+      line[index + 1] !== '<' ||
+      line[index + 2] === '<'
+    ) {
+      atWordStart = isShellWordSeparator(ch);
+      continue;
+    }
+
+    let cursor = index + 2;
+    const stripLeadingTabs = line[cursor] === '-';
+    if (stripLeadingTabs) cursor += 1;
+    while (line[cursor] === ' ' || line[cursor] === '\t') cursor += 1;
+    let delimiterQuote: "'" | '"' | null = null;
+    let quoted = false;
+    let delimiter = '';
+    while (cursor < line.length) {
+      const delimiterChar = line[cursor];
+      if (delimiterQuote) {
+        if (delimiterChar === delimiterQuote) {
+          delimiterQuote = null;
+        } else {
+          delimiter += delimiterChar;
+        }
+        cursor += 1;
+        continue;
+      }
+      if (isShellWordSeparator(delimiterChar)) break;
+      if (
+        delimiterChar === '$' &&
+        (line[cursor + 1] === "'" || line[cursor + 1] === '"')
+      ) {
+        quoted = true;
+        delimiterQuote = line[cursor + 1] as "'" | '"';
+        cursor += 2;
+        continue;
+      }
+      if (delimiterChar === "'" || delimiterChar === '"') {
+        quoted = true;
+        delimiterQuote = delimiterChar;
+        cursor += 1;
+        continue;
+      }
+      if (delimiterChar === '\\' && cursor + 1 < line.length) {
+        quoted = true;
+        cursor += 1;
+        delimiter += line[cursor];
+        cursor += 1;
+        continue;
+      }
+      delimiter += delimiterChar;
+      cursor += 1;
+    }
+    if (delimiterQuote || !delimiter) continue;
+    openers.push({ delimiter, stripLeadingTabs, quoted });
+    atWordStart = false;
+    index = cursor - 1;
+  }
+  return { openers, quote };
+}
+
+function scanHeredocs(s: string): { source: string; heredocs: ShellHeredoc[] } {
+  const out: string[] = [];
+  const heredocs: ShellHeredoc[] = [];
+  let logicalCommandLine = '';
+  let commandQuote: "'" | '"' | null = null;
+  const pending: Array<{
+    opener: HeredocOpener;
+    commandLine: string;
+    body: string[];
+  }> = [];
+  for (const line of s.split(/\r?\n/)) {
+    if (pending.length > 0) {
+      const current = pending[0];
+      const opener = current.opener;
+      const candidate = opener.stripLeadingTabs ? line.replace(/^\t+/, '') : line;
+      if (candidate === opener.delimiter) {
+        heredocs.push({
+          commandLine: current.commandLine,
+          delimiter: opener.delimiter,
+          quoted: opener.quoted,
+          body: current.body.join('\n'),
+        });
+        pending.shift();
+      } else {
+        current.body.push(candidate);
+      }
+      continue;
+    }
+    out.push(line);
+    const continuedLine = logicalCommandLine + line;
+    let trailingBackslashes = 0;
+    for (
+      let index = continuedLine.length - 1;
+      index >= 0 && continuedLine[index] === '\\';
+      index -= 1
+    ) {
+      trailingBackslashes += 1;
+    }
+    if (trailingBackslashes % 2 === 1) {
+      logicalCommandLine = continuedLine.slice(0, -1);
+      continue;
+    }
+    logicalCommandLine = '';
+    const lineScan = heredocOpeners(continuedLine, commandQuote);
+    commandQuote = lineScan.quote;
+    pending.push(
+      ...lineScan.openers.map((opener) => ({
+        opener,
+        commandLine: continuedLine,
+        body: [],
+      }))
+    );
+  }
+  // An unterminated heredoc consumes through EOF; shells warn, but still feed
+  // the accumulated body to the command.
+  for (const current of pending) {
+    heredocs.push({
+      commandLine: current.commandLine,
+      delimiter: current.opener.delimiter,
+      quoted: current.opener.quoted,
+      body: current.body.join('\n'),
+    });
+  }
+  return { source: out.join('\n'), heredocs };
+}
+
+/** Extract heredocs while retaining whether shell expansion is enabled. */
+export function shellHeredocs(s: string): ShellHeredoc[] {
+  return scanHeredocs(s).heredocs;
+}
+
+/** Remove heredoc bodies using shell's exact physical-line terminator rules. */
 function stripHeredocBodies(s: string): string {
-  return s.replace(/<<-?\s*(['"]?)([A-Za-z_]\w*)\1[\s\S]*?\n\s*\2\b/g, '<<HEREDOC');
+  return scanHeredocs(s).source;
+}
+
+/** Remove shell comments without erasing quoted `#` arguments. In POSIX shell
+ * syntax `#` starts a comment only at the beginning of a word, so hashes inside
+ * values such as `color=#fff` remain data. Newlines are retained because they
+ * still separate executable commands. */
+function stripShellComments(s: string): string {
+  let out = '';
+  let quote: "'" | '"' | '`' | null = null;
+  let escaped = false;
+  let atWordStart = true;
+
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (quote === "'") {
+      out += ch;
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (escaped) {
+      out += ch;
+      // An escaped newline is removed later and preserves the lexical word
+      // boundary from the prior physical line. Any other escaped character,
+      // including whitespace, is part of the current word.
+      if (ch !== '\n' && ch !== '\r') atWordStart = false;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && shellBackslashEscapes(quote, s[i + 1])) {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      out += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      out += ch;
+      atWordStart = false;
+      continue;
+    }
+    if (ch === '#' && atWordStart) {
+      while (i + 1 < s.length && s[i + 1] !== '\n') i += 1;
+      continue;
+    }
+    out += ch;
+    atWordStart = isShellWordSeparator(ch);
+  }
+  return out;
 }
 
 /** Blank single/double-quoted string literals, preserving token boundaries so a
@@ -101,10 +368,15 @@ function stripQuotedLiterals(s: string): string {
     .replace(/"(?:[^"\\]|\\.)*"/g, '""');
 }
 
+/** Shell source with non-executable bodies/comments removed but quoting kept. */
+export function executableShellSource(command: string): string {
+  return stripShellComments(stripHeredocBodies(command)).replace(/\\\r?\n/g, '');
+}
+
 /** The command reduced to tokens at real command positions: heredoc bodies and
  *  quoted literals removed (#2039). Matchers run against THIS, not the raw text. */
 export function executableShellSkeleton(command: string): string {
-  return stripQuotedLiterals(stripHeredocBodies(command));
+  return stripQuotedLiterals(executableShellSource(command));
 }
 
 // Matches `rm` followed by a flag cluster that contains both `r` and `f`,
@@ -324,11 +596,15 @@ function splitShellSegments(command: string): string[] {
 
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
     if (escaped) {
       escaped = false;
       continue;
     }
-    if (ch === '\\') {
+    if (ch === '\\' && shellBackslashEscapes(quote, command[i + 1])) {
       escaped = true;
       continue;
     }
@@ -342,12 +618,27 @@ function splitShellSegments(command: string): string[] {
     }
     const next = command[i + 1];
     const isDouble = (ch === '&' && next === '&') || (ch === '|' && next === '|');
-    const isSeparator = isDouble || ch === ';' || ch === '\n' || ch === '|';
+    const isPipeAnd = ch === '|' && next === '&';
+    const isPipeline = ch === '|' && command[i - 1] !== '>';
+    const isBackgroundSeparator =
+      ch === '&' &&
+      next !== '&' &&
+      command[i - 1] !== '|' &&
+      next !== '>' &&
+      command[i - 1] !== '>' &&
+      command[i - 1] !== '<';
+    const isSeparator =
+      isDouble ||
+      isPipeAnd ||
+      isBackgroundSeparator ||
+      ch === ';' ||
+      ch === '\n' ||
+      isPipeline;
     if (!isSeparator) continue;
     const segment = command.slice(start, i).trim();
     if (segment) out.push(segment);
-    start = i + (isDouble ? 2 : 1);
-    if (isDouble) i += 1;
+    start = i + (isDouble || isPipeAnd ? 2 : 1);
+    if (isDouble || isPipeAnd) i += 1;
   }
 
   const tail = command.slice(start).trim();
@@ -359,6 +650,7 @@ function tokenizeShellSegment(segment: string): string[] {
   const out: string[] = [];
   let token = '';
   let quote: "'" | '"' | '`' | null = null;
+  let quotedPartStart = 0;
   let escaped = false;
 
   const push = () => {
@@ -368,26 +660,66 @@ function tokenizeShellSegment(segment: string): string[] {
 
   for (let i = 0; i < segment.length; i += 1) {
     const ch = segment[i];
+    if (quote === "'") {
+      if (ch === "'") {
+        const quotedPart = token.slice(quotedPartStart);
+        if (/^\d*>>?$/.test(quotedPart)) {
+          token =
+            token.slice(0, quotedPartStart) +
+            quotedPart.replace('>', '\\>');
+        }
+        quote = null;
+      } else token += ch;
+      continue;
+    }
     if (escaped) {
-      token += ch;
+      // Keep escaped redirect glyphs distinguishable from shell operators.
+      // `\>` is an argv character, not a write, including inside an SSH
+      // payload that will be parsed a second time by the remote classifier.
+      token += ch === '>' ? `\\${ch}` : ch;
       escaped = false;
       continue;
     }
-    if (ch === '\\') {
+    if (ch === '\\' && shellBackslashEscapes(quote, segment[i + 1])) {
       escaped = true;
       continue;
     }
     if (quote) {
-      if (ch === quote) quote = null;
-      else token += ch;
+      if (ch === quote) {
+        const quotedPart = token.slice(quotedPartStart);
+        if (/^\d*>>?$/.test(quotedPart)) {
+          token =
+            token.slice(0, quotedPartStart) +
+            quotedPart.replace('>', '\\>');
+        }
+        quote = null;
+      } else token += ch;
       continue;
     }
     if (ch === "'" || ch === '"' || ch === '`') {
       quote = ch;
+      quotedPartStart = token.length;
       continue;
     }
     if (/\s/.test(ch)) {
       push();
+      continue;
+    }
+    if (ch === '(' || ch === ')') {
+      push();
+      out.push(ch);
+      continue;
+    }
+    // Preserve quote provenance for redirects: an unquoted `>file` is split
+    // into an operator + target, while the literal argument `'>file'` remains
+    // one token and therefore cannot be mistaken for a write.
+    if (ch === '>') {
+      const fd = /^\d+$/.test(token) ? token : '';
+      if (fd) token = '';
+      else push();
+      const append = segment[i + 1] === '>';
+      out.push(`${fd}${append ? '>>' : '>'}`);
+      if (append || segment[i + 1] === '|') i += 1;
       continue;
     }
     token += ch;
@@ -400,29 +732,207 @@ function isEnvAssignment(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=.*$/.test(token);
 }
 
+const SHELL_CONTROL_PREFIXES = new Set([
+  'if',
+  'then',
+  'elif',
+  'else',
+  'while',
+  'until',
+  'do',
+  '!',
+  '{',
+  '(',
+]);
+
+const SUDO_OPTIONS_WITH_ARGUMENT = new Set([
+  '-C', '-c', '-D', '-g', '-h', '-p', '-R', '-r', '-T', '-t', '-U', '-u',
+  '--close-from', '--chdir', '--group', '--host', '--prompt', '--chroot',
+  '--role', '--command-timeout', '--type', '--other-user', '--user',
+]);
+const SUDO_INFORMATIONAL_OPTIONS = new Set([
+  '--help',
+  '-l',
+  '--list',
+  '-V',
+  '--version',
+  '-v',
+  '--validate',
+  '-K',
+  '--remove-timestamp',
+]);
+const SUDO_INFORMATIONAL_SHORT_CLUSTER = /^-[ABbeEHikKlnNPSVsv]*[lvV][ABbeEHikKlnNPSVsv]*$/;
+const SUDO_COMBINED_OPTION_WITH_ARGUMENT = /^-[ABbeEHikKlnNPSVsv]*[CcDghpRrTtUu]$/;
+const TIME_OPTIONS_WITH_ARGUMENT = new Set(['-f', '-o', '--format', '--output']);
+const ENV_OPTIONS_WITH_ARGUMENT = new Set([
+  '-C',
+  '-S',
+  '-u',
+  '--chdir',
+  '--split-string',
+  '--unset',
+]);
+const TIMEOUT_OPTIONS_WITH_ARGUMENT = new Set([
+  '-k',
+  '-s',
+  '--kill-after',
+  '--signal',
+]);
+
+function skipWrapperOptions(
+  tokens: string[],
+  start: number,
+  optionsWithArgument: Set<string>
+): number {
+  let i = start;
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    if (tokens[i] === '--') return i + 1;
+    const option = tokens[i];
+    i += optionsWithArgument.has(option) ? 2 : 1;
+  }
+  return i;
+}
+
+/** Return the wrapped command index, or null when sudo itself is the action. */
+function sudoCommandIndex(tokens: string[], start: number): number | null {
+  let i = start;
+  while (i < tokens.length) {
+    const option = tokens[i];
+    if (option === '--') return i + 1;
+    if (!option.startsWith('-')) return i;
+    if (
+      SUDO_INFORMATIONAL_OPTIONS.has(option) ||
+      SUDO_INFORMATIONAL_SHORT_CLUSTER.test(option)
+    ) {
+      return null;
+    }
+    i +=
+      SUDO_OPTIONS_WITH_ARGUMENT.has(option) ||
+      SUDO_COMBINED_OPTION_WITH_ARGUMENT.test(option)
+        ? 2
+        : 1;
+  }
+  return i;
+}
+
+/** `command -v/-V` reports resolution; it does not execute the operand. */
+function commandExecutableIndex(tokens: string[], start: number): number | null {
+  let i = start;
+  while (i < tokens.length) {
+    const option = tokens[i];
+    if (option === '--') return i + 1;
+    if (!option.startsWith('-')) return i;
+    if (
+      option === '--help' ||
+      option === '--version' ||
+      /^-[^-]*[vV]/.test(option)
+    ) {
+      return null;
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function envExecutableTokens(tokens: string[], start: number): string[] {
+  let i = start;
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    const option = tokens[i];
+    if (option === '--') return tokens.slice(i + 1);
+    if (option === '--help' || option === '--version') return [];
+    if (option === '-S' || option === '--split-string') {
+      const splitString = tokens[i + 1] ?? '';
+      return [
+        ...tokenizeShellSegment(splitString),
+        ...tokens.slice(i + 2),
+      ];
+    }
+    if (option.startsWith('--split-string=')) {
+      return [
+        ...tokenizeShellSegment(option.slice('--split-string='.length)),
+        ...tokens.slice(i + 1),
+      ];
+    }
+    i += ENV_OPTIONS_WITH_ARGUMENT.has(option) ? 2 : 1;
+  }
+  return tokens.slice(i);
+}
+
+function timeoutCommandIndex(tokens: string[], start: number): number | null {
+  let i = start;
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    const option = tokens[i];
+    if (option === '--') {
+      i += 1;
+      break;
+    }
+    if (option === '--help' || option === '--version') return null;
+    i += TIMEOUT_OPTIONS_WITH_ARGUMENT.has(option) ? 2 : 1;
+  }
+  return i < tokens.length ? i + 1 : null; // skip the duration operand
+}
+
 function executableTokens(tokens: string[]): string[] {
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
+    if (SHELL_CONTROL_PREFIXES.has(t)) {
+      i += 1;
+      continue;
+    }
+    if (/^\d*>>?$/.test(t)) {
+      i += 2;
+      continue;
+    }
     if (isEnvAssignment(t)) {
       i += 1;
       continue;
     }
-    if (t === 'sudo' || t === 'time' || t === 'command') {
-      i += 1;
-      while (i < tokens.length && tokens[i].startsWith('-')) i += 1;
+    if (t === 'sudo') {
+      const commandIndex = sudoCommandIndex(tokens, i + 1);
+      if (commandIndex == null) {
+        i = tokens.length;
+        break;
+      }
+      i = commandIndex;
+      continue;
+    }
+    if (t === 'time') {
+      i = skipWrapperOptions(tokens, i + 1, TIME_OPTIONS_WITH_ARGUMENT);
+      continue;
+    }
+    if (t === 'command') {
+      const commandIndex = commandExecutableIndex(tokens, i + 1);
+      if (commandIndex == null) {
+        i = tokens.length;
+        break;
+      }
+      i = commandIndex;
       continue;
     }
     if (t === 'env') {
-      i += 1;
-      while (i < tokens.length && (tokens[i].startsWith('-') || isEnvAssignment(tokens[i]))) {
-        i += 1;
+      return executableTokens(envExecutableTokens(tokens, i + 1));
+    }
+    if (t === 'timeout') {
+      const commandIndex = timeoutCommandIndex(tokens, i + 1);
+      if (commandIndex == null) return [];
+      i = commandIndex;
+      continue;
+    }
+    if (t === 'nohup') {
+      if (tokens[i + 1] === '--help' || tokens[i + 1] === '--version') {
+        return [];
       }
+      i = skipWrapperOptions(tokens, i + 1, new Set());
       continue;
     }
     break;
   }
-  return tokens.slice(i);
+  const executable = tokens.slice(i);
+  if (executable.length > 0) {
+    executable[0] = executable[0].replace(/^[({]+/, '').split('/').pop() ?? '';
+  }
+  return executable.filter((token, index) => index > 0 || token.length > 0);
 }
 
 function commandSegments(command: string): string[][] {
@@ -430,6 +940,15 @@ function commandSegments(command: string): string[][] {
     .map(tokenizeShellSegment)
     .map(executableTokens)
     .filter((tokens) => tokens.length > 0);
+}
+
+/**
+ * Executable shell segments with heredoc bodies removed. Quoted arguments stay
+ * attached to their real command (so an ssh payload remains inspectable), while
+ * prose inside echo/printf/node arguments cannot become a command head.
+ */
+export function executableShellSegments(command: string): string[][] {
+  return commandSegments(executableShellSource(command));
 }
 
 function hasHelpArg(tokens: string[]): boolean {
@@ -643,43 +1162,6 @@ function evidenceRefForToolCall(
         );
   if (index < 0) return undefined;
   return evidenceRefForEntry(timeline, index) ?? undefined;
-}
-
-export function parsePermissionData(
-  text: string,
-  fileName: string
-): {
-  perModeEntries: { mode: string; sessionId: string }[];
-  changes: PermissionChange[];
-} | null {
-  const sessionId = fileName.replace(/\.jsonl$/, '');
-
-  const perModeEntries: { mode: string; sessionId: string }[] = [];
-  const changes: PermissionChange[] = [];
-
-  let lastMode: string | null = null;
-  let sawAny = false;
-
-  for (const entry of parseJsonl(text) as PermissionSessionEntry[]) {
-    const mode = entry.permissionMode;
-    if (typeof mode !== 'string' || mode.length === 0) continue;
-
-    sawAny = true;
-    perModeEntries.push({ mode, sessionId });
-
-    if (mode !== lastMode) {
-      changes.push({
-        sessionId,
-        timestamp: entry.timestamp ?? '',
-        fromMode: lastMode,
-        toMode: mode,
-      });
-      lastMode = mode;
-    }
-  }
-
-  if (!sawAny) return null;
-  return { perModeEntries, changes };
 }
 
 export function aggregatePermissionModes(

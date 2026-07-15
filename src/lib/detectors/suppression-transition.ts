@@ -13,8 +13,8 @@
  *
  * A finding that is null in the real run but fires in the blanked run is being
  * suppressed *by its CLAUDE.md markers* — exactly the `claudeMdMarksApplied`
- * gate, observed only through the public `Detector.rule` contract (no 12-file
- * sweep, no private-constant export).
+ * gate, observed only through the public detector emission contract (`emitAll`
+ * when present, otherwise `rule`; no 12-file sweep or private-constant export).
  *
  * Join key = finding id. We emit exactly one `SUPPRESSED` receipt the FIRST time
  * a previously-*surfaced* (hook-stamped) finding flips to marker-suppressed:
@@ -142,9 +142,9 @@ function resolveMarkerHeading(rec: Recommendation, mergedText: string): string {
  * Compute the FIRING→SUPPRESSED transitions for one engine run.
  *
  * `detectors` defaults to the full catalog; tests inject a small subset. The
- * function is pure: it runs each detector's `rule` twice (real + CLAUDE.md-
- * blanked) and never touches the filesystem. The async signature is only for
- * the WebCrypto fingerprint.
+ * function is pure: it runs each detector's public emission path twice (real +
+ * CLAUDE.md-blanked) and never touches the filesystem. The async signature is
+ * only for the WebCrypto fingerprint.
  */
 export async function computeSuppressionTransitions(
   input: RecommendationInput,
@@ -161,25 +161,34 @@ export async function computeSuppressionTransitions(
   const organic: OrganicSuppression[] = [];
 
   for (const d of detectors) {
-    // A finding can only flip via markers if blanking CLAUDE.md re-fires it.
-    const real = d.rule(input, now);
-    if (real) continue; // still firing — not suppressed.
-    const blanked = d.rule(blankedInput, now);
-    if (!blanked) continue; // null with markers AND without — not a marker flip.
-    // `blanked` fired but `real` is null ⇒ suppressed by CLAUDE.md markers.
-    const findingId = blanked.id;
-    if (alreadySuppressed.has(findingId)) continue; // already emitted — idempotent.
-    if (!surfaced.has(findingId)) {
-      // Marker-suppressed but never hook-surfaced ⇒ organic / not attributed.
-      organic.push({ findingId });
-      continue;
+    const emitted = (runInput: RecommendationInput): Recommendation[] => {
+      if (d.emitAll) return d.emitAll(runInput, now);
+      const rec = d.rule(runInput, now);
+      return rec ? [rec] : [];
+    };
+    const realIds = new Set(emitted(input).map((rec) => rec.id));
+    const seenBlankedIds = new Set<string>();
+
+    // A finding can only flip via markers if blanking CLAUDE.md re-fires that
+    // same finding id. Compare every emitted id independently so an unrelated
+    // companion finding cannot mask the transition in a multi-emit detector.
+    for (const blanked of emitted(blankedInput)) {
+      const findingId = blanked.id;
+      if (seenBlankedIds.has(findingId)) continue;
+      seenBlankedIds.add(findingId);
+      if (realIds.has(findingId)) continue;
+      if (alreadySuppressed.has(findingId)) continue;
+      if (!surfaced.has(findingId)) {
+        organic.push({ findingId });
+        continue;
+      }
+      transitions.push({
+        kind: 'SUPPRESSED',
+        findingId,
+        markerHeading: resolveMarkerHeading(blanked, mergedText),
+        contentFingerprint: await fingerprintText(mergedText),
+      });
     }
-    transitions.push({
-      kind: 'SUPPRESSED',
-      findingId,
-      markerHeading: resolveMarkerHeading(blanked, mergedText),
-      contentFingerprint: await fingerprintText(mergedText),
-    });
   }
 
   return { transitions, organic };

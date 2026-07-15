@@ -5,7 +5,9 @@ import {
   detectDangerousCommands,
   computeSafetyScores,
   rankPromptProneTools,
+  executableShellSegments,
   executableShellSkeleton,
+  shellHeredocs,
 } from './parse-permissions'
 import type { ToolCall, ToolUsageData } from './parse-tools'
 
@@ -227,6 +229,7 @@ describe('detectDangerousCommands', () => {
       `node -e "const x='rm -rf '+y; run(x)"`,
       `cat > settings.json <<'EOF'\n{ "deny": ["Bash(rm -rf:*)"] }\nEOF`,
       `cat > doc.md <<'EOF'\nDangerous patterns (rm -rf, dd, mkfs) are excluded.\nEOF`,
+      `cat 'foo\\' <<'EOF'\nrm -rf /\nEOF`,
       `echo 'do not run rm -rf / ever'`,
     ]
     for (const cmd of falsePositives) {
@@ -239,6 +242,9 @@ describe('detectDangerousCommands', () => {
       'rm -rf ~',
       'cd /tmp/x && mkdir y && rm -rf ~',
       'rm -rf "$TMPDIR/scratch"',
+      `echo foo\\ #bar; rm -rf /`,
+      `echo foo\\\n#bar; rm -rf /`,
+      `echo 'foo\\'; rm -rf /`,
     ]
     for (const cmd of realDeletions) {
       const found = detectDangerousCommands([session('s', [call('Bash', cmd)])])
@@ -281,6 +287,60 @@ describe('executableShellSkeleton (#2039)', () => {
     expect(executableShellSkeleton(`cat <<'EOF'\nrm -rf /\nEOF`)).not.toMatch(/rm -rf/)
     expect(executableShellSkeleton('rm -rf "$VAR"')).toMatch(/\brm\s+-rf\b/)
     expect(executableShellSkeleton('cd x && rm -rf ~')).toMatch(/\brm\s+-rf\b/)
+    expect(
+      executableShellSkeleton(`mask=$((1 << 4))\nrm -rf /`)
+    ).toMatch(/\brm\s+-rf\b/)
+    expect(
+      executableShellSkeleton(`cat foo\\ #bar <<'EOF'\nrm -rf /\nEOF`)
+    ).not.toMatch(/\brm\s+-rf\b/)
+    expect(
+      executableShellSkeleton(`cat foo\\\n#bar <<'EOF'\nrm -rf /\nEOF`)
+    ).not.toMatch(/\brm\s+-rf\b/)
+    expect(
+      executableShellSkeleton("x=`cat <<'EOF'\nrm -rf /\nEOF\n`")
+    ).not.toMatch(/\brm\s+-rf\b/)
+  })
+
+  it('retains heredoc execution metadata while stripping bodies from the skeleton', () => {
+    expect(shellHeredocs(`bash <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`)).toEqual([
+      {
+        commandLine: `bash <<'EOF'`,
+        delimiter: 'EOF',
+        quoted: true,
+        body: 'kubectl apply -f deploy.yaml',
+      },
+    ])
+    expect(shellHeredocs(`cat <<E\\OF\n$(kubectl apply -f deploy.yaml)\nEOF`)[0]).toMatchObject({
+      delimiter: 'EOF',
+      quoted: true,
+    })
+    expect(shellHeredocs(`cat <<E'OF'\nplain text\nEOF`)[0]).toMatchObject({
+      delimiter: 'EOF',
+      quoted: true,
+      body: 'plain text',
+    })
+    expect(shellHeredocs(`cat <<$'EOF'\nplain text\nEOF`)[0]).toMatchObject({
+      delimiter: 'EOF',
+      quoted: true,
+      body: 'plain text',
+    })
+    expect(
+      shellHeredocs(
+        `printf '%s\\n' 'documentation\n<<EOF\nstill documentation'\nkubectl apply -f x`
+      )
+    ).toEqual([])
+  })
+
+  it('skips combined sudo options whose final flag consumes an argument', () => {
+    expect(
+      executableShellSegments('sudo -iu deploy kubectl apply -f deploy.yaml')
+    ).toEqual([['kubectl', 'apply', '-f', 'deploy.yaml']])
+    expect(
+      executableShellSegments('sudo -Eiu deploy kubectl apply -f deploy.yaml')
+    ).toEqual([['kubectl', 'apply', '-f', 'deploy.yaml']])
+    expect(
+      executableShellSegments('sudo -uroot kubectl apply -f deploy.yaml')
+    ).toEqual([['kubectl', 'apply', '-f', 'deploy.yaml']])
   })
 })
 

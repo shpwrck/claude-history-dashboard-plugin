@@ -12,6 +12,10 @@
 export const DUAL_EMIT: Record<string, string[]> = {
   'safety.dangerous-bypass': ['safety.dangerous-bypass', 'safety.dangerous-commands'],
   'reliability.api-errors': ['reliability.api-errors', 'reliability.rate-limits'],
+  'workflow.value-of-agent-handoff': [
+    'workflow.value-of-agent-handoff',
+    'workflow.leave-behind-candidate-verification',
+  ],
 };
 
 /** Every rec id the detector catalog can emit for a given detector id. */

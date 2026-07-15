@@ -88,6 +88,12 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       canonical dangerous-command rules matched by each full raw Bash call.
 //       Reparse tool_json so stripped legacy previews cannot fabricate prefix
 //       coverage. Dataset schema v19 turns over bodies assembled without it.
+//   'durable-command-kind-v14' (#2313): parseToolUsage now classifies durable
+//       external-state Bash mutations from the full command and evaluates raw
+//       full-file Write markdown against the v1 leave-behind contract before
+//       bulk ingest strips either body. Reparse tool_json so cached v13 calls
+//       cannot hide a late mutation or masquerade as evaluated Write evidence.
+//       Dataset schema v20 turns over bodies assembled from pre-v14 rows.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));

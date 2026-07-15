@@ -210,6 +210,64 @@ describe('computeSuppressionTransitions (#576 — engine-loop FIRING→SUPPRESSE
     expect(result.transitions.map((t) => t.findingId)).toEqual(['cost.a']);
   });
 
+  it('compares multi-emit detectors by finding id instead of detector truthiness', async () => {
+    const mainId = 'workflow.main';
+    const companionId = 'workflow.companion';
+    const emit = (detectorInput: RecommendationInput): Recommendation[] => {
+      const companion: Recommendation = {
+        id: companionId,
+        category: 'workflow',
+        severity: 'info',
+        title: 'Companion finding',
+        detail: 'd',
+        action: 'a',
+      };
+      if (claudeMdMarksApplied(detectorInput.liveConfig, MARKERS_A)) {
+        return [companion];
+      }
+      return [
+        {
+          id: mainId,
+          category: 'workflow',
+          severity: 'info',
+          title: 'Main finding',
+          detail: 'd',
+          action: 'a',
+          fix: {
+            target: 'CLAUDE.md',
+            label: 'Main fix',
+            note: 'n',
+            snippet: 's',
+            appliedMarkers: MARKERS_A,
+          },
+        },
+        companion,
+      ];
+    };
+    const multiEmitDetector: Detector = {
+      id: mainId,
+      category: 'workflow',
+      rule(detectorInput): Recommendation | null {
+        return emit(detectorInput)[0] ?? null;
+      },
+      emitAll: emit,
+    };
+
+    const result = await computeSuppressionTransitions(
+      inputWithClaudeMd(CLAUDE_MD_A),
+      {
+        surfacedFindingIds: [mainId, companionId],
+        suppressedFindingIds: [],
+      },
+      [multiEmitDetector]
+    );
+
+    expect(result.transitions.map((transition) => transition.findingId)).toEqual([
+      mainId,
+    ]);
+    expect(result.organic).toEqual([]);
+  });
+
   it('treats a null liveConfig as "no markers" — never flips', async () => {
     const detectors = [markerGatedDetector('cost.a', MARKERS_A)];
     const input: RecommendationInput = {

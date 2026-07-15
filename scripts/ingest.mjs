@@ -1317,7 +1317,13 @@ export const PARSER_SIG_VERSION = 'v4';
 // Boolean `exists` field with timestamped present/missing/unverifiable states.
 // Unchanged settings sources would otherwise preserve cached false-missing
 // claims from containers that cannot follow host-side skill symlink targets.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 20;
+// v21 (#2313): parseToolUsage adds sparse `leaveBehindStructure` proof from raw
+// full-file Write markdown and `commandDurableKind` truth from full Bash commands
+// before bulk ingest strips their bodies. SESSION_BLOB_OUTPUT v14 reparses
+// tool_json; this paired turnover rejects persisted v20 bodies that could neither
+// prove structural candidates nor expose a durable mutation past the preview.
+// Git commitment remains deliberately unproven by transcript data.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 21;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

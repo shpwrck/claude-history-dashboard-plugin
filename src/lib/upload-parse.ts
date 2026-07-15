@@ -24,7 +24,7 @@ import type { ToolUsageData } from './parse-tools';
 import type { ToolInventory } from './parse-tool-inventory';
 import type { SessionTimeline as SessionTimelineData } from './parse-timeline';
 import type { ApiErrorEvent } from './parse-errors';
-import type { PermissionChange } from './parse-permissions';
+import type { PermissionChange } from './parse-permission-data';
 import type { AgentSettingEvent, SessionAttribution } from './parse-agents';
 import type { RuntimeEvents } from './parse-runtime-events';
 import type { ChurnGeometrySession } from './parse-churn-geometry';
@@ -91,7 +91,7 @@ export async function runUploadParse(
     import('./parse-tool-inventory'),
     import('./parse-timeline'),
     import('./parse-errors'),
-    import('./parse-permissions'),
+    import('./parse-permission-data'),
     import('./parse-agents'),
     import('./parse-runtime-events'),
     import('./parse-churn-geometry'),

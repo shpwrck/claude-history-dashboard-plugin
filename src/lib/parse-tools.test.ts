@@ -9,6 +9,7 @@ import {
   nativeBypassByScope,
   mineCorrections,
   aggregateCorrections,
+  classifyDurableCommand,
   stripToolCommandBodies,
   deriveBashCommandSignals,
 } from './parse-tools'
@@ -57,6 +58,56 @@ describe('parseToolUsage', () => {
     expect(out.calls[0].commandPreview).toBe('ls')
     expect(out.calls[0].commandHead).toBe('ls')
     expect(out.calls[0].commandHeadIsPermissionPrefix).toBe(true)
+  })
+
+  it('persists only a sparse marker for a structurally conformant leave-behind Write', () => {
+    const content = `---
+leave-behind: v1
+state-scope: app-production
+status: current
+---
+# App production
+## Operability
+### State and access
+References live in the team password manager.
+### Template map
+source.tmpl -> /etc/app/config
+### Re-run
+Run the idempotent installer.
+### Verify and recover
+Run the health check and rollback script.
+## Decision log
+### Decisions
+Keep generated state outside the checkout.
+### How to drive it
+Edit the source, install, verify, and record the decision.`
+    const text = [
+      toolUse('runbook', 'Write', {
+        file_path: '/workspace/repo/docs/runbooks/app-production/README.md',
+        content,
+      }),
+      toolResult('runbook'),
+      toolUse('half', 'Write', {
+        file_path: 'docs/runbooks/half/README.md',
+        content: '# Half\n\n## Operability\n\nOnly half exists.',
+      }),
+      toolResult('half'),
+      toolUse('edit', 'Edit', {
+        file_path: 'docs/runbooks/app-production/README.md',
+        old_string: 'old',
+        new_string: content,
+      }),
+      toolResult('edit'),
+    ].join('\n')
+
+    const calls = parseToolUsage(text, 'leave-behind.jsonl')!.calls
+
+    expect(calls[0].leaveBehindStructure).toBe('v1')
+    expect(calls[0].input).toEqual({
+      file_path: '/workspace/repo/docs/runbooks/app-production/README.md',
+    })
+    expect(calls[1].leaveBehindStructure).toBeUndefined()
+    expect(calls[2].leaveBehindStructure).toBeUndefined()
   })
 
   it('marks isError true for an error result', () => {
@@ -180,6 +231,362 @@ describe('parseToolUsage', () => {
     expect(stripped.calls[0].commandDangerousFragment).toBe('rm -rf ./.worktrees/feature-x')
     expect(stripped.calls[1].commandDangerousCertainty).toBe('high')
     expect(stripped.calls[1].commandDangerousFragment).toBe('rm -rf ~')
+  })
+
+  it('keeps durable-state truth when the mutation is past the stripped preview', () => {
+    const padding = 'echo preparing-local-input '.repeat(20)
+    const command = `${padding} && kubectl apply -f deploy.yaml`
+    const stripped = stripToolCommandBodies(
+      parseToolUsage(
+        [toolUse('u1', 'Bash', { command }), toolResult('u1', { content: 'ok' })].join('\n'),
+        'durable.jsonl'
+      )!
+    )
+    const call = stripped.calls[0]
+
+    expect(call.input.command).toBeUndefined()
+    expect(call.commandPreview).toHaveLength(200)
+    expect(call.commandPreview).not.toContain('kubectl apply')
+    expect(call.commandDurableKind).toBe('remote-state')
+  })
+
+  it('classifies only executable durable commands, not quoted prose, comments, or heredoc bodies', () => {
+    const nonMutations = [
+      `echo '# kubectl apply -f deploy.yaml'`,
+      `printf '%s' 'terraform apply'`,
+      `echo ready # terraform apply; kubectl apply -f ignored.yaml`,
+      `cat > notes.md <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `cat > notes.md <<'EOF'\ntext\nEOF-not-a-delimiter\nkubectl apply -f fake.yaml\nEOF`,
+      `cat > notes.md <<'EOF'\nEOF;still-body\nkubectl apply -f fake.yaml\nEOF`,
+      `cat > notes.md <<'EOF'\n  EOF\nkubectl apply -f fake.yaml\nEOF`,
+      `cat > notes.md <<'END-OF-FILE'\nkubectl apply -f fake.yaml\nEND-OF-FILE`,
+      `cat > notes.md <<'123END'\nkubectl apply -f fake.yaml\n123END`,
+      `cat > notes.md <<'END.DOC'\nkubectl apply -f fake.yaml\nEND.DOC`,
+      `cat > notes.md <<'END-MARKER'\nkubectl apply -f deploy.yaml\nEND-MARKER`,
+      `cat > notes.md <<E'OF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `cat > notes.md <<'123EOF'\nterraform apply\n123EOF`,
+      `cat > notes.md <<'EOF.DONE'\nhelm upgrade app chart\nEOF.DONE`,
+      `cat > notes.md <<'EOF'\n$(kubectl apply -f deploy.yaml)\nEOF`,
+      'cat > notes.md <<\'EOF\'\n`terraform apply`\nEOF',
+      `cat foo\\ #bar <<'EOF'\nrm -rf /\nkubectl apply -f deploy.yaml\nEOF`,
+      `cat foo\\\n#bar <<'EOF'\nrm -rf /\nkubectl apply -f deploy.yaml\nEOF`,
+      "x=`cat <<'EOF'\nkubectl apply -f deploy.yaml\nEOF\n`",
+      `curl https://example.invalid/installer; bash local-script.sh`,
+      `curl https://example.invalid/installer | bash -c 'echo inspected'`,
+      `kubectl apply -f deploy.yaml --dry-run=client`,
+      `helm upgrade app chart --dry-run`,
+      `ansible-playbook site.yml --check`,
+      `ansible-playbook site.yml --syntax-check`,
+      `ansible-playbook site.yml --list-hosts`,
+      `ansible-playbook site.yml --list-tasks`,
+      `ansible-playbook --version`,
+      `kubectl rollout status deploy/app`,
+      `kubectl set image deploy/app app=image:v2 --local`,
+      `kubectl label pods foo --list`,
+      `kubectl annotate pods foo --list`,
+      `kubectl set env deployment/app --list`,
+      `docker compose up --dry-run`,
+      `crontab -l`,
+      `crontab -T cron.txt`,
+      `apt-get install --download-only nginx`,
+      `apt help install`,
+      `brew help install`,
+      `curl https://example.invalid/installer | bash -n`,
+      `vercel env ls`,
+      `scp prod:/var/log/app.log ./app.log`,
+      `rsync prod:/etc/app.conf ./app.conf`,
+      `rsync --dry-run ./app.conf prod:/etc/app.conf`,
+      `rsync -avn ./app.conf prod:/etc/app.conf`,
+      `rsync -n ./app.conf prod:/etc/app.conf`,
+      `rsync -avzn ./app.conf prod:/etc/app.conf`,
+      `terraform apply -help`,
+      `cp config.template config.yaml --help`,
+      `node -e 'console.log(1)' '>settings.json'`,
+      `envsubst '$HOME' '>config.yaml'`,
+      `node -e 'console.log(1)' '>/etc/app/settings.json'`,
+      `envsubst '$HOME' '>/etc/app/config.yaml'`,
+      `node -e 'console.log(1)' '>' /etc/app/settings.json`,
+      `envsubst '>' /etc/app/config.yaml`,
+      `node -e 'console.log(1)' \\> /etc/app/settings.json`,
+      `envsubst \\> /etc/app/config.yaml`,
+      `python -c 'import sys; print(sys.argv)' '2>' /etc/app/config.yaml`,
+      `envsubst > '$HOME/.config/app/config.yaml'`,
+      `echo ready # $(kubectl apply -f ignored.yaml)`,
+      `ssh prod 'sudo systemctl status app'`,
+      `ssh prod 'kubectl get pods'`,
+      `ssh prod 'helm list'`,
+      `ssh prod 'terraform plan'`,
+      `ssh prod 'echo sudo'`,
+      `ssh prod 'echo ">"'`,
+      `ssh prod 'printf "%s\\n" ">"'`,
+      `ssh prod 'grep ">" config.txt'`,
+      `ssh prod 'echo ready >/dev/null'`,
+      `ssh prod 'journalctl -u app | tee /dev/null'`,
+      `ssh prod 'journalctl -u app | tee /dev/stdin'`,
+      `ssh prod 'journalctl -u app | tee /dev/stdout'`,
+      `ssh prod 'journalctl -u app | tee /dev/stderr'`,
+      `ssh prod 'journalctl -u app | tee /dev/fd/9'`,
+      `ssh prod 'journalctl -u app | tee /proc/self/fd/1'`,
+      `ssh prod 'journalctl -u app | tee'`,
+      `ssh prod 'echo ok 2>&1'`,
+      `ssh prod 'echo \\> /etc/app/config.yaml'`,
+      `ssh prod 'touch --version'`,
+      `sudo -l kubectl apply -f deploy.yaml`,
+      `sudo -ll kubectl apply -f deploy.yaml`,
+      `sudo -ln kubectl apply -f deploy.yaml`,
+      `sudo -nv kubectl apply -f deploy.yaml`,
+      `command -v ansible-playbook`,
+      `command -V kubectl`,
+      `command --help kubectl apply -f deploy.yaml`,
+      `env --help kubectl apply -f deploy.yaml`,
+      `env --version kubectl apply -f deploy.yaml`,
+      `cp config.template config.yaml`,
+      `cp config.template /workspace/repo/generated.yaml`,
+      `envsubst < config.template > /home/me/project/config.yaml`,
+      `helm template app chart > /tmp/rendered.yaml`,
+      `bash -n -c 'kubectl apply -f deploy.yaml'`,
+      `bash -nc 'kubectl apply -f deploy.yaml'`,
+      `bash --help -c 'kubectl apply -f deploy.yaml'`,
+      `bash --version -c 'kubectl apply -f deploy.yaml'`,
+      `bash --rpm-requires -c 'kubectl apply -f deploy.yaml'`,
+      `bash -D -c 'kubectl apply -f deploy.yaml'`,
+      `bash -lD -c 'kubectl apply -f deploy.yaml'`,
+      `bash --dump-strings -c 'kubectl apply -f deploy.yaml'`,
+      `bash --dump-po-strings -c 'kubectl apply -f deploy.yaml'`,
+      `bash script.sh -c 'kubectl apply -f deploy.yaml'`,
+      `bash -- -c 'kubectl apply -f deploy.yaml'`,
+      `sh -n -c 'terraform apply'`,
+      `ssh prod 'bash -n -c "kubectl apply -f deploy.yaml"'`,
+      `bash -n <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `bash script.sh <<EOF\nkubectl apply -f deploy.yaml\nEOF`,
+      `echo '$(kubectl apply -f quoted-literal.yaml)'`,
+      `echo "foo\\"; kubectl apply -f quoted-literal.yaml"`,
+      `ssh -N prod 'touch /etc/app/x'`,
+      `ssh -vN prod 'touch /etc/app/x'`,
+      `ssh -W target:22 prod 'touch /etc/app/x'`,
+      `ssh -Wtarget:22 prod 'touch /etc/app/x'`,
+      `ssh -n prod <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `ssh -f prod <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `ssh prod 'systemctl --message restart status app'`,
+      `ssh prod 'systemctl -qhH nested restart app'`,
+    ]
+
+    for (const command of nonMutations) {
+      expect(classifyDurableCommand(command), command).toBeNull()
+      const stripped = stripToolCommandBodies(
+        parseToolUsage(toolUse('durable-negative', 'Bash', { command }), 'negative.jsonl')!
+      )
+      expect(stripped.calls[0].commandDurableKind).toBeUndefined()
+    }
+
+    const remoteMutations = [
+      `ssh deploy@app 'sudo tee /etc/app/config.yaml >/dev/null'`,
+      `ssh deploy@app 'printf "%s" value > /etc/app/config.yaml'`,
+      `sudo -u deploy kubectl apply -f deploy.yaml`,
+      `sudo -b kubectl apply -f deploy.yaml`,
+      `/usr/bin/kubectl apply -f deploy.yaml`,
+      `(kubectl apply -f deploy.yaml)`,
+      `if true; then kubectl apply -f deploy.yaml; fi`,
+      `kubectl --context prod apply -f deploy.yaml`,
+      `helm --namespace prod upgrade app chart`,
+      `terraform -chdir=infra apply -auto-approve`,
+      `tofu -chdir=infra apply -auto-approve`,
+      `terraform taint aws_instance.app`,
+      `pulumi import aws:s3/bucket:Bucket app bucket-id`,
+      `cdk deploy AppStack`,
+      `aws cloudformation deploy --stack-name app`,
+      `aws ecs update-service --cluster prod --service app --force-new-deployment`,
+      `aws ssm put-parameter --name /app/url --value value --type String`,
+      `ansible-playbook site.yml`,
+      `scp ./app.conf prod:/etc/app.conf`,
+      `rsync ./app.conf prod:/etc/app.conf`,
+      `ssh -P prod-tag prod 'kubectl apply -f deploy.yaml'`,
+      `ssh -n prod 'kubectl apply -f deploy.yaml'`,
+      `ssh -f prod 'kubectl apply -f deploy.yaml'`,
+      `ssh -oGlobalKnownHostsFile=/tmp/known prod 'touch /etc/app/x'`,
+      `sudo -iu deploy kubectl apply -f deploy.yaml`,
+      `sudo -k kubectl apply -f deploy.yaml`,
+      `kubectl create configmap help --from-literal=key=value`,
+      `bash -O extglob -c 'kubectl apply -f deploy.yaml'`,
+      `bash -o nounset -c 'kubectl apply -f deploy.yaml'`,
+      `bash -euo pipefail -c 'kubectl apply -f deploy.yaml'`,
+      `bash -euoc pipefail 'kubectl apply -f deploy.yaml'`,
+      `fly deploy`,
+      `vercel env add API_URL production`,
+      `docker compose -f docker-compose.yml up -d`,
+      `podman compose -f docker-compose.yml -f docker-compose.local.yml up --build -d`,
+      `echo started & kubectl apply -f deploy.yaml`,
+      `bash -lc 'kubectl apply -f deploy.yaml'`,
+      `sh -c 'terraform apply -auto-approve'`,
+      `ssh prod 'bash -lc "kubectl apply -f deploy.yaml"'`,
+      `ssh prod 'bash -lc "systemctl restart app"'`,
+      `ssh prod 'sh -c "touch /etc/app/enabled"'`,
+      `ssh prod 'bash -s' <<'EOF'\nsystemctl restart app\nEOF`,
+      `ssh prod <<'EOF'\nsystemctl restart app\nEOF`,
+      `cat <<'EOF' | ssh prod bash -s\nsystemctl restart app\nEOF`,
+      `rsync -h ./config prod:/etc/config`,
+      `rsync -- -n prod:/etc/config`,
+      `ssh prod 'touch help'`,
+      `ssh prod 'touch -- --version'`,
+      `ssh prod 'touch -- --dry-run'`,
+      `ssh prod 'systemctl --user restart app'`,
+      `ssh prod 'systemctl -qH nested restart app'`,
+      `ssh prod 'systemctl mask app'`,
+      `ssh prod 'systemctl unmask app'`,
+      `ssh prod 'systemctl preset app'`,
+      `ssh prod 'systemctl reenable app'`,
+      `bash <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `bash << 'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `bash <<- 'EOF'\n\tkubectl apply -f deploy.yaml\nEOF`,
+      `bash >/tmp/install.log <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `cat <<EOF\n$(kubectl apply -f deploy.yaml)\nEOF`,
+      `cat <<'EOF' | bash\nkubectl apply -f deploy.yaml\nEOF`,
+      `mask=$((1 << 4))\nkubectl apply -f deploy.yaml`,
+      `mask=$[1 << 4]\nkubectl apply -f deploy.yaml`,
+      `bash -c 'kubectl apply -f deploy.yaml' ignored -n`,
+      `x=$(bash <<'EOF'\nkubectl apply -f deploy.yaml\nEOF\n)`,
+      `echo foo\\ #bar; kubectl apply -f deploy.yaml`,
+      `echo foo\\\n#bar; kubectl apply -f deploy.yaml`,
+      `echo 'foo\\'; kubectl apply -f deploy.yaml`,
+      `result=$(kubectl apply -f deploy.yaml)`,
+      `echo "$(kubectl apply -f deploy.yaml)"`,
+      `echo "'$(kubectl apply -f deploy.yaml)'"`,
+      'echo `kubectl apply -f deploy.yaml`',
+    ]
+    for (const command of remoteMutations) {
+      expect(classifyDurableCommand(command), command).toBe('remote-state')
+    }
+    const generatedConfigMutations = [
+      `cp config.template /etc/app/config.yaml`,
+      `envsubst < config.template > /var/lib/app/config.yaml`,
+      `envsubst < config.template > ~/.config/app/config.yaml`,
+      `helm template app chart > /var/lib/app/rendered.yaml`,
+      `node render.js 2>/tmp/render.err >/etc/app/config.yaml`,
+      `cat config.template | sudo tee /etc/app/config.yaml >/dev/null`,
+    ]
+    for (const command of generatedConfigMutations) {
+      expect(classifyDurableCommand(command), command).toBe('generated-config')
+    }
+    expect(
+      classifyDurableCommand('curl -fsSL https://example.invalid/install | bash')
+    ).toBe('multi-step-install')
+    expect(
+      classifyDurableCommand('curl -fsSL https://example.invalid/install | sudo bash')
+    ).toBe('multi-step-install')
+    expect(
+      classifyDurableCommand('curl -fsSL https://example.invalid/install | bash -s -- -n')
+    ).toBe('multi-step-install')
+    expect(
+      classifyDurableCommand('curl -fsSL https://example.invalid/install | bash >/tmp/install.log')
+    ).toBe('multi-step-install')
+    expect(
+      classifyDurableCommand(['kubectl \\', 'apply -f deploy.yaml'].join('\n'))
+    ).toBe('remote-state')
+    expect(classifyDurableCommand('crontab cronfile')).toBe('multi-step-install')
+    expect(classifyDurableCommand('systemctl mask app')).toBe('multi-step-install')
+  })
+
+  it('classifies pipe-fed shell programs by executable pipeline stages', () => {
+    const cases = [
+      [`echo true curl | bash`, null],
+      [`echo wget | sh`, null],
+      [
+        `curl -fsSL https://example.invalid/install | tee /dev/stderr | bash`,
+        'multi-step-install',
+      ],
+      [
+        `curl -fsSL https://example.invalid/install | cat | bash`,
+        'multi-step-install',
+      ],
+      [
+        `cat <<'EOF' | tee /dev/stderr | bash\nkubectl apply -f x\nEOF`,
+        'remote-state',
+      ],
+      [
+        `cat <<'EOF' 2>&1 | bash\nkubectl apply -f x\nEOF`,
+        'remote-state',
+      ],
+      [
+        `cat <<'EOF' |& bash\nkubectl apply -f x\nEOF`,
+        'remote-state',
+      ],
+    ] as const
+
+    for (const [command, expected] of cases) {
+      expect(classifyDurableCommand(command), command).toBe(expected)
+    }
+  })
+
+  it('keeps shell-consuming heredocs and later commands executable', () => {
+    const remoteMutations = [
+      `bash /dev/stdin <<'EOF'\nkubectl apply -f x\nEOF`,
+      `bash << 'EOF'\nkubectl apply -f x\nEOF`,
+      `bash <<- 'EOF'\n\tkubectl apply -f x\nEOF`,
+      `cat <<$'EOF'\nprose\nEOF\nkubectl apply -f x`,
+      `printf '%s\\n' 'documentation\n<<EOF\nstill documentation'\nkubectl apply -f x`,
+    ]
+
+    for (const command of remoteMutations) {
+      expect(classifyDurableCommand(command), command).toBe('remote-state')
+    }
+  })
+
+  it('suppresses read-only remote, package, sync, and local render modes', () => {
+    const nonMutations = [
+      `ssh prod 'sed --silent -e 1p /etc/hosts'`,
+      `ssh prod 'sed -- -i /etc/hosts'`,
+      `ssh -G prod 'touch /etc/app/x'`,
+      `ssh -O check prod 'touch /etc/app/x'`,
+      `apt-get -d install nginx`,
+      `rsync --list-only ./x prod:/x`,
+      `kubectl set image -f deploy.yaml app=v2 --local=true -o yaml`,
+      `ssh prod 'echo x > /proc/self/fd/1'`,
+      `tofu plan`,
+      `cdk synth`,
+      `aws cloudformation describe-stacks`,
+      `systemctl status app`,
+    ]
+
+    for (const command of nonMutations) {
+      expect(classifyDurableCommand(command), command).toBeNull()
+    }
+    expect(classifyDurableCommand(`apt-get install -- -d`)).toBe(
+      'multi-step-install'
+    )
+    expect(
+      classifyDurableCommand(`rsync -- --list-only ./x prod:/x`)
+    ).toBe('remote-state')
+  })
+
+  it('normalizes common execution wrappers and global CLI options', () => {
+    const remoteMutations = [
+      `timeout 30 kubectl apply -f x`,
+      `nohup kubectl apply -f x`,
+      `env -S 'kubectl apply -f x'`,
+      `bash +n -c 'kubectl apply -f x'`,
+      `bash +x -c 'kubectl apply -f x'`,
+      `vercel --token secret deploy`,
+      `docker --log-level debug compose up -d`,
+    ]
+
+    for (const command of remoteMutations) {
+      expect(classifyDurableCommand(command), command).toBe('remote-state')
+    }
+  })
+
+  it('traverses executable shell grouping, redirections, and process substitutions', () => {
+    const remoteMutations = [
+      `ssh prod 'echo x >| /etc/app/config.yaml'`,
+      `(terraform apply)`,
+      `diff <(kubectl apply -f x) expected`,
+    ]
+
+    for (const command of remoteMutations) {
+      expect(classifyDurableCommand(command), command).toBe('remote-state')
+    }
+    expect(
+      classifyDurableCommand(`echo "<(kubectl apply -f quoted-literal.yaml)"`)
+    ).toBeNull()
   })
 
   it('does not precompute a dangerous pattern for rm -rf inside a heredoc/script body (#2039)', () => {

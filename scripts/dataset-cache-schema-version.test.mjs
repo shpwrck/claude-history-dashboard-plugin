@@ -35,8 +35,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      20,
-      'timestamped tri-state hook probes must turn over persisted v19 dangerous-prefix datasets'
+      21,
+      'leave-behind and durable-command truth must turn over persisted v20 tri-state hook datasets'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -51,8 +51,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     );
     assert.notEqual(
       key,
-      `dataset-schema:v19:parser-${ingest.PARSER_SIG_VERSION}`,
-      'the pre-tri-state hook-reference dataset cache key must not remain current'
+      `dataset-schema:v20:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-leave-behind/durable-command dataset cache key must not remain current'
     );
     assert.match(
       ingest.sourceSignature(),

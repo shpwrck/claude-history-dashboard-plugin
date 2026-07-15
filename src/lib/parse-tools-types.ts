@@ -24,6 +24,12 @@ export type DangerousCommandCertainty = 'high' | 'medium';
  */
 export type BypassCategory = 'grep' | 'find' | 'cat' | 'sed' | 'awk' | 'cd';
 
+/** Durable external-state mutation derived from a full Bash command. */
+export type DurableCommandKind =
+  | 'remote-state'
+  | 'generated-config'
+  | 'multi-step-install';
+
 /**
  * Distilled tool-call `input`. The raw `call.input` blob is the single largest
  * contributor to the dataset payload (file contents, full command bodies, MCP
@@ -52,10 +58,21 @@ export interface ToolCall {
    * Additive field — see cost-attribution's token-weighted attribution.
    */
   resultBytes: number;
+  /**
+   * Sparse proof that a full-file Write matched the leave-behind v1 structure.
+   * The parser derives this before discarding the raw markdown content.
+   */
+  leaveBehindStructure?: 'v1';
   /** Compact fingerprint for repeat grouping after raw Bash text is stripped. */
   commandFingerprint?: string;
   /** Small redacted-ish display preview; raw command bodies stay out of bulk JSON. */
   commandPreview?: string;
+  /**
+   * Sparse durable-state classification derived from the FULL command before
+   * bulk ingest strips `input.command`. This keeps late command segments
+   * observable without retaining the command body.
+   */
+  commandDurableKind?: DurableCommandKind;
   /** First executable token after leading env assignments. */
   commandHead?: string;
   /**

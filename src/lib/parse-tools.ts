@@ -7,7 +7,15 @@ import {
   dangerousPatternCertainty,
   executableShellSkeleton,
   matchingDangerousPermissionRules,
+  executableShellSegments,
+  executableShellSource,
+  shellHeredocs,
 } from './parse-permissions';
+import {
+  LEAVE_BEHIND_CONTRACT,
+  leaveBehindStateScope,
+  validateLeaveBehindArtifact,
+} from './leave-behind';
 // The tool-call shapes live in a dependency-free leaf (#1582) so `parse-permissions`
 // can import `ToolUsageData` WITHOUT a (type-only) cycle back through this module,
 // which imports its classifier VALUES. Re-exported so every existing
@@ -15,6 +23,7 @@ import {
 import type {
   DistilledToolInput,
   BypassCategory,
+  DurableCommandKind,
   ToolCall,
   ToolUsageData,
 } from './parse-tools-types';
@@ -22,6 +31,7 @@ export type {
   DistilledToolInput,
   BypassCategory,
   DangerousCommandCertainty,
+  DurableCommandKind,
   ToolCall,
   ToolUsageData,
 } from './parse-tools-types';
@@ -47,6 +57,1131 @@ export interface BashCommandStat {
 
 const MAX_COMMAND_PREVIEW_LEN = 200;
 const MAX_COMMAND_GIT_SEGMENTS = 12;
+
+const CONFIG_SOURCE_RE = /\.(?:tmpl|template|example|sample|dist)$/i;
+const CONFIG_OUTPUT_RE = /\.(?:ya?ml|json|env|conf|toml|ini|service)$/i;
+
+function optionPrefix(tokens: string[]): string[] {
+  const end = tokens.indexOf('--', 1);
+  return tokens.slice(1, end < 0 ? undefined : end);
+}
+
+function hasHelpFlag(tokens: string[]): boolean {
+  return optionPrefix(tokens).some(
+    (token) =>
+      token === '--help' || token === '-help' || token === '--version'
+  );
+}
+
+function hasShortHelpFlag(tokens: string[]): boolean {
+  return optionPrefix(tokens).includes('-h');
+}
+
+function hasDryRunFlag(tokens: string[]): boolean {
+  return optionPrefix(tokens).some(
+    (token) =>
+      token === '--dry' ||
+      token === '--dry-run' ||
+      token.startsWith('--dry-run=')
+  );
+}
+
+function isNonMutatingInvocation(tokens: string[]): boolean {
+  return hasHelpFlag(tokens) || hasDryRunFlag(tokens);
+}
+
+function firstSubcommand(
+  tokens: string[],
+  optionsWithArgument: ReadonlySet<string> = new Set(),
+  combinedOptionWithArgument?: RegExp
+): { command: string; index: number } {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === '--') {
+      return { command: tokens[index + 1] ?? '', index: index + 1 };
+    }
+    if (!token.startsWith('-')) return { command: token, index };
+    if (
+      optionsWithArgument.has(token) ||
+      combinedOptionWithArgument?.test(token)
+    ) {
+      index += 1;
+    }
+  }
+  return { command: '', index: -1 };
+}
+
+const KUBECTL_OPTIONS_WITH_ARGUMENT = new Set([
+  '--as',
+  '--as-group',
+  '--cache-dir',
+  '--certificate-authority',
+  '--client-certificate',
+  '--client-key',
+  '--cluster',
+  '--context',
+  '--kubeconfig',
+  '--namespace',
+  '-n',
+  '--request-timeout',
+  '--server',
+  '-s',
+  '--token',
+  '--user',
+]);
+const HELM_OPTIONS_WITH_ARGUMENT = new Set([
+  '--kube-apiserver',
+  '--kube-context',
+  '--kube-token',
+  '--kubeconfig',
+  '--namespace',
+  '-n',
+  '--registry-config',
+  '--repository-cache',
+  '--repository-config',
+]);
+const CONTAINER_OPTIONS_WITH_ARGUMENT = new Set([
+  '--context',
+  '-c',
+  '--host',
+  '-H',
+  '--log-level',
+]);
+const COMPOSE_OPTIONS_WITH_ARGUMENT = new Set([
+  '--env-file',
+  '-f',
+  '--file',
+  '--parallel',
+  '--profile',
+  '-p',
+  '--project-directory',
+  '--project-name',
+  '--progress',
+]);
+const VERCEL_OPTIONS_WITH_ARGUMENT = new Set([
+  '--cwd',
+  '--global-config',
+  '--scope',
+  '-S',
+  '--token',
+]);
+const FLY_OPTIONS_WITH_ARGUMENT = new Set(['--config', '-c', '--org', '-o']);
+const SYSTEMCTL_OPTIONS_WITH_ARGUMENT = new Set([
+  '--boot-loader-entry',
+  '--boot-loader-menu',
+  '--capsule',
+  '--check-inhibitors',
+  '--drop-in',
+  '--host',
+  '-H',
+  '--image',
+  '--image-policy',
+  '--job-mode',
+  '--kill-subgroup',
+  '--kill-value',
+  '--kill-whom',
+  '--legend',
+  '--lines',
+  '--machine',
+  '-M',
+  '--message',
+  '--output',
+  '-o',
+  '--preset-mode',
+  '--property',
+  '-p',
+  '--reboot-argument',
+  '--root',
+  '--signal',
+  '-s',
+  '--state',
+  '--timestamp',
+  '--type',
+  '-t',
+  '--what',
+  '--when',
+]);
+const SYSTEMCTL_COMBINED_OPTION_WITH_ARGUMENT = /^-[halrTiqvf]*[CHMPtnpso]$/;
+const SYSTEMCTL_HELP_SHORT_CLUSTER = /^-[alrTiqvfh]+[CHMPtnpso]?$/;
+const SYSTEMCTL_PERSISTENT_MUTATIONS = new Set([
+  'add-requires',
+  'add-wants',
+  'disable',
+  'enable',
+  'link',
+  'mask',
+  'preset',
+  'preset-all',
+  'reenable',
+  'revert',
+  'unmask',
+]);
+const SYSTEMCTL_REMOTE_MUTATIONS = new Set([
+  ...SYSTEMCTL_PERSISTENT_MUTATIONS,
+  'reload',
+  'restart',
+  'start',
+  'stop',
+]);
+
+function hasSystemctlShortHelpFlag(tokens: string[]): boolean {
+  return optionPrefix(tokens).some(
+    (token) =>
+      token.includes('h') && SYSTEMCTL_HELP_SHORT_CLUSTER.test(token)
+  );
+}
+
+function isDeploymentMutationSegment(tokens: string[]): boolean {
+  if (isNonMutatingInvocation(tokens) || hasShortHelpFlag(tokens)) return false;
+  const head = tokens[0];
+  if (head === 'kubectl' || head === 'k') {
+    if (
+      optionPrefix(tokens).some(
+        (token) => token === '--local' || token === '--local=true'
+      )
+    ) {
+      return false;
+    }
+    const { command: verb, index } = firstSubcommand(
+      tokens,
+      KUBECTL_OPTIONS_WITH_ARGUMENT
+    );
+    if (verb === 'rollout') {
+      return ['restart', 'undo', 'pause', 'resume'].includes(tokens[index + 1]);
+    }
+    if (
+      (verb === 'annotate' || verb === 'label' || verb === 'set') &&
+      tokens.includes('--list')
+    ) {
+      return false;
+    }
+    return [
+      'annotate',
+      'apply',
+      'cordon',
+      'create',
+      'delete',
+      'drain',
+      'label',
+      'patch',
+      'replace',
+      'scale',
+      'set',
+      'taint',
+      'uncordon',
+    ].includes(verb);
+  }
+  if (head === 'helm') {
+    const { command: verb } = firstSubcommand(tokens, HELM_OPTIONS_WITH_ARGUMENT);
+    return ['install', 'rollback', 'uninstall', 'upgrade'].includes(verb);
+  }
+  if (head === 'terraform' || head === 'tofu') {
+    const { command: verb } = firstSubcommand(tokens);
+    return ['apply', 'destroy', 'import', 'taint'].includes(verb);
+  }
+  if (head === 'pulumi') {
+    const { command: verb } = firstSubcommand(tokens);
+    return (
+      ['up', 'destroy', 'import'].includes(verb) &&
+      !tokens.includes('--preview-only')
+    );
+  }
+  if (head === 'cdk') {
+    return firstSubcommand(tokens).command === 'deploy';
+  }
+  if (head === 'aws') {
+    const { command: service, index } = firstSubcommand(tokens);
+    const action = firstSubcommand(tokens.slice(index)).command;
+    return (
+      (service === 'cloudformation' && action === 'deploy') ||
+      (service === 'ecs' && action === 'update-service') ||
+      (service === 'ssm' && action === 'put-parameter')
+    );
+  }
+  if (head === 'ansible-playbook') {
+    if (tokens.includes('--version')) return false;
+    return !tokens.some((token) =>
+      [
+        '--check',
+        '-C',
+        '--syntax-check',
+        '--list-hosts',
+        '--list-tags',
+        '--list-tasks',
+      ].includes(token)
+    );
+  }
+  if (head === 'docker' || head === 'podman') {
+    const compose = firstSubcommand(tokens, CONTAINER_OPTIONS_WITH_ARGUMENT);
+    if (compose.command !== 'compose') return false;
+    const action = firstSubcommand(
+      tokens.slice(compose.index),
+      COMPOSE_OPTIONS_WITH_ARGUMENT
+    );
+    return ['down', 'restart', 'start', 'stop', 'up'].includes(action.command);
+  }
+  if (head === 'flyctl' || head === 'fly') {
+    return firstSubcommand(tokens, FLY_OPTIONS_WITH_ARGUMENT).command === 'deploy';
+  }
+  if (head === 'vercel') {
+    const top = firstSubcommand(tokens, VERCEL_OPTIONS_WITH_ARGUMENT);
+    if (top.command === 'deploy') return true;
+    if (top.command !== 'env') return false;
+    const action = firstSubcommand(tokens.slice(top.index));
+    return ['add', 'rm', 'remove', 'update'].includes(action.command);
+  }
+  return head === 'netlify' && firstSubcommand(tokens).command === 'deploy';
+}
+
+function isRemoteLocation(token: string | undefined): boolean {
+  if (!token || /^[A-Za-z]:[\\/]/.test(token)) return false;
+  return (
+    /^(?:scp|rsync):\/\//i.test(token) ||
+    /^(?:[^@\s/:]+@)?[^\s/:]+:.+$/.test(token)
+  );
+}
+
+const SSH_OPTIONS_WITH_ARGUMENT = new Set([
+  '-B', '-b', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L', '-l', '-m',
+  '-O', '-o', '-P', '-p', '-Q', '-R', '-S', '-W', '-w',
+]);
+const SSH_NO_ARGUMENT_SHORT_CLUSTER = /^-[1246AaCfGgKkMNnqsTtVvXxYy]+$/;
+
+function sshShortClusterHas(option: string, flags: string): boolean {
+  return (
+    SSH_NO_ARGUMENT_SHORT_CLUSTER.test(option) &&
+    [...flags].some((flag) => option.includes(flag))
+  );
+}
+
+/** ssh modes that inspect local state or establish forwarding and exit without
+ * running the command-looking operands on the destination. */
+function isSshQueryInvocation(tokens: string[]): boolean {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const option = tokens[index];
+    if (option === '--' || !option.startsWith('-')) return false;
+    if (
+      sshShortClusterHas(option, 'GNV') ||
+      option === '-W' ||
+      option.startsWith('-W') ||
+      option === '-Q' ||
+      option.startsWith('-Q') ||
+      option === '-O' ||
+      option.startsWith('-O')
+    ) {
+      return true;
+    }
+    if (option.length === 2 && SSH_OPTIONS_WITH_ARGUMENT.has(option)) index += 1;
+  }
+  return false;
+}
+
+/** `ssh -n` detaches stdin and `ssh -f` implies it. The explicit remote
+ * payload still executes, but a local heredoc cannot become its program. */
+function sshDisablesStdin(tokens: string[]): boolean {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const option = tokens[index];
+    if (option === '--' || !option.startsWith('-')) return false;
+    if (sshShortClusterHas(option, 'fn')) return true;
+    if (option.length === 2 && SSH_OPTIONS_WITH_ARGUMENT.has(option)) index += 1;
+  }
+  return false;
+}
+
+function sshPayload(tokens: string[]): string {
+  let index = 1;
+  while (index < tokens.length && tokens[index].startsWith('-')) {
+    if (tokens[index] === '--') {
+      index += 1;
+      break;
+    }
+    const option = tokens[index];
+    index += option.length === 2 && SSH_OPTIONS_WITH_ARGUMENT.has(option) ? 2 : 1;
+  }
+  if (index >= tokens.length) return '';
+  index += 1; // destination host
+  if (tokens[index] === '--') index += 1;
+  return tokens.slice(index).join(' ');
+}
+
+const SHELL_EXECUTABLES = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
+const SHELL_NON_EXECUTING_LONG_OPTIONS = new Set([
+  '--dump-po-strings',
+  '--dump-strings',
+  '--help',
+  '--rpm-requires',
+  '--version',
+]);
+
+interface ShellInvocation {
+  noExec: boolean;
+  commandPayload: string | null;
+  hasCommandFlag: boolean;
+  readsStdin: boolean;
+  scriptOperand: string | null;
+}
+
+function parseShellInvocation(tokens: string[]): ShellInvocation | null {
+  if (!SHELL_EXECUTABLES.has(tokens[0])) return null;
+  const argv = [tokens[0]];
+  for (let index = 1; index < tokens.length; index += 1) {
+    if (/^\d*>>?$/.test(tokens[index])) {
+      index += 1;
+      continue;
+    }
+    if (tokens[index] === '<<' || tokens[index] === '<<-') {
+      index += 1;
+      continue;
+    }
+    if (tokens[index].startsWith('<<')) continue;
+    argv.push(tokens[index]);
+  }
+  let noExec = false;
+  let readsStdin = false;
+  let index = 1;
+
+  for (; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === '--') {
+      index += 1;
+      break;
+    }
+    if (token === '--noexec') {
+      noExec = true;
+      continue;
+    }
+    if (SHELL_NON_EXECUTING_LONG_OPTIONS.has(token)) {
+      noExec = true;
+      continue;
+    }
+    if (token === '--stdin') {
+      readsStdin = true;
+      continue;
+    }
+    if (token.startsWith('--command=')) {
+      return {
+        noExec,
+        commandPayload: token.slice('--command='.length) || null,
+        hasCommandFlag: true,
+        readsStdin,
+        scriptOperand: null,
+      };
+    }
+    if (token === '--command') {
+      const payload = argv[index + 1];
+      return {
+        noExec,
+        commandPayload: payload && !payload.startsWith('<') ? payload : null,
+        hasCommandFlag: true,
+        readsStdin,
+        scriptOperand: null,
+      };
+    }
+    if (token === '--init-file' || token === '--rcfile') {
+      index += 1;
+      continue;
+    }
+    if (token === '-O' || token === '+O' || token === '-o' || token === '+o') {
+      index += 1;
+      continue;
+    }
+    if (/^[+-][^-]+$/.test(token)) {
+      const enabled = token.startsWith('-');
+      const flags = token.slice(1);
+      const optionArgumentCount = [...flags].filter(
+        (flag) => flag === 'o' || flag === 'O'
+      ).length;
+      if (flags.includes('n')) noExec = enabled;
+      if (flags.includes('D')) noExec = enabled;
+      if (flags.includes('s')) readsStdin = enabled;
+      if (enabled && flags.includes('c')) {
+        const payload = argv[index + 1 + optionArgumentCount];
+        return {
+          noExec,
+          commandPayload: payload && !payload.startsWith('<') ? payload : null,
+          hasCommandFlag: true,
+          readsStdin,
+          scriptOperand: null,
+        };
+      }
+      index += optionArgumentCount;
+      continue;
+    }
+    if (token.startsWith('--')) continue;
+    break;
+  }
+
+  const operands = argv.slice(index);
+  const scriptOperand = operands[0] ?? null;
+  const readsProgramFromStdin =
+    scriptOperand == null ||
+    scriptOperand === '-' ||
+    /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/.test(scriptOperand);
+  return {
+    noExec,
+    commandPayload: null,
+    hasCommandFlag: false,
+    readsStdin,
+    scriptOperand: readsStdin || readsProgramFromStdin ? null : scriptOperand,
+  };
+}
+
+function shellCommandPayload(tokens: string[]): string | null {
+  const invocation = parseShellInvocation(tokens);
+  return invocation && !invocation.noExec ? invocation.commandPayload : null;
+}
+
+function shellConsumesStdinProgram(tokens: string[]): boolean {
+  const invocation = parseShellInvocation(tokens);
+  return !!(
+    invocation &&
+    !invocation.noExec &&
+    !invocation.hasCommandFlag &&
+    invocation.scriptOperand == null
+  );
+}
+
+/** Whether this shell reads its program from stdin rather than -c or a file. */
+function shellConsumesHeredoc(
+  tokens: string[],
+  delimiter: string
+): boolean {
+  if (
+    !shellConsumesStdinProgram(tokens) ||
+    !tokens.some(
+      (token, index) =>
+        token === `<<${delimiter}` ||
+        token === `<<-${delimiter}` ||
+        ((token === '<<' || token === '<<-') &&
+          tokens[index + 1] === delimiter)
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+/** Commands inside `$()`, backticks, and process substitutions execute even
+ * when embedded in another command. Single quotes keep them literal. */
+function scannerBackslashEscapes(
+  quote: "'" | '"' | '`' | null,
+  next: string | undefined
+): boolean {
+  if (quote === "'") return false;
+  if (quote === '"') return next != null && /[$`"\\\n\r]/.test(next);
+  if (quote === '`') return next != null && /[$`\\\n\r]/.test(next);
+  return next != null;
+}
+
+function commandSubstitutionBodies(
+  command: string,
+  includeUnclosed = false,
+  includeProcessSubstitutions = true
+): string[] {
+  const bodies: string[] = [];
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const ch = command[index];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && scannerBackslashEscapes(quote, command[index + 1])) {
+      escaped = true;
+      continue;
+    }
+    if (quote === '"' && ch === '"') {
+      quote = null;
+      continue;
+    }
+    if (quote === null && ch === "'") {
+      quote = "'";
+      continue;
+    }
+    if (quote === null && ch === '"') {
+      quote = '"';
+      continue;
+    }
+
+    if (ch === '`') {
+      let end = index + 1;
+      let backtickEscaped = false;
+      for (; end < command.length; end += 1) {
+        const inner = command[end];
+        if (backtickEscaped) {
+          backtickEscaped = false;
+          continue;
+        }
+        if (inner === '\\') {
+          backtickEscaped = true;
+          continue;
+        }
+        if (inner === '`') break;
+      }
+      if (end < command.length) {
+        bodies.push(command.slice(index + 1, end));
+        index = end;
+      }
+      continue;
+    }
+
+    const commandSubstitution =
+      ch === '$' && command[index + 1] === '(' && command[index + 2] !== '(';
+    const processSubstitution =
+      includeProcessSubstitutions &&
+      quote === null &&
+      (ch === '<' || ch === '>') &&
+      command[index + 1] === '(';
+    if (!commandSubstitution && !processSubstitution) {
+      continue;
+    }
+    let depth = 1;
+    let end = index + 2;
+    let innerQuote: "'" | '"' | null = null;
+    let innerEscaped = false;
+    for (; end < command.length; end += 1) {
+      const inner = command[end];
+      if (innerQuote === "'") {
+        if (inner === "'") innerQuote = null;
+        continue;
+      }
+      if (innerEscaped) {
+        innerEscaped = false;
+        continue;
+      }
+      if (
+        inner === '\\' &&
+        scannerBackslashEscapes(innerQuote, command[end + 1])
+      ) {
+        innerEscaped = true;
+        continue;
+      }
+      if (innerQuote) {
+        if (inner === innerQuote) innerQuote = null;
+        continue;
+      }
+      if (inner === "'" || inner === '"') {
+        innerQuote = inner;
+        continue;
+      }
+      if (inner === '(') depth += 1;
+      if (inner === ')') depth -= 1;
+      if (depth === 0) break;
+    }
+    if (depth === 0) {
+      bodies.push(command.slice(index + 2, end));
+      index = end;
+    } else if (includeUnclosed) {
+      bodies.push(command.slice(index + 2));
+      break;
+    }
+  }
+  return bodies;
+}
+
+/** Split unquoted shell pipelines while keeping control operators as group
+ * breaks. `|&` is one pipeline operator, while `>&`/`<&` and `>|` remain
+ * redirections inside their stage. */
+function shellPipelineGroups(command: string): string[][] {
+  const groups: string[][] = [[]];
+  let start = 0;
+  let quote: "'" | '"' | '`' | null = null;
+  let escaped = false;
+  const pushStage = (end: number) => {
+    const stage = command.slice(start, end).trim();
+    if (stage) groups[groups.length - 1].push(stage);
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const ch = command[index];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && scannerBackslashEscapes(quote, command[index + 1])) {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    const previous = command[index - 1];
+    const next = command[index + 1];
+    const pipeAnd = ch === '|' && next === '&';
+    const singlePipe =
+      ch === '|' && previous !== '|' && previous !== '>' && next !== '|';
+    const redirectedAmpersand =
+      ch === '&' && (previous === '>' || previous === '<' || next === '>');
+    const doubleControl =
+      (ch === '&' && next === '&') || (ch === '|' && next === '|');
+    const controlBreak =
+      ch === ';' ||
+      ch === '\n' ||
+      doubleControl ||
+      (ch === '&' && !redirectedAmpersand);
+    if (!singlePipe && !controlBreak) continue;
+    pushStage(index);
+    const operatorLength = pipeAnd || doubleControl ? 2 : 1;
+    start = index + operatorLength;
+    if (controlBreak) groups.push([]);
+    if (operatorLength === 2) index += 1;
+  }
+  pushStage(command.length);
+  return groups.filter((group) => group.length > 0);
+}
+
+function pipelineStageTokens(stage: string): string[] | null {
+  return executableShellSegments(stage)[0] ?? null;
+}
+
+/** Commands whose stdout remains the pipeline's input stream. Keep this
+ * deliberately narrow: `tee` always copies stdin to stdout, and operand-free
+ * `cat` does too. */
+function isPipelinePassThrough(tokens: string[]): boolean {
+  if (tokens[0] === 'tee') return true;
+  return (
+    tokens[0] === 'cat' &&
+    tokens.slice(1).every((token) => token === '-' || token.startsWith('-'))
+  );
+}
+
+function pipelineReachesConsumer(
+  stages: string[],
+  producerIndex: number,
+  consumes: (tokens: string[]) => boolean
+): boolean {
+  for (let index = producerIndex + 1; index < stages.length; index += 1) {
+    const tokens = pipelineStageTokens(stages[index]);
+    if (!tokens) return false;
+    if (consumes(tokens)) return true;
+    if (!isPipelinePassThrough(tokens)) return false;
+  }
+  return false;
+}
+
+function pipelineConsumesHeredoc(commandLine: string, delimiter: string): boolean {
+  for (const stages of shellPipelineGroups(commandLine)) {
+    for (let index = 0; index < stages.length - 1; index += 1) {
+      const ownsHeredoc = shellHeredocs(stages[index]).some(
+        (heredoc) => heredoc.delimiter === delimiter
+      );
+      if (!ownsHeredoc) continue;
+      if (pipelineReachesConsumer(stages, index, shellConsumesStdinProgram)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function sshConsumesStdinProgram(tokens: string[]): boolean {
+  if (
+    tokens[0] !== 'ssh' ||
+    isSshQueryInvocation(tokens) ||
+    sshDisablesStdin(tokens)
+  ) {
+    return false;
+  }
+  const payload = sshPayload(tokens);
+  if (!payload) return true;
+  const consumer = executableShellSegments(payload)[0];
+  return !!(consumer && shellConsumesStdinProgram(consumer));
+}
+
+function pipelineFeedsRemoteShell(
+  commandLine: string,
+  delimiter: string
+): boolean {
+  for (const stages of shellPipelineGroups(commandLine)) {
+    for (let index = 0; index < stages.length - 1; index += 1) {
+      const ownsHeredoc = shellHeredocs(stages[index]).some(
+        (heredoc) => heredoc.delimiter === delimiter
+      );
+      if (!ownsHeredoc) continue;
+      if (pipelineReachesConsumer(stages, index, sshConsumesStdinProgram)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function nestedCommandConsumesHeredoc(
+  commandLine: string,
+  delimiter: string
+): boolean {
+  return commandSubstitutionBodies(commandLine, true).some((body) => {
+    const segments = executableShellSegments(body);
+    return (
+      segments.some((segment) => shellConsumesHeredoc(segment, delimiter)) ||
+      pipelineConsumesHeredoc(body, delimiter)
+    );
+  });
+}
+
+function heredocExecutableBodies(command: string): string[] {
+  const bodies: string[] = [];
+  for (const heredoc of shellHeredocs(command)) {
+    const headerSegments = executableShellSegments(heredoc.commandLine);
+    if (
+      headerSegments.some((segment) =>
+        shellConsumesHeredoc(segment, heredoc.delimiter)
+      ) ||
+      pipelineConsumesHeredoc(heredoc.commandLine, heredoc.delimiter) ||
+      nestedCommandConsumesHeredoc(heredoc.commandLine, heredoc.delimiter)
+    ) {
+      bodies.push(heredoc.body);
+    } else if (!heredoc.quoted) {
+      // An unquoted delimiter enables command substitution even when the
+      // receiving command treats the heredoc as plain data (for example cat).
+      bodies.push(...commandSubstitutionBodies(heredoc.body, false, false));
+    }
+  }
+  return bodies;
+}
+
+function remoteHeredocBodies(command: string): string[] {
+  const bodies: string[] = [];
+  for (const heredoc of shellHeredocs(command)) {
+    const contexts = [
+      heredoc.commandLine,
+      ...commandSubstitutionBodies(heredoc.commandLine, true),
+    ];
+    if (pipelineFeedsRemoteShell(heredoc.commandLine, heredoc.delimiter)) {
+      bodies.push(heredoc.body);
+    }
+    for (const context of contexts) {
+      const headerSegments = executableShellSegments(context);
+      for (const segment of headerSegments) {
+        if (segment[0] !== 'ssh') continue;
+        if (isSshQueryInvocation(segment) || sshDisablesStdin(segment)) continue;
+        const payload = sshPayload(segment);
+        if (!payload) {
+          bodies.push(heredoc.body);
+          continue;
+        }
+        const payloadSegments = executableShellSegments(payload);
+        if (
+          payloadSegments.some((payloadSegment) =>
+            shellConsumesHeredoc(payloadSegment, heredoc.delimiter)
+          ) ||
+          payloadSegments.every((payloadSegment) =>
+            payloadSegment.every((token) => token.startsWith('<<'))
+          )
+        ) {
+          bodies.push(heredoc.body);
+        }
+      }
+    }
+  }
+  return bodies;
+}
+
+function shellOutputPaths(tokens: string[]): string[] {
+  const paths: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (!/^\d*>>?$/.test(tokens[index])) continue;
+    const target = tokens[index + 1];
+    if (!target || /^&(?:\d+|-)$/.test(target)) continue;
+    paths.push(target.startsWith('&') ? target.slice(1) : target);
+  }
+  return paths;
+}
+
+function commandOutputPaths(tokens: string[]): string[] {
+  const paths: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === '--output' || token === '-o') {
+      if (tokens[index + 1]) paths.push(tokens[index + 1]);
+    } else if (token.startsWith('--output=')) {
+      paths.push(token.slice('--output='.length));
+    }
+  }
+  return paths;
+}
+
+function isDiscardOutputPath(path: string): boolean {
+  const clean = path.replace(/[)}]+$/, '');
+  return /^(?:\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)|\/proc\/self\/fd\/\d+)$/.test(
+    clean
+  );
+}
+
+function isCrontabMutation(tokens: string[]): boolean {
+  return (
+    tokens.length > 1 &&
+    !tokens.some((token) =>
+      ['-l', '--list', '-T', '--test', '--help'].includes(token)
+    )
+  );
+}
+
+function isRemoteFilesystemMutationSegment(tokens: string[]): boolean {
+  if (isNonMutatingInvocation(tokens)) return false;
+  const head = tokens[0];
+  if (head === 'tee') {
+    return tokens
+      .slice(1)
+      .some(
+        (token) => !token.startsWith('-') && !isDiscardOutputPath(token)
+      );
+  }
+  if (
+    [
+      'chmod',
+      'chown',
+      'cp',
+      'install',
+      'ln',
+      'mkdir',
+      'mv',
+      'rm',
+      'rmdir',
+      'touch',
+      'truncate',
+    ].includes(head)
+  ) {
+    return true;
+  }
+  if (head === 'systemctl') {
+    if (hasShortHelpFlag(tokens) || hasSystemctlShortHelpFlag(tokens)) {
+      return false;
+    }
+    const { command: verb } = firstSubcommand(
+      tokens,
+      SYSTEMCTL_OPTIONS_WITH_ARGUMENT,
+      SYSTEMCTL_COMBINED_OPTION_WITH_ARGUMENT
+    );
+    return SYSTEMCTL_REMOTE_MUTATIONS.has(verb);
+  }
+  if (head === 'launchctl') {
+    return ['bootstrap', 'bootout', 'kickstart', 'load', 'unload'].includes(tokens[1]);
+  }
+  if (head === 'crontab') return isCrontabMutation(tokens);
+  if (
+    head === 'sed' &&
+    optionPrefix(tokens).some(
+      (token) => /^-[^-]*i/.test(token) || /^--in-place(?:=|$)/.test(token)
+    )
+  ) {
+    return true;
+  }
+  return shellOutputPaths(tokens).some((path) => !isDiscardOutputPath(path));
+}
+
+function isSshRemoteMutation(tokens: string[], depth: number): boolean {
+  if (isSshQueryInvocation(tokens)) return false;
+  const payload = sshPayload(tokens);
+  if (!payload) return false;
+  return isRemotePayloadMutation(payload, depth + 1);
+}
+
+function isRemoteStateSegment(tokens: string[], depth: number): boolean {
+  if (isNonMutatingInvocation(tokens)) return false;
+  if (isDeploymentMutationSegment(tokens)) return true;
+  const head = tokens[0];
+  if (head === 'scp' || head === 'rsync') {
+    if (
+      head === 'rsync' &&
+      optionPrefix(tokens).some(
+        (token) =>
+          token === '--list-only' ||
+          token === '-n' ||
+          /^-[^-]*n/.test(token)
+      )
+    ) {
+      return false;
+    }
+    return isRemoteLocation(tokens[tokens.length - 1]?.replace(/[)}]+$/, ''));
+  }
+  return head === 'ssh' && isSshRemoteMutation(tokens, depth);
+}
+
+function isExternalConfigOutput(path: string | null): boolean {
+  if (!path) return false;
+  const clean = path.replace(/[)}]+$/, '');
+  const external = /^(?:~\/\.config\/|\/etc\/|\/usr\/local\/etc\/|\/var\/(?:lib|opt)\/|\/opt\/|\/srv\/|\/(?:home\/[^/]+|Users\/[^/]+)\/\.config\/)/.test(
+    clean
+  );
+  return external && CONFIG_OUTPUT_RE.test(clean);
+}
+
+function isGeneratedConfigSegment(tokens: string[]): boolean {
+  if (hasHelpFlag(tokens)) return false;
+  const [head, verb] = tokens;
+  if (
+    ['envsubst', 'gomplate', 'jinja2', 'mustache', 'ytt'].includes(head) ||
+    (head === 'kustomize' && verb === 'build') ||
+    (head === 'helm' &&
+      firstSubcommand(tokens, HELM_OPTIONS_WITH_ARGUMENT).command === 'template')
+  ) {
+    return [...shellOutputPaths(tokens), ...commandOutputPaths(tokens)].some(
+      isExternalConfigOutput
+    );
+  }
+  if (head === 'cp' || head === 'install') {
+    const positional = tokens.slice(1).filter((token) => !token.startsWith('-'));
+    return (
+      positional.length >= 2 &&
+      CONFIG_SOURCE_RE.test(positional[positional.length - 2]) &&
+      isExternalConfigOutput(positional[positional.length - 1])
+    );
+  }
+  if (head === 'tee') {
+    return tokens.slice(1).some(isExternalConfigOutput);
+  }
+  if (!['sed', 'perl', 'python', 'node'].includes(head)) return false;
+  return shellOutputPaths(tokens).some(isExternalConfigOutput);
+}
+
+function isDurableInstallSegment(tokens: string[]): boolean {
+  if (isNonMutatingInvocation(tokens) || hasShortHelpFlag(tokens)) return false;
+  const [head, verb, subverb] = tokens;
+  if (['apt-get', 'apt'].includes(head)) {
+    if (verb === 'help') return false;
+    if (
+      optionPrefix(tokens).some((token) =>
+        [
+          '-s',
+          '-d',
+          '--simulate',
+          '--just-print',
+          '--no-act',
+          '--download-only',
+        ].includes(token)
+      )
+    ) {
+      return false;
+    }
+    return tokens.includes('install');
+  }
+  if (head === 'brew') return firstSubcommand(tokens).command === 'install';
+  if (head === 'systemctl') {
+    if (hasSystemctlShortHelpFlag(tokens)) return false;
+    return SYSTEMCTL_PERSISTENT_MUTATIONS.has(
+      firstSubcommand(
+        tokens,
+        SYSTEMCTL_OPTIONS_WITH_ARGUMENT,
+        SYSTEMCTL_COMBINED_OPTION_WITH_ARGUMENT
+      ).command
+    );
+  }
+  if (head === 'launchctl') return verb === 'load' || verb === 'bootstrap';
+  if (head === 'crontab') return isCrontabMutation(tokens);
+  return (
+    (head === 'docker' || head === 'podman') &&
+    verb === 'volume' &&
+    subverb === 'create'
+  );
+}
+
+function nestedExecutableBodies(
+  rawCommand: string,
+  executableSource: string,
+  segments: string[][]
+): string[] {
+  return [
+    ...commandSubstitutionBodies(executableSource),
+    ...segments
+      .map(shellCommandPayload)
+      .filter((payload): payload is string => payload !== null),
+    ...heredocExecutableBodies(rawCommand),
+  ];
+}
+
+/** Classify a payload while retaining the fact that its filesystem is remote. */
+function isRemotePayloadMutation(command: string, depth: number): boolean {
+  const executableSource = executableShellSource(command);
+  const segments = executableShellSegments(command);
+  if (
+    segments.some(
+      (segment) =>
+        isRemoteStateSegment(segment, depth) ||
+        isRemoteFilesystemMutationSegment(segment) ||
+        isGeneratedConfigSegment(segment) ||
+        isDurableInstallSegment(segment)
+    )
+  ) {
+    return true;
+  }
+  if (depth >= 4) return false;
+  if (
+    remoteHeredocBodies(command).some((body) =>
+      isRemotePayloadMutation(body, depth + 1)
+    )
+  ) {
+    return true;
+  }
+  return nestedExecutableBodies(command, executableSource, segments).some(
+    (body) => isRemotePayloadMutation(body, depth + 1)
+  );
+}
+
+function isPipeToShellInstall(command: string): boolean {
+  for (const stages of shellPipelineGroups(command)) {
+    for (let index = 0; index < stages.length - 1; index += 1) {
+      const producer = pipelineStageTokens(stages[index]);
+      if (!producer || !['curl', 'wget'].includes(producer[0])) continue;
+      if (pipelineReachesConsumer(stages, index, shellConsumesStdinProgram)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function classifyDurableCommandInternal(
+  command: string,
+  depth: number
+): DurableCommandKind | null {
+  const executableSource = executableShellSource(command);
+  const segments = executableShellSegments(command);
+  if (segments.some((segment) => isRemoteStateSegment(segment, depth))) {
+    return 'remote-state';
+  }
+  if (
+    depth < 4 &&
+    remoteHeredocBodies(command).some((body) =>
+      isRemotePayloadMutation(body, depth + 1)
+    )
+  ) {
+    return 'remote-state';
+  }
+  if (segments.some(isGeneratedConfigSegment)) return 'generated-config';
+  if (segments.some(isDurableInstallSegment)) return 'multi-step-install';
+  if (depth < 4) {
+    for (const body of nestedExecutableBodies(command, executableSource, segments)) {
+      const nestedKind = classifyDurableCommandInternal(body, depth + 1);
+      if (nestedKind) return nestedKind;
+    }
+  }
+  if (isPipeToShellInstall(executableSource)) return 'multi-step-install';
+  return null;
+}
+
+/** Classify a full Bash command before its body is stripped from bulk data. */
+export function classifyDurableCommand(
+  command: string
+): DurableCommandKind | null {
+  return classifyDurableCommandInternal(command, 0);
+}
 
 /**
  * Character length of a tool_result `content` value, used as a cheap proxy for
@@ -100,6 +1235,26 @@ export function distillToolInput(input: unknown): DistilledToolInput {
   return out;
 }
 
+function deriveLeaveBehindStructure(
+  toolName: unknown,
+  rawInput: unknown
+): Pick<ToolCall, 'leaveBehindStructure'> | Record<string, never> {
+  if (toolName !== 'Write' || !rawInput || typeof rawInput !== 'object') {
+    return {};
+  }
+  const source = rawInput as Record<string, unknown>;
+  if (!leaveBehindStateScope(source.file_path)) return {};
+  const result = validateLeaveBehindArtifact({
+    required: true,
+    path: source.file_path,
+    content: source.content,
+    trackedAtHead: null,
+  });
+  return result.status === 'candidate'
+    ? { leaveBehindStructure: LEAVE_BEHIND_CONTRACT.version }
+    : {};
+}
+
 export function parseToolUsage(text: string, fileName: string): ToolUsageData | null {
   const sessionId = fileName.replace(/\.jsonl$/, '');
 
@@ -134,6 +1289,7 @@ export function parseToolUsage(text: string, fileName: string): ToolUsageData | 
           ...(block.name === 'Bash' && input.command
             ? deriveBashCommandSignals(input.command)
             : {}),
+          ...deriveLeaveBehindStructure(block.name, block.input),
         };
         callsById.set(toolUseId, call);
         if (pending !== undefined) pendingResults.delete(toolUseId);
@@ -612,11 +1768,13 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
     pattern.test(dangerousSkeleton)
   );
   const riskyAction = detectRiskyActionPatternName(command);
+  const durableKind = classifyDurableCommand(command);
   const head = commandHead(command);
   const gitSegments = commandGitSegments(command);
   return {
     commandFingerprint: bashCommandFingerprint(command),
     commandPreview: commandPreview(command),
+    ...(durableKind ? { commandDurableKind: durableKind } : {}),
     ...(head ? { commandHead: head } : {}),
     ...(head && commandHeadIsPermissionPrefix(command, head)
       ? { commandHeadIsPermissionPrefix: true }
