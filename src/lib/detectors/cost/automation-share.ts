@@ -2,6 +2,7 @@ import type {
   Detector,
   TaskClassCostBreakdown,
   RecommendationSavingsAttribution,
+  RecObservation,
 } from '../types';
 import {
   automationCostShare,
@@ -11,27 +12,149 @@ import {
   type AutomationClassCost,
 } from '../shared';
 import { CHEAPEST_MODEL } from '../../pricing';
-import { demoteStaleAttribution } from '../provenance';
+import { demoteStaleAttribution, isAsOfStale } from '../provenance';
 import {
   computeModelPinSavings,
   deriveModelPinSavingsConfig,
+  type ModelPinSavingsResult,
 } from '../../model-pin-savings';
 import { classifyTaskClass } from '../../task-class';
 import type { SessionTokenData } from '../../../types';
-import { type ReclaimClaim, type PoolId } from '../../reclaim';
-
-const ALL_POOLS: PoolId[] = ['input', 'output', 'cacheWrite5m', 'cacheWrite1h', 'cacheRead'];
+import {
+  estimateEntryCost,
+  isUnattendedEntrypoint,
+} from '../../parse-sessions';
 
 /**
- * Freshness horizon (days) for a per-class down-model proof (#2142). Anthropic
- * ships a new model generation on the order of one-to-three months, so a
- * measured "the cheaper model held the bar" before/after older than a quarter
- * spans at least one model version — the tradeoff it measured may no longer
- * hold. Beyond this window a measured proof is demoted to a dated estimate
+ * Freshness horizon (days) for per-class down-model evidence (#2142). Model
+ * capabilities and pricing move over time, so a before/after older than a
+ * quarter may no longer describe the current cost direction. Beyond this window
+ * the measurement is demoted to a dated estimate
  * (`demoteStaleAttribution`) so it is not asserted as CURRENT confidence; a
- * re-validation with fresher turns refreshes the `asOf` and restores the tier.
+ * re-measurement with fresher turns refreshes the `asOf` and restores the
+ * observational tier; it still does not quality-clear a class.
  */
 export const DOWN_MODEL_PROOF_FRESHNESS_DAYS = 90;
+
+function latestBillableAutomationTimestamp(
+  tokenData: SessionTokenData[]
+): number | null {
+  let latest: number | null = null;
+  for (const session of tokenData) {
+    if (!isUnattendedEntrypoint(session.entrypoint)) continue;
+    for (const entry of session.entries) {
+      // Keep this aligned with automationCostShare/estimateCost: an otherwise
+      // unpriced model can still add paid server-tool fees to the observed bill.
+      if (estimateEntryCost(entry) <= 0) continue;
+      const timestampMs = new Date(entry.timestamp).getTime();
+      if (!Number.isFinite(timestampMs)) continue;
+      latest = latest === null ? timestampMs : Math.max(latest, timestampMs);
+    }
+  }
+  return latest;
+}
+
+function measuredSavingsObservations(
+  measured: ModelPinSavingsResult
+): RecObservation[] {
+  const source = 'parse-sessions/model-pin-savings';
+  const target = measured.targetModel;
+  return [
+    {
+      claim: `the configured before/after target model was ${target}`,
+      source,
+      field: 'modelPinSavings.targetModel + pricing[targetModel]',
+      value: target,
+    },
+    {
+      claim: `the baseline window was [${measured.attribution.window?.baseline?.start}, ${measured.attribution.window?.baseline?.end})`,
+      source,
+      field:
+        'modelPinSavings.baseline.{start,end} + sessionData[].entries[].timestamp',
+      value: `${measured.attribution.window?.baseline?.start}..<${measured.attribution.window?.baseline?.end}`,
+    },
+    {
+      claim: `the baseline window contained ${measured.baseline.entries} priced unattended ${measured.baseline.entries === 1 ? 'entry' : 'entries'}`,
+      source,
+      field:
+        'sessionData[entrypoint sdk-*].entries[].{timestamp,model} filtered to modelPinSavings.baseline',
+      value: measured.baseline.entries,
+    },
+    {
+      claim: `baseline actual-model token spend was ${fmtUsd(measured.baseline.actualModelSpendUsd)}`,
+      source,
+      field:
+        'sessionData[entrypoint sdk-*].entries[].{timestamp,model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[actual model] within modelPinSavings.baseline',
+      value: measured.baseline.actualModelSpendUsd,
+    },
+    {
+      claim: `baseline same-token spend at ${target} rates was ${fmtUsd(measured.baseline.targetModelSpendUsd)}`,
+      source,
+      field:
+        'sessionData[entrypoint sdk-*].entries[].{timestamp,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[targetModel] within modelPinSavings.baseline',
+      value: measured.baseline.targetModelSpendUsd,
+    },
+    {
+      claim: `baseline token-only model premium was ${fmtUsd(measured.baseline.premiumUsd)}; server-tool fees were excluded`,
+      source,
+      field:
+        'max(0, sum(entryCostAtModel(entry, actualModel)) - sum(entryCostAtModel(entry, targetModel))) within modelPinSavings.baseline',
+      value: measured.baseline.premiumUsd,
+    },
+    {
+      claim: `the comparison window was [${measured.attribution.window?.comparison?.start}, ${measured.attribution.window?.comparison?.end})`,
+      source,
+      field:
+        'modelPinSavings.comparison.{start,end} + sessionData[].entries[].timestamp',
+      value: `${measured.attribution.window?.comparison?.start}..<${measured.attribution.window?.comparison?.end}`,
+    },
+    {
+      claim: `the comparison window contained ${measured.comparison.entries} priced unattended ${measured.comparison.entries === 1 ? 'entry' : 'entries'}`,
+      source,
+      field:
+        'sessionData[entrypoint sdk-*].entries[].{timestamp,model} filtered to modelPinSavings.comparison',
+      value: measured.comparison.entries,
+    },
+    {
+      claim: `comparison actual-model token spend was ${fmtUsd(measured.comparison.actualModelSpendUsd)}`,
+      source,
+      field:
+        'sessionData[entrypoint sdk-*].entries[].{timestamp,model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[actual model] within modelPinSavings.comparison',
+      value: measured.comparison.actualModelSpendUsd,
+    },
+    {
+      claim: `comparison same-token spend at ${target} rates was ${fmtUsd(measured.comparison.targetModelSpendUsd)}`,
+      source,
+      field:
+        'sessionData[entrypoint sdk-*].entries[].{timestamp,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[targetModel] within modelPinSavings.comparison',
+      value: measured.comparison.targetModelSpendUsd,
+    },
+    {
+      claim: `comparison token-only model premium was ${fmtUsd(measured.comparison.premiumUsd)}; server-tool fees were excluded`,
+      source,
+      field:
+        'max(0, sum(entryCostAtModel(entry, actualModel)) - sum(entryCostAtModel(entry, targetModel))) within modelPinSavings.comparison',
+      value: measured.comparison.premiumUsd,
+    },
+    ...(measured.attribution.asOf
+      ? [
+          {
+            claim: `the latest priced unattended comparison entry was observed as of ${measured.attribution.asOf}`,
+            source,
+            field:
+              'max(sessionData[entrypoint sdk-*].entries[].timestamp within modelPinSavings.comparison after model-pricing gates)',
+            value: measured.attribution.asOf,
+          },
+        ]
+      : []),
+    {
+      claim: `baseline minus comparison was a directional ${fmtUsd(measured.realizedSavingsUsd)} model-token premium difference; server-tool fees were excluded`,
+      source,
+      field: 'max(0, baseline token premium - comparison token premium)',
+      value: measured.realizedSavingsUsd,
+    },
+  ];
+}
 
 /**
  * The honest, always-available per-class attribution: pure token-accounting, so
@@ -98,16 +221,10 @@ function classSavingsAttribution(
   if (!measured?.attribution) return estimate;
 
   // Measured before/after for this class. `realizedSavingsUsd` + `confidence`
-  // come from the observed premium drop (`computeModelPinSavings`); we carry the
-  // class's own `sampleSize`/`asOf` so the auditable metadata matches the tier-0
-  // rows and a reader can still gate on evidence depth and freshness.
-  return {
-    ...measured.attribution,
-    sampleSize: measured.baseline.entries + measured.comparison.entries,
-    ...(c.latestTimestampMs !== null
-      ? { asOf: new Date(c.latestTimestampMs).toISOString().slice(0, 10) }
-      : {}),
-  };
+  // come from the observed premium drop (`computeModelPinSavings`). The
+  // attribution's own sample/asOf come from priced entries actually inside
+  // the measured windows, so unrelated newer turns cannot refresh it.
+  return measured.attribution;
 }
 
 /**
@@ -127,13 +244,14 @@ export const detector: Detector = {
     // Automation view's cost band agree exactly — no duplicated cost math.
     const { autoCost, total, share } = automationCostShare(input.tokenData);
     // Counterfactual: what the automation turns would have cost on the cheapest
-    // model. The per-entry (actual − Haiku) swap math — skip synthetic turns, sum
-    // only positive deltas, collect reclaim scopes/tokens — now lives in
+    // model. The per-entry (actual − Haiku) swap math — skip synthetic turns and
+    // sum only positive deltas — now lives in
     // `automationCostByClass` (#2139) so the grand totals and the per-class split
     // are one computation and cannot drift. It also PARTITIONS that spend +
     // savings into `authoring | mechanical | review` (epic #2138): the per-class
-    // figures sum back to `autoCost`/`swapSavings` exactly, so the $7,160
-    // automation reclaim can be read per class instead of as one number.
+    // figures sum back to `autoCost`/`swapSavings` exactly, so the raw automation
+    // swap ceiling can be audited per class instead of as one number. No class is
+    // booked here: this detector has cost arithmetic, not completion/quality proof.
     const byClass = automationCostByClass(input.tokenData);
     const swapSavings = byClass.swapSavings;
     const sessionCount = byClass.sessionIds.length;
@@ -147,12 +265,12 @@ export const detector: Detector = {
     // the sample size (billable turns behind the figure) and the data's `asOf`
     // freshness so a reader or auto-router can gate on the evidence.
     //
-    // Stale-proof decay (#2142, reusing the #1102 provenance path): a measured
+    // Stale-measurement decay (#2142, reusing the #1102 provenance path): a measured
     // before/after older than DOWN_MODEL_PROOF_FRESHNESS_DAYS is demoted back to a
     // dated `tier-0-estimate` with `stale: true` — model versions move, so an
-    // expired "cheaper model held the bar" verdict must not be counted as current
-    // confidence. A re-validation with fresher turns refreshes the `asOf` and
-    // restores the measured tier.
+    // expired cost-direction observation must not be counted as current
+    // evidence. A re-measurement with fresher turns refreshes the `asOf` and
+    // restores the observational tier; it still does not quality-clear a class.
     const taskClassBreakdown: TaskClassCostBreakdown[] = byClass.classes.map((c) => ({
       taskClass: c.taskClass,
       autoCostUsd: c.autoCost,
@@ -164,20 +282,6 @@ export const detector: Detector = {
         DOWN_MODEL_PROOF_FRESHNESS_DAYS
       ),
     }));
-    // Reclaim claim (model right-sizing): reprice the unattended-automation scopes
-    // onto the cheapest model across every pool. Placed LAST in the structural
-    // block (orderKey 80, doc §7.1 "model-swap last") so a reprice never discounts
-    // tokens a physical lever already removed. `reprice` recomputes residual
-    // tokens at the scope's own rate and re-bills them at the cheapest rate.
-    const reclaim: ReclaimClaim = {
-      leverId: 'cost.automation-share',
-      category: 'cost',
-      orderKey: 80,
-      ownedPools: ALL_POOLS,
-      scopeKeys: byClass.scopeKeys,
-      counterfactual: { kind: 'reprice', toModel: CHEAPEST_MODEL },
-      evidenceTokens: byClass.swapTokens,
-    };
     const measuredSavings = input.modelPinSavings
       ? computeModelPinSavings({
           tokenData: input.tokenData,
@@ -186,46 +290,156 @@ export const detector: Detector = {
           targetModel: input.modelPinSavings.targetModel,
         })
       : null;
+    const measuredAttribution = measuredSavings?.attribution
+      ? demoteStaleAttribution(
+          measuredSavings.attribution,
+          now,
+          DOWN_MODEL_PROOF_FRESHNESS_DAYS
+        )
+      : undefined;
     if (!measuredSavings?.attribution) {
       if (haikuPinned) return null;
       if (autoCost < 1 || total <= 0) return null;
       if (share < 15) return null;
     }
-    // Lead with the concrete recoverable figure (the swap counterfactual) when
+    // Lead with the concrete counterfactual ceiling when
     // there's something to recover; fall back to the share-only framing when the
-    // automation already runs on the cheapest tier (savings ≈ $0).
+    // automation already runs on the cheapest tier (savings ≈ $0). The swap
+    // figure is per-token repricing — an UPPER BOUND that assumes the cheaper
+    // model does the same work in the same number of turns, so its copy (below)
+    // and provenance flag the equal-completion assumption, iteration risk, and
+    // class-completability risk (#2548). Anthropic's model/effort guidance says
+    // to balance capability, speed, and cost and test actual prompts/data:
+    // https://platform.claude.com/docs/en/about-claude/models/choosing-a-model
+    // https://platform.claude.com/docs/en/build-with-claude/effort
+    // That supports per-class evaluation rather than a global pin, but does not
+    // prove any local class safe. Only a quality-gated T3 replay can clear a
+    // class; T2 is directional.
     const savingsSentence =
       swapSavings >= 0.01
-        ? ` Running those automation turns on Haiku instead would have cost about ${fmtUsd(swapSavings)} less.`
+        ? ` Repriced at Haiku's token rates, those turns would have cost about ${fmtUsd(swapSavings)} less.`
         : '';
     // Per-class breakdown (#2139): name where the automation spend actually sits.
-    // Mechanical (pickers/classify/status-writes/log-only replay) is the safest
-    // to down-model; authoring (code writes) the riskiest. These partition the
-    // `autoCost` above — they sum back to it exactly.
+    // Mechanical (pickers/classify/status-writes/log-only replay) is a lower-risk
+    // evaluation candidate; that keyword classification is not proof. Authoring
+    // (code writes) stays on the strong model until a quality-gated T3 replay
+    // clears it. These partition the `autoCost`
+    // above — they sum back to it exactly.
     const byC = byClass.byClass;
     const classSentence =
       autoCost > 0
-        ? ` By task class: ${fmtUsd(byC.mechanical.autoCost)} mechanical, ${fmtUsd(byC.authoring.autoCost)} authoring, ${fmtUsd(byC.review.autoCost)} review.`
+        ? ` By task class: ${fmtUsd(byC.mechanical.autoCost)} mechanical (lower-risk evaluation candidate, not proof), ${fmtUsd(byC.authoring.autoCost)} authoring (code writes — keep on the strong model), ${fmtUsd(byC.review.autoCost)} review.`
         : '';
+    const nonBookableSentence =
+      swapSavings >= 0.01
+        ? ` The full swap figure is ceiling-only and excluded from booked savings and reclaim because no task class has completion/quality proof; ${fmtUsd(byC.authoring.swapSavings)} of that ceiling is authoring.`
+        : '';
+    // The equal-completion / iteration / class-completability caveat: the swap
+    // figure is a ceiling, never a promised reduction (#2548).
+    const swapCaveatSentence =
+      swapSavings >= 0.01
+        ? ' That swap figure is an upper-bound estimate — it assumes the cheaper model completes the same work in the same number of turns; in practice a cheaper model may need more iterations or fail to complete some task classes.'
+        : '';
+    // Freshest billable automation turn → the provenance `asOf`; a snapshot older
+    // than the down-model freshness horizon demotes the present-tense claim.
+    const latestAutoTs = latestBillableAutomationTimestamp(input.tokenData);
+    const provenanceAsOf =
+      latestAutoTs !== null
+        ? new Date(latestAutoTs).toISOString().slice(0, 10)
+        : undefined;
+    const provenanceStale = isAsOfStale(
+      provenanceAsOf,
+      now,
+      DOWN_MODEL_PROOF_FRESHNESS_DAYS
+    );
+    const detailLead = provenanceStale
+      ? `As of ${provenanceAsOf}, automated`
+      : 'Automated';
+    const measurementContext =
+      measuredAttribution?.tier === 'tier-1-before-after'
+        ? 'The observed before/after is directional cost evidence only; it does not prove completion or quality. '
+        : measuredAttribution?.stale && measuredAttribution.asOf
+          ? `The before/after observation is historical as of ${measuredAttribution.asOf}; remeasure it before relying on its direction. `
+          : '';
+    const routeGuidance = haikuPinned
+      ? 'Treat the existing blanket Haiku pin as unverified by this card. Keep code-authoring on the strong model and retain a cheaper route only after a class-scoped replay (T3) with explicit completion and quality gates clears that class. A before/after (T2) can track cost direction, but cannot quality-clear a route.'
+      : 'Down-model a task class only after a class-scoped replay (T3) with explicit completion and quality gates clears it — start evaluation with mechanical (picker/classify/status/log-only) work and keep code-authoring on the strong model. A before/after (T2) can track cost direction, but cannot quality-clear a route; the swap figure remains a ceiling, not a guaranteed reduction.';
+    const guidance = `${measurementContext}${routeGuidance}`;
+    const action = provenanceStale
+      ? `As of ${provenanceAsOf}, this snapshot showed the automation mix above. Revalidate it against current runs before acting. ${guidance}`
+      : guidance;
     return {
       id: 'cost.automation-share',
       category: 'cost',
       severity: 'info',
-      title: 'Automation drives a large share of spend',
-      detail: `Automated (sdk-*) sessions account for ${fmtUsd(autoCost)} (${share.toFixed(0)}% of total) across ${sessionCount} session(s).${savingsSentence}${classSentence}`,
-      action: haikuPinned
-        ? 'Keep automated runs on the cheapest model that meets the quality bar; the observed before/after savings are shown on this card.'
-        : 'Confirm automated runs use the cheapest model that meets the quality bar — Haiku/Sonnet often suffice for scripted work.',
-      // The dollar weight is the recoverable swap savings, not the full
-      // automation spend — you can't recover spend you'd still pay on Haiku.
-      estSavingsUsd: swapSavings,
-      reclaim,
-      // Per-class partition of autoCost + swapSavings (#2139, epic #2138). The
-      // classes sum back to the card's totals exactly; nothing is dropped.
+      // The spend/share observation is accounting, but the recommendation's
+      // actionable dollar claim is a model-swap counterfactual whose completion
+      // and quality assumptions are unproven. T2 is directional calibration,
+      // not causal proof that a cheaper model holds the quality bar.
+      claimClass: 'causal',
+      proofTier:
+        measuredAttribution?.tier === 'tier-1-before-after'
+          ? 'observational'
+          : 'auditable',
+      title: provenanceStale
+        ? `Automation drove a large share of spend as of ${provenanceAsOf}`
+        : 'Automation drives a large share of spend',
+      detail: `${detailLead} (sdk-*) sessions account for ${fmtUsd(autoCost)} (${share.toFixed(0)}% of total) across ${sessionCount} session(s).${savingsSentence}${classSentence}${nonBookableSentence}${swapCaveatSentence}`,
+      action,
+      // Per-class partition of autoCost + the raw swap ceiling (#2139, epic
+      // #2138). No class ceiling is exported through estSavingsUsd/reclaim
+      // without quality proof.
       taskClassBreakdown,
-      ...(measuredSavings?.attribution
-        ? { savingsAttribution: measuredSavings.attribution }
+      ...(measuredAttribution
+        ? { savingsAttribution: measuredAttribution }
         : {}),
+      // Auditable provenance (#1049/#2548): the swap dollar figure is a
+      // tier-0-estimate
+      // per-token repricing counterfactual — an upper bound, never proof a class
+      // is safe to down-route. The inference states the equal-completion
+      // assumption, iteration risk, and class-completability risk so a reader or
+      // /recs consumer cannot mistake the estimate for a cleared class.
+      provenance: {
+        observations: [
+          {
+            claim: `${sessionCount} unattended sdk-* ${sessionCount === 1 ? 'session was' : 'sessions were'} observed`,
+            source: 'parse-sessions',
+            field: 'sessionData[].entrypoint',
+            value: sessionCount,
+          },
+          {
+            claim: `unattended sdk-* sessions incurred ${fmtUsd(autoCost)} of billable spend, including token and server-tool fees`,
+            source: 'parse-sessions',
+            field:
+              'sessionData[entrypoint sdk-*].entries[].{model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens,webSearchRequests,webFetchRequests} + pricing[model] + SERVER_TOOL_PRICING',
+            value: autoCost,
+          },
+          {
+            claim: `all sessions incurred ${fmtUsd(total)} of total billable spend, including token and server-tool fees`,
+            source: 'parse-sessions',
+            field:
+              'sessionData[].entries[].{model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens,webSearchRequests,webFetchRequests} + pricing[model] + SERVER_TOOL_PRICING',
+            value: total,
+          },
+          {
+            claim: `same-token repricing at ${CHEAPEST_MODEL} rates yields a ${fmtUsd(swapSavings)} ceiling across input, output, cacheWrite5m, cacheWrite1h, and cacheRead; server-tool fees are unchanged and excluded`,
+            source: 'parse-sessions',
+            field: `sum(max(0, entryCostAtModel(entry, entry.model) - entryCostAtModel(entry, ${CHEAPEST_MODEL}))) over sessionData[entrypoint sdk-*].entries[model resolves to priced non-synthetic].{model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens}; server-tool fees excluded`,
+            value: swapSavings,
+          },
+          ...(measuredSavings?.attribution
+            ? measuredSavingsObservations(measuredSavings)
+            : []),
+        ],
+        inference:
+          `The swap figure is a per-token repricing counterfactual (tier-0-estimate): an UPPER BOUND that assumes the cheaper model completes the same work in the same number of turns. It is auditable arithmetic, not proof of completion or quality, so no class ceiling is booked as estSavingsUsd or reclaim. The risk that a cheaper route needs more iterations or fails to complete a class is this detector's inference from that untested equal-turn assumption, not a guaranteed reduction or proof that any class is safe to down-route. Code-authoring especially stays on the strong model until a class-scoped replay (T3) with quality gates clears it; a before/after (T2) is directional cost evidence only. Anthropic's guidance recommends balancing capability, speed, and cost and testing model/effort choices on actual prompts and data.`,
+        ...(provenanceAsOf
+          ? {
+              asOf: provenanceAsOf,
+              stale: provenanceStale,
+            }
+          : {}),
+      },
       affected: sessionCount,
       view: 'cost',
       ...(haikuPinned
@@ -233,8 +447,14 @@ export const detector: Detector = {
         : {
             fix: {
               target: 'settings.json',
-              label: 'Default automation to Haiku',
-              note: `Merge into the settings.json your sdk-* runs use, to right-size the ${share.toFixed(0)}% automated spend. Use the cheapest model that holds your quality bar.`,
+              label: 'Example: down-model a T3-cleared class',
+              // A blanket global "model" pin is unsafe here: it down-routes every
+              // task class, including code-authoring, which the per-task-class
+              // safety boundary (epic #2138) keeps on the strong model until a
+              // T3 quality gate clears it. So this is an ADAPT-ME example, never a
+              // copy-paste-safe validated fix (#2548).
+              fixKind: 'illustrative',
+              note: `Example only — not a blanket global pin. A top-level "model" applies to every task class including code-authoring. A before/after (T2) is directional cost evidence only; only a class-scoped replay (T3) with explicit completion and quality gates can clear a class. Scope any cheaper route to a T3-cleared class and leave authoring on the strong model. See docs/product/features/down-modelling-confidence.md before adopting.`,
               snippet: `{\n  "model": "claude-haiku-4-5"\n}`,
             },
           }),

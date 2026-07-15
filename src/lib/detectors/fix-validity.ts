@@ -79,6 +79,36 @@ export function validateFixSnippet(fix: Pick<RecFix, 'fixKind' | 'snippet'>): st
 }
 
 /**
+ * A settings.json snippet that sets a top-level `"model"` key is a BLANKET,
+ * global model pin — it applies one model to EVERY task class, including
+ * code-authoring. For a down-model-for-cost fix that spans task classes (e.g.
+ * `cost.automation-share`), such a snippet must NOT be presented as `'validated'`
+ * copy-paste-safe: the per-task-class safety boundary (epic #2138,
+ * `docs/product/features/down-modelling-confidence.md`) keeps code-authoring on
+ * the strong model until a class-scoped replay (T3) with explicit completion
+ * and quality gates clears it. A before/after (T2) is directional cost evidence
+ * only. Anthropic frames model choice as a capability decision rather
+ * than a blanket cost lever (platform.claude.com model/effort guidance). Present
+ * it as `'illustrative'` (adapt to the proven-safe scope) instead (#2548).
+ *
+ * This is a SAFETY predicate a detector's own test asserts against its own fix.
+ * It is deliberately NOT wired into the portability gate, because a top-level
+ * model pin is legitimately `'validated'` in other contexts (upgrading a retired
+ * model, pinning a model when none is set, right-sizing one narrow agent type) —
+ * only a cost-down pin that spans task classes is unsafe.
+ */
+export function isBlanketModelPinSnippet(snippet: string): boolean {
+  const trimmed = snippet.trim();
+  if (!(trimmed.startsWith('{') && trimmed.endsWith('}'))) return false;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    return typeof parsed.model === 'string';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Extract the script names from any `npm run [-s] <script>` invocations in a
  * snippet. Used by {@link validateNpmRunScripts} for snippets that are meant to
  * run in THIS repo (not user-env hook templates).

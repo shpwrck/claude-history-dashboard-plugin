@@ -81,12 +81,12 @@ export interface ModelPinSavingsResult {
 interface PricedEntry {
   sessionId: string;
   model: string;
+  timestampMs: number;
   actualCost: number;
   targetCost: number;
 }
 
 interface TimestampedPricedEntry extends PricedEntry {
-  timestampMs: number;
   targetPriced: boolean;
 }
 
@@ -100,6 +100,7 @@ export function deriveModelPinSavingsConfig(
   input: ModelPinSavingsDerivationInput
 ): ModelPinSavingsConfig | null {
   const targetModel = input.targetModel ?? CHEAPEST_MODEL;
+  if (!isBillableModel(targetModel)) return null;
   const minBaselineEntries = input.minBaselineEntries ?? 1;
   const minComparisonEntries = input.minComparisonEntries ?? 1;
   const minComparisonTargetShare = input.minComparisonTargetShare ?? 0.5;
@@ -157,6 +158,7 @@ export function computeModelPinSavings(
   input: ModelPinSavingsInput
 ): ModelPinSavingsResult | null {
   const targetModel = input.targetModel ?? CHEAPEST_MODEL;
+  if (!isBillableModel(targetModel)) return null;
   const baselineEntries = collectWindowEntries(
     input.tokenData,
     input.baseline,
@@ -195,6 +197,8 @@ export function computeModelPinSavings(
       predictedSavingsUsd,
       realizedSavingsUsd,
       confidence: 'medium',
+      sampleSize: baselineEntries.length + comparisonEntries.length,
+      asOf: latestAsOf(comparisonEntries),
       window: {
         baseline: input.baseline,
         comparison: input.comparison,
@@ -217,9 +221,12 @@ function collectTimestampedEntries(
       const timestampMs = new Date(entry.timestamp).getTime();
       if (!Number.isFinite(timestampMs)) continue;
       const model = entry.model || session.model || 'unknown';
-      if (resolveModelPricing(model).isSynthetic) continue;
+      if (!isBillableModel(model)) continue;
       const actualCost = entryCostAtModel(entry, model);
       const targetCost = entryCostAtModel(entry, targetModel);
+      // Server-tool-only rows do not measure a model-price migration. Without
+      // this gate, a 0/0 row looks target-priced and can create a fake split.
+      if (!hasModelTokenCost(actualCost, targetCost)) continue;
       entries.push({
         sessionId: session.sessionId,
         model,
@@ -254,15 +261,18 @@ function collectWindowEntries(
     if (sessionFilter && !sessionFilter(session)) continue;
 
     for (const entry of session.entries) {
-      if (!isInPeriod(entry.timestamp, period)) continue;
+      const timestampMs = timestampInPeriod(entry.timestamp, period);
+      if (timestampMs === null) continue;
       const model = entry.model || session.model || 'unknown';
-      if (resolveModelPricing(model).isSynthetic) continue;
+      if (!isBillableModel(model)) continue;
 
       const actualCost = entryCostAtModel(entry, model);
       const targetCost = entryCostAtModel(entry, targetModel);
+      if (!hasModelTokenCost(actualCost, targetCost)) continue;
       entries.push({
         sessionId: session.sessionId,
         model,
+        timestampMs,
         actualCost,
         targetCost,
       });
@@ -272,14 +282,32 @@ function collectWindowEntries(
   return entries;
 }
 
-function isInPeriod(timestamp: string, period: SavingsAttributionPeriod): boolean {
+function timestampInPeriod(
+  timestamp: string,
+  period: SavingsAttributionPeriod
+): number | null {
   const t = new Date(timestamp).getTime();
   const start = new Date(period.start).getTime();
   const end = new Date(period.end).getTime();
   if (!Number.isFinite(t) || !Number.isFinite(start) || !Number.isFinite(end)) {
-    return false;
+    return null;
   }
-  return t >= start && t < end;
+  return t >= start && t < end ? t : null;
+}
+
+function isBillableModel(model: string): boolean {
+  const resolved = resolveModelPricing(model);
+  return !resolved.isSynthetic && !resolved.isUnknownModel && !resolved.isMissingModel;
+}
+
+function hasModelTokenCost(actualCost: number, targetCost: number): boolean {
+  return actualCost > 0 || targetCost > 0;
+}
+
+function latestAsOf(entries: PricedEntry[]): string {
+  return new Date(Math.max(...entries.map((entry) => entry.timestampMs)))
+    .toISOString()
+    .slice(0, 10);
 }
 
 function summarizeWindow(entries: PricedEntry[]): ModelPinWindowSummary {

@@ -163,9 +163,10 @@ export function getModelPricing(model: string): ModelPricing {
 
 /**
  * Cheapest current model — the floor of the model-swap "ceiling" math. Swapping
- * a turn here yields the maximum recoverable savings. Named so swap callers
- * (TokenUsage's swapScenario, the automation-cost counterfactual) don't sprinkle
- * the raw id around.
+ * a turn here yields the maximum same-token price ceiling. Callers decide
+ * whether that counterfactual is bookable. Named so swap callers (TokenUsage's
+ * swapScenario, the automation-cost counterfactual) don't sprinkle the raw id
+ * around.
  */
 export const CHEAPEST_MODEL = CHEAPEST_CURRENT_MODEL_ID;
 

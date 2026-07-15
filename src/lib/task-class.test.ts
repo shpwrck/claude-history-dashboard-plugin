@@ -66,10 +66,10 @@ describe('classifyTaskClass (#2139, epic #2138)', () => {
     expect(detailed.signal).toBe('default');
   });
 
-  it('biases to authoring on a keyword collision (the safe direction)', () => {
+  it('biases to authoring on a keyword collision (the conservative direction)', () => {
     // `burn-epic-pick` contains both a picker word and the authoring `burn-epic`
     // role; authoring is checked first so real code work is never mis-labelled
-    // down-model-safe.
+    // lower-risk merely from picker vocabulary.
     expect(classifyTaskClass({ entrypoint: 'sdk-cli', opener: 'burn-epic-pick --dry-run' })).toBe(
       'authoring'
     );
@@ -85,7 +85,7 @@ describe('classifyTaskClass (#2139, epic #2138)', () => {
       classifyTaskClass({ entrypoint: 'sdk-cli', opener: 'coder: implement code-review feedback' })
     ).toBe('authoring');
     // "add --dry-run support to X" is real code work; a bare dry-run must NOT
-    // bucket it mechanical (the dangerous down-model-safe misclassification).
+    // bucket it mechanical (a dangerous risk-classification error).
     expect(
       classifyTaskClass({
         entrypoint: 'sdk-cli',

@@ -325,7 +325,7 @@ export interface AutomationClassCost {
   taskClass: TaskClass;
   /** Actual estimated spend on this class's unattended sessions. */
   autoCost: number;
-  /** Estimated Haiku-swap savings recoverable from this class. */
+  /** Counterfactual same-token Haiku-swap ceiling; non-bookable metadata. */
   swapSavings: number;
   /** Distinct unattended sessions assigned to this class. */
   sessions: number;
@@ -346,13 +346,13 @@ export interface AutomationClassCost {
 export interface AutomationCostByClass {
   /** Grand automation spend — identical to {@link automationCostShare}().autoCost. */
   autoCost: number;
-  /** Grand Haiku-swap savings — identical to the automation-share detector total. */
+  /** Grand same-token Haiku-swap ceiling across all classes. */
   swapSavings: number;
-  /** Billable tokens behind the positive swap deltas (feeds the reclaim). */
+  /** Tokens behind positive swap deltas; retained as audit metadata. */
   swapTokens: number;
   /** Distinct unattended session ids across all classes. */
   sessionIds: string[];
-  /** `scopeKeyOf(sessionId, model)` for every positive-delta entry (reclaim scope). */
+  /** `scopeKeyOf(sessionId, model)` for every positive-delta entry. */
   scopeKeys: string[];
   /** Per-class partition, keyed by class. */
   byClass: Record<TaskClass, AutomationClassCost>;
@@ -367,8 +367,8 @@ export interface AutomationCostByClass {
  * exactly one class via {@link classifyTaskClass} (from its `entrypoint` +
  * `opener`), so the returned per-class `autoCost` sums back to
  * `automationCostShare().autoCost` and the per-class `swapSavings` sums back to
- * the detector's swap-savings total — by construction, nothing is dropped and
- * no new grand total is introduced.
+ * the raw swap ceiling — by construction, nothing is dropped. The detector
+ * exposes these figures as non-bookable metadata until quality proof exists.
  *
  * The swap-savings math here is the SAME per-entry counterfactual the detector
  * used inline (skip synthetic models, sum only positive actual−Haiku deltas via
@@ -410,8 +410,11 @@ export function automationCostByClass(
     bucket.autoCost += c;
     for (const entry of d.entries) {
       const model = entry.model || 'unknown';
-      if (resolveModelPricing(model).isSynthetic) continue;
-      // Every billable (non-synthetic) turn is an observation behind this
+      const resolved = resolveModelPricing(model);
+      if (resolved.isSynthetic || resolved.isUnknownModel || resolved.isMissingModel) {
+        continue;
+      }
+      // Every billable, priced turn is an observation behind this
       // class's estimate — its sample size (#2141). Track the freshest dated
       // turn so the detector can render an honest `asOf`.
       bucket.sampleSize += 1;
@@ -422,6 +425,14 @@ export function automationCostByClass(
             ? ts
             : Math.max(bucket.latestTimestampMs, ts);
       }
+      // COUNTERFACTUAL, NOT A GUARANTEE (#2548): this reprices the SAME tokens at
+      // the cheaper model's rates — an UPPER-BOUND estimate that assumes the
+      // cheaper model does the identical work in the same number of turns. A
+      // cheaper model may need more iterations or fail to complete a class, so
+      // the swap savings is a ceiling, not a promised reduction. That risk is
+      // this detector's inference from the equal-token assumption; Anthropic's
+      // guidance is to balance capability/speed/cost and test actual prompts.
+      // Per-task-class classification is risk segmentation, not clearance.
       const delta =
         entryCostAtModel(entry, model) - entryCostAtModel(entry, CHEAPEST_MODEL);
       if (delta > 0) {

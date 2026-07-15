@@ -308,10 +308,10 @@ export interface RecommendationSavingsAttribution {
    */
   asOf?: string;
   /**
-   * True when a once-measured proof has been demoted because its {@link asOf} is
+   * True when measured evidence has been demoted because its {@link asOf} is
    * older than the detector's freshness threshold (#2142). Model versions move,
-   * so an expired "cheaper model held the bar" before/after can no longer be
-   * asserted as current confidence — the demotion drops the measured `tier`/
+   * so an expired before/after cost direction can no longer be asserted as
+   * current evidence — the demotion drops the measured `tier`/
    * `confidence`/`realizedSavingsUsd`/`judgeAgreement` and sets this flag so a
    * renderer shows the figure "as of <date>" instead of a live claim. Mirrors
    * {@link RecProvenance.stale}; may only be `true` alongside an `asOf`.
@@ -340,19 +340,20 @@ export interface PromptAnalysis {
 }
 
 /**
- * One task class's slice of automation spend + Haiku-swap savings (#2139, epic
+ * One task class's slice of automation spend + raw Haiku-swap ceiling (#2139, epic
  * #2138). Emitted as an array on `cost.automation-share` (see
  * {@link Recommendation.taskClassBreakdown}). PARTITIONS the card's total
  * `autoCost`/`swapSavings`: the per-class `autoCostUsd` sum equals the card's
- * automation spend and the per-class `swapSavingsUsd` sum equals its swap
- * savings — no new grand total.
+ * automation spend and the per-class `swapSavingsUsd` sum equals the all-class
+ * counterfactual ceiling. Every class remains visible for auditability, but no
+ * class is booked/ranked without completion and quality proof.
  */
 export interface TaskClassCostBreakdown {
   /** `authoring | mechanical | review` (see `src/lib/task-class.ts`). */
   taskClass: TaskClass;
   /** Actual estimated spend on this class's unattended (`sdk-*`) sessions. */
   autoCostUsd: number;
-  /** Estimated Haiku-swap savings recoverable from this class. */
+  /** Counterfactual same-token Haiku-swap ceiling; non-bookable metadata. */
   swapSavingsUsd: number;
   /** Distinct unattended sessions assigned to this class. */
   sessions: number;
@@ -484,10 +485,11 @@ export interface Recommendation {
    */
   premiseUsdPerMo?: number;
   /**
-   * Per task-class partition of automation spend + Haiku-swap savings (#2139,
+   * Per task-class partition of automation spend + raw Haiku-swap ceilings (#2139,
    * epic #2138). Present ONLY on `cost.automation-share`. Additive/optional so
-   * every other consumer is unaffected; the classes sum back to this card's
-   * `autoCost`/`swapSavings` totals exactly (see {@link TaskClassCostBreakdown}).
+   * every other consumer is unaffected. The class ceilings are non-bookable
+   * metadata and are not exported as `estSavingsUsd`/reclaim without completion
+   * and quality proof (see {@link TaskClassCostBreakdown}).
    */
   taskClassBreakdown?: TaskClassCostBreakdown[];
 }

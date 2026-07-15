@@ -344,8 +344,8 @@ export const DETECTORS: Detector[] = [
 
   // ── #1755 (epic #1910) — batchable-workload Batch API -50% cost lever ──────
   // Flags token-heavy unattended (sdk-*) sessions routable through the Batch API
-  // for ~50% off standard input/output; composes after automation-share's model
-  // reprice (orderKey 82) so the saving is marginal, not double-counted. The
+  // for ~50% off standard input/output. Batch is the booked claim (orderKey 82);
+  // automation-share exposes only a separate non-booked same-token ceiling. The
   // batch-route shadow-calls axis is a separate meta follow-on.
   batchableWorkload,
 

@@ -28,10 +28,9 @@ export const detector: Detector = {
     if (rows.length === 0) return null;
     rows.sort((a, b) => b.meanCostUsd - a.meanCostUsd);
     const top = rows[0];
-    // Flag-only in the closed PR1 cascade: a subagent-model right-size overlaps
-    // the automation-share reprice over the same scopes, so booking it here would
-    // double-count. It carries evidence (run count) for per-category coverage but
-    // books $0 and mutates no residual.
+    // Flag-only in the closed PR1 cascade: this detector has aggregate run-count
+    // evidence but no scoped, quality-backed model-right-sizing claim. It carries
+    // evidence for per-category coverage, books $0, and mutates no residual.
     const reclaim: ReclaimClaim = {
       leverId: 'cost.expensive-agent-type',
       category: 'cost',

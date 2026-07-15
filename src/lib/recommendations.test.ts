@@ -306,11 +306,13 @@ describe('automationCostShare shared helper (#299)', () => {
   const costingSession = (
     sessionId: string,
     entrypoint: string | undefined,
-    entries: TokenEntry[]
+    entries: TokenEntry[],
+    opener?: string
   ): SessionTokenData =>
     ({
       sessionId,
       entrypoint,
+      opener,
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCacheCreationTokens: 0,
@@ -372,6 +374,66 @@ describe('automationCostShare shared helper (#299)', () => {
     expect(rec?.savingsAttribution).toBeUndefined();
   });
 
+  it.each([
+    ['authoring', 'coder: implement issue #2712'],
+    ['mechanical', 'route-loose classify picker'],
+    ['review', 'reviewer: review and merge open PRs'],
+  ] as const)('never books a %s-only swap ceiling in either rollup', (taskClass, opener) => {
+    const tokenData = [
+      costingSession(
+        `${taskClass}-only`,
+        'sdk-cli',
+        [entry('claude-opus-4-8', 5_000_000, 1_000_000)],
+        opener
+      ),
+    ];
+    const rec = buildRecommendations(baseInput({ tokenData })).find(
+      (r) => r.id === 'cost.automation-share'
+    );
+    const row = rec?.taskClassBreakdown?.find((item) => item.taskClass === taskClass);
+
+    expect(row?.swapSavingsUsd).toBeGreaterThan(0);
+    expect(totalEstimatedSavings([rec!])).toBe(0);
+    expect(backfillReclaimSavings([rec!], tokenData)[0].estSavingsUsd).toBeUndefined();
+  });
+
+  it('keeps mixed-class swap ceilings out of savings and reclaim rollups', () => {
+    const tokenData = [
+      costingSession(
+        'author',
+        'sdk-cli',
+        [entry('claude-opus-4-8', 5_000_000, 1_000_000)],
+        'coder: implement issue #2712'
+      ),
+      costingSession(
+        'mechanical',
+        'sdk-cli',
+        [entry('claude-opus-4-8', 3_000_000, 600_000)],
+        'route-loose classify picker'
+      ),
+      costingSession(
+        'review',
+        'sdk-cli',
+        [entry('claude-opus-4-8', 2_000_000, 400_000)],
+        'reviewer: review and merge open PRs'
+      ),
+    ];
+    const rec = buildRecommendations(baseInput({ tokenData })).find(
+      (r) => r.id === 'cost.automation-share'
+    );
+
+    expect(rec?.taskClassBreakdown?.map((row) => row.swapSavingsUsd)).toEqual([
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Number),
+    ]);
+    expect(rec?.taskClassBreakdown?.every((row) => row.swapSavingsUsd > 0)).toBe(true);
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim).toBeUndefined();
+    expect(totalEstimatedSavings([rec!])).toBe(0);
+    expect(backfillReclaimSavings([rec!], tokenData)[0].estSavingsUsd).toBeUndefined();
+  });
+
   it('attaches model-pin before/after attribution when a measurement window is available', () => {
     const tokenData = [
       costingSession('baseline-auto', 'sdk-cli', [
@@ -391,7 +453,11 @@ describe('automationCostShare shared helper (#299)', () => {
     })).find((r) => r.id === 'cost.automation-share');
 
     expect(rec).toBeDefined();
-    expect(rec?.estSavingsUsd).toBeGreaterThan(0);
+    // Before/after is directional cost evidence, not completion/quality proof.
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim).toBeUndefined();
+    expect(totalEstimatedSavings([rec!])).toBe(0);
+    expect(backfillReclaimSavings([rec!], tokenData)[0].estSavingsUsd).toBeUndefined();
     expect(rec?.savingsAttribution).toMatchObject({
       interventionKey: 'cost.automation-share',
       signatureId: 'automation-model-pin',
@@ -477,7 +543,11 @@ describe('automationCostShare shared helper (#299)', () => {
 
     expect(rec).toBeDefined();
     expect(rec?.savingsAttribution?.realizedSavingsUsd).toBeGreaterThan(0);
-    expect(rec?.action).toContain('observed before/after savings');
+    expect(rec?.action).toContain(
+      'observed before/after is directional cost evidence only'
+    );
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim).toBeUndefined();
     expect(rec?.fix).toBeUndefined();
   });
 

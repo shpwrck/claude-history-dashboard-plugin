@@ -3,11 +3,13 @@
  *
  * A COARSE, deterministic 3-bucket classifier that labels an automation
  * session/task as one of `authoring | mechanical | review` from EXISTING
- * per-session signals (`entrypoint` + `opener`). It exists so the
- * `cost.automation-share` reclaim ($7,160 of `sdk-*` spend) can be broken down
- * by class — mechanical work (pickers, classify, status-writes, log-only
- * replay) is the safest to down-model, whereas authoring (real code writes) is
- * the riskiest to touch.
+ * per-session signals (`entrypoint` + `opener`). It exists so the raw
+ * same-token swap ceiling for `cost.automation-share` ($7,160 of `sdk-*` spend)
+ * can be broken down by class — mechanical work (pickers, classify,
+ * status-writes, log-only replay) is the lowest-risk segment for later
+ * down-model evaluation, whereas authoring (real code writes) carries the most
+ * quality risk. This coarse segmentation never proves that any task is safe to
+ * down-model.
  *
  * NON-GOALS (deliberately): this is NOT a general/ML task classifier and NOT a
  * new taxonomy. It is a pure keyword-precedence function over the coarse role
@@ -32,17 +34,18 @@
  *   4. DEFAULT    — {@link DEFAULT_TASK_CLASS} = `authoring`.
  *
  * Authoring is checked FIRST on purpose: the dangerous misclassification is
- * calling real code-writing "mechanical" (down-model-safe) — or "review" — when
- * it is actually authoring, because down-modelling authoring risks output
- * quality. So on any keyword collision we bias toward authoring: an opener like
- * `coder: implement code-review feedback` is authoring (not review, despite
- * "code-review"), and `burn-epic-pick --dry-run` is authoring (not a mechanical
- * picker). Mechanical is the safe-to-downshift bucket, so its patterns are kept
- * SPECIFIC (a named picker / classify / status-write / log-only replay) — a bare
- * "dry-run" is deliberately NOT a mechanical signal, so `add --dry-run support
- * to X` (real code work) falls to authoring rather than being mislabelled
- * down-model-safe. Only work that matches a specific mechanical pattern AND
- * carries no authoring/review signal is bucketed mechanical.
+ * calling real code-writing "mechanical" (the lower-risk candidate bucket) — or
+ * "review" — when it is actually authoring, because down-modelling authoring
+ * risks output quality. So on any keyword collision we bias toward authoring:
+ * an opener like `coder: implement code-review feedback` is authoring (not
+ * review, despite "code-review"), and `burn-epic-pick --dry-run` is authoring
+ * (not a mechanical picker). Mechanical is only the lowest-risk candidate
+ * bucket, so its patterns are kept SPECIFIC (a named picker / classify /
+ * status-write / log-only replay) — a bare "dry-run" is deliberately NOT a
+ * mechanical signal, so `add --dry-run support to X` (real code work) falls to
+ * authoring rather than being mislabelled as lower-risk. Only work that matches
+ * a specific mechanical pattern AND carries no authoring/review signal is
+ * bucketed mechanical; the label is not clearance.
  *
  * ### Unknown / no-signal default
  * An unknown entrypoint, an absent opener, or an opener matching none of the
@@ -66,9 +69,9 @@ export const TASK_CLASSES: readonly TaskClass[] = ['authoring', 'mechanical', 'r
 
 /**
  * The documented conservative default for an unknown entrypoint / no-signal
- * opener. `authoring` because misclassifying real code-writing as
- * down-model-safe (`mechanical`) is the dangerous error — an unknown run is
- * assumed to be doing real work until a signal proves it mechanical.
+ * opener. `authoring` because misclassifying real code-writing as a lower-risk
+ * candidate (`mechanical`) is the dangerous error — an unknown run is assumed
+ * to be doing real work until a signal supports a mechanical classification.
  */
 export const DEFAULT_TASK_CLASS: TaskClass = 'authoring';
 
@@ -98,7 +101,8 @@ interface Pattern {
 // ── Role signal patterns (evaluated against the lowercased opener) ────────────
 // Each row cites a real automation role/skill in this repo's harness. Patterns
 // are intentionally specific so a code-writing opener does not fall into the
-// mechanical (down-model-safe) bucket by accident.
+// mechanical (lower-risk candidate) bucket by accident. Classification alone
+// never establishes that a task can be down-modelled without quality loss.
 
 /** reviewer role — audits/approves, does not write code. */
 const REVIEW_PATTERNS: Pattern[] = [
@@ -123,7 +127,7 @@ const AUTHORING_PATTERNS: Pattern[] = [
   { re: /\bwrite (?:the )?code\b/, label: 'write code' },
 ];
 
-/** pickers / classify / status-writes / log-only replay — down-model-safe. */
+/** Pickers, classify, status-writes, and log-only replay: lower-risk candidates. */
 const MECHANICAL_PATTERNS: Pattern[] = [
   { re: /\bpickers?\b/, label: 'picker' },
   { re: /\bpick\.mjs\b/, label: 'pick.mjs picker' },
@@ -131,7 +135,7 @@ const MECHANICAL_PATTERNS: Pattern[] = [
   { re: /\bpick the next\b/, label: 'pick-the-next (picker)' },
   // NB: a BARE "dry-run" / "--dry-run" is deliberately NOT a mechanical signal —
   // it would leak real code work (e.g. "add --dry-run support to X") into the
-  // down-model-safe bucket. Genuine picker dry-runs are caught by the named-picker
+  // lower-risk bucket. Genuine picker dry-runs are caught by the named-picker
   // patterns above (pick.mjs, route/groom/burn-epic-pick).
   { re: /\bclassif(?:y|ies|ied|ication|ying)\b/, label: 'classify' },
   { re: /\broute-loose\b/, label: 'route-loose classify' },
@@ -160,9 +164,9 @@ export function classifyTaskClassDetailed(input: TaskClassInput): TaskClassResul
   const opener = typeof input?.opener === 'string' ? input.opener.toLowerCase() : '';
 
   // 1. authoring — checked FIRST so any code-writing signal wins on a keyword
-  //    collision (safe direction: never down-model real code work). An opener
-  //    like `coder: implement code-review feedback` is authoring, not review,
-  //    even though it mentions "code-review".
+  //    collision (conservative direction: never understate code-work risk). An
+  //    opener like `coder: implement code-review feedback` is authoring, not
+  //    review, even though it mentions "code-review".
   const authoring = firstMatch(opener, AUTHORING_PATTERNS);
   if (authoring) {
     return { taskClass: 'authoring', signal: 'opener', reason: `opener matched ${authoring.label}` };

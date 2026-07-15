@@ -96,7 +96,15 @@ describe('computeModelPinSavings', () => {
       signatureId: 'automation-model-pin',
       tier: 'tier-1-before-after',
       confidence: 'medium',
+      sampleSize: 3,
+      asOf: '2026-05-10',
     });
+    // Model-premium measurement is token-only. The fixture carries paid web
+    // searches, but server-tool fees do not change when the model changes.
+    expect(result?.baseline.actualModelSpendUsd).toBeCloseTo(
+      entryCostAtModel(baselineOpus, 'claude-opus-4-8'),
+      6
+    );
   });
 
   it('ignores synthetic and interactive entries', () => {
@@ -127,6 +135,68 @@ describe('computeModelPinSavings', () => {
     expect(result?.comparison.entries).toBe(1);
     expect(result?.comparison.premiumUsd).toBeCloseTo(0, 6);
     expect(result?.realizedSavingsUsd).toBeCloseTo(baselinePremium, 6);
+    expect(result?.attribution.asOf).toBe('2026-05-09');
+  });
+
+  it('dates attribution from the latest priced comparison entry actually included', () => {
+    const keep = (s: SessionTokenData): boolean => s.sessionId !== 'filtered';
+    const result = computeModelPinSavings({
+      tokenData: [
+        session('included', 'sdk-cli', [
+          entry('2026-05-02T12:00:00Z', 'claude-opus-4-8'),
+          entry('2026-05-09T12:00:00Z', CHEAPEST_MODEL),
+          // The comparison end is exclusive.
+          entry('2026-05-15T00:00:00Z', CHEAPEST_MODEL),
+          // Synthetic and unpriced rows are not measurement samples.
+          entry('2026-05-13T12:00:00Z', SYNTHETIC_MODEL),
+          entry('2026-05-14T12:00:00Z', 'unknown-provider-model'),
+        ]),
+        session('interactive', 'cli', [
+          entry('2026-05-14T18:00:00Z', CHEAPEST_MODEL),
+        ]),
+        session('filtered', 'sdk-cli', [
+          entry('2026-05-14T20:00:00Z', CHEAPEST_MODEL),
+        ]),
+        session('outside', 'sdk-cli', [
+          entry('2026-06-01T12:00:00Z', CHEAPEST_MODEL),
+        ]),
+      ],
+      baseline,
+      comparison,
+      sessionFilter: keep,
+    });
+
+    expect(result?.comparison.entries).toBe(1);
+    expect(result?.attribution).toMatchObject({
+      sampleSize: 2,
+      asOf: '2026-05-09',
+    });
+  });
+
+  it('refuses an unpriced or synthetic target model', () => {
+    const tokenData = [
+      session('auto', 'sdk-cli', [
+        entry('2026-05-02T12:00:00Z', 'claude-opus-4-8'),
+        entry('2026-05-09T12:00:00Z', CHEAPEST_MODEL),
+      ]),
+    ];
+
+    expect(
+      computeModelPinSavings({
+        tokenData,
+        baseline,
+        comparison,
+        targetModel: 'unknown-provider-model',
+      })
+    ).toBeNull();
+    expect(
+      computeModelPinSavings({
+        tokenData,
+        baseline,
+        comparison,
+        targetModel: SYNTHETIC_MODEL,
+      })
+    ).toBeNull();
   });
 
   it('returns null when either compared window has no billable automation data', () => {
@@ -228,6 +298,26 @@ describe('deriveModelPinSavingsConfig', () => {
     ];
 
     expect(deriveModelPinSavingsConfig({ tokenData })).toBeNull();
+  });
+
+  it('does not infer a migration from a zero-token server-tool-only comparison row', () => {
+    const serverToolOnly = {
+      ...entry('2026-05-09T12:00:00Z', 'claude-opus-4-8'),
+      inputTokens: 0,
+      outputTokens: 0,
+      webSearchRequests: 100,
+    };
+    const tokenData = [
+      session('baseline-auto', 'sdk-cli', [
+        entry('2026-05-02T12:00:00Z', 'claude-opus-4-8'),
+      ]),
+      session('comparison-auto', 'sdk-cli', [serverToolOnly]),
+    ];
+
+    expect(deriveModelPinSavingsConfig({ tokenData })).toBeNull();
+    expect(
+      computeModelPinSavings({ tokenData, baseline, comparison })
+    ).toBeNull();
   });
 });
 

@@ -715,6 +715,48 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     }),
     now: 0,
   }),
+  'cost.automation-share': () => {
+    // Two unattended sdk-* sessions on the strong model (autoCost >= $1,
+    // share = 100%) so the estimate-only rec fires with cited provenance.
+    const autoEntry = (input: number, output: number, ts: string) => ({
+      timestamp: ts,
+      inputTokens: input,
+      outputTokens: output,
+      cacheCreationTokens: 0,
+      cacheCreation1hTokens: 0,
+      cacheReadTokens: 0,
+      webSearchRequests: 0,
+      webFetchRequests: 0,
+      model: 'claude-opus-4-8',
+    });
+    const autoSession = (
+      sessionId: string,
+      opener: string,
+      entries: ReturnType<typeof autoEntry>[]
+    ) => ({
+      sessionId,
+      entrypoint: 'sdk-cli',
+      opener,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      model: entries[0].model,
+      messageCount: entries.length,
+      entries,
+      compactionEvents: [],
+      hasUnknownModel: false,
+    });
+    const tokenData = [
+      autoSession('auto-mech', 'route-loose classify + groom-pick dry-run', [
+        autoEntry(3_000_000, 600_000, '2026-06-02T00:00:00.000Z'),
+      ]),
+      autoSession('auto-auth', 'coder: implement issue #2548', [
+        autoEntry(3_000_000, 600_000, '2026-06-03T00:00:00.000Z'),
+      ]),
+    ] as unknown as RecommendationInput['tokenData'];
+    return { input: baseInput({ tokenData }), now: 0 };
+  },
   'cost.idle-mcp-tools': () => ({
     input: baseInput({
       toolInventories: [

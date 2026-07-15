@@ -58,7 +58,7 @@ describe('cost.batchable-workload (#1755)', () => {
     expect(rec?.estSavingsUsd).toBeGreaterThan(0);
     expect(rec?.affected).toBe(1);
     expect(rec?.reclaim?.ownedPools).toEqual(['input', 'output']);
-    // Composes AFTER automation-share's reprice (orderKey 80).
+    // Stable late cost-lever order; automation-share's ceiling is not booked.
     expect(rec?.reclaim?.orderKey).toBeGreaterThan(80);
     expect(rec?.reclaim?.counterfactual.kind).toBe('scaleTokens');
     if (rec?.reclaim?.counterfactual.kind === 'scaleTokens') {

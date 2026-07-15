@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { detector, DOWN_MODEL_PROOF_FRESHNESS_DAYS } from './automation-share';
 import { automationCostShare } from '../shared';
-import { CHEAPEST_MODEL } from '../../pricing';
+import { effectiveFixKind, isBlanketModelPinSnippet } from '../fix-validity';
+import { validateRecommendationProvenance } from '../provenance';
+import { CHEAPEST_MODEL, entryCostAtModel } from '../../pricing';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData, TokenEntry } from '../../../types';
 
@@ -99,15 +101,42 @@ describe('cost.automation-share task-class breakdown (#2139, epic #2138)', () =>
     expect(perClassAutoCost).toBeCloseTo(autoCost, 10);
   });
 
-  it('per-class swap savings sums to the card swapSavings total exactly', () => {
+  it('keeps every task-class swap figure ceiling-only and non-bookable', () => {
     const rec = detector.rule(input({ tokenData }), 0);
-    // The card's ranking dollar weight IS the swapSavings total.
-    const swapSavings = rec?.estSavingsUsd ?? 0;
-    expect(swapSavings).toBeGreaterThan(0);
-    const perClassSwap = sum(
+    const allClassCeilings = sum(
       (rec?.taskClassBreakdown ?? []).map((c) => c.swapSavingsUsd)
     );
-    expect(perClassSwap).toBeCloseTo(swapSavings, 10);
+
+    expect(allClassCeilings).toBeGreaterThan(0);
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim).toBeUndefined();
+    expect(rec?.detail).toContain('full swap figure is ceiling-only');
+    expect(rec?.detail).toContain('no task class has completion/quality proof');
+  });
+
+  it.each([
+    ['authoring', 'coder: implement issue #2548'],
+    ['mechanical', 'route-loose classify + groom-pick dry-run'],
+    ['review', 'reviewer: review and merge the open PRs'],
+  ] as const)('keeps a %s-only swap ceiling entirely non-bookable', (taskClass, opener) => {
+    const rec = detector.rule(
+      input({
+        tokenData: [
+          session(`${taskClass}-only`, 'sdk-cli', opener, [
+            entry('claude-opus-4-8', 5_000_000, 1_000_000),
+          ]),
+        ],
+      }),
+      0
+    );
+    const row = rec?.taskClassBreakdown?.find((c) => c.taskClass === taskClass);
+
+    expect(row?.swapSavingsUsd).toBeGreaterThan(0);
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim).toBeUndefined();
+    expect(rec?.detail).toContain('full swap figure is ceiling-only');
+    expect(rec?.detail).toContain(taskClass);
+    expect(rec?.detail).toContain('excluded from booked savings and reclaim');
   });
 
   it('per-class sessions sum to affected, so no session is dropped', () => {
@@ -227,8 +256,8 @@ describe('cost.automation-share per-class measured tier-1 before/after (#2140)',
     const by = Object.fromEntries(
       (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
     );
-    // Authoring ran on Opus throughout — recoverable spend exists (swapSavings > 0)
-    // but there is no before/after migration, so it stays an honest estimate.
+    // Authoring ran on Opus throughout — a raw swap ceiling exists, but there is
+    // no before/after migration, so it stays an honest estimate and is not booked.
     expect(by.authoring.swapSavingsUsd).toBeGreaterThan(0);
     const auth = by.authoring.savingsAttribution;
     expect(auth?.tier).toBe('tier-0-estimate');
@@ -244,7 +273,7 @@ describe('cost.automation-share per-class measured tier-1 before/after (#2140)',
   });
 });
 
-describe('cost.automation-share stale down-model proof decay (#2142)', () => {
+describe('cost.automation-share stale down-model evidence decay (#2142)', () => {
   const DAY_MS = 24 * 60 * 60 * 1000;
   // Same shape as the #2140 fixture: mechanical migrated Opus -> Haiku in-window
   // (asOf = its freshest turn, 2026-05-10), producing a MEASURED tier-1
@@ -264,14 +293,14 @@ describe('cost.automation-share stale down-model proof decay (#2142)', () => {
   ];
   const asOfMs = Date.parse('2026-05-10T00:00:00.000Z');
 
-  it('keeps a measured proof a live tier-1 claim when it is still fresh', () => {
-    // now = 10 days after the proof's asOf — well inside the freshness window.
+  it('keeps fresh measured cost evidence at tier-1', () => {
+    // now = 10 days after the measurement's asOf — inside the freshness window.
     const now = asOfMs + 10 * DAY_MS;
     const rec = detector.rule(input({ tokenData }), now);
     const mech = Object.fromEntries(
       (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
     ).mechanical.savingsAttribution;
-    // A fresh before/after stays a present-tense confidence claim.
+    // A fresh before/after stays present-tense directional cost evidence.
     expect(mech?.tier).toBe('tier-1-before-after');
     expect(mech?.confidence).toBe('medium');
     expect(mech?.realizedSavingsUsd).toBeGreaterThan(0);
@@ -279,9 +308,9 @@ describe('cost.automation-share stale down-model proof decay (#2142)', () => {
     expect(mech?.asOf).toBe('2026-05-10');
   });
 
-  it('demotes a measured proof past the freshness window to a dated estimate, not counted as current confidence', () => {
+  it('demotes an old measurement to a dated estimate, not current evidence', () => {
     // now = well past the 90-day freshness horizon, so a model generation has
-    // shipped since the proof was observed.
+    // shipped since the measurement was observed.
     const now = asOfMs + (DOWN_MODEL_PROOF_FRESHNESS_DAYS + 24) * DAY_MS;
     const rec = detector.rule(input({ tokenData }), now);
     const mech = Object.fromEntries(
@@ -318,5 +347,523 @@ describe('cost.automation-share stale down-model proof decay (#2142)', () => {
     ).authoring.savingsAttribution;
     expect(auth?.tier).toBe('tier-0-estimate');
     expect(auth?.stale).toBeFalsy();
+  });
+});
+
+describe('cost.automation-share down-model safety caveat + fix safety (#2548)', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  // Unattended sdk-* automation on the strong model, dated so `asOf` resolves.
+  const tokenData = [
+    session('author', 'sdk-cli', 'coder: implement issue #2548', [
+      entry('claude-opus-4-8', 5_000_000, 1_000_000, '2026-06-03T00:00:00.000Z'),
+    ]),
+    session('mech', 'sdk-cli', 'route-loose classify + groom-pick dry-run', [
+      entry('claude-opus-4-8', 3_000_000, 600_000, '2026-06-02T00:00:00.000Z'),
+    ]),
+  ];
+  const asOfMs = Date.parse('2026-06-03T00:00:00.000Z');
+
+  it('states the equal-completion assumption, iteration risk, and class-completability risk in the copy', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const detail = rec?.detail ?? '';
+    // equal-completion assumption
+    expect(detail).toContain('upper-bound estimate');
+    expect(detail).toContain('same number of turns');
+    // iteration risk + class-completability risk
+    expect(detail).toMatch(/more iterations/);
+    expect(detail).toMatch(/fail to complete/);
+  });
+
+  it('never describes authoring as proven safe to down-route', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const text = `${rec?.detail ?? ''} ${rec?.action ?? ''}`;
+    // authoring is called out as unproven / kept on the strong model.
+    expect(text).toMatch(/authoring[^.]*unproven|code-authoring[^.]*strong model/i);
+    // the swap figure is framed as a ceiling, not a guaranteed reduction.
+    expect(rec?.action).toContain('ceiling, not a guaranteed reduction');
+  });
+
+  it('exposes the blanket Haiku pin as an illustrative example, never a validated copy-paste fix', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    expect(rec?.fix).toBeDefined();
+    // A top-level "model" pin is a blanket global down-route...
+    expect(isBlanketModelPinSnippet(rec!.fix!.snippet)).toBe(true);
+    // ...so it must be illustrative, never the copy-paste-safe default.
+    expect(rec?.fix?.fixKind).toBe('illustrative');
+    expect(effectiveFixKind(rec!.fix!)).not.toBe('validated');
+    // T2 is directional cost evidence; only a quality-gated T3 can clear.
+    expect(rec?.fix?.note).toContain(
+      'A before/after (T2) is directional cost evidence only'
+    );
+    expect(rec?.fix?.note).toContain(
+      'only a class-scoped replay (T3) with explicit completion and quality gates can clear a class'
+    );
+  });
+
+  it('emits auditable provenance whose inference carries the caveat, passing the contract', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    expect(rec?.provenance).toBeDefined();
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    expect(rec?.claimClass).toBe('causal');
+    expect(rec?.proofTier).toBe('auditable');
+    expect(rec!.provenance!.observations).toEqual([
+      {
+        claim: '2 unattended sdk-* sessions were observed',
+        source: 'parse-sessions',
+        field: 'sessionData[].entrypoint',
+        value: 2,
+      },
+      {
+        claim:
+          'unattended sdk-* sessions incurred $80.00 of billable spend, including token and server-tool fees',
+        source: 'parse-sessions',
+        field:
+          'sessionData[entrypoint sdk-*].entries[].{model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens,webSearchRequests,webFetchRequests} + pricing[model] + SERVER_TOOL_PRICING',
+        value: 80,
+      },
+      {
+        claim:
+          'all sessions incurred $80.00 of total billable spend, including token and server-tool fees',
+        source: 'parse-sessions',
+        field:
+          'sessionData[].entries[].{model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens,webSearchRequests,webFetchRequests} + pricing[model] + SERVER_TOOL_PRICING',
+        value: 80,
+      },
+      {
+        claim:
+          'same-token repricing at claude-haiku-4-5-20251001 rates yields a $64.00 ceiling across input, output, cacheWrite5m, cacheWrite1h, and cacheRead; server-tool fees are unchanged and excluded',
+        source: 'parse-sessions',
+        field:
+          'sum(max(0, entryCostAtModel(entry, entry.model) - entryCostAtModel(entry, claude-haiku-4-5-20251001))) over sessionData[entrypoint sdk-*].entries[model resolves to priced non-synthetic].{model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens}; server-tool fees excluded',
+        value: 64,
+      },
+    ]);
+    const inference = rec!.provenance!.inference ?? '';
+    expect(inference).toMatch(/upper bound/i);
+    expect(inference).toMatch(/safe to down-route/i);
+    expect(inference).toMatch(/detector's inference/i);
+    expect(inference).toMatch(/actual prompts and data/i);
+  });
+
+  it('emits atomic, reproducible observations for a configured before/after', () => {
+    const measuredTokenData = [
+      session('before', 'sdk-cli', 'route-loose classify picker', [
+        entry(
+          'claude-opus-4-8',
+          5_000_000,
+          1_000_000,
+          '2026-05-02T12:00:00.000Z'
+        ),
+      ]),
+      session('after', 'sdk-cli', 'route-loose classify picker', [
+        entry(CHEAPEST_MODEL, 5_000_000, 1_000_000, '2026-05-09T12:00:00.000Z'),
+      ]),
+    ];
+    const rec = detector.rule(
+      input({
+        tokenData: measuredTokenData,
+        liveConfig: {
+          settings: { model: 'claude-haiku-4-5' },
+        } as unknown as RecommendationInput['liveConfig'],
+        modelPinSavings: {
+          baseline: {
+            start: '2026-05-01T00:00:00.000Z',
+            end: '2026-05-08T00:00:00.000Z',
+          },
+          comparison: {
+            start: '2026-05-08T00:00:00.000Z',
+            end: '2026-05-15T00:00:00.000Z',
+          },
+          targetModel: CHEAPEST_MODEL,
+        },
+      }),
+      Date.parse('2026-05-10T00:00:00.000Z')
+    );
+
+    expect(rec?.savingsAttribution).toMatchObject({
+      tier: 'tier-1-before-after',
+      realizedSavingsUsd: 40,
+      asOf: '2026-05-09',
+    });
+    expect(rec?.proofTier).toBe('observational');
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim).toBeUndefined();
+    expect(rec?.action).toContain(
+      'observed before/after is directional cost evidence only'
+    );
+    expect(rec?.action).toContain(
+      'before/after (T2) can track cost direction, but cannot quality-clear'
+    );
+    expect(rec?.provenance?.observations.slice(4)).toEqual([
+      {
+        claim:
+          'the configured before/after target model was claude-haiku-4-5-20251001',
+        source: 'parse-sessions/model-pin-savings',
+        field: 'modelPinSavings.targetModel + pricing[targetModel]',
+        value: 'claude-haiku-4-5-20251001',
+      },
+      {
+        claim:
+          'the baseline window was [2026-05-01T00:00:00.000Z, 2026-05-08T00:00:00.000Z)',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'modelPinSavings.baseline.{start,end} + sessionData[].entries[].timestamp',
+        value: '2026-05-01T00:00:00.000Z..<2026-05-08T00:00:00.000Z',
+      },
+      {
+        claim: 'the baseline window contained 1 priced unattended entry',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'sessionData[entrypoint sdk-*].entries[].{timestamp,model} filtered to modelPinSavings.baseline',
+        value: 1,
+      },
+      {
+        claim: 'baseline actual-model token spend was $50.00',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'sessionData[entrypoint sdk-*].entries[].{timestamp,model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[actual model] within modelPinSavings.baseline',
+        value: 50,
+      },
+      {
+        claim:
+          'baseline same-token spend at claude-haiku-4-5-20251001 rates was $10.00',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'sessionData[entrypoint sdk-*].entries[].{timestamp,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[targetModel] within modelPinSavings.baseline',
+        value: 10,
+      },
+      {
+        claim:
+          'baseline token-only model premium was $40.00; server-tool fees were excluded',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'max(0, sum(entryCostAtModel(entry, actualModel)) - sum(entryCostAtModel(entry, targetModel))) within modelPinSavings.baseline',
+        value: 40,
+      },
+      {
+        claim:
+          'the comparison window was [2026-05-08T00:00:00.000Z, 2026-05-15T00:00:00.000Z)',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'modelPinSavings.comparison.{start,end} + sessionData[].entries[].timestamp',
+        value: '2026-05-08T00:00:00.000Z..<2026-05-15T00:00:00.000Z',
+      },
+      {
+        claim: 'the comparison window contained 1 priced unattended entry',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'sessionData[entrypoint sdk-*].entries[].{timestamp,model} filtered to modelPinSavings.comparison',
+        value: 1,
+      },
+      {
+        claim: 'comparison actual-model token spend was $10.00',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'sessionData[entrypoint sdk-*].entries[].{timestamp,model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[actual model] within modelPinSavings.comparison',
+        value: 10,
+      },
+      {
+        claim:
+          'comparison same-token spend at claude-haiku-4-5-20251001 rates was $10.00',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'sessionData[entrypoint sdk-*].entries[].{timestamp,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens} + pricing[targetModel] within modelPinSavings.comparison',
+        value: 10,
+      },
+      {
+        claim:
+          'comparison token-only model premium was $0.00; server-tool fees were excluded',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'max(0, sum(entryCostAtModel(entry, actualModel)) - sum(entryCostAtModel(entry, targetModel))) within modelPinSavings.comparison',
+        value: 0,
+      },
+      {
+        claim:
+          'the latest priced unattended comparison entry was observed as of 2026-05-09',
+        source: 'parse-sessions/model-pin-savings',
+        field:
+          'max(sessionData[entrypoint sdk-*].entries[].timestamp within modelPinSavings.comparison after model-pricing gates)',
+        value: '2026-05-09',
+      },
+      {
+        claim:
+          'baseline minus comparison was a directional $40.00 model-token premium difference; server-tool fees were excluded',
+        source: 'parse-sessions/model-pin-savings',
+        field: 'max(0, baseline token premium - comparison token premium)',
+        value: 40,
+      },
+    ]);
+  });
+
+  it('does not attribute an interactive model migration to unattended automation', () => {
+    const rec = detector.rule(
+      input({
+        tokenData: [
+          session('interactive-before', 'cli', 'interactive work', [
+            entry(
+              'claude-opus-4-8',
+              5_000_000,
+              1_000_000,
+              '2026-05-02T12:00:00.000Z'
+            ),
+          ]),
+          session('interactive-after', 'cli', 'interactive work', [
+            entry(
+              CHEAPEST_MODEL,
+              5_000_000,
+              1_000_000,
+              '2026-05-09T12:00:00.000Z'
+            ),
+          ]),
+          session('automation-after', 'sdk-cli', 'route-loose classify picker', [
+            entry(
+              CHEAPEST_MODEL,
+              1_000_000,
+              200_000,
+              '2026-05-10T12:00:00.000Z'
+            ),
+          ]),
+        ],
+        liveConfig: {
+          settings: { model: 'claude-haiku-4-5' },
+        } as unknown as RecommendationInput['liveConfig'],
+        modelPinSavings: {
+          baseline: {
+            start: '2026-05-01T00:00:00.000Z',
+            end: '2026-05-08T00:00:00.000Z',
+          },
+          comparison: {
+            start: '2026-05-08T00:00:00.000Z',
+            end: '2026-05-15T00:00:00.000Z',
+          },
+          targetModel: CHEAPEST_MODEL,
+        },
+      }),
+      Date.parse('2026-05-11T00:00:00.000Z')
+    );
+
+    // The only actual migration is interactive. With automation already pinned
+    // to Haiku, there is no unattended before/after evidence to surface.
+    expect(rec).toBeNull();
+  });
+
+  it('uses a non-default target and excludes web-search fees from model premium', () => {
+    const targetModel = 'claude-sonnet-5';
+    const before = {
+      ...entry(
+        'claude-opus-4-8',
+        5_000_001,
+        1_000_001,
+        '2026-05-02T12:00:00.000Z'
+      ),
+      webSearchRequests: 100,
+    };
+    const after = {
+      ...entry(targetModel, 5_000_001, 1_000_001, '2026-05-09T12:00:00.000Z'),
+      webSearchRequests: 100,
+    };
+    const rec = detector.rule(
+      input({
+        tokenData: [
+          session('before', 'sdk-cli', 'route-loose classify picker', [before]),
+          session('after', 'sdk-cli', 'route-loose classify picker', [after]),
+        ],
+        modelPinSavings: {
+          baseline: {
+            start: '2026-05-01T00:00:00.000Z',
+            end: '2026-05-08T00:00:00.000Z',
+          },
+          comparison: {
+            start: '2026-05-08T00:00:00.000Z',
+            end: '2026-05-15T00:00:00.000Z',
+          },
+          targetModel,
+        },
+      }),
+      Date.parse('2026-05-10T00:00:00.000Z')
+    );
+
+    const expectedPremium =
+      entryCostAtModel(before, 'claude-opus-4-8') -
+      entryCostAtModel(before, targetModel);
+    const expectedBill =
+      entryCostAtModel(before, 'claude-opus-4-8') +
+      entryCostAtModel(after, targetModel) +
+      2;
+    expect(rec?.savingsAttribution).toMatchObject({
+      tier: 'tier-1-before-after',
+      asOf: '2026-05-09',
+    });
+    expect(rec?.savingsAttribution?.realizedSavingsUsd).toBeCloseTo(
+      expectedPremium,
+      12
+    );
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim).toBeUndefined();
+    expect(rec?.provenance?.observations).toContainEqual({
+      claim: 'the configured before/after target model was claude-sonnet-5',
+      source: 'parse-sessions/model-pin-savings',
+      field: 'modelPinSavings.targetModel + pricing[targetModel]',
+      value: targetModel,
+    });
+    expect(rec?.provenance?.observations).toContainEqual({
+      claim:
+        'unattended sdk-* sessions incurred $82.00 of billable spend, including token and server-tool fees',
+      source: 'parse-sessions',
+      field:
+        'sessionData[entrypoint sdk-*].entries[].{model,inputTokens,outputTokens,cacheCreationTokens,cacheCreation1hTokens,cacheReadTokens,webSearchRequests,webFetchRequests} + pricing[model] + SERVER_TOOL_PRICING',
+      value: expectedBill,
+    });
+    expect(rec?.provenance?.observations).toContainEqual({
+      claim:
+        'baseline token-only model premium was $20.00; server-tool fees were excluded',
+      source: 'parse-sessions/model-pin-savings',
+      field:
+        'max(0, sum(entryCostAtModel(entry, actualModel)) - sum(entryCostAtModel(entry, targetModel))) within modelPinSavings.baseline',
+      value: expectedPremium,
+    });
+  });
+
+  it('dates an old measured window even when unrelated automation is newer', () => {
+    const rec = detector.rule(
+      input({
+        tokenData: [
+          session('old-before', 'sdk-cli', 'route-loose classify picker', [
+            entry(
+              'claude-opus-4-8',
+              5_000_000,
+              1_000_000,
+              '2025-05-02T12:00:00.000Z'
+            ),
+          ]),
+          session('old-after', 'sdk-cli', 'route-loose classify picker', [
+            entry(
+              CHEAPEST_MODEL,
+              5_000_000,
+              1_000_000,
+              '2025-05-09T12:00:00.000Z'
+            ),
+          ]),
+          session('new-unrelated', 'sdk-cli', 'coder: implement newer work', [
+            entry(
+              'claude-opus-4-8',
+              1_000_000,
+              200_000,
+              '2026-07-10T12:00:00.000Z'
+            ),
+          ]),
+        ],
+        modelPinSavings: {
+          baseline: {
+            start: '2025-05-01T00:00:00.000Z',
+            end: '2025-05-08T00:00:00.000Z',
+          },
+          comparison: {
+            start: '2025-05-08T00:00:00.000Z',
+            end: '2025-05-15T00:00:00.000Z',
+          },
+          targetModel: CHEAPEST_MODEL,
+        },
+      }),
+      Date.parse('2026-07-15T00:00:00.000Z')
+    );
+
+    expect(rec?.provenance).toMatchObject({
+      asOf: '2026-07-10',
+      stale: false,
+    });
+    expect(rec?.savingsAttribution).toMatchObject({
+      tier: 'tier-0-estimate',
+      asOf: '2025-05-09',
+      stale: true,
+    });
+    expect(rec?.savingsAttribution?.realizedSavingsUsd).toBeUndefined();
+    expect(rec?.proofTier).toBe('auditable');
+    expect(rec?.title).toBe('Automation drives a large share of spend');
+    expect(rec?.detail).toMatch(/^Automated/);
+    expect(rec?.action).toContain(
+      'before/after observation is historical as of 2025-05-09'
+    );
+  });
+
+  it('carries the freshest automation turn as asOf and demotes present-tense wording when stale', () => {
+    // Fresh: `now` just after the freshest turn — inside the freshness window.
+    const fresh = detector.rule(input({ tokenData }), asOfMs + 5 * DAY_MS);
+    expect(fresh?.provenance?.asOf).toBe('2026-06-03');
+    expect(fresh?.provenance?.stale).toBe(false);
+    expect(validateRecommendationProvenance(fresh!)).toEqual([]);
+
+    // Stale: `now` past the down-model freshness horizon — a model generation has
+    // shipped since, so the snapshot is demoted to "as of <date>".
+    const stale = detector.rule(
+      input({ tokenData }),
+      asOfMs + (DOWN_MODEL_PROOF_FRESHNESS_DAYS + 2) * DAY_MS
+    );
+    expect(stale?.provenance?.asOf).toBe('2026-06-03');
+    expect(stale?.provenance?.stale).toBe(true);
+    expect(validateRecommendationProvenance(stale!)).toEqual([]);
+    expect(stale?.title).toContain('as of 2026-06-03');
+    expect(stale?.detail).toContain('As of 2026-06-03');
+    expect(stale?.action).toContain('As of 2026-06-03');
+  });
+
+  it('does not let a later unpriced entry freshen the billable-share asOf', () => {
+    const rec = detector.rule(
+      input({
+        tokenData: [
+          ...tokenData,
+          session('unpriced', 'sdk-cli', 'coder: unknown model run', [
+            entry(
+              'unknown-provider-model',
+              5_000_000,
+              1_000_000,
+              '2026-06-20T00:00:00.000Z'
+            ),
+          ]),
+        ],
+      }),
+      Date.parse('2026-06-25T00:00:00.000Z')
+    );
+
+    expect(rec?.provenance?.asOf).toBe('2026-06-03');
+  });
+
+  it('dates the billable-share from a later unpriced entry when its server-tool fees contribute', () => {
+    const serverFeeEntry = {
+      ...entry(
+        'unknown-provider-model',
+        0,
+        0,
+        '2026-06-20T00:00:00.000Z'
+      ),
+      webSearchRequests: 100,
+    };
+    const rec = detector.rule(
+      input({
+        tokenData: [
+          ...tokenData,
+          session('unpriced-with-fees', 'sdk-cli', 'coder: unknown model run', [
+            serverFeeEntry,
+          ]),
+        ],
+      }),
+      Date.parse('2026-06-25T00:00:00.000Z')
+    );
+
+    expect(rec?.provenance?.asOf).toBe('2026-06-20');
+  });
+
+  it('suppresses the estimate-only finding once Haiku is already pinned (no measured win)', () => {
+    const rec = detector.rule(
+      input({
+        tokenData,
+        liveConfig: {
+          settings: { model: 'claude-haiku-4-5' },
+        } as unknown as RecommendationInput['liveConfig'],
+      }),
+      0
+    );
+    expect(rec).toBeNull();
   });
 });

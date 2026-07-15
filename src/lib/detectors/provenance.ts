@@ -32,6 +32,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'safety.dangerous-bypass',
   'speed.hook-overhead',
   'cost.idle-mcp-tools',
+  'cost.automation-share',
   'workflow.review-bottleneck',
   'workflow.native-bypass',
   'cost.model-eval-routing-gap',

@@ -18,12 +18,11 @@ import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
  * cache reads/writes are NOT batch-discounted, so they are excluded from the
  * dollar figure.
  *
- * DEDUP: `cost.automation-share` already reprices these same unattended sessions
- * onto the cheapest model (reprice, all pools, orderKey 80). This lever composes
- * AFTER it (orderKey 82, `scaleTokens` on input+output only), so the cascade
- * books the *marginal* batch saving on top of any model right-sizing rather than
- * double-claiming the same tokens. The actual `batch-route` shadow-calls axis is
- * a SEPARATE meta follow-on.
+ * DEDUP: `cost.automation-share` shows a non-booked same-token model-swap
+ * ceiling for these sessions. Batch remains the booked claim: orderKey 82,
+ * `scaleTokens` on input+output only. The cascade's residual guard handles any
+ * other booked claims without treating the automation ceiling as realized.
+ * The actual `batch-route` shadow-calls axis is a SEPARATE meta follow-on.
  */
 
 /** Batch API standard input/output discount (cache pools are NOT discounted). */
@@ -76,9 +75,9 @@ export const detector: Detector = {
 
     sessions.sort((a, b) => b.usd - a.usd);
 
-    // Marginal batch saving against the input/output pools, composed AFTER
-    // automation-share's model reprice (orderKey 80) so the same tokens aren't
-    // double-claimed; the cascade's residual guard caps it at the real bill.
+    // Book the Batch discount against input/output pools. OrderKey 82 preserves
+    // stable cost-lever ordering; automation-share's same-token ceiling is not a
+    // booked claim. The cascade's residual guard caps this at the real bill.
     const reclaim: ReclaimClaim = {
       leverId: 'cost.batchable-workload',
       category: 'cost',
@@ -109,7 +108,7 @@ export const detector: Detector = {
           estSavingsUsd
         )}.` +
         schedNote +
-        ` Cache reads/writes are excluded (not batch-discounted). Composes with cost.automation-share (batch applies on top of any model right-sizing).`,
+        ` Cache reads/writes are excluded (not batch-discounted). cost.automation-share may show a separate same-token ceiling, but that ceiling is not booked into reclaim.`,
       action:
         'Route latency-insensitive unattended/scheduled runs (bulk replay/eval/analysis, non-interactive cron jobs) through the Batch API for ~50% off standard input/output. Confirm each workload tolerates async (up-to-24h) turnaround before switching.',
       estSavingsUsd,
@@ -146,7 +145,7 @@ export const detector: Detector = {
             : []),
         ],
         inference:
-          'Unattended (sdk-*) token-heavy work has no human waiting on the turn, so it tolerates the Batch API\'s async turnaround for a deterministic ~50% cut on standard input/output (cache pools excluded). The dollar is a tier-0 counterfactual estimate; the booked reclaim composes after model right-sizing so the saving is the marginal, not double-counted.',
+          'Unattended (sdk-*) token-heavy work has no human waiting on the turn, so it tolerates the Batch API\'s async turnaround for a deterministic ~50% cut on standard input/output (cache pools excluded). The dollar is a tier-0 counterfactual estimate and the booked Batch claim remains distinct from automation-share\'s non-booked same-token ceiling.',
       },
     };
   },
