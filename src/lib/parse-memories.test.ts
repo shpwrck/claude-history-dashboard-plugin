@@ -93,6 +93,15 @@ b`;
     const noMtime = parseMemoryFile({ name: 'x.md', content: FULL });
     expect(noMtime.lastModifiedMs).toBeUndefined();
   });
+
+  it('keeps a canonical archive path while deriving the fallback name from its basename', () => {
+    const m = parseMemoryFile({
+      name: 'archive/old-decision.md',
+      content: 'An archived decision.',
+    });
+    expect(m.file).toBe('archive/old-decision.md');
+    expect(m.name).toBe('old-decision');
+  });
 });
 
 describe('parseMemories', () => {
@@ -156,6 +165,23 @@ describe('parseMemories', () => {
     };
     expect(parseMemories(indexOnly)).toEqual([]);
   });
+
+  it('excludes archive/ARCHIVE.md from cards while retaining archive facts', () => {
+    const grouped = parseMemories({
+      projects: [
+        {
+          slug: '-home-u-archive',
+          files: [
+            { name: 'archive/ARCHIVE.md', content: '- [Old](old.md)' },
+            { name: 'archive/old.md', content: 'old fact' },
+          ],
+        },
+      ],
+    });
+    expect(grouped[0].memories.map((memory) => memory.file)).toEqual([
+      'archive/old.md',
+    ]);
+  });
 });
 
 const INDEX_MD = `# Memory index — demo
@@ -186,6 +212,38 @@ describe('parseMemoryIndex', () => {
   it('returns [] when no link lines are present', () => {
     expect(parseMemoryIndex('# Just a heading\nsome prose')).toEqual([]);
     expect(parseMemoryIndex('')).toEqual([]);
+  });
+
+  it('canonicalizes archive-index links relative to archive/ without double-prefixing', () => {
+    const entries = parseMemoryIndex(
+      '- [Old](old.md)\n- [Qualified](archive/already.md)',
+      'archive/ARCHIVE.md'
+    );
+    expect(entries.map((entry) => entry.file)).toEqual([
+      'archive/old.md',
+      'archive/already.md',
+    ]);
+    expect(
+      parseMemoryIndex('- [Archive index](archive/archive.md)')[0]?.file
+    ).toBe('archive/ARCHIVE.md');
+  });
+
+  it('does not normalize traversal, absolute, URL, or deeper archive targets into valid facts', () => {
+    const entries = parseMemoryIndex(
+      [
+        '- [Traversal](../outside.md)',
+        '- [Absolute](/outside.md)',
+        '- [URL](https://example.test/outside.md)',
+        '- [Nested](nested/deeper.md)',
+      ].join('\n'),
+      'archive/ARCHIVE.md'
+    );
+    expect(entries.map((entry) => entry.file)).toEqual([
+      '../outside.md',
+      '/outside.md',
+      'https://example.test/outside.md',
+      'nested/deeper.md',
+    ]);
   });
 });
 
@@ -263,6 +321,80 @@ describe('buildMemoryStores', () => {
     const byName = Object.fromEntries(stores[0].memories.map((m) => [m.name, m.lastModifiedMs]));
     expect(byName.ay).toBe(1_700_000_000_000);
     expect(byName.bee).toBeUndefined();
+  });
+
+  it('models main and archive indexes with canonical root-relative paths', () => {
+    const stores = buildMemoryStores({
+      projects: [
+        {
+          slug: '-home-u-archive',
+          files: [
+            {
+              name: 'MEMORY.md',
+              content: '- [Archive index](archive/ARCHIVE.md)',
+            },
+            {
+              name: 'archive/ARCHIVE.md',
+              content: '- [Old fact](old.md)',
+            },
+            { name: 'archive/old.md', content: 'old fact' },
+          ],
+          readCompleteness: {
+            facts: true,
+            mainIndex: true,
+            archiveIndex: true,
+          },
+        },
+      ],
+    });
+
+    expect(stores).toHaveLength(1);
+    expect(stores[0].memories.map((memory) => memory.file)).toEqual([
+      'archive/old.md',
+    ]);
+    expect(stores[0].index.map((entry) => entry.file)).toEqual([
+      'archive/ARCHIVE.md',
+    ]);
+    expect(stores[0].archiveIndex.map((entry) => entry.file)).toEqual([
+      'archive/old.md',
+    ]);
+    expect(stores[0].readCompleteness).toEqual({
+      facts: true,
+      mainIndex: true,
+      archiveIndex: true,
+    });
+  });
+
+  it('carries explicit completeness and treats legacy payloads as unknown', () => {
+    const explicit = buildMemoryStores({
+      projects: [
+        {
+          slug: 'partial',
+          files: [{ name: 'one.md', content: 'one' }],
+          readCompleteness: {
+            facts: false,
+            mainIndex: true,
+            archiveIndex: false,
+          },
+        },
+      ],
+    })[0];
+    expect(explicit.readCompleteness).toEqual({
+      facts: false,
+      mainIndex: true,
+      archiveIndex: false,
+    });
+
+    const legacy = buildMemoryStores({
+      projects: [
+        { slug: 'legacy', files: [{ name: 'one.md', content: 'one' }] },
+      ],
+    })[0];
+    expect(legacy.readCompleteness).toEqual({
+      facts: false,
+      mainIndex: false,
+      archiveIndex: false,
+    });
   });
 });
 

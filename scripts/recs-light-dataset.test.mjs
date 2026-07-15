@@ -33,6 +33,7 @@ import {
   mkdirSync,
   readFileSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
   rmSync,
@@ -481,5 +482,272 @@ test('#2309 external-guidance cache gates share one bounded top-level JSON surfa
     else process.env.CHD_DB_PATH = origDb;
     if (origGuidanceDir === undefined) delete process.env.CHD_EXTERNAL_GUIDANCE_DIR;
     else process.env.CHD_EXTERNAL_GUIDANCE_DIR = origGuidanceDir;
+  }
+});
+
+test('#2558 fixed-depth archive memory reads feed stores and both cache gates', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = join(tmpdir(), `chd-2558-home-${randomUUID()}`);
+  const memory = join(home, '.claude', 'projects', 'project-a', 'memory');
+  const archive = join(memory, 'archive');
+  const nested = join(archive, 'nested');
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(memory, 'MEMORY.md'), '- [Archive](archive/ARCHIVE.md)\n');
+  writeFileSync(join(memory, 'current.md'), 'current\n');
+  writeFileSync(join(archive, 'ARCHIVE.md'), '- [Old](old.md)\n');
+  writeFileSync(join(archive, 'old.md'), 'old v1\n');
+  writeFileSync(join(nested, 'ignored.md'), 'ignored v1\n');
+
+  const rewriteWithNewMtime = (path, content, tick) => {
+    writeFileSync(path, content);
+    const when = new Date(Date.now() + tick * 10_000);
+    utimesSync(path, when, when);
+  };
+
+  try {
+    const ingest = await loadIngest(home);
+    assert.deepEqual(ingest.memoryOpenCapabilities({ O_RDONLY: 0 }), {
+      noFollow: false,
+      nonBlocking: false,
+    });
+    assert.equal(
+      ingest.memoryOpenFlags({ O_RDONLY: 0 }),
+      0,
+      'platforms without POSIX-only flags retain a read-only fallback'
+    );
+    assert.equal(
+      ingest.memoryOpenFlags({
+        O_RDONLY: 0,
+        O_NOFOLLOW: 0x10,
+        O_NONBLOCK: 0x20,
+      }),
+      0x30,
+      'available no-follow and nonblocking protections are both enabled'
+    );
+    assert.equal(
+      ingest.memoryOpenedPathMatches(
+        '/memory',
+        '/memory/old.md',
+        '/memory/old.md',
+        'linux'
+      ),
+      true
+    );
+    assert.equal(
+      ingest.memoryOpenedPathMatches(
+        '/memory',
+        '/memory/old.md',
+        '/memory/new.md',
+        'linux'
+      ),
+      false,
+      'an opened descriptor renamed to another path is treated as raced'
+    );
+    assert.equal(
+      ingest.memoryOpenedPathMatches(
+        'C:\\Memory',
+        'C:\\Memory\\OLD.md',
+        'c:\\memory\\old.md',
+        'win32'
+      ),
+      true,
+      'the portable Windows comparison is case-insensitive'
+    );
+    const stores = ingest.readMemoryStores();
+    assert.equal(stores.length, 1);
+    assert.deepEqual(
+      stores[0].memories.map((memoryFact) => memoryFact.file).sort(),
+      ['archive/old.md', 'current.md']
+    );
+    assert.deepEqual(
+      stores[0].archiveIndex.map((entry) => entry.file),
+      ['archive/old.md']
+    );
+    assert.deepEqual(stores[0].readCompleteness, {
+      facts: true,
+      mainIndex: true,
+      archiveIndex: true,
+    });
+
+    const sig1 = ingest.sourceSignature();
+    const hash1 = ingest.ingest().contentHash;
+    const oldPath = join(archive, 'old.md');
+    const oldStat = statSync(oldPath);
+    writeFileSync(oldPath, 'old v2\n');
+    utimesSync(oldPath, oldStat.atime, oldStat.mtime);
+    const sig2 = ingest.sourceSignature();
+    const hash2 = ingest.ingest().contentHash;
+    assert.notEqual(
+      sig2,
+      sig1,
+      'an equal-size, restored-mtime archive rewrite changes the cheap signature'
+    );
+    assert.notEqual(
+      hash2,
+      hash1,
+      'an equal-size, restored-mtime archive rewrite changes the content hash'
+    );
+
+    const invalidPath = join(archive, 'invalid.md');
+    writeFileSync(invalidPath, Buffer.from([0x80]));
+    const invalidStat = statSync(invalidPath);
+    const sigInvalid1 = ingest.sourceSignature();
+    const hashInvalid1 = ingest.ingest().contentHash;
+    writeFileSync(invalidPath, Buffer.from([0x81]));
+    utimesSync(invalidPath, invalidStat.atime, invalidStat.mtime);
+    assert.notEqual(
+      ingest.sourceSignature(),
+      sigInvalid1,
+      'same-decoding raw bytes change the cheap signature'
+    );
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      hashInvalid1,
+      'same-decoding raw bytes change the content hash'
+    );
+
+    rewriteWithNewMtime(
+      join(archive, 'ARCHIVE.md'),
+      '- [Old renamed](old.md)\n',
+      2
+    );
+    const sig3 = ingest.sourceSignature();
+    const hash3 = ingest.ingest().contentHash;
+    assert.notEqual(sig3, sig2, 'archive index changes the cheap source signature');
+    assert.notEqual(hash3, hash2, 'archive index changes the dataset content hash');
+
+    rewriteWithNewMtime(join(nested, 'ignored.md'), 'ignored v2\n', 3);
+    assert.equal(
+      ingest.sourceSignature(),
+      sig3,
+      'deeper archive files stay outside the fixed-depth signature'
+    );
+    assert.equal(
+      ingest.ingest().contentHash,
+      hash3,
+      'deeper archive files stay outside the fixed-depth content hash'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('#2558 memory-store ingest honors a sub-1 KiB memory file cap', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origMemoryCap = process.env.DASHBOARD_MEMORY_FILE_MAX_BYTES;
+  const home = join(tmpdir(), `chd-2558-cap-home-${randomUUID()}`);
+  const memory = join(home, '.claude', 'projects', 'project-capped', 'memory');
+  mkdirSync(memory, { recursive: true });
+  writeFileSync(join(memory, 'MEMORY.md'), '- [Large](large.md)\n');
+  writeFileSync(join(memory, 'large.md'), 'x'.repeat(512));
+
+  try {
+    process.env.DASHBOARD_MEMORY_FILE_MAX_BYTES = '256';
+    const ingest = await loadIngest(home);
+    const stores = ingest.readMemoryStores();
+    assert.equal(stores.length, 1);
+    assert.deepEqual(stores[0].memories, []);
+    assert.equal(stores[0].index[0]?.file, 'large.md');
+    assert.equal(stores[0].readCompleteness.facts, false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+    if (origMemoryCap === undefined) {
+      delete process.env.DASHBOARD_MEMORY_FILE_MAX_BYTES;
+    } else {
+      process.env.DASHBOARD_MEMORY_FILE_MAX_BYTES = origMemoryCap;
+    }
+  }
+});
+
+test('#2558 memory-store ingest rejects a memory symlink outside the projects root', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = join(tmpdir(), `chd-2558-symlink-home-${randomUUID()}`);
+  const project = join(home, '.claude', 'projects', 'project-linked');
+  const outsideMemory = join(home, 'outside-memory');
+  mkdirSync(project, { recursive: true });
+  mkdirSync(outsideMemory, { recursive: true });
+  writeFileSync(join(outsideMemory, 'MEMORY.md'), '- [Secret](secret.md)\n');
+  writeFileSync(join(outsideMemory, 'secret.md'), 'outside v1\n');
+  symlinkSync(outsideMemory, join(project, 'memory'), 'dir');
+
+  try {
+    const ingest = await loadIngest(home);
+    assert.deepEqual(
+      ingest.readMemoryStores(),
+      [],
+      'the recommendation input does not follow the escaping memory directory'
+    );
+    const sig1 = ingest.sourceSignature();
+    const hash1 = ingest.ingest().contentHash;
+
+    writeFileSync(join(outsideMemory, 'secret.md'), 'outside v2\n');
+    const when = new Date(Date.now() + 10_000);
+    utimesSync(join(outsideMemory, 'secret.md'), when, when);
+
+    assert.equal(
+      ingest.sourceSignature(),
+      sig1,
+      'outside memory changes stay outside the cheap signature'
+    );
+    assert.equal(
+      ingest.ingest().contentHash,
+      hash1,
+      'outside memory changes stay outside the dataset content hash'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('#2558 memory-store ingest reads an in-root symlinked memory directory', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = join(tmpdir(), `chd-2558-in-root-symlink-home-${randomUUID()}`);
+  const project = join(home, '.claude', 'projects', 'project-linked');
+  const realMemory = join(project, 'memory-real');
+  mkdirSync(realMemory, { recursive: true });
+  writeFileSync(join(realMemory, 'MEMORY.md'), '- [Fact](fact.md)\n');
+  writeFileSync(join(realMemory, 'fact.md'), 'linked memory fact\n');
+  symlinkSync(realMemory, join(project, 'memory'), 'dir');
+
+  try {
+    const ingest = await loadIngest(home);
+    const stores = ingest.readMemoryStores();
+    assert.equal(stores.length, 1);
+    assert.equal(stores[0].project, 'project-linked');
+    assert.deepEqual(
+      stores[0].memories.map((memory) => memory.file),
+      ['fact.md']
+    );
+    assert.deepEqual(
+      stores[0].index.map((entry) => entry.file),
+      ['fact.md']
+    );
+    assert.deepEqual(stores[0].readCompleteness, {
+      facts: true,
+      mainIndex: true,
+      archiveIndex: true,
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
   }
 });

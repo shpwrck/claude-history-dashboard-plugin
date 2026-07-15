@@ -469,10 +469,10 @@ export const DETECTORS: Detector[] = [
   lastNRunsAudit,
 
   // ── #1779 (epic #1910) — first `maintenance` detector: memory-store hygiene ──
-  // Reads the per-project memory store + MEMORY.md index (#1965 foundation) and
-  // emits the five deterministic signals — oversized index, long index line,
-  // dangling index link, unindexed file, dangling wikilink — grouped into one
-  // recommend-only card. Dark on a memory-store-free dataset (SPA/upload).
+  // Reads the per-project memory store plus main/archive indexes and emits four
+  // deterministic signals — oversized index, long index line, dangling index
+  // link, and unindexed file — grouped into one recommend-only card. Intentional
+  // forward-reference wikilinks are excluded. Dark without memory-store data.
   memoryHygiene,
 
   // ── #2258 (epic #2256) — doc-artifact hygiene: the docs analogue of the

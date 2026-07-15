@@ -1,12 +1,11 @@
 /**
  * Parser for per-project agent memories (#458).
  *
- * Agents persist one fact per file at `~/.claude/projects/<slug>/memory/*.md`
- * with YAML-ish frontmatter (`name`, `description`, `metadata.type`) followed by
- * the fact body. The server (`GET /api/memories`, in `scripts/server.mjs`) does
- * the filesystem walk and returns the RAW markdown per file; this module owns
- * the frontmatter parsing so the logic is unit-testable off a plain string,
- * matching the repo's `parse-*.ts` convention.
+ * Agents persist one fact per file in the root `memory/*.md` or fixed-depth
+ * `memory/archive/*.md` surface, with main/archive index files alongside them.
+ * Facts may carry YAML-ish frontmatter (`name`, `description`, `metadata.type`)
+ * followed by the body. The server (`GET /api/memories`) returns raw markdown;
+ * this module owns parsing so the logic is unit-testable off plain strings.
  *
  * Tolerant by design: a file with missing/partial frontmatter never throws —
  * `name` falls back to the filename and `type` to `'other'`.
@@ -51,10 +50,9 @@ export interface ProjectMemories {
 }
 
 /**
- * One parsed pointer line from a project's `MEMORY.md` index. The convention
- * (see the global CLAUDE.md memory contract) is one markdown list link per
- * memory: `- [Title](file.md) — hook`. Lines that don't match that shape are
- * skipped, so prose/section headings in the index never become entries.
+ * One parsed pointer line from `MEMORY.md` or `archive/ARCHIVE.md`. The
+ * convention is one markdown list link per memory: `- [Title](file.md) — hook`.
+ * Lines that don't match are skipped, so prose/headings never become entries.
  */
 export interface MemoryIndexEntry {
   /** The link text, e.g. `Burn loop: verify CI green before finishing`. */
@@ -68,20 +66,39 @@ export interface MemoryIndexEntry {
 }
 
 /**
- * A project's full memory store: the parsed fact files (frontmatter + body)
- * PLUS the `MEMORY.md` index (#1965). Separating the store from the index is the
- * foundation the memory-hygiene detector (#1779) needs — e.g. to spot an index
- * pointer with no backing file, or a fact file the index never references.
+ * A project's full fixed-depth memory store: parsed root/archive facts plus the
+ * main and archive indexes. Separating facts from both index surfaces lets the
+ * memory-hygiene detector audit dangling pointers and unindexed files.
  */
 export interface ProjectMemoryStore {
   /** The `~/.claude/projects/<slug>` directory name. */
   project: string;
-  /** Parsed fact files (every `*.md` except the `MEMORY.md` index). */
+  /** Parsed root/archive fact files, excluding both index files. */
   memories: AgentMemory[];
   /** Parsed `MEMORY.md` pointer lines; empty when no index file was present. */
   index: MemoryIndexEntry[];
   /** Raw `MEMORY.md` body text when present, else `''` (the as-written index). */
   indexRaw: string;
+  /** Whether `MEMORY.md` was observed, including an empty index file. */
+  indexPresent: boolean;
+  /** Parsed `archive/ARCHIVE.md` pointers, canonicalized from the memory root. */
+  archiveIndex: MemoryIndexEntry[];
+  /** Raw `archive/ARCHIVE.md` body, or `''` when absent/empty. */
+  archiveIndexRaw: string;
+  /** Whether `archive/ARCHIVE.md` was observed, including an empty index file. */
+  archiveIndexPresent: boolean;
+  /** Which absence claims this bounded filesystem read can support. */
+  readCompleteness: MemoryReadCompleteness;
+}
+
+/** Completeness of the three independently bounded memory-store surfaces. */
+export interface MemoryReadCompleteness {
+  /** All selected root and `archive/` fact files were enumerated and read. */
+  facts: boolean;
+  /** The main `MEMORY.md` index was conclusively read or observed absent. */
+  mainIndex: boolean;
+  /** `archive/ARCHIVE.md` was conclusively read or observed absent. */
+  archiveIndex: boolean;
 }
 
 /** Raw, unparsed shape returned by `GET /api/memories`. */
@@ -98,6 +115,8 @@ export interface RawMemoryFile {
 export interface RawProjectMemories {
   slug: string;
   files: RawMemoryFile[];
+  /** Optional for older API/upload fixtures; omission cannot prove absence. */
+  readCompleteness?: MemoryReadCompleteness;
 }
 export interface MemoriesResponse {
   projects: RawProjectMemories[];
@@ -123,7 +142,7 @@ function normalizeType(raw: string | undefined): MemoryType {
 
 /** Parse a single memory file's raw text into an {@link AgentMemory}. */
 export function parseMemoryFile(file: RawMemoryFile): AgentMemory {
-  const fallbackName = file.name.replace(/\.md$/i, '');
+  const fallbackName = (file.name.split('/').pop() ?? file.name).replace(/\.md$/i, '');
   const m = file.content.match(FRONTMATTER_RE);
   if (!m) {
     // No frontmatter block — treat the whole file as body, fall back on name.
@@ -196,7 +215,8 @@ export { projectPathToSlug, memoriesMatchProject } from './project-slug';
 
 /** Is this the per-project memory index file (case-insensitive)? */
 function isIndexFile(name: string): boolean {
-  return name.toLowerCase() === 'memory.md';
+  const normalized = name.replace(/\\/g, '/').toLowerCase();
+  return normalized === 'memory.md' || normalized === 'archive/archive.md';
 }
 
 const INDEX_LINE_RE =
@@ -207,7 +227,33 @@ const INDEX_LINE_RE =
  * list-link lines (`- [Title](file.md) — hook`) become entries; headings and
  * prose are ignored. Tolerant: a malformed line is simply skipped.
  */
-export function parseMemoryIndex(content: string): MemoryIndexEntry[] {
+function canonicalIndexTarget(target: string, indexPath: string): string {
+  const trimmed = target.trim();
+  // External/absolute/traversing targets are not local facts. Preserve them as
+  // written so completeness-aware dangling checks can report them without ever
+  // laundering them into a valid memory-root path.
+  if (
+    /^(?:[a-z][a-z0-9+.-]*:|\/|\\)/i.test(trimmed) ||
+    trimmed.split(/[\\/]/).includes('..')
+  ) {
+    return trimmed;
+  }
+  const local = trimmed.replace(/^\.\//, '');
+  if (local.replace(/\\/g, '/').toLowerCase() === 'archive/archive.md') {
+    return 'archive/ARCHIVE.md';
+  }
+  if (indexPath.toLowerCase() !== 'archive/archive.md') return local;
+  if (local.startsWith('archive/')) return local;
+  // Only direct archive children are in the fixed-depth reader. A nested path
+  // remains unmatched instead of being rewritten under archive/.
+  if (local.includes('/')) return trimmed;
+  return `archive/${local}`;
+}
+
+export function parseMemoryIndex(
+  content: string,
+  indexPath = 'MEMORY.md'
+): MemoryIndexEntry[] {
   const out: MemoryIndexEntry[] = [];
   for (const rawLine of content.split('\n')) {
     const line = rawLine.trim();
@@ -215,7 +261,7 @@ export function parseMemoryIndex(content: string): MemoryIndexEntry[] {
     if (!m) continue;
     out.push({
       title: m[1].trim(),
-      file: m[2].trim(),
+      file: canonicalIndexTarget(m[2], indexPath),
       hook: (m[3] ?? '').trim(),
       raw: line,
     });
@@ -224,21 +270,18 @@ export function parseMemoryIndex(content: string): MemoryIndexEntry[] {
 }
 
 /**
- * Build the per-project memory STORE + INDEX (#1965) from the raw
+ * Build the per-project memory store + indexes (#1965/#2558) from the raw
  * `/api/memories` response — the foundation the #1779 memory-hygiene detector
  * reads off {@link RecommendationInput.memoryStores}.
  *
- * For each project it splits the `MEMORY.md` index out from the fact files,
- * parses each fact file's frontmatter+body via {@link parseMemoryFile}, and
- * parses the index body into pointer lines. Tolerant by design: a project with
- * no index yields `index: []` / `indexRaw: ''`; a project with only an index and
- * no fact files yields `memories: []`. Projects whose `memory/` dir held nothing
- * parseable at all (no facts and no index) are dropped, mirroring
- * {@link parseMemories}. Projects are sorted by slug; facts by name.
+ * For each project it splits `MEMORY.md` and `archive/ARCHIVE.md` from the fact
+ * files, parses fact frontmatter/bodies, and canonicalizes pointer paths from
+ * both index bodies. Missing indexes yield empty arrays/raw strings; index-only
+ * projects retain `memories: []`. Completely empty projects are dropped.
+ * Projects are sorted by slug; facts by name.
  *
- * NOTE: the live server (`readMemories` in `scripts/server.mjs`) currently
- * EXCLUDES `MEMORY.md` from `/api/memories`, so over the live response `index`
- * is empty until that read is widened — exercised here over a fixture store.
+ * The live server and ingest readers supply canonical root-relative paths for
+ * the main index, direct fact files, and the fixed-depth `archive/` tier.
  */
 export function buildMemoryStores(
   resp: MemoriesResponse | null | undefined
@@ -247,17 +290,44 @@ export function buildMemoryStores(
   const out: ProjectMemoryStore[] = [];
   for (const p of projects) {
     const files = p.files ?? [];
-    const indexFile = files.find((f) => isIndexFile(f.name));
+    const indexFile = files.find((f) => f.name.toLowerCase() === 'memory.md');
+    const archiveIndexFile = files.find(
+      (f) => f.name.replace(/\\/g, '/').toLowerCase() === 'archive/archive.md'
+    );
     const memories = files
       .filter((f) => !isIndexFile(f.name))
       .map(parseMemoryFile)
       .sort((a, b) => a.name.localeCompare(b.name));
     const indexRaw = indexFile ? indexFile.content.trim() : '';
     const index = indexRaw ? parseMemoryIndex(indexRaw) : [];
-    if (memories.length === 0 && index.length === 0 && indexRaw === '') {
+    const archiveIndexRaw = archiveIndexFile
+      ? archiveIndexFile.content.trim()
+      : '';
+    const archiveIndex = archiveIndexRaw
+      ? parseMemoryIndex(archiveIndexRaw, 'archive/ARCHIVE.md')
+      : [];
+    if (
+      memories.length === 0 &&
+      !indexFile &&
+      !archiveIndexFile
+    ) {
       continue;
     }
-    out.push({ project: p.slug, memories, index, indexRaw });
+    out.push({
+      project: p.slug,
+      memories,
+      index,
+      indexRaw,
+      indexPresent: Boolean(indexFile),
+      archiveIndex,
+      archiveIndexRaw,
+      archiveIndexPresent: Boolean(archiveIndexFile),
+      readCompleteness: p.readCompleteness ?? {
+        facts: false,
+        mainIndex: false,
+        archiveIndex: false,
+      },
+    });
   }
   return out.sort((a, b) => a.project.localeCompare(b.project));
 }

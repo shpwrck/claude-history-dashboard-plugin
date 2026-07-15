@@ -3320,7 +3320,7 @@ function fixtureBank(): Fixture[] {
   }
 
   // ── maintenance.memory-hygiene (#1779): an index pointer to a file that is
-  // not on disk (dangling-index-link, one of the five deterministic signals).
+  // not on disk (dangling-index-link, one of the four deterministic signals).
   {
     const memoryStores = [
       {
@@ -3328,6 +3328,11 @@ function fixtureBank(): Fixture[] {
         memories: [],
         index: [{ title: 'Gone', file: 'gone.md', hook: '', raw: '- [Gone](gone.md)' }],
         indexRaw: '- [Gone](gone.md)',
+        indexPresent: true,
+        archiveIndex: [],
+        archiveIndexRaw: '',
+        archiveIndexPresent: false,
+        readCompleteness: { facts: true, mainIndex: true, archiveIndex: true },
       },
     ] as unknown as RecommendationInput['memoryStores'];
     out.push({ now, input: bankBase({ memoryStores }) });

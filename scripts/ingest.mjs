@@ -14,18 +14,22 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   chmodSync,
   closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
   opendirSync,
   openSync,
   readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { basename, delimiter, join, dirname, resolve, sep } from 'node:path';
+import { basename, delimiter, join, dirname, resolve, sep, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { gunzipSync, brotliCompressSync, constants as zlibConstants } from 'node:zlib';
@@ -480,6 +484,20 @@ export const INGEST_PROJECT_MAX_DIRS = Math.max(
     parseNonNegativeIntEnv('DASHBOARD_INGEST_PROJECT_MAX_DIRS', 50_000)
   )
 );
+export const MEMORY_FILE_MAX_BYTES = Math.max(
+  256,
+  Math.min(
+    16_777_216,
+    parseNonNegativeIntEnv('DASHBOARD_MEMORY_FILE_MAX_BYTES', 262_144)
+  )
+);
+export const MEMORY_DIR_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_MEMORY_DIR_MAX_ENTRIES', 50_000)
+  )
+);
 export const INGEST_SESSION_DISCOVERY_MAX_ENTRIES = Math.max(
   1,
   Math.min(
@@ -722,17 +740,338 @@ function readExternalGuidance() {
   }
 }
 
-// Walk every <PROJECTS>/<slug>/memory/ dir and build the per-project memory
-// STORE + MEMORY.md index (#1965/#1990) the #1779 memory-hygiene detector reads
-// off `RecommendationInput.memoryStores`. INCLUDES MEMORY.md (unlike the older
-// /api/memories read) so the index signals can fire. Read fresh per assemble —
-// NOT memoized — exactly like readExternalGuidance: sourceSignature() covers the
-// same memory dirs/files, so an in-place memory edit invalidates the recs cache;
-// a process-lifetime memo would let a stale store be re-served. Mirrors the
-// server's readMemories (single PROJECTS root, file-size cap, path-escape
-// guard). Tolerant: an unreadable project/file is skipped, never sinks recs.
-function readMemoryStores() {
+function readDirentsSortedBoundedSync(dir) {
+  let handle;
+  try {
+    handle = opendirSync(dir);
+  } catch {
+    return { entries: [], truncated: false, missing: true };
+  }
+  const entries = [];
+  let truncated = false;
+  try {
+    for (;;) {
+      const entry = handle.readSync();
+      if (!entry) break;
+      if (entries.length >= MEMORY_DIR_MAX_ENTRIES) {
+        truncated = true;
+        break;
+      }
+      entries.push(entry);
+    }
+  } finally {
+    handle.closeSync();
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  return { entries, truncated, missing: false };
+}
+
+// One canonical fixed-depth surface shared by the data reader and both cache
+// gates: root `*.md` plus direct `archive/*.md`, never `archive/**/`.
+function pathInsideReal(parent, child) {
+  return child === parent || child.startsWith(parent + sep);
+}
+
+export function memoryOpenCapabilities(constants = fsConstants) {
+  return {
+    noFollow: Number.isInteger(constants.O_NOFOLLOW),
+    nonBlocking: Number.isInteger(constants.O_NONBLOCK),
+  };
+}
+
+export function memoryOpenFlags(constants = fsConstants) {
+  const capabilities = memoryOpenCapabilities(constants);
+  return (
+    constants.O_RDONLY |
+    (capabilities.noFollow ? constants.O_NOFOLLOW : 0) |
+    (capabilities.nonBlocking ? constants.O_NONBLOCK : 0)
+  );
+}
+
+export function memoryOpenedPathMatches(
+  realParent,
+  selectedPath,
+  openedPath,
+  platform = process.platform
+) {
+  const expected =
+    platform === 'win32'
+      ? win32.join(realParent, win32.basename(selectedPath))
+      : join(realParent, basename(selectedPath));
+  return platform === 'win32'
+    ? openedPath.toLowerCase() === expected.toLowerCase()
+    : openedPath === expected;
+}
+
+function realpathOpenedMemoryFdSync(fd) {
+  for (const fdRoot of ['/proc/self/fd', '/dev/fd']) {
+    try {
+      const fdPath = join(fdRoot, String(fd));
+      const resolved = realpathSync(fdPath);
+      // Some non-Linux descriptor filesystems resolve only to their own device
+      // entry, not to the opened backing path. Treat that as unavailable so the
+      // portable local-mode verification below can run instead.
+      if (resolved === fdPath || pathInsideReal(fdRoot, resolved)) continue;
+      return resolved;
+    } catch {
+      /* try the next descriptor filesystem */
+    }
+  }
+  return null;
+}
+
+function memoryProjectSelection(memDir, realProjectsRoot) {
+  const files = [];
+  const dirs = [];
+  const readCompleteness = {
+    facts: true,
+    mainIndex: true,
+    archiveIndex: true,
+  };
+  let realMemDir;
+  try {
+    realMemDir = realpathSync(memDir);
+  } catch {
+    realMemDir = null;
+  }
+  if (
+    !realProjectsRoot ||
+    !realMemDir ||
+    !pathInsideReal(realProjectsRoot, realMemDir)
+  ) {
+    return {
+      files,
+      dirs,
+      readCompleteness: {
+        facts: false,
+        mainIndex: false,
+        archiveIndex: false,
+      },
+    };
+  }
+  // Enumerate and retain only the proven canonical directory. The lexical
+  // project path may itself be a symlink that is retargeted after this check.
+  dirs.push(realMemDir);
+  const root = readDirentsSortedBoundedSync(realMemDir);
+  if (root.missing) {
+    return {
+      files,
+      dirs,
+      readCompleteness: {
+        facts: false,
+        mainIndex: false,
+        archiveIndex: false,
+      },
+    };
+  }
+  if (root.truncated) {
+    readCompleteness.facts = false;
+    readCompleteness.mainIndex = false;
+    readCompleteness.archiveIndex = false;
+  }
+
+  for (const entry of root.entries) {
+    if (!entry.name.endsWith('.md')) continue;
+    if (!entry.isFile()) {
+      const component =
+        entry.name.toLowerCase() === 'memory.md' ? 'mainIndex' : 'facts';
+      readCompleteness[component] = false;
+      continue;
+    }
+    files.push({
+      name: entry.name,
+      path: join(realMemDir, entry.name),
+      realParent: realMemDir,
+      component:
+        entry.name.toLowerCase() === 'memory.md' ? 'mainIndex' : 'facts',
+    });
+  }
+
+  const archiveEntry = root.entries.find((entry) => entry.name === 'archive');
+  if (!archiveEntry) return { files, dirs, readCompleteness };
+  if (!archiveEntry.isDirectory()) {
+    readCompleteness.facts = false;
+    readCompleteness.archiveIndex = false;
+    return { files, dirs, readCompleteness };
+  }
+
+  const archiveDir = join(realMemDir, 'archive');
+  let realArchiveDir;
+  try {
+    realArchiveDir = realpathSync(archiveDir);
+  } catch {
+    realArchiveDir = null;
+  }
+  if (!realArchiveDir || !pathInsideReal(realMemDir, realArchiveDir)) {
+    readCompleteness.facts = false;
+    readCompleteness.archiveIndex = false;
+    return { files, dirs, readCompleteness };
+  }
+  dirs.push(realArchiveDir);
+  const archive = readDirentsSortedBoundedSync(realArchiveDir);
+  if (archive.missing || archive.truncated) {
+    readCompleteness.facts = false;
+    readCompleteness.archiveIndex = false;
+  }
+  for (const entry of archive.entries) {
+    if (!entry.name.endsWith('.md')) continue;
+    if (!entry.isFile()) {
+      const component =
+        entry.name.toLowerCase() === 'archive.md'
+          ? 'archiveIndex'
+          : 'facts';
+      readCompleteness[component] = false;
+      continue;
+    }
+    files.push({
+      name: `archive/${entry.name}`,
+      path: join(realArchiveDir, entry.name),
+      realParent: realArchiveDir,
+      component:
+        entry.name.toLowerCase() === 'archive.md'
+          ? 'archiveIndex'
+          : 'facts',
+    });
+  }
+  return { files, dirs, readCompleteness };
+}
+
+function readSelectedMemoryFileCappedSync(selected) {
+  let fd;
+  try {
+    const beforeReal = realpathSync(selected.path);
+    if (!pathInsideReal(selected.realParent, beforeReal)) {
+      const error = new Error(
+        'Memory file resolves outside its selected directory'
+      );
+      error.code = 'ERR_DASHBOARD_MEMORY_PATH_ESCAPE';
+      throw error;
+    }
+    if (
+      !memoryOpenedPathMatches(
+        selected.realParent,
+        selected.path,
+        beforeReal
+      )
+    ) {
+      const error = new Error('Memory file changed canonical path before open');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+    const before = lstatSync(selected.path);
+    if (!before.isFile()) {
+      const error = new Error('Selected memory path is not a regular file');
+      error.code = 'ERR_DASHBOARD_MEMORY_NOT_REGULAR';
+      throw error;
+    }
+
+    // Open the selected directory entry exactly once. O_NOFOLLOW closes the
+    // final-component swap-to-symlink window. O_NONBLOCK prevents a concurrent
+    // regular-file-to-FIFO swap from hanging before fstat where POSIX exposes
+    // those flags. Windows lacks both, so local mode uses the portable identity
+    // checks around the same opened handle instead of disabling memory reads.
+    fd = openSync(selected.path, memoryOpenFlags());
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) {
+      const error = new Error('Selected memory path is not a regular file');
+      error.code = 'ERR_DASHBOARD_MEMORY_NOT_REGULAR';
+      throw error;
+    }
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      const error = new Error('Memory file changed during secure open');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+
+    // Resolve the already-open descriptor, not the mutable pathname. That
+    // binds containment to the file actually read even if an ancestor is
+    // repeatedly swapped between in-root and escaping directories.
+    const realFile = realpathOpenedMemoryFdSync(fd);
+    if (realFile && !pathInsideReal(selected.realParent, realFile)) {
+      const error = new Error(
+        'Memory file resolves outside its selected directory'
+      );
+      error.code = 'ERR_DASHBOARD_MEMORY_PATH_ESCAPE';
+      throw error;
+    }
+    if (
+      realFile &&
+      !memoryOpenedPathMatches(
+        selected.realParent,
+        selected.path,
+        realFile
+      )
+    ) {
+      const error = new Error('Memory file changed canonical path during open');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+    if (!realFile) {
+      // Linux enterprise/scoped ingest must have descriptor-bound containment.
+      // Other platforms retain local plugin support with a conservative
+      // before/open/after identity check that fails closed on any observed swap.
+      if (SCOPED_INGEST) {
+        const error = new Error(
+          'Cannot bind scoped memory containment to the opened descriptor'
+        );
+        error.code = 'ERR_DASHBOARD_MEMORY_FD_PATH_UNAVAILABLE';
+        throw error;
+      }
+      const afterReal = realpathSync(selected.path);
+      if (!pathInsideReal(selected.realParent, afterReal)) {
+        const error = new Error(
+          'Memory file resolves outside its selected directory'
+        );
+        error.code = 'ERR_DASHBOARD_MEMORY_PATH_ESCAPE';
+        throw error;
+      }
+      if (
+        !memoryOpenedPathMatches(
+          selected.realParent,
+          selected.path,
+          afterReal
+        )
+      ) {
+        const error = new Error('Memory file changed canonical path during open');
+        error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+        throw error;
+      }
+      const linked = statSync(afterReal);
+      if (opened.dev !== linked.dev || opened.ino !== linked.ino) {
+        const error = new Error('Memory file changed during secure open');
+        error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+        throw error;
+      }
+    }
+
+    const read = readUtf8FdCappedSync(fd, MEMORY_FILE_MAX_BYTES);
+    const after = fstatSync(fd);
+    if (
+      opened.size !== after.size ||
+      opened.mtimeMs !== after.mtimeMs ||
+      opened.ctimeMs !== after.ctimeMs
+    ) {
+      const error = new Error('Memory file changed while it was being read');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+    return read;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+// Walk every <PROJECTS>/<slug>/memory/ dir and build the per-project store,
+// including the fixed-depth archive tier. Read fresh per assemble; the same
+// selection feeds sourceSignature() and ingest().contentHash.
+export function readMemoryStores() {
   const projects = [];
+  let realProjectsRoot;
+  try {
+    realProjectsRoot = realpathSync(PROJECTS);
+  } catch {
+    return [];
+  }
   let projectDirs;
   try {
     projectDirs = readdirSync(PROJECTS, { withFileTypes: true });
@@ -751,27 +1090,31 @@ function readMemoryStores() {
     checked += 1;
     const slug = ent.name;
     const memDir = join(PROJECTS, slug, 'memory');
-    if (!existsSync(memDir)) continue;
-    let names;
-    try {
-      names = readdirSync(memDir)
-        .filter((f) => f.endsWith('.md'))
-        .sort();
-    } catch {
-      continue;
-    }
+    const selection = memoryProjectSelection(memDir, realProjectsRoot);
+    if (selection.dirs.length === 0) continue;
     const files = [];
-    for (const name of names) {
-      const full = join(memDir, name);
-      // Defense in depth: never escape the memory dir via a crafted name.
-      if (!full.startsWith(memDir + sep)) continue;
+    for (const selected of selection.files) {
+      const { name, path: full, component } = selected;
+      // `memory/` may be an in-root symlink, so compare canonical paths. A
+      // lexical `memDir` prefix check would drop every file selected from the
+      // allowed canonical target and make ingest disagree with `/api/memories`.
+      if (!pathInsideReal(selected.realParent, full)) continue;
       try {
-        files.push({ name, content: readArtifactTextCappedSync(full) });
+        files.push({
+          name,
+          content: readSelectedMemoryFileCappedSync(selected).text,
+        });
       } catch {
-        /* skip an unreadable/oversized memory file */
+        selection.readCompleteness[component] = false;
       }
     }
-    if (files.length > 0) projects.push({ slug, files });
+    if (files.length > 0) {
+      projects.push({
+        slug,
+        files,
+        readCompleteness: selection.readCompleteness,
+      });
+    }
   }
   try {
     return buildMemoryStores({ projects });
@@ -1856,26 +2199,32 @@ function isIngestSessionTooLargeError(err) {
   return err?.code === 'ERR_DASHBOARD_INGEST_SESSION_TOO_LARGE';
 }
 
-function readUtf8FileCappedSync(filePath, maxBytes, initialBytes = 0) {
-  const fd = openSync(filePath, 'r');
+function readUtf8FdCappedSync(fd, maxBytes, initialBytes = 0) {
   const chunks = [];
   let bytes = initialBytes;
   const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes + 1));
+  while (true) {
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+    if (bytesRead === 0) break;
+    bytes += bytesRead;
+    if (bytes > maxBytes) throw ingestSessionTooLargeError(maxBytes);
+    chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+  }
+  const raw = Buffer.concat(chunks);
+  return {
+    text: raw.toString('utf8'),
+    bytes,
+    raw,
+  };
+}
+
+function readUtf8FileCappedSync(filePath, maxBytes, initialBytes = 0) {
+  const fd = openSync(filePath, 'r');
   try {
-    while (true) {
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      bytes += bytesRead;
-      if (bytes > maxBytes) throw ingestSessionTooLargeError(maxBytes);
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
-    }
+    return readUtf8FdCappedSync(fd, maxBytes, initialBytes);
   } finally {
     closeSync(fd);
   }
-  return {
-    text: Buffer.concat(chunks).toString('utf8'),
-    bytes,
-  };
 }
 
 // readArtifactTextCappedSync / readArtifactJsonCappedSync / artifactFileTooLargeError
@@ -2058,6 +2407,70 @@ function hashFileSig(path, hash) {
   hash.update('\n');
 }
 
+function hashMemoryFileContent(selected, hash) {
+  hash.update(selected.path);
+  hash.update('\0');
+  try {
+    const { raw, bytes } = readSelectedMemoryFileCappedSync(selected);
+    hash.update(String(bytes));
+    hash.update('\0');
+    hash.update(raw);
+  } catch (error) {
+    hash.update('unreadable\0');
+    hash.update(String(error?.code || 'error'));
+  }
+  hash.update('\n');
+}
+
+function hashMemoryFileIdentity(selected, hash) {
+  hash.update(selected.path);
+  hash.update('\0');
+  try {
+    // BigInt stats retain the filesystem's full timestamp precision. The cheap
+    // gate must detect in-place writes and atomic replacements without reading
+    // up to tens of GiB of bounded memory bodies on every cache-hit request.
+    const stat = lstatSync(selected.path, { bigint: true });
+    hash.update(stat.isFile() ? 'file\0' : 'non-file\0');
+    for (const value of [
+      stat.dev,
+      stat.ino,
+      stat.mode,
+      stat.size,
+      stat.mtimeNs,
+      stat.ctimeNs,
+    ]) {
+      hash.update(String(value));
+      hash.update('\0');
+    }
+  } catch (error) {
+    hash.update('unavailable\0');
+    hash.update(String(error?.code || 'error'));
+  }
+  hash.update('\n');
+}
+
+function hashMemorySelection(project, selection, hash) {
+  hash.update(`project:${project}\n`);
+  hash.update(`dirs:${selection.dirs.join('\0')}\n`);
+  hash.update(
+    `complete:${Number(selection.readCompleteness.facts)}${Number(selection.readCompleteness.mainIndex)}${Number(selection.readCompleteness.archiveIndex)}\n`
+  );
+  for (const selected of selection.files) {
+    hashMemoryFileContent(selected, hash);
+  }
+}
+
+function hashMemorySelectionIdentity(project, selection, hash) {
+  hash.update(`project:${project}\n`);
+  hash.update(`dirs:${selection.dirs.join('\0')}\n`);
+  hash.update(
+    `complete:${Number(selection.readCompleteness.facts)}${Number(selection.readCompleteness.mainIndex)}${Number(selection.readCompleteness.archiveIndex)}\n`
+  );
+  for (const selected of selection.files) {
+    hashMemoryFileIdentity(selected, hash);
+  }
+}
+
 // The host producer (#893) persists the PersistedRepoMap envelope
 // `{ version, cacheKey, sizeBounded, droppedFiles, map: RepoMap }`; the consumer
 // wants the inner RepoMap. `unwrapPersistedRepoMap` (shared with the producer's
@@ -2230,21 +2643,25 @@ export function sourceSignature() {
     }
     parts.push(`projects:${projectsRoot}:${Math.floor(maxDirMtime)}`);
   }
-  // Memory stores (#1990): readMemoryStores() reads each <PROJECTS>/<slug>/memory
-  // tree (MEMORY.md index + fact files) into RecommendationInput.memoryStores. A
+  // Memory stores (#1990/#2558): readMemoryStores() reads each
+  // <PROJECTS>/<slug>/memory fixed-depth surface (main + archive indexes and
+  // direct fact files) into RecommendationInput.memoryStores. A
   // project dir's mtime does NOT advance when a grandchild memory FILE is edited
   // in place (POSIX dir-mtime semantics), so the `projects:` dir signature above
   // misses index/fact edits — exactly the changes the #1779 detector keys on.
-  // Stat the memory dir (catches add/remove/rename) plus each .md file's
-  // mtime+size (catches in-place edits) so a memory change invalidates the recs
-  // cache, mirroring the liveConfig file section below. Cheap: memory dirs hold a
-  // handful of small files and are sparse across projects.
+  // Hash the exact bounded selection plus replacement-safe file identities and
+  // full-precision stats. Raw bytes belong only in ingest().contentHash during
+  // a rebuild; reading every body here would turn the cheap request-time gate
+  // into a worst-case multi-GiB synchronous scan.
   {
     let memDirs;
+    let realProjectsRoot;
     try {
       memDirs = readdirSync(PROJECTS, { withFileTypes: true });
+      realProjectsRoot = realpathSync(PROJECTS);
     } catch {
       memDirs = [];
+      realProjectsRoot = null;
     }
     let checked = 0;
     for (const ent of [...memDirs]
@@ -2253,28 +2670,11 @@ export function sourceSignature() {
       if (checked >= INGEST_PROJECT_MAX_DIRS) break;
       checked += 1;
       const memDir = join(PROJECTS, ent.name, 'memory');
-      try {
-        parts.push(`memory-dir:${memDir}:${Math.floor(statSync(memDir).mtimeMs)}`);
-      } catch {
-        continue; // no memory/ dir for this project — contributes nothing
-      }
-      let names;
-      try {
-        names = readdirSync(memDir)
-          .filter((f) => f.endsWith('.md'))
-          .sort();
-      } catch {
-        continue;
-      }
-      for (const name of names) {
-        const full = join(memDir, name);
-        try {
-          const s = statSync(full);
-          parts.push(`memory:${full}:${Math.floor(s.mtimeMs)}:${s.size}`);
-        } catch {
-          parts.push(`memory:${full}:0:0`);
-        }
-      }
+      const selection = memoryProjectSelection(memDir, realProjectsRoot);
+      if (selection.dirs.length === 0) continue;
+      const memoryHash = createHash('sha1');
+      hashMemorySelectionIdentity(ent.name, selection, memoryHash);
+      parts.push(`memory-identity:${memoryHash.digest('hex')}`);
     }
   }
   // Files whose CONTENT feeds the dataset: history.jsonl/history.d entries plus
@@ -2456,6 +2856,32 @@ export function ingest() {
   hash.update('history\n');
   for (const { path } of sourceHistoryFiles()) {
     hashFileSig(path, hash);
+  }
+  // The memory-hygiene input is assembled fresh and is not stored in session
+  // blobs. Hash the exact same fixed-depth selection as readMemoryStores(); a
+  // sourceSignature-only change would otherwise hit the old content hash and
+  // restamp stale recommendation bytes.
+  hash.update('memory-stores\n');
+  let memoryProjects;
+  let realMemoryProjectsRoot;
+  try {
+    memoryProjects = readdirSync(PROJECTS, { withFileTypes: true });
+    realMemoryProjectsRoot = realpathSync(PROJECTS);
+  } catch {
+    memoryProjects = [];
+    realMemoryProjectsRoot = null;
+  }
+  let memoryProjectsChecked = 0;
+  for (const entry of [...memoryProjects]
+    .filter((candidate) => candidate.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name))) {
+    if (memoryProjectsChecked >= INGEST_PROJECT_MAX_DIRS) break;
+    memoryProjectsChecked += 1;
+    const memDir = join(PROJECTS, entry.name, 'memory');
+    const selection = memoryProjectSelection(memDir, realMemoryProjectsRoot);
+    if (selection.dirs.length === 0) continue;
+    for (const dir of selection.dirs) hashFileSig(dir, hash);
+    hashMemorySelection(entry.name, selection, hash);
   }
   // Shadow-calls ledger (epic #513) — read fresh per assemble (like history), so it
   // must be in the gate or new experiments would never invalidate the recs cache.

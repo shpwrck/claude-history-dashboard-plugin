@@ -18,7 +18,7 @@
 //      published port, not the (NAT'd) peer address.
 
 import { createServer } from 'node:http';
-import { appendFile, chmod, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, normalize, resolve, extname, sep } from 'node:path';
@@ -76,6 +76,10 @@ import {
   INGEST_SESSION_MAX_PARTS,
   INGEST_PROJECT_MAX_DIRS,
   INGEST_SESSION_DISCOVERY_MAX_ENTRIES,
+  MEMORY_FILE_MAX_BYTES as INGEST_MEMORY_FILE_MAX_BYTES,
+  MEMORY_DIR_MAX_ENTRIES as INGEST_MEMORY_DIR_MAX_ENTRIES,
+  memoryOpenFlags,
+  memoryOpenedPathMatches,
   LIVE_SESSION_MAX_BYTES,
   computeLiveSession,
   recordSuppressionTransitions,
@@ -741,10 +745,7 @@ const DASHBOARD_USAGE_CREDENTIAL_MAX_BYTES = Math.max(
 );
 const DASHBOARD_MEMORY_FILE_MAX_BYTES = Math.max(
   256,
-  Math.min(
-    16_777_216,
-    parseNonNegativeIntEnv('DASHBOARD_MEMORY_FILE_MAX_BYTES', 262_144)
-  )
+  INGEST_MEMORY_FILE_MAX_BYTES
 );
 const DASHBOARD_MEMORY_RESPONSE_MAX_BYTES = Math.max(
   1_024,
@@ -759,10 +760,7 @@ const DASHBOARD_MEMORY_MAX_FILES = Math.max(
 );
 const DASHBOARD_MEMORY_DIR_MAX_ENTRIES = Math.max(
   1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_MEMORY_DIR_MAX_ENTRIES', 50_000)
-  )
+  INGEST_MEMORY_DIR_MAX_ENTRIES
 );
 
 // Per-process CSRF/auth token for the mutating policy route (#308). Generated
@@ -3202,6 +3200,155 @@ function readUtf8FileCapped(filePath, maxBytes, initialBytes = 0) {
   });
 }
 
+async function readSelectedMemoryFileCapped(candidate, maxBytes) {
+  let handle;
+  try {
+    const beforeReal = await realpath(candidate.full);
+    if (!pathInside(candidate.realParent, beforeReal)) {
+      const error = new Error(
+        'Memory file resolves outside its selected directory'
+      );
+      error.code = 'ERR_DASHBOARD_MEMORY_PATH_ESCAPE';
+      throw error;
+    }
+    if (
+      !memoryOpenedPathMatches(
+        candidate.realParent,
+        candidate.full,
+        beforeReal
+      )
+    ) {
+      const error = new Error('Memory file changed canonical path before open');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+    const before = await lstat(candidate.full);
+    if (!before.isFile()) {
+      const error = new Error('Selected memory path is not a regular file');
+      error.code = 'ERR_DASHBOARD_MEMORY_NOT_REGULAR';
+      throw error;
+    }
+
+    // Keep validation and reading bound to one opened identity. Resolving a
+    // pathname and reopening it later would let a writer swap in an escaping
+    // symlink between the containment check and the actual read.
+    handle = await open(candidate.full, memoryOpenFlags());
+    const opened = await handle.stat();
+    if (!opened.isFile()) {
+      const error = new Error('Selected memory path is not a regular file');
+      error.code = 'ERR_DASHBOARD_MEMORY_NOT_REGULAR';
+      throw error;
+    }
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      const error = new Error('Memory file changed during secure open');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+
+    let realFull = null;
+    for (const fdRoot of ['/proc/self/fd', '/dev/fd']) {
+      try {
+        const fdPath = join(fdRoot, String(handle.fd));
+        const resolved = await realpath(fdPath);
+        if (resolved === fdPath || pathInside(fdRoot, resolved)) continue;
+        realFull = resolved;
+        break;
+      } catch {
+        /* try the next descriptor filesystem */
+      }
+    }
+    if (realFull && !pathInside(candidate.realParent, realFull)) {
+      const error = new Error(
+        'Memory file resolves outside its selected directory'
+      );
+      error.code = 'ERR_DASHBOARD_MEMORY_PATH_ESCAPE';
+      throw error;
+    }
+    if (
+      realFull &&
+      !memoryOpenedPathMatches(
+        candidate.realParent,
+        candidate.full,
+        realFull
+      )
+    ) {
+      const error = new Error('Memory file changed canonical path during open');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+    if (!realFull) {
+      // Enterprise deployments require descriptor-bound containment. Local
+      // Windows/macOS plugin mode retains support through conservative
+      // before/open/after identity checks when no descriptor filesystem exists.
+      if (ENTERPRISE_AUTH_ON) {
+        const error = new Error(
+          'Cannot bind enterprise memory containment to the opened descriptor'
+        );
+        error.code = 'ERR_DASHBOARD_MEMORY_FD_PATH_UNAVAILABLE';
+        throw error;
+      }
+      const afterReal = await realpath(candidate.full);
+      if (!pathInside(candidate.realParent, afterReal)) {
+        const error = new Error(
+          'Memory file resolves outside its selected directory'
+        );
+        error.code = 'ERR_DASHBOARD_MEMORY_PATH_ESCAPE';
+        throw error;
+      }
+      if (
+        !memoryOpenedPathMatches(
+          candidate.realParent,
+          candidate.full,
+          afterReal
+        )
+      ) {
+        const error = new Error('Memory file changed canonical path during open');
+        error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+        throw error;
+      }
+      const linked = await stat(afterReal);
+      if (opened.dev !== linked.dev || opened.ino !== linked.ino) {
+        const error = new Error('Memory file changed during secure open');
+        error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+        throw error;
+      }
+    }
+
+    const chunks = [];
+    let bytes = 0;
+    const buffer = Buffer.allocUnsafe(Math.min(65_536, maxBytes + 1));
+    while (true) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        buffer.length,
+        null
+      );
+      if (bytesRead === 0) break;
+      bytes += bytesRead;
+      if (bytes > maxBytes) throw rawFileTooLargeError(maxBytes);
+      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+    }
+    const after = await handle.stat();
+    if (
+      opened.size !== after.size ||
+      opened.mtimeMs !== after.mtimeMs ||
+      opened.ctimeMs !== after.ctimeMs
+    ) {
+      const error = new Error('Memory file changed while it was being read');
+      error.code = 'ERR_DASHBOARD_MEMORY_FILE_RACED';
+      throw error;
+    }
+    return {
+      text: Buffer.concat(chunks).toString('utf8'),
+      bytes,
+      stat: opened,
+    };
+  } finally {
+    await handle?.close();
+  }
+}
+
 async function readTextFileInsideRoot(root, relativePath) {
   const file = join(root, relativePath);
   const [realRoot, realFile] = await Promise.all([
@@ -3564,13 +3711,11 @@ function appendVary(res, value) {
   res.setHeader('Vary', [...values].join(', '));
 }
 
-// Agent memories (#458). Walk every ~/.claude/projects/<slug>/memory/ dir and
-// return raw markdown per *.md file — INCLUDING the MEMORY.md index (#1990) so
-// `buildMemoryStores` can populate `store.index`/`indexRaw` and the #1779
-// memory-hygiene detector can fire; `parseMemories` still filters the index out
-// of the Memories view. Grouped by project slug. Read fresh per request; the
-// client parses the frontmatter. Any unreadable project/file is skipped rather
-// than failing the whole response.
+// Agent memories (#458/#2558). Walk each project memory dir at fixed depth:
+// root *.md plus direct archive/*.md, including both MEMORY.md indexes. The
+// parser keeps canonical root-relative paths and the route reports per-project
+// completeness so absence-based hygiene claims fail closed after any bounded
+// skip. Nested archive directories are never traversed.
 async function readMemories(projectsRoot = PROJECTS) {
   const out = [];
   let contentBytes = 0;
@@ -3619,62 +3764,142 @@ async function readMemories(projectsRoot = PROJECTS) {
     if (!existsSync(memDir)) continue;
     const realMemDir = await realpathOrNull(memDir);
     if (!realMemDir || !pathInside(realProjectsRoot, realMemDir)) continue;
-    const mdFiles = await readDirentsBounded(
+    const rootRead = await readDirentsBounded(
       memDir,
       DASHBOARD_MEMORY_DIR_MAX_ENTRIES
     );
-    if (mdFiles.missing) {
+    if (rootRead.missing) {
       continue;
     }
-    if (mdFiles.truncated) truncated = true;
-    const files = [];
-    for (const name of mdFiles.entries
-      .map((file) => file.name)
-      .filter((file) => file.endsWith('.md'))
-      .sort()) {
-      if (fileLimitReached || responseLimitReached) {
-        skippedFiles += 1;
+    const readCompleteness = {
+      facts: true,
+      mainIndex: true,
+      archiveIndex: true,
+    };
+    if (rootRead.truncated) {
+      truncated = true;
+      readCompleteness.facts = false;
+      readCompleteness.mainIndex = false;
+      readCompleteness.archiveIndex = false;
+    }
+
+    const selected = [];
+    for (const entry of rootRead.entries) {
+      if (!entry.name.endsWith('.md')) continue;
+      const component =
+        entry.name.toLowerCase() === 'memory.md' ? 'mainIndex' : 'facts';
+      if (!entry.isFile()) {
         truncated = true;
-        fileLimitReached = returnedFiles >= DASHBOARD_MEMORY_MAX_FILES;
+        readCompleteness[component] = false;
         continue;
       }
-      const full = join(memDir, name);
+      selected.push({
+        name: entry.name,
+        full: join(memDir, entry.name),
+        realParent: realMemDir,
+        component,
+      });
+    }
+
+    // Exactly one additional tier: memory/archive/*.md. Nested directories are
+    // never enumerated. The archive dir itself must resolve inside memory/.
+    const archiveEntry = rootRead.entries.find(
+      (entry) => entry.name === 'archive'
+    );
+    if (archiveEntry && !archiveEntry.isDirectory()) {
+      truncated = true;
+      readCompleteness.facts = false;
+      readCompleteness.archiveIndex = false;
+    } else if (archiveEntry) {
+      const archiveDir = join(memDir, 'archive');
+      const realArchiveDir = await realpathOrNull(archiveDir);
+      if (!realArchiveDir || !pathInside(realMemDir, realArchiveDir)) {
+        truncated = true;
+        readCompleteness.facts = false;
+        readCompleteness.archiveIndex = false;
+      } else {
+        const archiveRead = await readDirentsBounded(
+          archiveDir,
+          DASHBOARD_MEMORY_DIR_MAX_ENTRIES
+        );
+        if (archiveRead.missing || archiveRead.truncated) {
+          truncated = true;
+          readCompleteness.facts = false;
+          readCompleteness.archiveIndex = false;
+        }
+        for (const entry of archiveRead.entries) {
+          if (!entry.name.endsWith('.md')) continue;
+          const component =
+            entry.name.toLowerCase() === 'archive.md'
+              ? 'archiveIndex'
+              : 'facts';
+          if (!entry.isFile()) {
+            truncated = true;
+            readCompleteness[component] = false;
+            continue;
+          }
+          selected.push({
+            name: `archive/${entry.name}`,
+            full: join(archiveDir, entry.name),
+            realParent: realArchiveDir,
+            component,
+          });
+        }
+      }
+    }
+
+    selected.sort((a, b) => a.name.localeCompare(b.name));
+    const files = [];
+    for (let index = 0; index < selected.length; index += 1) {
+      const candidate = selected[index];
+      if (fileLimitReached || responseLimitReached) {
+        const remaining = selected.slice(index);
+        skippedFiles += remaining.length;
+        for (const skipped of remaining) {
+          readCompleteness[skipped.component] = false;
+        }
+        truncated = true;
+        fileLimitReached = returnedFiles >= DASHBOARD_MEMORY_MAX_FILES;
+        break;
+      }
+      const { name, full, component } = candidate;
       // Defense in depth: never escape the memory dir via a crafted name.
       if (!pathInside(memDir, full)) continue;
       try {
-        const realFull = await realpathOrNull(full);
-        if (!realFull || !pathInside(realMemDir, realFull)) continue;
-        const { text, bytes } = await readUtf8FileCapped(
-          realFull,
+        const { text, bytes, stat: memStat } = await readSelectedMemoryFileCapped(
+          candidate,
           DASHBOARD_MEMORY_FILE_MAX_BYTES
         );
         if (contentBytes + bytes > DASHBOARD_MEMORY_RESPONSE_MAX_BYTES) {
           skippedFiles += 1;
           truncated = true;
           responseLimitReached = true;
+          readCompleteness[component] = false;
           continue;
         }
         // Structural metadata only (#2495): the file's last-modified time, so
         // the parser can derive a last-edited-age signal. No new content surface.
-        // Undefined (stat failure) drops out of the JSON payload cleanly.
-        const memStat = await stat(realFull).catch(() => null);
         contentBytes += bytes;
         returnedFiles += 1;
-        files.push({ name, content: text, mtimeMs: memStat?.mtimeMs });
+        files.push({ name, content: text, mtimeMs: memStat.mtimeMs });
         if (returnedFiles >= DASHBOARD_MEMORY_MAX_FILES) {
           truncated = true;
           fileLimitReached = true;
+          const remaining = selected.slice(index + 1);
+          skippedFiles += remaining.length;
+          for (const skipped of remaining) {
+            readCompleteness[skipped.component] = false;
+          }
           break;
         }
-      } catch (err) {
-        if (isRawFileTooLargeError(err)) {
-          skippedFiles += 1;
-          truncated = true;
-        }
-        /* skip an unreadable file */
+      } catch {
+        skippedFiles += 1;
+        truncated = true;
+        readCompleteness[component] = false;
+        /* unreadable/oversized files degrade completeness without sinking */
       }
     }
-    if (files.length > 0) out.push({ slug, files });
+    if (files.length > 0) out.push({ slug, files, readCompleteness });
   }
   return {
     projects: out,
@@ -9486,10 +9711,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/memories') {
-      // Agent memories view (#458). Walk <scoped-root>/projects/<slug>/memory/*.md
-      // and return the RAW markdown per file, grouped by project slug, read
-      // fresh per request (mirrors the host-coupled, no-ingest routes). The
-      // client parser (src/lib/parse-memories.ts) owns the frontmatter parsing.
+      // Agent memories view (#458/#2558). Read the fixed-depth root + direct
+      // archive Markdown surface, with canonical memory-root-relative names
+      // and per-component read completeness. Fresh per request, like the other
+      // host-coupled routes; parse-memories owns frontmatter/index parsing.
       if (req.method !== 'GET') {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
       }

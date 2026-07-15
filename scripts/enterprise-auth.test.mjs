@@ -888,6 +888,91 @@ try {
   await server.stop();
 }
 
+server = await startServer();
+try {
+  const memoryDir = join(server.claudeDir, 'projects', 'memory-archive-project', 'memory');
+  const archiveDir = join(memoryDir, 'archive');
+  await mkdir(join(archiveDir, 'nested'), { recursive: true });
+  await writeFile(join(memoryDir, 'MEMORY.md'), '- [Archive](archive/ARCHIVE.md)\n');
+  await writeFile(join(memoryDir, 'current.md'), 'current memory marker\n');
+  await writeFile(join(archiveDir, 'ARCHIVE.md'), '- [Old](old.md)\n');
+  await writeFile(join(archiveDir, 'old.md'), 'archive memory marker\n');
+  await writeFile(join(archiveDir, 'nested', 'ignored.md'), 'nested memory marker\n');
+  const outsideArchiveFact = join(server.distDir, 'outside-archive-memory.md');
+  await writeFile(outsideArchiveFact, 'outside archive secret marker\n');
+  const escapeArchiveDir = join(
+    server.claudeDir,
+    'projects',
+    'memory-archive-symlink',
+    'memory',
+    'archive'
+  );
+  await mkdir(escapeArchiveDir, { recursive: true });
+  await writeFile(join(escapeArchiveDir, 'ARCHIVE.md'), '- [Escape](escape.md)\n');
+  await writeFile(join(escapeArchiveDir, 'kept.md'), 'in-root archive marker\n');
+  await symlink('kept.md', join(escapeArchiveDir, 'alias.md'));
+  await symlink(outsideArchiveFact, join(escapeArchiveDir, 'escape.md'));
+
+  const r = await fetch(`${server.base}/api/memories`);
+  const body = await json(r);
+  const project = body?.projects?.find((row) => row.slug === 'memory-archive-project');
+  const escapeProject = body?.projects?.find(
+    (row) => row.slug === 'memory-archive-symlink'
+  );
+  const names = project?.files?.map((file) => file.name).sort() ?? [];
+  check('memory archive fixed-depth read -> 200', r.status === 200, `got ${r.status}`);
+  check(
+    'memory archive returns canonical root-relative names',
+    JSON.stringify(names) ===
+      JSON.stringify(['MEMORY.md', 'archive/ARCHIVE.md', 'archive/old.md', 'current.md']),
+    `got ${JSON.stringify(names)}`
+  );
+  check(
+    'memory archive ignores deeper descendants',
+    !JSON.stringify(project).includes('nested memory marker')
+  );
+  check(
+    'memory archive rejects escaping and in-root symlink facts',
+    !JSON.stringify(escapeProject).includes('outside archive secret marker') &&
+      !escapeProject?.files?.some((file) => file.name === 'archive/alias.md') &&
+      escapeProject?.readCompleteness?.facts === false
+  );
+  check(
+    'memory archive reports complete component reads',
+    project?.readCompleteness?.facts === true &&
+      project?.readCompleteness?.mainIndex === true &&
+      project?.readCompleteness?.archiveIndex === true
+  );
+} finally {
+  await server.stop();
+}
+
+server = await startServer({
+  DASHBOARD_MEMORY_FILE_MAX_BYTES: '256',
+});
+try {
+  const memoryDir = join(server.claudeDir, 'projects', 'memory-archive-partial', 'memory');
+  const archiveDir = join(memoryDir, 'archive');
+  await mkdir(archiveDir, { recursive: true });
+  await writeFile(join(memoryDir, 'MEMORY.md'), '- [Archive](archive/ARCHIVE.md)\n');
+  await writeFile(join(archiveDir, 'ARCHIVE.md'), '- [Huge](huge.md)\n');
+  await writeFile(join(archiveDir, 'huge.md'), 'x'.repeat(512));
+
+  const r = await fetch(`${server.base}/api/memories`);
+  const body = await json(r);
+  const project = body?.projects?.find((row) => row.slug === 'memory-archive-partial');
+  check('memory archive partial read -> 200', r.status === 200, `got ${r.status}`);
+  check('memory archive partial read reports truncation', body?.truncated === true);
+  check(
+    'memory archive partial read marks facts incomplete but indexes complete',
+    project?.readCompleteness?.facts === false &&
+      project?.readCompleteness?.mainIndex === true &&
+      project?.readCompleteness?.archiveIndex === true
+  );
+} finally {
+  await server.stop();
+}
+
 server = await startServer({
   DASHBOARD_MEMORY_DIR_MAX_ENTRIES: '1',
 });

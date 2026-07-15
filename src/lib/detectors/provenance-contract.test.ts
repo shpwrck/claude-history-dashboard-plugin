@@ -386,11 +386,16 @@ const memoryHygieneStore = (): ProjectMemoryStore[] => [
   {
     project: 'proj-a',
     memories: [
-      { name: 'kept', description: '', type: 'project', body: 'links [[ghost-memory]]', file: 'kept.md' },
+      { name: 'kept', description: '', type: 'project', body: '', file: 'kept.md' },
     ],
     // Index points to a file that isn't on disk → dangling-index-link (structural).
     index: [{ title: 'Gone', file: 'gone.md', hook: 'x', raw: '- [Gone](gone.md) — x' }],
     indexRaw: '- [Gone](gone.md) — x',
+    indexPresent: true,
+    archiveIndex: [],
+    archiveIndexRaw: '',
+    archiveIndexPresent: false,
+    readCompleteness: { facts: true, mainIndex: true, archiveIndex: true },
   },
 ];
 
