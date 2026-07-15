@@ -33,7 +33,8 @@ export function useRecommendations(views: RecommendationViews): {
     [
       views.tokenData, views.toolData, views.sessions, views.projects,
       views.permissionRows, views.apiErrors, views.liveConfig, views.workflows,
-      views.assistantFeatures, views.deceitSignals, views.timelines, views.attribution,
+      views.assistantFeatures, views.deceitSignals, views.secretsAtRest,
+      views.timelines, views.attribution,
       views.agentSettings, views.runtimeEvents, views.taskSteering, views.churnGeometry,
       views.taskSuccess, views.toolInventories, views.tasks, views.teams,
       views.reviewEvents, views.sessionRegistry, views.telemetry, views.modelLatency,
