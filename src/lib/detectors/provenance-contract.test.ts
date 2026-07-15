@@ -465,6 +465,25 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     ] as unknown as RecommendationInput['workflows'];
     return { input: baseInput({ workflows }), now: 0 };
   },
+  'workflow.native-bypass': () => {
+    const toolData = [
+      {
+        sessionId: 'native-bypass-provenance',
+        calls: Array.from({ length: 12 }, (_, index) => ({
+          timestamp: `2026-06-10T00:00:${String(index).padStart(2, '0')}Z`,
+          toolName: 'Bash',
+          input: { command: 'grep -rn fixture src/' },
+          toolUseId: `native-bypass-${index}`,
+          isError: null,
+          resultBytes: 100,
+        })),
+      },
+    ] as RecommendationInput['toolData'];
+    return {
+      input: baseInput({ toolData }),
+      now: Date.parse('2026-06-11T00:00:00Z'),
+    };
+  },
   'workflow.procedural-memory': () => {
     // The same contiguous 3-step Bash procedure recurs across 3 sessions with a
     // present-but-empty skill inventory (liveConfig is REQUIRED — the finding

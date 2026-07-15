@@ -47,6 +47,12 @@ export const MARKERS_REPEATED_COMMANDS: AppliedMarkers = {
   headings: [/^##\s+Common commands\b/i],
   bodyPhrases: ['wrap them in a script'],
 };
+export const MARKERS_NATIVE_BYPASS: AppliedMarkers = {
+  headings: [/^##\s+Prefer native tools and path-safe shell usage\b/i],
+  bodyPhrases: [
+    'choose native tools or path-safe alternatives before Bash',
+  ],
+};
 export const MARKERS_MODEL_EVAL_ROUTING_GAP: AppliedMarkers = {
   headings: [/^##\s+Scoped model routing\b/i],
   bodyPhrases: ['scoped model-routing decision adopted from eval evidence'],
@@ -159,6 +165,7 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['context.low-health', MARKERS_LOW_HEALTH],
   ['context.repeated-compactions', MARKERS_REPEATED_COMPACTIONS],
   ['workflow.repeated-commands', MARKERS_REPEATED_COMMANDS],
+  ['workflow.native-bypass', MARKERS_NATIVE_BYPASS],
   ['cost.model-eval-routing-gap', MARKERS_MODEL_EVAL_ROUTING_GAP],
   ['context.compaction-hot-sessions', MARKERS_COMPACTION_HOT_SESSIONS],
   ['workflow.correction-mining', MARKERS_CORRECTIONS],

@@ -58,10 +58,23 @@ export interface ToolCall {
   commandPreview?: string;
   /** First executable token after leading env assignments. */
   commandHead?: string;
+  /**
+   * True only when `commandHead` is also the exact raw Bash permission prefix
+   * (`cmd === head || cmd.startsWith(head + ' ')`). Precomputed before bulk
+   * ingest strips the raw command because `commandPreview` flattens newlines and
+   * cannot prove permission-rule coverage losslessly.
+   */
+  commandHeadIsPermissionPrefix?: true;
   /** Git-related command segments needed by workflow detectors after stripping. */
   commandGitSegments?: string[];
   /** Precomputed native-tool-bypass categories for Bash commands. */
   commandBypassCategories?: BypassCategory[];
+  /**
+   * Exact executable aliases that produced each native-tool-bypass category.
+   * Derived from the full Bash command before bulk ingest strips `input.command`,
+   * including aliases behind wrappers/assignments and later shell-chain segments.
+   */
+  commandBypassAliases?: Partial<Record<BypassCategory, string[]>>;
   /** First dangerous-command pattern matched by the Bash command, if any. */
   commandDangerousPattern?: string;
   /**

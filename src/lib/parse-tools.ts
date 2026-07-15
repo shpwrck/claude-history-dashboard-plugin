@@ -242,10 +242,28 @@ function bashCommandPreview(call: ToolCall): string | null {
     : null;
 }
 
+const BYPASS_CATEGORY_VALUES = new Set<BypassCategory>([
+  'grep',
+  'find',
+  'cat',
+  'sed',
+  'awk',
+  'cd',
+]);
+
+function isBypassCategory(value: unknown): value is BypassCategory {
+  return (
+    typeof value === 'string' &&
+    BYPASS_CATEGORY_VALUES.has(value as BypassCategory)
+  );
+}
+
 function bashBypassCategories(call: ToolCall): BypassCategory[] {
   if (call.toolName !== 'Bash') return [];
   if (Array.isArray(call.commandBypassCategories)) {
-    return call.commandBypassCategories;
+    // Persisted data can outlive this parser version. Ignore unknown future or
+    // malformed categories instead of letting a downstream lookup throw.
+    return call.commandBypassCategories.filter(isBypassCategory);
   }
   const command = bashCommand(call);
   if (command === null) return [];
@@ -263,16 +281,76 @@ export interface BypassStat {
   nativeTool: string;
   count: number;
   hint: string;
+  /**
+   * Distinct leading command forms proven to produce this category. `null`
+   * means at least one contributing call could not be mapped safely (for
+   * example a later command in a shell chain, old stripped data, or `cd`).
+   */
+  observedCommandHeads: string[] | null;
+  /**
+   * Distinct executable aliases observed for user-facing guidance. Unlike
+   * `observedCommandHeads`, these need not start the raw permission prefix.
+   */
+  observedCommandAliases: string[];
 }
 
 export interface NativeToolBypass {
   categories: BypassStat[];
-  /** Total Bash commands that matched at least one bypass category. */
+  /** Total category matches; one Bash call can contribute to multiple categories. */
   totalBypass: number;
+  /** Newest dated contributing Bash call, normalized to ISO; null when undated. */
+  latestTimestamp: string | null;
+  /** Category matches backed by a strict RFC3339 timestamp. */
+  datedBypassMatches: number;
+  /** Category matches whose timestamp is absent or invalid. */
+  undatedBypassMatches: number;
   /** grep: native Grep calls vs Bash `grep` invocations. */
   grepRatio: { native: number; bash: number };
   /** find: native Glob calls vs Bash `find` invocations. */
   findRatio: { native: number; bash: number };
+}
+
+const RFC3339_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+/** Date.parse is permissive; require a real RFC3339 calendar instant. */
+function rfc3339TimestampMs(timestamp: string): number | null {
+  const match = RFC3339_TIMESTAMP.exec(timestamp);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[10] === undefined ? 0 : Number(match[10]);
+  const offsetMinute = match[11] === undefined ? 0 : Number(match[11]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 14 ||
+    offsetMinute > 59 ||
+    (offsetHour === 14 && offsetMinute !== 0)
+  ) {
+    return null;
+  }
+
+  const calendar = new Date(0);
+  calendar.setUTCHours(0, 0, 0, 0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  if (
+    calendar.getUTCFullYear() !== year ||
+    calendar.getUTCMonth() !== month - 1 ||
+    calendar.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /**
@@ -287,8 +365,12 @@ export interface NativeToolBypass {
  * (start of string, or after `;`/`&`/whitespace) whose effective preceding
  * operator is not `|`. Leading uses and `;`/`&&`-separated uses still count.
  */
-function matchesUnpiped(cmd: string, words: string[]): boolean {
+function unpipedCommandWords(cmd: string, words: string[]): string[] {
+  // All callers pass fixed, shell-command-safe words; keep the expression
+  // identical to the long-standing matcher so alias capture cannot drift from
+  // category classification.
   const re = new RegExp(`(${words.join('|')})(?=\\s|$)`, 'g');
+  const matched = new Set<string>();
   let m: RegExpExecArray | null;
   while ((m = re.exec(cmd)) !== null) {
     const start = m.index;
@@ -300,9 +382,19 @@ function matchesUnpiped(cmd: string, words: string[]): boolean {
     let j = start - 1;
     while (j >= 0 && (cmd[j] === ' ' || cmd[j] === '\t')) j -= 1;
     if (j >= 0 && cmd[j] === '|') continue;
-    return true;
+    matched.add(m[1]);
   }
-  return false;
+  return [...matched];
+}
+
+function matchesUnpiped(cmd: string, words: string[]): boolean {
+  return unpipedCommandWords(cmd, words).length > 0;
+}
+
+function leadingCommandWord(cmd: string, words: string[]): string[] {
+  const re = new RegExp(`^(${words.join('|')})(?=\\s|$)`);
+  const match = re.exec(cmd);
+  return match ? [match[1]] : [];
 }
 
 const BYPASS_DEFS: Array<{
@@ -310,6 +402,8 @@ const BYPASS_DEFS: Array<{
   nativeTool: string;
   /** Matches the command string (whole string, post-trim). */
   test: (cmd: string) => boolean;
+  /** Exact executable aliases responsible for this category match. */
+  observedAliases: (cmd: string) => string[];
   hint: string;
 }> = [
   {
@@ -318,6 +412,8 @@ const BYPASS_DEFS: Array<{
     // a `grep`/`rg`/`egrep` invocation as a command word, but NOT when piped
     // stdin (`… | grep`) — native Grep can't read another command's output.
     test: (c) => matchesUnpiped(c, ['grep', 'egrep', 'fgrep', 'rg']),
+    observedAliases: (c) =>
+      unpipedCommandWords(c, ['grep', 'egrep', 'fgrep', 'rg']),
     hint: 'Prefer native Grep over Bash grep — faster, integrates with permissions.',
   },
   {
@@ -326,6 +422,7 @@ const BYPASS_DEFS: Array<{
     // find walks a path it is given, so a piped `find` is unusual; still treat
     // a stdin-fed `find` as non-bypass for consistency. Keeps -exec/xargs uses.
     test: (c) => matchesUnpiped(c, ['find']),
+    observedAliases: (c) => unpipedCommandWords(c, ['find']),
     hint: 'Prefer native Glob over Bash find — pattern matching without a shell.',
   },
   {
@@ -333,6 +430,7 @@ const BYPASS_DEFS: Array<{
     nativeTool: 'Read',
     // leading cat/head/tail used to view a file
     test: (c) => /^(cat|head|tail)\s/.test(c),
+    observedAliases: (c) => leadingCommandWord(c, ['cat', 'head', 'tail']),
     hint: 'Prefer native Read over cat/head/tail — paginates and tracks file state.',
   },
   {
@@ -341,6 +439,7 @@ const BYPASS_DEFS: Array<{
     // not a bypass when fed by a pipe (`… | sed`) — Read/Edit edit files, not
     // another command's stdout.
     test: (c) => matchesUnpiped(c, ['sed']),
+    observedAliases: (c) => unpipedCommandWords(c, ['sed']),
     hint: 'Prefer native Read/Edit over sed — explicit edits with permission checks.',
   },
   {
@@ -348,6 +447,7 @@ const BYPASS_DEFS: Array<{
     nativeTool: 'Read/Edit',
     // not a bypass when fed by a pipe (`… | awk`).
     test: (c) => matchesUnpiped(c, ['awk']),
+    observedAliases: (c) => unpipedCommandWords(c, ['awk']),
     hint: 'Prefer native Read/Edit over awk for reading/transforming files.',
   },
   {
@@ -361,9 +461,55 @@ const BYPASS_DEFS: Array<{
     // chained form mislabels the required anchor as a bypass (#2014), so flag a
     // leading `cd` only when no chain operator (`&&`/`||`/`;`/`|`/`&`) follows.
     test: (c) => /^cd\s/.test(c) && !/[;&|]/.test(c),
+    observedAliases: () => [],
     hint: 'A standalone leading cd is wasted — cwd resets between Bash calls; use absolute paths. (A chained `cd <dir> && <cmd>` anchor is fine.)',
   },
 ];
+
+const BYPASS_COMMAND_HEADS: Readonly<
+  Record<BypassCategory, readonly string[]>
+> = {
+  grep: ['grep', 'egrep', 'fgrep', 'rg'],
+  find: ['find'],
+  cat: ['cat', 'head', 'tail'],
+  sed: ['sed'],
+  awk: ['awk'],
+  // A standalone cd is intentionally guidance-only. There is no blanket
+  // permission rule that safely represents the path-handling correction.
+  cd: [],
+};
+
+function commandAliasesForBypass(
+  call: ToolCall,
+  category: BypassCategory,
+  command: string | null
+): string[] {
+  if (command !== null) {
+    const def = BYPASS_DEFS.find((candidate) => candidate.category === category);
+    return def?.observedAliases(command.trim()) ?? [];
+  }
+
+  const persisted = call.commandBypassAliases as unknown;
+  if (persisted && typeof persisted === 'object' && !Array.isArray(persisted)) {
+    const candidates = (persisted as Record<string, unknown>)[category];
+    if (Array.isArray(candidates)) {
+      const aliases = candidates.filter(
+        (candidate): candidate is string =>
+          typeof candidate === 'string' &&
+          BYPASS_COMMAND_HEADS[category].includes(candidate)
+      );
+      if (aliases.length > 0) return [...new Set(aliases)];
+    }
+  }
+
+  // Pre-v12 stripped rows have no per-category alias map. Their full-command
+  // `commandHead` remains trustworthy only when it is itself a canonical alias;
+  // wrapped/chained heads stay unknown rather than inventing a category default.
+  return call.commandHead &&
+    BYPASS_COMMAND_HEADS[category].includes(call.commandHead)
+    ? [call.commandHead]
+    : [];
+}
 
 function commandPreview(command: string): string {
   const flat = command.replace(/\r?\n/g, ' ');
@@ -381,6 +527,11 @@ function commandHead(command: string): string | undefined {
     token = tokens[i];
   }
   return token || undefined;
+}
+
+function commandHeadIsPermissionPrefix(command: string, head: string): boolean {
+  const trimmed = command.trim();
+  return trimmed === head || trimmed.startsWith(`${head} `);
 }
 
 const WORKFLOW_GIT_SEGMENT_RE =
@@ -443,9 +594,13 @@ const COMMAND_DANGEROUS_PATTERNS: Array<{
 
 export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
   const trimmed = command.trim();
-  const bypassCategories = BYPASS_DEFS.filter((def) => def.test(trimmed)).map(
-    (def) => def.category
-  );
+  const bypassMatches = BYPASS_DEFS.filter((def) => def.test(trimmed));
+  const bypassCategories = bypassMatches.map((def) => def.category);
+  const bypassAliases: Partial<Record<BypassCategory, string[]>> = {};
+  for (const def of bypassMatches) {
+    const aliases = def.observedAliases(trimmed);
+    if (aliases.length > 0) bypassAliases[def.category] = aliases;
+  }
   // Match dangerous patterns against the executable skeleton (#2039): `rm -rf`
   // (and peers) inside heredoc bodies, quoted literals, or inline-script source
   // (`node -e "…"`) are not executed deletions and must not be flagged.
@@ -460,9 +615,15 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
     commandFingerprint: bashCommandFingerprint(command),
     commandPreview: commandPreview(command),
     ...(head ? { commandHead: head } : {}),
+    ...(head && commandHeadIsPermissionPrefix(command, head)
+      ? { commandHeadIsPermissionPrefix: true }
+      : {}),
     ...(gitSegments.length > 0 ? { commandGitSegments: gitSegments } : {}),
     ...(bypassCategories.length > 0
       ? { commandBypassCategories: bypassCategories }
+      : {}),
+    ...(Object.keys(bypassAliases).length > 0
+      ? { commandBypassAliases: bypassAliases }
       : {}),
     ...(dangerous
       ? {
@@ -492,8 +653,14 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
  */
 export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
   const counts = new Map<BypassCategory, number>();
+  const observedCommandHeads = new Map<BypassCategory, Set<string>>();
+  const observedCommandAliases = new Map<BypassCategory, Set<string>>();
+  const unmappableCommandCategories = new Set<BypassCategory>();
   let nativeGrep = 0;
   let nativeGlob = 0;
+  let latestBypassMs = Number.NEGATIVE_INFINITY;
+  let datedBypassMatches = 0;
+  let undatedBypassMatches = 0;
 
   for (const session of data) {
     for (const call of session.calls) {
@@ -505,8 +672,48 @@ export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
         nativeGlob += 1;
         continue;
       }
-      for (const category of bashBypassCategories(call)) {
+      const categories = bashBypassCategories(call);
+      if (categories.length > 0) {
+        const timestampMs = rfc3339TimestampMs(call.timestamp);
+        if (timestampMs !== null) {
+          latestBypassMs = Math.max(latestBypassMs, timestampMs);
+          datedBypassMatches += categories.length;
+        } else {
+          undatedBypassMatches += categories.length;
+        }
+      }
+      for (const category of categories) {
         counts.set(category, (counts.get(category) ?? 0) + 1);
+        const command = bashCommand(call);
+        const head =
+          call.commandHead ??
+          (command === null ? undefined : commandHead(command));
+        const hasPermissionPrefix =
+          head !== undefined &&
+          (command !== null
+            ? commandHeadIsPermissionPrefix(command, head)
+            : call.commandHeadIsPermissionPrefix === true);
+        for (const alias of commandAliasesForBypass(call, category, command)) {
+          const aliases =
+            observedCommandAliases.get(category) ?? new Set<string>();
+          aliases.add(alias);
+          observedCommandAliases.set(category, aliases);
+        }
+        if (
+          head &&
+          hasPermissionPrefix &&
+          BYPASS_COMMAND_HEADS[category].includes(head)
+        ) {
+          const heads =
+            observedCommandHeads.get(category) ?? new Set<string>();
+          heads.add(head);
+          observedCommandHeads.set(category, heads);
+        } else {
+          // Category aggregation collapses aliases (grep/rg, cat/head/tail).
+          // A policy proves adoption only when it covers the actual observed
+          // leading command form; ambiguity keeps the recommendation visible.
+          unmappableCommandCategories.add(category);
+        }
       }
     }
   }
@@ -517,6 +724,12 @@ export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
       nativeTool: d.nativeTool,
       count: counts.get(d.category) ?? 0,
       hint: d.hint,
+      observedCommandHeads: unmappableCommandCategories.has(d.category)
+        ? null
+        : [...(observedCommandHeads.get(d.category) ?? [])].sort(),
+      observedCommandAliases: [
+        ...(observedCommandAliases.get(d.category) ?? []),
+      ].sort(),
     }))
     .sort((a, b) => b.count - a.count);
 
@@ -525,6 +738,11 @@ export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
   return {
     categories,
     totalBypass,
+    latestTimestamp: Number.isFinite(latestBypassMs)
+      ? new Date(latestBypassMs).toISOString()
+      : null,
+    datedBypassMatches,
+    undatedBypassMatches,
     grepRatio: { native: nativeGrep, bash: counts.get('grep') ?? 0 },
     findRatio: { native: nativeGlob, bash: counts.get('find') ?? 0 },
   };
@@ -536,10 +754,9 @@ export interface NativeBypassScope {
   /** Bypass Bash commands in this session (a command can match >1 category once). */
   count: number;
   /**
-   * Sum of `tool_result` `resultBytes` over those bypass commands — the **direct**
-   * byte cost their shell output re-billed into context that a native Grep/Read
-   * would not have paid the same way. A char-count proxy (no per-call token count
-   * is on the wire); 0 when no bypass command carried a result payload.
+   * Sum of `tool_result` `resultBytes` over those bypass commands — evidence for
+   * the detector's causal reclaim hypothesis. A char-count proxy (no per-call
+   * token count is on the wire); 0 when no bypass command carried a result payload.
    */
   resultBytes: number;
 }
@@ -547,10 +764,10 @@ export interface NativeBypassScope {
 /**
  * Per-session breakdown of native-tool-bypass commands and the result bytes they
  * returned, for the workflow byte-lever reclaim claim (#951). Counts a command
- * once even if it matches several bypass categories (mirrors `totalBypass`), and
- * sums that call's `resultBytes` once — the **direct byte delta** the engine
- * dollarizes (bytes the shell streamed back into context). Sessions with no
- * bypass command are omitted.
+ * once even if it matches several bypass categories (unlike `totalBypass`, which
+ * counts category matches), and sums that call's `resultBytes` once. The detector
+ * uses that byte total as a counterfactual proxy, not a measured native-tool
+ * intervention effect. Sessions with no bypass command are omitted.
  */
 export function nativeBypassByScope(data: ToolUsageData[]): NativeBypassScope[] {
   const out: NativeBypassScope[] = [];

@@ -431,32 +431,65 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "title": "Assistant frequently course-corrects",
   },
   {
-    "action": "Prefer Grep/Glob/Read/Edit over grep/find/cat/sed — they are faster, cheaper, and integrate with permissions.",
+    "action": "Prefer Grep/Glob/Read/Edit for equivalent file work. Avoid standalone cd calls by using absolute paths or a same-command \`cd <dir> && <cmd>\` anchor.",
     "affected": 12,
     "category": "workflow",
-    "detail": "12 Bash commands re-implemented a native tool: grep (5), cat (4), find (3).",
+    "claimClass": "causal",
+    "detail": "The available tool history recorded 12 native-tool-bypass category match(es): grep (5), cat (4), find (3).",
     "evidence": [
       "grep → Grep: 5×",
       "cat → Read: 4×",
       "find → Glob: 3×",
     ],
     "fix": {
-      "label": "Add deny rules",
-      "note": "Merge into the "permissions" object in .claude/settings.json (deep-merge the "deny" array). Use "ask" instead of "deny" if you want a prompt rather than a hard block — both steer Claude onto native Grep/Glob/Read.",
-      "snippet": "{
-  "permissions": {
-    "deny": [
-      "Bash(grep:*)",
-      "Bash(cat:*)",
-      "Bash(find:*)"
-    ]
-  }
-}",
-      "target": "settings.json",
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "choose native tools or path-safe alternatives before Bash",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Prefer native tools and path-safe shell usage\\\\b/i,
+        ],
+      },
+      "fixKind": "illustrative",
+      "label": "Add native-tool guidance",
+      "note": "Adapt this CLAUDE.md example to the observed categories. It is behavioural guidance, not a blanket permission rule.",
+      "snippet": "## Prefer native tools and path-safe shell usage
+
+For avoidable shell patterns, choose native tools or path-safe alternatives before Bash.
+Keep file work structured and permission-aware. Apply these examples; category names are generic when an observed alias is unavailable:
+
+- Use the native Grep tool instead of Bash \`grep\`.
+- Use the native Read tool instead of Bash \`cat\`.
+- Use the native Glob tool instead of Bash \`find\`.",
+      "target": "CLAUDE.md",
     },
     "id": "workflow.native-bypass",
+    "proofTier": "auditable",
+    "provenance": {
+      "inference": "These category matches are candidates for first-class tool use or, for standalone cd, path-safe shell usage; whether each call is replaceable depends on its semantics. The guidance is therefore conditional and does not justify blanket shell-command denies. When result bytes are linked to input-token data, requesting their unrounded /4 token proxy as avoided by the native alternative is an auditable causal hypothesis, not a measured intervention effect; the cascade can cap or overlap-reduce that request.",
+      "observations": [
+        {
+          "claim": "12 native-tool bypass category match(es) were recorded",
+          "field": "toolData[].calls[].commandBypassCategories / input.command",
+          "source": "parse-tools",
+          "value": 12,
+        },
+        {
+          "claim": "Observed bypass categories and counts were grep=5, cat=4, find=3",
+          "field": "toolData[].calls[].commandBypassCategories / input.command",
+          "source": "parse-tools",
+          "value": "grep=5, cat=4, find=3",
+        },
+        {
+          "claim": "0 of 12 bypass category match(es) carried a valid RFC3339 timestamp",
+          "field": "toolData[].calls[].timestamp",
+          "source": "parse-tools",
+          "value": "0/12",
+        },
+      ],
+    },
     "severity": "info",
-    "title": "Use native tools instead of shell equivalents",
+    "title": "Review shell patterns for native or path-safe alternatives",
     "view": "tools",
   },
   {

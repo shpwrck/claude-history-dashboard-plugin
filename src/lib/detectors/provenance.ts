@@ -31,6 +31,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'reliability.hook-errors',
   'cost.idle-mcp-tools',
   'workflow.review-bottleneck',
+  'workflow.native-bypass',
   'cost.model-eval-routing-gap',
   'context.cross-session-reread',
   'reliability.passive-wait-stall',

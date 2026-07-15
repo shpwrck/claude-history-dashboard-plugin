@@ -55,6 +55,7 @@ describe('parseToolUsage', () => {
     expect(out.calls[0].commandFingerprint).toBeTruthy()
     expect(out.calls[0].commandPreview).toBe('ls')
     expect(out.calls[0].commandHead).toBe('ls')
+    expect(out.calls[0].commandHeadIsPermissionPrefix).toBe(true)
   })
 
   it('marks isError true for an error result', () => {
@@ -100,7 +101,9 @@ describe('parseToolUsage', () => {
     expect(bashCall.commandFingerprint).toBe(parsed.calls[0].commandFingerprint)
     expect(bashCall.commandPreview).toBe('grep foo src && rm -rf build')
     expect(bashCall.commandHead).toBe('grep')
+    expect(bashCall.commandHeadIsPermissionPrefix).toBe(true)
     expect(bashCall.commandBypassCategories).toContain('grep')
+    expect(bashCall.commandBypassAliases).toEqual({ grep: ['grep'] })
     expect(bashCall.commandDangerousPattern).toBe('rm -rf')
     // #2036: target-aware certainty + fragment are precomputed from the full
     // command before the body is stripped. `rm -rf build` is a scoped subpath.
@@ -114,6 +117,28 @@ describe('parseToolUsage', () => {
       'git stash pop',
     ])
     expect(Object.prototype.hasOwnProperty.call(stripped.calls[3].input, 'command')).toBe(false)
+  })
+
+  it('persists exact bypass aliases through wrappers and shell chains', () => {
+    const text = [
+      toolUse('u1', 'Bash', { command: 'env FOO=1 rg foo src' }),
+      toolUse('u2', 'Bash', { command: 'true && rg bar src' }),
+      toolUse('u3', 'Bash', { command: 'find src -name "*.ts" && rg baz src' }),
+      toolUse('u4', 'Bash', { command: 'printf x | rg x' }),
+    ].join('\n')
+    const stripped = stripToolCommandBodies(parseToolUsage(text, 'aliases.jsonl')!)
+
+    expect(stripped.calls[0].commandBypassAliases).toEqual({ grep: ['rg'] })
+    expect(stripped.calls[1].commandBypassAliases).toEqual({ grep: ['rg'] })
+    expect(stripped.calls[2].commandBypassAliases).toEqual({
+      grep: ['rg'],
+      find: ['find'],
+    })
+    expect(stripped.calls[3].commandBypassCategories).toBeUndefined()
+    expect(stripped.calls[3].commandBypassAliases).toBeUndefined()
+    for (const parsedCall of stripped.calls) {
+      expect(parsedCall.input.command).toBeUndefined()
+    }
   })
 
   it('precomputes correct rm -rf certainty even when the target is buried past the preview (#2036)', () => {
@@ -234,7 +259,160 @@ describe('nativeToolBypass', () => {
     const out = nativeToolBypass(data)
     const cats = Object.fromEntries(out.categories.map((c) => [c.category, c.count]))
     expect(cats).toMatchObject({ grep: 1, cat: 1, cd: 1 })
+    expect(out.categories.find((c) => c.category === 'grep')?.observedCommandHeads).toEqual(['grep'])
+    expect(out.categories.find((c) => c.category === 'grep')?.observedCommandAliases).toEqual(['grep'])
+    expect(out.categories.find((c) => c.category === 'cat')?.observedCommandHeads).toEqual(['cat'])
+    expect(out.categories.find((c) => c.category === 'cat')?.observedCommandAliases).toEqual(['cat'])
+    expect(out.categories.find((c) => c.category === 'cd')?.observedCommandHeads).toBeNull()
+    expect(out.categories.find((c) => c.category === 'cd')?.observedCommandAliases).toEqual([])
     expect(out.grepRatio).toEqual({ native: 1, bash: 1 })
+  })
+
+  it('preserves observed aliases for exact permission-policy coverage', () => {
+    const out = nativeToolBypass([
+      session('s', [bash('rg foo src'), bash('grep bar src'), bash('head README.md')]),
+    ])
+
+    expect(out.categories.find((c) => c.category === 'grep')?.observedCommandHeads).toEqual([
+      'grep',
+      'rg',
+    ])
+    expect(out.categories.find((c) => c.category === 'cat')?.observedCommandHeads).toEqual([
+      'head',
+    ])
+  })
+
+  it('keeps env-prefixed and unknown persisted categories unmappable', () => {
+    const envPrefixed = nativeToolBypass([
+      session('s', [bash('FOO=1 rg foo src')]),
+    ])
+    expect(
+      envPrefixed.categories.find((c) => c.category === 'grep')
+        ?.observedCommandHeads
+    ).toBeNull()
+    expect(
+      envPrefixed.categories.find((c) => c.category === 'grep')
+        ?.observedCommandAliases
+    ).toEqual(['rg'])
+
+    const malformed = call({
+      toolName: 'Bash',
+      input: {},
+      commandHead: 'grep',
+      commandPreview: 'grep foo src',
+      commandBypassCategories: [
+        'future-category',
+      ] as unknown as ToolCall['commandBypassCategories'],
+    })
+    expect(() => nativeToolBypass([session('old', [malformed])])).not.toThrow()
+    expect(nativeToolBypass([session('old', [malformed])]).categories).toEqual([])
+  })
+
+  it('keeps wrapper and chain aliases after raw commands are stripped', () => {
+    const text = [
+      toolUse('u1', 'Bash', { command: 'env FOO=1 rg foo src' }),
+      toolUse('u2', 'Bash', { command: 'true && rg bar src' }),
+      toolUse('u3', 'Bash', { command: 'find src -name "*.ts" && rg baz src' }),
+    ].join('\n')
+    const raw = parseToolUsage(text, 'aliases.jsonl')!
+
+    for (const data of [raw, stripToolCommandBodies(raw)]) {
+      const categories = nativeToolBypass([data]).categories
+      expect(
+        categories.find((category) => category.category === 'grep')
+          ?.observedCommandAliases
+      ).toEqual(['rg'])
+      expect(
+        categories.find((category) => category.category === 'find')
+          ?.observedCommandAliases
+      ).toEqual(['find'])
+    }
+  })
+
+  it('does not invent aliases for old or malformed stripped rows', () => {
+    const old = call({
+      toolName: 'Bash',
+      input: {},
+      commandHead: 'true',
+      commandBypassCategories: ['grep'],
+    })
+    const malformed = call({
+      ...old,
+      commandBypassAliases: {
+        grep: ['future-alias', 7],
+      } as unknown as ToolCall['commandBypassAliases'],
+    })
+
+    for (const persisted of [old, malformed]) {
+      expect(
+        nativeToolBypass([session('old', [persisted])]).categories[0]
+          .observedCommandAliases
+      ).toEqual([])
+    }
+  })
+
+  it('keeps lossy newline previews from proving permission-prefix coverage', () => {
+    const parsed = parseToolUsage(
+      toolUse('u1', 'Bash', { command: 'grep\nfoo src' }),
+      'newline.jsonl'
+    )!
+    expect(parsed.calls[0].commandHead).toBe('grep')
+    expect(parsed.calls[0].commandPreview).toBe('grep foo src')
+    expect(parsed.calls[0].commandHeadIsPermissionPrefix).toBeUndefined()
+
+    const stripped = stripToolCommandBodies(parsed)
+    expect(
+      nativeToolBypass([stripped]).categories.find(
+        (c) => c.category === 'grep'
+      )?.observedCommandHeads
+    ).toBeNull()
+  })
+
+  it('carries the newest valid contributing timestamp as point-in-time evidence', () => {
+    const data = [
+      session('s', [
+        call({
+          timestamp: '2026-05-01T10:00:00Z',
+          toolName: 'Bash',
+          input: { command: 'grep foo src' },
+        }),
+        call({
+          timestamp: 'not-a-date',
+          toolName: 'Bash',
+          input: { command: 'cat README.md' },
+        }),
+        call({
+          timestamp: '2026-02-30T00:00:00Z',
+          toolName: 'Bash',
+          input: { command: 'grep impossible-date src' },
+        }),
+        call({
+          timestamp: '0',
+          toolName: 'Bash',
+          input: { command: 'cat locale-like-date.txt' },
+        }),
+        call({
+          timestamp: '2026-05-03T12:30:00-04:00',
+          toolName: 'Bash',
+          input: { command: 'find . -name "*.ts"' },
+        }),
+        call({
+          timestamp: '2026-06-01T00:00:00Z',
+          toolName: 'Bash',
+          input: { command: 'echo not-a-bypass' },
+        }),
+      ]),
+    ]
+
+    const out = nativeToolBypass(data)
+    expect(out.latestTimestamp).toBe(
+      '2026-05-03T16:30:00.000Z'
+    )
+    expect(out.datedBypassMatches).toBe(2)
+    expect(out.undatedBypassMatches).toBe(3)
+    expect(
+      nativeToolBypass([session('s', [bash('grep foo src')])]).latestTimestamp
+    ).toBeNull()
   })
 
   it('does NOT count a chained `cd <dir> && <cmd>` anchor as a cd bypass (#2014)', () => {

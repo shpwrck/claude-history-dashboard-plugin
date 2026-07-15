@@ -10,9 +10,9 @@
  * Why a CLAUDE.md prose block (not a shell snippet): the corrective for a
  * native-bypass is behavioural guidance, not a command to run, so a prose block
  * is the genuinely useful artifact and — unlike a generated shell wrapper
- * (#1803) — carries no heredoc-delimiter / injection hazard. The detector's
- * existing `fix` already offers the complementary settings.json deny-rule
- * snippet; this adds the softer, copy-into-CLAUDE.md steer.
+ * (#1803) — carries no heredoc-delimiter / injection hazard. Both the Tools
+ * surface and detector reuse this generator so neither invents blanket shell
+ * permission rules for a behavioural preference.
  *
  * Pure string transformation — no fs, no network, no `@api-client` — so it is
  * safe in both the server and SPA (upload) builds.
@@ -24,6 +24,11 @@ export interface NativeBypassCorrectiveRow {
   category: string;
   /** The native tool (or guidance) to prefer instead, e.g. `Grep`, `Read/Edit`. */
   nativeTool: string;
+  /**
+   * Proven leading command aliases that produced this category. Omitted/null
+   * keeps legacy category-level callers conservative.
+   */
+  observedCommands?: readonly string[] | null;
 }
 
 /** Map a bypassed category to a single corrective bullet line. */
@@ -31,9 +36,16 @@ function correctiveLine(row: NativeBypassCorrectiveRow): string {
   // `cd` is special: there is no native tool — the cure is using absolute paths
   // because the Bash cwd resets between calls. Phrase it as guidance, not a swap.
   if (row.category === 'cd') {
-    return `- Don't lead a Bash command with \`cd\` — the working directory resets between calls; use ${row.nativeTool} instead.`;
+    return `- Avoid a standalone Bash \`cd\` command — its working-directory change ends with the call; use ${row.nativeTool}, or chain \`cd <dir> && <cmd>\` to anchor a same-call command.`;
   }
-  return `- Use the native ${row.nativeTool} tool instead of Bash \`${row.category}\`.`;
+  const observed =
+    row.observedCommands && row.observedCommands.length > 0
+      ? row.observedCommands
+      : [row.category];
+  const bashExamples = observed
+    .map((command) => `Bash \`${command}\``)
+    .join(' or ');
+  return `- Use the native ${row.nativeTool} tool instead of ${bashExamples}.`;
 }
 
 /**
@@ -59,10 +71,10 @@ export function nativeBypassGuidanceSnippet(
     return true;
   });
   return [
-    '## Prefer native tools over shell equivalents',
+    '## Prefer native tools and path-safe shell usage',
     '',
-    'Native tools are faster, cost fewer context tokens, and run through',
-    'permission integration. Reach for them first:',
+    'For avoidable shell patterns, choose native tools or path-safe alternatives before Bash.',
+    'Keep file work structured and permission-aware. Apply these examples; category names are generic when an observed alias is unavailable:',
     '',
     ...source.map(correctiveLine),
   ].join('\n');

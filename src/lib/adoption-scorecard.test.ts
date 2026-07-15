@@ -4,6 +4,7 @@ import {
   liveClaudeMdHunk,
 } from './adoption-scorecard';
 import { findingMarkerCatalog } from './detectors';
+import { nativeBypassGuidanceSnippet } from './native-bypass-snippet';
 import type {
   AdoptionReceipt,
   SurfacedReceipt,
@@ -187,6 +188,28 @@ describe('buildAdoptionScorecard', () => {
     expect(sc.rows[0].liveHunk).toContain('Avoid launching many parallel agent runs');
     // Still excluded from the coached M count — that requires a suppression.
     expect(sc.header.adoptedCount).toBe(0);
+  });
+
+  it('recognizes the universal native-bypass policy without inventing examples', () => {
+    const guidance = nativeBypassGuidanceSnippet([
+      { category: 'grep', nativeTool: 'Grep' },
+    ]);
+    expect(guidance).not.toContain('Bash `find`');
+    expect(guidance).not.toContain('Bash `cat`');
+
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-05-28T00:00:00.000Z', [
+          'workflow.native-bypass',
+        ]),
+      ],
+      config(guidance),
+      findingMarkerCatalog()
+    );
+    expect(sc.rows[0].status).toBe('ADOPTED');
+    expect(sc.rows[0].liveHunk).toContain(
+      'choose native tools or path-safe alternatives before Bash'
+    );
   });
 
   it('SURFACED finding whose markers are only partially present stays SURFACED (strict-AND)', () => {

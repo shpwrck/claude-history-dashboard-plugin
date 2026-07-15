@@ -1285,7 +1285,15 @@ export const PARSER_SIG_VERSION = 'v4';
 // environment observation plus findings from both global and local settings,
 // each with per-file provenance. Persisted v14 blobs lack those fields and
 // must not be served during stale-while-revalidate startup.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 15;
+// v16 (#2560): parseToolUsage adds sparse `commandHeadIsPermissionPrefix` truth
+// to toolData before raw Bash commands are stripped. SESSION_BLOB_OUTPUT v11
+// reparses tool_json, while this paired turnover rejects persisted v15 dataset
+// bodies assembled from v10 rows that would keep permission adoption unmappable.
+// v17 (#2560): parseToolUsage adds bounded `commandBypassAliases` evidence per
+// category before raw Bash commands are stripped. SESSION_BLOB_OUTPUT v12
+// reparses tool_json, while this paired turnover rejects persisted v16 dataset
+// bodies whose wrapped/chained bypasses lost the real executable alias.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 17;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

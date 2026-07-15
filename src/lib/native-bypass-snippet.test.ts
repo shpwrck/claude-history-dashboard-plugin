@@ -10,7 +10,10 @@ describe('nativeBypassGuidanceSnippet', () => {
       { category: 'grep', nativeTool: 'Grep' },
       { category: 'cat', nativeTool: 'Read' },
     ]);
-    expect(snippet).toContain('## Prefer native tools over shell equivalents');
+    expect(snippet).toContain('## Prefer native tools and path-safe shell usage');
+    expect(snippet).toContain(
+      'choose native tools or path-safe alternatives before Bash'
+    );
     expect(snippet).toContain('Use the native Grep tool instead of Bash `grep`.');
     expect(snippet).toContain('Use the native Read tool instead of Bash `cat`.');
     // Bullets are markdown list items.
@@ -21,10 +24,33 @@ describe('nativeBypassGuidanceSnippet', () => {
     const snippet = nativeBypassGuidanceSnippet([
       { category: 'cd', nativeTool: 'absolute paths' },
     ]);
-    expect(snippet).toContain("Don't lead a Bash command with `cd`");
-    expect(snippet).toContain('use absolute paths instead');
+    expect(snippet).toContain('Avoid a standalone Bash `cd` command');
+    expect(snippet).toContain('use absolute paths');
+    expect(snippet).toContain('`cd <dir> && <cmd>`');
     // It must NOT phrase `cd` as "use the native … tool".
     expect(snippet).not.toContain('native absolute paths tool');
+  });
+
+  it('uses proven command aliases when a category collapsed them', () => {
+    const snippet = nativeBypassGuidanceSnippet([
+      {
+        category: 'grep',
+        nativeTool: 'Grep',
+        observedCommands: ['grep', 'rg'],
+      },
+    ]);
+    expect(snippet).toContain('Bash `grep` or Bash `rg`');
+  });
+
+  it('labels an alias-free fallback as generic rather than observed', () => {
+    const snippet = nativeBypassGuidanceSnippet([
+      { category: 'grep', nativeTool: 'Grep', observedCommands: [] },
+    ]);
+    expect(snippet).toContain(
+      'category names are generic when an observed alias is unavailable'
+    );
+    expect(snippet).toContain('Bash `grep`');
+    expect(snippet).not.toContain('Apply these observed examples');
   });
 
   it('de-dupes repeated categories, preserving order', () => {
@@ -64,7 +90,8 @@ describe('nativeBypassRowSnippet', () => {
       category: 'cd',
       nativeTool: 'absolute paths',
     });
-    expect(line).toContain("Don't lead a Bash command with `cd`");
+    expect(line).toContain('Avoid a standalone Bash `cd` command');
+    expect(line).toContain('`cd <dir> && <cmd>`');
     expect(line.startsWith('- ')).toBe(false);
   });
 });

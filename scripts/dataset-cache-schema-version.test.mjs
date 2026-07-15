@@ -35,8 +35,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      15,
-      'settings-health provenance on top of workflow-agent errors must turn over persisted v14 datasets'
+      17,
+      'native-bypass alias truth must turn over persisted v16 datasets assembled from pre-v12 session blobs'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -51,8 +51,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     );
     assert.notEqual(
       key,
-      `dataset-schema:v14:parser-${ingest.PARSER_SIG_VERSION}`,
-      'the pre-settings-provenance dataset cache key must not remain current'
+      `dataset-schema:v16:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-alias-evidence dataset cache key must not remain current'
     );
     assert.match(
       ingest.sourceSignature(),

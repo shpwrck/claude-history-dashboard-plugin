@@ -74,6 +74,16 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       EvidenceRef coordinates (never the value). Without this bump the cached
 //       blobs keep the old 15-column parse and the secrets-at-rest column stays
 //       NULL, so the detector ships inert on deploy.
+//   'native-bypass-permission-prefix-v11' (#2560): parseToolUsage now persists
+//       sparse `commandHeadIsPermissionPrefix` truth on Bash calls before bulk
+//       ingest strips the raw command. Reparse tool_json so cached v10 blobs do
+//       not leave matching permission rules unmappable. Dataset schema v16 turns
+//       over bodies already assembled from those v10 rows.
+//   'native-bypass-aliases-v12' (#2560): parseToolUsage now persists bounded
+//       `commandBypassAliases` per category before bulk ingest strips raw Bash
+//       text. Reparse tool_json so wrapper/chained aliases (for example `env … rg`
+//       or `true && rg`) remain evidence instead of collapsing to a generic name.
+//       Dataset schema v17 turns over bodies assembled from pre-v12 rows.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
