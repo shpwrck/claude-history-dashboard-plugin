@@ -6,6 +6,7 @@ import {
   dangerousFragment,
   dangerousPatternCertainty,
   executableShellSkeleton,
+  matchingDangerousPermissionRules,
 } from './parse-permissions';
 // The tool-call shapes live in a dependency-free leaf (#1582) so `parse-permissions`
 // can import `ToolUsageData` WITHOUT a (type-only) cycle back through this module,
@@ -630,6 +631,10 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
     ...(dangerous
       ? {
           commandDangerousPattern: dangerous.name,
+          commandDangerousRuleMatches: matchingDangerousPermissionRules(
+            dangerous.name,
+            command
+          ),
           // Precompute certainty + fragment from the FULL command now, before the
           // raw body is stripped from the bulk payload (#2036). rm -rf certainty
           // is target-aware; others are static. Without this, downstream sees only

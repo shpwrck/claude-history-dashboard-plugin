@@ -27,6 +27,32 @@ function bashSession(
   return { sessionId, calls };
 }
 
+function strippedDangerousSession(
+  matchingRules: unknown,
+  fragment = 'rm -rfv ~'
+): ToolUsageData {
+  return {
+    sessionId: 'session-1',
+    calls: [
+      {
+        timestamp: DEFAULT_TS,
+        toolName: 'Bash',
+        input: {},
+        toolUseId: 'session-1-tool-0',
+        isError: null,
+        resultBytes: 0,
+        commandPreview: 'rm -rf ~',
+        commandDangerousPattern: 'rm -rf',
+        commandDangerousCertainty: 'high',
+        commandDangerousFragment: fragment,
+        ...(matchingRules !== undefined
+          ? { commandDangerousRuleMatches: matchingRules }
+          : {}),
+      } as ToolCall,
+    ],
+  };
+}
+
 function tokenSession(sessionId: string, entrypoint: string): SessionTokenData {
   return {
     sessionId,
@@ -158,6 +184,204 @@ describe('safety.dangerous-bypass observed-pattern coverage', () => {
     );
     expect(rec).toBeNull();
   });
+
+  it('suppresses a stripped exact invocation only from persisted prefix truth', () => {
+    const rec = detector.rule(
+      bypassInput(
+        [strippedDangerousSession(['Bash(rm -rf:*)'], 'rm -rf ~')],
+        { deny: ['Bash(rm -rf:*)'] }
+      ),
+      NOW
+    );
+    expect(rec).toBeNull();
+  });
+
+  it.each([
+    ['no persisted field', undefined],
+    ['unknown persisted rule', ['Bash(unknown:*)']],
+    [
+      'impossible persisted aliases',
+      ['Bash(rm -rf:*)', 'Bash(rm -fr:*)'],
+    ],
+    [
+      'duplicate persisted aliases',
+      ['Bash(rm -rf:*)', 'Bash(rm -rf:*)'],
+    ],
+    ['malformed persisted value', 'Bash(rm -rf:*)'],
+  ])(
+    'keeps stripped evidence visible without claiming a non-match when prefix truth has %s',
+    (_label, matchingRules) => {
+      const rec = detector.rule(
+        bypassInput([strippedDangerousSession(matchingRules)], {
+          deny: ['Bash(rm -rf:*)'],
+        }),
+        NOW
+      )!;
+
+      expect(rec.id).toBe('safety.dangerous-bypass');
+      expect(rec.fix).toBeUndefined();
+      expect(rec.detail).toContain(
+        'Permission-prefix truth was unavailable for: rm -rf'
+      );
+      expect(rec.detail).not.toContain(
+        'No canonical mapped prefix rule matched the observed Bash invocation'
+      );
+      expect(rec.provenance?.observations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            field:
+              'toolData[].calls[].input.command or commandDangerousRuleMatches',
+            value: 'rm -rf',
+          }),
+        ])
+      );
+    }
+  );
+
+  it('keeps a proven stripped non-match distinct from unavailable prefix truth', () => {
+    const rec = detector.rule(
+      bypassInput([strippedDangerousSession([])], {
+        deny: ['Bash(rm -rf:*)'],
+      }),
+      NOW
+    )!;
+
+    expect(rec.id).toBe('safety.dangerous-bypass');
+    expect(rec.fix).toBeUndefined();
+    expect(rec.detail).toContain(
+      'No canonical mapped prefix rule matched the observed Bash invocation for: rm -rf'
+    );
+    expect(rec.detail).not.toContain('Permission-prefix truth was unavailable');
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field:
+            'toolData[].calls[].input.command or commandDangerousRuleMatches / DANGEROUS_PATTERN_RULES',
+          value: 'rm -rf',
+        }),
+      ])
+    );
+  });
+
+  it('does not suppress when known rules are covered but another record has unknown prefix truth', () => {
+    const rec = detector.rule(
+      bypassInput(
+        [
+          bashSession('session-known', ['rm -rf ~']),
+          strippedDangerousSession(undefined),
+        ],
+        { deny: ['Bash(rm -rf:*)'] }
+      ),
+      NOW
+    )!;
+
+    expect(rec.id).toBe('safety.dangerous-bypass');
+    expect(rec.fix).toBeUndefined();
+    expect(rec.detail).toContain('Permission-prefix truth was unavailable for: rm -rf');
+    expect(rec.detail).toContain('cover 1 of 1 relevant mapped deny rule(s)');
+  });
+
+  it('suppresses unknown stripped prefix truth when a whole-tool Bash deny proves coverage', () => {
+    expect(
+      detector.rule(
+        bypassInput([strippedDangerousSession(undefined)], {
+          deny: ['Bash'],
+        }),
+        NOW
+      )
+    ).toBeNull();
+  });
+
+  it.each([
+    { ask: ['Bash'] },
+    { allow: ['Bash'] },
+  ])(
+    'does not treat non-deny whole-tool settings as bypass coverage: %j',
+    (permissions) => {
+      const rec = detector.rule(
+        bypassInput([strippedDangerousSession(undefined)], permissions),
+        NOW
+      )!;
+
+      expect(rec.id).toBe('safety.dangerous-bypass');
+      expect(rec.detail).toContain(
+        'Permission-prefix truth was unavailable for: rm -rf'
+      );
+    }
+  );
+
+  it('limits a mixed fix to known matches and calls out unknown persisted truth', () => {
+    const rec = detector.rule(
+      bypassInput([
+        bashSession('session-known', ['git reset --hard HEAD']),
+        strippedDangerousSession(undefined),
+      ]),
+      NOW
+    )!;
+
+    expect(fixRules(rec, 'deny')).toEqual(['Bash(git reset --hard:*)']);
+    expect(rec.fix?.note).toContain(
+      'Permission-prefix truth is unavailable for rm -rf'
+    );
+    expect(rec.fix?.snippet).not.toContain('Bash(rm -rf:*)');
+  });
+
+  it.each(['rm -rfv ~', 'rm -Rfv ~', 'cd /tmp && rm -rf ~'])(
+    'does not suppress an uncovered raw invocation behind canonical settings: %s',
+    (command) => {
+      const rec = detector.rule(
+        bypassInput([bashSession('session-1', [command])], {
+          deny: ['Bash(rm -rf:*)', 'Bash(rm -fr:*)'],
+        }),
+        NOW
+      )!;
+
+      expect(rec.id).toBe('safety.dangerous-bypass');
+      expect(rec.fix).toBeUndefined();
+      expect(rec.detail).toContain(
+        'No canonical mapped prefix rule matched the observed Bash invocation for: rm -rf'
+      );
+      expect(rec.provenance?.observations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            field:
+              'toolData[].calls[].input.command or commandDangerousRuleMatches / DANGEROUS_PATTERN_RULES',
+            value: 'rm -rf',
+          }),
+        ])
+      );
+    }
+  );
+
+  it.each(['rm -rfv ~', 'rm -Rfv ~', 'cd /tmp && rm -rf ~'])(
+    'suppresses a non-prefixable bypass invocation behind a whole-tool Bash deny: %s',
+    (command) => {
+      expect(
+        detector.rule(
+          bypassInput([bashSession('session-1', [command])], {
+            deny: ['Bash'],
+          }),
+          NOW
+        )
+      ).toBeNull();
+    }
+  );
+
+  it.each([{ ask: ['Bash'] }, { allow: ['Bash'] }])(
+    'does not treat non-deny whole-tool settings as bypass coverage for a proven non-match: %j',
+    (permissions) => {
+      const rec = detector.rule(
+        bypassInput(
+          [bashSession('session-1', ['cd /tmp && rm -rf ~'])],
+          permissions
+        ),
+        NOW
+      )!;
+
+      expect(rec.id).toBe('safety.dangerous-bypass');
+      expect(rec.fix).toBeUndefined();
+    }
+  );
 
   it('emits only the uncovered observed alias and notes the covered observed alias', () => {
     const rec = detector.rule(
@@ -307,6 +531,69 @@ describe('safety.dangerous-commands warning coverage', () => {
     }
   });
 
+  it.each([
+    { ask: ['Bash'] },
+    { deny: ['Bash'] },
+  ])(
+    'treats whole-tool %j as coverage for unknown stripped warning truth',
+    (permissions) => {
+      expect(
+        detector.rule(
+          input({
+            toolData: [strippedDangerousSession(undefined)],
+            liveConfig: liveConfig(permissions),
+          }),
+          NOW
+        )
+      ).toBeNull();
+    }
+  );
+
+  it('does not treat whole-tool allow as warning coverage for unknown truth', () => {
+    const rec = detector.rule(
+      input({
+        toolData: [strippedDangerousSession(undefined)],
+        liveConfig: liveConfig({ allow: ['Bash'] }),
+      }),
+      NOW
+    )!;
+
+    expect(rec.id).toBe('safety.dangerous-commands');
+    expect(rec.detail).toContain(
+      'Permission-prefix truth was unavailable for: rm -rf'
+    );
+  });
+
+  it.each([{ ask: ['Bash'] }, { deny: ['Bash'] }])(
+    'treats whole-tool %j as warning coverage for a proven non-match',
+    (permissions) => {
+      expect(
+        detector.rule(
+          input({
+            toolData: [
+              bashSession('session-1', ['cd /tmp && rm -rf ~']),
+            ],
+            liveConfig: liveConfig(permissions),
+          }),
+          NOW
+        )
+      ).toBeNull();
+    }
+  );
+
+  it('does not treat whole-tool allow as warning coverage for a proven non-match', () => {
+    const rec = detector.rule(
+      input({
+        toolData: [bashSession('session-1', ['cd /tmp && rm -rf ~'])],
+        liveConfig: liveConfig({ allow: ['Bash'] }),
+      }),
+      NOW
+    )!;
+
+    expect(rec.id).toBe('safety.dangerous-commands');
+    expect(rec.fix).toBeUndefined();
+  });
+
   it('emits only the missing ask rule when warning coverage is partial', () => {
     const rec = detector.rule(
       input({
@@ -426,6 +713,35 @@ describe('safety.dangerous-bypass broad and unmappable patterns', () => {
       ])
     );
   });
+
+  it.each([
+    ['bypass deny', bypassInput, { deny: ['Bash'] }],
+    [
+      'warning ask',
+      (toolData: ToolUsageData[], permissions: Parameters<typeof liveConfig>[0]) =>
+        input({ toolData, liveConfig: liveConfig(permissions) }),
+      { ask: ['Bash'] },
+    ],
+    [
+      'warning deny',
+      (toolData: ToolUsageData[], permissions: Parameters<typeof liveConfig>[0]) =>
+        input({ toolData, liveConfig: liveConfig(permissions) }),
+      { deny: ['Bash'] },
+    ],
+  ] as const)(
+    'treats a whole-tool Bash rule as coverage for an unmappable invocation in %s mode',
+    (_label, makeInput, permissions) => {
+      expect(
+        detector.rule(
+          makeInput(
+            [bashSession('session-1', [':(){ :|:& };:'])],
+            permissions
+          ),
+          NOW
+        )
+      ).toBeNull();
+    }
+  );
 
   it('keeps warning-branch curl protection broad and manual', () => {
     const rec = detector.rule(
@@ -603,6 +919,15 @@ describe('safety.dangerous-bypass settings authority and provenance', () => {
       asOf: '2026-07-13',
       stale: false,
     });
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field:
+            'toolData[].calls[].input.command or commandDangerousRuleMatches',
+          value: '2/2',
+        }),
+      ])
+    );
     expect(validateRecommendationProvenance(rec)).toEqual([]);
     expect(validateFixSnippet(rec.fix!)).toEqual([]);
   });

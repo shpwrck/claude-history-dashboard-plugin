@@ -1,14 +1,13 @@
 import type { DangerousCommand, ToolPromptFriction } from './parse-permissions';
-import { DANGEROUS_PATTERN_RULES } from './parse-permissions';
 import { BASH_SAFE_ALLOW_RULES } from './recommendations';
 
 /**
  * Policy Builder (#133) — turns the scattered permission recommendations into
  * an interactive panel. Two deterministic seed sources:
  *
- *  - **Dangerous commands** (`detectDangerousCommands`) → one row per canonical
- *    deny rule the matched pattern maps to (`DANGEROUS_PATTERN_RULES`), defaulting
- *    to `deny`.
+ *  - **Dangerous commands** (`detectDangerousCommands`) -> one row per canonical
+ *    deny rule proven to match the observed full invocation, defaulting to
+ *    `deny`. Legacy or unprovable records remain evidence-only.
  *  - **Prompt friction** (`rankPromptProneTools`) → one row per safe Bash variant
  *    (`BASH_SAFE_ALLOW_RULES`), plus the dominant non-Bash tool if any, defaulting
  *    to `allow`.
@@ -74,9 +73,9 @@ export function buildPolicyCandidates(
   // --- Dangerous rows: aggregate occurrences per canonical rule. ---
   const ruleAgg = new Map<string, { count: number; sessions: Set<string>; patterns: Set<string> }>();
   for (const d of dangerous) {
-    const rules = DANGEROUS_PATTERN_RULES[d.pattern];
-    if (!rules) continue; // pattern with no prefix-matchable rule (e.g. fork bomb)
+    const rules = Array.isArray(d.matchingRules) ? d.matchingRules : [];
     for (const rule of rules) {
+      if (typeof rule !== 'string') continue;
       let agg = ruleAgg.get(rule);
       if (!agg) {
         agg = { count: 0, sessions: new Set(), patterns: new Set() };

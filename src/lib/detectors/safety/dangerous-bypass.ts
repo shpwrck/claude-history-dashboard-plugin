@@ -8,7 +8,6 @@ import type {
 import {
   allowShadowedByDeny,
   bumpSeverity,
-  permRuleMatchesCall,
   short,
   STALE_WEEKS,
 } from '../shared';
@@ -31,6 +30,8 @@ type ProtectionMode = 'bypass' | 'warning';
 interface ProtectionContext {
   rules: string[];
   unmappablePatterns: string[];
+  unknownObservedPatterns: string[];
+  coveredByWholeTool: boolean;
   unmatchedObservedPatterns: string[];
   settingsAvailable: boolean;
   settingsUnavailableReason?: 'absent' | 'unhealthy';
@@ -108,9 +109,8 @@ function configuredRulesCover(
 }
 
 function observedMappedRules(
-  command: DangerousCommand,
-  toolData: Parameters<typeof detectDangerousCommands>[0]
-): { mapped: boolean; rules: string[] } {
+  command: DangerousCommand
+): { mapped: boolean; rules: string[] | null } {
   const mapped = Object.hasOwn(DANGEROUS_PATTERN_RULES, command.pattern)
     ? DANGEROUS_PATTERN_RULES[command.pattern]
     : undefined;
@@ -118,22 +118,13 @@ function observedMappedRules(
     return { mapped: false, rules: [] };
   }
 
-  const calls =
-    toolData
-      .find((session) => session.sessionId === command.sessionId)
-      ?.calls.filter((candidate) => candidate.toolUseId === command.toolUseId) ?? [];
-  if (calls.length === 0) return { mapped: true, rules: [] };
-
   return {
     mapped: true,
-    // A pattern family may have several canonical aliases (`rm -rf`/`rm -fr`,
-    // `curl`/`wget`, `--force`/`-f`). Only propose the member that actually
-    // matches the observed Bash invocation. This also refuses to claim that an
-    // inner command in a wrapper/compound invocation is protected by a prefix
-    // rule that would not match the recorded Bash call.
-    rules: mapped.filter(
-      (rule) => calls.some((call) => permRuleMatchesCall(rule, call) === true)
-    ),
+    // Parser-owned truth is derived from the full raw invocation before bulk
+    // ingest strips it. `null` is legacy/invalid unknown truth; an empty array
+    // is a positive non-match. Neither can fabricate coverage from a preview,
+    // but downstream copy must preserve the distinction for auditability.
+    rules: command.matchingRules,
   };
 }
 
@@ -156,16 +147,20 @@ function patternSummary(commands: DangerousCommand[]): string {
 function protectionContext(
   commands: DangerousCommand[],
   mode: ProtectionMode,
-  liveConfig: LiveConfig | null | undefined,
-  toolData: Parameters<typeof detectDangerousCommands>[0]
+  liveConfig: LiveConfig | null | undefined
 ): ProtectionContext {
   const rules: string[] = [];
   const unmappablePatterns: string[] = [];
+  const unknownObservedPatterns: string[] = [];
   const unmatchedObservedPatterns: string[] = [];
   for (const command of commands) {
-    const observed = observedMappedRules(command, toolData);
+    const observed = observedMappedRules(command);
     if (!observed.mapped) {
       unmappablePatterns.push(command.pattern);
+      continue;
+    }
+    if (observed.rules === null) {
+      unknownObservedPatterns.push(command.pattern);
       continue;
     }
     if (observed.rules.length === 0) {
@@ -184,6 +179,10 @@ function protectionContext(
         : undefined;
   const settingsAvailable = settingsUnavailableReason === undefined;
   const settings = liveConfig?.settings;
+  const coveredByWholeTool =
+    settingsAvailable &&
+    (configuredRulesCover(settings, 'deny', 'Bash') ||
+      (mode === 'warning' && configuredRulesCover(settings, 'ask', 'Bash')));
   const coveredRules = settingsAvailable
     ? dedupedRules.filter(
         (rule) =>
@@ -200,12 +199,36 @@ function protectionContext(
   return {
     rules: dedupedRules,
     unmappablePatterns: unique(unmappablePatterns),
+    unknownObservedPatterns: unique(unknownObservedPatterns),
+    coveredByWholeTool,
     unmatchedObservedPatterns: unique(unmatchedObservedPatterns),
     settingsAvailable,
     ...(settingsUnavailableReason ? { settingsUnavailableReason } : {}),
     coveredRules,
     missingRules,
   };
+}
+
+function protectionFullyCovered(protection: ProtectionContext): boolean {
+  return (
+    protection.settingsAvailable &&
+    protection.missingRules.length === 0 &&
+    (protection.coveredByWholeTool ||
+      (protection.unmappablePatterns.length === 0 &&
+        protection.unknownObservedPatterns.length === 0 &&
+        protection.unmatchedObservedPatterns.length === 0))
+  );
+}
+
+function hasUncoveredNonPrefixableEvidence(
+  protection: ProtectionContext
+): boolean {
+  return (
+    !protection.coveredByWholeTool &&
+    (protection.unmappablePatterns.length > 0 ||
+      protection.unknownObservedPatterns.length > 0 ||
+      protection.unmatchedObservedPatterns.length > 0)
+  );
 }
 
 function temporalContext(
@@ -256,18 +279,27 @@ function coverageDetail(
   }
 
   const coverageKind = mode === 'bypass' ? 'deny' : 'ask-or-deny';
-  const mapped = protection.rules.length
-    ? `Current merged settings cover ${protection.coveredRules.length} of ${protection.rules.length} relevant mapped ${coverageKind} rule(s); ${protection.missingRules.length} remain missing.`
-    : protection.unmatchedObservedPatterns.length
-      ? 'No contributing observed Bash invocation has a safely applicable canonical prefix rule.'
-      : 'No contributing pattern has a safe Bash prefix-rule mapping.';
+  const mapped = protection.coveredByWholeTool
+    ? `Current merged settings include a whole-tool Bash ${coverageKind} rule, which covers every contributing Bash invocation.`
+    : protection.rules.length
+      ? `Current merged settings cover ${protection.coveredRules.length} of ${protection.rules.length} relevant mapped ${coverageKind} rule(s); ${protection.missingRules.length} remain missing.`
+      : protection.unknownObservedPatterns.length
+        ? 'Current settings coverage could not be fully evaluated because contributing invocations lack usable permission-prefix truth.'
+        : protection.unmatchedObservedPatterns.length
+          ? 'No contributing observed Bash invocation has a safely applicable canonical prefix rule.'
+          : 'No contributing pattern has a safe Bash prefix-rule mapping.';
   const unmappable = protection.unmappablePatterns.length
     ? ` No safe prefix rule is known for: ${protection.unmappablePatterns.join(', ')}.`
+    : '';
+  const unknown = protection.unknownObservedPatterns.length
+    ? protection.coveredByWholeTool
+      ? ` Permission-prefix truth was unavailable for: ${protection.unknownObservedPatterns.join(', ')}, but a current whole-tool Bash ${coverageKind} rule covers every Bash invocation.`
+      : ` Permission-prefix truth was unavailable for: ${protection.unknownObservedPatterns.join(', ')}; legacy or malformed persisted data was not treated as a proven non-match.`
     : '';
   const unmatched = protection.unmatchedObservedPatterns.length
     ? ` No canonical mapped prefix rule matched the observed Bash invocation for: ${protection.unmatchedObservedPatterns.join(', ')}.`
     : '';
-  return `${mapped}${unmappable}${unmatched}`;
+  return `${mapped}${unmappable}${unknown}${unmatched}`;
 }
 
 function settingsFix(
@@ -303,6 +335,11 @@ function settingsFix(
   const unmappableNote = protection.unmappablePatterns.length
     ? ` No safe prefix rule exists for ${protection.unmappablePatterns.join(', ')}; this snippet does not claim to protect those observations.`
     : '';
+  const unknownNote =
+    protection.unknownObservedPatterns.length &&
+    !protection.coveredByWholeTool
+    ? ` Permission-prefix truth is unavailable for ${protection.unknownObservedPatterns.join(', ')}; this snippet does not claim to protect those observations.`
+    : '';
   const unmatchedNote = protection.unmatchedObservedPatterns.length
     ? ` No canonical mapped prefix rule matches the observed Bash invocation for ${protection.unmatchedObservedPatterns.join(', ')}; this snippet does not claim to protect those observations.`
     : '';
@@ -318,6 +355,7 @@ function settingsFix(
       coveredNote +
       broadNote +
       unmappableNote +
+      unknownNote +
       unmatchedNote,
     snippet: JSON.stringify(
       { permissions: { [bucket]: protection.missingRules } },
@@ -353,6 +391,13 @@ function provenance(
           ? 'computeSafetyScores(...).bypassMode / DangerousCommand.sessionId'
           : 'high-certainty records not handled by the bypass branch',
       value: commands.length,
+    },
+    {
+      claim: `${commands.filter((command) => command.matchingRules !== null).length} of ${commands.length} contributing record(s) had usable dangerous permission-prefix truth`,
+      source: 'parse-permissions.detectDangerousCommands(toolData)',
+      field:
+        'toolData[].calls[].input.command or commandDangerousRuleMatches',
+      value: `${commands.filter((command) => command.matchingRules !== null).length}/${commands.length}`,
     },
     {
       claim: `${temporal.plausibleTimestampCount} of ${commands.length} contributing call timestamp(s) passed the detector's RFC3339/calendar/future-skew check`,
@@ -406,11 +451,32 @@ function provenance(
       value: protection.unmappablePatterns.join(', '),
     });
   }
+  if (protection.unknownObservedPatterns.length) {
+    observations.push({
+      claim: `Dangerous permission-prefix truth was unavailable for pattern values: ${protection.unknownObservedPatterns.join(', ')}`,
+      source: 'parse-permissions.detectDangerousCommands(toolData)',
+      field:
+        'toolData[].calls[].input.command or commandDangerousRuleMatches',
+      value: protection.unknownObservedPatterns.join(', '),
+    });
+    if (protection.coveredByWholeTool) {
+      observations.push({
+        claim: `A current whole-tool Bash ${mode === 'bypass' ? 'deny' : 'ask-or-deny'} rule covers records whose exact permission-prefix truth is unavailable`,
+        source: 'merged ~/.claude/settings*.json via liveConfig',
+        field:
+          mode === 'bypass'
+            ? 'settings.permissions.deny'
+            : 'settings.permissions.ask / settings.permissions.deny',
+        value: 'Bash',
+      });
+    }
+  }
   if (protection.unmatchedObservedPatterns.length) {
     observations.push({
       claim: `Canonical mappings exist but none matched the observed Bash invocation for pattern values: ${protection.unmatchedObservedPatterns.join(', ')}`,
       source: 'parse-permissions / live toolData',
-      field: 'DANGEROUS_PATTERN_RULES / permRuleMatchesCall',
+      field:
+        'toolData[].calls[].input.command or commandDangerousRuleMatches / DANGEROUS_PATTERN_RULES',
       value: protection.unmatchedObservedPatterns.join(', '),
     });
   }
@@ -426,7 +492,7 @@ function provenance(
   return {
     observations,
     inference:
-      'The classifier treats commandDangerousCertainty=high calls as dangerous evidence. Candidate protections are limited to canonical pattern rules that match the observed Bash invocation under the repository permission matcher. Coverage uses permission-rule containment, so a broader configured prefix or bare Bash rule covers a narrower requirement: deny is required for bypassed commands, while ask or stronger deny covers the warning branch. A missing mapping or a mapped family that does not match the observed invocation is not evidence that a safe prefix rule exists, so those patterns remain visible without a fabricated settings rule.',
+      'The classifier treats commandDangerousCertainty=high calls as dangerous evidence. Candidate protections are limited to canonical pattern rules that match the observed Bash invocation under the repository permission matcher. Coverage uses permission-rule containment, so a broader configured prefix or bare Bash rule covers a narrower requirement: deny is required for bypassed commands, while ask or stronger deny covers the warning branch. An unavailable persisted match set is unknown, while an empty validated set is a proven non-match; neither is used to fabricate a settings rule. A current whole-tool Bash rule can still prove coverage for unknown, non-prefixable, or unmappable observations because it covers every Bash invocation. A missing pattern mapping otherwise remains visible without a fabricated settings rule.',
     ...(temporal.asOf
       ? { asOf: temporal.asOf, stale: temporal.stale }
       : {}),
@@ -476,14 +542,9 @@ export const detector: Detector = {
       const protection = protectionContext(
         contributing,
         'bypass',
-        input.liveConfig,
-        input.toolData
+        input.liveConfig
       );
-      const bypassCovered =
-        protection.settingsAvailable &&
-        protection.missingRules.length === 0 &&
-        protection.unmappablePatterns.length === 0 &&
-        protection.unmatchedObservedPatterns.length === 0;
+      const bypassCovered = protectionFullyCovered(protection);
       if (bypassCovered) {
         warningCommands = dangerous.filter(
           (command) => !riskySessions.has(command.sessionId)
@@ -517,9 +578,8 @@ export const detector: Detector = {
           action:
             staleAction +
             'Reserve bypassPermissions for trusted, reversible work; review the cited commands and verify current protections. ' +
-            (protection.unmappablePatterns.length
-              || protection.unmatchedObservedPatterns.length
-              ? 'Handle unmappable patterns with a reviewed hook or operational control rather than inventing a Bash prefix rule.'
+            (hasUncoveredNonPrefixableEvidence(protection)
+              ? 'Handle patterns without a proven applicable prefix rule with a reviewed hook or operational control rather than inventing one.'
               : 'Manually add only the missing observed-pattern deny rules, if any.'),
           affected: contributing.length,
           evidence: contributing.slice(0, 5).map(dangerousEvidence),
@@ -545,15 +605,9 @@ export const detector: Detector = {
     const protection = protectionContext(
       warningCommands,
       'warning',
-      input.liveConfig,
-      input.toolData
+      input.liveConfig
     );
-    if (
-      protection.settingsAvailable &&
-      protection.missingRules.length === 0 &&
-      protection.unmappablePatterns.length === 0 &&
-      protection.unmatchedObservedPatterns.length === 0
-    ) {
+    if (protectionFullyCovered(protection)) {
       return null;
     }
 
@@ -578,9 +632,8 @@ export const detector: Detector = {
       action:
         staleAction +
         'Spot-check these were intentional and verify current protections. ' +
-        (protection.unmappablePatterns.length
-          || protection.unmatchedObservedPatterns.length
-          ? 'Handle unmappable patterns with a reviewed hook or operational control rather than inventing a Bash prefix rule.'
+        (hasUncoveredNonPrefixableEvidence(protection)
+          ? 'Handle patterns without a proven applicable prefix rule with a reviewed hook or operational control rather than inventing one.'
           : 'Manually add only the missing observed-pattern ask rules, if any.'),
       affected: warningCommands.length,
       evidence: warningCommands.slice(0, 5).map(dangerousEvidence),

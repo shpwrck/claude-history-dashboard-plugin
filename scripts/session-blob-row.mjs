@@ -84,6 +84,10 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       text. Reparse tool_json so wrapper/chained aliases (for example `env … rg`
 //       or `true && rg`) remain evidence instead of collapsing to a generic name.
 //       Dataset schema v17 turns over bodies assembled from pre-v12 rows.
+//   'dangerous-prefix-rules-v13' (#2663): parseToolUsage now persists the exact
+//       canonical dangerous-command rules matched by each full raw Bash call.
+//       Reparse tool_json so stripped legacy previews cannot fabricate prefix
+//       coverage. Dataset schema v19 turns over bodies assembled without it.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));

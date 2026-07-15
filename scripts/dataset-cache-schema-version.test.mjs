@@ -35,8 +35,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      18,
-      'per-variation shadow receipts must turn over persisted v17 datasets after native-bypass alias evidence'
+      19,
+      'dangerous-prefix truth must turn over persisted v18 datasets after raw command stripping'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -51,8 +51,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     );
     assert.notEqual(
       key,
-      `dataset-schema:v17:parser-${ingest.PARSER_SIG_VERSION}`,
-      'the pre-variation-receipt dataset cache key must not remain current'
+      `dataset-schema:v18:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-dangerous-prefix-truth dataset cache key must not remain current'
     );
     assert.match(
       ingest.sourceSignature(),

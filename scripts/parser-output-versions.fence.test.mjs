@@ -105,11 +105,11 @@ test('session-blob version is the value the session_blob cache key actually bake
   assert.equal(typeof SESSION_BLOB_OUTPUT.version, 'string');
 });
 
-test('session-blob version turns over for persisted native-bypass alias truth (#2560)', () => {
+test('session-blob version turns over for persisted dangerous-prefix truth (#2663)', () => {
   assert.equal(
     SESSION_BLOB_OUTPUT.version,
-    'native-bypass-aliases-v12',
-    'tool_json now persists commandBypassAliases; the pre-field v11 cache key must not remain current'
+    'dangerous-prefix-rules-v13',
+    'tool_json now persists commandDangerousRuleMatches; the pre-field v12 cache key must not remain current'
   );
 });
 

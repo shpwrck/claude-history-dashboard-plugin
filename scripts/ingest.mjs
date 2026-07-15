@@ -1310,7 +1310,10 @@ export const PARSER_SIG_VERSION = 'v4';
 // while a persisted v17 dataset lacks `byVariation` and `variationSkipped`, so
 // turn over the assembled-dataset cache without changing transcript or ledger
 // schema versions.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 18;
+// v19 (#2663): toolData now carries parser-owned dangerous permission-prefix
+// matches derived before raw Bash bodies are stripped. Reject persisted v18
+// bodies whose previews could otherwise be mistaken for executable-prefix truth.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 19;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

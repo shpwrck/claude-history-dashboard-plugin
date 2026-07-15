@@ -8,6 +8,11 @@ export type { DangerousCommandCertainty } from './parse-tools-types';
 import { evidenceRefForEntry, type EvidenceRef } from './evidence';
 import type { SessionTimeline } from './parse-timeline';
 import { parseJsonl, type RawSessionEntry } from './parse-utils';
+import {
+  bashSpec,
+  parsePermRule,
+  permRuleMatchesCall,
+} from './permission-rules';
 
 export interface PermissionModeStat {
   mode: string;
@@ -22,6 +27,8 @@ export interface DangerousCommand {
   command: string; // truncated to 200 chars, newlines → " "
   pattern: string; // which pattern matched
   certainty: DangerousCommandCertainty;
+  /** Canonical rules matching the full invocation; null for legacy/invalid truth. */
+  matchingRules: string[] | null;
 }
 
 export type RiskyActionCategory =
@@ -232,6 +239,75 @@ export const DANGEROUS_PATTERN_RULES: Record<string, string[]> = {
   'curl pipe shell': ['Bash(curl:*)', 'Bash(wget:*)'],
   'npm publish': ['Bash(npm publish:*)'],
 };
+
+function canonicalRulesForPattern(pattern: string): string[] {
+  if (!Object.hasOwn(DANGEROUS_PATTERN_RULES, pattern)) return [];
+  const rules = DANGEROUS_PATTERN_RULES[pattern];
+  return Array.isArray(rules) ? rules : [];
+}
+
+/**
+ * Canonical dangerous-pattern rules that match the complete raw Bash call.
+ * This must run before bulk ingest strips `input.command`; display previews are
+ * deliberately not accepted as coverage evidence.
+ */
+export function matchingDangerousPermissionRules(
+  pattern: string,
+  command: string
+): string[] {
+  return canonicalRulesForPattern(pattern).filter(
+    (rule) =>
+      permRuleMatchesCall(rule, {
+        toolName: 'Bash',
+        input: { command },
+      }) === true
+  );
+}
+
+function validatedPersistedRuleMatches(
+  pattern: string,
+  value: unknown
+): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const canonical = canonicalRulesForPattern(pattern);
+  if (
+    value.some(
+      (candidate) =>
+        typeof candidate !== 'string' || !canonical.includes(candidate)
+    )
+  ) {
+    return null;
+  }
+  const typed = value as string[];
+  const persisted = new Set(typed);
+  if (persisted.size !== typed.length) return null;
+
+  // Persisted truth must describe one possible raw Bash invocation, not merely
+  // contain individually canonical members. Alias pairs such as rm -rf/-fr,
+  // git push --force/-f, and curl/wget cannot both match one direct-prefix
+  // call. Treat such impossible shapes as malformed unknown truth.
+  const witnessCommands = typed.flatMap((rule) => {
+    const { tool, specifier } = parsePermRule(rule);
+    if (tool !== 'Bash' || specifier === null) return [];
+    const { literal } = bashSpec(specifier);
+    return [literal, `${literal} __chd_permission_probe__`];
+  });
+  if (
+    typed.length > 0 &&
+    !witnessCommands.some((command) =>
+      typed.every(
+        (rule) =>
+          permRuleMatchesCall(rule, {
+            toolName: 'Bash',
+            input: { command },
+          }) === true
+      )
+    )
+  ) {
+    return null;
+  }
+  return canonical.filter((rule) => persisted.has(rule));
+}
 
 interface RiskyActionPattern {
   name: string;
@@ -787,6 +863,13 @@ export function detectDangerousCommands(
 
       if (precomputedPattern) {
         const text = commandText ?? preview ?? '';
+        const matchingRules =
+          commandText !== null
+            ? matchingDangerousPermissionRules(precomputedPattern, commandText)
+            : validatedPersistedRuleMatches(
+                precomputedPattern,
+                call.commandDangerousRuleMatches
+              );
         out.push({
           sessionId: session.sessionId,
           timestamp: call.timestamp,
@@ -811,6 +894,7 @@ export function detectDangerousCommands(
             (precomputedPattern === 'rm -rf'
               ? rmRfCertainty(text)
               : dangerousPatternCertainty(precomputedPattern)),
+          matchingRules,
         });
         continue;
       }
@@ -829,6 +913,7 @@ export function detectDangerousCommands(
           pattern: name,
           // rm -rf certainty is target-aware (#2011); other patterns are static.
           certainty: name === 'rm -rf' ? rmRfCertainty(commandText) : certainty ?? 'high',
+          matchingRules: matchingDangerousPermissionRules(name, commandText),
         });
         break; // only record first matching pattern per command
       }

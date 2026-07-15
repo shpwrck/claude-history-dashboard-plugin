@@ -63,7 +63,7 @@
 export const SESSION_BLOB_OUTPUT = {
   // History of prior values is documented in scripts/session-blob-row.mjs next
   // to where this is consumed; keep new rationale there AND bump here.
-  version: 'native-bypass-aliases-v12',
+  version: 'dangerous-prefix-rules-v13',
   contract: [
     'token_json',
     'tool_json',

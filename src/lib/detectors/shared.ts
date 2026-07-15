@@ -15,6 +15,15 @@ import { estimateCost, isUnattendedEntrypoint } from '../parse-sessions';
 import { classifyTaskClass, TASK_CLASSES, type TaskClass } from '../task-class';
 import { resolveModelPricing, entryCostAtModel, CHEAPEST_MODEL } from '../pricing';
 import { scopeKeyOf } from '../reclaim';
+import {
+  bashSpec,
+  parsePermRule,
+} from '../permission-rules';
+export {
+  allowShadowedByDeny,
+  parsePermRule,
+  permRuleMatchesCall,
+} from '../permission-rules';
 
 /** Higher = surfaced first. Drives the primary sort in `buildRecommendations`. */
 export const SEVERITY_RANK: Record<RecSeverity, number> = {
@@ -71,82 +80,6 @@ export function permissionsContain(
   if (!Array.isArray(have) || have.length === 0) return false;
   const set = new Set(have);
   return rules.every((r) => set.has(r));
-}
-
-// ── Permission-rule parsing/matching (#175) ─────────────────────────────
-// Claude Code permission rules are `Tool(specifier)` or a bare `Tool`. For
-// Bash the specifier is a command prefix; a trailing `:*` means "any args
-// after this prefix", its absence means an exact command. These helpers power
-// the two settings-safety rules (deny-never-triggered, allow-overlaps-deny).
-
-interface PermRule {
-  tool: string;
-  /** null = bare `Tool` rule (matches any use of the tool). */
-  specifier: string | null;
-}
-
-export function parsePermRule(rule: string): PermRule {
-  const m = /^([A-Za-z][\w-]*)\((.*)\)$/.exec(rule.trim());
-  if (m) return { tool: m[1], specifier: m[2] };
-  return { tool: rule.trim(), specifier: null };
-}
-
-/** Bash specifier → its literal prefix and whether it is a prefix (`:*`) match. */
-function bashSpec(specifier: string): { literal: string; prefix: boolean } {
-  if (specifier.endsWith(':*')) {
-    return { literal: specifier.slice(0, -2).trim(), prefix: true };
-  }
-  return { literal: specifier.trim(), prefix: false };
-}
-
-/**
- * Does a recorded tool call match a permission rule? Returns `null` when the
- * rule can't be evaluated confidently (a non-Bash rule with a specifier — path
- * globs etc.), so callers can decline to judge it rather than guess. Bash rules
- * and bare-tool rules are evaluated exactly.
- */
-export function permRuleMatchesCall(
-  rule: string,
-  call: { toolName: string; input: { command?: string }; commandPreview?: string }
-): boolean | null {
-  const { tool, specifier } = parsePermRule(rule);
-  if (call.toolName !== tool) return false;
-  if (specifier === null) return true; // bare tool rule matches any use
-  if (tool === 'Bash') {
-    const cmd =
-      typeof call.input?.command === 'string'
-        ? call.input.command.trim()
-        : call.commandPreview?.trim() ?? '';
-    if (!cmd) return false;
-    const { literal, prefix } = bashSpec(specifier);
-    return prefix ? cmd === literal || cmd.startsWith(literal + ' ') : cmd === literal;
-  }
-  return null; // non-Bash specifier — not confidently evaluable
-}
-
-/**
- * Is `allow` fully shadowed by `deny`? When every command the allow would
- * permit is also caught by the deny, the allow is dead (deny always wins).
- * Conservative for non-Bash specifiers (equality only) so we never claim a
- * shadow we can't prove.
- */
-export function allowShadowedByDeny(allow: string, deny: string): boolean {
-  const A = parsePermRule(allow);
-  const D = parsePermRule(deny);
-  if (A.tool !== D.tool) return false;
-  if (D.specifier === null) return true; // deny whole tool → any allow is dead
-  if (A.specifier === null) return false; // allow whole tool ⊄ a specific deny
-  if (A.tool === 'Bash') {
-    const a = bashSpec(A.specifier);
-    const d = bashSpec(D.specifier);
-    if (d.prefix) {
-      // Every cmd starting with a.literal also starts with d.literal.
-      return a.literal === d.literal || a.literal.startsWith(d.literal + ' ');
-    }
-    // Exact deny shadows only an identical exact allow.
-    return !a.prefix && a.literal === d.literal;
-  }
-  return A.specifier === D.specifier; // non-Bash: conservative equality
 }
 
 // Dangerous-command stems whose `deny` guards are *expected* to sit unused —

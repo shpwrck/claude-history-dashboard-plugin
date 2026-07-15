@@ -73,6 +73,22 @@ describe('detectDangerousCommands', () => {
     expect(found[0].certainty).toBe('high')
   })
 
+  it.each([
+    ['rm -rf ~', ['Bash(rm -rf:*)']],
+    ['rm -fr ~', ['Bash(rm -fr:*)']],
+    ['rm -rfv ~', []],
+    ['rm -Rfv ~', []],
+    ['cd /tmp && rm -rf ~', []],
+  ])(
+    'records canonical rules that match the full raw invocation for %j',
+    (command, expected) => {
+      const [found] = detectDangerousCommands([
+        session('s', [call('Bash', command)]),
+      ])
+      expect(found.matchingRules).toEqual(expected)
+    }
+  )
+
   it('scores rm -rf certainty by target: scoped/reversible is medium, catastrophic stays high (#2011)', () => {
     const medium = ['rm -rf ./.worktrees/feature-x', 'rm -rf /tmp/scratch', 'rm -rf build/out']
     for (const cmd of medium) {
@@ -127,6 +143,7 @@ describe('detectDangerousCommands', () => {
         command: 'rm -rf ~',
         pattern: 'rm -rf',
         certainty: 'high',
+        matchingRules: null,
       },
     ])
   })
@@ -156,9 +173,37 @@ describe('detectDangerousCommands', () => {
         command: 'rm -rf ./.worktrees/feature-x',
         pattern: 'rm -rf',
         certainty: 'medium',
+        matchingRules: null,
       },
     ])
   })
+
+  it.each([
+    [undefined, null],
+    [[], []],
+    [['Bash(rm -rf:*)'], ['Bash(rm -rf:*)']],
+    [['Bash(unknown:*)'], null],
+    [['Bash(rm -rf:*)', 'Bash(rm -fr:*)'], null],
+    [['Bash(rm -rf:*)', 'Bash(rm -rf:*)'], null],
+    [['Bash(rm -rf:*)', 42], null],
+    ['Bash(rm -rf:*)', null],
+  ])(
+    'validates persisted dangerous-prefix truth without reconstructing preview (%j)',
+    (persisted, expected) => {
+      const parsed = detectDangerousCommands([
+        session('s', [
+          {
+            ...call('Bash'),
+            input: {},
+            commandPreview: 'rm -rf ~',
+            commandDangerousPattern: 'rm -rf',
+            commandDangerousRuleMatches: persisted,
+          } as ToolCall,
+        ]),
+      ])
+      expect(parsed[0].matchingRules).toEqual(expected)
+    }
+  )
 
   it('falls back to high on a truncated preview when no precompute exists (pre-#2036 blob)', () => {
     // Old ingested data lacks commandDangerousCertainty; with the rm -rf target

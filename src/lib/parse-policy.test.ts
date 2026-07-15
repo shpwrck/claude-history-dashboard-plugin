@@ -4,16 +4,42 @@ import {
   computePolicyDiff,
   policyDiffToSnippet,
 } from './parse-policy';
-import type { DangerousCommand, ToolPromptFriction } from './parse-permissions';
+import {
+  detectDangerousCommands,
+  type DangerousCommand,
+  type ToolPromptFriction,
+} from './parse-permissions';
 
-const danger = (pattern: string, sessionId = 's1'): DangerousCommand => ({
+const danger = (
+  pattern: string,
+  matchingRules: string[] | null,
+  sessionId = 's1'
+): DangerousCommand => ({
   sessionId,
   timestamp: 't',
   toolUseId: 'u',
   command: 'x',
   pattern,
   certainty: 'high',
+  matchingRules,
 });
+
+const detected = (command: string): DangerousCommand[] =>
+  detectDangerousCommands([
+    {
+      sessionId: 's1',
+      calls: [
+        {
+          timestamp: 't',
+          toolName: 'Bash',
+          input: { command },
+          toolUseId: 'u',
+          isError: null,
+          resultBytes: 0,
+        },
+      ],
+    },
+  ]);
 
 const bashFriction: ToolPromptFriction = {
   toolName: 'Bash',
@@ -23,16 +49,59 @@ const bashFriction: ToolPromptFriction = {
 };
 
 describe('buildPolicyCandidates', () => {
-  it('maps a dangerous pattern to its canonical deny rule(s), defaulting to deny', () => {
-    const out = buildPolicyCandidates([danger('rm -rf')], []);
+  it('maps only the canonical rule proven against the observed invocation', () => {
+    const out = buildPolicyCandidates(detected('rm -rf ~'), []);
     const rules = out.map((c) => c.rule);
     expect(rules).toContain('Bash(rm -rf:*)');
-    expect(rules).toContain('Bash(rm -fr:*)');
+    expect(rules).not.toContain('Bash(rm -fr:*)');
     expect(out.every((c) => c.kind === 'dangerous' && c.defaultAction === 'deny')).toBe(true);
   });
 
+  it.each(['rm -rfv ~', 'rm -Rfv ~', 'cd /tmp && rm -rf ~'])(
+    'omits a policy fix when no canonical rule covers the raw invocation: %s',
+    (command) => {
+      expect(buildPolicyCandidates(detected(command), [])).toHaveLength(0);
+    }
+  );
+
+  it.each([
+    ['legacy unknown', null],
+    ['proven non-match', []],
+  ])('omits a policy fix for %s persisted prefix truth', (_label, rules) => {
+    expect(buildPolicyCandidates([danger('rm -rf', rules)], [])).toHaveLength(0);
+  });
+
+  it('omits impossible persisted alias sets after parser validation', () => {
+    const parsed = detectDangerousCommands([
+      {
+        sessionId: 's1',
+        calls: [
+          {
+            timestamp: 't',
+            toolName: 'Bash',
+            input: {},
+            toolUseId: 'u',
+            isError: null,
+            resultBytes: 0,
+            commandPreview: 'rm -rf ~',
+            commandDangerousPattern: 'rm -rf',
+            commandDangerousCertainty: 'high',
+            commandDangerousRuleMatches: [
+              'Bash(rm -rf:*)',
+              'Bash(rm -fr:*)',
+            ],
+          },
+        ],
+      },
+    ]);
+
+    expect(parsed[0].matchingRules).toBeNull();
+    expect(buildPolicyCandidates(parsed, [])).toHaveLength(0);
+  });
+
   it('omits patterns with no prefix-matchable rule (fork bomb)', () => {
-    expect(buildPolicyCandidates([danger('fork bomb')], [])).toHaveLength(0);
+    expect(buildPolicyCandidates([danger('fork bomb', [])], [])).toHaveLength(0);
+    expect(buildPolicyCandidates([danger('constructor', null)], [])).toHaveLength(0);
   });
 
   it('emits safe Bash allow rows from prompt friction, defaulting to allow', () => {
@@ -43,13 +112,16 @@ describe('buildPolicyCandidates', () => {
   });
 
   it('marks a rule already present in settings via `current`', () => {
-    const out = buildPolicyCandidates([danger('dd if=')], [], { deny: ['Bash(dd:*)'] });
+    const out = buildPolicyCandidates([danger('dd if=', ['Bash(dd:*)'])], [], { deny: ['Bash(dd:*)'] });
     const dd = out.find((c) => c.rule === 'Bash(dd:*)');
     expect(dd?.current).toBe('deny');
   });
 
   it('does not map a generic disk redirect to the unrelated dd prefix rule', () => {
-    const out = buildPolicyCandidates([danger('dd if='), danger('disk overwrite')], []);
+    const out = buildPolicyCandidates([
+      danger('dd if=', ['Bash(dd:*)']),
+      danger('disk overwrite', []),
+    ], []);
     expect(out.filter((c) => c.rule === 'Bash(dd:*)')).toHaveLength(1);
     expect(out.some((c) => c.detail.includes('disk overwrite'))).toBe(false);
   });

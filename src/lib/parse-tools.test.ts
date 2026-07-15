@@ -10,6 +10,7 @@ import {
   mineCorrections,
   aggregateCorrections,
   stripToolCommandBodies,
+  deriveBashCommandSignals,
 } from './parse-tools'
 import type { ToolCall, ToolUsageData } from './parse-tools'
 
@@ -105,6 +106,7 @@ describe('parseToolUsage', () => {
     expect(bashCall.commandBypassCategories).toContain('grep')
     expect(bashCall.commandBypassAliases).toEqual({ grep: ['grep'] })
     expect(bashCall.commandDangerousPattern).toBe('rm -rf')
+    expect(bashCall.commandDangerousRuleMatches).toEqual([])
     // #2036: target-aware certainty + fragment are precomputed from the full
     // command before the body is stripped. `rm -rf build` is a scoped subpath.
     expect(bashCall.commandDangerousCertainty).toBe('medium')
@@ -118,6 +120,22 @@ describe('parseToolUsage', () => {
     ])
     expect(Object.prototype.hasOwnProperty.call(stripped.calls[3].input, 'command')).toBe(false)
   })
+
+  it.each([
+    ['rm -rf ~', ['Bash(rm -rf:*)']],
+    ['rm -fr ~', ['Bash(rm -fr:*)']],
+    ['rm -rfv ~', []],
+    ['rm -Rfv ~', []],
+    ['cd /tmp && rm -rf ~', []],
+    ['rm -rf\n~', []],
+  ])(
+    'precomputes exact dangerous permission-prefix coverage for %j',
+    (command, expected) => {
+      expect(deriveBashCommandSignals(command).commandDangerousRuleMatches).toEqual(
+        expected
+      )
+    }
+  )
 
   it('persists exact bypass aliases through wrappers and shell chains', () => {
     const text = [

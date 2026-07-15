@@ -78,6 +78,13 @@ export interface ToolCall {
   /** First dangerous-command pattern matched by the Bash command, if any. */
   commandDangerousPattern?: string;
   /**
+   * Canonical dangerous-pattern rules that matched the full raw Bash invocation
+   * under the dashboard's conservative direct-prefix matcher. An empty array
+   * positively proves that no mapped rule matched in that model; absence means
+   * legacy/unknown truth.
+   */
+  commandDangerousRuleMatches?: string[];
+  /**
    * Precomputed dangerous-command certainty (target-aware for `rm -rf`), derived
    * from the FULL command at parse time so it survives raw-body stripping (#2036).
    * Consumers (detectDangerousCommands) must prefer this over recomputing from the

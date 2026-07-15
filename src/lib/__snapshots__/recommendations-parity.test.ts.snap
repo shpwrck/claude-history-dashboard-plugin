@@ -29,7 +29,7 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
     "id": "safety.dangerous-bypass",
     "proofTier": "accounting",
     "provenance": {
-      "inference": "The classifier treats commandDangerousCertainty=high calls as dangerous evidence. Candidate protections are limited to canonical pattern rules that match the observed Bash invocation under the repository permission matcher. Coverage uses permission-rule containment, so a broader configured prefix or bare Bash rule covers a narrower requirement: deny is required for bypassed commands, while ask or stronger deny covers the warning branch. A missing mapping or a mapped family that does not match the observed invocation is not evidence that a safe prefix rule exists, so those patterns remain visible without a fabricated settings rule.",
+      "inference": "The classifier treats commandDangerousCertainty=high calls as dangerous evidence. Candidate protections are limited to canonical pattern rules that match the observed Bash invocation under the repository permission matcher. Coverage uses permission-rule containment, so a broader configured prefix or bare Bash rule covers a narrower requirement: deny is required for bypassed commands, while ask or stronger deny covers the warning branch. An unavailable persisted match set is unknown, while an empty validated set is a proven non-match; neither is used to fabricate a settings rule. A current whole-tool Bash rule can still prove coverage for unknown, non-prefixable, or unmappable observations because it covers every Bash invocation. A missing pattern mapping otherwise remains visible without a fabricated settings rule.",
       "observations": [
         {
           "claim": "detectDangerousCommands returned 2 total record(s); 2 passed the certainty=high gate",
@@ -42,6 +42,12 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
           "field": "computeSafetyScores(...).bypassMode / DangerousCommand.sessionId",
           "source": "safety.dangerous-bypass branch selection",
           "value": 2,
+        },
+        {
+          "claim": "2 of 2 contributing record(s) had usable dangerous permission-prefix truth",
+          "field": "toolData[].calls[].input.command or commandDangerousRuleMatches",
+          "source": "parse-permissions.detectDangerousCommands(toolData)",
+          "value": "2/2",
         },
         {
           "claim": "0 of 2 contributing call timestamp(s) passed the detector's RFC3339/calendar/future-skew check",
