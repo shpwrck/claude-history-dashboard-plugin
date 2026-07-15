@@ -133,6 +133,209 @@ afterEach(() => {
 });
 
 describe('loadServerDataset', () => {
+  it('leaves the live-owned workflows slice out of progressive state patches', async () => {
+    const boot = { ...BOOT, sliceKeys: ['entries', 'workflows'] };
+    const workflowRows = [{ runId: 'wf-live-owner' }];
+    installFetch({
+      '/api/dataset/boot': () => jsonRes(boot, { version: 'v1' }),
+      '/api/dataset/slice/entries': () =>
+        jsonRes([{ sessionId: 'a' }], { version: 'v1' }),
+      '/api/dataset/slice/workflows': () =>
+        jsonRes(workflowRows, { version: 'v1' }),
+    });
+    const apply = vi.fn();
+    const applySlice = vi.fn();
+
+    await loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
+
+    expect(applySlice).toHaveBeenCalledTimes(1);
+    expect(applySlice).toHaveBeenCalledWith({
+      key: 'entries',
+      value: [{ sessionId: 'a' }],
+    });
+    expect(apply.mock.calls.at(-1)?.[0]).toMatchObject({
+      workflows: workflowRows,
+    });
+  });
+
+  it('backfills a fast slice before a slow sibling without full-apply fan-out', async () => {
+    let resolveSlow: ((response: Response) => void) | undefined;
+    const slowResponse = new Promise<Response>((resolve) => {
+      resolveSlow = resolve;
+    });
+    installFetch({
+      ...okRoutes(),
+      '/api/dataset/slice/tokenData': () => slowResponse,
+    });
+    const apply = vi.fn();
+    const applySlice = vi.fn();
+
+    let settled = false;
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
+    void loading.then(() => { settled = true; });
+
+    await vi.waitFor(() =>
+      expect(applySlice).toHaveBeenCalledWith({
+        key: 'entries',
+        value: [{ sessionId: 'a' }],
+      })
+    );
+    expect(settled).toBe(false);
+    // The full-state seam ran only for the boot shell; the fast slice used its
+    // one-key seam instead of replaying every App setter.
+    expect(apply).toHaveBeenCalledTimes(1);
+
+    resolveSlow?.(jsonRes([{ model: 'm' }], { version: 'v1' }));
+    await loading;
+
+    expect(applySlice.mock.calls).toEqual([
+      [{ key: 'entries', value: [{ sessionId: 'a' }] }],
+      [{ key: 'tokenData', value: [{ model: 'm' }] }],
+    ]);
+    // Shell + one final atomic full dataset, never shell + N partial full applies.
+    expect(apply).toHaveBeenCalledTimes(2);
+  });
+
+  it('streams worker slice messages before the worker batch is done', async () => {
+    const workers: ProgressiveWorker[] = [];
+    class ProgressiveWorker {
+      onmessage?: (event: MessageEvent) => void;
+      onerror?: (event: ErrorEvent) => void;
+      terminate = vi.fn();
+      constructor() { workers.push(this); }
+      postMessage() {
+        queueMicrotask(() => this.onmessage?.({
+          data: {
+            type: 'slice',
+            key: 'entries',
+            value: [{ sessionId: 'worker-fast' }],
+            version: 'v1',
+          },
+        } as MessageEvent));
+      }
+      finish() {
+        this.onmessage?.({
+          data: {
+            type: 'slice',
+            key: 'tokenData',
+            value: [{ model: 'worker-slow' }],
+            version: 'v1',
+          },
+        } as MessageEvent);
+        this.onmessage?.({ data: { type: 'done' } } as MessageEvent);
+      }
+    }
+    vi.stubGlobal('Worker', ProgressiveWorker);
+    installFetch({ '/api/dataset/boot': () => jsonRes(BOOT, { version: 'v1' }) });
+    const apply = vi.fn();
+    const applySlice = vi.fn();
+
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
+    await vi.waitFor(() =>
+      expect(applySlice).toHaveBeenCalledWith({
+        key: 'entries',
+        value: [{ sessionId: 'worker-fast' }],
+      })
+    );
+    expect(apply).toHaveBeenCalledTimes(1);
+    workers[0]?.finish();
+    await loading;
+
+    expect(applySlice).toHaveBeenLastCalledWith({
+      key: 'tokenData',
+      value: [{ model: 'worker-slow' }],
+    });
+    expect(apply).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reapply a worker-delivered slice when crash fallback refetches it', async () => {
+    class CrashAfterSliceWorker {
+      onmessage?: (event: MessageEvent) => void;
+      onerror?: (event: ErrorEvent) => void;
+      terminate = vi.fn();
+      postMessage() {
+        queueMicrotask(() => {
+          this.onmessage?.({
+            data: {
+              type: 'slice',
+              key: 'entries',
+              value: [{ sessionId: 'worker-first' }],
+              version: 'v1',
+            },
+          } as MessageEvent);
+          this.onerror?.({ message: 'worker crashed' } as ErrorEvent);
+        });
+      }
+    }
+    vi.stubGlobal('Worker', CrashAfterSliceWorker);
+    installFetch(okRoutes());
+    const applySlice = vi.fn();
+
+    await loadServerDataset(vi.fn(), vi.fn(), vi.fn(), { applySlice });
+
+    expect(applySlice.mock.calls.filter(([patch]) => patch.key === 'entries')).toEqual([
+      [{ key: 'entries', value: [{ sessionId: 'worker-first' }] }],
+    ]);
+    expect(applySlice).toHaveBeenCalledWith({
+      key: 'tokenData',
+      value: [{ model: 'm' }],
+    });
+  });
+
+  it('never applies a skewed slice and replaces earlier partials with the monolith', async () => {
+    let resolveSkewed: ((response: Response) => void) | undefined;
+    const skewedResponse = new Promise<Response>((resolve) => {
+      resolveSkewed = resolve;
+    });
+    installFetch({
+      ...okRoutes(),
+      '/api/dataset/slice/tokenData': () => skewedResponse,
+    });
+    const monolith = { entries: [{ sessionId: 'atomic' }], tokenData: [] };
+    fetchDatasetMock.mockResolvedValue(monolith);
+    installIndexedDb([]);
+    const apply = vi.fn();
+    const applySlice = vi.fn();
+
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
+    await vi.waitFor(() => expect(applySlice).toHaveBeenCalledWith({
+      key: 'entries',
+      value: [{ sessionId: 'a' }],
+    }));
+    resolveSkewed?.(jsonRes([{ model: 'stale' }], { version: 'v2' }));
+    await loading;
+
+    expect(applySlice).not.toHaveBeenCalledWith(expect.objectContaining({
+      key: 'tokenData',
+    }));
+    expect(apply).toHaveBeenLastCalledWith(monolith);
+  });
+
+  it('ignores late sibling completions after a slice failure starts fallback', async () => {
+    let resolveLate: ((response: Response) => void) | undefined;
+    const lateResponse = new Promise<Response>((resolve) => {
+      resolveLate = resolve;
+    });
+    installFetch({
+      ...okRoutes(),
+      '/api/dataset/slice/entries': () => lateResponse,
+      '/api/dataset/slice/tokenData': () => jsonRes({}, { status: 500 }),
+    });
+    const monolith = { entries: [{ sessionId: 'fallback' }], tokenData: [] };
+    fetchDatasetMock.mockResolvedValue(monolith);
+    const apply = vi.fn();
+    const applySlice = vi.fn();
+
+    await loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
+    expect(apply).toHaveBeenLastCalledWith(monolith);
+
+    resolveLate?.(jsonRes([{ sessionId: 'too-late' }], { version: 'v1' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(applySlice).not.toHaveBeenCalled();
+    expect(apply).toHaveBeenLastCalledWith(monolith);
+  });
+
   it('paints the shell (with real boot counts), then the full dataset (cold load)', async () => {
     installFetch(okRoutes());
     const apply = vi.fn();
@@ -202,8 +405,9 @@ describe('loadServerDataset', () => {
     const cached = { entries: [{ sessionId: 'cached' }], tokenData: [] };
     readCachedDatasetMock.mockResolvedValue(cached);
     const apply = vi.fn();
+    const applySlice = vi.fn();
 
-    const loading = loadServerDataset(apply, vi.fn(), vi.fn());
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
     await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(cached));
     expect(resolveBoot).toBeDefined();
     resolveBoot?.(jsonRes(BOOT, { version: 'v1' }));
@@ -211,6 +415,43 @@ describe('loadServerDataset', () => {
 
     expect((apply.mock.calls.at(-1)?.[0] as Record<string, unknown>).entries).toEqual([
       { sessionId: 'a' },
+    ]);
+    expect(applySlice).not.toHaveBeenCalled();
+  });
+
+  it('suppresses slow progressive slices after a delayed cache paint wins', async () => {
+    let resolveSlow: ((response: Response) => void) | undefined;
+    const slowResponse = new Promise<Response>((resolve) => {
+      resolveSlow = resolve;
+    });
+    installFetch({
+      ...okRoutes(),
+      '/api/dataset/slice/tokenData': () => slowResponse,
+    });
+    let resolveCache: ((data: unknown) => void) | undefined;
+    readCachedDatasetMock.mockImplementation(() => new Promise((resolve) => {
+      resolveCache = resolve;
+    }));
+    const cached = { entries: [{ sessionId: 'cached' }], tokenData: [] };
+    const apply = vi.fn();
+    const applySlice = vi.fn();
+
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
+    await vi.waitFor(() => expect(applySlice).toHaveBeenCalledWith({
+      key: 'entries',
+      value: [{ sessionId: 'a' }],
+    }));
+    resolveCache?.(cached);
+    await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(cached));
+
+    resolveSlow?.(jsonRes([{ model: 'fresh' }], { version: 'v1' }));
+    await loading;
+
+    expect(applySlice).not.toHaveBeenCalledWith(expect.objectContaining({
+      key: 'tokenData',
+    }));
+    expect((apply.mock.calls.at(-1)?.[0] as Record<string, unknown>).tokenData).toEqual([
+      { model: 'fresh' },
     ]);
   });
 
@@ -421,9 +662,20 @@ describe('loadServerDataset', () => {
       terminate = vi.fn();
       constructor() { workers.push(this); }
       postMessage() {
-        queueMicrotask(() => this.onmessage?.({
-          data: { type: 'slice-error', key: 'entries', error: 'slice failed' },
-        } as MessageEvent));
+        queueMicrotask(() => {
+          this.onmessage?.({
+            data: { type: 'slice-error', key: 'entries', error: 'slice failed' },
+          } as MessageEvent);
+          // A misbehaving/queued worker message after the error must be ignored.
+          this.onmessage?.({
+            data: {
+              type: 'slice',
+              key: 'tokenData',
+              value: [{ model: 'too-late' }],
+              version: 'v1',
+            },
+          } as MessageEvent);
+        });
       }
     }
     vi.stubGlobal('Worker', SliceErrorWorker);
@@ -431,15 +683,17 @@ describe('loadServerDataset', () => {
     const monolith = { entries: [{ sessionId: 'fallback' }] };
     fetchDatasetMock.mockResolvedValue(monolith);
     const apply = vi.fn();
+    const applySlice = vi.fn();
 
     const outcome = await Promise.race([
-      loadServerDataset(apply, vi.fn(), vi.fn()).then(() => 'completed'),
+      loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice }).then(() => 'completed'),
       new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 25)),
     ]);
 
     expect(outcome).toBe('completed');
     expect(workers[0]?.terminate).toHaveBeenCalledTimes(1);
     expect(apply).toHaveBeenLastCalledWith(monolith);
+    expect(applySlice).not.toHaveBeenCalled();
   });
 
   it('clears the shell counts when a COLD load fails both boot-first AND monolith (#2450 review)', async () => {
@@ -456,6 +710,32 @@ describe('loadServerDataset', () => {
     // finally clear drops the stand-in so it never sits stale over empty views.
     expect(setShellCounts).toHaveBeenNthCalledWith(1, BOOT_COUNTS);
     expect(setShellCounts).toHaveBeenLastCalledWith(null);
+  });
+
+  it('rolls fast partial slices back to the shell after total cold-load failure', async () => {
+    const routes = okRoutes();
+    let failSlowSlice: ((response: Response) => void) | undefined;
+    routes['/api/dataset/slice/tokenData'] = () =>
+      new Promise<Response>((resolve) => {
+        failSlowSlice = resolve;
+      });
+    installFetch(routes);
+    fetchDatasetMock.mockRejectedValue(new Error('monolith unreachable'));
+    const apply = vi.fn();
+    const applySlice = vi.fn();
+
+    const loading = loadServerDataset(apply, vi.fn(), vi.fn(), { applySlice });
+    await vi.waitFor(() =>
+      expect(applySlice).toHaveBeenCalledWith({
+        key: 'entries',
+        value: [{ sessionId: 'a' }],
+      })
+    );
+    failSlowSlice?.(jsonRes({}, { status: 500 }));
+    await loading;
+
+    expect(apply).toHaveBeenCalledTimes(2);
+    expect(apply.mock.calls.at(-1)?.[0]).toEqual(apply.mock.calls[0]?.[0]);
   });
 
   it('preserves last-good data when a reload hits boot-first AND monolith failure (#2449)', async () => {
@@ -479,7 +759,11 @@ describe('loadServerDataset', () => {
     const apply = vi.fn();
     const setShellCounts = vi.fn();
 
-    await loadServerDataset(apply, vi.fn(), setShellCounts, { hasExistingData: true });
+    const applySlice = vi.fn();
+    await loadServerDataset(apply, vi.fn(), setShellCounts, {
+      hasExistingData: true,
+      applySlice,
+    });
 
     // Only the full dataset is applied — no empty-shell paint, no stand-in counts.
     expect(apply).toHaveBeenCalledTimes(1);
@@ -487,5 +771,6 @@ describe('loadServerDataset', () => {
       { sessionId: 'a' },
     ]);
     expect(neverSetRealCounts(setShellCounts)).toBe(true);
+    expect(applySlice).not.toHaveBeenCalled();
   });
 });

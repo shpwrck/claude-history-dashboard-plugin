@@ -21,7 +21,13 @@ import {
   resolveDatasetCacheKey,
 } from './dataset-cache-client';
 import { mergeDataset } from './dataset-boot';
-import type { DatasetBoot, DatasetShellCounts } from './dataset-boot';
+import { isSliceKey } from './dataset-boot';
+import type {
+  DatasetBoot,
+  DatasetShellCounts,
+  DatasetSlicePatch,
+  HeavySliceKey,
+} from './dataset-boot';
 
 /** One heavy per-view slice, keyed, with the dataset version that produced it. */
 export interface DatasetSliceResult {
@@ -41,6 +47,8 @@ export interface LoadServerDatasetOptions {
    * React ref, read at the call site (an effect/handler) — never during render.
    */
   hasExistingData?: boolean;
+  /** Apply one validated client-owned slice without replaying the full App fan-out. */
+  applySlice?: (patch: DatasetSlicePatch) => void;
 }
 
 // Same credentials + enterprise-auth header the api-client `serverFetch` applies.
@@ -100,12 +108,14 @@ interface DatasetSliceRequest {
 class SliceWorkerCrashError extends Error {}
 
 // #2448: decode the heavy slices OFF the UI thread. The worker fetches+parses
-// each slice and posts it back as it lands; we resolve once `done` arrives,
-// reject with the first slice error, or reject with a SliceWorkerCrashError if
+// each slice and posts it back as it lands; `onResult` publishes each validated
+// message immediately, while the batch promise resolves only once `done`
+// arrives. Reject with the first slice error, or with SliceWorkerCrashError if
 // the worker itself couldn't run.
 function decodeSlicesViaWorker(
   requests: DatasetSliceRequest[],
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  onResult: (result: DatasetSliceResult) => void,
 ): Promise<DatasetSliceResult[]> {
   return new Promise((resolve, reject) => {
     let worker: Worker;
@@ -118,31 +128,44 @@ function decodeSlicesViaWorker(
       return;
     }
     const results: DatasetSliceResult[] = [];
+    let settled = false;
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      worker.terminate();
+      reject(error);
+    };
     worker.onmessage = (e: MessageEvent<SliceWorkerMessage>) => {
+      if (settled) return;
       const msg = e.data;
       if (msg.type === 'slice') {
-        results.push({
+        const result = {
           key: msg.key ?? '',
           value: msg.value,
           version: msg.version ?? null,
-        });
+        };
+        results.push(result);
+        try {
+          onResult(result);
+        } catch (error) {
+          rejectOnce(error instanceof Error ? error : new Error(String(error)));
+        }
       } else if (msg.type === 'slice-error') {
         // The worker starts all slice requests concurrently. Stop it on the
         // first genuine slice failure so the monolith fallback does not wait for
         // unrelated heavy downloads/parses to finish.
-        worker.terminate();
-        reject(new Error(msg.error ?? `slice '${msg.key}' failed`));
+        rejectOnce(new Error(msg.error ?? `slice '${msg.key}' failed`));
       } else if (msg.type === 'done') {
         // Every slice has been fetched+parsed (or errored). Ignore any other
         // message type rather than treating it as done (defensive — no premature
         // resolve with a partial result set on a future protocol drift).
+        settled = true;
         worker.terminate();
         resolve(results);
       }
     };
     worker.onerror = (e) => {
-      worker.terminate();
-      reject(new SliceWorkerCrashError(e.message || 'slice worker crashed'));
+      rejectOnce(new SliceWorkerCrashError(e.message || 'slice worker crashed'));
     };
     worker.postMessage({ slices: requests, headers });
   });
@@ -155,6 +178,7 @@ function decodeSlicesViaWorker(
 async function fetchSlices(
   sliceKeys: string[],
   token: string | null,
+  onResult: (result: DatasetSliceResult) => void,
 ): Promise<DatasetSliceResult[]> {
   if (sliceKeys.length === 0) return [];
   const requests: DatasetSliceRequest[] = sliceKeys.map((key) => ({
@@ -163,13 +187,26 @@ async function fetchSlices(
   }));
   if (typeof Worker !== 'undefined') {
     try {
-      return await decodeSlicesViaWorker(requests, authHeaders(token));
+      return await decodeSlicesViaWorker(requests, authHeaders(token), onResult);
     } catch (err) {
       if (!(err instanceof SliceWorkerCrashError)) throw err;
       // Worker infra failed — fall through to the main thread.
     }
   }
-  return Promise.all(requests.map((r) => fetchSliceOnMainThread(r.key, token)));
+  let acceptingResults = true;
+  try {
+    return await Promise.all(
+      requests.map(async (request) => {
+        const result = await fetchSliceOnMainThread(request.key, token);
+        if (acceptingResults) onResult(result);
+        return result;
+      })
+    );
+  } finally {
+    // Promise.all rejects on the first failed slice, but sibling fetches keep
+    // running. Their late completions must not publish over monolith fallback.
+    acceptingResults = false;
+  }
 }
 
 /** The masthead's headline counts, straight from the boot payload (#2450). */
@@ -185,14 +222,16 @@ function shellCountsFromBoot(boot: DatasetBoot): DatasetShellCounts {
  * Instant-load progressive fetch. Paints the landing shell from the tiny boot
  * payload FIRST (via `onPartial`, which also receives the real headline counts
  * so the masthead never shows a transient `0` — #2450), then backfills every
- * heavy slice (off the UI thread — #2448) and resolves with the full dataset —
- * so first paint waits on ~59 KB (boot), not the ~15 MB monolith. Returns `null`
- * if the corpus changed mid-load (boot and a slice carry different
+ * heavy slice (off the UI thread — #2448), publishes each client-owned slice
+ * through its one-key state seam as it arrives, and resolves with the full
+ * dataset — so first paint waits on ~59 KB (boot), not the ~15 MB monolith.
+ * Returns `null` if the corpus changed mid-load (boot and a slice carry different
  * `X-Dataset-Version`), signalling the caller to take the atomic
  * `/api/dataset.json` instead so a render never mixes snapshots.
  */
 async function fetchDatasetProgressive(
   onPartial: (data: unknown, counts: DatasetShellCounts) => void,
+  onSlice: (patch: DatasetSlicePatch) => void,
   token: string | null,
 ): Promise<unknown | null> {
   const boot = await fetchBoot(token);
@@ -200,13 +239,46 @@ async function fetchDatasetProgressive(
   // Instant shell: the full Dataset shape with heavy slices still empty, plus the
   // real session/entry/token counts so the masthead shows true numbers now.
   onPartial(mergeDataset(meta, {}), shellCountsFromBoot(boot));
-  const fetched = await fetchSlices(boot.sliceKeys ?? [], token);
-  const skew = fetched.some(
-    (r) => boot.version && r.version && r.version !== boot.version
-  );
-  if (skew) return null;
+  const requestedKeys = boot.sliceKeys ?? [];
+  const requested = new Set<HeavySliceKey>();
+  for (const key of requestedKeys) {
+    if (!isSliceKey(key) || requested.has(key)) {
+      throw new Error(`invalid or duplicate dataset slice key '${key}'`);
+    }
+    requested.add(key);
+  }
+
   const slices: Record<string, unknown> = {};
-  for (const r of fetched) slices[r.key] = r.value;
+  const delivered = new Set<HeavySliceKey>();
+  let acceptingSlices = true;
+  let skew = false;
+  try {
+    await fetchSlices(requestedKeys, token, (result) => {
+      if (!acceptingSlices) return;
+      if (!isSliceKey(result.key) || !requested.has(result.key)) {
+        throw new Error(`unexpected dataset slice key '${result.key}'`);
+      }
+      // Worker-infrastructure fallback can refetch an already-delivered key.
+      // Retain the first validated result and never double-apply it.
+      if (delivered.has(result.key)) return;
+      if (boot.version && result.version && result.version !== boot.version) {
+        skew = true;
+        acceptingSlices = false;
+        return;
+      }
+      delivered.add(result.key);
+      slices[result.key] = result.value;
+      if (result.key !== 'workflows') {
+        onSlice({ key: result.key, value: result.value });
+      }
+    });
+  } finally {
+    acceptingSlices = false;
+  }
+  if (skew) return null;
+  if (delivered.size !== requested.size) {
+    throw new Error('dataset slice batch completed without every requested slice');
+  }
   return mergeDataset(meta, slices);
 }
 
@@ -290,6 +362,8 @@ export async function loadServerDataset(
 ): Promise<void> {
   let visibleData = opts.hasExistingData ?? false;
   let suppressCachePaint = false;
+  let coldShell: unknown | null = null;
+  let progressivePatchApplied = false;
   setBusy(true);
   const token = getEnterpriseAuthToken();
   const cacheKey = await resolveDatasetCacheKey(token);
@@ -306,20 +380,32 @@ export async function loadServerDataset(
     })
     .catch(() => {});
   try {
-    const full = await fetchDatasetProgressive((partial, counts) => {
-      // #2449: on a reload with data already loaded, don't wipe the screen to the
-      // empty boot shell — keep the existing data visible and just swap in the
-      // full dataset when it lands (and keep the old data if everything fails).
-      if (visibleData) return;
-      apply(partial);
-      setShellCounts(counts); // #2450: real counts stand in for the empty arrays
-      // The interaction lock (busy) is deliberately NOT cleared here — it stays up
-      // through slice backfill so Upload/Reload remain disabled until the full
-      // dataset lands. Clearing it on the shell paint let a concurrent upload/reload
-      // start mid-backfill and then be overwritten when this load's apply(full)
-      // resolved (#2446 review). The shell is already painted (content + real
-      // counts visible), so holding the lock only keeps the spinner spinning.
-    }, token);
+    const full = await fetchDatasetProgressive(
+      (partial, counts) => {
+        // #2449: on a reload with data already loaded, don't wipe the screen to the
+        // empty boot shell — keep the existing data visible and just swap in the
+        // full dataset when it lands (and keep the old data if everything fails).
+        if (visibleData) return;
+        coldShell = partial;
+        apply(partial);
+        setShellCounts(counts); // #2450: real counts stand in for the empty arrays
+        // The interaction lock (busy) is deliberately NOT cleared here — it stays up
+        // through slice backfill so Upload/Reload remain disabled until the full
+        // dataset lands. Clearing it on the shell paint let a concurrent upload/reload
+        // start mid-backfill and then be overwritten when this load's apply(full)
+        // resolved (#2446 review). The shell is already painted (content + real
+        // counts visible), so holding the lock only keeps the spinner spinning.
+      },
+      (patch) => {
+        // A reload or a last-good cache paint stays atomic: never mix a fresh
+        // partial slice into data from a different completed snapshot.
+        if (!visibleData && opts.applySlice) {
+          opts.applySlice(patch);
+          progressivePatchApplied = true;
+        }
+      },
+      token
+    );
     if (full) {
       suppressCachePaint = true;
       cacheRead?.cancel();
@@ -375,6 +461,13 @@ export async function loadServerDataset(
         if (timeout) clearTimeout(timeout);
       }
       cacheRead?.cancel();
+      // A cold load may already have published fast slices before a slow sibling
+      // and the monolith both failed. With no cache/last-good dataset to replace
+      // them, restore the captured boot shell so the unlocked UI never presents
+      // a subset as a completed load. A cache paint flips visibleData and wins.
+      if (!visibleData && progressivePatchApplied && coldShell !== null) {
+        apply(coldShell);
+      }
     }
   } finally {
     // Drop the boot stand-in on every exit: a successful full/monolith apply has

@@ -24,4 +24,15 @@ describe('App instant-load boundary', () => {
     expect(source).toContain('reloadFromDisk(datasetApplied)');
     expect(source).not.toContain('reloadFromDisk(SERVER_AVAILABLE && sessions.length > 0)');
   });
+
+  it('wires progressive slices through the targeted one-slice App seam', () => {
+    const progressiveDispatcher = source.slice(
+      source.indexOf('const applyDatasetSlice = useCallback'),
+      source.indexOf('// Apply a fetched dataset')
+    );
+    expect(source).toContain('const applyDatasetSlice = useCallback');
+    expect(reload).toContain('applySlice: applyDatasetSlice');
+    expect(source).toContain('const exhaustive: never = key');
+    expect(progressiveDispatcher).not.toContain("case 'workflows':");
+  });
 });

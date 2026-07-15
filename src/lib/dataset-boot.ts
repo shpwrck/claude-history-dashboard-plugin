@@ -47,6 +47,17 @@ export const HEAVY_SLICE_KEYS = [
 ] as const;
 
 export type HeavySliceKey = (typeof HEAVY_SLICE_KEYS)[number];
+export type ProgressiveSliceKey = Exclude<HeavySliceKey, 'workflows'>;
+
+/**
+ * One validated heavy-slice arrival for targeted client-state backfill.
+ * Workflows keep their existing live endpoint owner rather than consuming the
+ * independently cached dataset snapshot.
+ */
+export interface DatasetSlicePatch {
+  key: ProgressiveSliceKey;
+  value: unknown;
+}
 
 /**
  * Heavy keys whose value is a non-array object (or null) rather than an array,
