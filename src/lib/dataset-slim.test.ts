@@ -86,6 +86,101 @@ describe('slimDataset', () => {
 });
 
 describe('rehydrateDataset', () => {
+  it('normalizes a pre-v8 shadowCalls aggregate at the cache rehydration seam', () => {
+    const legacy = {
+      shadowCalls: {
+        total: 5,
+        byAxis: [
+          { axis: 'recs', samples: 3, live: 2, replay: 1 },
+          { axis: 'config-scoping', samples: 2, live: 1, replay: 1 },
+        ],
+      },
+    };
+
+    const result = rehydrateDataset(legacy);
+
+    expect(result).toBe(legacy);
+    expect(legacy.shadowCalls).toMatchObject({
+      total: 5,
+      counted: 5,
+      synthetic: 0,
+      skipped: 0,
+      live: 3,
+      replay: 2,
+    });
+  });
+
+  it('leaves a current shadowCalls aggregate untouched', () => {
+    const current = {
+      total: 10,
+      counted: 7,
+      synthetic: 1,
+      skipped: 2,
+      live: 3,
+      replay: 4,
+      byAxis: [{ axis: 'recs', live: 3, replay: 4 }],
+    };
+    const before = JSON.parse(JSON.stringify(current));
+    const dataset = { shadowCalls: current };
+
+    const result = rehydrateDataset(dataset);
+
+    expect(result).toBe(dataset);
+    expect(dataset.shadowCalls).toBe(current);
+    expect(current).toEqual(before);
+  });
+
+  it.each([
+    ['fractional total', { total: 1.5, byAxis: [{ samples: 1, live: 1, replay: 0 }] }],
+    ['fractional axis count', { total: 1, byAxis: [{ samples: 1, live: 0.5, replay: 0.5 }] }],
+    ['axis sample mismatch', { total: 2, byAxis: [{ samples: 1, live: 1, replay: 1 }] }],
+    ['non-reconciling buckets', { total: 5, byAxis: [{ samples: 2, live: 1, replay: 1 }] }],
+    [
+      'overflowing axis sum',
+      {
+        total: Number.MAX_SAFE_INTEGER,
+        byAxis: [
+          { samples: Number.MAX_SAFE_INTEGER, live: Number.MAX_SAFE_INTEGER, replay: 0 },
+          { samples: 1, live: 1, replay: 0 },
+        ],
+      },
+    ],
+  ])('fails closed on a malformed legacy aggregate: %s', (_name, shadowCalls) => {
+    const before = structuredClone(shadowCalls);
+    const dataset = { shadowCalls };
+
+    rehydrateDataset(dataset);
+
+    expect(dataset.shadowCalls).toEqual(before);
+    expect('counted' in dataset.shadowCalls).toBe(false);
+  });
+
+  it.each([
+    [
+      'v8 disposition bucket',
+      {
+        total: 2,
+        synthetic: 1,
+        byAxis: [{ axis: 'recs', samples: 1, live: 1, replay: 0 }],
+      },
+    ],
+    [
+      'post-v8 truncation marker',
+      {
+        total: 1,
+        truncated: true,
+        byAxis: [{ axis: 'recs', samples: 1, live: 1, replay: 0 }],
+      },
+    ],
+  ])('leaves an ambiguous current-like aggregate untouched: %s', (_name, shadowCalls) => {
+    const before = structuredClone(shadowCalls);
+
+    rehydrateDataset({ shadowCalls });
+
+    expect(shadowCalls).toEqual(before);
+    expect('counted' in shadowCalls).toBe(false);
+  });
+
   it('restores every dropped TokenEntry default to its exact value', () => {
     const ds = { tokenData: [{ sessionId: 's1', entries: [fullEntry()] }] };
     const wire = JSON.parse(JSON.stringify(slimDataset(ds)));

@@ -66,6 +66,20 @@ const ENTRY_DROP_WHEN_ZERO = [
 
 type AnyRecord = Record<string, unknown>;
 
+const POST_V7_SHADOW_CALL_KEYS = [
+  'counted',
+  'synthetic',
+  'skipped',
+  'live',
+  'replay',
+  'bySourceAxis',
+  'byVariation',
+  'variationSkipped',
+  'variationCellsTruncated',
+  'external',
+  'truncated',
+] as const;
+
 // ---------------------------------------------------------------------------
 // Slim (serialize side) — drop zero-valued numeric members. Clones each touched
 // row so the caller's in-memory object is never mutated.
@@ -131,6 +145,83 @@ function rehydrateTokenEntry(entry: AnyRecord): void {
   }
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function sumLegacyAxisCounts(
+  byAxis: unknown[]
+): { live: number; replay: number } | null {
+  let live = 0;
+  let replay = 0;
+  for (const axis of byAxis) {
+    if (!axis || typeof axis !== 'object' || Array.isArray(axis)) return null;
+    const axisRecord = axis as AnyRecord;
+    const axisLive = axisRecord.live;
+    const axisReplay = axisRecord.replay;
+    const axisSamples = axisRecord.samples;
+    if (
+      !isNonNegativeSafeInteger(axisLive) ||
+      !isNonNegativeSafeInteger(axisReplay) ||
+      !isNonNegativeSafeInteger(axisSamples)
+    ) {
+      return null;
+    }
+    const samples = axisLive + axisReplay;
+    if (!Number.isSafeInteger(samples) || samples !== axisSamples) return null;
+    live += axisLive;
+    replay += axisReplay;
+    if (!Number.isSafeInteger(live) || !Number.isSafeInteger(replay)) return null;
+  }
+  return { live, replay };
+}
+
+/**
+ * Browser caches written before shadow-call aggregate v8 carry only the old
+ * counted total plus per-axis live/replay counts. Normalize that legacy shape
+ * once at the universal cache-load seam so downstream consumers never need a
+ * component-specific fallback (#2379).
+ */
+function rehydrateLegacyShadowCalls(record: AnyRecord): void {
+  const value = record.shadowCalls;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const aggregate = value as AnyRecord;
+
+  // A valid v7 aggregate predates every explicit disposition/source/variation
+  // field. Any one of those keys makes this current-like or ambiguous, so leave
+  // it byte-for-byte unchanged instead of overwriting a partial newer shape.
+  if (
+    POST_V7_SHADOW_CALL_KEYS.some((key) =>
+      Object.prototype.hasOwnProperty.call(aggregate, key)
+    )
+  ) {
+    return;
+  }
+  if (
+    !isNonNegativeSafeInteger(aggregate.total) ||
+    !Array.isArray(aggregate.byAxis)
+  ) {
+    return;
+  }
+
+  const axisCounts = sumLegacyAxisCounts(aggregate.byAxis);
+  if (axisCounts === null) return;
+  const { live, replay } = axisCounts;
+  const counted = live + replay;
+  if (
+    !Number.isSafeInteger(counted) ||
+    counted !== aggregate.total
+  ) {
+    return;
+  }
+
+  aggregate.counted = counted;
+  aggregate.synthetic = 0;
+  aggregate.skipped = 0;
+  aggregate.live = live;
+  aggregate.replay = replay;
+}
+
 /**
  * Restore the zero-valued numeric members `slimDataset` dropped, in place, on a
  * freshly-parsed dataset. Idempotent: entries that still carry the field (sample
@@ -139,6 +230,7 @@ function rehydrateTokenEntry(entry: AnyRecord): void {
 export function rehydrateDataset<T>(dataset: T): T {
   if (!dataset || typeof dataset !== 'object') return dataset;
   const record = dataset as AnyRecord;
+  rehydrateLegacyShadowCalls(record);
   if (Array.isArray(record.tokenData)) {
     for (const row of record.tokenData) {
       const entries = (row as AnyRecord)?.entries;
