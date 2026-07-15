@@ -72,6 +72,30 @@ describe('generateRepoMap', () => {
     }
   });
 
+  it('enforces maxFiles inside a flat directory', async () => {
+    const cappedRoot = mkdtempSync(join(tmpdir(), 'repomap-file-cap-'));
+    const parsed: string[] = [];
+    try {
+      writeFileSync(join(cappedRoot, 'a.ts'), 'export const a = 1;\n');
+      writeFileSync(join(cappedRoot, 'b.ts'), 'export const b = 1;\n');
+      const parse: ParseFile = (source, path) => {
+        parsed.push(path);
+        return fakeParse(source, path);
+      };
+
+      const map = await generateRepoMap(cappedRoot, {
+        parseFile: parse,
+        maxFiles: 1,
+        tokenBudget: 5000,
+      });
+
+      expect(map.fileCount).toBe(1);
+      expect(parsed).toHaveLength(1);
+    } finally {
+      rmSync(cappedRoot, { recursive: true, force: true });
+    }
+  });
+
   it('ranks the most-imported file first', async () => {
     const map = await generateRepoMap(root, { parseFile: fakeParse });
     // b.ts is imported by a.ts and sub/c.ts -> ranks ahead of the others.

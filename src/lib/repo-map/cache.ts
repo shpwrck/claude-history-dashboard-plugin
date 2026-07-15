@@ -55,6 +55,14 @@ export interface RepoMapCacheKey {
    * change bumps an mtime even when HEAD does not move.
    */
   maxMtimeMs: number;
+  /**
+   * SHA-256 over the parser/grammar salt and the complete sorted
+   * path/content-hash cohort. This binds the canonical artifact to the
+   * disposable file-cache generation that justified it, so concurrent
+   * producers or preserved-mtime rewrites cannot validate stale structure.
+   * Null is reserved for callers that do not use the per-file cache.
+   */
+  structureSignature: string | null;
 }
 
 /**
@@ -95,7 +103,8 @@ export const PERSISTED_REPO_MAP_VERSION: number = REPO_MAP_OUTPUT.version;
 export function computeCacheKey(
   root: string,
   gitSha: string | null,
-  absFiles: string[]
+  absFiles: string[],
+  structureSignature: string | null = null
 ): RepoMapCacheKey {
   let maxMtimeMs = 0;
   for (const abs of absFiles) {
@@ -107,7 +116,7 @@ export function computeCacheKey(
       // the signature — the next run will stat the surviving set.
     }
   }
-  return { root, gitSha, maxMtimeMs };
+  return { root, gitSha, maxMtimeMs, structureSignature };
 }
 
 /**
@@ -128,6 +137,7 @@ export function isCacheValid(
   if (persisted.version !== PERSISTED_REPO_MAP_VERSION) return false;
   const cached = persisted.cacheKey;
   if (cached.root !== current.root) return false;
+  if (cached.structureSignature !== current.structureSignature) return false;
   if (cached.gitSha !== null && current.gitSha !== null) {
     return cached.gitSha === current.gitSha;
   }

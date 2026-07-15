@@ -53,8 +53,20 @@ export interface FileStructure {
 
 /** A parse function: source text + relative path -> structure. Injected into
  *  {@link generateRepoMap} so the file walk/render/ranking is testable without
- *  the WASM parser, and so other languages can plug in later. */
-export type ParseFile = (source: string, path: string) => FileStructure;
+ *  the WASM parser, and so other languages can plug in later. Async results
+ *  support lazy parser initialization on the first cache miss. */
+export type ParseFile = (
+  source: string,
+  path: string
+) => FileStructure | Promise<FileStructure>;
+
+/** Fatal parser-construction failure, distinct from one unparseable file. */
+export class RepoMapParserInitializationError extends Error {
+  constructor(cause: unknown) {
+    super('repo-map parser initialization failed', { cause });
+    this.name = 'RepoMapParserInitializationError';
+  }
+}
 
 /** The generated map. `text` is the rendered, token-budgeted map; the structured
  *  `files` back it. `generatedAtGitSha` is the staleness stamp (ADR 0007) — the

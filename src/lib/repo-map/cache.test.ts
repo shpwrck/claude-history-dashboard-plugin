@@ -46,10 +46,11 @@ const renderText = (files: RepoMap['files']) => renderRepoMap(files, 8000);
 describe('computeCacheKey', () => {
   it('records the root, sha, and max source mtime', () => {
     const abs = [join(root, 'a.ts'), join(root, 'b.ts')];
-    const key = computeCacheKey(root, 'sha1', abs);
+    const key = computeCacheKey(root, 'sha1', abs, 'a'.repeat(64));
     expect(key.root).toBe(root);
     expect(key.gitSha).toBe('sha1');
     expect(key.maxMtimeMs).toBeGreaterThan(0);
+    expect(key.structureSignature).toBe('a'.repeat(64));
   });
 
   it('advances the mtime watermark when a source file is touched', () => {
@@ -63,7 +64,12 @@ describe('computeCacheKey', () => {
 });
 
 describe('isCacheValid', () => {
-  const base = { root: '/repo', gitSha: 'sha1', maxMtimeMs: 100 };
+  const base = {
+    root: '/repo',
+    gitSha: 'sha1',
+    maxMtimeMs: 100,
+    structureSignature: 'a'.repeat(64),
+  };
   const persisted = { version: PERSISTED_REPO_MAP_VERSION, cacheKey: base };
 
   it('is invalid when there is no persisted artifact', () => {
@@ -74,9 +80,9 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from pre-deduplication repo-map semantics', () => {
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(3);
-    expect(isCacheValid({ ...persisted, version: 2 }, base)).toBe(false);
+  it('invalidates artifacts from before parser/cohort identity binding', () => {
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(4);
+    expect(isCacheValid({ ...persisted, version: 3 }, base)).toBe(false);
   });
 
   it('is valid when the clean-repo sha matches (mtime ignored)', () => {
@@ -91,14 +97,27 @@ describe('isCacheValid', () => {
     expect(isCacheValid(persisted, { ...base, root: '/other' })).toBe(false);
   });
 
+  it('is invalid when a concurrent parser/cohort identity differs', () => {
+    expect(
+      isCacheValid(persisted, {
+        ...base,
+        structureSignature: 'b'.repeat(64),
+      })
+    ).toBe(false);
+  });
+
   it('falls back to the mtime watermark when there is no sha', () => {
-    const noSha = { version: PERSISTED_REPO_MAP_VERSION, cacheKey: { root: '/repo', gitSha: null, maxMtimeMs: 100 } };
-    expect(isCacheValid(noSha, { root: '/repo', gitSha: null, maxMtimeMs: 100 })).toBe(true);
-    expect(isCacheValid(noSha, { root: '/repo', gitSha: null, maxMtimeMs: 101 })).toBe(false);
+    const noShaKey = { ...base, gitSha: null, maxMtimeMs: 100 };
+    const noSha = { version: PERSISTED_REPO_MAP_VERSION, cacheKey: noShaKey };
+    expect(isCacheValid(noSha, noShaKey)).toBe(true);
+    expect(isCacheValid(noSha, { ...noShaKey, maxMtimeMs: 101 })).toBe(false);
   });
 
   it('invalidates when the repo flips between sha and no-sha (dirty/clean)', () => {
-    const noSha = { version: PERSISTED_REPO_MAP_VERSION, cacheKey: { root: '/repo', gitSha: null, maxMtimeMs: 100 } };
+    const noSha = {
+      version: PERSISTED_REPO_MAP_VERSION,
+      cacheKey: { ...base, gitSha: null, maxMtimeMs: 100 },
+    };
     expect(isCacheValid(noSha, base)).toBe(false); // was dirty, now has a sha
     expect(isCacheValid(persisted, { ...base, gitSha: null })).toBe(false); // was clean, now dirty
   });
@@ -154,7 +173,7 @@ describe('assertNoBodyLeakage (privacy invariant)', () => {
   it('reports a leak when a body sentinel survives into the artifact', () => {
     const leaky = {
       version: PERSISTED_REPO_MAP_VERSION,
-      cacheKey: { root, gitSha: null, maxMtimeMs: 1 },
+      cacheKey: { root, gitSha: null, maxMtimeMs: 1, structureSignature: null },
       sizeBounded: false,
       droppedFiles: 0,
       map: {

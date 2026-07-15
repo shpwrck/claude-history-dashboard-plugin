@@ -98,7 +98,7 @@ export const SESSION_BLOB_OUTPUT = {
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
-  version: 3,
+  version: 4,
   contract: ['version', 'cacheKey', 'sizeBounded', 'droppedFiles', 'map'],
   consumedBy:
     'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version)',

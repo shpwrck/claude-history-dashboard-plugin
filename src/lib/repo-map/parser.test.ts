@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import Parser from 'web-tree-sitter';
-import { loadTsParser, extractStructure } from './parser';
+import { loadTsParser, extractStructure, repoMapParserCacheSalt } from './parser';
 
 // Exercises the REAL WASM Tree-sitter grammar (web-tree-sitter@0.20.8 +
 // tree-sitter-wasms@0.1.13). Confirms the pinned pair loads under vitest and
@@ -82,5 +82,11 @@ const localConst = 2;
     const { symbols } = extractStructure(parser, 'export const x = () => 1;\n');
     expect(symbols.find((s) => s.name === 'x')).toMatchObject({ kind: 'const', exported: true });
     expect(extractStructure(parser, '')).toEqual({ symbols: [], imports: [] });
+  });
+
+  it('exposes a stable cache salt fingerprinting grammar + extraction semantics', () => {
+    const first = repoMapParserCacheSalt();
+    expect(first).toMatch(/^repo-map-output-v\d+:[a-f0-9]{64}$/);
+    expect(repoMapParserCacheSalt()).toBe(first);
   });
 });

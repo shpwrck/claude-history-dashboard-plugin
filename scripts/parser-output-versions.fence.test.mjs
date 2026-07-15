@@ -122,7 +122,12 @@ test('repo-map output contract === live PersistedRepoMap envelope fields (fence:
   // Build a minimal persisted envelope through the real producer path so the
   // field set is the LIVE one, not a hand-copied list.
   const map = { root: '/repo', files: [], fileCount: 0, text: '' };
-  const cacheKey = { root: '/repo', gitSha: null, maxMtimeMs: 0 };
+  const cacheKey = {
+    root: '/repo',
+    gitSha: null,
+    maxMtimeMs: 0,
+    structureSignature: null,
+  };
   const persisted = enforceSizeLimit(
     map,
     cacheKey,
@@ -142,7 +147,12 @@ test('repo-map output contract === live PersistedRepoMap envelope fields (fence:
 
 test('repo-map version is the value the persisted envelope actually stamps', () => {
   const map = { root: '/repo', files: [], fileCount: 0, text: '' };
-  const cacheKey = { root: '/repo', gitSha: null, maxMtimeMs: 0 };
+  const cacheKey = {
+    root: '/repo',
+    gitSha: null,
+    maxMtimeMs: 0,
+    structureSignature: null,
+  };
   const persisted = enforceSizeLimit(
     map,
     cacheKey,

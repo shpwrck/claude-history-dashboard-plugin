@@ -15,8 +15,25 @@ export type {
   ParseFile,
   GenerateRepoMapOptions,
 } from './types';
+export { RepoMapParserInitializationError } from './types';
 export { generateRepoMap, renderRepoMap } from './generate';
-export { createTsParseFile, extractStructure, loadTsParser } from './parser';
+export {
+  createTsParseFile,
+  extractStructure,
+  loadTsParser,
+  repoMapParserCacheSalt,
+} from './parser';
+export type {
+  RepoMapFileCache,
+  RepoMapFileCacheCommit,
+  RepoMapFileCacheOptions,
+} from './file-cache';
+export {
+  createRepoMapFileCache,
+  DEFAULT_REPO_MAP_FILE_CACHE_MAX_BYTES,
+  DEFAULT_REPO_MAP_FILE_CACHE_MAX_ENTRIES,
+  REPO_MAP_FILE_CACHE_VERSION,
+} from './file-cache';
 export type {
   RepoMapCacheKey,
   PersistedRepoMap,

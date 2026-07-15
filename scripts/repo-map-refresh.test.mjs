@@ -15,13 +15,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DRIVER = join(PROJECT_DIR, 'scripts', 'repo-map-refresh.mjs');
+const GENERATOR = join(PROJECT_DIR, 'scripts', 'repo-map-generate.mjs');
+const REGISTER_TS = join(PROJECT_DIR, 'scripts', 'register-ts.mjs');
 
 // The REAL consumer seam: `cache.ts` (runtime-safe — node builtins + a type only,
 // NOT the parser barrel) owns the unwrap; `parse-repo-map-join.ts` is the dataset
@@ -38,6 +40,23 @@ function runDriver(home, env = {}) {
     env: { ...process.env, HOME: home, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+}
+
+function runProducer(home, project, cacheDir, extraArgs = []) {
+  return execFileSync(
+    process.execPath,
+    ['--import', REGISTER_TS, GENERATOR, project, ...extraArgs],
+    {
+      cwd: PROJECT_DIR,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: home,
+        REPO_MAP_FILE_CACHE_DIR: cacheDir,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
 }
 
 function seedFixtureRoot(root) {
@@ -94,6 +113,99 @@ test('produces an artifact the REAL consumer can read, then is idempotent', () =
     const out2 = runDriver(home);
     assert.match(out2, /1 up to date/);
     assert.doesNotMatch(out2, /[1-9]\d* failed/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('producer reuses per-file parses while keeping the sidecar out of artifacts', () => {
+  const home = mkdtempSync(join(tmpdir(), 'rmr-file-cache-home-'));
+  const project = mkdtempSync(join(tmpdir(), 'rmr-file-cache-proj-'));
+  const cacheDir = join(home, 'host-cache', 'repo-map');
+  try {
+    seedFixtureRoot(project);
+
+    const cold = runProducer(home, project, cacheDir);
+    assert.match(cold, /parse cache 0 hits, 2 misses, 2 retained/);
+    assert.equal(
+      readdirSync(artifactDirOf(home)).filter((name) => name.endsWith('.json')).length,
+      1,
+      'runtime artifact directory contains only the consumer artifact'
+    );
+    assert.equal(
+      readdirSync(cacheDir).filter((name) => name.endsWith('.json')).length,
+      1,
+      'host cache is a separate sidecar'
+    );
+
+    const warm = runProducer(home, project, cacheDir);
+    assert.match(warm, /parse cache 2 hits, 0 misses, 2 retained/);
+
+    // Losing/replacing the sidecar models a grammar-salt cohort invalidation.
+    // The old outer git-sha/mtime key is unchanged, but fresh parse misses must
+    // still force the canonical artifact write so stale structures cannot win.
+    rmSync(cacheDir, { recursive: true, force: true });
+    const artifactFile = join(artifactDirOf(home), onlyArtifact(home).files[0]);
+    chmodSync(artifactFile, 0o400);
+    try {
+      assert.throws(
+        () => runProducer(home, project, cacheDir),
+        /Command failed/,
+        'canonical artifact write failure is surfaced'
+      );
+      assert.equal(
+        existsSync(cacheDir),
+        false,
+        'changed sidecar is not committed before the canonical write succeeds'
+      );
+    } finally {
+      chmodSync(artifactFile, 0o600);
+    }
+
+    const invalidated = runProducer(home, project, cacheDir);
+    assert.match(invalidated, /parse cache 0 hits, 2 misses, 2 retained/);
+    assert.doesNotMatch(invalidated, /cache hit/);
+    assert.match(invalidated, /wrote /);
+
+    writeFileSync(
+      join(project, 'src', 'api.ts'),
+      "import type { Thing } from './types'\nexport function changed(): Thing { return { id: 'y' } }\n"
+    );
+    const changed = runProducer(home, project, cacheDir);
+    assert.match(changed, /parse cache 1 hits, 1 misses, 2 retained/);
+
+    const forced = runProducer(home, project, cacheDir, ['--force']);
+    assert.match(forced, /parse cache 0 hits, 2 misses, 2 retained/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('producer rejects cache directories that alias the runtime artifact tree', () => {
+  const home = mkdtempSync(join(tmpdir(), 'rmr-cache-alias-home-'));
+  const project = mkdtempSync(join(tmpdir(), 'rmr-cache-alias-proj-'));
+  const safeCache = join(home, 'host-cache', 'repo-map');
+  try {
+    seedFixtureRoot(project);
+    runProducer(home, project, safeCache);
+    const artifact = join(artifactDirOf(home), onlyArtifact(home).files[0]);
+    const before = readFileSync(artifact, 'utf8');
+
+    assert.throws(
+      () => runProducer(home, project, artifactDirOf(home)),
+      /must resolve outside the runtime repo-map artifact directory/
+    );
+    assert.equal(readFileSync(artifact, 'utf8'), before, 'direct alias leaves artifact intact');
+
+    const alias = join(home, 'artifact-dir-alias');
+    symlinkSync(artifactDirOf(home), alias, 'dir');
+    assert.throws(
+      () => runProducer(home, project, alias),
+      /must resolve outside the runtime repo-map artifact directory/
+    );
+    assert.equal(readFileSync(artifact, 'utf8'), before, 'symlink alias leaves artifact intact');
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });

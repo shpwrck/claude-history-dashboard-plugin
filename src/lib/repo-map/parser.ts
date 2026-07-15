@@ -1,8 +1,14 @@
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import Parser from 'web-tree-sitter';
 import type { FileStructure, ParseFile, RepoSymbol, RepoSymbolKind } from './types';
+// The canonical parser-output -> cache-invalidation seam (#2075). A change to
+// extractStructure semantics already requires this version to move; reuse it
+// rather than creating a second manual bump point for the per-file cache.
+// @ts-expect-error - plain ESM constant registry, no .d.ts (same as cache.ts).
+import { REPO_MAP_OUTPUT } from '../../../scripts/lib/parser-output-versions.mjs';
 
 /**
  * WASM Tree-sitter TS/JS structure extractor (#887 / ADR 0007).
@@ -27,6 +33,23 @@ const require = createRequire(import.meta.url);
 function grammarWasmPath(lang: string): string {
   const core = require.resolve('web-tree-sitter/tree-sitter.wasm');
   return join(dirname(core), '..', 'tree-sitter-wasms', 'out', `tree-sitter-${lang}.wasm`);
+}
+
+let fileCacheSalt: string | null = null;
+
+/** Stable grammar + engine + extraction-semantics salt for per-file caching. */
+export function repoMapParserCacheSalt(): string {
+  if (!fileCacheSalt) {
+    const engine = readFileSync(require.resolve('web-tree-sitter/tree-sitter.wasm'));
+    const grammar = readFileSync(grammarWasmPath('typescript'));
+    const wasmDigest = createHash('sha256')
+      .update(engine)
+      .update('\0')
+      .update(grammar)
+      .digest('hex');
+    fileCacheSalt = `repo-map-output-v${REPO_MAP_OUTPUT.version}:${wasmDigest}`;
+  }
+  return fileCacheSalt;
 }
 
 let parserPromise: Promise<Parser> | null = null;

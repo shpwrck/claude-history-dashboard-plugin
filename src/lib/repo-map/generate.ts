@@ -6,6 +6,7 @@ import type {
   RepoFile,
   RepoMap,
 } from './types';
+import { RepoMapParserInitializationError } from './types';
 import { createTsParseFile } from './parser';
 import { readDirentsBoundedSync } from '../bounded-fs';
 
@@ -73,6 +74,7 @@ function walkSourceFiles(
     ).sort((a, b) => a.name.localeCompare(b.name));
     inspectedDirEntries += entries.length;
     for (const entry of entries) {
+      if (found.length >= maxFiles) break;
       const name = entry.name;
       if (name.startsWith('.')) continue; // dotfiles/dotdirs
       const full = join(dir, name);
@@ -218,8 +220,12 @@ export async function generateRepoMap(
     }
     let structure;
     try {
-      structure = parseFile(source, relPosix(root, abs));
-    } catch {
+      structure = await parseFile(source, relPosix(root, abs));
+    } catch (error) {
+      // Missing/incompatible WASM is a producer failure, not an unparseable
+      // source file. Preserve the fail-loud behavior the eager parser had so a
+      // refresh can never replace a valid artifact with a successful empty map.
+      if (error instanceof RepoMapParserInitializationError) throw error;
       continue; // a single unparseable file must not sink the whole map
     }
     files.push({
