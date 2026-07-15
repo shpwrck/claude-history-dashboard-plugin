@@ -369,20 +369,38 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "view": "cost",
   },
   {
-    "action": "Confirm automated runs use the cheapest model that meets the quality bar — Haiku/Sonnet often suffice for scripted work.",
+    "action": "Down-model only the task classes a per-class before/after (T2) or replay (T3) proof has cleared on your own history — start with mechanical (picker/classify/status/log-only) work and keep code-authoring on the strong model. A cheaper model can take more iterations or fail to complete a class, so the swap figure is a ceiling, not a guaranteed reduction.",
     "affected": 1,
     "category": "cost",
-    "detail": "Automated (sdk-*) sessions account for $100.00 (89% of total) across 1 session(s). Running those automation turns on Haiku instead would have cost about $80.00 less. By task class: $0.00 mechanical, $100.00 authoring, $0.00 review.",
+    "detail": "Automated (sdk-*) sessions account for $100.00 (89% of total) across 1 session(s). Repriced at Haiku's token rates, those turns would have cost about $80.00 less. By task class: $0.00 mechanical (safest to down-model), $100.00 authoring (code writes — unproven, keep on the strong model), $0.00 review. That swap figure is an upper-bound estimate — it assumes the cheaper model completes the same work in the same number of turns; in practice a cheaper model may need more iterations or fail to complete some task classes.",
     "estSavingsUsd": 80,
     "fix": {
-      "label": "Default automation to Haiku",
-      "note": "Merge into the settings.json your sdk-* runs use, to right-size the 89% automated spend. Use the cheapest model that holds your quality bar.",
+      "fixKind": "illustrative",
+      "label": "Example: down-model a proof-cleared class",
+      "note": "Example only — not a blanket global pin. A top-level "model" applies to every task class including code-authoring; scope the cheaper model to the sdk-* runs whose class a before/after (T2) or replay (T3) proof has cleared, and leave authoring on the strong model. See docs/product/features/down-modelling-confidence.md before adopting.",
       "snippet": "{
   "model": "claude-haiku-4-5"
 }",
       "target": "settings.json",
     },
     "id": "cost.automation-share",
+    "provenance": {
+      "inference": "The swap figure is a per-token repricing counterfactual (T1 estimate): an UPPER BOUND that assumes the cheaper model completes the same work in the same number of turns. A cheaper model may need more iterations or fail to complete a class, so it is neither a guaranteed reduction nor proof that any class is safe to down-route — code-authoring especially stays on the strong model until a per-class before/after (T2) or replay (T3) proof clears it. This mirrors Anthropic's own guidance that model choice is a capability decision, not a blanket cost lever.",
+      "observations": [
+        {
+          "claim": "89% of billable token spend (~$100.00) ran on unattended sdk-* entrypoints across 1 session(s)",
+          "field": "entrypoint",
+          "source": "parse-sessions",
+          "value": 1,
+        },
+        {
+          "claim": "repricing those turns at claude-haiku-4-5-20251001's token rates yields a counterfactual $80.00 lower bill",
+          "field": "entries[].model",
+          "source": "parse-sessions",
+          "value": 80,
+        },
+      ],
+    },
     "reclaim": {
       "category": "cost",
       "counterfactual": {

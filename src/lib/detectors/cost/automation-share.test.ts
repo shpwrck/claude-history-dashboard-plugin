@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { detector, DOWN_MODEL_PROOF_FRESHNESS_DAYS } from './automation-share';
 import { automationCostShare } from '../shared';
+import { effectiveFixKind, isBlanketModelPinSnippet } from '../fix-validity';
+import { validateRecommendationProvenance } from '../provenance';
 import { CHEAPEST_MODEL } from '../../pricing';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData, TokenEntry } from '../../../types';
@@ -318,5 +320,95 @@ describe('cost.automation-share stale down-model proof decay (#2142)', () => {
     ).authoring.savingsAttribution;
     expect(auth?.tier).toBe('tier-0-estimate');
     expect(auth?.stale).toBeFalsy();
+  });
+});
+
+describe('cost.automation-share down-model safety caveat + fix safety (#2548)', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  // Unattended sdk-* automation on the strong model, dated so `asOf` resolves.
+  const tokenData = [
+    session('author', 'sdk-cli', 'coder: implement issue #2548', [
+      entry('claude-opus-4-8', 5_000_000, 1_000_000, '2026-06-03T00:00:00.000Z'),
+    ]),
+    session('mech', 'sdk-cli', 'route-loose classify + groom-pick dry-run', [
+      entry('claude-opus-4-8', 3_000_000, 600_000, '2026-06-02T00:00:00.000Z'),
+    ]),
+  ];
+  const asOfMs = Date.parse('2026-06-03T00:00:00.000Z');
+
+  it('states the equal-completion assumption, iteration risk, and class-completability risk in the copy', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const detail = rec?.detail ?? '';
+    // equal-completion assumption
+    expect(detail).toContain('upper-bound estimate');
+    expect(detail).toContain('same number of turns');
+    // iteration risk + class-completability risk
+    expect(detail).toMatch(/more iterations/);
+    expect(detail).toMatch(/fail to complete/);
+  });
+
+  it('never describes authoring as proven safe to down-route', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    const text = `${rec?.detail ?? ''} ${rec?.action ?? ''}`;
+    // authoring is called out as unproven / kept on the strong model.
+    expect(text).toMatch(/authoring[^.]*unproven|code-authoring[^.]*strong model/i);
+    // the swap figure is framed as a ceiling, not a guaranteed reduction.
+    expect(rec?.action).toContain('ceiling, not a guaranteed reduction');
+  });
+
+  it('exposes the blanket Haiku pin as an illustrative example, never a validated copy-paste fix', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    expect(rec?.fix).toBeDefined();
+    // A top-level "model" pin is a blanket global down-route...
+    expect(isBlanketModelPinSnippet(rec!.fix!.snippet)).toBe(true);
+    // ...so it must be illustrative, never the copy-paste-safe default.
+    expect(rec?.fix?.fixKind).toBe('illustrative');
+    expect(effectiveFixKind(rec!.fix!)).not.toBe('validated');
+    // and its note points at the class-scoped proof before adoption.
+    expect(rec?.fix?.note).toMatch(/T2|T3|before\/after|replay/);
+  });
+
+  it('emits auditable provenance whose inference carries the caveat, passing the contract', () => {
+    const rec = detector.rule(input({ tokenData }), 0);
+    expect(rec?.provenance).toBeDefined();
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    for (const o of rec!.provenance!.observations) {
+      expect(o.source).toBe('parse-sessions');
+    }
+    const inference = rec!.provenance!.inference ?? '';
+    expect(inference).toMatch(/upper bound/i);
+    expect(inference).toMatch(/safe to down-route/i);
+    expect(inference).toMatch(/capability decision/i);
+  });
+
+  it('carries the freshest automation turn as asOf and demotes present-tense wording when stale', () => {
+    // Fresh: `now` just after the freshest turn — inside the freshness window.
+    const fresh = detector.rule(input({ tokenData }), asOfMs + 5 * DAY_MS);
+    expect(fresh?.provenance?.asOf).toBe('2026-06-03');
+    expect(fresh?.provenance?.stale).toBe(false);
+    expect(validateRecommendationProvenance(fresh!)).toEqual([]);
+
+    // Stale: `now` past the down-model freshness horizon — a model generation has
+    // shipped since, so the snapshot is demoted to "as of <date>".
+    const stale = detector.rule(
+      input({ tokenData }),
+      asOfMs + (DOWN_MODEL_PROOF_FRESHNESS_DAYS + 2) * DAY_MS
+    );
+    expect(stale?.provenance?.asOf).toBe('2026-06-03');
+    expect(stale?.provenance?.stale).toBe(true);
+    expect(validateRecommendationProvenance(stale!)).toEqual([]);
+  });
+
+  it('suppresses the estimate-only finding once Haiku is already pinned (no measured win)', () => {
+    const rec = detector.rule(
+      input({
+        tokenData,
+        liveConfig: {
+          settings: { model: 'claude-haiku-4-5' },
+        } as unknown as RecommendationInput['liveConfig'],
+      }),
+      0
+    );
+    expect(rec).toBeNull();
   });
 });

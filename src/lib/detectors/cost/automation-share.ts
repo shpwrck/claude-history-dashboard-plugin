@@ -11,7 +11,7 @@ import {
   type AutomationClassCost,
 } from '../shared';
 import { CHEAPEST_MODEL } from '../../pricing';
-import { demoteStaleAttribution } from '../provenance';
+import { demoteStaleAttribution, isAsOfStale } from '../provenance';
 import {
   computeModelPinSavings,
   deriveModelPinSavingsConfig,
@@ -193,29 +193,55 @@ export const detector: Detector = {
     }
     // Lead with the concrete recoverable figure (the swap counterfactual) when
     // there's something to recover; fall back to the share-only framing when the
-    // automation already runs on the cheapest tier (savings ≈ $0).
+    // automation already runs on the cheapest tier (savings ≈ $0). The swap
+    // figure is per-token repricing — an UPPER BOUND that assumes the cheaper
+    // model does the same work in the same number of turns, so its copy (below)
+    // and provenance flag the equal-completion assumption, iteration risk, and
+    // class-completability risk (#2548). Anthropic frames model choice as a
+    // capability decision, not a blanket cost lever (platform.claude.com
+    // model/effort guidance:
+    // https://platform.claude.com/docs/en/build-with-claude/effort.md); that
+    // first-party rationale is why the safe scope is per task class (epic #2138),
+    // never a global pin — but it is general guidance, not proof any class here
+    // is safe (only a T2/T3 receipt is).
     const savingsSentence =
       swapSavings >= 0.01
-        ? ` Running those automation turns on Haiku instead would have cost about ${fmtUsd(swapSavings)} less.`
+        ? ` Repriced at Haiku's token rates, those turns would have cost about ${fmtUsd(swapSavings)} less.`
         : '';
     // Per-class breakdown (#2139): name where the automation spend actually sits.
     // Mechanical (pickers/classify/status-writes/log-only replay) is the safest
-    // to down-model; authoring (code writes) the riskiest. These partition the
-    // `autoCost` above — they sum back to it exactly.
+    // to down-model; authoring (code writes) is UNPROVEN and stays on the strong
+    // model until a per-class proof clears it. These partition the `autoCost`
+    // above — they sum back to it exactly.
     const byC = byClass.byClass;
     const classSentence =
       autoCost > 0
-        ? ` By task class: ${fmtUsd(byC.mechanical.autoCost)} mechanical, ${fmtUsd(byC.authoring.autoCost)} authoring, ${fmtUsd(byC.review.autoCost)} review.`
+        ? ` By task class: ${fmtUsd(byC.mechanical.autoCost)} mechanical (safest to down-model), ${fmtUsd(byC.authoring.autoCost)} authoring (code writes — unproven, keep on the strong model), ${fmtUsd(byC.review.autoCost)} review.`
         : '';
+    // The equal-completion / iteration / class-completability caveat: the swap
+    // figure is a ceiling, never a promised reduction (#2548).
+    const swapCaveatSentence =
+      swapSavings >= 0.01
+        ? ' That swap figure is an upper-bound estimate — it assumes the cheaper model completes the same work in the same number of turns; in practice a cheaper model may need more iterations or fail to complete some task classes.'
+        : '';
+    // Freshest billable automation turn → the provenance `asOf`; a snapshot older
+    // than the down-model freshness horizon demotes the present-tense claim.
+    const latestAutoTs = Math.max(
+      ...byClass.classes.map((c) => c.latestTimestampMs ?? Number.NEGATIVE_INFINITY)
+    );
+    const provenanceAsOf =
+      Number.isFinite(latestAutoTs) && latestAutoTs > 0
+        ? new Date(latestAutoTs).toISOString().slice(0, 10)
+        : undefined;
     return {
       id: 'cost.automation-share',
       category: 'cost',
       severity: 'info',
       title: 'Automation drives a large share of spend',
-      detail: `Automated (sdk-*) sessions account for ${fmtUsd(autoCost)} (${share.toFixed(0)}% of total) across ${sessionCount} session(s).${savingsSentence}${classSentence}`,
+      detail: `Automated (sdk-*) sessions account for ${fmtUsd(autoCost)} (${share.toFixed(0)}% of total) across ${sessionCount} session(s).${savingsSentence}${classSentence}${swapCaveatSentence}`,
       action: haikuPinned
-        ? 'Keep automated runs on the cheapest model that meets the quality bar; the observed before/after savings are shown on this card.'
-        : 'Confirm automated runs use the cheapest model that meets the quality bar — Haiku/Sonnet often suffice for scripted work.',
+        ? 'Keep automated runs on the cheapest model that holds the quality bar of each task class — down-model only proof-cleared classes and leave code-authoring on the strong model; the observed before/after savings are shown on this card.'
+        : 'Down-model only the task classes a per-class before/after (T2) or replay (T3) proof has cleared on your own history — start with mechanical (picker/classify/status/log-only) work and keep code-authoring on the strong model. A cheaper model can take more iterations or fail to complete a class, so the swap figure is a ceiling, not a guaranteed reduction.',
       // The dollar weight is the recoverable swap savings, not the full
       // automation spend — you can't recover spend you'd still pay on Haiku.
       estSavingsUsd: swapSavings,
@@ -226,6 +252,35 @@ export const detector: Detector = {
       ...(measuredSavings?.attribution
         ? { savingsAttribution: measuredSavings.attribution }
         : {}),
+      // Auditable provenance (#1049/#2548): the swap dollar figure is a T1
+      // per-token repricing counterfactual — an upper bound, never proof a class
+      // is safe to down-route. The inference states the equal-completion
+      // assumption, iteration risk, and class-completability risk so a reader or
+      // /recs consumer cannot mistake the estimate for a cleared class.
+      provenance: {
+        observations: [
+          {
+            claim: `${share.toFixed(0)}% of billable token spend (~${fmtUsd(autoCost)}) ran on unattended sdk-* entrypoints across ${sessionCount} session(s)`,
+            source: 'parse-sessions',
+            field: 'entrypoint',
+            value: sessionCount,
+          },
+          {
+            claim: `repricing those turns at ${CHEAPEST_MODEL}'s token rates yields a counterfactual ${fmtUsd(swapSavings)} lower bill`,
+            source: 'parse-sessions',
+            field: 'entries[].model',
+            value: Number(swapSavings.toFixed(2)),
+          },
+        ],
+        inference:
+          `The swap figure is a per-token repricing counterfactual (T1 estimate): an UPPER BOUND that assumes the cheaper model completes the same work in the same number of turns. A cheaper model may need more iterations or fail to complete a class, so it is neither a guaranteed reduction nor proof that any class is safe to down-route — code-authoring especially stays on the strong model until a per-class before/after (T2) or replay (T3) proof clears it. This mirrors Anthropic's own guidance that model choice is a capability decision, not a blanket cost lever.`,
+        ...(provenanceAsOf
+          ? {
+              asOf: provenanceAsOf,
+              stale: isAsOfStale(provenanceAsOf, now, DOWN_MODEL_PROOF_FRESHNESS_DAYS),
+            }
+          : {}),
+      },
       affected: sessionCount,
       view: 'cost',
       ...(haikuPinned
@@ -233,8 +288,14 @@ export const detector: Detector = {
         : {
             fix: {
               target: 'settings.json',
-              label: 'Default automation to Haiku',
-              note: `Merge into the settings.json your sdk-* runs use, to right-size the ${share.toFixed(0)}% automated spend. Use the cheapest model that holds your quality bar.`,
+              label: 'Example: down-model a proof-cleared class',
+              // A blanket global "model" pin is unsafe here: it down-routes every
+              // task class, including code-authoring, which the per-task-class
+              // safety boundary (epic #2138) keeps on the strong model until a
+              // proof clears it. So this is an ADAPT-ME example, never a
+              // copy-paste-safe validated fix (#2548).
+              fixKind: 'illustrative',
+              note: `Example only — not a blanket global pin. A top-level "model" applies to every task class including code-authoring; scope the cheaper model to the sdk-* runs whose class a before/after (T2) or replay (T3) proof has cleared, and leave authoring on the strong model. See docs/product/features/down-modelling-confidence.md before adopting.`,
               snippet: `{\n  "model": "claude-haiku-4-5"\n}`,
             },
           }),
