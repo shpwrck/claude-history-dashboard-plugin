@@ -37,14 +37,6 @@ export const CLIENT_ABSENT_ENGINE_FIELDS: readonly string[] = [
   'docHygieneArtifact',
   'modelPinSavings',
   'organizationIdentity',
-  // `secretsAtRest` (#2504) is computed at server ingest (the shared
-  // SECRET_PATTERNS run over transcripts) and consumed by the server recs route
-  // via the generic signal-input loop. It is not (yet) threaded through the
-  // client ViewData envelope, so `security.secrets-at-rest` fires on the
-  // server `/api/recommendations.json` path (which `/recs` reads) but stays
-  // dark on the SPA/client. Threading it to the client Recommendations view is
-  // a follow-up; until then it is honestly client-absent here.
-  'secretsAtRest',
 ];
 
 export function recommendationViewsFromViewData(
@@ -61,6 +53,7 @@ export function recommendationViewsFromViewData(
     workflows: d.workflows,
     assistantFeatures: d.assistantFeatures,
     deceitSignals: d.deceitSignals,
+    secretsAtRest: d.secretsAtRest ?? [],
     timelines: d.timelines,
     attribution: d.attribution,
     agentSettings: d.agentSettings,

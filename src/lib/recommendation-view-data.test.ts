@@ -4,9 +4,11 @@ import {
   recommendationViewsFromViewData,
 } from './recommendation-view-data';
 import {
+  assembleRecommendationInput,
   engineConsumedFields,
   listOmittedEngineSignals,
 } from './recommendations';
+import type { SecretsAtRestSignal } from './parse-secrets-at-rest';
 import type { ViewData } from './view-registry';
 
 /**
@@ -21,7 +23,7 @@ import type { ViewData } from './view-registry';
 // Fully-populated ViewData stand-in: every engine field gets a non-undefined
 // value. Values are shape-irrelevant here — the contract under test is key
 // coverage, not detector behavior.
-function fullViewData(): ViewData {
+function fullViewData(overrides: Partial<ViewData> = {}): ViewData {
   return {
     entries: [],
     sessions: [],
@@ -43,6 +45,7 @@ function fullViewData(): ViewData {
     assistantFeatures: [],
     promptAnalysis: [],
     deceitSignals: [],
+    secretsAtRest: [],
     liveConfig: null,
     repoMap: null,
     shadowCalls: null,
@@ -65,10 +68,49 @@ function fullViewData(): ViewData {
     externalGuidance: [],
     enterpriseSession: null,
     sampleAdoptionReceipts: [],
+    ...overrides,
   };
 }
 
 describe('recommendationViewsFromViewData (#2352 parity contract)', () => {
+  it('projects the already-sanitized secrets-at-rest signal into the canonical envelope', () => {
+    const secretsAtRest: SecretsAtRestSignal[] = [
+      {
+        sessionId: 'session-safe-coordinates',
+        totalCount: 2,
+        countsByKind: { 'anthropic-key': 1, 'private-key': 1 },
+        evidenceRefs: [
+          {
+            sessionId: 'session-safe-coordinates',
+            entryIndex: 4,
+            timestamp: '2026-07-15T10:00:00.000Z',
+            toolUseId: 'tool-use-coordinate',
+          },
+        ],
+        lastObserved: '2026-07-15T10:00:00.000Z',
+      },
+    ];
+    const envelope = recommendationViewsFromViewData(fullViewData({ secretsAtRest }));
+    const detectorInput = assembleRecommendationInput(envelope);
+
+    expect(envelope.secretsAtRest).toBe(secretsAtRest);
+    expect(detectorInput.secretsAtRest).toBe(secretsAtRest);
+    expect(CLIENT_ABSENT_ENGINE_FIELDS).not.toContain('secretsAtRest');
+    expect(listOmittedEngineSignals(envelope)).not.toContain('secretsAtRest');
+  });
+
+  it('preserves the empty signal used for legacy and SPA datasets', () => {
+    const envelope = recommendationViewsFromViewData(fullViewData());
+    const legacyEnvelope = recommendationViewsFromViewData({
+      ...fullViewData(),
+      secretsAtRest: undefined,
+    } as unknown as ViewData);
+
+    expect(envelope.secretsAtRest).toEqual([]);
+    expect(assembleRecommendationInput(envelope).secretsAtRest).toEqual([]);
+    expect(legacyEnvelope.secretsAtRest).toEqual([]);
+  });
+
   it('supplies every engine-consumed field the client dataset carries', () => {
     const envelope = recommendationViewsFromViewData(fullViewData());
     const record = envelope as unknown as Record<string, unknown>;

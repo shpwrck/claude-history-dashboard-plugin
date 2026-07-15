@@ -50,6 +50,7 @@ import type { TaskSteering } from './parse-steering';
 import type { ChurnGeometrySession } from './parse-churn-geometry';
 import type { ValueFlowSession } from './parse-value-flow';
 import type { TaskSuccessProxy } from './parse-task-success';
+import type { SecretsAtRestSignal } from './parse-secrets-at-rest';
 import { memoriesMatchProject } from './project-slug';
 import type { ProjectMemories } from './parse-memories';
 import type { WorkflowRun } from './parse-workflows';
@@ -292,6 +293,7 @@ export interface ViewData {
   assistantFeatures: AssistantFeatures[];
   promptAnalysis: PromptAnalysis[];
   deceitSignals: DeceitSignals[];
+  secretsAtRest: SecretsAtRestSignal[];
   liveConfig: LiveConfig | null;
   repoMap: RepoMapDataset | null;
   shadowCalls: ShadowCallAggregate | null;
@@ -578,6 +580,8 @@ export const VIEW_DATA_FILTER_POLICIES = {
   // Claims and deception checks are tied to session turns and therefore
   // filterable.
   deceitSignals: { time: 'filtered', project: 'filtered' },
+  // Secret-at-rest counts and evidence coordinates are emitted per session.
+  secretsAtRest: { time: 'filtered', project: 'filtered' },
   // Runtime config is a singleton-like artifact for the workspace.
   liveConfig: { time: 'global', project: 'global' },
   // Repo-map structure is cross-project infrastructure metadata for static
@@ -692,6 +696,7 @@ const SESSION_SCOPED_FIELDS = [
   'assistantFeatures',
   'promptAnalysis',
   'deceitSignals',
+  'secretsAtRest',
   'debugLogs',
 ] as const;
 

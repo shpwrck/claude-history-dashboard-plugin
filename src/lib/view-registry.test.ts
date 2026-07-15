@@ -223,6 +223,7 @@ function emptyData(overrides: Partial<ViewData> = {}): ViewData {
     assistantFeatures: [],
     promptAnalysis: [],
     deceitSignals: [],
+    secretsAtRest: [],
     liveConfig: null,
     repoMap: null,
     shadowCalls: null,
@@ -790,6 +791,10 @@ describe('project-scoped view data filtering', () => {
           claimSnippets: [],
         },
       ],
+      secretsAtRest: [
+        { sessionId: 'alpha-1', totalCount: 1, countsByKind: {}, evidenceRefs: [] },
+        { sessionId: 'beta-1', totalCount: 1, countsByKind: {}, evidenceRefs: [] },
+      ],
       workflows: [
         {
           runId: 'wf-alpha',
@@ -916,6 +921,7 @@ describe('project-scoped view data filtering', () => {
     expect(filtered.assistantFeatures.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.promptAnalysis.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.deceitSignals.map((item) => item.sessionId)).toEqual(['alpha-1']);
+    expect(filtered.secretsAtRest.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.workflows.map((item) => item.sessionId)).toEqual(['alpha-1']);
     expect(filtered.fileHistory.map((item) => item.sessionId)).toEqual(['alpha-1']);
     // The path-format `ctx.project` must join to the slug-format memory key.
@@ -928,6 +934,10 @@ describe('project-scoped view data filtering', () => {
   });
 
   it('records explicit filter-policy decisions for audited fields', () => {
+    expect(VIEW_DATA_FILTER_POLICIES.secretsAtRest).toMatchObject({
+      time: 'filtered',
+      project: 'filtered',
+    });
     expect(VIEW_DATA_FILTER_POLICIES.workflows).toMatchObject({
       time: 'filtered',
       project: 'filtered',
@@ -1220,6 +1230,21 @@ describe('filterViewDataByTime', () => {
     expect(
       filterViewDataByTime(data, { time: 'all', project: ALL_PROJECTS })
     ).toBe(data);
+  });
+
+  it('filters secrets-at-rest signals by the selected sessions', () => {
+    const withSignals = filterViewDataByTime(
+      {
+        ...data,
+        secretsAtRest: [
+          { sessionId: 'old', totalCount: 1, countsByKind: {}, evidenceRefs: [] },
+          { sessionId: 'recent', totalCount: 1, countsByKind: {}, evidenceRefs: [] },
+        ],
+      },
+      { time: '24h', project: ALL_PROJECTS }
+    );
+
+    expect(withSignals.secretsAtRest.map((row) => row.sessionId)).toEqual(['recent']);
   });
 
   it('filters representative dashboard arrays to the last 24 hours', () => {

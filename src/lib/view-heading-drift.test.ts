@@ -93,6 +93,7 @@ const emptyData: ViewData = {
   assistantFeatures: [],
   promptAnalysis: [],
   deceitSignals: [],
+  secretsAtRest: [],
   liveConfig: null,
   repoMap: null,
   shadowCalls: null,
