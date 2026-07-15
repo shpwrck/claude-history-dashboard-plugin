@@ -296,6 +296,8 @@ export interface BypassStat {
 
 export interface NativeToolBypass {
   categories: BypassStat[];
+  /** Distinct contributing Bash calls; one call can match multiple categories. */
+  distinctBypassCalls: number;
   /** Total category matches; one Bash call can contribute to multiple categories. */
   totalBypass: number;
   /** Newest dated contributing Bash call, normalized to ISO; null when undated. */
@@ -658,6 +660,7 @@ export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
   const unmappableCommandCategories = new Set<BypassCategory>();
   let nativeGrep = 0;
   let nativeGlob = 0;
+  let distinctBypassCalls = 0;
   let latestBypassMs = Number.NEGATIVE_INFINITY;
   let datedBypassMatches = 0;
   let undatedBypassMatches = 0;
@@ -674,6 +677,7 @@ export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
       }
       const categories = bashBypassCategories(call);
       if (categories.length > 0) {
+        distinctBypassCalls += 1;
         const timestampMs = rfc3339TimestampMs(call.timestamp);
         if (timestampMs !== null) {
           latestBypassMs = Math.max(latestBypassMs, timestampMs);
@@ -737,6 +741,7 @@ export function nativeToolBypass(data: ToolUsageData[]): NativeToolBypass {
 
   return {
     categories,
+    distinctBypassCalls,
     totalBypass,
     latestTimestamp: Number.isFinite(latestBypassMs)
       ? new Date(latestBypassMs).toISOString()
@@ -753,6 +758,8 @@ export interface NativeBypassScope {
   sessionId: string;
   /** Bypass Bash commands in this session (a command can match >1 category once). */
   count: number;
+  /** Bypass calls with a positive result payload, counted once per call. */
+  resultBearingCalls: number;
   /**
    * Sum of `tool_result` `resultBytes` over those bypass commands — evidence for
    * the detector's causal reclaim hypothesis. A char-count proxy (no per-call
@@ -773,14 +780,20 @@ export function nativeBypassByScope(data: ToolUsageData[]): NativeBypassScope[] 
   const out: NativeBypassScope[] = [];
   for (const session of data) {
     let count = 0;
+    let resultBearingCalls = 0;
     let resultBytes = 0;
     for (const call of session.calls) {
       // A single command can satisfy multiple BYPASS_DEFS; count it once.
       if (bashBypassCategories(call).length === 0) continue;
       count += 1;
-      if (call.resultBytes > 0) resultBytes += call.resultBytes;
+      if (call.resultBytes > 0) {
+        resultBearingCalls += 1;
+        resultBytes += call.resultBytes;
+      }
     }
-    if (count > 0) out.push({ sessionId: session.sessionId, count, resultBytes });
+    if (count > 0) {
+      out.push({ sessionId: session.sessionId, count, resultBearingCalls, resultBytes });
+    }
   }
   return out;
 }

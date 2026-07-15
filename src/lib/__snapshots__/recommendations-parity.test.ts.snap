@@ -456,11 +456,12 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "affected": 12,
     "category": "workflow",
     "claimClass": "causal",
-    "detail": "The available tool history recorded 12 native-tool-bypass category match(es): grep (5), cat (4), find (3).",
+    "detail": "The available tool history recorded 12 distinct native-tool-bypass Bash call(s); those calls produced 12 category match(es): grep (5), cat (4), find (3).",
     "evidence": [
-      "grep → Grep: 5×",
-      "cat → Read: 4×",
-      "find → Glob: 3×",
+      "12 distinct Bash call(s) produced 12 category match(es)",
+      "grep → Grep: 5 category match(es)",
+      "cat → Read: 4 category match(es)",
+      "find → Glob: 3 category match(es)",
     ],
     "fix": {
       "appliedMarkers": {
@@ -490,7 +491,13 @@ Keep file work structured and permission-aware. Apply these examples; category n
       "inference": "These category matches are candidates for first-class tool use or, for standalone cd, path-safe shell usage; whether each call is replaceable depends on its semantics. The guidance is therefore conditional and does not justify blanket shell-command denies. When result bytes are linked to input-token data, requesting their unrounded /4 token proxy as avoided by the native alternative is an auditable causal hypothesis, not a measured intervention effect; the cascade can cap or overlap-reduce that request.",
       "observations": [
         {
-          "claim": "12 native-tool bypass category match(es) were recorded",
+          "claim": "12 distinct native-tool bypass Bash call(s) were recorded",
+          "field": "toolData[].calls[].commandBypassCategories / input.command",
+          "source": "parse-tools",
+          "value": 12,
+        },
+        {
+          "claim": "Those calls produced 12 native-tool bypass category match(es)",
           "field": "toolData[].calls[].commandBypassCategories / input.command",
           "source": "parse-tools",
           "value": 12,

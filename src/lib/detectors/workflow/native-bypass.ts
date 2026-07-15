@@ -30,7 +30,7 @@ export const detector: Detector = {
   dataDeps: ['toolData', 'tokenData', 'liveConfig'],
   rule(input, now) {
     const bypass = nativeToolBypass(input.toolData);
-    if (bypass.totalBypass < MIN_BYPASS_CALLS) return null;
+    if (bypass.distinctBypassCalls < MIN_BYPASS_CALLS) return null;
     // The category set is statically bounded (six parser-owned families). Keep
     // every category visible because adoption/suppression is evaluated across
     // every category: hiding a fifth family would make the finding impossible
@@ -120,17 +120,23 @@ export const detector: Detector = {
     // to resolve real token cells — absent ⇒ no claim (the rec still surfaces).
     const byScope = nativeBypassByScope(input.toolData);
     const bytesBySession = new Map<string, number>();
+    const resultCallsBySession = new Map<string, number>();
     for (const s of byScope) {
-      if (s.resultBytes > 0) bytesBySession.set(s.sessionId, s.resultBytes);
+      if (s.resultBytes > 0) {
+        bytesBySession.set(s.sessionId, s.resultBytes);
+        resultCallsBySession.set(s.sessionId, s.resultBearingCalls);
+      }
     }
     const scopeKeys = new Set<string>();
     let inScopeInputTokens = 0;
     let directWasteTokens = 0;
     let attributedResultBytes = 0;
+    let attributedResultCalls = 0;
     for (const d of input.tokenData ?? []) {
       const bytes = bytesBySession.get(d.sessionId);
       if (!bytes) continue;
       attributedResultBytes += bytes;
+      attributedResultCalls += resultCallsBySession.get(d.sessionId) ?? 0;
       directWasteTokens += bytes / CHARS_PER_TOKEN;
       for (const e of d.entries) {
         scopeKeys.add(scopeKeyOf(d.sessionId, e.model || 'unknown'));
@@ -159,16 +165,20 @@ export const detector: Detector = {
       category: 'workflow',
       severity: 'info',
       title: 'Review shell patterns for native or path-safe alternatives',
-      detail: `${historyLead} ${bypass.totalBypass} native-tool-bypass category match(es): ${reported
+      detail: `${historyLead} ${bypass.distinctBypassCalls} distinct native-tool-bypass Bash call(s); those calls produced ${bypass.totalBypass} category match(es): ${reported
         .map((c) => `${c.category} (${c.count})`)
         .join(', ')}.`,
       action:
         'Prefer Grep/Glob/Read/Edit for equivalent file work. Avoid standalone cd calls by using absolute paths or a same-command `cd <dir> && <cmd>` anchor.',
       ...(reclaim ? { reclaim } : {}),
-      affected: bypass.totalBypass,
-      evidence: reported.map(
-        (c) => `${c.category} → ${c.nativeTool}: ${c.count}×`
-      ),
+      affected: bypass.distinctBypassCalls,
+      evidence: [
+        `${bypass.distinctBypassCalls} distinct Bash call(s) produced ${bypass.totalBypass} category match(es)`,
+        ...reported.map(
+          (c) =>
+            `${c.category} → ${c.nativeTool}: ${c.count} category match(es)`
+        ),
+      ],
       view: 'tools',
       claimClass: 'causal',
       proofTier: 'auditable',
@@ -190,7 +200,14 @@ export const detector: Detector = {
       provenance: {
         observations: [
           {
-            claim: `${bypass.totalBypass} native-tool bypass category match(es) were recorded`,
+            claim: `${bypass.distinctBypassCalls} distinct native-tool bypass Bash call(s) were recorded`,
+            source: 'parse-tools',
+            field:
+              'toolData[].calls[].commandBypassCategories / input.command',
+            value: bypass.distinctBypassCalls,
+          },
+          {
+            claim: `Those calls produced ${bypass.totalBypass} native-tool bypass category match(es)`,
             source: 'parse-tools',
             field:
               'toolData[].calls[].commandBypassCategories / input.command',
@@ -215,12 +232,22 @@ export const detector: Detector = {
             ? [
                 {
                   claim:
-                    `${attributedResultBytes} result character(s) from contributing Bash calls ` +
-                    'were linked to sessions with input-token data used to scope the reclaim',
+                    `${attributedResultBytes} result character(s) from result-bearing Bash calls ` +
+                    'were counted once per call and linked ' +
+                    'to sessions with input-token data used to scope the reclaim',
                   source: 'parse-tools + tokenData',
                   field:
                     'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens',
                   value: attributedResultBytes,
+                },
+                {
+                  claim:
+                    `${attributedResultCalls} result-bearing Bash call(s) supplied those ` +
+                    'linked result characters',
+                  source: 'parse-tools + tokenData',
+                  field:
+                    'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens',
+                  value: attributedResultCalls,
                 },
                 {
                   claim:

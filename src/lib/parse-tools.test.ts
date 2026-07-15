@@ -247,6 +247,22 @@ describe('repeatedCommands', () => {
 })
 
 describe('nativeToolBypass', () => {
+  it('separates distinct contributing calls from overlapping category matches', () => {
+    const out = nativeToolBypass([
+      session('s', [
+        bash('find src -name "*.ts" && grep TODO src/index.ts'),
+      ]),
+    ])
+
+    expect(out.distinctBypassCalls).toBe(1)
+    expect(out.totalBypass).toBe(2)
+    expect(
+      Object.fromEntries(
+        out.categories.map((category) => [category.category, category.count])
+      )
+    ).toMatchObject({ find: 1, grep: 1 })
+  })
+
   it('classifies unpiped grep/cat/cd bypasses and counts native Grep separately', () => {
     const data = [
       session('s', [
@@ -265,6 +281,8 @@ describe('nativeToolBypass', () => {
     expect(out.categories.find((c) => c.category === 'cat')?.observedCommandAliases).toEqual(['cat'])
     expect(out.categories.find((c) => c.category === 'cd')?.observedCommandHeads).toBeNull()
     expect(out.categories.find((c) => c.category === 'cd')?.observedCommandAliases).toEqual([])
+    expect(out.distinctBypassCalls).toBe(3)
+    expect(out.totalBypass).toBe(3)
     expect(out.grepRatio).toEqual({ native: 1, bash: 1 })
   })
 
@@ -457,7 +475,9 @@ describe('nativeBypassByScope (#951)', () => {
       session('s2', [call({ toolName: 'Bash', input: { command: 'echo hi' }, resultBytes: 10 })]),
     ]
     const out = nativeBypassByScope(data)
-    expect(out).toEqual([{ sessionId: 's1', count: 2, resultBytes: 500 }])
+    expect(out).toEqual([
+      { sessionId: 's1', count: 2, resultBearingCalls: 2, resultBytes: 500 },
+    ])
   })
 
   it('counts a command matching multiple bypass categories exactly once', () => {
@@ -468,7 +488,9 @@ describe('nativeBypassByScope (#951)', () => {
       ]),
     ]
     const out = nativeBypassByScope(data)
-    expect(out).toEqual([{ sessionId: 's', count: 1, resultBytes: 80 }])
+    expect(out).toEqual([
+      { sessionId: 's', count: 1, resultBearingCalls: 1, resultBytes: 80 },
+    ])
   })
 
   it('does not count a pipe-fed grep (consistent with nativeToolBypass)', () => {

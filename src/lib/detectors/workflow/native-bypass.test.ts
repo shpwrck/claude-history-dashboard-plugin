@@ -84,6 +84,114 @@ const commandData = (
 ];
 
 describe('workflow.native-bypass (#951)', () => {
+  it('gates and reports affected on distinct calls, not overlapping category matches', () => {
+    const dualCategoryCommand =
+      'find src -name "*.ts" && grep TODO src/index.ts';
+    const sixCalls = commandData(dualCategoryCommand, 6);
+
+    expect(detector.rule(input({ toolData: sixCalls }), 0)).toBeNull();
+
+    const rec = detector.rule(
+      input({ toolData: commandData(dualCategoryCommand, 10) }),
+      0
+    )!;
+    expect(rec.affected).toBe(10);
+    expect(rec.detail).toContain('10 distinct native-tool-bypass Bash call(s)');
+    expect(rec.detail).toContain('20 category match(es)');
+    expect(rec.evidence).toEqual(
+      expect.arrayContaining([
+        'find → Glob: 10 category match(es)',
+        'grep → Grep: 10 category match(es)',
+      ])
+    );
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          claim: '10 distinct native-tool bypass Bash call(s) were recorded',
+          value: 10,
+        }),
+        expect.objectContaining({
+          claim: 'Those calls produced 20 native-tool bypass category match(es)',
+          value: 20,
+        }),
+      ])
+    );
+  });
+
+  it('counts each multi-category result payload once in reclaim evidence', () => {
+    const rec = detector.rule(
+      input({
+        toolData: commandData(
+          'find src -name "*.ts" && grep TODO src/index.ts',
+          10
+        ),
+      }),
+      0
+    )!;
+    const resultBytesObservation = rec.provenance?.observations.find(
+      (observation) =>
+        observation.field ===
+        'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens'
+    );
+    const resultCallsObservation = rec.provenance?.observations.find(
+      (observation) =>
+        observation.field ===
+        'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens'
+    );
+
+    expect({
+      affected: rec.affected,
+      evidenceTokens: rec.reclaim?.evidenceTokens,
+      resultCharacters: resultBytesObservation?.value,
+      resultBearingCalls: resultCallsObservation?.value,
+    }).toEqual({
+      affected: 10,
+      evidenceTokens: 1_000,
+      resultCharacters: 4_000,
+      resultBearingCalls: 10,
+    });
+    expect(resultBytesObservation?.claim).toContain(
+      'were counted once per call'
+    );
+    expect(resultCallsObservation?.claim).toContain(
+      '10 result-bearing Bash call(s) supplied those linked result characters'
+    );
+  });
+
+  it('reports only result-bearing calls joined to token data in reclaim provenance', () => {
+    const dualCategoryCommand =
+      'find src -name "*.ts" && grep TODO src/index.ts';
+    const linkedCalls = commandData(dualCategoryCommand, 5)[0].calls;
+    const unlinkedCalls = commandData(dualCategoryCommand, 5)[0].calls;
+    const rec = detector.rule(
+      input({
+        toolData: [
+          { sessionId: 's1', calls: linkedCalls },
+          { sessionId: 's2', calls: unlinkedCalls },
+        ],
+      }),
+      0
+    )!;
+    const resultBytesObservation = rec.provenance?.observations.find(
+      (observation) =>
+        observation.field ===
+        'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens'
+    );
+    const resultCallsObservation = rec.provenance?.observations.find(
+      (observation) =>
+        observation.field ===
+        'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens'
+    );
+
+    expect(rec.affected).toBe(10);
+    expect(rec.reclaim?.evidenceTokens).toBe(500);
+    expect(resultBytesObservation).toMatchObject({ value: 2_000 });
+    expect(resultCallsObservation).toMatchObject({ value: 5 });
+    expect(resultCallsObservation?.claim).toContain(
+      '5 result-bearing Bash call(s) supplied those linked result characters'
+    );
+  });
+
   it('fires and emits a workflow ReclaimClaim (direct byte delta)', () => {
     const rec = detector.rule(input(), 0);
     expect(rec?.id).toBe('workflow.native-bypass');
@@ -271,7 +379,9 @@ describe('workflow.native-bypass (#951)', () => {
 
     expect(rec).not.toBeNull();
     expect(rec?.detail).toContain('awk (2)');
-    expect(rec?.evidence).toContain('awk → Read/Edit: 2×');
+    expect(rec?.evidence).toContain(
+      'awk → Read/Edit: 2 category match(es)'
+    );
     expect(rec?.fix?.snippet).toContain('Bash `awk`');
     expect(
       detector.rule(
