@@ -945,6 +945,79 @@ describe('project-scoped view data filtering', () => {
       project: 'global',
     });
   });
+
+  it('keeps nav filter-scope claims aligned with their data policies (#2439)', () => {
+    type Scope =
+      | 'filtered/filtered'
+      | 'filtered/global'
+      | 'global/filtered'
+      | 'global/global';
+    type ScopeClaim = {
+      view: View;
+      fields: readonly (keyof ViewData)[];
+    };
+
+    // Each entry names only the data behind the description's scope sentence.
+    // Pulse, for example, qualifies its claim to stats-cache panels, so its
+    // filtered session panels are deliberately not part of that claim. Diary
+    // and Provisioning consume no ViewData and are global by construction.
+    const claims = [
+      { view: 'adoption', fields: ['liveConfig', 'sampleAdoptionReceipts'] },
+      { view: 'provisioning', fields: [] },
+      { view: 'diary', fields: [] },
+      { view: 'shadow-calls', fields: ['shadowCalls'] },
+      { view: 'pulse', fields: ['statsCache'] },
+      { view: 'memories', fields: ['memories'] },
+      { view: 'tasks', fields: ['tasks'] },
+      { view: 'teams', fields: ['teams'] },
+      { view: 'plans', fields: ['plans'] },
+      { view: 'workflows', fields: ['workflows'] },
+    ] as const satisfies readonly ScopeClaim[];
+
+    const scopePatterns: Record<Scope, RegExp> = {
+      'global/global':
+        /^(?:Ignores global time\/project filters|Use the date picker; global time\/project filters do not narrow this view|(?:Stats-cache panels|Task artifacts|Team artifacts|Plan artifacts) ignore global time\/project filters)\.$/,
+      'global/filtered':
+        /^Read-only; the project filter applies but the global time window does not\.$/,
+      'filtered/global':
+        /^The global time (?:filter|window) applies but the project filter does not\.$/,
+      'filtered/filtered': /^The global time and project filters apply\.$/,
+    };
+
+    for (const claim of claims) {
+      const policies =
+        claim.fields.length > 0
+          ? claim.fields.map((field) => VIEW_DATA_FILTER_POLICIES[field])
+          : [{ time: 'global', project: 'global' } as const];
+      const timeModes = [...new Set(policies.map((policy) => policy.time))];
+      const projectModes = [
+        ...new Set(policies.map((policy) => policy.project)),
+      ];
+
+      expect(
+        timeModes,
+        `${claim.view} scope claim mixes time policies`
+      ).toHaveLength(1);
+      expect(
+        projectModes,
+        `${claim.view} scope claim mixes project policies`
+      ).toHaveLength(1);
+
+      const expectedScope = `${timeModes[0]}/${projectModes[0]}` as Scope;
+      const description = getNavItem(claim.view)?.description ?? '';
+      const scopeSentence = description.match(/[^.!?]+[.!?]$/)?.[0].trim() ?? '';
+      const declaredScopes = (
+        Object.entries(scopePatterns) as [Scope, RegExp][]
+      )
+        .filter(([, pattern]) => pattern.test(scopeSentence))
+        .map(([scope]) => scope);
+
+      expect(
+        declaredScopes,
+        `${claim.view} description must declare ${expectedScope} filter scope`
+      ).toEqual([expectedScope]);
+    }
+  });
 });
 
 describe('domain structure (#490)', () => {
