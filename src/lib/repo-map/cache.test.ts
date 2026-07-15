@@ -74,6 +74,11 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
+  it('invalidates artifacts from pre-deduplication repo-map semantics', () => {
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(3);
+    expect(isCacheValid({ ...persisted, version: 2 }, base)).toBe(false);
+  });
+
   it('is valid when the clean-repo sha matches (mtime ignored)', () => {
     expect(isCacheValid(persisted, { ...base, maxMtimeMs: 999 })).toBe(true);
   });

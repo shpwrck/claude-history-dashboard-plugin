@@ -115,6 +115,55 @@ describe('generateRepoMap', () => {
     // The real parser must not leak the body either.
     expect(JSON.stringify(map)).not.toContain(BODY_SECRET);
   });
+
+  it('counts distinct importing files, not repeated declarations in one file', async () => {
+    const edgeRoot = mkdtempSync(join(tmpdir(), 'repomap-edges-'));
+    try {
+      writeFileSync(
+        join(edgeRoot, 'one.ts'),
+        [
+          "import { target } from './z-target';",
+          "export { target as targetAgain } from './z-target';",
+          "import { target as targetTwice } from './z-target';",
+          "import { target as targetWithTsExtension } from './z-target.ts';",
+          "export { target as targetWithJsExtension } from './z-target.js';",
+          "import { competitor } from './a-competitor';",
+          'export const one = [target, targetTwice, targetWithTsExtension, competitor];',
+        ].join('\n')
+      );
+      writeFileSync(
+        join(edgeRoot, 'two.ts'),
+        "import { competitor } from './a-competitor';\nexport const two = competitor;\n"
+      );
+      writeFileSync(
+        join(edgeRoot, 'z-target.ts'),
+        'export const target = 1;\n'
+      );
+      writeFileSync(
+        join(edgeRoot, 'a-competitor.ts'),
+        'export const competitor = 2;\n'
+      );
+
+      const map = await generateRepoMap(edgeRoot, { tokenBudget: 5000 });
+      const one = map.files.find((file) => file.path === 'one.ts')!;
+
+      expect(one.imports).toEqual([
+        './z-target',
+        './z-target.ts',
+        './z-target.js',
+        './a-competitor',
+      ]);
+      // competitor has two distinct importer files; target has one importer
+      // with repeated declarations and three equivalent specifier spellings.
+      // Neither form may manufacture a larger in-degree for target.
+      expect(map.files[0].path).toBe('a-competitor.ts');
+      expect(map.text).toContain(
+        'imports: ./z-target, ./z-target.ts, ./z-target.js, ./a-competitor'
+      );
+    } finally {
+      rmSync(edgeRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('renderRepoMap', () => {

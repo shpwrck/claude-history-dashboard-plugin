@@ -77,8 +77,8 @@ export interface PersistedRepoMap
 }
 
 /**
- * Bump when the persisted repo-map output shape changes so stale artifacts are
- * not reused. The value is owned by the single parser-output ->
+ * Bump when the persisted repo-map output shape or generation semantics change
+ * so stale artifacts are not reused. The value is owned by the single parser-output ->
  * cache-invalidation SEAM (#2075) in `scripts/lib/parser-output-versions.mjs`;
  * bump it THERE (and update its contract fingerprint) so the forward-fence test
  * catches an un-bumped shape change. Re-exported here under the original name so

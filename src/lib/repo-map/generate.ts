@@ -107,6 +107,7 @@ function rankByInDegree(files: RepoFile[]): RepoFile[] {
   for (const f of files) byStem.set(stemOf(f.path), 0);
 
   for (const f of files) {
+    const importedTargets = new Set<string>();
     for (const spec of f.imports) {
       if (!spec.startsWith('.')) continue; // only intra-repo edges count
       // Resolve the relative spec against the importer's dir, loosely.
@@ -114,10 +115,17 @@ function rankByInDegree(files: RepoFile[]): RepoFile[] {
       const joined = normalizeRel(dir, spec);
       for (const cand of [joined, `${joined}/index`]) {
         if (byStem.has(cand)) {
-          byStem.set(cand, (byStem.get(cand) as number) + 1);
+          // Different specifier spellings (for example `./target` and
+          // `./target.ts`) can resolve to the same file. In-degree measures
+          // distinct importing files, so one importer contributes at most one
+          // edge to a resolved target.
+          importedTargets.add(cand);
           break;
         }
       }
+    }
+    for (const target of importedTargets) {
+      byStem.set(target, (byStem.get(target) as number) + 1);
     }
   }
 
@@ -218,7 +226,12 @@ export async function generateRepoMap(
       path: relPosix(root, abs),
       mtimeMs,
       symbols: structure.symbols,
-      imports: structure.imports,
+      // A source file contributes one graph edge per target, not one edge per
+      // import/re-export declaration. Parser output intentionally preserves the
+      // declarations it sees; normalize at this generator seam so ranking,
+      // persisted structure, and rendered maps all share the same distinct,
+      // first-seen import list.
+      imports: [...new Set(structure.imports)],
     });
   }
 

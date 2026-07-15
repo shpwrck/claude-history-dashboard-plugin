@@ -5,7 +5,7 @@
 // session-blob cache key (`SESSION_BLOB_PARSER_VERSION` in session-blob-row.mjs)
 // and a numeric envelope field for the repo-map artifact
 // (`PERSISTED_REPO_MAP_VERSION` in src/lib/repo-map/cache.ts). Nothing said in
-// one place "bump THIS when THAT parser's output shape changes", so the wrong
+// one place "bump THIS when THAT parser's persisted output changes", so the wrong
 // knob got bumped and a parser-output change shipped INERT (a documented
 // multi-cycle failure, e.g. #2036 -> #2040, #2129).
 //
@@ -15,9 +15,9 @@
 // gate genuinely different artifacts (see "What this is NOT" below).
 //
 // HOW TO USE THIS (the recipe the seam exists to make obvious):
-//   When you change the OUTPUT SHAPE of a parser that feeds one of these caches,
-//   bump that entry's `version` here, and update its `contract` fingerprint to
-//   the new shape. The forward-fence test
+//   When you change the output shape OR generation semantics of a parser that
+//   feeds one of these caches, bump that entry's `version` here. On a shape
+//   change, also update its `contract` fingerprint. The forward-fence test
 //   (`parser-output-versions.fence.test.mjs`) recomputes each contract from the
 //   live code and FAILS if a parser's output shape drifted without the contract
 //   (and therefore the human-reviewed version bump) moving with it. So a forgot-
@@ -40,7 +40,8 @@
 /**
  * @typedef {Object} ParserOutputContract
  * @property {string|number} version  The value baked into the cache key for the
- *   artifact this contract gates. Bump deliberately on an output-shape change.
+ *   artifact this contract gates. Bump deliberately on an output-shape or
+ *   generation-semantics change.
  * @property {string[]} contract  A stable, order-independent fingerprint of the
  *   parser's OUTPUT SHAPE: the field/column names the cache consumer depends on.
  *   The forward-fence test recomputes this from the live code and asserts a
@@ -97,12 +98,12 @@ export const SESSION_BLOB_OUTPUT = {
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
-  version: 2,
+  version: 3,
   contract: ['version', 'cacheKey', 'sizeBounded', 'droppedFiles', 'map'],
   consumedBy:
     'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version)',
   bumpWhen:
-    'the persisted repo-map envelope shape changes, or the structural map the artifact carries changes shape',
+    'the persisted repo-map envelope/structural-map shape changes, or generation semantics change persisted structure, ranking, or rendered text',
 };
 
 /**
