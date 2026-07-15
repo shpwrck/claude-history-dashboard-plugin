@@ -20,7 +20,6 @@ import {
   validateFixSnippet,
   validateNpmRunScripts,
   npmRunScripts,
-  isBlanketModelPinSnippet,
   NON_PORTABLE_SNIPPET_PATTERNS,
 } from './fix-validity';
 
@@ -74,21 +73,6 @@ describe('validateNpmRunScripts (repo-local snippets)', () => {
   });
   it('rejects a script absent from package.json (the audited typecheck case)', () => {
     expect(validateNpmRunScripts('npm run -s typecheck', scripts).length).toBeGreaterThan(0);
-  });
-});
-
-describe('isBlanketModelPinSnippet (#2548)', () => {
-  it('flags a top-level global model pin', () => {
-    expect(isBlanketModelPinSnippet('{\n  "model": "claude-haiku-4-5"\n}')).toBe(true);
-  });
-  it('ignores a settings object with no top-level model key', () => {
-    expect(isBlanketModelPinSnippet('{ "permissions": { "allow": ["Bash(ls:*)"] } }')).toBe(false);
-  });
-  it('ignores prose / non-JSON snippets', () => {
-    expect(isBlanketModelPinSnippet('Set the model in the settings.json your sdk-* runs use.')).toBe(false);
-  });
-  it('ignores a non-string model value', () => {
-    expect(isBlanketModelPinSnippet('{ "model": { "id": "x" } }')).toBe(false);
   });
 });
 

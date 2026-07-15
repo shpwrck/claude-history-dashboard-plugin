@@ -422,14 +422,6 @@ export function automationCostByClass(
             ? ts
             : Math.max(bucket.latestTimestampMs, ts);
       }
-      // COUNTERFACTUAL, NOT A GUARANTEE (#2548): this reprices the SAME tokens at
-      // the cheaper model's rates — an UPPER-BOUND estimate that assumes the
-      // cheaper model does the identical work in the same number of turns. A
-      // cheaper model may need more iterations or fail to complete a class, so
-      // the swap savings is a ceiling, not a promised reduction. Anthropic frames
-      // model choice as a capability decision, not a blanket cost lever
-      // (platform.claude.com model/effort guidance); the per-task-class safety
-      // boundary (epic #2138) is what gates which classes may actually adopt it.
       const delta =
         entryCostAtModel(entry, model) - entryCostAtModel(entry, CHEAPEST_MODEL);
       if (delta > 0) {
