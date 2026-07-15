@@ -27,10 +27,10 @@ export type RecCategory =
   | 'reliability'
   | 'speed'
   | 'activity'
-  // Upkeep of the agent's own durable state — memory-store hygiene (stale,
-  // duplicate, or contradictory memories), and future config/skill rot. The
-  // foundation for the memory-hygiene detector (#1779); no detector emits it
-  // yet, but every exhaustive consumer must render/aggregate it (#1965).
+  // Upkeep of the agent's own durable state. Maintenance is live: registered
+  // detectors include maintenance.memory-hygiene, maintenance.doc-hygiene, and
+  // maintenance.skill-hook-integrity. The canonical domain registry maps it to
+  // the Clean workflow ActionDomain (#1965).
   | 'maintenance';
 
 export type SavingsAttributionTier =
