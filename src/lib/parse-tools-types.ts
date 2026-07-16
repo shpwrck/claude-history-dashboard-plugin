@@ -45,6 +45,37 @@ export interface DistilledToolInput {
   skill?: string;
 }
 
+/**
+ * Compact formatting-churn metrics derived from ONE Edit/MultiEdit call's raw
+ * `old_string`/`new_string` bodies before distillation drops them (#2507).
+ * Counts and sizes only — no source text is ever retained. A hunk is
+ * formatting-only when its ordered nonblank lines are identical after per-line
+ * trim (pure reindent / blank-line churn); any internal (semantic-space) or
+ * content change disqualifies it. Write is excluded because no local pre-image
+ * exists, so formatting-vs-content is unknowable there.
+ */
+export interface EditFormatChurn {
+  /** Hunks analyzed (1 for Edit; `edits.length` for MultiEdit, bounded). */
+  hunks: number;
+  /** Hunks whose ordered nonblank lines are identical after per-line trim. */
+  formattingOnlyHunks: number;
+  /** Total raw lines across analyzed hunks (max of old/new per hunk). */
+  lines: number;
+  /** Raw lines across formatting-only hunks (max of old/new per hunk). */
+  formattingOnlyLines: number;
+  /** Total old+new chars across analyzed hunks. */
+  chars: number;
+  /** Old+new chars across formatting-only hunks only — per-hunk truth, so a
+   * mixed MultiEdit can never attribute semantic hunks' bytes to formatting. */
+  formattingOnlyChars: number;
+  /**
+   * Analysis stopped at its documented resource boundary; hunks past it are
+   * NOT classified. Consumers must treat the call as suppressed evidence,
+   * never infer formatting-dominance from a truncated analysis.
+   */
+  truncated?: true;
+}
+
 export interface ToolCall {
   timestamp: string;
   toolName: string;
@@ -146,6 +177,13 @@ export interface ToolCall {
   commandRiskyActionPattern?: string;
   /** Whether the command references Claude-specific paths such as `.claude`. */
   commandMentionsClaudePath?: boolean;
+  /**
+   * Sparse formatting-churn metrics derived from raw Edit/MultiEdit
+   * `old_string`/`new_string` bodies before bulk ingest drops them (#2507).
+   * Absent for other tools, for malformed inputs (fail-closed suppression),
+   * and for every call parsed before this field existed.
+   */
+  editFormatChurn?: EditFormatChurn;
 }
 
 export interface ToolUsageData {

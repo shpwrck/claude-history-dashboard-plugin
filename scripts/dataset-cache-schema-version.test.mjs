@@ -35,8 +35,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      26,
-      'doc-node git-time provenance (#2707) must turn over persisted v25 datasets'
+      27,
+      'edit format-churn metrics (#2507) must turn over persisted v26 datasets'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -48,6 +48,11 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       key,
       `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`
+    );
+    assert.notEqual(
+      key,
+      `dataset-schema:v26:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-edit-format-churn (#2507) dataset cache key must not remain current'
     );
     assert.notEqual(
       key,

@@ -98,8 +98,11 @@ import {
   hookOverheadCacheValidityContains,
   skillHookIntegrityCacheValidity,
   skillHookIntegrityCacheValidityContains,
+  editFormatChurnCacheValidity,
+  editFormatChurnCacheValidityContains,
   type HookOverheadCacheValidity,
   type SkillHookIntegrityCacheValidity,
+  type EditFormatChurnCacheValidity,
 } from './detectors';
 import {
   externalGuidanceCacheValidity,
@@ -280,6 +283,7 @@ interface RecommendationBuildCacheEntry {
   guidanceCacheValidity: ExternalGuidanceCacheValidity;
   hookOverheadCacheValidity: HookOverheadCacheValidity;
   skillHookIntegrityCacheValidity: SkillHookIntegrityCacheValidity;
+  editFormatChurnCacheValidity: EditFormatChurnCacheValidity;
 }
 
 const buildCache: WeakMap<RecommendationInput, RecommendationBuildCacheEntry> =
@@ -432,7 +436,8 @@ export function buildRecommendations(
       skillHookIntegrityCacheValidityContains(
         cached.skillHookIntegrityCacheValidity,
         t
-      )
+      ) &&
+      editFormatChurnCacheValidityContains(cached.editFormatChurnCacheValidity, t)
     ) {
       return cached.recommendations;
     }
@@ -462,6 +467,7 @@ export function buildRecommendations(
       ),
       hookOverheadCacheValidity: hookOverheadCacheValidity(input, t),
       skillHookIntegrityCacheValidity: skillHookIntegrityCacheValidity(input, t),
+      editFormatChurnCacheValidity: editFormatChurnCacheValidity(input, t),
     });
   }
   return sorted;

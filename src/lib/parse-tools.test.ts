@@ -110,6 +110,224 @@ Edit the source, install, verify, and record the decision.`
     expect(calls[2].leaveBehindStructure).toBeUndefined()
   })
 
+  // ── Edit/MultiEdit format-churn metrics (#2507) ───────────────────────────
+
+  it('classifies a pure reindent Edit as formatting-only without retaining source text', () => {
+    const oldBody = 'function f() {\nreturn 1;\n}\n'
+    const newBody = 'function f() {\n  return 1;\n}\n'
+    const text = [
+      toolUse('e1', 'Edit', { file_path: '/repo/a.ts', old_string: oldBody, new_string: newBody }),
+      toolResult('e1'),
+    ].join('\n')
+    const c = parseToolUsage(text, 's.jsonl')!.calls[0]
+    expect(c.editFormatChurn).toEqual({
+      hunks: 1,
+      formattingOnlyHunks: 1,
+      lines: 4,
+      formattingOnlyLines: 4,
+      chars: oldBody.length + newBody.length,
+      formattingOnlyChars: oldBody.length + newBody.length,
+    })
+    // No raw-content leakage: the edited source never survives into the call.
+    const serialized = JSON.stringify(c)
+    expect(serialized).not.toContain('return 1;')
+    expect(serialized).not.toContain('function f()')
+  })
+
+  it('aggregates MultiEdit hunks: reindent + blank-line churn count, content changes do not', () => {
+    const text = [
+      toolUse('m1', 'MultiEdit', {
+        file_path: '/repo/b.ts',
+        edits: [
+          { old_string: 'a();\nb();', new_string: '  a();\n  b();' }, // reindent → formatting-only
+          { old_string: 'const x = 1;', new_string: 'const x = 2;' }, // content change
+          { old_string: 'one();\ntwo();', new_string: 'one();\n\n\ntwo();' }, // blank-line churn → formatting-only
+        ],
+      }),
+      toolResult('m1'),
+    ].join('\n')
+    const c = parseToolUsage(text, 's.jsonl')!.calls[0]
+    expect(c.editFormatChurn).toMatchObject({
+      hunks: 3,
+      formattingOnlyHunks: 2,
+    })
+    expect(c.editFormatChurn!.formattingOnlyLines).toBe(2 + 4)
+    // Per-hunk char truth: only the two formatting-only hunks' bytes count, so
+    // a mixed call can never attribute the semantic hunk's bytes to formatting.
+    expect(c.editFormatChurn!.formattingOnlyChars).toBe(
+      'a();\nb();'.length + '  a();\n  b();'.length +
+      'one();\ntwo();'.length + 'one();\n\n\ntwo();'.length
+    )
+    expect(c.editFormatChurn!.formattingOnlyChars).toBeLessThan(c.editFormatChurn!.chars)
+    expect(c.editFormatChurn!.truncated).toBeUndefined()
+  })
+
+  it('never classifies a hunk touching a potential multiline literal as formatting-only', () => {
+    const text = [
+      // Reindent around a template literal: the indentation may be part of the
+      // runtime string, so trim-identical lines do not prove a semantic no-op.
+      toolUse('lit1', 'Edit', {
+        file_path: '/repo/f.ts',
+        old_string: 'const s = `\nhello\n`;',
+        new_string: '  const s = `\n  hello\n  `;',
+      }),
+      toolResult('lit1'),
+      toolUse('lit2', 'Edit', {
+        file_path: '/repo/g.sh',
+        old_string: 'cat <<EOF\nbody\nEOF',
+        new_string: '  cat <<EOF\n  body\n  EOF',
+      }),
+      toolResult('lit2'),
+      // The common spaced heredoc form must be recognized too.
+      toolUse('lit3', 'Edit', {
+        file_path: '/repo/h.sh',
+        old_string: 'cat << EOF\nbody\nEOF',
+        new_string: '  cat << EOF\n  body\n  EOF',
+      }),
+      toolResult('lit3'),
+      // Rust-style raw string spanning lines: indentation is the value.
+      toolUse('lit4', 'Edit', {
+        file_path: '/repo/i.rs',
+        old_string: 'let s = r#"\nx\n"#;',
+        new_string: '  let s = r#"\n  x\n  "#;',
+      }),
+      toolResult('lit4'),
+      // Escaped line continuation (a C string/macro spanning lines).
+      toolUse('lit5', 'Edit', {
+        file_path: '/repo/j.c',
+        old_string: 'char* s = "a\\\nb";',
+        new_string: '  char* s = "a\\\n  b";',
+      }),
+      toolResult('lit5'),
+    ].join('\n')
+    const calls = parseToolUsage(text, 's.jsonl')!.calls
+    for (let i = 0; i < 5; i++) {
+      expect(calls[i].editFormatChurn, `call ${i}`).toMatchObject({
+        hunks: 1,
+        formattingOnlyHunks: 0,
+      })
+    }
+  })
+
+  it('skips churn derivation when the caller opts out (live-session polls)', () => {
+    const text = [
+      toolUse('e9', 'Edit', { file_path: '/repo/a.ts', old_string: 'a();', new_string: '  a();' }),
+      toolResult('e9'),
+    ].join('\n')
+    const c = parseToolUsage(text, 's.jsonl', { editFormatChurn: false })!.calls[0]
+    expect(c.editFormatChurn).toBeUndefined()
+  })
+
+  it('enforces the per-transcript churn budget with an explicit truncated barrier', () => {
+    // 8 calls of exactly 1,000,000 analyzed chars each spend the 8 MiB
+    // transcript budget down to its tail; the 9th exceeds it mid-call and every
+    // later call hits the top-of-call barrier. No zero-hunk call is ever a
+    // silent "no churn" claim — each carries `truncated`.
+    const half = 'x'.repeat(500_000)
+    const halfB = 'y'.repeat(500_000)
+    const lines: string[] = []
+    for (let i = 0; i < 8; i++) {
+      lines.push(
+        toolUse(`big${i}`, 'Edit', { file_path: '/repo/big.ts', old_string: half, new_string: halfB }),
+        toolResult(`big${i}`)
+      )
+    }
+    lines.push(
+      toolUse('over', 'Edit', {
+        file_path: '/repo/big.ts',
+        old_string: 'z'.repeat(200_000),
+        new_string: 'w'.repeat(200_000),
+      }),
+      toolResult('over'),
+      toolUse('after', 'Edit', { file_path: '/repo/small.ts', old_string: 'a();', new_string: '  a();' }),
+      toolResult('after')
+    )
+    const calls = parseToolUsage(lines.join('\n'), 's.jsonl')!.calls
+    for (let i = 0; i < 8; i++) {
+      expect(calls[i].editFormatChurn).toMatchObject({ hunks: 1 })
+      expect(calls[i].editFormatChurn!.truncated).toBeUndefined()
+    }
+    expect(calls[8].editFormatChurn).toMatchObject({ hunks: 0, truncated: true })
+    expect(calls[9].editFormatChurn).toMatchObject({ hunks: 0, truncated: true })
+  })
+
+  it('excludes semantic-space changes: internal whitespace and line splits are NOT formatting-only', () => {
+    const text = [
+      toolUse('e2', 'Edit', { file_path: '/repo/c.ts', old_string: 'const  x = 1;', new_string: 'const x = 1;' }),
+      toolResult('e2'),
+      toolUse('e3', 'Edit', { file_path: '/repo/c.ts', old_string: 'a(); b();', new_string: 'a();\nb();' }),
+      toolResult('e3'),
+      toolUse('e4', 'Edit', { file_path: '/repo/c.ts', old_string: 'same', new_string: 'same' }),
+      toolResult('e4'),
+    ].join('\n')
+    const calls = parseToolUsage(text, 's.jsonl')!.calls
+    expect(calls[0].editFormatChurn).toMatchObject({ hunks: 1, formattingOnlyHunks: 0 }) // internal space is semantic
+    expect(calls[1].editFormatChurn).toMatchObject({ hunks: 1, formattingOnlyHunks: 0 }) // line split changes the sequence
+    expect(calls[2].editFormatChurn).toMatchObject({ hunks: 1, formattingOnlyHunks: 0 }) // a no-op is not churn
+  })
+
+  it('hardens edge lines: single-line hunks and quote-adjacent edge changes are never formatting-only', () => {
+    const text = [
+      // Single-line hunk: old_string can start mid-line, so edge whitespace
+      // is not provably indentation (e.g. a CSS descendant combinator).
+      toolUse('edge1', 'Edit', { file_path: '/repo/a.ts', old_string: 'foo()', new_string: ' foo()' }),
+      toolResult('edge1'),
+      // First line carries a quote and changed: the slice could cut through a
+      // string literal whose leading whitespace is runtime value.
+      toolUse('edge2', 'Edit', {
+        file_path: '/repo/b.ts',
+        old_string: 'world";\nnext();',
+        new_string: '  world";\n  next();',
+      }),
+      toolResult('edge2'),
+    ].join('\n')
+    const calls = parseToolUsage(text, 's.jsonl')!.calls
+    expect(calls[0].editFormatChurn).toMatchObject({ hunks: 1, formattingOnlyHunks: 0 })
+    expect(calls[1].editFormatChurn).toMatchObject({ hunks: 1, formattingOnlyHunks: 0 })
+  })
+
+  it('suppresses the whole metric on malformed input and excludes Write (fail-closed)', () => {
+    const text = [
+      toolUse('bad1', 'MultiEdit', {
+        file_path: '/repo/d.ts',
+        edits: [
+          { old_string: 'x', new_string: '  x' },
+          { old_string: 'y' }, // missing new_string → whole call suppressed
+        ],
+      }),
+      toolResult('bad1'),
+      toolUse('bad2', 'Edit', { file_path: '/repo/d.ts', old_string: 42, new_string: 'x' }),
+      toolResult('bad2'),
+      toolUse('bad3', 'MultiEdit', { file_path: '/repo/d.ts', edits: [] }),
+      toolResult('bad3'),
+      toolUse('w1', 'Write', { file_path: '/repo/d.ts', content: 'formatted\n' }),
+      toolResult('w1'),
+    ].join('\n')
+    const calls = parseToolUsage(text, 's.jsonl')!.calls
+    for (const c of calls) expect(c.editFormatChurn).toBeUndefined()
+  })
+
+  it('stops at the per-call resource boundary and marks the analysis truncated', () => {
+    const big = 'x'.repeat(600_000)
+    const text = [
+      toolUse('t1', 'MultiEdit', {
+        file_path: '/repo/e.ts',
+        edits: [
+          { old_string: 'a();\nb();', new_string: '  a();\n  b();' },
+          { old_string: big, new_string: `${big} ` }, // pushes past the char budget
+          { old_string: 'c();', new_string: '  c();' }, // never analyzed
+        ],
+      }),
+      toolResult('t1'),
+    ].join('\n')
+    const c = parseToolUsage(text, 's.jsonl')!.calls[0]
+    expect(c.editFormatChurn).toMatchObject({
+      hunks: 1,
+      formattingOnlyHunks: 1,
+      truncated: true,
+    })
+  })
+
   it('marks isError true for an error result', () => {
     const text = [toolUse('u1', 'Bash', { command: 'bad' }), toolResult('u1', { isError: true, content: 'boom' })].join('\n')
     expect(parseToolUsage(text, 's.jsonl')!.calls[0].isError).toBe(true)

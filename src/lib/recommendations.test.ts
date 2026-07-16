@@ -3798,6 +3798,30 @@ function fixtureBank(): Fixture[] {
     });
   }
 
+  // ── cost.edit-format-churn (#2507): recent formatting-only Edit churn ──────
+  {
+    const churnCalls: ToolCall[] = Array.from({ length: 12 }, (_, i) => ({
+      timestamp: new Date(now - 60 * 60 * 1000).toISOString(),
+      toolName: 'Edit',
+      input: { file_path: '/repo/src/reformatted.ts' },
+      toolUseId: `efc${i}`,
+      isError: false,
+      resultBytes: 0,
+      editFormatChurn: {
+        hunks: 1,
+        formattingOnlyHunks: 1,
+        lines: 12,
+        formattingOnlyLines: 12,
+        chars: 600,
+        formattingOnlyChars: 600,
+      },
+    }));
+    out.push({
+      now,
+      input: bankBase({ toolData: [{ sessionId: 'format-churn', calls: churnCalls }] }),
+    });
+  }
+
   return out;
 }
 

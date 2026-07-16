@@ -335,7 +335,9 @@ export function liveSession(
 
   // In-progress "why" badge (#196): same parser the dataset's tool views use,
   // over the merged transcript, then the #139 detectors over its recent tail.
-  const tool = parseToolUsage(merged, name);
+  // Live polls read only error/retry patterns; skip the edit-churn derivation
+  // so an active transcript's Edit bodies aren't split on every poll (#2507).
+  const tool = parseToolUsage(merged, name, { editFormatChurn: false });
   const { retryStorm, rereadLoop } = detectLivePatterns(tool);
 
   // Tokens burned so far = every token type the session has consumed (input +

@@ -161,6 +161,10 @@ export const MARKERS_SESSION_RESTART_RETYPE: AppliedMarkers = {
   headings: [/^##\s+Resume prior sessions instead of re-?typing\b/i],
   bodyPhrases: ['resume the prior session instead of re-explaining the task'],
 };
+export const MARKERS_EDIT_FORMAT_CHURN: AppliedMarkers = {
+  headings: [/^##\s+Formatting discipline\b/i],
+  bodyPhrases: ['do not reformat code you are not otherwise changing'],
+};
 
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
@@ -188,6 +192,7 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['context.compaction-large-tool-outputs', MARKERS_COMPACTION_LARGE_TOOL_OUTPUTS],
   ['cost.web-search-spend', MARKERS_WEB_SEARCH_SPEND],
   ['cost.output-verbosity', MARKERS_OUTPUT_VERBOSITY],
+  ['cost.edit-format-churn', MARKERS_EDIT_FORMAT_CHURN],
   ['context.repo-map-context-waste', MARKERS_REPO_MAP_WASTE],
   ['context.cross-session-reread', MARKERS_CROSS_SESSION_REREAD],
   ['context.reclaim-potential', MARKERS_RECLAIM_POTENTIAL],

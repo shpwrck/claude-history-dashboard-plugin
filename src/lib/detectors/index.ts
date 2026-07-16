@@ -52,6 +52,12 @@ import { detector as disproportionateThinking } from './cost/disproportionate-th
 import { detector as modelEvalRoutingGap } from './cost/model-eval-routing-gap';
 import { detector as outputVerbosity } from './cost/output-verbosity';
 import { detector as batchableWorkload } from './cost/batchable-workload';
+import { detector as editFormatChurn } from './cost/edit-format-churn';
+export {
+  editFormatChurnCacheValidity,
+  editFormatChurnCacheValidityContains,
+  type EditFormatChurnCacheValidity,
+} from './cost/edit-format-churn';
 
 // ── CONTEXT ─────────────────────────────────────────────────────────────
 import { detector as overWindow } from './context/over-window';
@@ -348,6 +354,13 @@ export const DETECTORS: Detector[] = [
   // automation-share exposes only a separate non-booked same-token ceiling. The
   // batch-route shadow-calls axis is a separate meta follow-on.
   batchableWorkload,
+
+  // ── #2507 (epic #2199) — format-dominated Edit/MultiEdit churn (proxy) ─────
+  // Counts hunks whose ordered nonblank lines are identical after per-line trim
+  // (parser-owned editFormatChurn metric, derived before raw bodies are dropped).
+  // Proxy signal with "verify intent" wording; whitespace-semantic languages and
+  // machine-formatted files excluded; truncated/errored calls never counted.
+  editFormatChurn,
 
   // ── #1752 (epic #1910) — cross-session cold-read -> distilled-note lever ───
   // The cross-session slice nothing else covers: aggregates the per-session FIRST

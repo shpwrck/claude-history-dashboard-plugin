@@ -32,6 +32,7 @@ import type {
   DistilledToolInput,
   BypassCategory,
   DurableCommandKind,
+  EditFormatChurn,
   ToolCall,
   ToolUsageData,
 } from './parse-tools-types';
@@ -40,6 +41,7 @@ export type {
   BypassCategory,
   DangerousCommandCertainty,
   DurableCommandKind,
+  EditFormatChurn,
   ToolCall,
   ToolUsageData,
 } from './parse-tools-types';
@@ -3120,12 +3122,199 @@ function deriveLeaveBehindStructure(
     : {};
 }
 
-export function parseToolUsage(text: string, fileName: string): ToolUsageData | null {
+// ── Edit/MultiEdit format-churn metrics (#2507) ─────────────────────────────
+// Resource boundaries for the analysis — bounds, not semantic limits. Past
+// them the call is marked `truncated` and unanalyzed hunks are never
+// classified (fail closed), mirroring the static-shell analysis barrier. The
+// per-TRANSCRIPT budget exists because per-call caps reset on every call: a
+// session repeatedly rewriting large files must not buy unbounded split/trim
+// work during ingest.
+const MAX_EDIT_CHURN_HUNKS = 100;
+const MAX_EDIT_CHURN_CHARS_PER_CALL = 1_000_000;
+const MAX_EDIT_CHURN_TRANSCRIPT_CHARS = 8 * 1024 * 1024;
+const MAX_EDIT_CHURN_CALLS_PER_TRANSCRIPT = 2_048;
+
+/** Running per-transcript analysis budget, owned by one parseToolUsage run. */
+interface EditChurnTranscriptBudget {
+  chars: number;
+  calls: number;
+  exhausted: boolean;
+}
+
+/** Per-line-trimmed, blank-dropped line sequence — the formatting-only basis. */
+function trimmedNonblankLines(s: string): string[] {
+  const out: string[] = [];
+  for (const line of s.split('\n')) {
+    const t = line.trim();
+    if (t !== '') out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Conservative multiline-literal guard: a hunk containing a template-literal
+ * backtick, a triple-quoted string, or a heredoc marker may carry whitespace
+ * that IS the runtime value (indentation inside the literal), so trim-identical
+ * lines do not prove a semantic no-op there. Such hunks are never classified
+ * formatting-only (fail closed — under-counting is the accepted direction).
+ * `<<` matches heredoc-style tags including the spaced `<< EOF` form; a
+ * bit-shift by an identifier (`x << width`) therefore also disqualifies its
+ * hunk — accepted, since under-counting is the safe direction and shifts by
+ * numeric literals remain unaffected. Rust-style raw strings (`r"…"`/`r#"…"#`),
+ * C++ raw strings (`R"(…)"`), and an escaped line continuation (`\` at end of
+ * line — a C/C++ string or macro spanning lines) are guarded for the same
+ * reason.
+ */
+const MULTILINE_LITERAL_MARKER = /`|'''|"""|<<[-~]?\s*["']?[A-Za-z_]|\b[rR]#*"|\\\r?\n/;
+
+/**
+ * A hunk is formatting-only when the strings differ but their ordered nonblank
+ * lines are identical after per-line trim: pure reindentation, trailing-space,
+ * blank-line, and line-ending churn. Any internal (semantic-space) or content
+ * change — including line splits/joins — breaks the sequence equality and
+ * disqualifies the hunk, as does any potential multiline string literal whose
+ * leading whitespace is part of the runtime value.
+ *
+ * Edge-line hardening: an Edit `old_string` can start or end MID-line, so its
+ * first/last lines' edge whitespace is not provably indentation. Single-line
+ * hunks (edge-whitespace-only by definition) are never formatting-only, and a
+ * changed first/last line that carries a quote character is disqualified —
+ * the slice could cut through a string literal whose whitespace is value.
+ * Interior lines are whole lines by construction, so trim is sound there.
+ */
+function isFormattingOnlyHunk(oldS: string, newS: string): boolean {
+  if (oldS === newS) return false; // a no-op is not churn
+  if (!oldS.includes('\n') && !newS.includes('\n')) return false; // single-line
+  if (MULTILINE_LITERAL_MARKER.test(oldS) || MULTILINE_LITERAL_MARKER.test(newS)) {
+    return false;
+  }
+  const oldRaw = oldS.split('\n');
+  const newRaw = newS.split('\n');
+  for (const [i, j] of [
+    [0, 0],
+    [oldRaw.length - 1, newRaw.length - 1],
+  ]) {
+    if (oldRaw[i] !== newRaw[j] && /["']/.test(oldRaw[i] + newRaw[j])) {
+      return false;
+    }
+  }
+  const a = trimmedNonblankLines(oldS);
+  const b = trimmedNonblankLines(newS);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function rawLineCount(s: string): number {
+  return s.length === 0 ? 0 : s.split('\n').length;
+}
+
+/**
+ * Derive compact formatting-churn metrics from a raw Edit/MultiEdit input
+ * before distillation drops the `old_string`/`new_string` bodies (#2507).
+ * Counts and sizes only — no source text survives into the ToolCall. Malformed
+ * input (missing/non-string hunk fields, non-array `edits`) suppresses the
+ * whole call fail-closed rather than emitting a partial claim. Write is
+ * excluded: with no local pre-image, formatting-vs-content is unknowable.
+ */
+function deriveEditFormatChurn(
+  toolName: unknown,
+  rawInput: unknown,
+  budget: EditChurnTranscriptBudget
+): Pick<ToolCall, 'editFormatChurn'> | Record<string, never> {
+  if (
+    (toolName !== 'Edit' && toolName !== 'MultiEdit') ||
+    !rawInput ||
+    typeof rawInput !== 'object'
+  ) {
+    return {};
+  }
+  const metrics: EditFormatChurn = {
+    hunks: 0,
+    formattingOnlyHunks: 0,
+    lines: 0,
+    formattingOnlyLines: 0,
+    chars: 0,
+    formattingOnlyChars: 0,
+  };
+  // Transcript-level barrier: once the running budget is spent, later calls
+  // carry an explicit zero-hunk truncated marker (an analysis boundary the
+  // consumers suppress), never a silent "no churn" claim.
+  if (budget.exhausted || budget.calls >= MAX_EDIT_CHURN_CALLS_PER_TRANSCRIPT) {
+    budget.exhausted = true;
+    metrics.truncated = true;
+    return { editFormatChurn: metrics };
+  }
+  budget.calls += 1;
+  const src = rawInput as Record<string, unknown>;
+  // Iterate the raw hunk entries directly — materializing a normalized pair
+  // array first would walk an arbitrarily large `edits` array before the
+  // resource boundary below could stop the work.
+  let entries: readonly unknown[];
+  if (toolName === 'Edit') {
+    entries = [src];
+  } else {
+    if (!Array.isArray(src.edits) || src.edits.length === 0) return {};
+    entries = src.edits;
+  }
+  for (const entry of entries) {
+    const hunk = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : null;
+    const oldS = hunk?.old_string;
+    const newS = hunk?.new_string;
+    if (typeof oldS !== 'string' || typeof newS !== 'string') return {};
+    const hunkChars = oldS.length + newS.length;
+    if (budget.chars + hunkChars > MAX_EDIT_CHURN_TRANSCRIPT_CHARS) {
+      budget.exhausted = true;
+      metrics.truncated = true;
+      break;
+    }
+    if (
+      metrics.hunks >= MAX_EDIT_CHURN_HUNKS ||
+      metrics.chars + hunkChars > MAX_EDIT_CHURN_CHARS_PER_CALL
+    ) {
+      metrics.truncated = true;
+      break;
+    }
+    budget.chars += hunkChars;
+    metrics.hunks += 1;
+    metrics.chars += hunkChars;
+    const hunkLines = Math.max(rawLineCount(oldS), rawLineCount(newS));
+    metrics.lines += hunkLines;
+    if (isFormattingOnlyHunk(oldS, newS)) {
+      metrics.formattingOnlyHunks += 1;
+      metrics.formattingOnlyLines += hunkLines;
+      metrics.formattingOnlyChars += hunkChars;
+    }
+  }
+  return { editFormatChurn: metrics };
+}
+
+export function parseToolUsage(
+  text: string,
+  fileName: string,
+  options: {
+    /**
+     * Derive `editFormatChurn` metrics (#2507). Default on for ingest /
+     * recommendation / upload parsing; the live-session poll path opts out —
+     * it reads only error/retry patterns and must not pay the churn budget on
+     * every poll.
+     */
+    editFormatChurn?: boolean;
+  } = {}
+): ToolUsageData | null {
+  const deriveChurn = options.editFormatChurn !== false;
   const sessionId = fileName.replace(/\.jsonl$/, '');
   let staticShellChars = 0;
   let staticShellSyntaxChars = 0;
   let staticShellCalls = 0;
   let staticShellBudgetExhausted = false;
+  const editChurnBudget: EditChurnTranscriptBudget = {
+    chars: 0,
+    calls: 0,
+    exhausted: false,
+  };
 
   // Map of tool_use_id -> ToolCall
   const callsById = new Map<string, ToolCall>();
@@ -3187,6 +3376,9 @@ export function parseToolUsage(text: string, fileName: string): ToolUsageData | 
           resultBytes: pending !== undefined ? pending.resultBytes : 0,
           ...commandSignals,
           ...deriveLeaveBehindStructure(block.name, block.input),
+          ...(deriveChurn
+            ? deriveEditFormatChurn(block.name, block.input, editChurnBudget)
+            : {}),
         };
         callsById.set(toolUseId, call);
         if (pending !== undefined) pendingResults.delete(toolUseId);

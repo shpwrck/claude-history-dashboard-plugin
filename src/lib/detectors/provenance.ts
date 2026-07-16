@@ -56,6 +56,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'workflow.value-of-agent-handoff',
   'workflow.session-restart-retype',
   'security.secrets-at-rest',
+  'cost.edit-format-churn',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */

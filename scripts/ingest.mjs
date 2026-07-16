@@ -1858,7 +1858,12 @@ export const PARSER_SIG_VERSION = 'v4';
 // manifest instead of the Docker COPY mtime. A persisted v25 dataset carries
 // clause-less nodes whose filesystem fallback could be mistaken for Git
 // history, so turn the assembled-dataset cache over.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 26;
+// v27 (#2507): parseToolUsage persists sparse `editFormatChurn` metrics
+// (counts/sizes only) derived from raw Edit/MultiEdit old/new bodies before
+// distillation drops them, feeding cost.edit-format-churn. SESSION_BLOB_OUTPUT
+// v18 reparses tool_json; this paired turnover rejects persisted v26 bodies
+// that lack the metric and would keep the detector inert on deployed data.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 27;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

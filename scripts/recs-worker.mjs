@@ -30,7 +30,8 @@
 //   worker -> parent: { id, ok:true, json, contentHash, sourceSig,
 //                       guidanceTransitions, guidanceCacheValidity,
 //                       hookOverheadCacheValidity, hookOverheadConfigState,
-//                       skillHookIntegrityCacheValidity }
+//                       skillHookIntegrityCacheValidity,
+//                       editFormatChurnCacheValidity }
 //                  |  { id, ok:false, error }
 //                  |  { type:'ready' }   (once, after module init)
 //                  |  { type:'log', level, message }
@@ -105,6 +106,9 @@ const { skillHookIntegrityCacheValidity } = await import(
     'skill-hook-integrity.ts'
   )
 );
+const { editFormatChurnCacheValidity } = await import(
+  join(projectDir, 'src', 'lib', 'detectors', 'cost', 'edit-format-churn.ts')
+);
 
 parentPort.on('message', async (msg) => {
   if (!msg || typeof msg !== 'object') return;
@@ -138,6 +142,10 @@ parentPort.on('message', async (msg) => {
     );
     const hookConfigState = hookOverheadConfigState(dataset);
     const skillHookCacheValidity = skillHookIntegrityCacheValidity(
+      dataset,
+      guidanceBuiltAt
+    );
+    const editChurnCacheValidity = editFormatChurnCacheValidity(
       dataset,
       guidanceBuiltAt
     );
@@ -192,6 +200,7 @@ parentPort.on('message', async (msg) => {
       hookOverheadCacheValidity: hookCacheValidity,
       hookOverheadConfigState: hookConfigState,
       skillHookIntegrityCacheValidity: skillHookCacheValidity,
+      editFormatChurnCacheValidity: editChurnCacheValidity,
       sourceSig: sourceSignature(),
     });
   } catch (err) {

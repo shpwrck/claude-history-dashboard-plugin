@@ -400,6 +400,31 @@ const memoryHygieneStore = (): ProjectMemoryStore[] => [
 ];
 
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
+  'cost.edit-format-churn': () => {
+    // 12 recent formatting-only Edit hunks (pure reindent) on a non-excluded
+    // extension → clears every floor gate with cited parse-tools provenance.
+    const now = Date.parse('2026-01-10T00:00:00.000Z');
+    const calls = Array.from({ length: 12 }, (_, i) => ({
+      timestamp: '2026-01-09T00:00:00.000Z',
+      toolName: 'Edit',
+      input: { file_path: '/repo/src/churn.ts' },
+      toolUseId: `efc${i}`,
+      isError: false,
+      resultBytes: 0,
+      editFormatChurn: {
+        hunks: 1,
+        formattingOnlyHunks: 1,
+        lines: 12,
+        formattingOnlyLines: 12,
+        chars: 600,
+        formattingOnlyChars: 600,
+      },
+    }));
+    return {
+      input: baseInput({ toolData: [{ sessionId: 's-churn', calls }] }),
+      now,
+    };
+  },
   'maintenance.memory-hygiene': () => ({
     input: baseInput({ memoryStores: memoryHygieneStore() }),
     now: 0,

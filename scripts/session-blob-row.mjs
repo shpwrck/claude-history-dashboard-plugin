@@ -109,6 +109,11 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       marker. Reparse tool_json so multi-path mutations cannot leave a stale
 //       candidate hidden behind the legacy scalar. Dataset schema v25 rejects
 //       bodies assembled from pre-v17 rows.
+//   'edit-format-churn-v18' (#2507): parseToolUsage now persists sparse
+//       `editFormatChurn` metrics (counts/sizes only, never source text) derived
+//       from raw Edit/MultiEdit old/new bodies before distillation drops them.
+//       Reparse tool_json so cached rows carry the metric. Dataset schema v26
+//       rejects bodies assembled from pre-v18 rows.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
