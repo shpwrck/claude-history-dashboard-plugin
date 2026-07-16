@@ -1449,6 +1449,7 @@ const {
   assembleLiveConfig,
   readTextFileCappedSync,
   readStopHookConfigState,
+  hookReferencedTargetsSignature,
   hostEnvironmentObservation,
   hostEnvironmentObservationSignature,
 } = configLoaderModule;
@@ -1464,6 +1465,22 @@ const LIVE_CONFIG_ENVIRONMENT_OBSERVATION = SCOPED_INGEST
 /** Cheap current-state gate for the recommendations response cache (#2554). */
 export function stopHookConfigState() {
   return readStopHookConfigState({
+    claudeDir: CLAUDE,
+    homeDir: CLAUDE_HOME,
+    scoped: SCOPED_INGEST,
+    projectRoots: liveConfigProjectRoots(repoMapArtifactRoots()),
+    environment: LIVE_CONFIG_ENVIRONMENT_OBSERVATION,
+  });
+}
+
+// Values-free probed-state signature for every hook-referenced target (#2539),
+// observing the SAME sources as assembleLiveConfig above. Feeds both dataset
+// cache gates: target existence is serialized into the dataset
+// (`referencedPaths[].state`, #2500/#2553) but lives outside every hashed
+// source, so a delete/create/restore of a referenced script with settings
+// untouched would otherwise keep serving the stale cached state.
+function hookTargetsSignature() {
+  return hookReferencedTargetsSignature({
     claudeDir: CLAUDE,
     homeDir: CLAUDE_HOME,
     scoped: SCOPED_INGEST,
@@ -2797,6 +2814,13 @@ export function sourceSignature() {
       parts.push(`${f}:0:0`);
     }
   }
+  // Hook-referenced target existence feeds `referencedPaths[].state` in the
+  // dataset (#2500/#2553) but sits OUTSIDE every source above: deleting or
+  // restoring a referenced script moves neither settings.json nor a hashed
+  // resource dir. Fold the values-free probed-state signature in so such a
+  // transition refreshes instead of serving stale reference-integrity state
+  // (#2539).
+  parts.push(`hook-targets:${hookTargetsSignature()}`);
   // liveConfig resource dirs: their membership feeds the dataset, and skill
   // descriptions are read from SKILL.md under the config file cap. Hashing the
   // tree's mtime/size pairs catches both add/remove/rename and bounded metadata
@@ -3008,6 +3032,12 @@ export function ingest() {
   hashFileSig(CLAUDE_MD_GLOBAL, hash);
   hashFileSig(PLUGINS_REGISTRY, hash);
   hashFileSig(CLAUDE_JSON, hash);
+  // Hook-referenced target existence state (#2539): serialized into the
+  // assembled bundle as `referencedPaths[].state`, so its transitions must
+  // rebuild the persisted dataset cache even though no hashed source moved.
+  hash.update('hook-targets\n');
+  hash.update(hookTargetsSignature());
+  hash.update('\n');
   // Walk the resource directories so a new SKILL.md or command file
   // invalidates without us having to re-stat each individual file.
   hash.update('skills\n');

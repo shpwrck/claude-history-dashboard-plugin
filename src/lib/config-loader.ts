@@ -15,6 +15,7 @@ import {
   readSync,
   statSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
 import {
@@ -785,20 +786,26 @@ function resolveVerifiablePath(
   return resolved;
 }
 
+interface HookReferencedToken {
+  /** The token exactly as written, for display/provenance. */
+  path: string;
+  /** The verifiable ABSOLUTE target the token resolves to. */
+  resolved: string;
+}
+
 /**
- * Extract the verifiable filesystem path tokens a hook `command` references,
- * each with its timestamped ingest-time state. Conservative: whitespace-tokenized,
- * redirect targets (`> file`) are ignored (they are outputs, not references),
- * and only tokens `resolveVerifiablePath` accepts are recorded. `path` is the
- * token exactly as written for display/provenance.
+ * Resolve the verifiable filesystem path tokens a hook `command` references,
+ * WITHOUT probing them. Conservative: whitespace-tokenized, redirect targets
+ * (`> file`) are ignored (they are outputs, not references), and only tokens
+ * `resolveVerifiablePath` accepts are recorded. Shared by annotation and the
+ * #2539 invalidation signature so the two can never resolve different targets.
  */
-function extractHookReferencedPaths(
+function resolveHookReferencedTokens(
   command: string,
   homeDir: string,
-  projectDir: string | undefined,
-  checkedAt: string
-): HookReferencedPath[] {
-  const out: HookReferencedPath[] = [];
+  projectDir: string | undefined
+): HookReferencedToken[] {
+  const out: HookReferencedToken[] = [];
   const seen = new Set<string>();
   const tokens = command.split(/\s+/).slice(0, HOOK_COMMAND_MAX_TOKENS);
   let expectRedirectTarget = false;
@@ -824,9 +831,26 @@ function extractHookReferencedPaths(
     const resolved = resolveVerifiablePath(tok, homeDir, projectDir);
     if (resolved === null) continue;
     seen.add(tok);
-    out.push({ path: tok, state: probeHookReferencedPath(resolved), checkedAt });
+    out.push({ path: tok, resolved });
   }
   return out;
+}
+
+/**
+ * Extract the verifiable filesystem path tokens a hook `command` references,
+ * each with its timestamped ingest-time state.
+ */
+function extractHookReferencedPaths(
+  command: string,
+  homeDir: string,
+  projectDir: string | undefined,
+  checkedAt: string
+): HookReferencedPath[] {
+  return resolveHookReferencedTokens(command, homeDir, projectDir).map((t) => ({
+    path: t.path,
+    state: probeHookReferencedPath(t.resolved),
+    checkedAt,
+  }));
 }
 
 type HookPathState = 'present' | 'missing' | 'unverifiable';
@@ -897,13 +921,12 @@ function probeHookReferencedPath(target: string): HookPathState {
   }
 }
 
-/** Annotate every hook command in a merged settings object with its
- *  ingest-time `referencedPaths` (only when it references a verifiable path). */
-function annotateHookReferencedPaths(
+/** Walk every hook command entry in a merged settings object — the single
+ *  traversal shared by annotation and the #2539 invalidation signature, so the
+ *  two can never observe different hook sets. */
+function forEachHookCommand(
   settings: Obj,
-  homeDir: string,
-  projectDir: string | undefined,
-  checkedAt: string
+  fn: (hook: Obj, command: string, event: string) => void
 ): void {
   const hooks = settings && typeof settings.hooks === 'object' ? (settings.hooks as Obj) : null;
   if (!hooks) return;
@@ -918,11 +941,170 @@ function annotateHookReferencedPaths(
         if (!h || typeof h !== 'object') continue;
         const cmd = (h as Obj).command;
         if (typeof cmd !== 'string') continue;
-        const refs = extractHookReferencedPaths(cmd, homeDir, projectDir, checkedAt);
-        if (refs.length > 0) (h as Obj).referencedPaths = refs;
+        fn(h as Obj, cmd, event);
       }
     }
   }
+}
+
+/** Annotate every hook command in a merged settings object with its
+ *  ingest-time `referencedPaths` (only when it references a verifiable path). */
+function annotateHookReferencedPaths(
+  settings: Obj,
+  homeDir: string,
+  projectDir: string | undefined,
+  checkedAt: string
+): void {
+  forEachHookCommand(settings, (h, cmd) => {
+    const refs = extractHookReferencedPaths(cmd, homeDir, projectDir, checkedAt);
+    if (refs.length > 0) h.referencedPaths = refs;
+  });
+}
+
+interface HookTargetRef {
+  scope: string;
+  event: string;
+  path: string;
+  resolved: string;
+}
+
+interface HookTargetsExtraction {
+  /** Every settings source whose CONTENT defines the referenced-target set. */
+  sources: string[];
+  /** Replacement-safe stat identities of `sources` at extraction time. */
+  identity: string;
+  refs: HookTargetRef[];
+}
+
+/**
+ * Extraction memo for {@link hookReferencedTargetsSignature}, keyed by the
+ * resolved path options. Capped so alternating scoped/unscoped callers cannot
+ * grow it unboundedly.
+ */
+const hookTargetsExtractionMemo = new Map<string, HookTargetsExtraction>();
+const HOOK_TARGETS_MEMO_MAX_KEYS = 8;
+
+/**
+ * Values-free stat identity for one settings source — deliberately the SAME
+ * fields (floored mtime + size) as `sourceSignature()`'s own settings entries,
+ * so the memo is exactly as blind as the gate it feeds. A settings rewrite the
+ * gate cannot see (equal length, restored mtime) must not re-enumerate here
+ * either: the recommendations response cache's post-build current-state retry
+ * owns that blind spot, and a sharper identity (ctime/inode) was observed to
+ * desynchronize the two gates and break the in-flight build join. Any visible
+ * source move re-extracts.
+ */
+function sourceStatIdentity(path: string): string {
+  try {
+    const s = statSync(path);
+    return `${Math.floor(s.mtimeMs)}:${s.size}`;
+  } catch {
+    return 'absent';
+  }
+}
+
+/**
+ * Bounded, values-free signature over the CURRENT probed state of every
+ * hook-referenced target (#2539). Assembly serializes each hook command's
+ * `referencedPaths[].state` (present/missing/unverifiable), but the ingest
+ * cache gates hash only the settings/resource SOURCES — so deleting, creating,
+ * or restoring a referenced script without touching settings would keep
+ * serving the persisted dataset's stale reference-integrity state. Folding
+ * this signature into those gates fences the caches on exactly the derived
+ * state a rebuild would serialize.
+ *
+ * Cost discipline: `sourceSignature()` calls this on the request hot path, so
+ * the settings reads that ENUMERATE the referenced targets are memoized on the
+ * replacement-safe stat identities of every content-defining source (user
+ * settings x2, `~/.claude.json`, and each project root's settings x2 — root
+ * discovery itself derives from `~/.claude.json` content and the caller's
+ * option set, both part of the memo validity). Steady-state calls therefore
+ * stat the sources and probe the targets, reading no file bodies; any source
+ * move re-extracts through the same merge + project-root rules as
+ * `assembleLiveConfig`, via the shared traversal/resolution helpers. Target
+ * probes are NEVER memoized — observing their transitions is the point.
+ */
+export function hookReferencedTargetsSignature(
+  opts: LiveConfigPathOptions = {}
+): string {
+  const paths = liveConfigPaths(opts);
+  const memoKey = JSON.stringify([
+    paths.claudeDir,
+    paths.homeDir,
+    paths.scoped,
+    paths.configFileMaxBytes,
+    paths.configResourceMaxEntries,
+    paths.projectRoots,
+  ]);
+
+  let extraction = hookTargetsExtractionMemo.get(memoKey);
+  if (
+    extraction
+    && extraction.identity !== extraction.sources.map(sourceStatIdentity).join('|')
+  ) {
+    extraction = undefined;
+  }
+
+  if (!extraction) {
+    // Capture every identity BEFORE its content is read: a source replaced
+    // mid-extraction then looks changed on the next call and re-extracts.
+    // ~/.claude.json is read FIRST (it discovers the project roots), so its
+    // identity is captured ahead of that read rather than with the rest.
+    const claudeJsonIdentity = sourceStatIdentity(paths.claudeJson);
+    const claudeJson = asObj(readJsonOrNull(paths.claudeJson, paths.configFileMaxBytes));
+    const projectRoots = readableProjectRoots(paths, claudeJson);
+    const sources = [
+      paths.settingsGlobal,
+      paths.settingsLocal,
+      paths.claudeJson,
+      ...projectRoots.flatMap((root) => [
+        join(root, '.claude', 'settings.json'),
+        join(root, '.claude', 'settings.local.json'),
+      ]),
+    ];
+    const identity = [
+      sourceStatIdentity(paths.settingsGlobal),
+      sourceStatIdentity(paths.settingsLocal),
+      claudeJsonIdentity,
+      ...sources.slice(3).map(sourceStatIdentity),
+    ].join('|');
+
+    const refs: HookTargetRef[] = [];
+    const collect = (settings: Obj, projectDir: string | undefined, scope: string) => {
+      forEachHookCommand(settings, (_h, cmd, event) => {
+        for (const t of resolveHookReferencedTokens(cmd, paths.homeDir, projectDir)) {
+          refs.push({ scope, event, path: t.path, resolved: t.resolved });
+        }
+      });
+    };
+    const { settings } = readLiveSettings(paths);
+    collect(settings, undefined, 'user');
+    const projectSettings = readProjectSettings(projectRoots, paths.configFileMaxBytes);
+    for (const [root, ps] of Object.entries(projectSettings)) {
+      collect(ps, root, root);
+    }
+
+    extraction = { sources, identity, refs };
+    if (
+      !hookTargetsExtractionMemo.has(memoKey)
+      && hookTargetsExtractionMemo.size >= HOOK_TARGETS_MEMO_MAX_KEYS
+    ) {
+      const oldest = hookTargetsExtractionMemo.keys().next().value;
+      if (oldest !== undefined) hookTargetsExtractionMemo.delete(oldest);
+    }
+    hookTargetsExtractionMemo.set(memoKey, extraction);
+  }
+
+  // Probe every target fresh; JSON-encode each tuple so no field value can
+  // alias the separators.
+  const hash = createHash('sha1');
+  for (const ref of extraction.refs) {
+    hash.update(
+      JSON.stringify([ref.scope, ref.event, ref.path, probeHookReferencedPath(ref.resolved)])
+    );
+    hash.update('\n');
+  }
+  return `${extraction.refs.length}:${hash.digest('hex')}`;
 }
 
 /** A markdown-link target that is a checkable relative bundled-resource ref, or

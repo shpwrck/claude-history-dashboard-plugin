@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import {
   assembleLiveConfig,
+  hookReferencedTargetsSignature,
   hostEnvironmentObservation,
   hostEnvironmentObservationSignature,
   readStopHookConfigState,
 } from './config-loader';
 import { detector as settingsJsonInvalidDetector } from './detectors/reliability/settings-json-invalid';
+import { detector as skillHookIntegrityDetector } from './detectors/maintenance/skill-hook-integrity';
 import type { RecommendationInput } from './detectors/types';
 
 describe('assembleLiveConfig', () => {
@@ -792,6 +794,121 @@ describe('assembleLiveConfig', () => {
         checkedAt: '2026-07-15T02:03:04.000Z',
       },
     ]);
+  });
+
+  // ── #2539 hook-target existence must fence the dataset caches ─────────────
+
+  describe('hookReferencedTargetsSignature (#2539)', () => {
+    const HOOK_SETTINGS = {
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: 'node ~/.claude/hooks/probe.mjs' }] }],
+      },
+    };
+
+    it('moves on missing→present and restores exactly on the inverse, settings untouched', () => {
+      writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(HOOK_SETTINGS));
+      const target = join(claudeDir, 'hooks', 'probe.mjs');
+
+      const absent = hookReferencedTargetsSignature({ claudeDir, homeDir: root });
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).toBe(absent);
+
+      mkdirSync(join(claudeDir, 'hooks'), { recursive: true });
+      writeFileSync(target, '// hook\n');
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).not.toBe(absent);
+
+      rmSync(target);
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).toBe(absent);
+    });
+
+    it('ignores target content edits — path identity plus state only, no bytes (values-free)', () => {
+      mkdirSync(join(claudeDir, 'hooks'), { recursive: true });
+      writeFileSync(join(claudeDir, 'hooks', 'probe.mjs'), '// v1\n');
+      writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(HOOK_SETTINGS));
+      const before = hookReferencedTargetsSignature({ claudeDir, homeDir: root });
+      writeFileSync(join(claudeDir, 'hooks', 'probe.mjs'), '// v2 — longer, different bytes\n');
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).toBe(before);
+    });
+
+    it('re-extracts when a settings edit changes the referenced-target set (memo invalidation)', () => {
+      writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(HOOK_SETTINGS));
+      const before = hookReferencedTargetsSignature({ claudeDir, homeDir: root });
+      // Different length so the source's stat identity moves even on coarse
+      // filesystem timestamps.
+      writeFileSync(
+        join(claudeDir, 'settings.json'),
+        JSON.stringify({
+          hooks: {
+            Stop: [{
+              hooks: [{ type: 'command', command: 'node ~/.claude/hooks/other-target.mjs' }],
+            }],
+          },
+        })
+      );
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).not.toBe(before);
+    });
+
+    it('covers project-scoped $CLAUDE_PROJECT_DIR hook targets', () => {
+      const projectRoot = join(root, 'repo-2539');
+      mkdirSync(join(projectRoot, '.claude', 'hooks'), { recursive: true });
+      writeFileSync(
+        join(root, '.claude.json'),
+        JSON.stringify({ projects: { [projectRoot]: {} } })
+      );
+      writeFileSync(
+        join(projectRoot, '.claude', 'settings.json'),
+        JSON.stringify({
+          hooks: {
+            PostToolUse: [{
+              hooks: [{ type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh' }],
+            }],
+          },
+        })
+      );
+      const absent = hookReferencedTargetsSignature({ claudeDir, homeDir: root });
+      writeFileSync(join(projectRoot, '.claude', 'hooks', 'guard.sh'), '# hook\n');
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).not.toBe(absent);
+    });
+
+    it('a fresh assembly after each transition refreshes referencedPaths state and the detector outcome', () => {
+      writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(HOOK_SETTINGS));
+      const now = new Date('2026-07-15T02:03:04.000Z');
+      const asInput = (liveConfig: unknown) =>
+        ({ liveConfig }) as unknown as RecommendationInput;
+
+      // Absent: the ingest-time probe records `missing` and the
+      // dangling-hook-script finding fires.
+      const stale = assembleLiveConfig({ claudeDir, homeDir: root, now: () => now });
+      expect(
+        stale.settings.hooks?.Stop?.[0]?.hooks?.[0]?.referencedPaths?.[0]?.state
+      ).toBe('missing');
+      expect(
+        skillHookIntegrityDetector.rule(asInput(stale), now.getTime())
+      ).not.toBeNull();
+
+      // Create the script WITHOUT touching settings: the invalidation signature
+      // moves (so cached datasets are fenced), and the next rebuild serializes
+      // the refreshed state with a clean detector outcome.
+      const sigAbsent = hookReferencedTargetsSignature({ claudeDir, homeDir: root });
+      mkdirSync(join(claudeDir, 'hooks'), { recursive: true });
+      writeFileSync(join(claudeDir, 'hooks', 'probe.mjs'), '// hook\n');
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).not.toBe(sigAbsent);
+      const fresh = assembleLiveConfig({ claudeDir, homeDir: root, now: () => now });
+      expect(
+        fresh.settings.hooks?.Stop?.[0]?.hooks?.[0]?.referencedPaths?.[0]?.state
+      ).toBe('present');
+      expect(skillHookIntegrityDetector.rule(asInput(fresh), now.getTime())).toBeNull();
+
+      // Inverse present→absent: the signature moves again and the finding is back.
+      rmSync(join(claudeDir, 'hooks', 'probe.mjs'));
+      expect(hookReferencedTargetsSignature({ claudeDir, homeDir: root })).toBe(sigAbsent);
+      const gone = assembleLiveConfig({ claudeDir, homeDir: root, now: () => now });
+      expect(
+        gone.settings.hooks?.Stop?.[0]?.hooks?.[0]?.referencedPaths?.[0]?.state
+      ).toBe('missing');
+      expect(
+        skillHookIntegrityDetector.rule(asInput(gone), now.getTime())
+      ).not.toBeNull();
+    });
   });
 
   it('flags a skill SKILL.md reference to a removed bundled path, keeping present ones (#2500)', () => {

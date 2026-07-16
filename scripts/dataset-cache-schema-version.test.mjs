@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, brotliCompressSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
@@ -207,4 +207,67 @@ test('v9 session-blob semantics reject a persisted dataset assembled from v8 row
     if (origDb === undefined) delete process.env.CHD_DB_PATH;
     else process.env.CHD_DB_PATH = origDb;
   }
+});
+
+test('hook-target existence transition moves sourceSignature with settings untouched (#2539)', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = join(tmpdir(), `chd-2539-home-${randomUUID()}`);
+  mkdirSync(join(home, '.claude', 'projects'), { recursive: true });
+  writeFileSync(
+    join(home, '.claude', 'settings.json'),
+    JSON.stringify({
+      hooks: {
+        Stop: [
+          { hooks: [{ type: 'command', command: 'node ~/.claude/hooks/probe-2539.mjs' }] },
+        ],
+      },
+    })
+  );
+
+  try {
+    const ingest = await loadIngest(home);
+    const target = join(home, '.claude', 'hooks', 'probe-2539.mjs');
+
+    const absent = ingest.sourceSignature();
+    mkdirSync(join(home, '.claude', 'hooks'), { recursive: true });
+    writeFileSync(target, '// hook\n');
+    assert.notEqual(
+      ingest.sourceSignature(),
+      absent,
+      'creating the referenced hook script (settings untouched) must move the cheap stat-gate'
+    );
+
+    rmSync(target);
+    assert.equal(
+      ingest.sourceSignature(),
+      absent,
+      'removing it again must restore the signature exactly (values-free: state only)'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('ingest() contentHash folds the hook-targets probed-state signature (#2539)', () => {
+  const src = readFileSync(join(HERE, 'ingest.mjs'), 'utf8');
+  assert.match(
+    src,
+    /hash\.update\('hook-targets\\n'\)/,
+    'ingest() contentHash must label the hook-targets section'
+  );
+  assert.match(
+    src,
+    /hash\.update\(hookTargetsSignature\(\)\)/,
+    'ingest() contentHash must include the hook-targets probed-state signature'
+  );
+  assert.match(
+    src,
+    /parts\.push\(`hook-targets:\$\{hookTargetsSignature\(\)\}`\)/,
+    'sourceSignature() must include the hook-targets probed-state signature'
+  );
 });
