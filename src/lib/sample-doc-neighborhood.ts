@@ -45,6 +45,9 @@ function node(
     frontmatter,
     headings: [],
     gitMtimeIso,
+    // The sample mimics a live full-history checkout (#2707). Provenance is a
+    // plain literal here — no Node modules reach the browser bundle.
+    gitMtimeProvenance: 'git',
     ...extra,
   };
 }

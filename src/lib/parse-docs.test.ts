@@ -340,21 +340,26 @@ describe('buildDocGraph', () => {
     const mtime = byslug.get('REFERENCES')?.gitMtimeIso;
     expect(typeof mtime).toBe('string');
     expect(Number.isNaN(Date.parse(mtime as string))).toBe(false);
+    // The fallback clock is explicitly labelled non-authoritative (#2707).
+    expect(byslug.get('REFERENCES')?.gitMtimeProvenance).toBe('filesystem');
   });
 
   it('resolves every tracked mtime with one bounded git history query', () => {
     write(root, 'README.md', '# Readme\n');
     write(root, 'docs/a.md', '# A\n');
     write(root, 'docs/untracked.md', '# Untracked\n');
-    execFileSyncMock.mockReturnValue(
-      'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
-        'CHD-DATE:2026-07-13T09:00:00-04:00\0\0\ndocs/a.md\0'
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string =>
+      args?.includes('--is-shallow-repository')
+        ? 'false\n'
+        : 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
+          'CHD-DATE:2026-07-13T09:00:00-04:00\0\0\ndocs/a.md\0'
     );
 
     const graph = buildDocGraph(root);
     const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
 
-    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    // Exactly two git children: the shallow probe (#2707), then ONE batched log.
+    expect(execFileSyncMock).toHaveBeenCalledTimes(2);
     expect(execFileSyncMock).toHaveBeenCalledWith(
       'git',
       expect.arrayContaining([
@@ -374,16 +379,20 @@ describe('buildDocGraph', () => {
     expect(byPath.get('README.md')?.gitMtimeIso).toBe(
       '2026-07-14T10:00:00-04:00'
     );
+    expect(byPath.get('README.md')?.gitMtimeProvenance).toBe('git');
     expect(byPath.get('docs/a.md')?.gitMtimeIso).toBe(
       '2026-07-13T09:00:00-04:00'
     );
+    expect(byPath.get('docs/a.md')?.gitMtimeProvenance).toBe('git');
     expect(Date.parse(byPath.get('docs/untracked.md')?.gitMtimeIso ?? '')).not.toBeNaN();
+    expect(byPath.get('docs/untracked.md')?.gitMtimeProvenance).toBe('filesystem');
   });
 
   it('preserves git mtimes emitted before a bounded history walk fails', () => {
     write(root, 'README.md', '# Readme\n');
     write(root, 'docs/older.md', '# Older\n');
-    execFileSyncMock.mockImplementation((): string => {
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'false\n';
       throw Object.assign(new Error('missing historical tree'), {
         stdout: 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0',
       });
@@ -392,13 +401,127 @@ describe('buildDocGraph', () => {
     const graph = buildDocGraph(root);
     const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
 
-    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(2);
     expect(byPath.get('README.md')?.gitMtimeIso).toBe(
       '2026-07-14T10:00:00-04:00'
     );
+    expect(byPath.get('README.md')?.gitMtimeProvenance).toBe('git');
     expect(
       Date.parse(byPath.get('docs/older.md')?.gitMtimeIso ?? '')
     ).not.toBeNaN();
+    expect(byPath.get('docs/older.md')?.gitMtimeProvenance).toBe('filesystem');
+  });
+
+  it('never trusts live history in a SHALLOW checkout (#2707)', () => {
+    write(root, 'README.md', '# Readme\n');
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'true\n';
+      // The batched log would happily return grafted boundary-commit times —
+      // it must never be consulted.
+      return 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0';
+    });
+
+    const graph = buildDocGraph(root);
+
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1); // probe only, no log
+    const node = graph.nodes.find((n) => n.path === 'README.md');
+    expect(node?.gitMtimeProvenance).toBe('filesystem');
+    expect(node?.gitMtimeIso).not.toBe('2026-07-14T10:00:00-04:00');
+  });
+
+  describe('packaged git-times manifest join (#2707)', () => {
+    const COMMIT = 'c'.repeat(40);
+
+    const writeManifest = (files: Record<string, string>, overrides = {}) => {
+      write(
+        root,
+        'data/doc-git-times.json',
+        JSON.stringify({
+          schemaVersion: 1,
+          sourceCommit: COMMIT,
+          complete: true,
+          files,
+          ...overrides,
+        })
+      );
+    };
+
+    it('carries manifest provenance when no .git exists and the commit binds', () => {
+      write(root, 'README.md', '# Readme\n');
+      write(root, 'docs/extra.md', '# Not in manifest\n');
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
+
+      const graph = buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT });
+      const byPath = new Map(graph.nodes.map((n) => [n.path, n]));
+
+      expect(byPath.get('README.md')?.gitMtimeIso).toBe('2026-01-05T10:00:00+00:00');
+      expect(byPath.get('README.md')?.gitMtimeProvenance).toBe('manifest');
+      // A doc absent from the manifest degrades honestly to filesystem.
+      expect(byPath.get('docs/extra.md')?.gitMtimeProvenance).toBe('filesystem');
+      // The manifest itself is not a doc node (data/ is outside the doc walk).
+      expect(byPath.has('data/doc-git-times.json')).toBe(false);
+    });
+
+    it('binds via the CHD_DOC_GIT_TIMES_EXPECTED_COMMIT env seam', () => {
+      write(root, 'README.md', '# Readme\n');
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
+      vi.stubEnv('CHD_DOC_GIT_TIMES_EXPECTED_COMMIT', COMMIT);
+      try {
+        const graph = buildDocGraph(root);
+        expect(graph.nodes[0]?.gitMtimeProvenance).toBe('manifest');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('never promotes Docker mtime: a commit-mismatched manifest is ignored', () => {
+      write(root, 'README.md', '# Readme\n');
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
+
+      const graph = buildDocGraph(root, {
+        docGitTimesExpectedCommit: 'd'.repeat(40),
+      });
+      const node = graph.nodes.find((n) => n.path === 'README.md');
+      expect(node?.gitMtimeProvenance).toBe('filesystem');
+      expect(node?.gitMtimeIso).not.toBe('2026-01-05T10:00:00+00:00');
+    });
+
+    it('fails closed on an unbound (no runtime commit), partial, or malformed manifest', () => {
+      write(root, 'README.md', '# Readme\n');
+
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
+      expect(
+        buildDocGraph(root, { docGitTimesExpectedCommit: null }).nodes[0]
+          ?.gitMtimeProvenance
+      ).toBe('filesystem');
+
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' }, { complete: false });
+      expect(
+        buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT }).nodes[0]
+          ?.gitMtimeProvenance
+      ).toBe('filesystem');
+
+      write(root, 'data/doc-git-times.json', '{not json');
+      expect(
+        buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT }).nodes[0]
+          ?.gitMtimeProvenance
+      ).toBe('filesystem');
+    });
+
+    it('prefers live non-shallow git history over a valid manifest', () => {
+      write(root, 'README.md', '# Readme\n');
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
+      execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string =>
+        args?.includes('--is-shallow-repository')
+          ? 'false\n'
+          : 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0'
+      );
+
+      const graph = buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT });
+      const node = graph.nodes.find((n) => n.path === 'README.md');
+      expect(node?.gitMtimeIso).toBe('2026-07-14T10:00:00-04:00');
+      expect(node?.gitMtimeProvenance).toBe('git');
+    });
   });
 
   it('produces deterministic, sorted, de-duplicated output', () => {

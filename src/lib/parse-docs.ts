@@ -28,6 +28,15 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix, resolve } from 'node:path';
+import {
+  DOC_GIT_TIMES_EXPECTED_COMMIT_ENV,
+  DOC_GIT_TIMES_MAX_FILE_BYTES,
+  DOC_GIT_TIMES_RELPATH,
+  parseDocGitTimesManifest,
+  type DocTimeProvenance,
+} from './doc-git-times';
+
+export type { DocTimeProvenance } from './doc-git-times';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -78,11 +87,24 @@ export interface DocNode {
   /** ATX heading texts in document order (fenced-code headings excluded). */
   headings: string[];
   /**
-   * Last git commit time (ISO 8601) for this file, or — when the tree is not a
-   * git repo / the file is untracked — the filesystem mtime; `null` if neither
-   * is available. This is the doc's "as-of" clock for staleness.
+   * Last git commit time (ISO 8601) for this file, or — when no Git history is
+   * reachable (no repo, shallow checkout, untracked file, no valid packaged
+   * manifest) — the filesystem mtime; `null` if neither is available. This is
+   * the doc's "as-of" clock. Check {@link DocNode.gitMtimeProvenance} before
+   * treating it as Git history: a `filesystem` value inside the production
+   * image is just the Docker COPY time.
    */
   gitMtimeIso: string | null;
+  /**
+   * How `gitMtimeIso` was derived (#2707): `git` (live non-shallow history) >
+   * `manifest` (valid commit-bound packaged manifest) > `filesystem` (stat
+   * mtime — never authoritative) > `unavailable` (`gitMtimeIso` is null).
+   * Always set by {@link buildDocGraph}; optional only so older serialized
+   * graphs remain type-valid — an ABSENT provenance must be treated exactly
+   * like `filesystem`/`unavailable` (never as Git history), so a stale
+   * deserialized node can never pass an authoritative-freshness check.
+   */
+  gitMtimeProvenance?: DocTimeProvenance;
   /** Set when this doc is a declared partial index (see {@link DocIndexKind}). */
   indexKind?: DocIndexKind;
   /** Numeric ordinal for an ADR (`0007-…` -> 7); only set for `adr-sequence`. */
@@ -123,11 +145,14 @@ const EXCLUDE_DIRS: ReadonlySet<string> = new Set([
 
 /** Skip a single doc larger than this (defensive; real docs are tiny). */
 export const DOC_GRAPH_MAX_FILE_BYTES = 512 * 1024;
-/** Hard cap on files walked, so a pathological tree can never hang ingest. */
-const DEFAULT_MAX_FILES = 5000;
+/** Hard cap on files walked, so a pathological tree can never hang ingest.
+ *  Exported for the producer/consumer parity fence (doc-git-times-parity):
+ *  the manifest entry cap and producer file cap must stay lock-step with it. */
+export const DOC_GRAPH_DEFAULT_MAX_FILES = 5000;
 const DOC_GRAPH_GIT_MAX_COMMITS = 4096;
 const DOC_GRAPH_GIT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-const DOC_GRAPH_GIT_PATHS = [
+/** Exported for the parity fence: the producer must query the SAME surface. */
+export const DOC_GRAPH_GIT_PATHS = [
   ':(glob)*.md',
   ':(glob)docs/**/*.md',
 ] as const;
@@ -135,6 +160,17 @@ const DOC_GRAPH_GIT_PATHS = [
 export interface BuildDocGraphOptions {
   maxFileBytes?: number;
   maxFiles?: number;
+  /**
+   * Packaged git-times manifest location (#2707); defaults to
+   * `<root>/data/doc-git-times.json` ({@link DOC_GIT_TIMES_RELPATH}).
+   */
+  docGitTimesPath?: string;
+  /**
+   * Full commit to bind the packaged manifest against. Defaults to
+   * `CHD_DOC_GIT_TIMES_EXPECTED_COMMIT` then the baked `GIT_SHA` env. Without
+   * a value the manifest is rejected (fail closed), never trusted unbound.
+   */
+  docGitTimesExpectedCommit?: string | null;
 }
 
 // ── Pure extraction helpers (unit-tested off strings) ─────────────────────────
@@ -341,7 +377,7 @@ export function docGraphSourcePaths(
   root: string,
   opts: Pick<BuildDocGraphOptions, 'maxFiles'> = {}
 ): string[] {
-  const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
+  const maxFiles = opts.maxFiles ?? DOC_GRAPH_DEFAULT_MAX_FILES;
   const found: string[] = [];
   const walk = (absDir: string, relDir: string, isRoot: boolean): void => {
     if (found.length >= maxFiles) return;
@@ -390,6 +426,32 @@ function partialGitStdout(error: unknown): string {
   return '';
 }
 
+/**
+ * Whether live `git log` history under `root` may be trusted as authoritative
+ * (#2707). A SHALLOW checkout grafts old files onto the shallow-boundary
+ * commit, so its per-path "last commit" times are fabrications — exactly the
+ * failure this issue removes. Returns:
+ *  - `'ok'`          — a real, non-shallow repository; history is trustworthy.
+ *  - `'shallow'`     — shallow checkout; live history must NOT be used.
+ *  - `'unavailable'` — not a git repo / git missing; live history cannot run.
+ */
+export function gitHistoryAvailability(
+  root: string
+): 'ok' | 'shallow' | 'unavailable' {
+  try {
+    const out = execFileSync(
+      'git',
+      ['-C', root, 'rev-parse', '--is-shallow-repository'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }
+    ).trim();
+    if (out === 'false') return 'ok';
+    if (out === 'true') return 'shallow';
+    return 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
+
 function gitMtimesByPath(
   root: string,
   relPaths: readonly string[]
@@ -417,6 +479,10 @@ function gitMtimesByPath(
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 15_000,
         maxBuffer: DOC_GRAPH_GIT_MAX_OUTPUT_BYTES,
+        // This is promised as a LOCAL walk (see ingest's readDocGraph): never
+        // hydrate a partial/treeless clone over the network. If git then fails,
+        // the normal failure path falls through to manifest/filesystem tiers.
+        env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
       }
     );
   } catch (error) {
@@ -456,18 +522,64 @@ export function docGraphGitHistorySignature(root: string): string {
   }
 }
 
-/** Best-effort git time with a filesystem fallback for untracked files. */
-function deriveMtimeIso(
+/**
+ * Server-side bounded read + fail-closed validation of the packaged git-times
+ * manifest (#2707). Returns the per-path time map, or `null` when the manifest
+ * is missing, oversized, unparseable, unbound, or fails ANY strictness check in
+ * {@link parseDocGitTimesManifest} — a rejected manifest contributes nothing.
+ */
+function readDocGitTimes(
+  root: string,
+  opts: Pick<BuildDocGraphOptions, 'docGitTimesPath' | 'docGitTimesExpectedCommit'>
+): Map<string, string> | null {
+  const path = opts.docGitTimesPath ?? join(root, DOC_GIT_TIMES_RELPATH);
+  // `||` (not `??`): a SET-BUT-EMPTY env var means "unset" here — compose files
+  // export empty stamps (e.g. `GIT_SHA: ${GIT_SHA:-}`), and an empty override
+  // must fall through to the next source instead of silently unbinding the
+  // manifest with no diagnostic.
+  const expectedCommit =
+    opts.docGitTimesExpectedCommit !== undefined
+      ? opts.docGitTimesExpectedCommit
+      : (process.env[DOC_GIT_TIMES_EXPECTED_COMMIT_ENV] ||
+         process.env.GIT_SHA ||
+         null);
+  try {
+    const st = statSync(path);
+    if (!st.isFile() || st.size > DOC_GIT_TIMES_MAX_FILE_BYTES) return null;
+    const parsed = parseDocGitTimesManifest(
+      JSON.parse(readFileSync(path, 'utf8')),
+      { expectedCommit }
+    );
+    return parsed.ok ? parsed.times : null;
+  } catch {
+    return null; // absent/unreadable/malformed JSON — fail closed
+  }
+}
+
+/**
+ * The provenance ladder (#2707): live non-shallow git history, then the valid
+ * commit-bound manifest, then the filesystem mtime (present but NEVER
+ * authoritative), then nothing.
+ */
+function deriveDocTime(
   root: string,
   relPath: string,
-  gitMtimes: ReadonlyMap<string, string>
-): string | null {
+  gitMtimes: ReadonlyMap<string, string>,
+  manifestTimes: ReadonlyMap<string, string> | null
+): { gitMtimeIso: string | null; gitMtimeProvenance: DocTimeProvenance } {
   const gitMtime = gitMtimes.get(relPath);
-  if (gitMtime) return gitMtime;
+  if (gitMtime) return { gitMtimeIso: gitMtime, gitMtimeProvenance: 'git' };
+  const manifestTime = manifestTimes?.get(relPath);
+  if (manifestTime) {
+    return { gitMtimeIso: manifestTime, gitMtimeProvenance: 'manifest' };
+  }
   try {
-    return statSync(join(root, relPath)).mtime.toISOString();
+    return {
+      gitMtimeIso: statSync(join(root, relPath)).mtime.toISOString(),
+      gitMtimeProvenance: 'filesystem',
+    };
   } catch {
-    return null;
+    return { gitMtimeIso: null, gitMtimeProvenance: 'unavailable' };
   }
 }
 
@@ -485,16 +597,23 @@ export function buildDocGraph(
 ): DocGraph {
   const resolvedRoot = resolve(root);
   const maxFileBytes = opts.maxFileBytes ?? DOC_GRAPH_MAX_FILE_BYTES;
-  const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
+  const maxFiles = opts.maxFiles ?? DOC_GRAPH_DEFAULT_MAX_FILES;
   const relPaths = docGraphSourcePaths(resolvedRoot, { maxFiles });
-  const gitMtimes = gitMtimesByPath(resolvedRoot, relPaths);
+  // #2707: a shallow checkout's per-path history is fabricated (files graft
+  // onto the boundary commit), so live git times are used only when the repo
+  // provably has full history; otherwise fall through to the packaged manifest.
+  const gitMtimes =
+    gitHistoryAvailability(resolvedRoot) === 'ok'
+      ? gitMtimesByPath(resolvedRoot, relPaths)
+      : new Map<string, string>();
+  const manifestTimes = readDocGitTimes(resolvedRoot, opts);
 
   const nodes: DocNode[] = [];
   const edgeKeys = new Set<string>();
   const edges: DocEdge[] = [];
 
   const addEdge = (from: string, to: string, kind: DocEdgeKind): void => {
-    const key = `${from} ${to} ${kind}`;
+    const key = `${from} ${to} ${kind}`;
     if (edgeKeys.has(key)) return;
     edgeKeys.add(key);
     edges.push({ from, to, kind });
@@ -513,13 +632,20 @@ export function buildDocGraph(
     const slug = slugForPath(rel);
     const category = deriveCategory(rel);
     const { frontmatter, body } = parseFrontmatter(content);
+    const { gitMtimeIso, gitMtimeProvenance } = deriveDocTime(
+      resolvedRoot,
+      rel,
+      gitMtimes,
+      manifestTimes
+    );
     const node: DocNode = {
       slug,
       path: toPosix(rel),
       category,
       frontmatter,
       headings: extractHeadings(body),
-      gitMtimeIso: deriveMtimeIso(resolvedRoot, rel, gitMtimes),
+      gitMtimeIso,
+      gitMtimeProvenance,
     };
     const idx = classifyIndex(slug, category);
     if (idx) {

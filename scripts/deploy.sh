@@ -71,6 +71,13 @@ if [ "$REFRESH" -eq 1 ]; then
     --root "$DIR" \
     --artifact-key "$CHD_DOC_HYGIENE_ARTIFACT_KEY" || \
     echo "deploy: doc-hygiene refresh reported a problem — continuing with deploy" >&2
+  # #2707: per-doc Git last-commit times, packaged into the image (data/ COPY)
+  # so the runtime never mistakes Docker COPY mtimes for Git history. Best-effort
+  # like its siblings: on failure a stale/absent manifest simply fails the
+  # runtime's commit binding and docs carry non-authoritative provenance.
+  echo "deploy: refreshing doc git-times manifest (host-side)…"
+  node "$DIR/scripts/doc-git-times-generate.mjs" --root "$DIR" || \
+    echo "deploy: doc git-times refresh reported a problem — continuing with deploy" >&2
 fi
 
 COMPOSE=("$ENGINE" compose -f "$DIR/docker-compose.yml" -f "$DIR/docker-compose.local.yml")
