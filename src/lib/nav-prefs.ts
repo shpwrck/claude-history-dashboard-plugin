@@ -45,6 +45,7 @@ import type { ViewRequirement, VariantCapabilities } from './variant-capabilitie
 import { ALL_DOMAINS, DOMAIN_OUTCOME_VERB } from './domain-registry';
 
 const STORAGE_KEY = 'claude-dashboard:nav-prefs';
+const EMPTY_VIEW_SET: ReadonlySet<View> = new Set();
 
 /**
  * Sticky entrypoint scope (#132). `all` shows every session's activity;
@@ -203,7 +204,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: TachometerAltIcon,
     domain: 'home',
     description:
-      'Your highest-priority findings across cost, speed, success, safety, context, and workflow, ranked so you can act on what matters most first. Server-side engine artifacts are computed over all data; the global time/project filters scope the rest of the page.',
+      'Your highest-priority findings across cost, speed, success, safety, context, and workflow, ranked by priority. Server-side engine artifacts cover all data; global time/project filters scope the rest of the page.',
   },
   {
     view: 'recommendations',
@@ -606,7 +607,7 @@ export const LIVE_SERVER_VIEWS = new Set<View>(
  * guard); finer gating uses {@link isNavViewAvailable} with the variant caps.
  */
 export const SERVER_ONLY_VIEWS = new Set<View>(
-  NAV_ITEMS.filter((i) => i.requires).map((i) => i.view)
+  [...SERVER_DATA_VIEWS, ...LIVE_SERVER_VIEWS]
 );
 
 /**
@@ -619,7 +620,7 @@ export const SERVER_ONLY_VIEWS = new Set<View>(
 export function isNavViewAvailable(
   view: View,
   caps: VariantCapabilities,
-  uploadCoveredViews: ReadonlySet<View> = new Set()
+  uploadCoveredViews: ReadonlySet<View> = EMPTY_VIEW_SET
 ): boolean {
   if (LIVE_SERVER_VIEWS.has(view)) return caps.hasLiveServer;
   if (SERVER_DATA_VIEWS.has(view)) {
@@ -815,7 +816,7 @@ export function migrateNavPrefs(prefs: NavPrefs): NavPrefs {
 export function resolveInitialView(
   prefs: NavPrefs,
   caps: VariantCapabilities,
-  uploadCoveredViews: ReadonlySet<View> = new Set()
+  uploadCoveredViews: ReadonlySet<View> = EMPTY_VIEW_SET
 ): View {
   const hidden = new Set(prefs.hiddenViews);
   const isVisible = (v: View) =>
@@ -827,7 +828,7 @@ export function resolveInitialView(
   const firstVisible = NAV_ITEMS.find(
     (i) => !hidden.has(i.view) && isNavViewAvailable(i.view, caps, uploadCoveredViews)
   );
-  return firstVisible ? firstVisible.view : DEFAULT_VIEW;
+  return firstVisible?.view ?? DEFAULT_VIEW;
 }
 
 /** Record the last-viewed route, returning a new prefs object (#141). */
