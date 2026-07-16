@@ -22,7 +22,7 @@
 // unit level until such an endpoint exists.
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -73,8 +73,8 @@ async function waitUp(base, proc) {
 }
 
 // Connection: close so each request uses a fresh socket (avoids keep-alive races).
-async function getRecs(base) {
-  const res = await fetch(`${base}/api/recommendations.json`, {
+async function getRecs(base, query = '') {
+  const res = await fetch(`${base}/api/recommendations.json${query}`, {
     headers: { connection: 'close' },
   });
   return {
@@ -82,6 +82,15 @@ async function getRecs(base) {
     cache: res.headers.get('x-recommendations-cache'),
     body: await res.text(),
   };
+}
+
+async function waitForOutputCount(readOutput, marker, count, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (readOutput().split(marker).length - 1 >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`server did not emit ${marker} ${count} time(s)`);
 }
 
 async function postReject(base, port, findingId, reason) {
@@ -116,28 +125,42 @@ async function readReceipts(path) {
     .filter(Boolean);
 }
 
-function sessionJsonl(id, prompt, ts) {
-  return (
-    [
-      JSON.stringify({ type: 'custom-title', sessionId: id, customTitle: prompt }),
+function sessionJsonl(id, prompt, ts, { followUpTurns = 0 } = {}) {
+  const rows = [
+    JSON.stringify({ type: 'custom-title', sessionId: id, customTitle: prompt }),
+    JSON.stringify({
+      type: 'user',
+      timestamp: ts,
+      cwd: '/tmp/demo',
+      message: { role: 'user', content: prompt },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: ts,
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: `toolu_${id}`,
+            name: 'Read',
+            input: { file_path: '/tmp/a.txt' },
+          },
+        ],
+      },
+    }),
+  ];
+  for (let i = 0; i < followUpTurns; i += 1) {
+    rows.push(
       JSON.stringify({
         type: 'user',
-        timestamp: ts,
+        timestamp: new Date(Date.parse(ts) + (i + 1) * 1_000).toISOString(),
         cwd: '/tmp/demo',
-        message: { role: 'user', content: prompt },
-      }),
-      JSON.stringify({
-        type: 'assistant',
-        timestamp: ts,
-        message: {
-          role: 'assistant',
-          content: [
-            { type: 'tool_use', id: `toolu_${id}`, name: 'Read', input: { file_path: '/tmp/a.txt' } },
-          ],
-        },
-      }),
-    ].join('\n') + '\n'
-  );
+        message: { role: 'user', content: `continue ${i + 1}` },
+      })
+    );
+  }
+  return `${rows.join('\n')}\n`;
 }
 
 const port = await freePort();
@@ -147,13 +170,22 @@ const cacheDir = await mkdtemp(join(tmpdir(), 'reject-route-cache-'));
 const base = `http://127.0.0.1:${port}`;
 const projectDir = join(claudeDir, 'projects', 'demo');
 const receiptsPath = join(cacheDir, 'adoption-receipts.jsonl');
+const workerReceiptGate = join(cacheDir, 'worker-after-receipts.fifo');
 
 await mkdir(projectDir, { recursive: true });
 await writeFile(join(distDir, 'index.html'), '<!doctype html><main>ok</main>');
 await writeFile(join(claudeDir, 'history.jsonl'), '');
-await writeFile(
-  join(projectDir, 'one.jsonl'),
-  sessionJsonl('one', 'do the first thing', '2024-01-01T14:00:00.000Z')
+await Promise.all(
+  [
+    ['low-one', 'do it', '2024-01-01T14:00:00.000Z', { followUpTurns: 3 }],
+    ['low-two', 'help me', '2024-01-02T14:00:00.000Z', { followUpTurns: 3 }],
+    ['low-three', 'make it better', '2024-01-03T14:00:00.000Z', { followUpTurns: 3 }],
+    ['specific-one', 'Update src/a.ts and make tests pass.', '2024-01-04T14:00:00.000Z'],
+    ['specific-two', 'Update src/b.ts and make tests pass.', '2024-01-05T14:00:00.000Z'],
+    ['specific-three', 'Update src/c.ts and make tests pass.', '2024-01-06T14:00:00.000Z'],
+  ].map(([id, prompt, ts, options]) =>
+    writeFile(join(projectDir, `${id}.jsonl`), sessionJsonl(id, prompt, ts, options))
+  )
 );
 
 let stdout = '';
@@ -179,6 +211,8 @@ const proc = spawn('node', ['--import', REGISTER, SERVER], {
     ANTHROPIC_API_KEY: '',
     // Configure write auth so the reject POST can authenticate deterministically.
     POLICY_WRITE_TOKEN: WRITE_TOKEN,
+    CHD_RECS_CACHE_TEST_EVENTS: '1',
+    CHD_RECS_WORKER_TEST_AFTER_RECEIPTS_GATE: workerReceiptGate,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -228,21 +262,52 @@ try {
       assert.equal(hit.cache, 'hit')
     );
 
-    // Target a real emitted finding if the fixture produced one; otherwise a
-    // synthetic id (the mirror + cache-bust are id-agnostic).
-    let realFinding = null;
-    try {
-      const arr = JSON.parse(cold.body);
-      if (Array.isArray(arr) && arr.length > 0 && typeof arr[0].id === 'string') {
-        realFinding = arr[0].id;
-      }
-    } catch {
-      /* body not an array */
-    }
-    const findingId = realFinding || 'cost.reject-route-integration';
+    const legacyRecommendations = JSON.parse(cold.body);
+
+    // #2718 typed surfaces cold-build on the worker. Reproduce the critical
+    // reject race exactly: pause an SWR worker after it captured OLD receipts,
+    // reject the visible finding, and refetch while that worker is still alive.
+    // The refetch must start a post-invalidation owner (not join the old one),
+    // and releasing the orphan must never overwrite the corrected cache entry.
+    const typedQuery = '?surface=global&dashboardTime=all';
+    const typedCold = await getRecs(base, typedQuery);
+    const typedColdBody = JSON.parse(typedCold.body);
+    const findingId = typedColdBody.recommendations?.find(
+      (rec) => rec.id === 'workflow.prompt-clarity'
+    )?.id;
+    await check('typed race key cold-builds an analysis envelope', () => {
+      assert.equal(typedCold.status, 200);
+      assert.equal(typedCold.cache, 'miss');
+      assert.ok(Array.isArray(typedColdBody.recommendations));
+      assert.equal(findingId, 'workflow.prompt-clarity');
+      assert.ok(legacyRecommendations.some((rec) => rec.id === findingId));
+    });
+    const typedHit = await getRecs(base, typedQuery);
+    await check('typed race key is primed', () => assert.equal(typedHit.cache, 'hit'));
+
+    const mkfifo = spawnSync('mkfifo', [workerReceiptGate]);
+    await check('reject race creates its one-shot worker gate', () =>
+      assert.equal(mkfifo.status, 0, String(mkfifo.stderr || ''))
+    );
+    await writeFile(
+      join(projectDir, 'two.jsonl'),
+      sessionJsonl('two', 'change content while typed cache is warm', '2024-01-02T14:00:00.000Z')
+    );
+    const gateMarker = '[recs-cache-test] worker-receipts-read';
+    const gateMarkersBefore = `${stdout}${stderr}`.split(gateMarker).length - 1;
+    const typedStale = await getRecs(base, typedQuery);
+    await check('typed content change starts worker SWR', () => {
+      assert.equal(typedStale.cache, 'stale');
+      assert.equal(typedStale.body, typedHit.body);
+    });
+    await waitForOutputCount(
+      () => `${stdout}${stderr}`,
+      gateMarker,
+      gateMarkersBefore + 1
+    );
 
     const rej = await postReject(base, port, findingId, 'wrong');
-    await check('authenticated reject returns 200', () =>
+    await check('authenticated reject lands while old typed worker is paused', () =>
       assert.equal(rej.status, 200, rej.body)
     );
 
@@ -255,24 +320,43 @@ try {
       assert.equal(rec.active, true);
     });
 
+    const corrected = await getRecs(base, typedQuery);
+    await check('post-reject typed refetch supersedes the pre-receipt build', () => {
+      assert.equal(corrected.status, 200);
+      assert.equal(corrected.cache, 'miss');
+      const ids = JSON.parse(corrected.body).recommendations.map((rec) => rec.id);
+      assert.equal(ids.includes(findingId), false);
+    });
+
+    const supersededMarker = '[recs-cache-test] invalidated-build-superseded';
+    const supersededBefore = stdout.split(supersededMarker).length - 1;
+    await writeFile(workerReceiptGate, '\n');
+    await waitForOutputCount(
+      () => stdout,
+      supersededMarker,
+      supersededBefore + 1
+    );
+    const afterOrphan = await getRecs(base, typedQuery);
+    await check('released pre-receipt worker cannot overwrite corrected typed cache', () => {
+      assert.equal(afterOrphan.cache, 'hit');
+      const ids = JSON.parse(afterOrphan.body).recommendations.map((rec) => rec.id);
+      assert.equal(ids.includes(findingId), false);
+    });
+
     // (2) The reject busts the recs cache, so the next request rebuilds.
     const afterReject = await getRecs(base);
     await check('reject busts the recs cache (next request is a fresh build)', () =>
       assert.equal(afterReject.cache, 'miss')
     );
 
-    // (3) End-to-end suppression when the fixture emitted a real finding.
-    if (realFinding) {
-      await check('the rejected finding is suppressed from the recs output', () => {
-        const ids = JSON.parse(afterReject.body).map((r) => r.id);
-        assert.ok(
-          !ids.includes(realFinding),
-          `${realFinding} should be suppressed but is still present`
-        );
-      });
-    } else {
-      console.log('  --  (fixture emitted no findings; end-to-end suppression is unit-covered)');
-    }
+    // (3) End-to-end suppression of the deterministic prompt-clarity finding.
+    await check('the rejected finding is suppressed from the recs output', () => {
+      const ids = JSON.parse(afterReject.body).map((r) => r.id);
+      assert.ok(
+        !ids.includes(findingId),
+        `${findingId} should be suppressed but is still present`
+      );
+    });
   }
 } finally {
   proc.kill('SIGTERM');

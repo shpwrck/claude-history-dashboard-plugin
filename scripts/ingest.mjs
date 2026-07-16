@@ -602,6 +602,23 @@ const {
 const { appendAdoptionReceipt, readAdoptionReceiptIndex, readRejectedFindingIds } =
   await import(join(LIB, 'adoption-receipts.ts'));
 export { readRejectedFindingIds };
+// #2718: server-safe masthead + Cost-route filter boundary (extracted from the
+// React view layer into a React-free module) and the canonical ViewData -> engine
+// input mapping. The scoped recommendation surfaces reproduce the browser's exact
+// global-masthead-then-route filter semantics by running the SAME pure code the
+// UI does — parity is structural, not a hand-kept reimplementation.
+const { filterViewDataByTime, filterViewDataByProject } = await import(
+  join(LIB, 'view-scope.ts')
+);
+const { filterCostDataByRoute, reclaimScopedInput } = await import(
+  join(LIB, 'cost-scope.ts')
+);
+const { recommendationViewsFromViewData } = await import(
+  join(LIB, 'recommendation-view-data.ts')
+);
+const { ALL_PROJECTS, DEFAULT_TIME_PRESET } = await import(
+  join(LIB, 'routing-core.ts')
+);
 // Durable checkpoint answer-time efficacy reader (#2519). Kept outside the
 // dataset/hash path: this dashboard-owned telemetry is queried explicitly and
 // never changes transcript-derived dataset freshness.
@@ -3959,6 +3976,93 @@ export function assembleRecommendationResult(project, options = {}) {
       ? filterRecommendationsByProject(recs, project, sessions)
       : recs,
   };
+}
+
+// Adapt the lighter recommendation dataset into a full {@link ViewData} shape so
+// the extracted masthead filters (view-scope.ts) can run over it byte-identically
+// to the browser. `sessions`/`projects` are derived exactly as the client does
+// (groupBySessions -> groupByProjects); the two ViewData collections the recs
+// dataset does not carry (`memories`, `permissionChanges`) default to empty so a
+// filter field-map never dereferences undefined. No served detector reads either,
+// so the served recs stay byte-identical.
+function recommendationDatasetToViewData(dataset, sessions, projects) {
+  return {
+    ...dataset,
+    sessions,
+    projects,
+    memories: dataset.memories ?? [],
+    permissionChanges: dataset.permissionChanges ?? [],
+  };
+}
+
+// Typed, scope-exact recommendation analysis for the browser viewer surfaces
+// (#2718, epic #2443). Returns the `{ recommendations, domainCoverage }` envelope
+// `buildRecommendationResult` produces, computed over an input scoped EXACTLY like
+// the corresponding client surface:
+//   * `surface: 'global'` — the masthead time+project filter (dashboardTime,
+//     dashboardProject) applied to the ViewData, mapped through the canonical
+//     `recommendationViewsFromViewData` envelope. Equals what the browser
+//     Recommendations/Home/Ask-Claude views compute today under those filters.
+//   * `surface: 'reclaim-compass'` — the same masthead scope, THEN the Cost route
+//     filter (routeProject/routeDate/routeMode/routeEntrypoint), then the reduced
+//     engine input the Reclaim card feeds today (the three route-scoped Cost
+//     collections; the other three required base fields empty; optionals omitted).
+// Rejected-finding receipts suppress on BOTH surfaces (options.rejectedFindingIds).
+// The masthead/route filter code is the SAME pure code the UI runs, so parity is
+// structural. This path never emits suppression-transition receipts — that
+// canonical side effect belongs only to the unfiltered global legacy route.
+export function assembleScopedRecommendationResult(
+  surface,
+  filters = {},
+  options = {}
+) {
+  const dataset = options.dataset ?? assembleRecommendationDataset();
+  const sessions = groupBySessions(dataset.entries);
+  const projects = groupByProjects(sessions);
+  const viewData = recommendationDatasetToViewData(dataset, sessions, projects);
+  // Default to the browser's default masthead (DEFAULT_DASHBOARD_FILTER: 24h +
+  // All projects) when a direct caller omits a field, so a programmatic call
+  // matches the HTTP contract's defaults instead of silently widening to the
+  // whole corpus. The HTTP path always passes an explicit, validated tuple.
+  const mastheadFilter = {
+    time: filters.dashboardTime ?? DEFAULT_TIME_PRESET,
+    project: filters.dashboardProject ?? ALL_PROJECTS,
+  };
+  const scoped = filterViewDataByProject(
+    filterViewDataByTime(viewData, mastheadFilter),
+    mastheadFilter
+  );
+  let views;
+  if (surface === 'reclaim-compass') {
+    const routeFilter = {};
+    if (filters.routeProject) routeFilter.project = filters.routeProject;
+    if (filters.routeDate) routeFilter.date = filters.routeDate;
+    if (filters.routeMode) routeFilter.mode = filters.routeMode;
+    if (filters.routeEntrypoint) routeFilter.entrypoint = filters.routeEntrypoint;
+    const scopedCost = filterCostDataByRoute(
+      scoped.tokenData,
+      scoped.toolData,
+      scoped.sessions,
+      routeFilter
+    );
+    views = reclaimScopedInput(scopedCost);
+  } else {
+    views = {
+      ...recommendationViewsFromViewData(scoped),
+      // The browser dataset has no organization identity, but enterprise server
+      // requests do. Preserve that server-side enrichment on the global typed
+      // surface so owner/reviewer alias grouping and provenance match the legacy
+      // route. Reclaim deliberately keeps its reduced, optional-signal-free input.
+      organizationIdentity: options.organizationIdentity ?? null,
+    };
+  }
+  const input = assembleRecommendationInput(views);
+  const result = buildRecommendationResult(input, options.now);
+  const recommendations = suppressRejectedRecommendations(
+    result.recommendations,
+    options.rejectedFindingIds ?? new Set()
+  );
+  return { recommendations, domainCoverage: result.domainCoverage };
 }
 
 /**

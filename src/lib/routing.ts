@@ -21,12 +21,24 @@
 import { useEffect, useRef } from 'react';
 import type { View } from '../types';
 import { isValidView, resolveViewRedirect, REDIRECTED_VIEW_TAB } from './nav-prefs';
+// #2718: the React-free primitives live in routing-core.ts so the server can
+// import them without pulling React/nav-prefs. Re-exported here so every existing
+// `from './routing'` import is unchanged.
+import {
+  TIME_PRESETS,
+  ALL_PROJECTS,
+  DEFAULT_TIME_PRESET,
+  presetToRange,
+} from './routing-core';
+import type { TimePreset, TimeRange } from './routing-core';
+export {
+  TIME_PRESETS,
+  ALL_PROJECTS,
+  DEFAULT_TIME_PRESET,
+  presetToRange,
+};
+export type { TimePreset, TimeRange };
 
-export const TIME_PRESETS = ['24h', '7d', '30d', 'all'] as const;
-export type TimePreset = (typeof TIME_PRESETS)[number];
-
-export const ALL_PROJECTS = 'All projects';
-export const DEFAULT_TIME_PRESET: TimePreset = '24h';
 export const DEFAULT_DASHBOARD_FILTER: DashboardFilter = {
   time: DEFAULT_TIME_PRESET,
   project: ALL_PROJECTS,
@@ -66,11 +78,6 @@ export const ROUTE_FILTER_KEYS = [
 export type RouteFilterKey = (typeof ROUTE_FILTER_KEYS)[number];
 export type RouteFilter = Partial<Record<RouteFilterKey, string>>;
 
-export interface TimeRange {
-  from: number | null;
-  to: number | null;
-}
-
 export interface ParsedRoute {
   /** The view named by the hash, if it is a known view id. */
   view?: View;
@@ -104,20 +111,6 @@ export function normalizeTimePreset(
   value: string | null | undefined
 ): TimePreset {
   return isTimePreset(value) ? value : DEFAULT_TIME_PRESET;
-}
-
-const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
-
-export function presetToRange(
-  preset: TimePreset,
-  now = Date.now()
-): TimeRange {
-  if (preset === 'all') return { from: null, to: null };
-  const to = Number.isFinite(now) ? now : Date.now();
-  const span =
-    preset === '24h' ? DAY_MS : preset === '7d' ? 7 * DAY_MS : 30 * DAY_MS;
-  return { from: to - span, to };
 }
 
 export function normalizeProjectFilter(

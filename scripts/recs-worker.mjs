@@ -21,8 +21,12 @@
 // parsers ingest.mjs dynamically imports resolve, exactly like the server.
 //
 // Protocol:
-//   parent -> worker: { id, project, organizationIdentity, emitSuppressionTransitions,
-//                       adoptionReceiptsPath, shadowCallsDir }
+//   parent -> worker: { id, project, surface, filters, organizationIdentity,
+//                       emitSuppressionTransitions, adoptionReceiptsPath, shadowCallsDir }
+//     `surface` (#2718): absent/null -> legacy raw Recommendation[] body; 'global'
+//     | 'reclaim-compass' -> the typed { recommendations, domainCoverage } envelope
+//     scoped by `filters`. The clock/config metadata below is dataset-derived and
+//     therefore surface-independent.
 //   worker -> parent: { id, ok:true, json, contentHash, sourceSig,
 //                       guidanceTransitions, guidanceCacheValidity,
 //                       hookOverheadCacheValidity, hookOverheadConfigState,
@@ -33,6 +37,7 @@
 
 import { parentPort, workerData } from 'node:worker_threads';
 import { join } from 'node:path';
+import { access, readFile } from 'node:fs/promises';
 
 if (!parentPort) {
   throw new Error('recs-worker.mjs must be run as a worker_thread');
@@ -43,12 +48,39 @@ if (!projectDir) {
   throw new Error('recs-worker.mjs requires workerData.projectDir');
 }
 
+// Deterministic integration-test seam for the reject-vs-worker race. When the
+// configured path exists, the first rebuild pauses immediately AFTER reading
+// rejection receipts. Production has no path configured and pays no I/O. The
+// one-shot gate lets a second, post-invalidation rebuild proceed concurrently.
+const AFTER_RECEIPTS_TEST_GATE =
+  process.env.CHD_RECS_CACHE_TEST_EVENTS === '1'
+    ? process.env.CHD_RECS_WORKER_TEST_AFTER_RECEIPTS_GATE || ''
+    : '';
+let afterReceiptsTestGateUsed = false;
+
+async function waitAtAfterReceiptsTestGate() {
+  if (!AFTER_RECEIPTS_TEST_GATE || afterReceiptsTestGateUsed) return;
+  try {
+    await access(AFTER_RECEIPTS_TEST_GATE);
+  } catch {
+    return;
+  }
+  afterReceiptsTestGateUsed = true;
+  parentPort.postMessage({
+    type: 'log',
+    level: 'warn',
+    message: '[recs-cache-test] worker-receipts-read',
+  });
+  await readFile(AFTER_RECEIPTS_TEST_GATE);
+}
+
 // Same dynamic-import shape the server uses, so the worker shares the exact
 // ingest + serialization code path (no drift).
 const {
   ingest,
   assembleRecommendationDataset,
   assembleRecommendations,
+  assembleScopedRecommendationResult,
   recordSuppressionTransitions,
   readRejectedFindingIds,
   sourceSignature,
@@ -79,6 +111,8 @@ parentPort.on('message', async (msg) => {
   const {
     id,
     project,
+    surface,
+    filters,
     organizationIdentity,
     emitSuppressionTransitions,
     adoptionReceiptsPath,
@@ -130,13 +164,24 @@ parentPort.on('message', async (msg) => {
     const rejectedFindingIds = adoptionReceiptsPath
       ? await readRejectedFindingIds(adoptionReceiptsPath)
       : new Set();
-    const recs = assembleRecommendations(project || undefined, {
-      organizationIdentity: organizationIdentity ?? null,
-      dataset,
-      rejectedFindingIds,
-      now: guidanceBuiltAt,
-    });
-    const json = safeJsonStringify(recs);
+    await waitAtAfterReceiptsTestGate();
+    // #2718: a `surface` request returns the typed { recommendations,
+    // domainCoverage } envelope scoped by `filters`; otherwise the legacy raw
+    // Recommendation[]. safeJsonStringify serializes either shape.
+    const result = surface
+      ? assembleScopedRecommendationResult(surface, filters ?? {}, {
+          organizationIdentity: organizationIdentity ?? null,
+          dataset,
+          rejectedFindingIds,
+          now: guidanceBuiltAt,
+        })
+      : assembleRecommendations(project || undefined, {
+          organizationIdentity: organizationIdentity ?? null,
+          dataset,
+          rejectedFindingIds,
+          now: guidanceBuiltAt,
+        });
+    const json = safeJsonStringify(result);
     parentPort.postMessage({
       id,
       ok: true,

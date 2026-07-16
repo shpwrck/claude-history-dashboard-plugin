@@ -5995,6 +5995,40 @@ try {
     r.headers.get('x-recommendations-cache') === 'hit',
     r.headers.get('x-recommendations-cache') || ''
   );
+
+  // #2718: the typed global surface replaces the browser-side engine, but it
+  // must retain the enterprise identity enrichment already applied by the
+  // legacy route. Otherwise the same admin request regresses to raw principals
+  // and loses the matched-identity provenance observation.
+  r = await fetch(
+    `${server.base}/api/recommendations.json?surface=global&dashboardTime=all`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  body = await json(r);
+  const typedIdentityRecommendation = body?.recommendations?.find?.(
+    (rec) => rec?.id === 'workflow.owner-concentration'
+  );
+  check('enterprise typed recommendations -> 200', r.status === 200, `got ${r.status}`);
+  check(
+    'enterprise typed recommendations return the analysis envelope',
+    Array.isArray(body?.recommendations) && Array.isArray(body?.domainCoverage)
+  );
+  check(
+    'enterprise typed recommendations use org identity aliases',
+    typedIdentityRecommendation?.detail?.includes('Admin User owns 4 of 6') &&
+      typedIdentityRecommendation?.evidence?.[0]?.includes(
+        'via aliases admin@example.com, u-admin'
+      ),
+    typedIdentityRecommendation?.detail || ''
+  );
+  check(
+    'enterprise typed recommendations cite matched principal identity',
+    typedIdentityRecommendation?.provenance?.observations?.some?.(
+      (observation) =>
+        observation?.source === 'organizationIdentity' &&
+        observation?.value === 'u-admin'
+    )
+  );
   check('enterprise live API is no-store', r.headers.get('cache-control') === 'no-store');
 
   r = await fetch(`${server.base}/api/organization/rollup.json`, {

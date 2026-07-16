@@ -209,9 +209,14 @@ check(
 );
 check(
   'recommendationsBuilds is pruned after insertion',
-  recommendationBuildInsertions.length === recommendationBuildInitializers.length &&
+  // An invalidated in-flight owner may be re-reserved after pruning removed its
+  // original slot, so there can be more guarded insertions than initializers.
+  recommendationBuildInsertions.length >= recommendationBuildInitializers.length &&
     recommendationBuildInsertions.every((match) =>
       recommendationBuildInitializers.some((initializer) => initializer[1] === match[1])
+    ) &&
+    recommendationBuildInitializers.every((initializer) =>
+      recommendationBuildInsertions.some((match) => match[1] === initializer[1])
     )
 );
 

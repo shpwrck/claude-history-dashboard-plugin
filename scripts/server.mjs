@@ -56,6 +56,7 @@ import {
   assembleDataset,
   assembleRecommendationDataset,
   assembleRecommendations,
+  assembleScopedRecommendationResult,
   loadDatasetCache,
   loadLatestDatasetCache,
   saveDatasetCache,
@@ -1200,6 +1201,7 @@ const GLOBAL_INGEST_API = {
   assembleDataset,
   assembleRecommendationDataset,
   assembleRecommendations,
+  assembleScopedRecommendationResult,
   loadDatasetCache,
   loadLatestDatasetCache,
   saveDatasetCache,
@@ -1231,6 +1233,10 @@ function datasetState(apiPromise, key = 'global') {
     recommendationsCache: new Map(),
     recommendationsBuilds: new Map(),
     recommendationsBuildGeneration: 0,
+    // Receipt writes are outside sourceSignature/contentHash. Every reject bumps
+    // this epoch so a build that captured older receipt state cannot be joined or
+    // committed after cache invalidation.
+    recommendationsInvalidationGeneration: 0,
     // Bounded response caches for /api/digest and /api/search (#1573). Both
     // routes previously ran a full ingest()+assembleDataset() (and, for search,
     // a score+embed over every entry) on the event loop per request with no
@@ -2179,11 +2185,29 @@ function recommendationIdentityCacheKey(organizationIdentity) {
     .slice(0, 16);
 }
 
-function recommendationsCacheKey(project, identityKey = 'none') {
+function recommendationsCacheKey(project, identityKey = 'none', surfaceKey = null) {
   const base = !project
     ? 'global'
     : `project:${createHash('sha1').update(project).digest('hex')}`;
-  return identityKey === 'none' ? base : `${base}:identity:${identityKey}`;
+  const withIdentity =
+    identityKey === 'none' ? base : `${base}:identity:${identityKey}`;
+  // #2718: the typed surface contract folds `surface` + the normalized full
+  // filter tuple into a distinct key namespace so scoped bodies can never alias
+  // the legacy raw-array body (or each other). Legacy (surfaceKey null) keeps its
+  // exact pre-#2718 key, so existing cache/SWR/ETag identity is byte-unchanged.
+  return surfaceKey ? `${withIdentity}:${surfaceKey}` : withIdentity;
+}
+
+// Stable cache-key fragment for a typed surface request: `surface:<name>:<hash>`
+// over the surface plus its canonicalized filter tuple. Distinct surfaces or
+// filter tuples hash differently and therefore cannot cross-serve.
+function recommendationsSurfaceKey(surfaceRequest) {
+  if (!surfaceRequest) return null;
+  const hash = createHash('sha1')
+    .update(safeJsonStringify({ filters: surfaceRequest.filters }))
+    .digest('hex')
+    .slice(0, 16);
+  return `surface:${surfaceRequest.surface}:${hash}`;
 }
 
 function pruneRecommendationsCache(state) {
@@ -2372,7 +2396,12 @@ const RECS_WORKER_TIMEOUT_MS = Math.max(
   parseNonNegativeIntEnv('CHD_RECS_WORKER_TIMEOUT_MS', 180_000)
 );
 
-function requestRecsRebuildViaWorker(project, organizationIdentity, emitSuppressionTransitions) {
+function requestRecsRebuildViaWorker(
+  project,
+  organizationIdentity,
+  emitSuppressionTransitions,
+  surfaceRequest = null
+) {
   const w = spawnRecsWorker();
   if (!w) return Promise.reject(new Error('recs worker unavailable'));
   const id = ++recsWorkerReqId;
@@ -2397,6 +2426,10 @@ function requestRecsRebuildViaWorker(project, organizationIdentity, emitSuppress
       w.postMessage({
         id,
         project: project || null,
+        // #2718: a typed surface request scopes the worker rebuild; absent -> the
+        // legacy raw-array rebuild. Filters travel as plain data.
+        surface: surfaceRequest?.surface ?? null,
+        filters: surfaceRequest?.filters ?? null,
         organizationIdentity: organizationIdentity || null,
         emitSuppressionTransitions: !!emitSuppressionTransitions,
         adoptionReceiptsPath: ADOPTION_RECEIPTS,
@@ -2430,13 +2463,22 @@ function assertRecommendationsResponseSize(json) {
 // rather than serving a label it cannot prove current.
 function redecorateCachedGuidanceLabels(entry, now) {
   if (!Array.isArray(entry.guidanceTransitions)) return false;
-  let recommendations;
+  let parsed;
   try {
-    recommendations = JSON.parse(entry.json);
+    parsed = JSON.parse(entry.json);
   } catch {
     return false;
   }
-  if (!Array.isArray(recommendations)) return false;
+  // The legacy body is a raw Recommendation[]; the #2718 typed surfaces wrap it in
+  // { recommendations, domainCoverage }. Relabel the recommendations array either
+  // way (it is a reference into `parsed`, so mutating it re-serializes correctly),
+  // preserving whichever shape was cached.
+  const recommendations = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.recommendations)
+      ? parsed.recommendations
+      : null;
+  if (!recommendations) return false;
 
   const transitionsByUrl = new Map();
   for (const transition of entry.guidanceTransitions) {
@@ -2490,7 +2532,7 @@ function redecorateCachedGuidanceLabels(entry, now) {
   }
 
   if (changed) {
-    const json = safeJsonStringify(recommendations);
+    const json = safeJsonStringify(parsed);
     assertRecommendationsResponseSize(json);
     entry.json = json;
     entry.etag = datasetEtagFrom(json);
@@ -2532,7 +2574,11 @@ async function buildRecommendationsCacheEntryViaWorker(
   key,
   sourceSig,
   project,
-  { emitSuppressionTransitions = false, organizationIdentity = null } = {}
+  {
+    emitSuppressionTransitions = false,
+    organizationIdentity = null,
+    surfaceRequest = null,
+  } = {}
 ) {
   const {
     json,
@@ -2546,7 +2592,8 @@ async function buildRecommendationsCacheEntryViaWorker(
     await requestRecsRebuildViaWorker(
       project,
       organizationIdentity,
-      emitSuppressionTransitions
+      emitSuppressionTransitions,
+      surfaceRequest
     );
   assertRecommendationsResponseSize(json);
   const entry = {
@@ -2570,7 +2617,11 @@ async function buildRecommendationsCacheEntry(
   key,
   sourceSig,
   project,
-  { emitSuppressionTransitions = false, organizationIdentity = null } = {}
+  {
+    emitSuppressionTransitions = false,
+    organizationIdentity = null,
+    surfaceRequest = null,
+  } = {}
 ) {
   const stats = api.ingest();
   // `ingest()` fingerprints settings by bounded stat metadata. Fold the cheap
@@ -2625,12 +2676,26 @@ async function buildRecommendationsCacheEntry(
   // those findings from output. Best-effort like the rest of the route's receipt
   // I/O — a read failure yields an empty set (no suppression), never a 500.
   const rejectedFindingIds = await api.readRejectedFindingIds(ADOPTION_RECEIPTS);
-  const recs = api.assembleRecommendations(project || undefined, {
-    organizationIdentity,
-    dataset,
-    rejectedFindingIds,
-    now: guidanceBuiltAt,
-  });
+  // #2718: a typed surface request returns the { recommendations, domainCoverage }
+  // envelope scoped by its filters (masthead-then-route), suppressing rejected
+  // findings on both surfaces; the legacy path returns the raw Recommendation[].
+  const recs = surfaceRequest
+    ? api.assembleScopedRecommendationResult(
+        surfaceRequest.surface,
+        surfaceRequest.filters,
+        {
+          organizationIdentity,
+          dataset,
+          rejectedFindingIds,
+          now: guidanceBuiltAt,
+        }
+      )
+    : api.assembleRecommendations(project || undefined, {
+        organizationIdentity,
+        dataset,
+        rejectedFindingIds,
+        now: guidanceBuiltAt,
+      });
   const json = safeJsonStringify(recs); // scrub lone surrogates so the export stays strict-parser-valid (#1104)
   assertRecommendationsResponseSize(json);
   const entry = {
@@ -2679,34 +2744,70 @@ async function ensureCurrentRecommendationsCacheEntry(
   entry,
   retryBuild
 ) {
-  let newer = newerRecommendationsResult(state, key, buildOwner);
-  if (newer) return newer;
+  let clockConfigRetriesRemaining = 1;
+  for (;;) {
+    let newer = newerRecommendationsResult(state, key, buildOwner);
+    if (newer) {
+      if (
+        RECS_CACHE_TEST_EVENTS &&
+        buildOwner.invalidationGeneration !==
+          state.recommendationsInvalidationGeneration
+      ) {
+        console.log('[recs-cache-test] invalidated-build-superseded');
+      }
+      return newer;
+    }
 
-  if (recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
-    newer = newerRecommendationsResult(state, key, buildOwner);
-    return newer || commitRecommendationsCacheEntry(state, key, entry, buildOwner);
-  }
+    if (
+      buildOwner.invalidationGeneration !==
+      state.recommendationsInvalidationGeneration
+    ) {
+      // A reject receipt landed after this build read suppression state. If a
+      // post-invalidation request already owns the key, share that newer result.
+      // Otherwise retain this owner and rebuild against the new receipt epoch.
+      // Recheck after every await so repeated receipt writes cannot let an old
+      // body commit. The cold requester (if any) therefore receives corrected
+      // output rather than a transient 500.
+      const currentBuild = state.recommendationsBuilds.get(key);
+      if (currentBuild && currentBuild !== buildOwner) {
+        return currentBuild.promise;
+      }
+      if (!currentBuild) {
+        state.recommendationsBuilds.set(key, buildOwner);
+        pruneRecommendationsBuilds(state);
+      }
+      buildOwner.invalidationGeneration =
+        state.recommendationsInvalidationGeneration;
+      const retrySourceSig = api.sourceSignature();
+      buildOwner.sourceSig = retrySourceSig;
+      entry = await retryBuild(retrySourceSig);
+      clockConfigRetriesRemaining = 1;
+      continue;
+    }
 
-  // A cold build can span a clock/config boundary. Rebuild once against the
-  // completed state instead of returning a stale body. The owner token keeps an
-  // overtaken build from deleting/restamping a newer build or cache entry.
-  const retrySourceSig = api.sourceSignature();
-  const currentBuild = state.recommendationsBuilds.get(key);
-  if (currentBuild && currentBuild !== buildOwner) {
-    return currentBuild.promise;
-  }
-  if (currentBuild === buildOwner) buildOwner.sourceSig = retrySourceSig;
-  entry = await retryBuild(retrySourceSig);
+    if (recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
+      newer = newerRecommendationsResult(state, key, buildOwner);
+      return newer || commitRecommendationsCacheEntry(state, key, entry, buildOwner);
+    }
 
-  newer = newerRecommendationsResult(state, key, buildOwner);
-  if (newer) return newer;
-  if (!recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
-    throw new Error(
-      'Recommendation clock/config metadata changed across the bounded rebuild retry'
-    );
+    if (clockConfigRetriesRemaining <= 0) {
+      throw new Error(
+        'Recommendation clock/config metadata changed across the bounded rebuild retry'
+      );
+    }
+    clockConfigRetriesRemaining -= 1;
+
+    // A cold build can span a clock/config boundary. Rebuild once against the
+    // completed state instead of returning a stale body. The owner token keeps an
+    // overtaken build from deleting/restamping a newer build or cache entry.
+    const retrySourceSig = api.sourceSignature();
+    const currentBuild = state.recommendationsBuilds.get(key);
+    if (currentBuild && currentBuild !== buildOwner) {
+      return currentBuild.promise;
+    }
+    if (currentBuild === buildOwner) buildOwner.sourceSig = retrySourceSig;
+    entry = await retryBuild(retrySourceSig);
   }
-  newer = newerRecommendationsResult(state, key, buildOwner);
-  return newer || commitRecommendationsCacheEntry(state, key, entry, buildOwner);
 }
 
 async function recommendationsResponseCache(
@@ -2717,11 +2818,16 @@ async function recommendationsResponseCache(
     emitSuppressionTransitions = false,
     organizationIdentity = null,
     allowWorker = false,
+    surfaceRequest = null,
   } = {}
 ) {
   const sourceSig = api.sourceSignature();
   const identityKey = recommendationIdentityCacheKey(organizationIdentity);
-  const key = recommendationsCacheKey(project, identityKey);
+  // #2718: the surface + normalized filter tuple partitions the cache so scoped
+  // bodies never alias the legacy raw array (or each other); null keeps the
+  // legacy key byte-identical.
+  const surfaceKey = recommendationsSurfaceKey(surfaceRequest);
+  const key = recommendationsCacheKey(project, identityKey, surfaceKey);
   const inlineBuild = (buildSourceSig) =>
     buildRecommendationsCacheEntry(
       state,
@@ -2729,7 +2835,7 @@ async function recommendationsResponseCache(
       key,
       buildSourceSig,
       project,
-      { emitSuppressionTransitions, organizationIdentity }
+      { emitSuppressionTransitions, organizationIdentity, surfaceRequest }
     );
   const refreshBuild = (buildSourceSig) => {
     if (!allowWorker || !RECS_WORKER_ENABLED) return inlineBuild(buildSourceSig);
@@ -2738,7 +2844,7 @@ async function recommendationsResponseCache(
       key,
       buildSourceSig,
       project,
-      { emitSuppressionTransitions, organizationIdentity }
+      { emitSuppressionTransitions, organizationIdentity, surfaceRequest }
     ).catch((err) => {
       if (isRecommendationsResponseTooLargeError(err)) throw err;
       console.warn(
@@ -2838,6 +2944,7 @@ async function recommendationsResponseCache(
     let settle;
     const buildOwner = {
       generation: ++state.recommendationsBuildGeneration,
+      invalidationGeneration: state.recommendationsInvalidationGeneration,
       sourceSig,
       promise: null,
       lastAccess: Date.now(),
@@ -2894,16 +3001,25 @@ async function recommendationsResponseCache(
     return { entry: cached, cache: 'stale', scheduleRefresh };
   }
   // Cold key (no cached entry to serve): build now and await it. This is the
-  // only path that blocks, and only on the very first request for a key.
+  // only blocking path, and only on the very first request for a key. #2718: a
+  // scoped surface uses the worker here too (refreshBuild -> worker on the global
+  // ingest path, inline fallback otherwise) so no scoped cold miss is stuck on a
+  // synchronous-only build; the legacy path keeps its exact inline cold build.
+  const coldBuild = surfaceRequest ? refreshBuild : inlineBuild;
   let build = state.recommendationsBuilds.get(key);
-  if (!build || build.sourceSig !== sourceSig) {
+  if (
+    !build ||
+    build.sourceSig !== sourceSig ||
+    build.invalidationGeneration !== state.recommendationsInvalidationGeneration
+  ) {
     const buildOwner = {
       generation: ++state.recommendationsBuildGeneration,
+      invalidationGeneration: state.recommendationsInvalidationGeneration,
       sourceSig,
       promise: null,
       lastAccess: Date.now(),
     };
-    const promise = inlineBuild(sourceSig)
+    const promise = coldBuild(sourceSig)
       .then((entry) =>
         ensureCurrentRecommendationsCacheEntry(
           state,
@@ -2911,7 +3027,7 @@ async function recommendationsResponseCache(
           key,
           buildOwner,
           entry,
-          inlineBuild
+          coldBuild
         )
       )
       .finally(() => {
@@ -4701,8 +4817,10 @@ async function handleAdoptionReceiptWrite(req, res) {
 // unchanged would otherwise serve a stale, un-suppressed body until the source
 // churns. Cheap: a rejected click is rare relative to recs requests.
 function invalidateRecommendationsCaches() {
+  globalDatasetState.recommendationsInvalidationGeneration += 1;
   globalDatasetState.recommendationsCache.clear();
   for (const state of scopedDatasetStates.values()) {
+    state.recommendationsInvalidationGeneration += 1;
     state.recommendationsCache.clear();
   }
 }
@@ -9280,6 +9398,136 @@ async function handleSearch(req, res) {
   return sendJson(res, 200, payload);
 }
 
+// #2718: the strict v1 typed-surface contract for /api/recommendations.json.
+// These sets/constants mirror the client's masthead + route vocabulary
+// (TIME_PRESETS, ALL_PROJECTS, routeFilterValue in src/lib/routing.ts); the
+// actual filter SEMANTICS are the shared pure code in view-scope.ts, so only the
+// param names/validation live here.
+const RECOMMENDATION_SURFACES = new Set(['global', 'reclaim-compass']);
+const RECOMMENDATION_TIME_PRESETS = new Set(['24h', '7d', '30d', 'all']);
+const RECOMMENDATION_ALL_PROJECTS = 'All projects';
+const RECOMMENDATION_SURFACE_PARAM_MAX = 512;
+const RECOMMENDATION_SURFACE_ALLOWED_PARAMS = {
+  global: new Set(['surface', 'dashboardTime', 'dashboardProject']),
+  'reclaim-compass': new Set([
+    'surface',
+    'dashboardTime',
+    'dashboardProject',
+    'routeProject',
+    'routeDate',
+    'routeMode',
+    'routeEntrypoint',
+  ]),
+};
+
+function normalizeRecommendationRouteValue(key, value) {
+  const normalized = (value ?? '').trim();
+  if (!normalized) return undefined;
+  if (key === 'project' && normalized === RECOMMENDATION_ALL_PROJECTS) {
+    return undefined;
+  }
+  return normalized;
+}
+
+// Parse + strictly validate the typed-surface query. Returns { ok:true, request }
+// with a canonicalized filter tuple, or { ok:false, error } (-> 400). Rejects an
+// unknown surface, any parameter outside the surface's allow-list (incl. the
+// legacy `project`, so the two contracts never overlap), duplicate values, and
+// oversized values — never silently widens scope.
+function parseRecommendationSurfaceRequest(params) {
+  const surface = params.get('surface');
+  // Bound the discriminator before membership validation or reflection. Without
+  // this early check, an oversized invalid surface bypasses the generic loop
+  // below and is copied in full into the error response.
+  if (surface != null && surface.length > RECOMMENDATION_SURFACE_PARAM_MAX) {
+    return {
+      ok: false,
+      error: `parameter 'surface' exceeds ${RECOMMENDATION_SURFACE_PARAM_MAX} characters`,
+    };
+  }
+  if (!RECOMMENDATION_SURFACES.has(surface)) {
+    return {
+      ok: false,
+      error: `unsupported surface '${surface ?? ''}'; expected one of global, reclaim-compass`,
+    };
+  }
+  const allowed = RECOMMENDATION_SURFACE_ALLOWED_PARAMS[surface];
+  for (const key of params.keys()) {
+    if (key.length > RECOMMENDATION_SURFACE_PARAM_MAX) {
+      return {
+        ok: false,
+        error: `parameter name exceeds ${RECOMMENDATION_SURFACE_PARAM_MAX} characters`,
+      };
+    }
+    if (!allowed.has(key)) {
+      return {
+        ok: false,
+        error: `unsupported parameter '${key}' for surface '${surface}'`,
+      };
+    }
+    if (params.getAll(key).length > 1) {
+      return { ok: false, error: `duplicate parameter '${key}'` };
+    }
+    const value = params.get(key);
+    if (value != null && value.length > RECOMMENDATION_SURFACE_PARAM_MAX) {
+      return {
+        ok: false,
+        error: `parameter '${key}' exceeds ${RECOMMENDATION_SURFACE_PARAM_MAX} characters`,
+      };
+    }
+  }
+  const rawTime = params.get('dashboardTime');
+  // Empty values are the browser's default masthead state, just like an omitted
+  // parameter. Canonicalize them before validation/cache-key construction so
+  // `dashboardTime=` cannot become a needless 400 or a distinct cache entry.
+  // Keep non-empty values byte-strict: e.g. ` 24h ` remains unsupported instead
+  // of silently broadening or rewriting an invalid client request.
+  const dashboardTime = rawTime == null || rawTime.trim() === '' ? '24h' : rawTime;
+  if (!RECOMMENDATION_TIME_PRESETS.has(dashboardTime)) {
+    return {
+      ok: false,
+      error: `unsupported dashboardTime '${dashboardTime}'; expected one of 24h, 7d, 30d, all`,
+    };
+  }
+  const rawProject = (params.get('dashboardProject') ?? '').trim();
+  const dashboardProject =
+    rawProject === '' ? RECOMMENDATION_ALL_PROJECTS : rawProject;
+  // Insertion order is fixed so the cache-key filter hash is deterministic.
+  const filters = { dashboardTime, dashboardProject };
+  if (surface === 'reclaim-compass') {
+    const routeProject = normalizeRecommendationRouteValue(
+      'project',
+      params.get('routeProject')
+    );
+    const routeDate = normalizeRecommendationRouteValue(
+      'date',
+      params.get('routeDate')
+    );
+    const routeMode = normalizeRecommendationRouteValue(
+      'mode',
+      params.get('routeMode')
+    );
+    const routeEntrypoint = normalizeRecommendationRouteValue(
+      'entrypoint',
+      params.get('routeEntrypoint')
+    );
+    if (routeProject) filters.routeProject = routeProject;
+    if (routeDate) filters.routeDate = routeDate;
+    if (routeMode) filters.routeMode = routeMode;
+    if (routeEntrypoint) filters.routeEntrypoint = routeEntrypoint;
+  }
+  return { ok: true, request: { surface, filters } };
+}
+
+function sendRecommendationsBadRequest(res, message) {
+  const body = safeJsonStringify({ error: message });
+  res.statusCode = 400;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Length', Buffer.byteLength(body));
+  res.end(body);
+}
+
 async function handleRecommendationsJson(req, res) {
   const { ingestState, ingestApi } = await loadIngestedDataset(req, {
     useCache: true,
@@ -9292,9 +9540,30 @@ async function handleRecommendationsJson(req, res) {
   // ingest+assemble work for unchanged data while preserving the old
   // freshness gate for consumers that never call /api/dataset.json.
   const url = new URL(req.url, 'http://localhost');
-  const project = url.searchParams.get('project');
+  // #2718: strict v1 typed-surface contract. `surface` absent -> the legacy raw
+  // Recommendation[] (byte-compatible, incl. the optional `?project=` post-hoc
+  // attribution filter). Present -> validate strictly and serve the typed
+  // { recommendations, domainCoverage } envelope scoped to the exact active view;
+  // any unsupported / conflicting / oversized parameter is a 400, never a silent
+  // scope widening.
+  let surfaceRequest = null;
+  if (url.searchParams.has('surface')) {
+    const parsed = parseRecommendationSurfaceRequest(url.searchParams);
+    if (!parsed.ok) {
+      return sendRecommendationsBadRequest(res, parsed.error);
+    }
+    surfaceRequest = parsed.request;
+  }
+  // The legacy `?project=` attribution filter is honored ONLY on the legacy
+  // contract; the typed contract carries its own exact `dashboardProject` scope
+  // and rejects `project` as conflicting (in the parser above).
+  const project = surfaceRequest ? null : url.searchParams.get('project');
   const usesGlobalIngest = enterpriseRequestUsesGlobalIngest(req);
-  const emitSuppressionTransitions = usesGlobalIngest && !project;
+  // Scoped surfaces never emit suppression-transition side effects (#2718) — that
+  // canonical write belongs only to the unfiltered global legacy path. They still
+  // READ rejected receipts to suppress findings.
+  const emitSuppressionTransitions =
+    usesGlobalIngest && !project && !surfaceRequest;
   const organizationIdentity = enterpriseRecommendationIdentity(req);
   // #2196: only the global ingest path may use the rebuild worker — the worker
   // ingests the main process's global CLAUDE_DIR, not a per-principal scoped
@@ -9308,7 +9577,7 @@ async function handleRecommendationsJson(req, res) {
       ingestState,
       ingestApi,
       project,
-      { emitSuppressionTransitions, organizationIdentity, allowWorker }
+      { emitSuppressionTransitions, organizationIdentity, allowWorker, surfaceRequest }
     ));
   } catch (err) {
     if (isRecommendationsResponseTooLargeError(err)) {

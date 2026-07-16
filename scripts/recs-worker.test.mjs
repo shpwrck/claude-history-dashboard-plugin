@@ -63,8 +63,9 @@ function buildFixtureHome() {
   return home;
 }
 
-// One rebuild round-trip against the worker; resolves the worker's reply.
-function workerRebuild(home, dbPath) {
+// One rebuild round-trip against the worker; resolves the worker's reply. `extra`
+// carries the optional #2718 surface/filters so a scoped rebuild can be exercised.
+function workerRebuild(home, dbPath, extra = {}) {
   return new Promise((resolve, reject) => {
     const w = new Worker(WORKER, {
       execArgv: ['--import', REGISTER],
@@ -94,6 +95,7 @@ function workerRebuild(home, dbPath) {
       emitSuppressionTransitions: false,
       adoptionReceiptsPath: join(home, '.claude', '.cache', 'chd', 'adoption-receipts.jsonl'),
       shadowCallsDir: join(home, '.claude', 'shadow-calls'),
+      ...extra,
     });
   });
 }
@@ -164,6 +166,81 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
       { after: null, through: null },
       'worker returns hook-path evidence cache validity metadata'
     );
+  } finally {
+    process.env.HOME = origHome;
+    process.env.CHD_DB_PATH = origDb;
+    if (origClaude === undefined) delete process.env.CLAUDE_DIR;
+    else process.env.CLAUDE_DIR = origClaude;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// #2718: the scoped-surface rebuild must be byte-identical off-thread too, so a
+// worker-served { recommendations, domainCoverage } envelope matches the inline
+// build — the same auditable-recs guarantee, extended to the typed surfaces.
+test('worker scoped-surface rebuilds are byte-identical to inline for both surfaces (#2718)', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origClaude = process.env.CLAUDE_DIR;
+  const home = buildFixtureHome();
+  const cases = [
+    {
+      surface: 'global',
+      filters: { dashboardTime: 'all', dashboardProject: 'All projects' },
+      organizationIdentity: {
+        source: 'worker-parity-fixture',
+        contributors: [
+          {
+            id: 'u-fixture',
+            displayName: 'Fixture User',
+            aliases: [{ kind: 'username', value: 'fixture-user' }],
+          },
+        ],
+      },
+    },
+    {
+      surface: 'reclaim-compass',
+      filters: {
+        dashboardTime: 'all',
+        dashboardProject: 'All projects',
+        routeMode: 'opus',
+      },
+    },
+  ];
+  try {
+    process.env.HOME = home;
+    process.env.CLAUDE_DIR = join(home, '.claude');
+    process.env.CHD_DB_PATH = join(tmpdir(), `chd-2718-inline-${randomUUID()}.db`);
+    const ingest = await import(`./ingest.mjs?fixture=${randomUUID()}`);
+    const { safeJsonStringify } = await import(`../src/lib/json-safe.ts?fixture=${randomUUID()}`);
+    ingest.ingest();
+    for (const { surface, filters, organizationIdentity = null } of cases) {
+      const result = ingest.assembleScopedRecommendationResult(surface, filters, {
+        organizationIdentity,
+      });
+      const jsonInline = safeJsonStringify(result);
+      assert.ok(
+        Array.isArray(result.recommendations),
+        `${surface} inline result has recommendations[]`
+      );
+      assert.equal(
+        result.domainCoverage.length,
+        6,
+        `${surface} inline result has 6 coverage domains`
+      );
+
+      const reply = await workerRebuild(
+        home,
+        join(tmpdir(), `chd-2718-worker-${randomUUID()}.db`),
+        { surface, filters, organizationIdentity }
+      );
+      assert.equal(reply.ok, true, `worker replied ok for ${surface}`);
+      assert.equal(
+        reply.json,
+        jsonInline,
+        `${surface} worker envelope must be byte-identical to the inline build`
+      );
+    }
   } finally {
     process.env.HOME = origHome;
     process.env.CHD_DB_PATH = origDb;
