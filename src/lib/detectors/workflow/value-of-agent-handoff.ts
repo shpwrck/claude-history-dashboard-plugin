@@ -11,7 +11,13 @@ import {
   type ToolCall,
   type ToolUsageData,
 } from '../../parse-tools';
-import { observeLeaveBehindWrite } from '../../leave-behind';
+import { observeLeaveBehindWrites } from '../../leave-behind';
+import {
+  normalizePosixAbsolutePath,
+  normalizePosixRelativePath,
+  resolveProjectBySession,
+  windowsProjectIdentityKey,
+} from '../../project-identity';
 import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
 import { isRediscoveryText } from '../../parse-timeline';
 import { claudeMdMarksApplied, short } from '../shared';
@@ -49,6 +55,7 @@ const REDISCOVERY_WINDOW_MS = 20 * 60 * 1000;
 const REDISCOVERY_MIN_HITS = 2;
 const FRESHNESS_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 const MARKERS: AppliedMarkers = {
   headings: [
@@ -61,7 +68,11 @@ interface DurableMutation {
   sessionId: string;
   taskClass: string;
   timestampMs: number | null;
-  date: string | null;
+  timestampIssue?: TimestampIssue;
+  /** Monotone transcript-order lower bound for causal comparisons. */
+  orderingTimestampMs: number | null;
+  /** False when the raw timestamp is absent or moves backwards in the transcript. */
+  orderingTimestampExact: boolean;
   toolUseId: string;
   order: number;
   kind: DurableCommandKind;
@@ -75,8 +86,10 @@ interface PreSignal {
   mutations: DurableMutation[];
   structuralCandidatePaths: string[];
   leaveBehindDecisions: LeaveBehindDecision[];
+  /** Latest monotone ordering bound across the mutation and deciding state. */
   latestMs: number | null;
-  latestDate: string | null;
+  /** Whether every event contributing to this signal has exact timestamp evidence. */
+  orderingTimestampExact: boolean;
 }
 
 interface RediscoveryBurst {
@@ -114,8 +127,72 @@ interface ClassRollup {
 
 function parseMs(value: string | undefined): number | null {
   if (!value) return null;
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/i.exec(
+      value
+    );
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8]);
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9]);
+  if (
+    year < 1000 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > new Date(Date.UTC(year, month, 0)).getUTCDate() ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 14 ||
+    offsetMinute > 59 ||
+    (offsetHour === 14 && offsetMinute !== 0)
+  ) {
+    return null;
+  }
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
+}
+
+type TimestampIssue = 'missing-or-unparseable' | 'future';
+
+function parseTimestamp(
+  value: string | undefined,
+  now: number
+): { ms: number | null; issue?: TimestampIssue } {
+  const ms = parseMs(value);
+  if (ms == null) return { ms: null, issue: 'missing-or-unparseable' };
+  if (Number.isFinite(now) && now > 0 && ms > now + MAX_FUTURE_SKEW_MS) {
+    return { ms: null, issue: 'future' };
+  }
+  return { ms };
+}
+
+function timestampLimitation(
+  timestampIssue: TimestampIssue | undefined,
+  timestampMs: number | null
+): string {
+  if (timestampIssue === 'future') {
+    return 'has a timestamp materially in the future relative to the evaluation clock';
+  }
+  if (timestampMs == null) return 'has a missing or unparseable timestamp';
+  return 'has a timestamp earlier than a prior transcript call, so only a monotone ordering lower bound is available';
+}
+
+function timestampEvidenceLimitation(
+  timestampIssue: TimestampIssue | undefined,
+  timestampMs: number | null
+): string {
+  if (timestampIssue === 'future') {
+    return 'has a timestamp materially in the future relative to the evaluation clock';
+  }
+  if (timestampMs == null) return 'has timestamp unavailable';
+  return 'has only an ordering lower bound because its transcript clock moves backwards';
 }
 
 function isoDate(ms: number): string {
@@ -133,18 +210,56 @@ function commandText(call: ToolCall): { text: string; field: string } | null {
 }
 
 function projectBySession(input: Parameters<Detector['rule']>[0]): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const s of input.sessions ?? []) {
-    if (s.sessionId && s.project) out.set(s.sessionId, s.project);
-  }
-  for (const t of input.tokenData ?? []) {
-    if (t.sessionId && t.project && !out.has(t.sessionId)) out.set(t.sessionId, t.project);
-  }
-  return out;
+  return resolveProjectBySession([
+    ...(input.sessions ?? []),
+    ...(input.tokenData ?? []),
+  ]);
 }
 
 function taskClassOf(sessionId: string, projects: Map<string, string>): string {
-  return projects.get(sessionId) ?? 'unknown-project';
+  // A shared `unknown-project` bucket would let unrelated transcripts satisfy
+  // the detector's same-project join and fabricate rediscovery attribution.
+  // Keep unresolved identity unique per session: the cold-start pre-signal can
+  // still fire, but no cross-session claim is made without a proven project.
+  return projects.get(sessionId) ?? `unknown-project:${sessionId}`;
+}
+
+const UNKNOWN_PROJECT_PREFIX = 'unknown-project:';
+
+function taskClassDisplay(taskClass: string): string {
+  return taskClass.startsWith(UNKNOWN_PROJECT_PREFIX)
+    ? 'a session with unresolved project identity (session-local)'
+    : `project "${taskClass}"`;
+}
+
+/** Project filters index only the first evidence token. Do not let an
+ * unresolved session's short id alias an unrelated resolved session; keep the
+ * id later in a non-indexable token while preserving it for human audit. */
+function projectEvidenceLead(sessionId: string, taskClass: string): string {
+  return taskClass.startsWith(UNKNOWN_PROJECT_PREFIX)
+    ? `unresolved-project(session=${short(sessionId)})`
+    : short(sessionId);
+}
+
+function projectJoinObservation(taskClass: string): RecObservation {
+  if (taskClass.startsWith(UNKNOWN_PROJECT_PREFIX)) {
+    return {
+      claim:
+        'project identity was unresolved, so this session was isolated in a session-local bucket and no cross-session project join was attempted',
+      source: 'sessions + tokenData',
+      field:
+        'sessions[].sessionId + sessions[].project / tokenData[].sessionId + tokenData[].project',
+      value: 'unresolved',
+    };
+  }
+  return {
+    claim:
+      `same-project grouping and cross-session leave-behind ordering used project identity "${taskClass}"`,
+    source: 'sessions + tokenData',
+    field:
+      'sessions[].sessionId + sessions[].project / tokenData[].sessionId + tokenData[].project',
+    value: taskClass,
+  };
 }
 
 const DURABLE_COMMAND_KINDS = new Set<DurableCommandKind>([
@@ -178,6 +293,7 @@ function classifyDurableMutation(call: ToolCall): {
       field: 'commandDurableKind',
     };
   }
+  if (call.commandAnalysisComplete === true) return null;
   if (cmd) {
     const kind = classifyDurableCommand(cmd.text);
     if (kind) return { kind, label: cmd.text, field: cmd.field };
@@ -187,84 +303,367 @@ function classifyDurableMutation(call: ToolCall): {
 
 interface CrossSessionTransition {
   sessionId: string;
-  project: string;
+  project: string | null;
   key: string;
   timestampMs: number | null;
+  timestampIssue?: TimestampIssue;
   order: number;
   toolUseId: string;
   toolName: string;
   path: string;
-  status: 'candidate' | 'invalidated';
+  pathField:
+    | 'input.file_path'
+    | 'leaveBehindMutationPath'
+    | 'leaveBehindMutationPaths'
+    | 'commandAnalysisTruncated';
+  status: 'candidate' | 'invalidated' | 'ambiguous';
+  ambiguityReason?:
+    | 'cross-session-ordering'
+    | 'truncated-path-tail'
+    | 'truncated-command-analysis';
+  /** Monotone lower bound used only to order final calls across transcripts.
+   * A transcript's array order wins when per-call clocks move backwards. */
+  orderingTimestampMs?: number | null;
+  /** False when orderingTimestampMs is only a lower bound because this call's
+   * timestamp is absent or moved backwards within its transcript. */
+  orderingTimestampExact?: boolean;
+}
+
+interface SessionLeaveBehindState {
+  status: 'candidate' | 'invalidated' | 'ambiguous';
+  order: number;
+  path: string;
+  timestampMs: number | null;
+  transition?: CrossSessionTransition;
+  /** A conformant candidate that remains possible at this point in the
+   * transcript. Exact invalidations clear it; uncertainty barriers preserve it. */
+  candidateTransition?: CrossSessionTransition;
 }
 
 interface LeaveBehindDecision {
   key: string;
   path: string;
   outcome: 'candidate' | 'invalidated' | 'ambiguous';
+  ambiguityReason?:
+    | 'cross-session-ordering'
+    | 'truncated-path-tail'
+    | 'truncated-command-analysis';
   transitions: CrossSessionTransition[];
+  /** Conformant candidates not proven superseded before the final decision.
+   * Kept separate because an uncertainty barrier is not itself a candidate. */
+  provenCandidateTransitions: CrossSessionTransition[];
+}
+
+interface CrossSessionInvalidationBarrier {
+  sessionId: string;
+  project: string;
+  timestampMs: number | null;
+  timestampIssue?: TimestampIssue;
+  orderingTimestampMs?: number | null;
+  orderingTimestampExact?: boolean;
+  order: number;
+  toolUseId: string;
+  toolName: string;
+  ambiguityReason: 'truncated-path-tail' | 'truncated-command-analysis';
+}
+
+function projectScopedTransitionKey(
+  path: string,
+  relativeKey: string,
+  project: string | null
+): string | null {
+  if (project == null) {
+    const windowsPath = windowsProjectIdentityKey(path);
+    if (windowsPath) return `absolute:${windowsPath}`;
+    const absolutePath = normalizePosixAbsolutePath(path);
+    if (absolutePath) return `absolute:posix:${absolutePath}`;
+  }
+  const projectIsWindows =
+    project != null &&
+    windowsProjectIdentityKey(project) != null;
+  // Structured tool paths are platform-dependent. A backslash is a separator
+  // only when session project identity proves Windows; on POSIX it is a valid
+  // filename character and must not alias the canonical slash path.
+  if (!projectIsWindows) {
+    // POSIX permits literal backslashes and normalizes only slash separators.
+    // A relative `docs\\runbooks...` path therefore remains a different file.
+    if (!path.startsWith('/')) {
+      return normalizePosixRelativePath(path) === relativeKey
+        ? relativeKey
+        : null;
+    }
+    if (!project) return null;
+    const normalizedPath = normalizePosixAbsolutePath(path);
+    const normalizedProject = normalizePosixAbsolutePath(project);
+    if (!normalizedPath || !normalizedProject) return null;
+    const expected = `${normalizedProject}${normalizedProject.endsWith('/') ? '' : '/'}${relativeKey}`;
+    return normalizedPath === expected ? relativeKey : null;
+  }
+  const normalizePath = (value: string): string => {
+    const leadingSeparators = /^[\\/]+/.exec(value)?.[0].length ?? 0;
+    const slashes = value.replace(/\\/g, '/');
+    const collapsedTail = slashes
+      .replace(/^\/+/, '')
+      .replace(/\/{2,}/g, '/');
+    const collapsed =
+      leadingSeparators === 2
+        ? `//${collapsedTail}`
+        : leadingSeparators >= 3
+          ? `/${collapsedTail}`
+          : slashes.replace(/\/{2,}/g, '/');
+    const rootLength = collapsed.startsWith('//')
+      ? 2
+      : /^[A-Za-z]:\//.test(collapsed)
+        ? 3
+        : collapsed.startsWith('/')
+          ? 1
+          : 0;
+    const prefix = collapsed.slice(0, rootLength);
+    const tail = collapsed
+      .slice(rootLength)
+      .split('/')
+      .filter((segment) => segment !== '' && segment !== '.')
+      .join('/');
+    return tail ? `${prefix}${tail}` : prefix;
+  };
+  const normalizedPath = normalizePath(path);
+  const isAbsolute =
+    normalizedPath.startsWith('/') || /^[A-Za-z]:\//.test(normalizedPath);
+  if (!isAbsolute) {
+    return normalizedPath.toLowerCase() === relativeKey.toLowerCase()
+      ? relativeKey
+      : null;
+  }
+  if (!project) return null;
+  const projectPath = normalizePath(project);
+  const normalizedProject =
+    projectPath === '/' || /^[A-Za-z]:\/$/.test(projectPath)
+      ? projectPath
+      : projectPath.replace(/\/$/, '');
+  if (
+    !normalizedProject.startsWith('/') &&
+    !/^[A-Za-z]:\//.test(normalizedProject)
+  ) {
+    return null;
+  }
+  const expected = `${normalizedProject}${normalizedProject.endsWith('/') ? '' : '/'}${relativeKey}`;
+  return normalizedPath.toLowerCase() === expected.toLowerCase()
+    ? relativeKey
+    : null;
+}
+
+function candidateTransitionForEvidence(
+  transitions: CrossSessionTransition[]
+): CrossSessionTransition | undefined {
+  return transitions
+    .filter((transition) => transition.status === 'candidate')
+    .sort(
+      (a, b) =>
+        (b.timestampMs ?? -Infinity) - (a.timestampMs ?? -Infinity) ||
+        b.order - a.order ||
+        a.sessionId.localeCompare(b.sessionId) ||
+        a.toolUseId.localeCompare(b.toolUseId)
+    )[0];
+}
+
+function transitionIsProvenAfter(
+  later: CrossSessionTransition,
+  earlier: CrossSessionTransition
+): boolean {
+  if (later.sessionId === earlier.sessionId) {
+    return later.order > earlier.order;
+  }
+  return (
+    earlier.orderingTimestampExact === true &&
+    later.orderingTimestampMs != null &&
+    earlier.orderingTimestampMs != null &&
+    later.orderingTimestampMs > earlier.orderingTimestampMs
+  );
+}
+
+function candidateTransitionsNotProvenSuperseded(
+  state: SessionLeaveBehindState,
+  transitions: CrossSessionTransition[]
+): CrossSessionTransition[] {
+  const candidates = [
+    ...(state.candidateTransition ? [state.candidateTransition] : []),
+    ...transitions.filter((transition) => transition.status === 'candidate'),
+  ];
+  const uniqueCandidates = new Map<string, CrossSessionTransition>();
+  for (const candidate of candidates) {
+    uniqueCandidates.set(
+      `${candidate.sessionId}\u0000${candidate.order}\u0000${candidate.toolUseId}`,
+      candidate
+    );
+  }
+  const invalidations = transitions.filter(
+    (transition) => transition.status === 'invalidated'
+  );
+  return [...uniqueCandidates.values()].filter(
+    (candidate) =>
+      !invalidations.some((invalidation) =>
+        transitionIsProvenAfter(invalidation, candidate)
+      )
+  );
+}
+
+function candidateIsProvenBeforeLatestMutation(
+  candidate: CrossSessionTransition,
+  durableSessionId: string,
+  mutations: DurableMutation[]
+): boolean {
+  if (candidate.sessionId === durableSessionId) {
+    return candidate.order < Math.max(
+      ...mutations.map((mutation) => mutation.order)
+    );
+  }
+  if (
+    candidate.orderingTimestampExact !== true ||
+    candidate.orderingTimestampMs == null ||
+    !mutations.every(
+      (mutation) =>
+        mutation.orderingTimestampExact &&
+        mutation.orderingTimestampMs != null
+    )
+  ) {
+    return false;
+  }
+  const latestMutationMs = maxMs(
+    mutations.map((mutation) => mutation.orderingTimestampMs)
+  );
+  return (
+    latestMutationMs != null &&
+    candidate.orderingTimestampMs < latestMutationMs
+  );
 }
 
 function collectPreSignals(
   toolData: ToolUsageData[],
-  projects: Map<string, string>
+  projects: Map<string, string>,
+  now: number
 ): PreSignal[] {
   const leaveBehindStateBySession = new Map<
     string,
-    Map<
-      string,
-      {
-        status: 'candidate' | 'invalidated';
-        order: number;
-        path: string;
-        timestampMs: number | null;
-        transition?: CrossSessionTransition;
-      }
-    >
+    Map<string, SessionLeaveBehindState>
   >();
   const mutationsBySession = new Map<string, DurableMutation[]>();
   const crossSessionTransitions: CrossSessionTransition[] = [];
+  const crossSessionInvalidationBarriers: CrossSessionInvalidationBarrier[] = [];
 
   for (const session of toolData) {
-    const leaveBehindState = new Map<
-      string,
-      {
-        status: 'candidate' | 'invalidated';
-        order: number;
-        path: string;
-        timestampMs: number | null;
-        transition?: CrossSessionTransition;
-      }
-    >();
+    let sessionOrderingTimestampMs: number | null = null;
+    const leaveBehindState = new Map<string, SessionLeaveBehindState>();
     for (const [order, call] of (session.calls ?? []).entries()) {
-      const transition = observeLeaveBehindWrite(call);
-      if (transition) {
-        const transitionMs = parseMs(call.timestamp);
-        const project = projects.get(session.sessionId);
-        const observedTransition =
-          project
-            ? {
-                sessionId: session.sessionId,
-                project,
-                key: transition.key,
-                timestampMs: transitionMs,
-                order,
-                toolUseId: call.toolUseId,
-                toolName: call.toolName,
-                path: transition.path,
-                status: transition.status,
-              }
-            : undefined;
-        leaveBehindState.set(
+      const project = projects.get(session.sessionId) ?? null;
+      const parsedTransitionTimestamp = parseTimestamp(call.timestamp, now);
+      const transitionMs = parsedTransitionTimestamp.ms;
+      const priorSessionOrderingTimestampMs = sessionOrderingTimestampMs;
+      sessionOrderingTimestampMs = maxMs([
+        sessionOrderingTimestampMs,
+        transitionMs,
+      ]);
+      const orderingTimestampExact =
+        transitionMs != null &&
+        (priorSessionOrderingTimestampMs == null ||
+          transitionMs >= priorSessionOrderingTimestampMs);
+      const transitions = observeLeaveBehindWrites(call);
+      const transitionedKeysThisCall = new Set<string>();
+      for (const transition of transitions) {
+        const transitionKey = projectScopedTransitionKey(
+          transition.path,
           transition.key,
+          project
+        );
+        if (!transitionKey) continue;
+        transitionedKeysThisCall.add(transitionKey);
+        const observedTransition: CrossSessionTransition = {
+          sessionId: session.sessionId,
+          project,
+          key: transitionKey,
+          timestampMs: transitionMs,
+          timestampIssue: parsedTransitionTimestamp.issue,
+          orderingTimestampMs: sessionOrderingTimestampMs,
+          orderingTimestampExact,
+          order,
+          toolUseId: call.toolUseId,
+          toolName: call.toolName,
+          path: transition.path,
+          pathField: transition.field,
+          status: transition.status,
+        };
+        leaveBehindState.set(
+          transitionKey,
           {
             status: transition.status,
             order,
             path: transition.path,
             timestampMs: transitionMs,
-            ...(observedTransition ? { transition: observedTransition } : {}),
+            transition: observedTransition,
+            ...(transition.status === 'candidate'
+              ? { candidateTransition: observedTransition }
+              : {}),
           }
         );
-        if (observedTransition) crossSessionTransitions.push(observedTransition);
+        if (project != null) crossSessionTransitions.push(observedTransition);
+      }
+      const mutationAmbiguityReason =
+        call.commandAnalysisTruncated === true
+          ? ('truncated-command-analysis' as const)
+          : call.leaveBehindMutationPathsTruncated === true
+            ? ('truncated-path-tail' as const)
+            : null;
+      if (
+        call.toolName === 'Bash' &&
+        call.isError === false &&
+        mutationAmbiguityReason != null
+      ) {
+        for (const [transitionKey, state] of leaveBehindState) {
+          if (transitionedKeysThisCall.has(transitionKey)) continue;
+          const observedTransition: CrossSessionTransition = {
+            sessionId: session.sessionId,
+            project,
+            key: transitionKey,
+            timestampMs: transitionMs,
+            timestampIssue: parsedTransitionTimestamp.issue,
+            orderingTimestampMs: sessionOrderingTimestampMs,
+            orderingTimestampExact,
+            order,
+            toolUseId: call.toolUseId,
+            toolName: call.toolName,
+            path: state.path,
+            pathField:
+              mutationAmbiguityReason === 'truncated-command-analysis'
+                ? 'commandAnalysisTruncated'
+                : 'leaveBehindMutationPaths',
+            status: 'ambiguous',
+            ambiguityReason: mutationAmbiguityReason,
+          };
+          leaveBehindState.set(transitionKey, {
+            ...state,
+            status: 'ambiguous',
+            order,
+            timestampMs: transitionMs,
+            transition: observedTransition,
+          });
+          // A bounded prefix or an analysis resource barrier does not prove
+          // which path was omitted. Keep the same-session candidate uncertain,
+          // while the project-wide barrier below gives other sessions the same
+          // non-claiming outcome.
+        }
+        if (project != null) {
+          crossSessionInvalidationBarriers.push({
+            sessionId: session.sessionId,
+            project,
+            timestampMs: transitionMs,
+            timestampIssue: parsedTransitionTimestamp.issue,
+            orderingTimestampMs: sessionOrderingTimestampMs,
+            orderingTimestampExact,
+            order,
+            toolUseId: call.toolUseId,
+            toolName: call.toolName,
+            ambiguityReason: mutationAmbiguityReason,
+          });
+        }
       }
       // A failed or result-less attempt is not evidence that durable state
       // changed. Requiring the observed successful result keeps mutation order
@@ -273,12 +672,13 @@ function collectPreSignals(
       if (call.isError !== false) continue;
       const classified = classifyDurableMutation(call);
       if (!classified) continue;
-      const ms = parseMs(call.timestamp);
       const mutation: DurableMutation = {
         sessionId: session.sessionId,
         taskClass: taskClassOf(session.sessionId, projects),
-        timestampMs: ms,
-        date: ms == null ? null : isoDate(ms),
+        timestampMs: transitionMs,
+        timestampIssue: parsedTransitionTimestamp.issue,
+        orderingTimestampMs: sessionOrderingTimestampMs,
+        orderingTimestampExact,
         toolUseId: call.toolUseId,
         order,
         kind: classified.kind,
@@ -304,62 +704,84 @@ function collectPreSignals(
     const leaveBehindDecisions: LeaveBehindDecision[] = [];
     const structuralCandidatePaths: string[] = [];
     for (const [key, state] of finalStates) {
-      const candidateTimestampMs = state.timestampMs;
       const laterTransitions =
         project
-          ? crossSessionTransitions.filter(
-              (transition) =>
-                transition.sessionId !== sessionId &&
-                transition.project === project &&
-                transition.key === key &&
-                (candidateTimestampMs == null ||
-                  transition.timestampMs == null ||
-                  transition.timestampMs >= candidateTimestampMs)
-            )
+          ? [
+              ...crossSessionTransitions.filter(
+                (transition) =>
+                  transition.sessionId !== sessionId &&
+                  transition.project === project &&
+                  transition.key === key
+              ),
+              ...crossSessionInvalidationBarriers
+                .filter(
+                  (barrier) =>
+                    barrier.sessionId !== sessionId &&
+                    barrier.project === project
+                )
+                .map(
+                  (barrier): CrossSessionTransition => ({
+                    ...barrier,
+                    key,
+                    path: state.path,
+                    pathField:
+                      barrier.ambiguityReason ===
+                      'truncated-command-analysis'
+                        ? 'commandAnalysisTruncated'
+                        : 'leaveBehindMutationPaths',
+                    status: 'ambiguous',
+                    ambiguityReason: barrier.ambiguityReason,
+                  })
+                ),
+            ]
           : [];
       const potentiallyFinalTransitions = [
         ...(state.transition ? [state.transition] : []),
         ...laterTransitions,
       ];
-      const latestTransitionMs = maxMs(
-        potentiallyFinalTransitions.map((transition) => transition.timestampMs)
-      );
-      const latestTransitions =
-        latestTransitionMs == null
-          ? []
-          : potentiallyFinalTransitions.filter(
-              (transition) => transition.timestampMs === latestTransitionMs
-            );
-      // Calls within one transcript have a proven order even when every tool
-      // use in the assistant message shares one timestamp. Collapse each
-      // session to its final call at the latest timestamp; conflicting final
-      // states across different sessions remain genuinely unordered.
-      const finalLatestTransitionBySession = new Map<
-        string,
-        CrossSessionTransition
-      >();
-      for (const transition of latestTransitions) {
-        const prior = finalLatestTransitionBySession.get(transition.sessionId);
-        if (!prior || transition.order > prior.order) {
-          finalLatestTransitionBySession.set(transition.sessionId, transition);
-        }
-      }
-      // An unparseable cross-session timestamp cannot be ordered against a
-      // known timestamp. Retain the final such call per transcript alongside
-      // the latest known-time calls; a status conflict then becomes ambiguous
-      // rather than a billable missing-artifact claim.
+      // Calls within one transcript have proven array order even when their
+      // timestamps tie, are absent, or move backwards. Collapse every session
+      // to its final relevant call first; only then compare those final states
+      // by timestamp across transcripts.
+      const finalTransitionBySession = new Map<string, CrossSessionTransition>();
       for (const transition of potentiallyFinalTransitions) {
-        if (transition.timestampMs != null) continue;
-        const prior = finalLatestTransitionBySession.get(transition.sessionId);
+        const prior = finalTransitionBySession.get(transition.sessionId);
         if (!prior || transition.order > prior.order) {
-          finalLatestTransitionBySession.set(transition.sessionId, transition);
+          finalTransitionBySession.set(transition.sessionId, transition);
         }
       }
-      const finalLatestTransitions = [...finalLatestTransitionBySession.values()];
+      const perSessionFinalTransitions = [...finalTransitionBySession.values()];
+      const latestTransitionMs = maxMs(
+        perSessionFinalTransitions.map(
+          (transition) => transition.orderingTimestampMs ?? null
+        )
+      );
+      // A lower-bound-only final may occur after any later point timestamp, so
+      // it always remains a contender. Exact points are discarded only when a
+      // different session-final state has a strictly later proven lower bound.
+      const finalLatestTransitions = perSessionFinalTransitions.filter(
+        (transition) =>
+          transition.orderingTimestampExact === false ||
+          transition.orderingTimestampMs == null ||
+          latestTransitionMs == null ||
+          transition.orderingTimestampMs === latestTransitionMs
+      );
       const decidingTransitions =
         finalLatestTransitions.length > 0
           ? finalLatestTransitions
           : [];
+      const provenCandidateTransitions =
+        candidateTransitionsNotProvenSuperseded(
+          state,
+          potentiallyFinalTransitions
+        ).filter(
+          (candidate) =>
+            !candidateIsProvenBeforeLatestMutation(
+              candidate,
+              sessionId,
+              mutations
+            )
+        );
       const finalStatuses = new Set(
         finalLatestTransitions.map((transition) => transition.status)
       );
@@ -369,26 +791,55 @@ function collectPreSignals(
           : finalStatuses.size > 1
             ? 'ambiguous'
             : finalLatestTransitions[0].status;
-      const latestCandidate = decidingTransitions.find(
-        (transition) => transition.status === 'candidate'
+      const latestCandidate = candidateTransitionForEvidence(
+        provenCandidateTransitions
       );
       const path = latestCandidate?.path ?? state.path;
       leaveBehindDecisions.push({
         key,
         path,
         outcome,
+        ...(outcome === 'ambiguous'
+          ? {
+              ambiguityReason: finalLatestTransitions.some(
+                (transition) =>
+                  transition.ambiguityReason ===
+                  'truncated-command-analysis'
+              )
+                ? ('truncated-command-analysis' as const)
+                : finalLatestTransitions.some(
+                      (transition) =>
+                        transition.ambiguityReason === 'truncated-path-tail'
+                    )
+                  ? ('truncated-path-tail' as const)
+                  : ('cross-session-ordering' as const),
+            }
+          : {}),
         transitions: decidingTransitions,
+        provenCandidateTransitions,
       });
       // An equal-time cross-session conflict cannot prove either absence or a
       // final candidate. Keep it on the zero-savings verification path.
-      if (outcome !== 'invalidated') structuralCandidatePaths.push(path);
+      if (
+        outcome !== 'invalidated' &&
+        provenCandidateTransitions.length > 0
+      ) {
+        structuralCandidatePaths.push(path);
+      }
     }
-    const latestMs = maxMs([
-      ...mutations.map((mutation) => mutation.timestampMs),
+    const orderingEvents = [
+      ...mutations.map((mutation) => ({
+        timestampMs: mutation.orderingTimestampMs,
+        exact: mutation.orderingTimestampExact,
+      })),
       ...leaveBehindDecisions.flatMap((decision) =>
-        decision.transitions.map((transition) => transition.timestampMs)
+        decision.transitions.map((transition) => ({
+          timestampMs: transition.orderingTimestampMs ?? null,
+          exact: transition.orderingTimestampExact === true,
+        }))
       ),
-    ]);
+    ];
+    const latestMs = maxMs(orderingEvents.map((event) => event.timestampMs));
     signals.push({
       sessionId,
       taskClass: taskClassOf(sessionId, projects),
@@ -396,7 +847,11 @@ function collectPreSignals(
       structuralCandidatePaths,
       leaveBehindDecisions,
       latestMs,
-      latestDate: latestMs == null ? null : isoDate(latestMs),
+      orderingTimestampExact:
+        orderingEvents.length > 0 &&
+        orderingEvents.every(
+          (event) => event.exact && event.timestampMs != null
+        ),
     });
   }
   return signals;
@@ -407,14 +862,24 @@ function maxMs(values: Array<number | null>): number | null {
   return nums.length ? Math.max(...nums) : null;
 }
 
-function rediscoveryBurst(timeline: SessionTimeline, projects: Map<string, string>): RediscoveryBurst | null {
-  const firstMs = parseMs(timeline.startTime) ?? parseMs(timeline.entries[0]?.timestamp);
+function rediscoveryBurst(
+  timeline: SessionTimeline,
+  projects: Map<string, string>,
+  now: number
+): RediscoveryBurst | null {
+  const firstMs =
+    parseTimestamp(timeline.startTime, now).ms ??
+    parseTimestamp(timeline.entries[0]?.timestamp, now).ms;
   if (firstMs == null) return null;
   const early = timeline.entries
     .filter((entry) => entry.kind === 'user' || entry.kind === 'assistant')
     .filter((entry) => {
-      const ms = parseMs(entry.timestamp);
-      return ms != null && ms - firstMs <= REDISCOVERY_WINDOW_MS;
+      const ms = parseTimestamp(entry.timestamp, now).ms;
+      return (
+        ms != null &&
+        ms >= firstMs &&
+        ms - firstMs <= REDISCOVERY_WINDOW_MS
+      );
     })
     // Cap the early window at the first 10 conversational turns: a rediscovery
     // burst is a start-of-session phenomenon, and the density gate below
@@ -428,7 +893,7 @@ function rediscoveryBurst(timeline: SessionTimeline, projects: Map<string, strin
   if (hits.length / early.length < 0.4) return null;
 
   const hitTimes = hits
-    .map((entry) => parseMs(entry.timestamp))
+    .map((entry) => parseTimestamp(entry.timestamp, now).ms)
     .filter((ms): ms is number => ms != null);
   const endMs = hitTimes.length ? Math.max(...hitTimes) : firstMs;
   // The observed measurement — NOT floored at the preset (finding #2).
@@ -478,10 +943,24 @@ function billRediscoveries(
     // so admitting it could bill a mutation as the cause of an earlier burst
     // (adversarial-review finding #5) — exclude it.
     const candidates = (priorsByClass.get(burst.taskClass) ?? []).filter(
-      (signal) => signal.latestMs != null && signal.latestMs < burst.startMs
+      (signal) =>
+        signal.sessionId !== burst.sessionId &&
+        signal.orderingTimestampExact &&
+        signal.latestMs != null &&
+        signal.latestMs < burst.startMs
     );
     if (candidates.length === 0) continue;
     const prior = candidates[candidates.length - 1];
+    if (
+      candidates.length > 1 &&
+      candidates[candidates.length - 2].latestMs === prior.latestMs
+    ) {
+      // Two project-local sessions at the same latest proven instant are both
+      // before the burst, but the transcript clocks cannot identify which one
+      // the rediscovery revisited. Keep the burst unbilled rather than choosing
+      // by input order and manufacturing a causal edge.
+      continue;
+    }
     out.push({ priorSessionId: prior.sessionId, burst });
   }
   return out;
@@ -492,16 +971,67 @@ function billRediscoveries(
 // same running total, producing a meaningless mixed-unit number (adversarial-
 // review finding #4). `toolResultBytes` / `toolUseIds` remain the join keys the
 // provenance cites, but they are not summed into a token figure.
-function tokenAttributionTokens(
+interface TokenAttributionCoverage {
+  tokenTotal: number;
+  tokenRowsMeasured: number;
+  relevantTokenRows: number;
+  involvedSessions: number;
+  matchingToolUseLinks: number;
+  involvedToolUseLinks: number;
+  matchingEntriesWithResultBytes: number;
+}
+
+function tokenAttributionCoverage(
   input: Parameters<Detector['rule']>[0],
-  sessionIds: Set<string>
-): number {
-  let total = 0;
-  for (const row of input.tokenData ?? []) {
-    if (!sessionIds.has(row.sessionId)) continue;
-    total += row.contextToolResultTokensSum ?? 0;
+  sessionIds: Set<string>,
+  involvedToolUseIdsBySession: Map<string, Set<string>>
+): TokenAttributionCoverage {
+  const rows = (input.tokenData ?? []).filter((row) =>
+    sessionIds.has(row.sessionId)
+  );
+  const measuredRows = rows.filter(
+    (row) =>
+      typeof row.contextToolResultTokensSum === 'number' &&
+      Number.isFinite(row.contextToolResultTokensSum) &&
+      row.contextToolResultTokensSum >= 0
+  );
+  const matchingToolUseLinks = new Set<string>();
+  let matchingEntriesWithResultBytes = 0;
+  for (const row of rows) {
+    const involvedToolUseIds = involvedToolUseIdsBySession.get(row.sessionId);
+    if (!involvedToolUseIds) continue;
+    for (const entry of row.entries ?? []) {
+      const matches = (entry.toolUseIds ?? []).filter((toolUseId) =>
+        involvedToolUseIds.has(toolUseId)
+      );
+      if (matches.length === 0) continue;
+      for (const toolUseId of matches) {
+        matchingToolUseLinks.add(`${row.sessionId}\u0000${toolUseId}`);
+      }
+      if (
+        typeof entry.toolResultBytes === 'number' &&
+        Number.isFinite(entry.toolResultBytes) &&
+        entry.toolResultBytes >= 0
+      ) {
+        matchingEntriesWithResultBytes += 1;
+      }
+    }
   }
-  return total;
+  return {
+    tokenTotal: measuredRows.reduce(
+      (total, row) => total + row.contextToolResultTokensSum!,
+      0
+    ),
+    tokenRowsMeasured: measuredRows.length,
+    relevantTokenRows: rows.length,
+    involvedSessions: sessionIds.size,
+    matchingToolUseLinks: matchingToolUseLinks.size,
+    involvedToolUseLinks: [...involvedToolUseIdsBySession.values()].reduce(
+      (total, toolUseIds) => total + toolUseIds.size,
+      0
+    ),
+    matchingEntriesWithResultBytes,
+  };
 }
 
 interface DetectorAnalysis {
@@ -509,25 +1039,33 @@ interface DetectorAnalysis {
   preSignals: PreSignal[];
 }
 
-function analyzeInput(input: Parameters<Detector['rule']>[0]): DetectorAnalysis {
+function analyzeInput(
+  input: Parameters<Detector['rule']>[0],
+  now: number
+): DetectorAnalysis {
   const projects = projectBySession(input);
   return {
     projects,
-    preSignals: collectPreSignals(input.toolData ?? [], projects),
+    preSignals: collectPreSignals(input.toolData ?? [], projects, now),
   };
 }
 
 function buildRollups(
   input: Parameters<Detector['rule']>[0],
-  analysis: DetectorAnalysis
+  analysis: DetectorAnalysis,
+  now: number
 ): ClassRollup[] {
   const preSignals = analysis.preSignals.filter(
-    (signal) => signal.structuralCandidatePaths.length === 0
+    (signal) =>
+      signal.structuralCandidatePaths.length === 0 &&
+      !signal.leaveBehindDecisions.some(
+        (decision) => decision.outcome === 'ambiguous'
+      )
   );
   if (preSignals.length === 0) return [];
 
   const bursts = (input.timelines ?? [])
-    .map((timeline) => rediscoveryBurst(timeline, analysis.projects))
+    .map((timeline) => rediscoveryBurst(timeline, analysis.projects, now))
     .filter((b): b is RediscoveryBurst => b != null);
   const rediscoveries = billRediscoveries(bursts, preSignals);
 
@@ -570,6 +1108,35 @@ function buildRollups(
   });
 }
 
+function candidateIsProvenAfterMutations(
+  signal: PreSignal,
+  candidate: CrossSessionTransition
+): boolean {
+  if (candidate.sessionId === signal.sessionId) {
+    return candidate.order > Math.max(
+      ...signal.mutations.map((mutation) => mutation.order)
+    );
+  }
+  if (
+    candidate.orderingTimestampExact !== true ||
+    candidate.orderingTimestampMs == null ||
+    !signal.mutations.every(
+      (mutation) =>
+        mutation.orderingTimestampExact &&
+        mutation.orderingTimestampMs != null
+    )
+  ) {
+    return false;
+  }
+  const latestMutationMs = maxMs(
+    signal.mutations.map((mutation) => mutation.orderingTimestampMs)
+  );
+  return (
+    latestMutationMs != null &&
+    candidate.orderingTimestampMs > latestMutationMs
+  );
+}
+
 function candidateVerificationRecommendation(
   now: number,
   analysis: DetectorAnalysis
@@ -590,50 +1157,180 @@ function candidateVerificationRecommendation(
     return (maxMs(b[1].map((signal) => signal.latestMs)) ?? -Infinity) -
       (maxMs(a[1].map((signal) => signal.latestMs)) ?? -Infinity);
   })[0];
+  const displayedTaskClass = taskClassDisplay(taskClass);
   const paths = [...new Set(signals.flatMap((signal) => signal.structuralCandidatePaths))];
   const candidateEntries = signals.flatMap((signal) =>
     signal.leaveBehindDecisions
-      .filter((decision) => decision.outcome !== 'invalidated')
-      .map((decision) => ({
-        signal,
-        decision,
-        latestMs:
-          maxMs(decision.transitions.map((transition) => transition.timestampMs)) ??
-          signal.latestMs,
-      }))
+      .filter(
+        (decision) =>
+          decision.outcome !== 'invalidated' &&
+          decision.provenCandidateTransitions.length > 0
+      )
+      .map((decision) => {
+        const candidateTransitions = decision.provenCandidateTransitions;
+        return {
+          signal,
+          decision,
+          candidateTransitions,
+          provenAfterMutation: candidateTransitions.some((transition) =>
+            candidateIsProvenAfterMutations(signal, transition)
+          ),
+          latestMs:
+            maxMs(
+              decision.transitions.map(
+                (transition) => transition.orderingTimestampMs ?? null
+              )
+            ) ?? signal.latestMs,
+        };
+      })
   );
   candidateEntries.sort(
     (a, b) => (b.latestMs ?? -Infinity) - (a.latestMs ?? -Infinity)
   );
   const latestMs = maxMs(candidateEntries.map((entry) => entry.latestMs));
-  const latestDate = latestMs == null ? undefined : isoDate(latestMs);
+  const candidateFreshnessUnknown = candidateEntries.some(
+    ({ signal, decision }) =>
+      signal.mutations.some(
+        (mutation) =>
+          mutation.timestampMs == null || !mutation.orderingTimestampExact
+      ) ||
+      decision.transitions.length === 0 ||
+      decision.transitions.some(
+        (transition) =>
+          transition.timestampMs == null ||
+          transition.orderingTimestampExact === false
+      ) ||
+      decision.provenCandidateTransitions.some(
+        (transition) =>
+          transition.timestampMs == null ||
+          transition.orderingTimestampExact === false
+      )
+  );
+  const latestDate =
+    latestMs == null || candidateFreshnessUnknown
+      ? undefined
+      : isoDate(latestMs);
   const stale = latestMs != null ? now - latestMs > FRESHNESS_DAYS * DAY_MS : undefined;
   const asOfPrefix = stale && latestDate ? `As of ${latestDate}, ` : '';
-  const { signal: example, decision: exampleDecision } = candidateEntries[0];
-  const decidingCandidate = exampleDecision?.transitions
-    .filter((transition) => transition.status === 'candidate')
-    .sort(
-      (a, b) =>
-        (b.timestampMs ?? -Infinity) - (a.timestampMs ?? -Infinity) ||
-        b.order - a.order
-    )[0];
+  const exampleEntry = [...candidateEntries].sort(
+    (a, b) =>
+      Number(b.provenAfterMutation) - Number(a.provenAfterMutation) ||
+      (b.latestMs ?? -Infinity) - (a.latestMs ?? -Infinity)
+  )[0];
+  const { signal: example, decision: exampleDecision } = exampleEntry;
+  const decidingCandidate =
+    exampleEntry.candidateTransitions.find((transition) =>
+      candidateIsProvenAfterMutations(example, transition)
+    ) ?? candidateTransitionForEvidence(exampleEntry.candidateTransitions);
+  const exampleCandidateProvenAfterMutation =
+    decidingCandidate != null &&
+    candidateIsProvenAfterMutations(example, decidingCandidate);
+  const evidencePath = decidingCandidate?.path ?? exampleDecision.path;
   const evidenceSessionId = decidingCandidate?.sessionId ?? example.sessionId;
-  const ambiguousDecisions = candidateEntries.filter(
-    ({ decision }) => decision.outcome === 'ambiguous'
+  const provenAfterMutationCount = candidateEntries.filter(
+    (entry) => entry.provenAfterMutation
+  ).length;
+  const mutationOrderingUnknownCount =
+    candidateEntries.length - provenAfterMutationCount;
+  const freshnessTransition = candidateEntries
+    .flatMap(({ decision }) => decision.transitions)
+    .find(
+      (transition) =>
+        transition.timestampMs == null ||
+        transition.orderingTimestampExact === false
+    );
+  const freshnessCandidate = candidateEntries
+    .flatMap(({ decision }) => decision.provenCandidateTransitions)
+    .find(
+      (transition) =>
+        transition.timestampMs == null ||
+        transition.orderingTimestampExact === false
+    );
+  const freshnessMutation = candidateEntries
+    .flatMap(({ signal }) => signal.mutations)
+    .find(
+      (mutation) =>
+        mutation.timestampMs == null || !mutation.orderingTimestampExact
+    );
+  const hasMissingDecisionTiming = candidateEntries.some(
+    ({ decision }) => decision.transitions.length === 0
+  );
+  const orderingAmbiguities = candidateEntries.filter(
+    ({ decision }) =>
+      decision.outcome === 'ambiguous' &&
+      decision.ambiguityReason === 'cross-session-ordering'
+  ).length;
+  const truncatedTailAmbiguities = candidateEntries.filter(
+    ({ decision }) =>
+      decision.outcome === 'ambiguous' &&
+      decision.ambiguityReason === 'truncated-path-tail'
+  ).length;
+  const truncatedAnalysisAmbiguities = candidateEntries.filter(
+    ({ decision }) =>
+      decision.outcome === 'ambiguous' &&
+      decision.ambiguityReason === 'truncated-command-analysis'
   ).length;
   const unknownTimeAmbiguities = candidateEntries.filter(
     ({ decision }) =>
       decision.outcome === 'ambiguous' &&
-      decision.transitions.some((transition) => transition.timestampMs == null)
+      decision.ambiguityReason === 'cross-session-ordering' &&
+      decision.transitions.some(
+        (transition) =>
+          transition.timestampMs == null &&
+          transition.timestampIssue !== 'future'
+      )
   ).length;
-  const ambiguityDetail =
-    ambiguousDecisions > 0
-      ? ` ${ambiguousDecisions} state-scope observation(s) also have conflicting candidate ` +
+  const futureTimeAmbiguities = candidateEntries.filter(
+    ({ decision }) =>
+      decision.outcome === 'ambiguous' &&
+      decision.ambiguityReason === 'cross-session-ordering' &&
+      decision.transitions.some(
+        (transition) => transition.timestampIssue === 'future'
+      )
+  ).length;
+  const lowerBoundTimeAmbiguities = candidateEntries.filter(
+    ({ decision }) =>
+      decision.outcome === 'ambiguous' &&
+      decision.ambiguityReason === 'cross-session-ordering' &&
+      decision.transitions.some(
+        (transition) => transition.orderingTimestampExact === false
+      )
+  ).length;
+  const orderingAmbiguityDetail =
+    orderingAmbiguities > 0
+      ? ` ${orderingAmbiguities} state-scope observation(s) also have conflicting candidate ` +
         `and invalidation transitions that cannot be ordered across sessions` +
         (unknownTimeAmbiguities > 0
           ? `; ${unknownTimeAmbiguities} include missing or unparseable timestamps.`
+          : futureTimeAmbiguities > 0
+          ? ` because ${futureTimeAmbiguities} include timestamps materially in the future relative to the evaluation clock.`
+          : lowerBoundTimeAmbiguities > 0
+          ? ` because ${lowerBoundTimeAmbiguities} include transcript clocks that move backwards, leaving only an ordering lower bound.`
           : ` because their timestamps are equal.`)
       : '';
+  const truncatedTailDetail =
+    truncatedTailAmbiguities > 0
+      ? ` ${truncatedTailAmbiguities} state-scope observation(s) remain uncertain because ` +
+        `a successful Bash mutation exceeded the persisted path bound; the omitted path tail ` +
+        `is unknown, so no exact-path invalidation is claimed.`
+      : '';
+  const truncatedAnalysisDetail =
+    truncatedAnalysisAmbiguities > 0
+      ? ` ${truncatedAnalysisAmbiguities} state-scope observation(s) remain uncertain because ` +
+        `a successful Bash call exceeded the static command analysis resource bound; its mutation paths ` +
+        `are unknown, so no final-state claim is made.`
+      : '';
+  const freshnessDetail = candidateFreshnessUnknown
+    ? ` Candidate freshness cannot be established because at least one relevant ` +
+      `mutation or same-scope transition lacks complete timestamp evidence.`
+    : '';
+  const candidateOrderingDetail =
+    (provenAfterMutationCount > 0
+      ? ` ${provenAfterMutationCount} association(s) include candidate evidence proven after the durable mutation.`
+      : '') +
+    (mutationOrderingUnknownCount > 0
+      ? ` ${mutationOrderingUnknownCount} association(s) have same-scope candidate evidence whose order relative to the durable mutation is not proven.`
+      : '');
 
   return {
     id: CANDIDATE_VERIFICATION_ID,
@@ -641,58 +1338,107 @@ function candidateVerificationRecommendation(
     severity: 'info',
     title: 'Verify the leave-behind candidate reached Git',
     detail:
-      `${asOfPrefix}${signals.length} durable-state session(s) in "${taskClass}" have ` +
-      `${candidateEntries.length} structurally conformant leave-behind candidate observation(s) ` +
-      `across ${paths.length} unique path(s) after their mutations that are not provably ` +
-      `superseded by a later invalidation.` +
-      ambiguityDetail + ' ' +
+      `${asOfPrefix}${signals.length} durable-state session(s) in ${displayedTaskClass} have ` +
+      `${candidateEntries.length} structurally conformant leave-behind candidate state association(s) ` +
+      `across ${paths.length} unique path(s) that are not provably superseded by a later invalidation.` +
+      candidateOrderingDetail +
+      orderingAmbiguityDetail + truncatedTailDetail + truncatedAnalysisDetail + freshnessDetail + ' ' +
       `Transcript data cannot prove Git HEAD tracking or scope coverage, so no missing-artifact ` +
       `savings are booked until both are verified.`,
     action:
-      `Verify ${exampleDecision.path} is tracked at HEAD and covers the durable mutation(s) in ` +
+      `Verify ${evidencePath} is tracked at HEAD and covers the durable mutation(s) in ` +
       `${short(example.sessionId)}. ` +
       `If either check fails, update and commit the leave-behind for the correct state scope; an ` +
       `unrelated tracked artifact does not satisfy the contract.`,
     affected: signals.length,
     view: 'timeline',
     evidence: [
-      `${short(evidenceSessionId)} ${candidateEntries.length} structural candidate observation(s) across ${paths.length} unique path(s) not provably superseded in ${signals.length} durable-state session(s); Git HEAD is unobserved in transcript data` +
-        (ambiguousDecisions > 0
-          ? `; ${ambiguousDecisions} cross-session state conflict(s) remain unordered`
+      `${projectEvidenceLead(evidenceSessionId, taskClass)} ${candidateEntries.length} candidate state association(s) across ${paths.length} unique path(s) not provably superseded in ${signals.length} durable-state session(s); Git HEAD is unobserved in transcript data` +
+        (orderingAmbiguities > 0
+          ? `; ${orderingAmbiguities} cross-session state conflict(s) remain unordered`
+          : '') +
+        (truncatedTailAmbiguities > 0
+          ? `; ${truncatedTailAmbiguities} bounded mutation-path tail(s) remain unknown`
+          : '') +
+        (truncatedAnalysisAmbiguities > 0
+          ? `; ${truncatedAnalysisAmbiguities} bounded command analysis result(s) leave mutation paths unknown`
           : ''),
-      `${short(evidenceSessionId)} cited conformant Write candidate -> ${exampleDecision?.path ?? example.structuralCandidatePaths[0]}` +
+      `${projectEvidenceLead(evidenceSessionId, taskClass)} cited conformant Write candidate -> ${evidencePath}` +
         (decidingCandidate
           ? ` (tool_use_id ${decidingCandidate.toolUseId}` +
             (decidingCandidate.timestampMs == null
-              ? ', timestamp unavailable)'
-              : `, ${new Date(decidingCandidate.timestampMs).toISOString()})`)
+              ? decidingCandidate.timestampIssue === 'future'
+                ? ', timestamp materially in the future relative to the evaluation clock)'
+                : ', timestamp unavailable)'
+              : `, ${new Date(decidingCandidate.timestampMs).toISOString()}` +
+                (decidingCandidate.orderingTimestampExact === false
+                  ? ', ordering lower bound only)'
+                  : ')')) +
+            (exampleCandidateProvenAfterMutation
+              ? '; transcript/timestamp ordering proves this candidate follows the mutation'
+              : '; ordering relative to the mutation is not proven')
           : ''),
+      ...(freshnessTransition
+        ? [
+            `${projectEvidenceLead(freshnessTransition.sessionId, taskClass)} freshness-limiting transition ` +
+              `(tool_use_id ${freshnessTransition.toolUseId}) ` +
+              timestampEvidenceLimitation(
+                freshnessTransition.timestampIssue,
+                freshnessTransition.timestampMs
+              ),
+          ]
+        : freshnessCandidate
+          ? [
+              `${projectEvidenceLead(freshnessCandidate.sessionId, taskClass)} freshness-limiting conformant candidate ` +
+                `(tool_use_id ${freshnessCandidate.toolUseId}) ` +
+                timestampEvidenceLimitation(
+                  freshnessCandidate.timestampIssue,
+                  freshnessCandidate.timestampMs
+                ),
+            ]
+          : freshnessMutation
+          ? [
+              `${projectEvidenceLead(freshnessMutation.sessionId, taskClass)} freshness-limiting durable mutation ` +
+                `(tool_use_id ${freshnessMutation.toolUseId}) ` +
+                timestampEvidenceLimitation(
+                  freshnessMutation.timestampIssue,
+                  freshnessMutation.timestampMs
+                ),
+            ]
+          : hasMissingDecisionTiming
+            ? [
+                `${projectEvidenceLead(example.sessionId, taskClass)} at least one candidate association has no deciding transition timestamp evidence`,
+              ]
+            : []),
     ],
     claimClass: 'accounting',
     proofTier: 'accounting',
     provenance: {
       observations: [
         {
-          claim: `${candidateEntries.length} full-file Write candidate observation(s) across ${paths.length} unique path(s) passed the v1 path and two-half structure without a provably later invalidation`,
+          claim:
+            `${candidateEntries.length} durable-session/state-scope candidate association(s) across ${paths.length} unique path(s) have conformant full-file Write evidence without a provably later invalidation; ` +
+            `${provenAfterMutationCount} are proven after their durable mutation and ${mutationOrderingUnknownCount} have mutation ordering unproven`,
           source: 'parse-tools',
           field: 'ToolCall.toolName + ToolCall.input.file_path + ToolCall.leaveBehindStructure + ToolCall.isError',
           value: candidateEntries.length,
         },
-        {
-          claim:
-            `same-project transition ordering for candidate verification used project identity "${taskClass}"`,
-          source: 'sessions + tokenData',
-          field:
-            'sessions[].sessionId + sessions[].project / tokenData[].sessionId + tokenData[].project',
-          value: taskClass,
-        },
+        projectJoinObservation(taskClass),
         ...(decidingCandidate
           ? [
               {
                 claim:
-                  exampleDecision?.outcome === 'ambiguous'
-                    ? `a conformant Write in the equal-time unresolved state conflict was observed in session ${decidingCandidate.sessionId}`
-                    : `the latest observed conformant Write candidate was observed in session ${decidingCandidate.sessionId}`,
+                  (exampleDecision?.ambiguityReason === 'truncated-path-tail'
+                    ? `a conformant Write remains unresolved after a bounded mutation-path overflow in session ${decidingCandidate.sessionId}`
+                    : exampleDecision?.ambiguityReason ===
+                        'truncated-command-analysis'
+                      ? `a conformant Write remains unresolved after bounded command analysis stopped in session ${decidingCandidate.sessionId}`
+                    : exampleDecision?.outcome === 'ambiguous'
+                    ? `a conformant Write in an unresolved cross-session state conflict was observed in session ${decidingCandidate.sessionId}`
+                    : `a same-scope conformant Write candidate was observed in session ${decidingCandidate.sessionId}`) +
+                  (exampleCandidateProvenAfterMutation
+                    ? '; the candidate is proven after the durable mutation by transcript/timestamp ordering'
+                    : '; its order relative to the durable mutation is unproven'),
                 source: 'parse-tools',
                 field:
                   'ToolCall.timestamp + toolName + input.file_path + leaveBehindStructure + isError',
@@ -700,15 +1446,97 @@ function candidateVerificationRecommendation(
               } satisfies RecObservation,
             ]
           : []),
-        ...(ambiguousDecisions > 0
+        ...(freshnessTransition
           ? [
               {
                 claim:
-                  `${ambiguousDecisions} state-scope observation(s) have conflicting candidate and invalidation transitions that cannot be ordered across sessions`,
+                  `transition ${freshnessTransition.toolUseId} in session ${freshnessTransition.sessionId} ` +
+                  timestampLimitation(
+                    freshnessTransition.timestampIssue,
+                    freshnessTransition.timestampMs
+                  ) +
+                  '; candidate freshness is not claimed',
+                source: 'parse-tools',
+                field:
+                  'ToolCall.timestamp + ordered ToolCall[] + toolName + input.file_path/leaveBehindMutationPaths',
+                value: freshnessTransition.toolUseId,
+              } satisfies RecObservation,
+            ]
+          : freshnessCandidate
+            ? [
+                {
+                  claim:
+                    `conformant candidate ${freshnessCandidate.toolUseId} in session ${freshnessCandidate.sessionId} ` +
+                    timestampLimitation(
+                      freshnessCandidate.timestampIssue,
+                      freshnessCandidate.timestampMs
+                    ) +
+                    '; candidate freshness is not claimed',
+                  source: 'parse-tools',
+                  field:
+                    'ToolCall.timestamp + toolName + input.file_path + leaveBehindStructure + isError',
+                  value: freshnessCandidate.toolUseId,
+                } satisfies RecObservation,
+              ]
+            : freshnessMutation
+            ? [
+                {
+                  claim:
+                    `durable mutation ${freshnessMutation.toolUseId} in session ${freshnessMutation.sessionId} ` +
+                    timestampLimitation(
+                      freshnessMutation.timestampIssue,
+                      freshnessMutation.timestampMs
+                    ) +
+                    '; candidate freshness is not claimed',
+                  source: 'parse-tools',
+                  field: 'ToolCall.timestamp + ordered ToolCall[]',
+                  value: freshnessMutation.toolUseId,
+                } satisfies RecObservation,
+              ]
+            : hasMissingDecisionTiming
+              ? [
+                  {
+                    claim:
+                      'at least one candidate association has no deciding transition timestamp evidence; candidate freshness is not claimed',
+                    source: 'parse-tools',
+                    field: 'LeaveBehindDecision.transitions',
+                    value: 'unavailable',
+                  } satisfies RecObservation,
+                ]
+              : []),
+        ...(orderingAmbiguities > 0
+          ? [
+              {
+                claim:
+                  `${orderingAmbiguities} state-scope observation(s) have conflicting candidate and invalidation transitions that cannot be ordered across sessions`,
                 source: 'parse-tools',
                 field:
                   'ToolCall.timestamp + sessionId + toolName + input.file_path + leaveBehindStructure + isError',
-                value: ambiguousDecisions,
+                value: orderingAmbiguities,
+              } satisfies RecObservation,
+            ]
+          : []),
+        ...(truncatedTailAmbiguities > 0
+          ? [
+              {
+                claim:
+                  `${truncatedTailAmbiguities} state-scope observation(s) remain uncertain because a bounded leaveBehindMutationPaths tail was omitted; no exact-path invalidation is claimed`,
+                source: 'parse-tools',
+                field:
+                  'ToolCall.leaveBehindMutationPaths + ToolCall.leaveBehindMutationPathsTruncated + ToolCall.isError',
+                value: truncatedTailAmbiguities,
+              } satisfies RecObservation,
+            ]
+          : []),
+        ...(truncatedAnalysisAmbiguities > 0
+          ? [
+              {
+                claim:
+                  `${truncatedAnalysisAmbiguities} state-scope observation(s) remain uncertain because static Bash analysis stopped at its resource bound; no final mutation-path state is claimed`,
+                source: 'parse-tools',
+                field:
+                  'ToolCall.commandAnalysisTruncated + ToolCall.isError',
+                value: truncatedAnalysisAmbiguities,
               } satisfies RecObservation,
             ]
           : []),
@@ -720,7 +1548,7 @@ function candidateVerificationRecommendation(
         },
       ],
       inference:
-        'A conformant document structure was observed after the durable-state mutation without a provably later invalidation, but cross-session conflicts may be unordered when timestamps tie or are unavailable, and Git commitment plus semantic scope coverage are unknown. Verification is warranted; final state, absence, saved time, and a need to rewrite the artifact are not claimed.',
+        'A conformant document structure was observed in the same state scope without a provably later exact-path invalidation. Some candidates are provably after the durable mutation while others may have unproven mutation ordering; cross-session transitions can also remain unordered when timestamps tie or are unavailable, and a bounded mutation-path tail or bounded command analysis may leave final state uncertain. Git commitment plus semantic scope coverage are unknown. Verification is warranted; final state, absence, saved time, and a need to rewrite the artifact are not claimed.',
       ...(latestDate ? { asOf: latestDate, stale: !!stale } : {}),
     },
   };
@@ -760,10 +1588,137 @@ function toRecommendation(
   roll: ClassRollup,
   now: number
 ): Recommendation {
-  const latestDate = roll.latestMs == null ? undefined : isoDate(roll.latestMs);
+  const uncertainTimeMutation = roll.preSignals
+    .flatMap((signal) => signal.mutations)
+    .find(
+      (mutation) =>
+        mutation.timestampMs == null || !mutation.orderingTimestampExact
+    );
+  const mutationFreshnessUnknown = uncertainTimeMutation != null;
+  const invalidationHasUnknownTime = roll.preSignals.some((signal) =>
+    signal.leaveBehindDecisions.some(
+      (decision) =>
+        decision.outcome === 'invalidated' &&
+        decision.transitions.some(
+          (transition) =>
+            transition.timestampMs == null &&
+            transition.timestampIssue !== 'future'
+        )
+    )
+  );
+  const invalidationHasFutureTime = roll.preSignals.some((signal) =>
+    signal.leaveBehindDecisions.some(
+      (decision) =>
+        decision.outcome === 'invalidated' &&
+        decision.transitions.some(
+          (transition) => transition.timestampIssue === 'future'
+        )
+    )
+  );
+  const invalidationHasLowerBoundTime = roll.preSignals.some((signal) =>
+    signal.leaveBehindDecisions.some(
+      (decision) =>
+        decision.outcome === 'invalidated' &&
+        decision.transitions.some(
+          (transition) => transition.orderingTimestampExact === false
+        )
+    )
+  );
+  const invalidationFreshnessUnknown = roll.preSignals.some((signal) =>
+    signal.leaveBehindDecisions.some(
+      (decision) =>
+        decision.outcome === 'invalidated' &&
+        (decision.transitions.length === 0 ||
+          decision.transitions.some(
+          (transition) => transition.timestampMs == null
+            || transition.orderingTimestampExact === false
+          ))
+    )
+  );
+  const freshnessInvalidation = roll.preSignals
+    .flatMap((signal) => signal.leaveBehindDecisions)
+    .filter((decision) => decision.outcome === 'invalidated')
+    .flatMap((decision) => decision.transitions)
+    .find(
+      (transition) =>
+        transition.status === 'invalidated' &&
+        (transition.timestampMs == null ||
+          transition.orderingTimestampExact === false)
+    );
+  const aggregateFreshnessUnknown =
+    mutationFreshnessUnknown || invalidationFreshnessUnknown;
+  const latestDate =
+    roll.latestMs == null || aggregateFreshnessUnknown
+      ? undefined
+      : isoDate(roll.latestMs);
+  const latestRediscovery = latestDate
+    ? roll.rediscoveries.find(
+        (rediscovery) => rediscovery.burst.endMs === roll.latestMs
+      )
+    : undefined;
+  const latestStateTransition = latestDate
+    ? roll.preSignals
+        .flatMap((signal) => signal.leaveBehindDecisions)
+        .flatMap((decision) => decision.transitions)
+        .find(
+          (transition) =>
+            transition.orderingTimestampExact === true &&
+            transition.orderingTimestampMs === roll.latestMs
+        )
+    : undefined;
+  const latestMutation = latestDate
+    ? roll.preSignals
+        .flatMap((signal) => signal.mutations)
+        .find(
+          (mutation) =>
+            mutation.orderingTimestampExact &&
+            mutation.orderingTimestampMs === roll.latestMs
+        )
+    : undefined;
+  const latestFreshnessObservation: RecObservation | undefined =
+    latestRediscovery
+      ? {
+          claim:
+            `rediscovery burst ${latestRediscovery.burst.sessionId} determines aggregate freshness as of ${latestDate}`,
+          source: 'parse-timeline',
+          field:
+            'SessionTimeline.sessionId + startTime + entries[].timestamp + entries[].rediscovery',
+          value: latestRediscovery.burst.sessionId,
+        }
+      : latestStateTransition
+      ? {
+          claim:
+            `state transition ${latestStateTransition.toolUseId} in session ${latestStateTransition.sessionId} ` +
+            `determines aggregate freshness as of ${latestDate}`,
+          source: 'parse-tools',
+          field:
+            `ToolCall.timestamp + toolName + ${latestStateTransition.pathField} + isError`,
+          value: latestStateTransition.toolUseId,
+        }
+      : latestMutation
+      ? {
+          claim:
+            `durable mutation ${latestMutation.toolUseId} in session ${latestMutation.sessionId} ` +
+            `determines aggregate freshness as of ${latestDate}`,
+          source: 'parse-tools',
+          field:
+            'ToolCall.timestamp + commandAnalysisComplete + commandDurableKind/input.command/commandPreview + isError',
+          value: latestMutation.toolUseId,
+        }
+      : undefined;
   const stale =
     roll.latestMs != null ? now - roll.latestMs > FRESHNESS_DAYS * DAY_MS : undefined;
   const asOfPrefix = stale && latestDate ? `As of ${latestDate}, ` : '';
+  const invalidationTimingCaveat = invalidationHasUnknownTime
+    ? 'at least one relevant same-scope transition has timestamp unavailable'
+    : invalidationHasFutureTime
+    ? 'at least one relevant same-scope transition has a timestamp materially in the future relative to the evaluation clock'
+    : invalidationHasLowerBoundTime
+    ? 'at least one relevant same-scope transition has only an ordering lower bound because its transcript clock moves backwards'
+    : 'complete cross-session timing evidence is unavailable for at least one relevant same-scope state';
+  const aggregateFreshnessDetail = aggregateFreshnessUnknown
+    ? 'Aggregate freshness cannot be established because at least one relevant durable mutation or same-scope state transition lacks complete timestamp evidence. '
+    : '';
 
   const sessionIds = new Set<string>();
   for (const signal of roll.preSignals) sessionIds.add(signal.sessionId);
@@ -771,7 +1726,29 @@ function toRecommendation(
     sessionIds.add(billed.priorSessionId);
     sessionIds.add(billed.burst.sessionId);
   }
-  const attributionTokens = tokenAttributionTokens(input, sessionIds);
+  const involvedToolUseIdsBySession = new Map<string, Set<string>>();
+  const addInvolvedToolUse = (sessionId: string, toolUseId: string) => {
+    const toolUseIds =
+      involvedToolUseIdsBySession.get(sessionId) ?? new Set<string>();
+    toolUseIds.add(toolUseId);
+    involvedToolUseIdsBySession.set(sessionId, toolUseIds);
+    sessionIds.add(sessionId);
+  };
+  for (const signal of roll.preSignals) {
+    for (const mutation of signal.mutations) {
+      addInvolvedToolUse(mutation.sessionId, mutation.toolUseId);
+    }
+    for (const decision of signal.leaveBehindDecisions) {
+      for (const transition of decision.transitions) {
+        addInvolvedToolUse(transition.sessionId, transition.toolUseId);
+      }
+    }
+  }
+  const attribution = tokenAttributionCoverage(
+    input,
+    sessionIds,
+    involvedToolUseIdsBySession
+  );
 
   const billedLeadSession = roll.rediscoveries[0]?.priorSessionId;
   const lead =
@@ -791,26 +1768,57 @@ function toRecommendation(
     )
     .sort(
       (a, b) =>
-        (b.transition.timestampMs ?? -Infinity) -
-          (a.transition.timestampMs ?? -Infinity) ||
+        (b.transition.orderingTimestampMs ?? -Infinity) -
+          (a.transition.orderingTimestampMs ?? -Infinity) ||
         b.transition.order - a.transition.order
     )[0];
   const observedRediscoveryMin = roll.rediscoveries.reduce(
     (sum, r) => sum + r.burst.observedMinutes,
     0
   );
+  const displayedTaskClass = taskClassDisplay(roll.taskClass);
+  const orderingScope = roll.taskClass.startsWith(UNKNOWN_PROJECT_PREFIX)
+    ? 'within the same transcript; cross-session state ordering was not attempted because project identity is unresolved'
+    : 'in the same project';
   const evidence = [
-    `${short(lead.sessionId)} ${roll.taskClass}: ${roll.preSignals.length} durable-state session(s) without an uninvalidated final v1 structural candidate written after the latest durable mutation in the transcript and remaining uninvalidated by later observed file mutations in the same project; ` +
+    `${projectEvidenceLead(lead.sessionId, roll.taskClass)} ${displayedTaskClass}: ${roll.preSignals.length} durable-state session(s) without an uninvalidated final v1 structural candidate written after the latest durable mutation in the transcript and remaining uninvalidated by later observed file mutations ${orderingScope}; ` +
       `example ${short(lead.sessionId)} ${leadMutation.kind} via ${clip(leadMutation.label)}`,
+    ...(uncertainTimeMutation
+      ? [
+          `${projectEvidenceLead(uncertainTimeMutation.sessionId, roll.taskClass)} durable mutation ` +
+            `(tool_use_id ${uncertainTimeMutation.toolUseId}) ` +
+            timestampEvidenceLimitation(
+              uncertainTimeMutation.timestampIssue,
+              uncertainTimeMutation.timestampMs
+            ) +
+            '; ' +
+            `aggregate freshness is not claimed`,
+        ]
+      : []),
     ...(latestInvalidation
       ? [
-          `${short(latestInvalidation.transition.sessionId)} successful ${latestInvalidation.transition.toolName} ` +
-            `(tool_use_id ${latestInvalidation.transition.toolUseId}) established the latest observed invalidated state for ${latestInvalidation.decision.path}`,
+          invalidationFreshnessUnknown
+            ? `${projectEvidenceLead(latestInvalidation.transition.sessionId, roll.taskClass)} ` +
+              `${latestInvalidation.transition.timestampMs == null ? 'undated' : 'dated'} invalidation example: ` +
+              `successful ${latestInvalidation.transition.toolName} ` +
+              `(tool_use_id ${latestInvalidation.transition.toolUseId}) provided invalidation evidence for ` +
+              `${latestInvalidation.decision.path}; ${invalidationTimingCaveat}, so no latest ` +
+              `invalidated state is claimed`
+            : `${projectEvidenceLead(latestInvalidation.transition.sessionId, roll.taskClass)} successful ${latestInvalidation.transition.toolName} ` +
+              `(tool_use_id ${latestInvalidation.transition.toolUseId}) established the latest observed invalidated state for ${latestInvalidation.decision.path}`,
+        ]
+      : []),
+    ...(freshnessInvalidation
+      ? [
+          `${projectEvidenceLead(freshnessInvalidation.sessionId, roll.taskClass)} freshness-limiting invalidation ` +
+            `(tool_use_id ${freshnessInvalidation.toolUseId}) ` +
+            `${timestampEvidenceLimitation(freshnessInvalidation.timestampIssue, freshnessInvalidation.timestampMs)}; ` +
+            'aggregate freshness is not claimed',
         ]
       : []),
     ...(roll.rediscoveries.length
       ? [
-          `${short(roll.rediscoveries[0].priorSessionId)} ${roll.rediscoveries.length} later rediscovery session(s), ~${fmtMin(observedRediscoveryMin)} billed back; ` +
+          `${projectEvidenceLead(roll.rediscoveries[0].priorSessionId, roll.taskClass)} ${roll.rediscoveries.length} later rediscovery session(s), ~${fmtMin(observedRediscoveryMin)} billed back; ` +
             `example ${short(roll.rediscoveries[0].priorSessionId)} -> ${short(roll.rediscoveries[0].burst.sessionId)} ` +
             `(${clip(roll.rediscoveries[0].burst.sample)})`,
         ]
@@ -822,20 +1830,64 @@ function toRecommendation(
   const observations: RecObservation[] = [
     {
       claim:
-        `${roll.preSignals.length} session(s) in task class "${roll.taskClass}" mutated durable external state and did not end with an uninvalidated v1 structural candidate written after the latest durable external-state mutation in the same transcript and remaining uninvalidated by later timestamped file mutations in the same project`,
+        `${roll.preSignals.length} session(s) in ${displayedTaskClass} mutated durable external state and did not end with an uninvalidated v1 structural candidate written after the latest durable external-state mutation in the same transcript and remaining uninvalidated by later observed file mutations ${orderingScope}`,
       source: 'parse-tools',
-      field: 'ordered ToolCall[]: toolName + commandDurableKind/input.command/commandPreview + input.file_path + leaveBehindStructure + timestamp + isError',
+      field: 'ordered ToolCall[]: toolName + commandAnalysisComplete + commandDurableKind/input.command/commandPreview + input.file_path/leaveBehindMutationPath/leaveBehindMutationPaths/leaveBehindMutationPathsTruncated + leaveBehindStructure + timestamp + isError',
       value: roll.preSignals.length,
     },
-    ...(latestInvalidation
+    ...(uncertainTimeMutation
       ? [
           {
             claim:
-              `a successful ${latestInvalidation.transition.toolName} in session ${latestInvalidation.transition.sessionId} established the latest observed invalidated state for the canonical leave-behind path in project ${latestInvalidation.transition.project}`,
-            source: 'parse-tools + sessions + tokenData',
+              `durable mutation ${uncertainTimeMutation.toolUseId} in session ${uncertainTimeMutation.sessionId} ` +
+              timestampLimitation(
+                uncertainTimeMutation.timestampIssue,
+                uncertainTimeMutation.timestampMs
+              ) +
+              '; aggregate freshness is not claimed',
+            source: 'parse-tools',
             field:
-              'ToolCall.timestamp + toolName + input.file_path + leaveBehindStructure + isError joined by sessionId to sessions[].project / tokenData[].project',
+              'ToolCall.timestamp + commandAnalysisComplete + commandDurableKind/input.command/commandPreview + isError',
+            value: uncertainTimeMutation.toolUseId,
+          } satisfies RecObservation,
+        ]
+      : []),
+    ...(latestInvalidation
+      ? [
+          {
+            // A same-transcript transition remains auditable when project
+            // identity is absent; only the cross-session join is unavailable.
+            claim:
+              invalidationFreshnessUnknown
+                ? `${latestInvalidation.transition.timestampMs == null ? 'an undated' : 'a dated'} invalidation example: ` +
+                  `a successful ${latestInvalidation.transition.toolName} in session ${latestInvalidation.transition.sessionId} ` +
+                  `provided invalidation evidence for the canonical leave-behind path ` +
+                  `${latestInvalidation.transition.project == null ? 'within the same transcript (project identity unresolved)' : `in project ${latestInvalidation.transition.project}`}; ${invalidationTimingCaveat}, so no latest ` +
+                  `invalidated state or freshness is claimed`
+                : `a successful ${latestInvalidation.transition.toolName} in session ${latestInvalidation.transition.sessionId} established the latest observed invalidated state for the canonical leave-behind path ${latestInvalidation.transition.project == null ? 'within the same transcript (project identity unresolved)' : `in project ${latestInvalidation.transition.project}`}`,
+            source:
+              latestInvalidation.transition.project == null
+                ? 'parse-tools'
+                : 'parse-tools + sessions + tokenData',
+            field:
+              latestInvalidation.transition.project == null
+                ? `ToolCall.timestamp + toolName + ${latestInvalidation.transition.pathField} + isError`
+                : `ToolCall.timestamp + toolName + ${latestInvalidation.transition.pathField} + isError joined by sessionId to sessions[].project / tokenData[].project`,
             value: latestInvalidation.transition.toolUseId,
+          } satisfies RecObservation,
+        ]
+      : []),
+    ...(freshnessInvalidation
+      ? [
+          {
+            claim:
+              `invalidation ${freshnessInvalidation.toolUseId} in session ${freshnessInvalidation.sessionId} ` +
+              `${timestampLimitation(freshnessInvalidation.timestampIssue, freshnessInvalidation.timestampMs)}; ` +
+              'aggregate freshness is not claimed',
+            source: 'parse-tools',
+            field:
+              `ToolCall.timestamp + ordered ToolCall[] + toolName + ${freshnessInvalidation.pathField} + isError`,
+            value: freshnessInvalidation.toolUseId,
           } satisfies RecObservation,
         ]
       : []),
@@ -855,21 +1907,54 @@ function toRecommendation(
       field: 'entries[].rediscovery (derived at parse time from the full turn text; survives slimming) in the first 20 minutes',
       value: roll.rediscoveries.length > 0 ? observedRediscoveryMin : CONSERVATIVE_PRESET_MIN,
     },
-    {
-      claim:
-        `tool/context attribution substrate is present for audit joins: #1926 contextToolResultTokensSum totals ${Math.round(attributionTokens)} context tool-result tokens for involved sessions; #1928 tool_use_id/result-byte fields provide the join keys`,
-      source: 'tokenData + parse-tools',
-      field: 'SessionTokenData.contextToolResultTokensSum (summed) / TokenEntry.toolUseIds / TokenEntry.toolResultBytes / ToolCall.toolUseId (join keys)',
-      value: Math.round(attributionTokens),
-    },
-    {
-      claim:
-        `same-project grouping and cross-session leave-behind ordering used project identity "${roll.taskClass}"`,
-      source: 'sessions + tokenData',
-      field:
-        'sessions[].sessionId + sessions[].project / tokenData[].sessionId + tokenData[].project',
-      value: roll.taskClass,
-    },
+    ...(attribution.tokenRowsMeasured > 0
+      ? [
+          {
+            claim:
+              `#1926 contextToolResultTokensSum is numeric on ${attribution.tokenRowsMeasured} of ` +
+              `${attribution.relevantTokenRows} matching token row(s) across ${attribution.involvedSessions} involved session(s), ` +
+              `totaling ${Math.round(attribution.tokenTotal)} context tool-result tokens`,
+            source: 'tokenData',
+            field: 'SessionTokenData.sessionId + contextToolResultTokensSum',
+            value: Math.round(attribution.tokenTotal),
+          } satisfies RecObservation,
+        ]
+      : [
+          {
+            claim:
+              `#1926 contextToolResultTokensSum is unavailable for the ${attribution.involvedSessions} involved session(s); ` +
+              `${attribution.relevantTokenRows} matching token row(s) were present`,
+            source: 'tokenData',
+            field: 'SessionTokenData.sessionId + contextToolResultTokensSum',
+            value: 'unavailable',
+          } satisfies RecObservation,
+        ]),
+    ...(attribution.matchingToolUseLinks > 0
+      ? [
+          {
+            claim:
+              `#1928 token-entry join evidence intersects ${attribution.matchingToolUseLinks} of ` +
+              `${attribution.involvedToolUseLinks} involved session-scoped ToolCall.toolUseId value(s); ` +
+              `${attribution.matchingEntriesWithResultBytes} matching entry/entries also carry numeric toolResultBytes`,
+            source: 'tokenData + parse-tools',
+            field:
+              'SessionTokenData.sessionId + TokenEntry.toolUseIds intersect ToolUsageData.sessionId + ToolCall.toolUseId; TokenEntry.toolResultBytes coverage reported separately',
+            value: attribution.matchingToolUseLinks,
+          } satisfies RecObservation,
+        ]
+      : [
+          {
+            claim:
+              `#1928 token-entry tool-use attribution is unavailable because 0 of ${attribution.involvedToolUseLinks} ` +
+              'involved session-scoped ToolCall.toolUseId values intersect tokenData entry toolUseIds',
+            source: 'tokenData + parse-tools',
+            field:
+              'SessionTokenData.sessionId + TokenEntry.toolUseIds intersect ToolUsageData.sessionId + ToolCall.toolUseId',
+            value: 'unavailable',
+          } satisfies RecObservation,
+        ]),
+    ...(latestFreshnessObservation ? [latestFreshnessObservation] : []),
+    projectJoinObservation(roll.taskClass),
   ];
 
   return {
@@ -878,15 +1963,16 @@ function toRecommendation(
     severity: roll.rediscoveries.length > 0 ? 'warning' : 'info',
     title: 'Leave a handoff when agents establish durable state',
     detail:
-      `${asOfPrefix}${roll.preSignals.length} durable-state session(s) in "${roll.taskClass}" ` +
-      `changed remote/config/install state without an uninvalidated final v1 structural candidate written after the latest durable mutation in the transcript and remaining uninvalidated by later observed file mutations in the same project. ` +
+      `${asOfPrefix}${roll.preSignals.length} durable-state session(s) in ${displayedTaskClass} ` +
+      `changed remote/config/install state without an uninvalidated final v1 structural candidate written after the latest durable mutation in the transcript and remaining uninvalidated by later observed file mutations ${orderingScope}. ` +
+      aggregateFreshnessDetail +
       (roll.rediscoveries.length > 0
         ? `${roll.rediscoveries.length} later session(s) then spent early turns re-discovering that setup (~${fmtMin(observedRediscoveryMin)} observed). `
         : `This is a cold-start pre-signal: no later historical corpus is needed. `) +
       `The ${fmtMin(roll.estimatedMinutes)} estimate is a hypothesis, using a conservative ` +
       `${CONSERVATIVE_PRESET_MIN} minute floor per no-leave-behind session and per rediscovery burst (or its observed span when longer); it is not a calibrated causal saving.`,
     action:
-      `For "${roll.taskClass}" tasks that mutate material durable external state, follow docs/leave-behind-contract.md and update docs/runbooks/<state-scope>/README.md with both Operability and Decision log halves. Skip trivial local-only changes.`,
+      `For tasks in ${displayedTaskClass} that mutate material durable external state, follow docs/leave-behind-contract.md and update docs/runbooks/<state-scope>/README.md with both Operability and Decision log halves. Skip trivial local-only changes.`,
     affected: roll.preSignals.length,
     estTimeReclaimedMin: roll.estimatedMinutes,
     view: 'timeline',
@@ -909,19 +1995,19 @@ export const detector: Detector = {
   dataDeps: ['toolData', 'timelines', 'sessions', 'tokenData', 'liveConfig'],
   appliedMarkers: MARKERS,
   rule(input, now): Recommendation | null {
-    const analysis = analyzeInput(input);
+    const analysis = analyzeInput(input, now);
     const roll = claudeMdMarksApplied(input.liveConfig, MARKERS)
       ? undefined
-      : buildRollups(input, analysis)[0];
+      : buildRollups(input, analysis, now)[0];
     return roll
       ? toRecommendation(input, roll, now)
       : candidateVerificationRecommendation(now, analysis);
   },
   emitAll(input, now): Recommendation[] {
-    const analysis = analyzeInput(input);
+    const analysis = analyzeInput(input, now);
     const recommendations: Recommendation[] = [];
     if (!claudeMdMarksApplied(input.liveConfig, MARKERS)) {
-      const roll = buildRollups(input, analysis)[0];
+      const roll = buildRollups(input, analysis, now)[0];
       if (roll) recommendations.push(toRecommendation(input, roll, now));
     }
     const candidate = candidateVerificationRecommendation(now, analysis);

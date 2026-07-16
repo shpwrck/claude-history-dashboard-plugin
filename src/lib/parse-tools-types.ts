@@ -63,6 +63,21 @@ export interface ToolCall {
    * The parser derives this before discarding the raw markdown content.
    */
   leaveBehindStructure?: 'v1';
+  /**
+   * Sparse canonical runbook path in a parser-classified unconditional Bash
+   * mutation. Derived from the full raw command before bulk ingest strips it;
+   * consumers combine it with result success and never reconstruct this proof
+   * from the flattened preview.
+   */
+  leaveBehindMutationPath?: string;
+  /** Bounded complete-prefix of canonical runbook paths mutated by one Bash
+   * call. Plural truth prevents a multi-target command from leaving stale
+   * candidates behind merely because the legacy scalar could hold one path. */
+  leaveBehindMutationPaths?: string[];
+  /** The parser proved more mutation paths than the bounded persisted array can
+   * retain; consumers must treat this call as a project-wide invalidation
+   * barrier for earlier candidates. */
+  leaveBehindMutationPathsTruncated?: true;
   /** Compact fingerprint for repeat grouping after raw Bash text is stripped. */
   commandFingerprint?: string;
   /** Small redacted-ish display preview; raw command bodies stay out of bulk JSON. */
@@ -73,6 +88,19 @@ export interface ToolCall {
    * observable without retaining the command body.
    */
   commandDurableKind?: DurableCommandKind;
+  /**
+   * Positive proof that the parser-owned signal boundary was applied. For an
+   * ordinary command this means full analysis completed; an oversized command
+   * is deliberately failed closed and also carries `commandAnalysisTruncated`.
+   * When present, absence of a sparse positive signal such as
+   * `commandDurableKind` or `commandRiskyActionPattern` is an analyzed negative,
+   * not permission to reclassify a lossy preview or raw upload command.
+   */
+  commandAnalysisComplete?: true;
+  /** Static shell analysis stopped at its documented resource boundary. A
+   * successful call is therefore an uncertainty barrier for consumers that
+   * make final-state claims from sparse mutation-path evidence. */
+  commandAnalysisTruncated?: true;
   /** First executable token after leading env assignments. */
   commandHead?: string;
   /**

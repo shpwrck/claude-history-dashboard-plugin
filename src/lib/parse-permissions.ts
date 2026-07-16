@@ -14,6 +14,7 @@ import {
   parsePermRule,
   permRuleMatchesCall,
 } from './permission-rules';
+import { hasUnprovenShellExpansion } from './leave-behind';
 
 export interface PermissionModeStat {
   mode: string;
@@ -80,10 +81,18 @@ interface HeredocOpener {
   delimiter: string;
   stripLeadingTabs: boolean;
   quoted: boolean;
+  localeTranslated: boolean;
+  delimiterStart: number;
+  delimiterEnd: number;
 }
 
 export interface ShellHeredoc {
   commandLine: string;
+  /** commandLine with every opener delimiter replaced by its lexical identity. */
+  identityCommandLine: string;
+  /** Zero-based lexical opener identity within commandLine. Delimiters are not
+   * identities: one command may legally use the same delimiter more than once. */
+  openerIndex: number;
   delimiter: string;
   quoted: boolean;
   body: string;
@@ -93,24 +102,161 @@ function isShellWordSeparator(ch: string): boolean {
   return /[\s;&|()<>]/.test(ch);
 }
 
+type ShellQuote = "'" | '"' | '`' | 'ansi' | null;
+
 /** Whether a backslash quotes the following character in the active shell
  * quoting context. POSIX single quotes make every enclosed character literal,
  * including backslash itself; double quotes only retain backslash escaping for
  * the shell's small special-character set. */
 function shellBackslashEscapes(
-  quote: "'" | '"' | '`' | null,
+  quote: ShellQuote,
   next: string | undefined
 ): boolean {
   if (quote === "'") return false;
+  if (quote === 'ansi') return next != null;
   if (quote === '"') return next != null && /[$`"\\\n\r]/.test(next);
   if (quote === '`') return next != null && /[$`\\\n\r]/.test(next);
   return next != null;
 }
 
+function decodeAnsiEscape(
+  input: string,
+  slashIndex: number
+): { value: string; end: number; terminatesWord?: boolean } {
+  const escaped = input[slashIndex + 1];
+  if (escaped == null) return { value: '\\', end: slashIndex };
+  const simple: Record<string, string> = {
+    a: '\x07',
+    b: '\b',
+    e: '\x1b',
+    E: '\x1b',
+    f: '\f',
+    n: '\n',
+    r: '\r',
+    t: '\t',
+    v: '\v',
+    '\\': '\\',
+    "'": "'",
+    '"': '"',
+    '?': '?',
+  };
+  if (escaped in simple) {
+    return { value: simple[escaped], end: slashIndex + 1 };
+  }
+  if (escaped === 'c' && input[slashIndex + 2] != null) {
+    const target = input[slashIndex + 2];
+    const codePoint = target === '?' ? 0x7f : target.charCodeAt(0) & 0x1f;
+    return {
+      value: codePoint === 0 ? '' : String.fromCharCode(codePoint),
+      end: slashIndex + 2,
+      ...(codePoint === 0 ? { terminatesWord: true } : {}),
+    };
+  }
+  const numeric =
+    escaped === 'x'
+      ? { pattern: /^[0-9a-fA-F]{1,2}/, radix: 16, start: slashIndex + 2 }
+      : escaped === 'u'
+        ? { pattern: /^[0-9a-fA-F]{1,4}/, radix: 16, start: slashIndex + 2 }
+        : escaped === 'U'
+          ? { pattern: /^[0-9a-fA-F]{1,8}/, radix: 16, start: slashIndex + 2 }
+          : /[0-7]/.test(escaped)
+            ? { pattern: /^[0-7]{1,3}/, radix: 8, start: slashIndex + 1 }
+            : null;
+  if (numeric) {
+    const digits = input.slice(numeric.start).match(numeric.pattern)?.[0];
+    if (digits) {
+      const codePoint = Number.parseInt(digits, numeric.radix);
+      if (
+        codePoint <= 0x10ffff &&
+        !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+      ) {
+        return {
+          value: codePoint === 0 ? '' : String.fromCodePoint(codePoint),
+          end: numeric.start + digits.length - 1,
+          ...(codePoint === 0 ? { terminatesWord: true } : {}),
+        };
+      }
+    }
+  }
+  // Bash preserves the slash for an escape it does not recognize.
+  return { value: `\\${escaped}`, end: slashIndex + 1 };
+}
+
+/** Decode Bash's ANSI-C `$'…'` quoting before the lightweight shell scanners
+ * run. Treating it as ordinary single quotes is incorrect in both directions:
+ * an escaped quote can expose a literal `;`, while escapes such as `\x20`
+ * produce spaces inside a shell payload. Re-quoting the decoded argv fragment
+ * with double quotes keeps separators literal and prevents expansion. */
+function normalizeDollarQuotedStrings(source: string): string {
+  const quoteForShell = (value: string): string =>
+    `"${value.replace(/[\\"$`]/g, (character) => `\\${character}`)}"`;
+
+  let out = '';
+  let quote: "'" | '"' | '`' | null = null;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      out += character;
+      escaped = false;
+      continue;
+    }
+    if (character === '\\' && shellBackslashEscapes(quote, source[index + 1])) {
+      out += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      out += character;
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '$' && source[index + 1] === "'") {
+      let value = '';
+      let cursor = index + 2;
+      let closed = false;
+      let terminated = false;
+      for (; cursor < source.length; cursor += 1) {
+        if (source[cursor] === "'") {
+          closed = true;
+          break;
+        }
+        if (source[cursor] === '\\') {
+          const decoded = decodeAnsiEscape(source, cursor);
+          if (!terminated) value += decoded.value;
+          terminated ||= decoded.terminatesWord === true;
+          cursor = decoded.end;
+        } else if (!terminated) {
+          value += source[cursor];
+        }
+      }
+      if (closed) {
+        out += quoteForShell(value);
+        index = cursor;
+        continue;
+      }
+    }
+    if (character === '$' && source[index + 1] === '"') {
+      // Preserve Bash's locale-translation marker. It still opens ordinary
+      // double-quote token boundaries, but downstream static-execution proofs
+      // must see `$` and fail closed because gettext can replace the argv word.
+      out += '$"';
+      quote = '"';
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      quote = character;
+    }
+    out += character;
+  }
+  return out;
+}
+
 function heredocOpeners(
   line: string,
-  initialQuote: "'" | '"' | null = null
-): { openers: HeredocOpener[]; quote: "'" | '"' | null } {
+  initialQuote: "'" | '"' | 'ansi' | null = null
+): { openers: HeredocOpener[]; quote: "'" | '"' | 'ansi' | null } {
   const openers: HeredocOpener[] = [];
   let quote = initialQuote;
   let arithmeticDepth = 0;
@@ -127,6 +273,12 @@ function heredocOpeners(
     if (escaped) {
       if (ch !== '\n' && ch !== '\r') atWordStart = false;
       escaped = false;
+      continue;
+    }
+    if (quote === 'ansi') {
+      atWordStart = false;
+      if (ch === '\\') escaped = true;
+      else if (ch === "'") quote = null;
       continue;
     }
     if (ch === '\\' && shellBackslashEscapes(quote, line[index + 1])) {
@@ -146,6 +298,12 @@ function heredocOpeners(
     if (arithmeticBracketDepth > 0) {
       if (ch === '[') arithmeticBracketDepth += 1;
       if (ch === ']') arithmeticBracketDepth -= 1;
+      continue;
+    }
+    if (ch === '$' && line[index + 1] === "'") {
+      quote = 'ansi';
+      atWordStart = false;
+      index += 1;
       continue;
     }
     if (ch === "'" || ch === '"') {
@@ -183,8 +341,10 @@ function heredocOpeners(
     const stripLeadingTabs = line[cursor] === '-';
     if (stripLeadingTabs) cursor += 1;
     while (line[cursor] === ' ' || line[cursor] === '\t') cursor += 1;
+    const delimiterStart = cursor;
     let delimiterQuote: "'" | '"' | null = null;
     let quoted = false;
+    let localeTranslated = false;
     let delimiter = '';
     while (cursor < line.length) {
       const delimiterChar = line[cursor];
@@ -203,8 +363,35 @@ function heredocOpeners(
         (line[cursor + 1] === "'" || line[cursor + 1] === '"')
       ) {
         quoted = true;
-        delimiterQuote = line[cursor + 1] as "'" | '"';
-        cursor += 2;
+        if (line[cursor + 1] === "'") {
+          let ansiCursor = cursor + 2;
+          let closed = false;
+          let terminated = false;
+          while (ansiCursor < line.length) {
+            if (line[ansiCursor] === "'") {
+              closed = true;
+              ansiCursor += 1;
+              break;
+            }
+            if (line[ansiCursor] === '\\') {
+              const decoded = decodeAnsiEscape(line, ansiCursor);
+              if (!terminated) delimiter += decoded.value;
+              terminated ||= decoded.terminatesWord === true;
+              ansiCursor = decoded.end + 1;
+            } else if (!terminated) {
+              delimiter += line[ansiCursor];
+              ansiCursor += 1;
+            } else {
+              ansiCursor += 1;
+            }
+          }
+          if (!closed) delimiterQuote = "'";
+          cursor = ansiCursor;
+        } else {
+          localeTranslated = true;
+          delimiterQuote = '"';
+          cursor += 2;
+        }
         continue;
       }
       if (delimiterChar === "'" || delimiterChar === '"') {
@@ -223,24 +410,75 @@ function heredocOpeners(
       delimiter += delimiterChar;
       cursor += 1;
     }
-    if (delimiterQuote || !delimiter) continue;
-    openers.push({ delimiter, stripLeadingTabs, quoted });
+    // Quote removal may legitimately produce an empty delimiter (`<<''` or
+    // an ANSI-C word truncated by NUL). Only a wholly missing unquoted word is
+    // invalid; an empty quoted delimiter terminates on the next empty line.
+    if (delimiterQuote || (!delimiter && !quoted)) continue;
+    openers.push({
+      delimiter,
+      stripLeadingTabs,
+      quoted,
+      localeTranslated,
+      delimiterStart,
+      delimiterEnd: cursor,
+    });
     atWordStart = false;
     index = cursor - 1;
   }
   return { openers, quote };
 }
 
-function scanHeredocs(s: string): { source: string; heredocs: ShellHeredoc[] } {
+const HEREDOC_IDENTITY_PREFIX = '__chd_heredoc_opener_';
+
+/** A shell-safe synthetic delimiter for one lexical heredoc opener. */
+export function shellHeredocIdentityDelimiter(openerIndex: number): string {
+  return `${HEREDOC_IDENTITY_PREFIX}${openerIndex}__`;
+}
+
+function identitySourceFromOpeners(
+  commandLine: string,
+  openers: readonly HeredocOpener[]
+): string {
+  const pieces: string[] = [];
+  let cursor = 0;
+  for (let openerIndex = 0; openerIndex < openers.length; openerIndex += 1) {
+    const opener = openers[openerIndex];
+    pieces.push(
+      commandLine.slice(cursor, opener.delimiterStart),
+      shellHeredocIdentityDelimiter(openerIndex)
+    );
+    cursor = opener.delimiterEnd;
+  }
+  pieces.push(commandLine.slice(cursor));
+  return pieces.join('');
+}
+
+/** Replace delimiter words with unique shell-safe identities while preserving
+ * every operator, fd prefix, and command boundary. This lets downstream stdin
+ * routing compare the exact opener even when two heredocs both use `EOF`. */
+export function shellHeredocIdentitySource(commandLine: string): string {
+  const { openers } = heredocOpeners(commandLine);
+  return identitySourceFromOpeners(commandLine, openers);
+}
+
+function scanHeredocs(s: string): {
+  source: string;
+  heredocs: ShellHeredoc[];
+  localeTainted: boolean;
+} {
   const out: string[] = [];
   const heredocs: ShellHeredoc[] = [];
   let logicalCommandLine = '';
-  let commandQuote: "'" | '"' | null = null;
+  let logicalCommandStart = 0;
+  let commandQuote: "'" | '"' | 'ansi' | null = null;
   const pending: Array<{
     opener: HeredocOpener;
+    openerIndex: number;
     commandLine: string;
+    identityCommandLine: string;
     body: string[];
   }> = [];
+  let localeTainted = false;
   for (const line of s.split(/\r?\n/)) {
     if (pending.length > 0) {
       const current = pending[0];
@@ -249,6 +487,8 @@ function scanHeredocs(s: string): { source: string; heredocs: ShellHeredoc[] } {
       if (candidate === opener.delimiter) {
         heredocs.push({
           commandLine: current.commandLine,
+          identityCommandLine: current.identityCommandLine,
+          openerIndex: current.openerIndex,
           delimiter: opener.delimiter,
           quoted: opener.quoted,
           body: current.body.join('\n'),
@@ -259,6 +499,7 @@ function scanHeredocs(s: string): { source: string; heredocs: ShellHeredoc[] } {
       }
       continue;
     }
+    if (logicalCommandLine === '') logicalCommandStart = out.length;
     out.push(line);
     const continuedLine = logicalCommandLine + line;
     let trailingBackslashes = 0;
@@ -276,10 +517,25 @@ function scanHeredocs(s: string): { source: string; heredocs: ShellHeredoc[] } {
     logicalCommandLine = '';
     const lineScan = heredocOpeners(continuedLine, commandQuote);
     commandQuote = lineScan.quote;
+    if (lineScan.openers.some((opener) => opener.localeTranslated)) {
+      // Gettext changes the delimiter word before quote removal, so neither
+      // the heredoc body boundary nor any following source is statically
+      // knowable. Drop the entire logical opener and the remainder rather than
+      // manufacturing claims from a guessed `EOF` terminator.
+      out.splice(logicalCommandStart);
+      localeTainted = true;
+      break;
+    }
+    const identityCommandLine = identitySourceFromOpeners(
+      continuedLine,
+      lineScan.openers
+    );
     pending.push(
-      ...lineScan.openers.map((opener) => ({
+      ...lineScan.openers.map((opener, openerIndex) => ({
         opener,
+        openerIndex,
         commandLine: continuedLine,
+        identityCommandLine,
         body: [],
       }))
     );
@@ -289,22 +545,19 @@ function scanHeredocs(s: string): { source: string; heredocs: ShellHeredoc[] } {
   for (const current of pending) {
     heredocs.push({
       commandLine: current.commandLine,
+      identityCommandLine: current.identityCommandLine,
+      openerIndex: current.openerIndex,
       delimiter: current.opener.delimiter,
       quoted: current.opener.quoted,
       body: current.body.join('\n'),
     });
   }
-  return { source: out.join('\n'), heredocs };
+  return { source: out.join('\n'), heredocs, localeTainted };
 }
 
 /** Extract heredocs while retaining whether shell expansion is enabled. */
 export function shellHeredocs(s: string): ShellHeredoc[] {
   return scanHeredocs(s).heredocs;
-}
-
-/** Remove heredoc bodies using shell's exact physical-line terminator rules. */
-function stripHeredocBodies(s: string): string {
-  return scanHeredocs(s).source;
 }
 
 /** Remove shell comments without erasing quoted `#` arguments. In POSIX shell
@@ -313,9 +566,57 @@ function stripHeredocBodies(s: string): string {
  * still separate executable commands. */
 function stripShellComments(s: string): string {
   let out = '';
-  let quote: "'" | '"' | '`' | null = null;
+  let quote: ShellQuote = null;
   let escaped = false;
   let atWordStart = true;
+  const parenthesisContexts: Array<{
+    extglob: boolean;
+    wordPart: boolean;
+    opaque: boolean;
+    kind: 'substitution' | 'extglob' | 'arithmetic' | 'nested' | 'subshell';
+  }> = [];
+  let opaqueContextDepth = 0;
+  const casePhases: Array<'subject' | 'await-in' | 'pattern' | 'body'> = [];
+  let shellWord = '';
+  let shellWordPresent = false;
+  let atCommandStart = true;
+  const flushShellWord = () => {
+    if (!shellWordPresent || opaqueContextDepth === 0) {
+      shellWord = '';
+      shellWordPresent = false;
+      return;
+    }
+    const phase = casePhases.at(-1);
+    if (
+      shellWord === 'case' &&
+      atCommandStart &&
+      (phase == null || phase === 'body')
+    ) {
+      casePhases.push('subject');
+    } else if (phase === 'subject') {
+      casePhases[casePhases.length - 1] = 'await-in';
+    } else if (shellWord === 'in' && phase === 'await-in') {
+      casePhases[casePhases.length - 1] = 'pattern';
+    } else if (
+      shellWord === 'esac' &&
+      (phase === 'body' || phase === 'pattern')
+    ) {
+      casePhases.pop();
+    }
+    if (phase !== 'pattern') atCommandStart = false;
+    shellWord = '';
+    shellWordPresent = false;
+  };
+  const noteShellWordCharacter = (character: string) => {
+    shellWord += character;
+    shellWordPresent = true;
+  };
+  const consumeQuotedCaseSubject = () => {
+    if (casePhases.at(-1) === 'subject') {
+      casePhases[casePhases.length - 1] = 'await-in';
+      atCommandStart = false;
+    }
+  };
 
   for (let i = 0; i < s.length; i += 1) {
     const ch = s[i];
@@ -330,7 +631,14 @@ function stripShellComments(s: string): string {
       // boundary from the prior physical line. Any other escaped character,
       // including whitespace, is part of the current word.
       if (ch !== '\n' && ch !== '\r') atWordStart = false;
+      if (ch !== '\n' && ch !== '\r') noteShellWordCharacter(`\\${ch}`);
       escaped = false;
+      continue;
+    }
+    if (quote === 'ansi') {
+      out += ch;
+      if (ch === '\\') escaped = true;
+      else if (ch === "'") quote = null;
       continue;
     }
     if (ch === '\\' && shellBackslashEscapes(quote, s[i + 1])) {
@@ -343,17 +651,107 @@ function stripShellComments(s: string): string {
       if (ch === quote) quote = null;
       continue;
     }
+    if (ch === '$' && s[i + 1] === "'") {
+      flushShellWord();
+      consumeQuotedCaseSubject();
+      if (opaqueContextDepth > 0) atCommandStart = false;
+      quote = 'ansi';
+      out += "$'";
+      atWordStart = false;
+      i += 1;
+      continue;
+    }
     if (ch === "'" || ch === '"' || ch === '`') {
+      flushShellWord();
+      consumeQuotedCaseSubject();
+      if (opaqueContextDepth > 0) atCommandStart = false;
       quote = ch;
       out += ch;
       atWordStart = false;
       continue;
     }
-    if (ch === '#' && atWordStart) {
+    if (ch === '(') {
+      flushShellWord();
+      consumeQuotedCaseSubject();
+      const inheritedExtglob = parenthesisContexts.at(-1)?.extglob ?? false;
+      const inheritedOpaque = opaqueContextDepth > 0;
+      const extglobOpener = /[@!?+*]/.test(s[i - 1] ?? '');
+      const substitutionOpener = /[$<>]/.test(s[i - 1] ?? '');
+      const arithmetic =
+        (s[i - 1] === '$' && s[i + 1] === '(') ||
+        (s[i - 1] === '(' && s[i - 2] === '$') ||
+        (!inheritedOpaque && s[i + 1] === '(');
+      const opaque =
+        inheritedOpaque || extglobOpener || substitutionOpener || arithmetic;
+      parenthesisContexts.push({
+        extglob: inheritedExtglob || extglobOpener,
+        wordPart: inheritedExtglob || extglobOpener || substitutionOpener,
+        opaque,
+        kind: substitutionOpener
+          ? 'substitution'
+          : extglobOpener
+            ? 'extglob'
+            : arithmetic
+              ? 'arithmetic'
+              : inheritedOpaque
+                ? 'nested'
+                : 'subshell',
+      });
+      if (opaque) opaqueContextDepth += 1;
+      if (!inheritedOpaque && opaqueContextDepth > 0) atCommandStart = true;
+      out += ch;
+      atWordStart = true;
+      continue;
+    }
+    if (ch === ')') {
+      flushShellWord();
+      const context = parenthesisContexts.at(-1);
+      if (
+        context?.opaque &&
+        context.kind === 'substitution' &&
+        casePhases.at(-1) === 'pattern'
+      ) {
+        casePhases[casePhases.length - 1] = 'body';
+        atCommandStart = true;
+        out += ch;
+        atWordStart = true;
+        continue;
+      }
+      parenthesisContexts.pop();
+      if (context?.opaque) opaqueContextDepth -= 1;
+      if (opaqueContextDepth === 0) {
+        casePhases.length = 0;
+        atCommandStart = false;
+      }
+      out += ch;
+      atWordStart = !(context?.wordPart ?? false);
+      continue;
+    }
+    if (
+      ch === '#' &&
+      atWordStart &&
+      !(parenthesisContexts.at(-1)?.extglob ?? false)
+    ) {
       while (i + 1 < s.length && s[i + 1] !== '\n') i += 1;
       continue;
     }
     out += ch;
+    if (!isShellWordSeparator(ch)) noteShellWordCharacter(ch);
+    else flushShellWord();
+    if (
+      ch === ';' &&
+      casePhases.at(-1) === 'body' &&
+      (s[i + 1] === ';' || s[i + 1] === '&')
+    ) {
+      casePhases[casePhases.length - 1] = 'pattern';
+      atCommandStart = false;
+    } else if (
+      opaqueContextDepth > 0 &&
+      casePhases.at(-1) !== 'pattern' &&
+      (ch === ';' || ch === '&' || ch === '|' || ch === '\n')
+    ) {
+      atCommandStart = true;
+    }
     atWordStart = isShellWordSeparator(ch);
   }
   return out;
@@ -370,13 +768,82 @@ function stripQuotedLiterals(s: string): string {
 
 /** Shell source with non-executable bodies/comments removed but quoting kept. */
 export function executableShellSource(command: string): string {
-  return stripShellComments(stripHeredocBodies(command)).replace(/\\\r?\n/g, '');
+  const heredocScan = scanHeredocs(command);
+  const withoutComments = stripShellComments(heredocScan.source);
+  const localeTainted =
+    heredocScan.localeTainted ||
+    hasLocaleTranslatedShellWord(withoutComments);
+  const executable = normalizeDollarQuotedStrings(withoutComments).replace(
+    /\\\r?\n/g,
+    ''
+  );
+  return localeTainted
+    ? `$"__chd_locale_tainted_command__"\n${executable}`
+    : executable;
+}
+
+/** True only for an unescaped Bash gettext word opener at executable syntax. */
+export function hasLocaleTranslatedShellWord(source: string): boolean {
+  const normalized = source.replace(/\\\r?\n/g, '');
+  interface LocaleScanFrame {
+    quote: "'" | '"' | null;
+    parenthesisDepth: number;
+  }
+  const frames: LocaleScanFrame[] = [{ quote: null, parenthesisDepth: 0 }];
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index];
+    const frame = frames.at(-1)!;
+    if (frame.quote === "'") {
+      if (character === "'") frame.quote = null;
+      continue;
+    }
+    if (
+      character === '\\' &&
+      shellBackslashEscapes(frame.quote, normalized[index + 1])
+    ) {
+      index += 1;
+      continue;
+    }
+    if (
+      character === '$' &&
+      normalized[index + 1] === '(' &&
+      normalized[index + 2] !== '('
+    ) {
+      frames.push({ quote: null, parenthesisDepth: 1 });
+      index += 1;
+      continue;
+    }
+    // `$"..."` inside a nested executable context can carry data into a later
+    // segment through assignments, arrays, functions, or substitutions. Static
+    // mutation claims do not attempt shell dataflow: any potentially executable
+    // marker taints the whole command. Only a proven single-quoted literal is
+    // exempt; false negatives are safer than locale-dependent false claims.
+    if (frame.quote === '"') {
+      if (character === '"') frame.quote = null;
+      continue;
+    }
+    if (character === '$' && normalized[index + 1] === '"') return true;
+    if (character === "'") {
+      frame.quote = "'";
+    } else if (character === '"') {
+      frame.quote = '"';
+    } else if (frames.length > 1 && character === '(') {
+      frame.parenthesisDepth += 1;
+    } else if (frames.length > 1 && character === ')') {
+      frame.parenthesisDepth -= 1;
+      if (frame.parenthesisDepth === 0) frames.pop();
+    }
+  }
+  return false;
 }
 
 /** The command reduced to tokens at real command positions: heredoc bodies and
  *  quoted literals removed (#2039). Matchers run against THIS, not the raw text. */
 export function executableShellSkeleton(command: string): string {
-  return stripQuotedLiterals(executableShellSource(command));
+  const executable = executableShellSource(command);
+  return hasLocaleTranslatedShellWord(executable)
+    ? ''
+    : stripQuotedLiterals(executable);
 }
 
 // Matches `rm` followed by a flag cluster that contains both `r` and `f`,
@@ -588,11 +1055,76 @@ interface RiskyActionPattern {
   test: (cmd: string) => boolean;
 }
 
-function splitShellSegments(command: string): string[] {
-  const out: string[] = [];
+export type ExecutableShellListOperator =
+  | ';'
+  | '\n'
+  | '&'
+  | '&&'
+  | '||'
+  | '|'
+  | '|&'
+  | ';;'
+  | ';&'
+  | ';;&';
+
+export interface ExecutableShellListSegment {
+  source: string;
+  followingOperator?: ExecutableShellListOperator;
+}
+
+function splitShellListSegments(command: string): ExecutableShellListSegment[] {
+  const out: ExecutableShellListSegment[] = [];
   let start = 0;
   let quote: "'" | '"' | '`' | null = null;
   let escaped = false;
+  const parenthesisContexts: Array<{
+    opaque: boolean;
+    kind: 'substitution' | 'extglob' | 'arithmetic' | 'nested' | 'subshell';
+  }> = [];
+  let opaqueContextDepth = 0;
+  const casePhases: Array<'subject' | 'await-in' | 'pattern' | 'body'> = [];
+  let shellWord = '';
+  let shellWordPresent = false;
+  let atCommandStart = true;
+  let parameterDepth = 0;
+
+  const flushShellWord = () => {
+    if (!shellWordPresent || opaqueContextDepth === 0) {
+      shellWord = '';
+      shellWordPresent = false;
+      return;
+    }
+    const phase = casePhases.at(-1);
+    if (
+      shellWord === 'case' &&
+      atCommandStart &&
+      (phase == null || phase === 'body')
+    ) {
+      casePhases.push('subject');
+    } else if (phase === 'subject') {
+      casePhases[casePhases.length - 1] = 'await-in';
+    } else if (shellWord === 'in' && phase === 'await-in') {
+      casePhases[casePhases.length - 1] = 'pattern';
+    } else if (
+      shellWord === 'esac' &&
+      (phase === 'body' || phase === 'pattern')
+    ) {
+      casePhases.pop();
+    }
+    if (phase !== 'pattern') atCommandStart = false;
+    shellWord = '';
+    shellWordPresent = false;
+  };
+  const noteShellWordCharacter = (character: string) => {
+    shellWord += character;
+    shellWordPresent = true;
+  };
+  const consumeQuotedCaseSubject = () => {
+    if (casePhases.at(-1) === 'subject') {
+      casePhases[casePhases.length - 1] = 'await-in';
+      atCommandStart = false;
+    }
+  };
 
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
@@ -601,6 +1133,7 @@ function splitShellSegments(command: string): string[] {
       continue;
     }
     if (escaped) {
+      noteShellWordCharacter(`\\${ch}`);
       escaped = false;
       continue;
     }
@@ -613,12 +1146,97 @@ function splitShellSegments(command: string): string[] {
       continue;
     }
     if (ch === "'" || ch === '"' || ch === '`') {
+      flushShellWord();
+      consumeQuotedCaseSubject();
+      if (opaqueContextDepth > 0) atCommandStart = false;
       quote = ch;
+      continue;
+    }
+    if (ch === '(') {
+      flushShellWord();
+      consumeQuotedCaseSubject();
+      const inheritedOpaque = opaqueContextDepth > 0;
+      const previous = command[i - 1] ?? '';
+      const extglob = /[@!?+*]/.test(previous);
+      const substitution = /[$<>]/.test(previous);
+      const arithmetic =
+        (previous === '$' && command[i + 1] === '(') ||
+        (previous === '(' && command[i - 2] === '$') ||
+        (!inheritedOpaque && command[i + 1] === '(');
+      const opaque = inheritedOpaque || extglob || substitution || arithmetic;
+      parenthesisContexts.push({
+        opaque,
+        kind: substitution
+          ? 'substitution'
+          : extglob
+            ? 'extglob'
+            : arithmetic
+              ? 'arithmetic'
+              : inheritedOpaque
+                ? 'nested'
+                : 'subshell',
+      });
+      if (opaque) opaqueContextDepth += 1;
+      if (!inheritedOpaque && opaqueContextDepth > 0) atCommandStart = true;
+      continue;
+    }
+    if (ch === ')' && parenthesisContexts.length > 0) {
+      flushShellWord();
+      const context = parenthesisContexts.at(-1)!;
+      if (
+        context.opaque &&
+        context.kind === 'substitution' &&
+        casePhases.at(-1) === 'pattern'
+      ) {
+        casePhases[casePhases.length - 1] = 'body';
+        atCommandStart = true;
+        continue;
+      }
+      parenthesisContexts.pop();
+      if (context.opaque) opaqueContextDepth -= 1;
+      if (opaqueContextDepth === 0) {
+        casePhases.length = 0;
+        atCommandStart = false;
+      }
+      continue;
+    }
+    if (ch === ')') return [];
+    if (ch === '{' && (parameterDepth > 0 || command[i - 1] === '$')) {
+      parameterDepth += 1;
+      continue;
+    }
+    if (ch === '}' && parameterDepth > 0) {
+      parameterDepth -= 1;
+      continue;
+    }
+    // Control operators inside command/process/arithmetic substitutions,
+    // extglobs, subshells, and parameter expansions belong to the containing
+    // word or compound command. Splitting there can detach a locale-dependent
+    // `$"..."` word from the outer mutation and manufacture a static claim.
+    if (!isShellWordSeparator(ch)) noteShellWordCharacter(ch);
+    else flushShellWord();
+    if (opaqueContextDepth > 0 || parameterDepth > 0) {
+      if (
+        ch === ';' &&
+        casePhases.at(-1) === 'body' &&
+        (command[i + 1] === ';' || command[i + 1] === '&')
+      ) {
+        casePhases[casePhases.length - 1] = 'pattern';
+        atCommandStart = false;
+      } else if (
+        casePhases.at(-1) !== 'pattern' &&
+        (ch === ';' || ch === '&' || ch === '|' || ch === '\n')
+      ) {
+        atCommandStart = true;
+      }
       continue;
     }
     const next = command[i + 1];
     const isDouble = (ch === '&' && next === '&') || (ch === '|' && next === '|');
     const isPipeAnd = ch === '|' && next === '&';
+    const isCaseTerminator = ch === ';' && (next === ';' || next === '&');
+    const isDoubleCaseTerminator =
+      isCaseTerminator && next === ';' && command[i + 2] === '&';
     const isPipeline = ch === '|' && command[i - 1] !== '>';
     const isBackgroundSeparator =
       ch === '&' &&
@@ -630,54 +1248,128 @@ function splitShellSegments(command: string): string[] {
     const isSeparator =
       isDouble ||
       isPipeAnd ||
+      isCaseTerminator ||
       isBackgroundSeparator ||
       ch === ';' ||
       ch === '\n' ||
       isPipeline;
     if (!isSeparator) continue;
     const segment = command.slice(start, i).trim();
-    if (segment) out.push(segment);
-    start = i + (isDouble || isPipeAnd ? 2 : 1);
-    if (isDouble || isPipeAnd) i += 1;
+    const operatorLength = isDoubleCaseTerminator
+      ? 3
+      : isDouble || isPipeAnd || isCaseTerminator
+        ? 2
+        : 1;
+    const operator = command.slice(i, i + operatorLength) as ExecutableShellListOperator;
+    if (!segment && operator !== '\n') return [];
+    if (segment) out.push({ source: segment, followingOperator: operator });
+    start = i + operatorLength;
+    i += operatorLength - 1;
   }
 
+  if (quote != null || parenthesisContexts.length > 0 || parameterDepth > 0) {
+    return [];
+  }
   const tail = command.slice(start).trim();
-  if (tail) out.push(tail);
+  if (tail) out.push({ source: tail });
+  if (
+    !tail &&
+    ['|', '|&', '&&', '||'].includes(out.at(-1)?.followingOperator ?? '')
+  ) {
+    return [];
+  }
   return out;
 }
 
+function splitShellSegments(command: string): string[] {
+  return splitShellListSegments(command).map((segment) => segment.source);
+}
+
+// NUL cannot occur in an executable shell argv. Use it to retain an
+// unforgeable distinction between a redirect glyph made literal by local
+// quoting/escaping and a genuine backslash byte. OpenSSH removes the former
+// quote boundary when it reconstructs remote source, while the latter must
+// remain escaped.
+const PROTECTED_SHELL_CHARS = new Set(['<', '>', '|', '&', ';', '(', ')']);
+const PROTECTED_EMPTY_SHELL_WORD = '\0';
+
+function protectShellSyntaxChar(char: string): string {
+  return PROTECTED_SHELL_CHARS.has(char) ? `\0${char}` : char;
+}
+
+export function decodeProtectedShellRedirects(token: string): string {
+  if (token === PROTECTED_EMPTY_SHELL_WORD) return '';
+  return token.replace(/\0([<>|&;()])/g, '$1');
+}
+
+/** Top-level executable shell stages together with the operator that follows
+ * each one. Quoted strings and nested substitutions remain inside their owning
+ * stage, so callers can reason about ordinary lists without attributing dead
+ * boolean/case branches to the outer command. */
+export function executableShellListSegments(
+  command: string
+): ExecutableShellListSegment[] {
+  const executable = executableShellSource(command);
+  return hasLocaleTranslatedShellWord(executable)
+    ? []
+    : splitShellListSegments(executable);
+}
+
 function tokenizeShellSegment(segment: string): string[] {
+  // A real shell command cannot contain NUL. Reject it before introducing the
+  // internal provenance marker so transcript bytes cannot forge that marker.
+  if (segment.includes('\0')) return [];
   const out: string[] = [];
   let token = '';
+  let tokenHasQuotedSyntax = false;
   let quote: "'" | '"' | '`' | null = null;
-  let quotedPartStart = 0;
+  let quotedPart = '';
   let escaped = false;
+  let unquotedDollarPrefix = false;
 
   const push = () => {
-    if (token.length > 0) out.push(token);
+    if (token.length > 0 || tokenHasQuotedSyntax) {
+      out.push(token || PROTECTED_EMPTY_SHELL_WORD);
+    }
     token = '';
+    tokenHasQuotedSyntax = false;
+  };
+
+  const protectQuotedRedirect = () => {
+    // Local quote boundaries disappear when OpenSSH concatenates trailing
+    // argv into remote shell source. Preserve every shell metacharacter here,
+    // not only redirect glyphs, so local syntax validation sees an argv byte
+    // while remote reconstruction can deliberately decode and reparse it.
+    const protectedPart = quotedPart.replace(
+      /[<>|&;()]/g,
+      protectShellSyntaxChar
+    );
+    // Append only the just-closed fragment. Re-slicing and rebuilding the
+    // growing word at every quote boundary makes adjacent quoted fragments
+    // quadratic on transcript-controlled input.
+    token += protectedPart;
+    quotedPart = '';
   };
 
   for (let i = 0; i < segment.length; i += 1) {
     const ch = segment[i];
     if (quote === "'") {
       if (ch === "'") {
-        const quotedPart = token.slice(quotedPartStart);
-        if (/^\d*>>?$/.test(quotedPart)) {
-          token =
-            token.slice(0, quotedPartStart) +
-            quotedPart.replace('>', '\\>');
-        }
+        protectQuotedRedirect();
         quote = null;
-      } else token += ch;
+      } else quotedPart += ch;
       continue;
     }
     if (escaped) {
       // Keep escaped redirect glyphs distinguishable from shell operators.
-      // `\>` is an argv character, not a write, including inside an SSH
-      // payload that will be parsed a second time by the remote classifier.
-      token += ch === '>' ? `\\${ch}` : ch;
+      // OpenSSH removes this local escape when reconstructing remote source;
+      // a dedicated marker avoids conflating it with a genuine backslash.
+      const escapedChar = protectShellSyntaxChar(ch);
+      if (quote) quotedPart += escapedChar;
+      else token += escapedChar;
+      tokenHasQuotedSyntax = true;
       escaped = false;
+      unquotedDollarPrefix = false;
       continue;
     }
     if (ch === '\\' && shellBackslashEscapes(quote, segment[i + 1])) {
@@ -686,50 +1378,131 @@ function tokenizeShellSegment(segment: string): string[] {
     }
     if (quote) {
       if (ch === quote) {
-        const quotedPart = token.slice(quotedPartStart);
-        if (/^\d*>>?$/.test(quotedPart)) {
-          token =
-            token.slice(0, quotedPartStart) +
-            quotedPart.replace('>', '\\>');
-        }
+        protectQuotedRedirect();
         quote = null;
-      } else token += ch;
+      } else quotedPart += ch;
       continue;
     }
     if (ch === "'" || ch === '"' || ch === '`') {
+      // ANSI-C `$'...'` has already been normalized before tokenization, so
+      // its prefix is not an argv character. Preserve the `$` on Bash's
+      // locale-translated `$"..."` form: its contents depend on runtime locale
+      // and therefore cannot prove a static executable command.
+      if (unquotedDollarPrefix && ch === "'") token = token.slice(0, -1);
       quote = ch;
-      quotedPartStart = token.length;
+      quotedPart = '';
+      tokenHasQuotedSyntax = true;
+      unquotedDollarPrefix = false;
       continue;
     }
     if (/\s/.test(ch)) {
       push();
+      unquotedDollarPrefix = false;
       continue;
     }
     if (ch === '(' || ch === ')') {
       push();
       out.push(ch);
+      unquotedDollarPrefix = false;
       continue;
     }
     // Preserve quote provenance for redirects: an unquoted `>file` is split
     // into an operator + target, while the literal argument `'>file'` remains
     // one token and therefore cannot be mistaken for a write.
+    if (ch === '&' && segment[i + 1] === '>') {
+      push();
+      const append = segment[i + 2] === '>';
+      out.push(append ? '&>>' : '&>');
+      i += append ? 2 : 1;
+      unquotedDollarPrefix = false;
+      continue;
+    }
     if (ch === '>') {
-      const fd = /^\d+$/.test(token) ? token : '';
+      const fd = !tokenHasQuotedSyntax && /^\d+$/.test(token) ? token : '';
       if (fd) token = '';
       else push();
-      const append = segment[i + 1] === '>';
-      out.push(`${fd}${append ? '>>' : '>'}`);
-      if (append || segment[i + 1] === '|') i += 1;
+      const following = segment[i + 1];
+      const operator =
+        following === '>'
+          ? '>>'
+          : following === '|'
+            ? '>|'
+            : following === '&'
+              ? '>&'
+              : '>';
+      out.push(`${fd}${operator}`);
+      if (operator !== '>') i += 1;
+      unquotedDollarPrefix = false;
+      continue;
+    }
+    if (ch === '<') {
+      if (segment[i + 1] === '(') {
+        // Process substitution is an argv word, not an input redirection.
+        token += '<(';
+        i += 1;
+        unquotedDollarPrefix = false;
+        continue;
+      }
+      const fd = !tokenHasQuotedSyntax && /^\d+$/.test(token) ? token : '';
+      if (fd) token = '';
+      else push();
+      let operator = '<';
+      if (segment[i + 1] === '<') {
+        operator = segment[i + 2] === '<' ? '<<<' : '<<';
+        i += operator.length - 1;
+        if (operator === '<<' && segment[i + 1] === '-') {
+          operator = '<<-';
+          i += 1;
+        }
+      } else if (segment[i + 1] === '>' || segment[i + 1] === '&') {
+        operator += segment[i + 1];
+        i += 1;
+      }
+      out.push(`${fd}${operator}`);
+      unquotedDollarPrefix = false;
       continue;
     }
     token += ch;
+    unquotedDollarPrefix = ch === '$';
   }
+  // Preserve the prior fail-closed token shape for an unclosed quote. Closed
+  // fragments take the provenance path above; an unclosed fragment never
+  // becomes a proven redirect operator.
+  if (quote) token += quotedPart;
   push();
   return out;
 }
 
+/** Raw lexical tokens before executable/wrapper normalization. Syntax proof
+ * must inspect this surface because normalization intentionally drops
+ * redirect-only tokens that are irrelevant to argv but decisive to parsing. */
+export function rawExecutableShellTokens(segment: string): string[] {
+  return tokenizeShellSegment(segment);
+}
+
 function isEnvAssignment(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=.*$/.test(token);
+}
+
+function assignmentTaintsExecutableIdentity(token: string): boolean {
+  const name = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token)?.[1];
+  return (
+    name != null &&
+    (name === 'PATH' ||
+      name.startsWith('LD_') ||
+      name.startsWith('DYLD_') ||
+      ['BASH_ENV', 'ENV', 'SHELLOPTS', 'BASHOPTS'].includes(name))
+  );
+}
+
+function trustedExecutableName(token: string): string | null {
+  const command = token.replace(/^[({]+/, '');
+  if (!command.includes('/')) return command.includes('\\') ? null : command;
+  const trusted =
+    /^\/(?:bin|sbin|usr\/(?:bin|sbin|local\/(?:bin|sbin))|opt\/homebrew\/(?:bin|sbin))\/([^/]+)$/.exec(
+      command
+    );
+  return trusted?.[1] ?? null;
 }
 
 const SHELL_CONTROL_PREFIXES = new Set([
@@ -754,6 +1527,8 @@ const SUDO_INFORMATIONAL_OPTIONS = new Set([
   '--help',
   '-l',
   '--list',
+  '-U',
+  '--other-user',
   '-V',
   '--version',
   '-v',
@@ -761,8 +1536,12 @@ const SUDO_INFORMATIONAL_OPTIONS = new Set([
   '-K',
   '--remove-timestamp',
 ]);
-const SUDO_INFORMATIONAL_SHORT_CLUSTER = /^-[ABbeEHikKlnNPSVsv]*[lvV][ABbeEHikKlnNPSVsv]*$/;
-const SUDO_COMBINED_OPTION_WITH_ARGUMENT = /^-[ABbeEHikKlnNPSVsv]*[CcDghpRrTtUu]$/;
+const SUDO_SHORT_OPTIONS_WITH_ARGUMENT = new Set([
+  ...'CcDghpRrTtUu',
+]);
+const SUDO_SHORT_OPTIONS_WITHOUT_ARGUMENT = new Set([
+  ...'ABbeEHikKlnNPSVsv',
+]);
 const TIME_OPTIONS_WITH_ARGUMENT = new Set(['-f', '-o', '--format', '--output']);
 const ENV_OPTIONS_WITH_ARGUMENT = new Set([
   '-C',
@@ -793,26 +1572,100 @@ function skipWrapperOptions(
   return i;
 }
 
-/** Return the wrapped command index, or null when sudo itself is the action. */
-function sudoCommandIndex(tokens: string[], start: number): number | null {
+interface SudoInvocation {
+  commandIndex: number | null;
+  editMode: boolean;
+}
+
+interface SudoShortOption {
+  consumesNext: boolean;
+  backgroundMode: boolean;
+  editMode: boolean;
+  queryMode: boolean;
+}
+
+/** Parse a sudo short cluster left-to-right. Once an argument-taking flag is
+ * reached, the rest of that same token is its attached value, not more flags. */
+function parseSudoShortOption(option: string): SudoShortOption | null {
+  if (!/^-[^-]/.test(option)) return null;
+  let backgroundMode = false;
+  let editMode = false;
+  let queryMode = false;
+  for (let index = 1; index < option.length; index += 1) {
+    const flag = option[index];
+    if (SUDO_SHORT_OPTIONS_WITH_ARGUMENT.has(flag)) {
+      if (flag === 'U') queryMode = true;
+      return {
+        consumesNext: index === option.length - 1,
+        backgroundMode,
+        editMode,
+        queryMode,
+      };
+    }
+    if (!SUDO_SHORT_OPTIONS_WITHOUT_ARGUMENT.has(flag)) return null;
+    if (flag === 'b') backgroundMode = true;
+    if (flag === 'e') editMode = true;
+    if (flag === 'l' || flag === 'v' || flag === 'V' || flag === 'K') {
+      queryMode = true;
+    }
+  }
+  return { consumesNext: false, backgroundMode, editMode, queryMode };
+}
+
+/** Locate sudo's command, preserving sudoedit as an operation rather than
+ * accidentally treating its file operands as an executable command. */
+function sudoInvocation(tokens: string[], start: number): SudoInvocation {
   let i = start;
+  let editMode = false;
   while (i < tokens.length) {
     const option = tokens[i];
-    if (option === '--') return i + 1;
-    if (!option.startsWith('-')) return i;
+    if (option === '--') return { commandIndex: i + 1, editMode };
+    if (!option.startsWith('-')) return { commandIndex: i, editMode };
+    if (option === '--edit') {
+      editMode = true;
+      i += 1;
+      continue;
+    }
+    if (option === '--background') {
+      return { commandIndex: null, editMode: false };
+    }
+    if (
+      option === '-R' ||
+      option === '--chroot' ||
+      option.startsWith('--chroot=') ||
+      /^-[^-]*R/.test(option)
+    ) {
+      return { commandIndex: null, editMode: false };
+    }
     if (
       SUDO_INFORMATIONAL_OPTIONS.has(option) ||
-      SUDO_INFORMATIONAL_SHORT_CLUSTER.test(option)
+      option.startsWith('--other-user=')
     ) {
-      return null;
+      return { commandIndex: null, editMode: false };
     }
-    i +=
-      SUDO_OPTIONS_WITH_ARGUMENT.has(option) ||
-      SUDO_COMBINED_OPTION_WITH_ARGUMENT.test(option)
-        ? 2
-        : 1;
+    const short = parseSudoShortOption(option);
+    if (short) {
+      if (short.backgroundMode || short.queryMode) {
+        return { commandIndex: null, editMode: false };
+      }
+      editMode ||= short.editMode;
+      i += short.consumesNext ? 2 : 1;
+      continue;
+    }
+    i += SUDO_OPTIONS_WITH_ARGUMENT.has(option) ? 2 : 1;
   }
-  return i;
+  return { commandIndex: i, editMode };
+}
+
+function execCommandIndex(tokens: string[], start: number): number | null {
+  let index = start;
+  while (index < tokens.length && tokens[index].startsWith('-')) {
+    const option = tokens[index];
+    if (option === '--') return index + 1;
+    if (option === '--help' || option === '--version') return null;
+    index += option === '-a' ? 2 : 1;
+  }
+  return index < tokens.length ? index : null;
 }
 
 /** `command -v/-V` reports resolution; it does not execute the operand. */
@@ -853,6 +1706,12 @@ function envExecutableTokens(tokens: string[], start: number): string[] {
         ...tokens.slice(i + 1),
       ];
     }
+    if (option.startsWith('-S') && option.length > 2) {
+      return [
+        ...tokenizeShellSegment(option.slice(2)),
+        ...tokens.slice(i + 1),
+      ];
+    }
     i += ENV_OPTIONS_WITH_ARGUMENT.has(option) ? 2 : 1;
   }
   return tokens.slice(i);
@@ -885,19 +1744,40 @@ function executableTokens(tokens: string[]): string[] {
       continue;
     }
     if (isEnvAssignment(t)) {
+      if (assignmentTaintsExecutableIdentity(t)) return [];
       i += 1;
       continue;
     }
     if (t === 'sudo') {
-      const commandIndex = sudoCommandIndex(tokens, i + 1);
-      if (commandIndex == null) {
+      const invocation = sudoInvocation(tokens, i + 1);
+      if (invocation.commandIndex == null) {
         i = tokens.length;
         break;
       }
+      if (invocation.editMode) {
+        return ['sudoedit', ...tokens.slice(invocation.commandIndex)];
+      }
+      i = invocation.commandIndex;
+      continue;
+    }
+    if (t === 'exec') {
+      const commandIndex = execCommandIndex(tokens, i + 1);
+      if (commandIndex == null) return [];
+      // `exec >path` applies redirections to the current shell without a
+      // wrapped command. Keep that segment intact so mutation classifiers see
+      // the shell-opened path.
+      if (/^\d*>>?$/.test(tokens[commandIndex])) return tokens.slice(i);
       i = commandIndex;
       continue;
     }
     if (t === 'time') {
+      if (
+        tokens[i + 1] === '--help' ||
+        tokens[i + 1] === '--version' ||
+        tokens[i + 1] === '-V'
+      ) {
+        return [];
+      }
       i = skipWrapperOptions(tokens, i + 1, TIME_OPTIONS_WITH_ARGUMENT);
       continue;
     }
@@ -930,25 +1810,74 @@ function executableTokens(tokens: string[]): string[] {
   }
   const executable = tokens.slice(i);
   if (executable.length > 0) {
-    executable[0] = executable[0].replace(/^[({]+/, '').split('/').pop() ?? '';
+    const trustedName = trustedExecutableName(executable[0]);
+    if (!trustedName) return [];
+    executable[0] = trustedName;
   }
   return executable.filter((token, index) => index > 0 || token.length > 0);
 }
 
+/** Keep shell-opened output paths attached after wrapper normalization. Prefix
+ * redirects (`>file true`) and query wrappers otherwise disappear while their
+ * filesystem effect still occurs before the command is invoked. */
+function preserveOutputRedirections(
+  executable: string[],
+  rawTokens: string[]
+): string[] {
+  const redirections: string[] = [];
+  for (let index = 0; index < rawTokens.length; index += 1) {
+    if (!/^(?:\d*(?:>>|>\||>)|>&|&>>?)$/.test(rawTokens[index])) continue;
+    const target = rawTokens[index + 1];
+    if (target == null) continue;
+    redirections.push(rawTokens[index], target);
+    index += 1;
+  }
+  if (redirections.length === 0) return executable;
+
+  const command: string[] = [];
+  for (let index = 0; index < executable.length; index += 1) {
+    if (/^(?:\d*(?:>>|>\||>)|>&|&>>?)$/.test(executable[index])) {
+      index += 1;
+      continue;
+    }
+    command.push(executable[index]);
+  }
+  return [...(command.length > 0 ? command : [':']), ...redirections];
+}
+
 function commandSegments(command: string): string[][] {
-  return splitShellSegments(command)
+  const normalized = command.replace(/\\\r?\n/g, '');
+  if (normalized.includes('\0')) return [];
+  // A gettext word can flow into later segments through assignments, arrays,
+  // functions, or substitutions. Without a full shell/dataflow proof, no
+  // mutation claim from this command is auditable.
+  if (hasLocaleTranslatedShellWord(normalized)) return [];
+  return splitShellSegments(normalized)
     .map(tokenizeShellSegment)
-    .map(executableTokens)
+    .map((tokens) => preserveOutputRedirections(executableTokens(tokens), tokens))
     .filter((tokens) => tokens.length > 0);
+}
+
+/** Executable shell segments with internal local quote/escape provenance.
+ * Callers that reconstruct source (notably OpenSSH's remote command) must keep
+ * these markers until they deliberately join and reparse argv. */
+export function executableShellSegmentsWithSyntaxProvenance(
+  command: string
+): string[][] {
+  return commandSegments(executableShellSource(command));
 }
 
 /**
  * Executable shell segments with heredoc bodies removed. Quoted arguments stay
  * attached to their real command (so an ssh payload remains inspectable), while
- * prose inside echo/printf/node arguments cannot become a command head.
+ * prose inside echo/printf/node arguments cannot become a command head. The
+ * public token surface contains only the argv bytes a caller would observe;
+ * source-reconstruction code uses the provenance-preserving variant above.
  */
 export function executableShellSegments(command: string): string[][] {
-  return commandSegments(executableShellSource(command));
+  return executableShellSegmentsWithSyntaxProvenance(command).map((tokens) =>
+    tokens.map(decodeProtectedShellRedirects)
+  );
 }
 
 function hasHelpArg(tokens: string[]): boolean {
@@ -972,6 +1901,7 @@ function isHelmMutation(tokens: string[]): boolean {
   return (
     head === 'helm' &&
     !hasHelpArg(tokens) &&
+    !hasDryRunArg(tokens) &&
     ['upgrade', 'install', 'rollback', 'uninstall'].includes(verb)
   );
 }
@@ -1132,8 +2062,13 @@ const RISKY_ACTION_BY_NAME = new Map(
   RISKY_ACTION_PATTERNS.map((pattern) => [pattern.name, pattern])
 );
 
+function detectRiskyActionPattern(command: string): RiskyActionPattern | null {
+  const executable = executableShellSource(command);
+  return RISKY_ACTION_PATTERNS.find((pattern) => pattern.test(executable)) ?? null;
+}
+
 export function detectRiskyActionPatternName(command: string): string | null {
-  return RISKY_ACTION_PATTERNS.find((pattern) => pattern.test(command))?.name ?? null;
+  return detectRiskyActionPattern(command)?.name ?? null;
 }
 
 function truncateCommand(s: string): string {
@@ -1381,7 +2316,9 @@ export function detectDangerousCommands(
         continue;
       }
 
-      if (commandText === null) continue;
+      if (commandText === null || call.commandAnalysisComplete === true) {
+        continue;
+      }
       // Match against the executable skeleton (#2039) so `rm -rf` (and peers)
       // inside heredocs/quoted literals/inline-script bodies don't false-fire.
       const skeleton = executableShellSkeleton(commandText);
@@ -1432,13 +2369,34 @@ export function detectRiskyActions(
           ? call.commandPreview
           : null;
 
+      if (precomputedPattern) {
+        out.push({
+          sessionId: session.sessionId,
+          timestamp: call.timestamp,
+          toolUseId: call.toolUseId,
+          command: truncateCommand(commandText ?? preview ?? ''),
+          pattern: precomputedPattern.name,
+          category: precomputedPattern.category,
+          severity: precomputedPattern.severity,
+          evidenceRef: evidenceRefForToolCall(
+            timelines,
+            session.sessionId,
+            call
+          ),
+        });
+        continue;
+      }
+      if (commandText === null || call.commandAnalysisComplete === true) {
+        continue;
+      }
+      const detectedRawPattern =
+        detectRiskyActionPattern(commandText);
+      const rawHasDynamicArgv =
+        hasUnprovenShellExpansion(executableShellSource(commandText));
       const pattern =
-        precomputedPattern ??
-        (commandText === null
-          ? null
-          : RISKY_ACTION_PATTERNS.find((candidate) =>
-              candidate.test(commandText)
-            ) ?? null);
+        !rawHasDynamicArgv || detectedRawPattern?.category === 'secret-sensitive'
+          ? detectedRawPattern
+          : null;
       if (!pattern) continue;
 
       out.push({

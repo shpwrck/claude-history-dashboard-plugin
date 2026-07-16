@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { detector } from './risky-actions';
 import { detectRiskyActions } from '../../parse-permissions';
-import type { ToolCall, ToolUsageData } from '../../parse-tools';
+import {
+  deriveBashCommandSignals,
+  parseToolUsage,
+  type ToolCall,
+  type ToolUsageData,
+} from '../../parse-tools';
 import type { SessionTimeline } from '../../parse-timeline';
 import type { RecommendationInput } from '../types';
 
@@ -101,6 +106,136 @@ describe('safety.risky-actions (#1309)', () => {
     expect(detectRiskyActions([toolSession(calls)], [timeline(calls)])).toEqual([]);
   });
 
+  it('does not claim locale-translated help or dry-run words are mutations', () => {
+    const calls = [
+      bash('kubectl-dry-run', 'kubectl apply $"--dry-run=client" -f deploy.yaml', 1),
+      bash('kubectl-help', 'kubectl apply $"--help" -f deploy.yaml', 2),
+      bash('helm-dry-run', 'helm upgrade app chart $"--dry-run"', 3),
+      bash(
+        'remote-heredoc',
+        'ssh prod <<\'EOF\'\nkubectl apply $"--dry-run=client" -f deploy.yaml\nEOF',
+        4
+      ),
+      bash(
+        'command-substitution',
+        'kubectl apply $(true; printf $"--dry-run=client") -f deploy.yaml',
+        5
+      ),
+      bash(
+        'process-substitution',
+        'kubectl apply <(printf foo | cat $"--dry-run=client") -f deploy.yaml',
+        6
+      ),
+      bash(
+        'extglob-pipeline',
+        'kubectl apply @(foo|#bar) $"--dry-run=client" -f deploy.yaml',
+        7
+      ),
+      bash(
+        'process-substitution-suffix',
+        'kubectl apply <(printf foo)#bar $"--dry-run=client" -f deploy.yaml',
+        8
+      ),
+      bash(
+        'translated-heredoc-following-command',
+        'cat <<$"EOF"\nprose\nEOF\nkubectl apply -f deploy.yaml',
+        9
+      ),
+      bash(
+        'translated-heredoc-local-body',
+        'bash <<$"EOF"\nkubectl apply -f deploy.yaml\nEOF',
+        10
+      ),
+      bash(
+        'translated-heredoc-remote-body',
+        'ssh prod <<$"EOF"\nkubectl apply -f deploy.yaml\nEOF',
+        11
+      ),
+    ];
+
+    expect(detectRiskyActions([toolSession(calls)], [timeline(calls)])).toEqual([]);
+  });
+
+  it('retains parser-proven risky attempts inside executable heredoc bodies', () => {
+    const commands = [
+      `bash <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `ssh prod bash -s <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`,
+      `cat <<'EOF' | bash\nkubectl apply -f deploy.yaml\nEOF`,
+    ];
+    const calls = commands.map((command, index) => ({
+      ...bash(`heredoc-risk-${index}`, command, index + 1),
+      ...deriveBashCommandSignals(command),
+    }));
+
+    expect(
+      detectRiskyActions([toolSession(calls)], [timeline(calls)]).map(
+        (action) => action.pattern
+      )
+    ).toEqual([
+      'kubectl mutation',
+      'kubectl mutation',
+      'kubectl mutation',
+    ]);
+  });
+
+  it('uses parser-owned dynamic argv truth for raw safety detection', () => {
+    const queryCommands = [
+      `kubectl apply "$(printf %s --dry-run=client)" -f deploy.yaml`,
+      `kubectl apply $(case y in x) echo esac;; y) true;; esac)#suffix --dry-run=client -f deploy.yaml`,
+      `kubectl apply "$(true # comment "\nprintf %s --dry-run=client\n)" -f deploy.yaml`,
+    ];
+    const queryCalls = queryCommands.map((command, index) => ({
+      ...bash(`dynamic-query-${index}`, command, index + 1),
+      ...deriveBashCommandSignals(command),
+    }));
+    expect(detectRiskyActions([toolSession(queryCalls)])).toEqual([]);
+
+    const nested = `echo "$(kubectl apply -f missing.yaml)"`;
+    const nestedCall = {
+      ...bash('nested-risk', nested, 5),
+      ...deriveBashCommandSignals(nested),
+    };
+    expect(detectRiskyActions([toolSession([nestedCall])])).toMatchObject([
+      { pattern: 'kubectl mutation' },
+    ]);
+  });
+
+  it('preserves parser-owned analyzed negatives on raw upload-shaped calls', () => {
+    const commands = [
+      'false && kubectl apply -f deploy.yaml',
+      'true || terraform apply -auto-approve',
+      'exit 0; kubectl delete namespace prod',
+    ];
+    const transcript = commands
+      .map((command, index) =>
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: ts(index + 1),
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: `dead-risk-${index}`,
+                name: 'Bash',
+                input: { command },
+              },
+            ],
+          },
+        })
+      )
+      .join('\n');
+    const parsed = parseToolUsage(transcript, 'upload-shaped.jsonl')!;
+
+    expect(
+      parsed.calls.map(
+        (call) =>
+          (call as ToolCall & { commandAnalysisComplete?: true })
+            .commandAnalysisComplete
+      )
+    ).toEqual([true, true, true]);
+    expect(detectRiskyActions([parsed])).toEqual([]);
+  });
+
   it('uses precomputed risky-action signals when raw command bodies are stripped', () => {
     const stripped: ToolCall = {
       ...bash('terraform-1', 'terraform apply -auto-approve', 1),
@@ -116,6 +251,32 @@ describe('safety.risky-actions (#1309)', () => {
         command: 'terraform apply -auto-approve',
       },
     ]);
+  });
+
+  it('persists secret-sensitive evidence whose value is supplied dynamically', () => {
+    const commands = [
+      'echo "$GITHUB_TOKEN"',
+      'echo "$ANTHROPIC_API_KEY"',
+      'printf "%s" "$AWS_SECRET_ACCESS_KEY"',
+      'gh secret set API_KEY --body "$VALUE"',
+      'kubectl create secret generic app --from-literal=key="$VALUE"',
+      'aws secretsmanager put-secret-value --secret-id app --secret-string "$VALUE"',
+    ];
+    const stripped = commands.map((command, index) => {
+      const signals = deriveBashCommandSignals(command);
+      expect(signals.commandRiskyActionPattern, command).toBe(
+        'secret exposure or mutation'
+      );
+      return {
+        ...bash(`secret-dynamic-${index}`, command, index + 1),
+        ...signals,
+        input: {},
+      };
+    });
+
+    expect(
+      detectRiskyActions([toolSession(stripped)]).map((action) => action.pattern)
+    ).toEqual(commands.map(() => 'secret exposure or mutation'));
   });
 
   it('emits a recommendation carrying structured evidence refs', () => {

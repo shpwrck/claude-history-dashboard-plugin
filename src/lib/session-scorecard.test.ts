@@ -5,7 +5,12 @@ import type {
   TokenEntry,
 } from '../types';
 import type { ApiErrorEvent } from './parse-errors';
-import type { ToolCall, ToolUsageData } from './parse-tools';
+import {
+  deriveBashCommandSignals,
+  stripToolCommandBodies,
+  type ToolCall,
+  type ToolUsageData,
+} from './parse-tools';
 import type { SessionTimeline } from './parse-timeline';
 import type { RuntimeEvents } from './parse-runtime-events';
 import {
@@ -457,6 +462,32 @@ describe('computeSessionScorecard', () => {
       score: 66,
       confidence: 'medium',
     });
+  });
+
+  it('preserves late .claude path evidence when bounded command bodies are stripped', () => {
+    const command = `${'x'.repeat(70 * 1024)}.claude/settings.json`;
+    const raw = toolData([
+      toolCall('Bash', {
+        input: { command },
+        ...deriveBashCommandSignals(command),
+      }),
+    ]);
+    expect(raw.calls[0].commandAnalysisTruncated).toBe(true);
+    expect(raw.calls[0].commandMentionsClaudePath).toBe(true);
+
+    const stripped = stripToolCommandBodies(raw);
+    expect(stripped.calls[0].input.command).toBeUndefined();
+    expect(
+      scorecardAxis(
+        computeSessionScorecard({ sessionId: 'sess-1', toolData: stripped }),
+        'portability'
+      )
+    ).toEqual(
+      scorecardAxis(
+        computeSessionScorecard({ sessionId: 'sess-1', toolData: raw }),
+        'portability'
+      )
+    );
   });
 
   it('keeps partial-data sessions renderable with low-confidence evidence', () => {

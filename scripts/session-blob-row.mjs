@@ -93,7 +93,22 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       full-file Write markdown against the v1 leave-behind contract before
 //       bulk ingest strips either body. Reparse tool_json so cached v13 calls
 //       cannot hide a late mutation or masquerade as evaluated Write evidence.
-//       Dataset schema v20 turns over bodies assembled from pre-v14 rows.
+//       Dataset schema v21 turns over bodies assembled from pre-v14 rows.
+//   'leave-behind-mutation-v15' (#2313): parseToolUsage now persists sparse,
+//       parser-owned `leaveBehindMutationPath` truth from the full raw Bash
+//       command. Reparse so cached v14 calls cannot leave a later canonical-path
+//       invalidation invisible after the raw command is stripped. Dataset schema
+//       v23 turns over bodies assembled from pre-v15 rows.
+//   'command-analysis-complete-v16' (#2716): parseToolUsage now persists
+//       `commandAnalysisComplete` on every analyzed Bash call. Reparse tool_json
+//       so an absent sparse risky/durable positive is distinguishable from
+//       legacy unknown truth. Dataset schema v24 turns over bodies assembled
+//       from pre-v16 rows.
+//   'leave-behind-mutation-paths-v17' (#2716): parseToolUsage now persists every
+//       canonical path touched by one Bash call plus a bounded-array overflow
+//       marker. Reparse tool_json so multi-path mutations cannot leave a stale
+//       candidate hidden behind the legacy scalar. Dataset schema v25 rejects
+//       bodies assembled from pre-v17 rows.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));

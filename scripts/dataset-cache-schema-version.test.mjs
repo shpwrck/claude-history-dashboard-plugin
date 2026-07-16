@@ -35,8 +35,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      22,
-      'client-carried doc graphs must turn over persisted v21 leave-behind datasets'
+      25,
+      'plural leave-behind mutation truth must turn over persisted v24 datasets'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -51,8 +51,28 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     );
     assert.notEqual(
       key,
+      `dataset-schema:v24:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-plural-mutation dataset cache key must not remain current'
+    );
+    assert.notEqual(
+      key,
+      `dataset-schema:v23:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-command-analysis-complete dataset cache key must not remain current'
+    );
+    assert.notEqual(
+      key,
+      `dataset-schema:v22:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-leave-behind-mutation dataset cache key must not remain current'
+    );
+    assert.notEqual(
+      key,
       `dataset-schema:v21:parser-${ingest.PARSER_SIG_VERSION}`,
       'the pre-doc-graph dataset cache key must not remain current'
+    );
+    assert.notEqual(
+      key,
+      `dataset-schema:v20:parser-${ingest.PARSER_SIG_VERSION}`,
+      'the pre-leave-behind/durable-command dataset cache key must not remain current'
     );
     assert.match(
       ingest.sourceSignature(),

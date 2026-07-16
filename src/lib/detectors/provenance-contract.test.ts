@@ -547,7 +547,7 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
             toolName: 'Bash',
             input: {
               command:
-                "ssh deploy@app 'sudo tee /etc/app/config.yaml >/dev/null && sudo systemctl restart app'",
+                "ssh deploy@app 'sudo tee /etc/app/config.yaml >/dev/null'",
             },
             toolUseId: 'handoff-tool-1',
             isError: false,

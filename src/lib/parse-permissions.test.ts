@@ -5,10 +5,16 @@ import {
   detectDangerousCommands,
   computeSafetyScores,
   rankPromptProneTools,
+  decodeProtectedShellRedirects,
   executableShellSegments,
+  executableShellSegmentsWithSyntaxProvenance,
   executableShellSkeleton,
   shellHeredocs,
 } from './parse-permissions'
+import {
+  deriveBashCommandSignals,
+  stripToolCommandBodies,
+} from './parse-tools'
 import type { ToolCall, ToolUsageData } from './parse-tools'
 
 const modeLine = (mode: string, timestamp = 't') => JSON.stringify({ permissionMode: mode, timestamp })
@@ -53,6 +59,14 @@ describe('aggregatePermissionModes', () => {
 })
 
 describe('detectDangerousCommands', () => {
+  it('does not claim a locale-dependent rm invocation is destructive', () => {
+    expect(
+      detectDangerousCommands([
+        session('s', [call('Bash', 'rm -rf $"--help" /')]),
+      ])
+    ).toEqual([])
+  })
+
   it('flags rm -rf, git reset --hard, and curl|sh; ignores benign commands', () => {
     const data = [
       session('s', [
@@ -148,6 +162,68 @@ describe('detectDangerousCommands', () => {
         matchingRules: null,
       },
     ])
+  })
+
+  it('keeps parser-owned malformed-shell negatives identical before and after command stripping', () => {
+    const command = 'true > ; rm -rf /'
+    const parsed = session('s', [
+      {
+        ...call('Bash', command),
+        ...deriveBashCommandSignals(command),
+      },
+    ])
+    const analyzed = parsed.calls[0]
+
+    expect(analyzed.commandAnalysisComplete).toBe(true)
+    expect(analyzed.commandDangerousPattern).toBeUndefined()
+    expect(detectDangerousCommands([parsed])).toEqual([])
+    expect(
+      detectDangerousCommands([stripToolCommandBodies(parsed)])
+    ).toEqual([])
+
+    // Marker-less legacy rows keep the executable-skeleton fallback until
+    // their parser cache is turned over.
+    expect(
+      detectDangerousCommands([session('legacy', [call('Bash', command)])])
+    ).toHaveLength(1)
+  })
+
+  it('does not resurrect a dangerous boolean branch after unproven redirects', () => {
+    const skipped = [
+      '(true 3>&4) 4>/tmp/chd-fd || rm -rf /',
+      'if false; then rm -rf /; fi',
+      'if true; then false; fi && rm -rf /',
+      'if false; then true; fi || rm -rf /',
+      'f(){ rm -rf /; }; true',
+    ]
+    const independent = 'true 2>&foo; rm -rf /'
+    const independentData = session('independent', [
+      {
+        ...call('Bash', independent),
+        ...deriveBashCommandSignals(independent),
+      },
+    ])
+
+    for (const command of skipped) {
+      const skippedData = session('skipped', [
+        {
+          ...call('Bash', command),
+          ...deriveBashCommandSignals(command),
+        },
+      ])
+      expect(skippedData.calls[0].commandDangerousPattern).toBeUndefined()
+      for (const data of [skippedData, stripToolCommandBodies(skippedData)]) {
+        expect(detectDangerousCommands([data]), command).toEqual([])
+      }
+    }
+
+    expect(independentData.calls[0].commandDangerousPattern).toBe('rm -rf')
+    for (const data of [
+      independentData,
+      stripToolCommandBodies(independentData),
+    ]) {
+      expect(detectDangerousCommands([data])).toHaveLength(1)
+    }
   })
 
   it('prefers precomputed certainty + fragment over the truncated preview (#2036)', () => {
@@ -281,6 +357,39 @@ describe('detectDangerousCommands', () => {
 })
 
 describe('executableShellSkeleton (#2039)', () => {
+  it('preserves quoted redirect glyphs and quoted numeric argv provenance', () => {
+    expect(executableShellSegments("bash -s '3'<<'EOF'")).toEqual([
+      ['bash', '-s', '3', '<<', 'EOF'],
+    ])
+    const quoted = executableShellSegmentsWithSyntaxProvenance(
+      "ssh prod bash -s '<' /dev/null"
+    )
+    const escaped = executableShellSegmentsWithSyntaxProvenance(
+      'ssh prod bash -s \\< /dev/null'
+    )
+    expect(quoted).toEqual(escaped)
+    expect(quoted[0]?.[4]).not.toBe('<')
+    expect(quoted[0]?.map(decodeProtectedShellRedirects)).toEqual([
+      'ssh',
+      'prod',
+      'bash',
+      '-s',
+      '<',
+      '/dev/null',
+    ])
+    const embeddedQuoted = executableShellSegmentsWithSyntaxProvenance(
+      "ssh prod bash -s x'>'"
+    )[0]?.[4]
+    const genuineBackslash = executableShellSegmentsWithSyntaxProvenance(
+      String.raw`ssh prod bash -s 'x\>'`
+    )[0]?.[4]
+    expect(embeddedQuoted).not.toBe('x>')
+    expect(decodeProtectedShellRedirects(embeddedQuoted ?? '')).toBe('x>')
+    expect(decodeProtectedShellRedirects(genuineBackslash ?? '')).toBe(
+      String.raw`x\>`
+    )
+  })
+
   it('strips heredoc bodies and quoted literals but keeps real command tokens', () => {
     expect(executableShellSkeleton(`echo 'rm -rf /'`)).not.toMatch(/rm -rf/)
     expect(executableShellSkeleton(`node -e "rm -rf x"`)).not.toMatch(/rm -rf/)
@@ -305,6 +414,8 @@ describe('executableShellSkeleton (#2039)', () => {
     expect(shellHeredocs(`bash <<'EOF'\nkubectl apply -f deploy.yaml\nEOF`)).toEqual([
       {
         commandLine: `bash <<'EOF'`,
+        identityCommandLine: 'bash <<__chd_heredoc_opener_0__',
+        openerIndex: 0,
         delimiter: 'EOF',
         quoted: true,
         body: 'kubectl apply -f deploy.yaml',
@@ -325,10 +436,46 @@ describe('executableShellSkeleton (#2039)', () => {
       body: 'plain text',
     })
     expect(
+      shellHeredocs(String.raw`cat <<$'E\x4fF'
+plain text
+EOF`)[0]
+    ).toMatchObject({
+      delimiter: 'EOF',
+      quoted: true,
+      body: 'plain text',
+    })
+    expect(
       shellHeredocs(
         `printf '%s\\n' 'documentation\n<<EOF\nstill documentation'\nkubectl apply -f x`
       )
     ).toEqual([])
+  })
+
+  it('models ANSI-C control and NUL heredoc delimiters like Bash', () => {
+    const control = shellHeredocs(
+      `cat <<$'\\c?'\nbody\n\x1f\nkubectl apply -f prod.yaml`
+    )[0]
+    expect(control).toMatchObject({
+      delimiter: '\x7f',
+      quoted: true,
+    })
+    expect(control.body).toContain('kubectl apply -f prod.yaml')
+
+    for (const delimiter of [
+      String.raw`\0X`,
+      String.raw`\x00X`,
+      String.raw`\u0000X`,
+      String.raw`\c@X`,
+    ]) {
+      const heredoc = shellHeredocs(
+        `cat <<$'${delimiter}'\nbody\nX\nkubectl apply -f prod.yaml`
+      )[0]
+      expect(heredoc, delimiter).toMatchObject({
+        delimiter: '',
+        quoted: true,
+      })
+      expect(heredoc.body, delimiter).toContain('kubectl apply -f prod.yaml')
+    }
   })
 
   it('skips combined sudo options whose final flag consumes an argument', () => {
@@ -341,7 +488,70 @@ describe('executableShellSkeleton (#2039)', () => {
     expect(
       executableShellSegments('sudo -uroot kubectl apply -f deploy.yaml')
     ).toEqual([['kubectl', 'apply', '-f', 'deploy.yaml']])
+    expect(
+      executableShellSegments('sudo -lU root kubectl apply -f deploy.yaml')
+    ).toEqual([])
+    expect(
+      executableShellSegments('sudo --other-user=root kubectl apply -f deploy.yaml')
+    ).toEqual([])
+    expect(
+      executableShellSegments('sudo -e kubectl apply -f deploy.yaml')
+    ).toEqual([['sudoedit', 'kubectl', 'apply', '-f', 'deploy.yaml']])
+    expect(
+      executableShellSegments("bash -c $'kubectl apply -f deploy.yaml'")
+    ).toEqual([['bash', '-c', 'kubectl apply -f deploy.yaml']])
+    expect(
+      executableShellSegments(
+        String.raw`printf %s $'prose\'; kubectl apply -f fake'`
+      )
+    ).toEqual([['printf', '%s', "prose'; kubectl apply -f fake"]])
+    expect(
+      executableShellSegments(
+        String.raw`bash -c $'kubectl\x20apply\x20-f\x20deploy.yaml'`
+      )
+    ).toEqual([['bash', '-c', 'kubectl apply -f deploy.yaml']])
+    expect(executableShellSegments('exec kubectl apply -f deploy.yaml')).toEqual([
+      ['kubectl', 'apply', '-f', 'deploy.yaml'],
+    ])
+    expect(executableShellSegments('exec 9>/etc/app/config.yaml')).toEqual([
+      ['exec', '9>', '/etc/app/config.yaml'],
+    ])
+    expect(
+      executableShellSegments('sudo -luroot kubectl apply -f deploy.yaml')
+    ).toEqual([])
+    expect(
+      executableShellSegments('sudo -b kubectl apply -f deploy.yaml')
+    ).toEqual([])
+    expect(
+      executableShellSegments('sudo -nb kubectl apply -f deploy.yaml')
+    ).toEqual([])
+    expect(
+      executableShellSegments('sudo --background kubectl apply -f deploy.yaml')
+    ).toEqual([])
+    expect(
+      executableShellSegments('sudo -vuroot kubectl apply -f deploy.yaml')
+    ).toEqual([])
+    expect(
+      executableShellSegments('sudo -euroot /etc/app/config.yaml')
+    ).toEqual([['sudoedit', '/etc/app/config.yaml']])
+    expect(
+      executableShellSegments('sudo -ehprod /etc/app/config.yaml')
+    ).toEqual([['sudoedit', '/etc/app/config.yaml']])
   })
+
+  it(
+    'scans deeply nested command substitutions without recursive overflow',
+    () => {
+      const depth = 12_000
+      const command = `${'$('.repeat(depth)}true${')'.repeat(depth)}`
+
+      expect(() => executableShellSegments(command)).not.toThrow()
+      expect(
+        executableShellSegments(`${command} $"localized"`)
+      ).toEqual([])
+    },
+    1_000
+  )
 })
 
 describe('computeSafetyScores', () => {

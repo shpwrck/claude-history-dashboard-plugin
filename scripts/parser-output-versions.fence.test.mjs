@@ -105,11 +105,11 @@ test('session-blob version is the value the session_blob cache key actually bake
   assert.equal(typeof SESSION_BLOB_OUTPUT.version, 'string');
 });
 
-test('session-blob version turns over for leave-behind and durable-command truth (#2313)', () => {
+test('session-blob version turns over for plural leave-behind mutation truth (#2716)', () => {
   assert.equal(
     SESSION_BLOB_OUTPUT.version,
-    'durable-command-kind-v14',
-    'tool_json now persists leaveBehindStructure and commandDurableKind; the pre-field v13 cache key must not remain current'
+    'leave-behind-mutation-paths-v17',
+    'tool_json now persists plural mutation paths; the scalar-only v16 cache key must not remain current'
   );
 });
 

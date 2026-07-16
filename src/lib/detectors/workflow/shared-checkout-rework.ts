@@ -24,10 +24,11 @@
  * that ARE reconstructable and are distinctive of the documented incident
  * (#646 / PR #954/#955), so it stays low-false-positive:
  *
- *   S1 — cross-branch stash transport: a `git stash [push]`, then later (by
- *        timestamp) a `git checkout`/`git switch` to a branch, then later a
- *        `git stash pop`/`apply`. Moving uncommitted work across a branch switch
- *        in a shared checkout — the exact "stash → switch → pop" dance.
+ *   S1 — cross-branch stash-transport command signature: a `git stash [push]`,
+ *        then later in transcript order a `git checkout`/`git switch` to a
+ *        branch, then later a `git stash pop`/`apply`, with no newer default
+ *        stash after the switch. This is the exact "stash → switch → pop"
+ *        command dance; command evidence alone does not prove every effect.
  *   S2 — orphaned-commit / foreign-HEAD recovery: `git reflog` co-occurring with
  *        `git cherry-pick` or `git merge --ff-only` in one session — the reflog
  *        recovery used when a foreign checkout orphaned a commit.
@@ -72,8 +73,9 @@ git stash list
 git stash show -p stash@{n}
 git stash apply stash@{n}`;
 
-// Command matchers. We test the FULL command string (a single Bash call can
-// chain several git ops with `&&`), so `git stash && git checkout -` is caught.
+// Command matchers run over parser-projected, execution-proven git segments.
+// A single Bash call may contribute several ordered semicolon-separated ops;
+// conditionally reachable `&&`/`||` arms are deliberately failed closed.
 // A stash *push* — `git stash`, `git stash push`, `git stash save`. The negative
 // lookahead keeps `git stash pop/apply/list/show/drop/clear/branch` from being
 // misread as a push (segments are split on shell separators before matching).
@@ -96,32 +98,38 @@ interface FlaggedSession {
 }
 
 /**
- * Ordered git "segments" for one session, oldest first. Each Bash call is split
- * on shell separators (`&&`, `;`, `|`) so a single chained call like
- * `git stash && git checkout master && git stash pop` yields three ordered
+ * Git "segments" for one session in transcript array order. Each Bash call is split
+ * on shell separators for legacy rows, while current rows consume the parser's
+ * sparse projection. A single call like
+ * `git stash; git checkout master; git stash pop` yields three ordered
  * segments — the S1 state machine then sees the sequence whether the agent
- * chained it in one call or spread it across several. Each segment carries its
- * parent call's timestamp for as-of dating.
+ * chained it in one call or spread it across several. Transcript array order
+ * is authoritative; timestamps are metadata for as-of dating and may be equal,
+ * missing, or move backward across clock domains.
  */
 function bashSegments(sd: ToolUsageData): { command: string; ts: string }[] {
   const calls = sd.calls
     .filter(
       (c) =>
         c.toolName === 'Bash' &&
-        (typeof c.input.command === 'string' ||
-          Array.isArray(c.commandGitSegments) ||
-          typeof c.commandPreview === 'string')
+        c.isError !== true &&
+        (Array.isArray(c.commandGitSegments) ||
+          (c.commandAnalysisComplete !== true &&
+            (typeof c.input.command === 'string' ||
+              typeof c.commandPreview === 'string')))
     )
     .flatMap((c) => {
-      if (typeof c.input.command === 'string') {
-        return [{ command: c.input.command, ts: c.timestamp }];
-      }
       if (Array.isArray(c.commandGitSegments) && c.commandGitSegments.length > 0) {
         return c.commandGitSegments.map((command) => ({ command, ts: c.timestamp }));
       }
-      return [{ command: c.commandPreview as string, ts: c.timestamp }];
-    })
-    .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+      if (c.commandAnalysisComplete === true) return [];
+      if (typeof c.input.command === 'string') {
+        return [{ command: c.input.command, ts: c.timestamp }];
+      }
+      return typeof c.commandPreview === 'string'
+        ? [{ command: c.commandPreview, ts: c.timestamp }]
+        : [];
+    });
   const segments: { command: string; ts: string }[] = [];
   for (const { command, ts } of calls) {
     for (const part of command.split(/&&|\|\||;|\|/)) {
@@ -133,7 +141,7 @@ function bashSegments(sd: ToolUsageData): { command: string; ts: string }[] {
 }
 
 /**
- * S1 — a stash, then a branch switch, then a stash pop, in that timestamp order.
+ * S1 — a stash, then a branch switch, then a stash pop, in transcript order.
  * Returns the offending command (the pop) when present, else null.
  */
 function detectStashTransport(
@@ -153,6 +161,14 @@ function detectStashTransport(
         continue;
       }
       if (RE_BRANCH_SWITCH.test(command)) sawSwitchAfterStash = true;
+      continue;
+    }
+    // A new default-stack stash after the switch becomes the stash that a
+    // later bare pop/apply would consume. Without an explicit stash ref, the
+    // transcript no longer proves that the pre-switch tree crossed branches;
+    // treat the newer stash as a fresh candidate instead.
+    if (RE_STASH_PUSH.test(command)) {
+      sawSwitchAfterStash = false;
       continue;
     }
     if (RE_STASH_POP.test(command)) return { sample: command, ts };
@@ -217,8 +233,9 @@ export const detector: Detector = {
       title: 'Shared-checkout rework — switch to a worktree',
       detail:
         `${flagged.length} session(s) show the shared-checkout / foreign-HEAD-swap ` +
-        `recovery signature: stashing a tree across a branch switch, or reflog + ` +
-        `cherry-pick/ff-merge to recover an orphaned commit. In this repo the main ` +
+        `recovery command signature: an attempted stash/switch/pop sequence, or ` +
+        `reflog plus cherry-pick/ff-merge. These commands do not by themselves ` +
+        `prove every Git effect. In this repo the main ` +
         `checkout (and the standing chd-main/chd-spa instances) share one HEAD across ` +
         `concurrent sessions, so a foreign \`git checkout\` can move HEAD out from under ` +
         `you mid-task — the rework above is the symptom.`,
@@ -239,16 +256,18 @@ export const detector: Detector = {
       provenance: {
         observations: [
           {
-            claim: `${flagged.length} session(s) ran the shared-checkout rework command signature (stash-transport or reflog-recovery)`,
+            claim: `${flagged.length} session(s) ran or attempted the shared-checkout rework command signature (stash-transport or reflog-recovery)`,
             source: 'parse-tools',
-            field: 'toolData[].calls[].commandPreview',
+            field:
+              'toolData[].calls[].commandGitSegments/input.command/commandPreview',
             value: flagged.length,
           },
         ],
         inference:
-          'These git command sequences are the documented recovery from a foreign ' +
-          'HEAD swap in a shared working directory (#646, PR #954/#955); the ' +
-          'structural cure is per-branch worktree isolation.',
+          'These git command sequences match the documented recovery pattern for ' +
+          'a foreign HEAD swap in a shared working directory (#646, PR #954/#955); ' +
+          'they do not prove the command effects, while the structural prevention ' +
+          'remains per-branch worktree isolation.',
         asOf,
       },
     };

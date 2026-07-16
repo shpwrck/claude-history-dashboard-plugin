@@ -1779,7 +1779,20 @@ export const PARSER_SIG_VERSION = 'v4';
 // Git commitment remains deliberately unproven by transcript data.
 // v22 (#2380): the serialized full/light datasets now carry docGraph so every
 // client recommendation surface observes the same local doc-hygiene evidence.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 22;
+// v23 (#2313): parseToolUsage adds sparse `leaveBehindMutationPath` truth from
+// the full Bash command before bulk ingest strips `input.command`.
+// SESSION_BLOB_OUTPUT v15 reparses tool_json, while this paired turnover rejects
+// persisted v22 bodies that cannot observe a later canonical-path invalidation.
+// v24 (#2716): parseToolUsage persists `commandAnalysisComplete` so consumers
+// can distinguish an analyzed negative from legacy unknown truth instead of
+// reclassifying raw commands or lossy previews. SESSION_BLOB_OUTPUT v16 reparses
+// tool_json; this paired turnover rejects persisted v23 bodies without the
+// completion proof.
+// v25 (#2716): parseToolUsage persists bounded plural leave-behind mutation
+// paths and an overflow barrier. SESSION_BLOB_OUTPUT v17 reparses tool_json;
+// this paired turnover rejects persisted v24 bodies that can invalidate only
+// the legacy scalar path.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 25;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -4096,7 +4109,7 @@ export function assembleRecommendationResult(project, options = {}) {
   return {
     ...result,
     recommendations: project
-      ? filterRecommendationsByProject(recs, project, sessions)
+      ? filterRecommendationsByProject(recs, project, sessions, input.tokenData)
       : recs,
   };
 }

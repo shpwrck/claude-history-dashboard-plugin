@@ -22,6 +22,11 @@
  *    saying", which keeps the assembled list free of zero-impact noise.
  */
 import type { Session } from '../types';
+import {
+  projectIdentityKey,
+  resolveProjectBySession,
+  sameProjectIdentity,
+} from './project-identity';
 
 // ── Recommendation types ─────────────────────────────────────────────────
 // Defined in ./detectors/types and re-exported here so existing importers
@@ -684,12 +689,39 @@ export function backfillReclaimSavings(
 // happens only when a caller asks for a project-scoped slice, so the unfiltered
 // output is byte-identical to pre-#330.
 
-/** Index `short(sessionId)` (8-char prefix) → project path for every session. */
+/** Index `short(sessionId)` (8-char prefix) → one proven project identity.
+ * Session metadata and token rows share the detector's arbitration contract:
+ * invalid spellings yield to a valid fallback, valid conflicts fail closed,
+ * and conflicting 8-character prefixes are omitted rather than overwritten. */
 export function buildSessionProjectIndex(
-  sessions: Pick<Session, 'sessionId' | 'project'>[]
+  sessions: Pick<Session, 'sessionId' | 'project'>[],
+  tokenData: Pick<SessionTokenData, 'sessionId' | 'project'>[] = []
 ): Map<string, string> {
   const index = new Map<string, string>();
-  for (const s of sessions) index.set(short(s.sessionId), s.project);
+  const observations = [...sessions, ...tokenData];
+  const sessionIdsByPrefix = new Map<string, Set<string>>();
+  for (const { sessionId } of observations) {
+    if (!sessionId) continue;
+    const prefix = short(sessionId);
+    const sessionIds = sessionIdsByPrefix.get(prefix) ?? new Set<string>();
+    sessionIds.add(sessionId);
+    sessionIdsByPrefix.set(prefix, sessionIds);
+  }
+  const resolved = resolveProjectBySession(observations);
+  for (const [prefix, sessionIds] of sessionIdsByPrefix) {
+    const projects = [...sessionIds].map((sessionId) =>
+      resolved.get(sessionId)
+    );
+    // Evidence carries only the eight-character prefix. Every observed full id
+    // under it must resolve, and every resolved identity must agree; otherwise
+    // the evidence token cannot prove which project owns the finding.
+    if (projects.some((project) => project == null)) continue;
+    const identities = new Set(
+      projects.map((project) => projectIdentityKey(project!))
+    );
+    if (identities.size !== 1 || identities.has(null)) continue;
+    index.set(prefix, projects[0]!);
+  }
   return index;
 }
 
@@ -723,13 +755,16 @@ export function recommendationProjects(
 export function filterRecommendationsByProject(
   recs: Recommendation[],
   project: string,
-  sessions: Pick<Session, 'sessionId' | 'project'>[]
+  sessions: Pick<Session, 'sessionId' | 'project'>[],
+  tokenData: Pick<SessionTokenData, 'sessionId' | 'project'>[] = []
 ): Recommendation[] {
-  const index = buildSessionProjectIndex(sessions);
+  const index = buildSessionProjectIndex(sessions, tokenData);
   const out: Recommendation[] = [];
   for (const rec of recs) {
     const projects = recommendationProjects(rec, index);
-    if (projects.includes(project)) out.push({ ...rec, projects });
+    if (projects.some((candidate) => sameProjectIdentity(candidate, project))) {
+      out.push({ ...rec, projects });
+    }
   }
   return out;
 }

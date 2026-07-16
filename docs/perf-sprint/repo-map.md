@@ -59,12 +59,15 @@ reread-waste model is a coarse ~4-chars/token estimate but monotonic — a dense
 better-ranked map saves more, a bloated/redundant one saves less.
 
 `localizationTopK` is the synthetic probe's bounded ranked-slice width, separate
-from the recall floor and the token-bounded runtime fragment. #2313 widened it
-from 60 to 63 after the canonical leave-behind validator and dependency-light
-permission upload parser added legitimate direct dependencies to the integrated
-working set: top-61 measured 126/160 (78.8%), while top-63 measures 127/160
-(79.4%) and keeps the existing 79% floor unchanged. This gate-only recalibration
-does not change runtime output or claim an improvement in ranking quality.
+from the recall floor and the token-bounded runtime fragment. #2716 widens it
+from 63 to 64 after the canonical leave-behind validator and dependency-light
+permission upload parser added two legitimate direct dependencies to the
+integrated working set: `recommendations.ts` -> `project-identity.ts` and
+`parse-permissions.ts` -> `leave-behind.ts`. On master, top-63 measures 127/160
+(79.4%); the integrated set measures 127/162 (78.4%) at top-63 and 128/162
+(79.0%) at top-64, preserving the existing 79% floor. This gate-only
+recalibration does not change runtime output or claim an improvement in ranking
+quality.
 
 ### Baseline (2026-06-09, this repo, 426 source files)
 

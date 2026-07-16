@@ -628,6 +628,57 @@ describe('per-project recommendation attribution (#330)', () => {
     expect(index.size).toBe(3);
   });
 
+  it('arbitrates session and token project identity before project slicing', () => {
+    const identitySessions = [
+      { sessionId: 'conflict-session', project: '/repo/app' },
+      { sessionId: 'fallback-session', project: 'repo/relative' },
+      { sessionId: 'deadbeef-one', project: '/repo/one' },
+      { sessionId: 'deadbeef-two', project: '/repo/two' },
+    ];
+    const identityTokens = [
+      { sessionId: 'conflict-session', project: '/repo/other' },
+      { sessionId: 'fallback-session', project: '/repo/fallback' },
+      { sessionId: 'deadbeef-one', project: '/repo/conflict' },
+    ];
+    const index = buildSessionProjectIndex(
+      identitySessions,
+      identityTokens
+    );
+
+    expect(index.has('conflict')).toBe(false);
+    expect(index.get('fallback')).toBe('/repo/fallback');
+    expect(index.has('deadbeef')).toBe(false);
+
+    const findings = [
+      rec('conflict', ['conflict, durable mutation']),
+      rec('fallback', ['fallback, durable mutation']),
+    ];
+    expect(
+      filterRecommendationsByProject(
+        findings,
+        '/repo/app',
+        identitySessions,
+        identityTokens
+      )
+    ).toEqual([]);
+    expect(
+      filterRecommendationsByProject(
+        findings,
+        '/repo/other',
+        identitySessions,
+        identityTokens
+      )
+    ).toEqual([]);
+    expect(
+      filterRecommendationsByProject(
+        findings,
+        '/repo/fallback',
+        identitySessions,
+        identityTokens
+      ).map((finding) => finding.id)
+    ).toEqual(['fallback']);
+  });
+
   it('derives a rec\'s projects from the session-ids leading its evidence', () => {
     const index = buildSessionProjectIndex(sessions);
     // Evidence rows mirror the engine's `${short(id)}, …` formatting.
@@ -662,6 +713,62 @@ describe('per-project recommendation attribution (#330)', () => {
 
     // Unattributable / non-matching recs are dropped.
     expect(filterRecommendationsByProject(recs, '/repo/gamma', sessions)).toEqual([]);
+  });
+
+  it('matches proven Windows project aliases without folding POSIX paths', () => {
+    const windowsSessions = [
+      {
+        sessionId: 'dddddddd-1111-2222-3333-444444444444',
+        project: 'C:\\Repo',
+      },
+    ];
+    const windowsRec = rec('windows', ['dddddddd, durable mutation']);
+
+    expect(
+      filterRecommendationsByProject(
+        [windowsRec],
+        'c:/repo/',
+        windowsSessions
+      ).map((item) => item.id)
+    ).toEqual(['windows']);
+    expect(
+      filterRecommendationsByProject(
+        [rec('posix', ['eeeeeeee, durable mutation'])],
+        '//tmp/repo',
+        [
+          {
+            sessionId: 'eeeeeeee-1111-2222-3333-444444444444',
+            project: '//tmp/Repo',
+          },
+        ]
+      )
+    ).toEqual([]);
+  });
+
+  it('normalizes POSIX slash runs while preserving the exact double-slash root', () => {
+    const posixRec = rec('posix', ['ffffffff, durable mutation']);
+    const posixSessions = [
+      {
+        sessionId: 'ffffffff-1111-2222-3333-444444444444',
+        project: '/repo//app/',
+      },
+    ];
+
+    expect(
+      filterRecommendationsByProject([posixRec], '/repo/app', posixSessions)
+        .map((item) => item.id)
+    ).toEqual(['posix']);
+    expect(
+      filterRecommendationsByProject([posixRec], '/repo/./app', posixSessions)
+        .map((item) => item.id)
+    ).toEqual(['posix']);
+    expect(
+      filterRecommendationsByProject([posixRec], '///repo/app', posixSessions)
+        .map((item) => item.id)
+    ).toEqual(['posix']);
+    expect(
+      filterRecommendationsByProject([posixRec], '//repo/app', posixSessions)
+    ).toEqual([]);
   });
 });
 
@@ -3601,7 +3708,7 @@ function fixtureBank(): Fixture[] {
           toolName: 'Bash',
           input: {
             command:
-              "ssh deploy@app 'sudo tee /etc/app/config.yaml >/dev/null && sudo systemctl restart app'",
+              "ssh deploy@app 'sudo tee /etc/app/config.yaml >/dev/null'",
           },
           toolUseId: 'handoff-tool-1',
           isError: false,
