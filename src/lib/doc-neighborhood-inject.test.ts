@@ -38,7 +38,11 @@ function node(slug: string, extra: Partial<DocNode> = {}): DocNode {
   };
 }
 const md = (from: string, to: string): DocEdge => ({ from, to, kind: 'md-link' });
-const graph = (nodes: DocNode[], edges: DocEdge[]): DocGraph => ({ nodes, edges });
+const graph = (nodes: DocNode[], edges: DocEdge[]): DocGraph => ({
+  root: '/repo',
+  nodes,
+  edges,
+});
 const docAnchor = (slug: string): NeighborhoodAnchor => ({ kind: 'doc', slug });
 
 // ── Injection payload shape ─────────────────────────────────────────────────────

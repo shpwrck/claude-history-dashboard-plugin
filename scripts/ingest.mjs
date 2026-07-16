@@ -51,6 +51,7 @@ import {
 } from './lib/host-producer.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+const DOC_GRAPH_ROOT = resolve(process.env.CHD_DOC_GRAPH_ROOT || PROJECT_DIR);
 const LIB = join(PROJECT_DIR, 'src', 'lib');
 const { resolveSources } = await import(join(LIB, 'sources.ts'));
 const { filesystemArtifactSource } = await import(join(LIB, 'artifact-source.ts'));
@@ -657,11 +658,16 @@ const { buildGitOutcomes, gitOutcomesReposFromEnv } = await import(
   join(LIB, 'parse-git-outcome.ts')
 );
 // Repo doc graph (#2257, epic #2256). buildDocGraph walks this repo's own
-// Markdown (root *.md + docs/**) into a SCIP-style node/edge graph the future
+// Markdown (root *.md + docs/**) into a SCIP-style node/edge graph the
 // doc-hygiene detector reads off `RecommendationInput.docGraph`. Pure over the
 // project root — a LOCAL repo-docs walk, no network — so it is safe under the
 // zero-deps runtime import guard (node:fs/child_process only, like parse-tasks).
-const { buildDocGraph } = await import(join(LIB, 'parse-docs.ts'));
+const {
+  buildDocGraph,
+  docGraphGitHistorySignature,
+  docGraphSourcePaths,
+  DOC_GRAPH_MAX_FILE_BYTES,
+} = await import(join(LIB, 'parse-docs.ts'));
 const {
   DOC_HYGIENE_ARTIFACT_KEY_ENV,
   DOC_HYGIENE_EXPECTED_COMMIT_ENV,
@@ -1148,12 +1154,83 @@ export function readMemoryStores() {
 // throws (unreadable files are skipped, a missing root yields an empty graph),
 // and this wrapper degrades any surprise to an empty graph so it never sinks the
 // dataset endpoint. Root is PROJECT_DIR (the dashboard repo), not ~/.claude.
+let warnedIncompleteBundledDocGraph = false;
 function readDocGraph() {
   try {
-    return buildDocGraph(PROJECT_DIR);
+    const graph = buildDocGraph(DOC_GRAPH_ROOT);
+    if (
+      !process.env.CHD_DOC_GRAPH_ROOT &&
+      !warnedIncompleteBundledDocGraph &&
+      (!graph.nodes.some((node) => node.path === 'REFERENCES.md') ||
+        !graph.nodes.some((node) => node.path.startsWith('docs/')))
+    ) {
+      warnedIncompleteBundledDocGraph = true;
+      console.warn(
+        `[ingest] bundled doc graph is incomplete under ${DOC_GRAPH_ROOT}; ` +
+          'expected REFERENCES.md and docs/** runtime inputs'
+      );
+    }
+    return graph;
   } catch {
-    return { nodes: [], edges: [] };
+    return { root: DOC_GRAPH_ROOT, nodes: [], edges: [] };
   }
+}
+
+// The graph reader and both cache gates share this exact bounded source list.
+// Include ctime/inode as well as mtime/size: a caller can restore mtime and byte
+// length after an in-place rewrite, but cannot restore ctime, while an atomic
+// replacement changes inode identity. The hot signature path adds one bounded
+// Git-history probe but still avoids reading doc bodies; graph assembly remains
+// the only path that reads them.
+function docGraphSourceSignature() {
+  const hash = createHash('sha1');
+  hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
+  let count = 0;
+  for (const relPath of docGraphSourcePaths(DOC_GRAPH_ROOT)) {
+    hash.update(relPath);
+    hash.update('\0');
+    try {
+      const s = statSync(join(DOC_GRAPH_ROOT, relPath));
+      hash.update(String(s.mtimeMs));
+      hash.update('\0');
+      hash.update(String(s.size));
+      hash.update('\0');
+      hash.update(String(s.ctimeMs));
+      hash.update('\0');
+      hash.update(String(s.ino));
+    } catch {
+      hash.update('0\0' + '0\0' + '0\0' + '0');
+    }
+    hash.update('\n');
+    count += 1;
+  }
+  hash.update(`count:${count}`);
+  return `${count}:${hash.digest('hex')}`;
+}
+
+function hashDocGraphContent(hash) {
+  hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
+  let count = 0;
+  for (const relPath of docGraphSourcePaths(DOC_GRAPH_ROOT)) {
+    const path = join(DOC_GRAPH_ROOT, relPath);
+    hash.update(relPath);
+    hash.update('\0');
+    try {
+      const s = statSync(path);
+      // Filesystem mtime is part of graph output when git is absent/untracked.
+      hash.update(String(s.mtimeMs));
+      hash.update('\0');
+      hash.update(String(s.size));
+      hash.update('\0');
+      hash.update(readTextFileCappedSync(path, DOC_GRAPH_MAX_FILE_BYTES));
+    } catch (error) {
+      hash.update('unreadable\0');
+      hash.update(String(error?.code || 'error'));
+    }
+    hash.update('\n');
+    count += 1;
+  }
+  hash.update(`count:${count}\n`);
 }
 
 // Host-produced checker output (#2486, epic #2256). A direct host ingest uses
@@ -1683,7 +1760,9 @@ export const PARSER_SIG_VERSION = 'v4';
 // tool_json; this paired turnover rejects persisted v20 bodies that could neither
 // prove structural candidates nor expose a durable mutation past the preview.
 // Git commitment remains deliberately unproven by transcript data.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 21;
+// v22 (#2380): the serialized full/light datasets now carry docGraph so every
+// client recommendation surface observes the same local doc-hygiene evidence.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 22;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2759,6 +2838,7 @@ export function sourceSignature() {
   parts.push(
     `external-guidance:${EXTERNAL_GUIDANCE_DIR}:${externalGuidanceSourceSignature()}`
   );
+  parts.push(`doc-graph:${DOC_GRAPH_ROOT}:${docGraphSourceSignature()}`);
   if (!SCOPED_INGEST) {
     for (const root of liveConfigProjectRoots(repoMapArtifactRoots())) {
       for (const name of ['AGENTS.md', 'CLAUDE.md', 'REFERENCES.md']) {
@@ -2981,6 +3061,13 @@ export function ingest() {
   // in the gate or a refreshed snapshot would be served stale.
   hash.update('external-guidance\n');
   hashExternalGuidanceContent(hash);
+  // Repo Markdown feeds the serialized docGraph and the doc-hygiene detector.
+  // Reuse the same bounded stat surface as sourceSignature() so neither cache
+  // can serve a graph from before an in-place doc edit or membership change.
+  hash.update('doc-graph\n');
+  hash.update(DOC_GRAPH_ROOT);
+  hash.update('\0');
+  hashDocGraphContent(hash);
   const contentHash = hash.digest('hex');
   return {
     total: sessions.length,
@@ -3474,6 +3561,7 @@ function assembleDatasetCore() {
     configBackups,
   } = assembleArtifacts();
   const externalGuidance = readExternalGuidance();
+  const docGraph = readDocGraph();
 
   // Artifact-derived experiment sources (#2151): proof receipts + model-eval
   // batches join the ledger's uniform (source, axis) cells so every experiment
@@ -3572,6 +3660,7 @@ function assembleDatasetCore() {
     configBackups,
     externalGuidance,
     gitOutcomes,
+    docGraph,
     // repoMap inputs (each caller builds repoMap; only the full path folds in
     // the embedded recommendations)
     maps,
@@ -3629,6 +3718,7 @@ export function assembleDataset() {
     configBackups,
     externalGuidance,
     gitOutcomes,
+    docGraph,
     maps,
     configSections,
     configAttribution,
@@ -3664,6 +3754,7 @@ export function assembleDataset() {
       configBackups,
       externalGuidance,
       gitOutcomes,
+      docGraph,
       promptAnalysis,
     })
   );
@@ -3762,6 +3853,7 @@ export function assembleDataset() {
     externalGuidance,
     // Git delivery-outcome rows (#1757); empty unless CHD_GIT_OUTCOMES is set.
     gitOutcomes,
+    docGraph,
   };
 }
 
@@ -3834,6 +3926,7 @@ export function assembleRecommendationDataset() {
     configBackups: core.configBackups,
     externalGuidance: core.externalGuidance,
     gitOutcomes: core.gitOutcomes,
+    docGraph: core.docGraph,
     repoMap,
   };
 }
@@ -3935,7 +4028,7 @@ function assembleRecommendationContext(options = {}) {
     // doc-hygiene detector (epic #2256) reads. Built fresh from a LOCAL walk of
     // this repo's own Markdown; empty on the SPA/upload dataset or when docs are
     // absent, so the detector simply emits nothing there.
-    docGraph: readDocGraph(),
+    docGraph: dataset.docGraph ?? readDocGraph(),
     // Optional host-produced Lychee output. Flag-off runner operation is local
     // and offline; ingest only reads the persisted JSON and never invokes a
     // checker or makes an external call.

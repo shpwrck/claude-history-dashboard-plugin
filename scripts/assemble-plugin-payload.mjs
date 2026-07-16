@@ -2,7 +2,7 @@
 // Single source of truth for the marketplace mirror payload. The publish
 // workflow and the clean-runtime test both call this implementation.
 
-import { cp, mkdir, rm } from 'node:fs/promises';
+import { cp, mkdir, readdir, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -72,6 +72,23 @@ export async function assemblePluginPayload({
     join(payloadRoot, '.claude-plugin')
   );
   await copy(join(projectRoot, 'commands'), join(payloadRoot, 'commands'));
+  // The plugin launches the same server from the payload root. Repo docs are
+  // therefore runtime data, not publishing-only prose: preserve the complete
+  // root *.md + docs/** surface consumed by buildDocGraph(). The marketplace
+  // README is deliberately the plugin-specific mirror below, so the graph
+  // describes the exact deployed payload rather than the source checkout.
+  for (const entry of await readdir(projectRoot, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.md')) {
+      await copy(
+        join(projectRoot, entry.name),
+        join(payloadRoot, entry.name)
+      );
+    }
+  }
+  await copy(join(projectRoot, 'docs'), join(payloadRoot, 'docs'));
+  // Keep this replacement after the root-doc copy. The marketplace landing
+  // page has plugin installation instructions that the repository README does
+  // not, and is intentionally the payload's canonical README node.
   await copy(
     join(projectRoot, 'docs', 'plugin-mirror-README.md'),
     join(payloadRoot, 'README.md')

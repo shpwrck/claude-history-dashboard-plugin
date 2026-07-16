@@ -9,6 +9,7 @@ import {
   listOmittedEngineSignals,
 } from './recommendations';
 import type { SecretsAtRestSignal } from './parse-secrets-at-rest';
+import type { DocGraph } from './parse-docs';
 import type { ViewData } from './view-registry';
 
 /**
@@ -48,6 +49,7 @@ function fullViewData(overrides: Partial<ViewData> = {}): ViewData {
     secretsAtRest: [],
     liveConfig: null,
     repoMap: null,
+    docGraph: null,
     shadowCalls: null,
     memories: [],
     workflows: [],
@@ -109,6 +111,29 @@ describe('recommendationViewsFromViewData (#2352 parity contract)', () => {
     expect(envelope.secretsAtRest).toEqual([]);
     expect(assembleRecommendationInput(envelope).secretsAtRest).toEqual([]);
     expect(legacyEnvelope.secretsAtRest).toEqual([]);
+  });
+
+  it('carries the server dataset doc graph through every client recommendation surface', () => {
+    const docGraph: DocGraph = {
+      root: '/repo',
+      nodes: [
+        {
+          slug: 'README',
+          path: 'README.md',
+          category: 'root',
+          frontmatter: {},
+          headings: ['Readme'],
+          gitMtimeIso: '2026-07-15T12:00:00.000Z',
+        },
+      ],
+      edges: [],
+    };
+    const envelope = recommendationViewsFromViewData(fullViewData({ docGraph }));
+
+    expect(envelope.docGraph).toBe(docGraph);
+    expect(assembleRecommendationInput(envelope).docGraph).toBe(docGraph);
+    expect(CLIENT_ABSENT_ENGINE_FIELDS).not.toContain('docGraph');
+    expect(listOmittedEngineSignals(envelope)).not.toContain('docGraph');
   });
 
   it('supplies every engine-consumed field the client dataset carries', () => {

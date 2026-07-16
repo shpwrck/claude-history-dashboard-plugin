@@ -4,7 +4,7 @@
  *
  * This is the doc-graph analogue of `parse-memories.ts`: where that module owns
  * the per-project agent-memory store the #1779 memory-hygiene detector reads,
- * this one owns the per-repo DOC store a future doc-hygiene detector will read
+ * this one owns the per-repo DOC store the doc-hygiene detector reads
  * off `RecommendationInput.docGraph`. It mirrors parse-memories' philosophy —
  * dependency-free, hand-rolled frontmatter/link extraction (regex + string ops,
  * NO yaml/markdown/remark deps), tolerant of malformed input (a bad file is
@@ -27,7 +27,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { join, posix, resolve } from 'node:path';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -104,8 +104,10 @@ export interface DocEdge {
   kind: DocEdgeKind;
 }
 
-/** The SCIP-style doc graph: sorted nodes + sorted, de-duplicated edges. */
+/** The SCIP-style doc graph: source root + sorted nodes and de-duplicated edges. */
 export interface DocGraph {
+  /** Resolved absolute root whose docs were walked (the repo-map join key). */
+  root: string;
   nodes: DocNode[];
   edges: DocEdge[];
 }
@@ -120,9 +122,15 @@ const EXCLUDE_DIRS: ReadonlySet<string> = new Set([
 ]);
 
 /** Skip a single doc larger than this (defensive; real docs are tiny). */
-const DEFAULT_MAX_FILE_BYTES = 512 * 1024;
+export const DOC_GRAPH_MAX_FILE_BYTES = 512 * 1024;
 /** Hard cap on files walked, so a pathological tree can never hang ingest. */
 const DEFAULT_MAX_FILES = 5000;
+const DOC_GRAPH_GIT_MAX_COMMITS = 4096;
+const DOC_GRAPH_GIT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const DOC_GRAPH_GIT_PATHS = [
+  ':(glob)*.md',
+  ':(glob)docs/**/*.md',
+] as const;
 
 export interface BuildDocGraphOptions {
   maxFileBytes?: number;
@@ -329,7 +337,11 @@ function toPosix(p: string): string {
  * repo-root `*.md` plus everything under `docs/**`, skipping {@link EXCLUDE_DIRS}
  * and capping the total. Deterministic (sorted) so the graph is stable.
  */
-function collectDocPaths(root: string, maxFiles: number): string[] {
+export function docGraphSourcePaths(
+  root: string,
+  opts: Pick<BuildDocGraphOptions, 'maxFiles'> = {}
+): string[] {
+  const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
   const found: string[] = [];
   const walk = (absDir: string, relDir: string, isRoot: boolean): void => {
     if (found.length >= maxFiles) return;
@@ -356,35 +368,102 @@ function collectDocPaths(root: string, maxFiles: number): string[] {
   return found.sort();
 }
 
-/** Mutable per-build state for the best-effort git-mtime probe. */
-interface GitProbe {
-  usable: boolean;
+/**
+ * Resolve the newest commit touching each current doc path with ONE git child
+ * process. `git log --name-only -z` emits commits newest-first, so the first
+ * occurrence of a path owns its last-commit timestamp. A marker prefixes the
+ * pretty-format record so filenames cannot be mistaken for dates. The pathspecs
+ * are relative to `git -C root` (and `--relative` keeps emitted names on that
+ * same surface), so an overridden root nested inside a larger repository does
+ * not accidentally query the repository top level.
+ *
+ * Both history depth and captured stdout are capped. If a partial clone, timeout,
+ * or output cap terminates the walk after Git has emitted newer commits, Node's
+ * child-process error retains that partial stdout; parse it instead of dropping
+ * every valid mtime and making the whole graph fall back to checkout mtimes.
+ */
+function partialGitStdout(error: unknown): string {
+  if (!error || typeof error !== 'object' || !('stdout' in error)) return '';
+  const stdout = (error as { stdout?: unknown }).stdout;
+  if (typeof stdout === 'string') return stdout;
+  if (stdout instanceof Uint8Array) return Buffer.from(stdout).toString('utf8');
+  return '';
+}
+
+function gitMtimesByPath(
+  root: string,
+  relPaths: readonly string[]
+): Map<string, string> {
+  const mtimes = new Map<string, string>();
+  if (relPaths.length === 0) return mtimes;
+  let output: string;
+  try {
+    output = execFileSync(
+      'git',
+      [
+        '-C',
+        root,
+        'log',
+        `--max-count=${DOC_GRAPH_GIT_MAX_COMMITS}`,
+        '--format=CHD-DATE:%cI%x00',
+        '--name-only',
+        '-z',
+        '--relative',
+        '--',
+        ...DOC_GRAPH_GIT_PATHS,
+      ],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 15_000,
+        maxBuffer: DOC_GRAPH_GIT_MAX_OUTPUT_BYTES,
+      }
+    );
+  } catch (error) {
+    output = partialGitStdout(error);
+  }
+  const wanted = new Set(relPaths);
+  let commitTime: string | null = null;
+  for (const raw of output.split('\0')) {
+    if (raw.startsWith('CHD-DATE:')) {
+      commitTime = raw.slice('CHD-DATE:'.length).trim();
+      continue;
+    }
+    const path = raw.replace(/^\n+/, '');
+    if (commitTime && wanted.has(path) && !mtimes.has(path)) {
+      mtimes.set(path, commitTime);
+    }
+  }
+  return mtimes;
 }
 
 /**
- * Best-effort last-commit ISO time for `relPath` under `root`. Tries git once;
- * if git is missing or the tree is not a repo, disables git for the rest of the
- * build and falls back to filesystem mtime. Untracked files (empty git output)
- * also fall back to mtime. `null` only when neither is available. No new deps —
- * `git` via node:child_process, like `scripts/ingest.mjs` already shells out.
+ * Bounded fingerprint for the Git history that supplies node `gitMtimeIso`.
+ * A doc can move from untracked to committed without changing its working-tree
+ * bytes or stat metadata, so dataset cache keys must cover this separately.
  */
+export function docGraphGitHistorySignature(root: string): string {
+  try {
+    return (
+      execFileSync(
+        'git',
+        ['-C', root, 'log', '-1', '--format=%H', '--', ...DOC_GRAPH_GIT_PATHS],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }
+      ).trim() || 'none'
+    );
+  } catch {
+    return 'none';
+  }
+}
+
+/** Best-effort git time with a filesystem fallback for untracked files. */
 function deriveMtimeIso(
   root: string,
   relPath: string,
-  probe: GitProbe
+  gitMtimes: ReadonlyMap<string, string>
 ): string | null {
-  if (probe.usable) {
-    try {
-      const out = execFileSync(
-        'git',
-        ['-C', root, 'log', '-1', '--format=%cI', '--', relPath],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }
-      ).trim();
-      if (out) return out;
-    } catch {
-      probe.usable = false; // git unavailable / not a repo — stop trying
-    }
-  }
+  const gitMtime = gitMtimes.get(relPath);
+  if (gitMtime) return gitMtime;
   try {
     return statSync(join(root, relPath)).mtime.toISOString();
   } catch {
@@ -397,21 +476,22 @@ function deriveMtimeIso(
  * path: reads repo-root `*.md` + `docs/**`, hand-extracts frontmatter, headings
  * and edges (md-link / issue-ref / src-ref), and recognises the declared
  * partial indices. Tolerant by design — an unreadable/oversized file is skipped,
- * never thrown — and returns an empty graph (`{ nodes: [], edges: [] }`) for a
- * missing/empty root, mirroring {@link buildMemoryStores}' empty-input contract.
+ * never thrown — and returns a root-tagged empty graph for a missing/empty
+ * root, mirroring {@link buildMemoryStores}' empty-input contract.
  */
 export function buildDocGraph(
   root: string,
   opts: BuildDocGraphOptions = {}
 ): DocGraph {
-  const maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+  const resolvedRoot = resolve(root);
+  const maxFileBytes = opts.maxFileBytes ?? DOC_GRAPH_MAX_FILE_BYTES;
   const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
-  const relPaths = collectDocPaths(root, maxFiles);
+  const relPaths = docGraphSourcePaths(resolvedRoot, { maxFiles });
+  const gitMtimes = gitMtimesByPath(resolvedRoot, relPaths);
 
   const nodes: DocNode[] = [];
   const edgeKeys = new Set<string>();
   const edges: DocEdge[] = [];
-  const probe: GitProbe = { usable: true };
 
   const addEdge = (from: string, to: string, kind: DocEdgeKind): void => {
     const key = `${from} ${to} ${kind}`;
@@ -423,9 +503,9 @@ export function buildDocGraph(
   for (const rel of relPaths) {
     let content: string;
     try {
-      const st = statSync(join(root, rel));
+      const st = statSync(join(resolvedRoot, rel));
       if (!st.isFile() || st.size > maxFileBytes) continue;
-      content = readFileSync(join(root, rel), 'utf8');
+      content = readFileSync(join(resolvedRoot, rel), 'utf8');
     } catch {
       continue; // unreadable — skip
     }
@@ -439,7 +519,7 @@ export function buildDocGraph(
       category,
       frontmatter,
       headings: extractHeadings(body),
-      gitMtimeIso: deriveMtimeIso(root, rel, probe),
+      gitMtimeIso: deriveMtimeIso(resolvedRoot, rel, gitMtimes),
     };
     const idx = classifyIndex(slug, category);
     if (idx) {
@@ -471,5 +551,5 @@ export function buildDocGraph(
       a.kind.localeCompare(b.kind) ||
       a.to.localeCompare(b.to)
   );
-  return { nodes, edges };
+  return { root: resolvedRoot, nodes, edges };
 }

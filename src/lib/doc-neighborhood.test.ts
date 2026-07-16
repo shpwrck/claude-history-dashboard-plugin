@@ -45,7 +45,11 @@ const src = (from: string, p: string): DocEdge => ({
   to: `src:${p}`,
   kind: 'src-ref',
 });
-const graph = (nodes: DocNode[], edges: DocEdge[]): DocGraph => ({ nodes, edges });
+const graph = (nodes: DocNode[], edges: DocEdge[]): DocGraph => ({
+  root: '/repo',
+  nodes,
+  edges,
+});
 
 const slugs = (r: { nodes: { slug: string }[] }): string[] =>
   r.nodes.map((n) => n.slug).sort();

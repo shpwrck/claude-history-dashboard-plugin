@@ -135,6 +135,13 @@ try {
     undefined,
     'plugin MCP config belongs inline in plugin.json, not at payload root'
   );
+  await access(join(payloadRoot, 'REFERENCES.md'));
+  await access(join(payloadRoot, 'docs', 'adding-a-recommendation.md'));
+  assert.equal(
+    await readFile(join(payloadRoot, 'README.md'), 'utf8'),
+    await readFile(resolve('docs/plugin-mirror-README.md'), 'utf8'),
+    'the payload doc graph should use the marketplace-specific README'
+  );
 
   const manifest = JSON.parse(
     await readFile(join(payloadRoot, '.claude-plugin', 'plugin.json'), 'utf8')

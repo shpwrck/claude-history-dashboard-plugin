@@ -705,13 +705,14 @@ export interface RecommendationInput {
   /**
    * SCIP-style graph over the repository's own Markdown docs (#2257, epic
    * #2256), dataset key `docGraph`. A non-signal aggregate (like `memoryStores`
-   * / `externalGuidance`): `nodes` (slug, path, category, frontmatter, headings,
-   * gitMtime) + typed `edges` (`md-link`/`issue-ref`/`src-ref`), plus the three
-   * declared partial indices (REFERENCES parser table, competitive-analysis
-   * tracker, ADR numeric ordering) flagged via `indexKind`/`ordinal`. Built at
-   * ingest time by `buildDocGraph` (parse-docs) from a local repo-docs walk —
-   * zero network, zero Anthropic egress. `maintenance.doc-hygiene` consumes it
-   * alongside the optional host-produced checker artifact.
+   * / `externalGuidance`): resolved absolute `root` (the repo-map identity join),
+   * `nodes` (slug, path, category, frontmatter, headings, gitMtime) + typed
+   * `edges` (`md-link`/`issue-ref`/`src-ref`), plus the three declared partial
+   * indices (REFERENCES parser table, competitive-analysis tracker, ADR numeric
+   * ordering) flagged via `indexKind`/`ordinal`. Built at ingest time by
+   * `buildDocGraph` (parse-docs) from a local repo-docs walk — zero network,
+   * zero Anthropic egress. `maintenance.doc-hygiene` consumes it alongside the
+   * optional host-produced checker artifact.
    * Optional: `undefined`/`null`/empty (no docs, or the SPA/upload dataset)
    * means downstream detectors emit nothing.
    */

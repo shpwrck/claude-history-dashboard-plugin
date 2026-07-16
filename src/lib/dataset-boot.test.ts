@@ -35,6 +35,7 @@ function sampleDataset() {
     ],
     toolData: [{ sessionId: 'a', calls: [] }],
     repoMap: { files: { 'a.ts': 1 } }, // non-array heavy key
+    docGraph: { nodes: [{ path: 'README.md' }], edges: [] },
   };
 }
 
@@ -53,6 +54,7 @@ describe('splitDataset', () => {
       { sessionId: 'c', id: 'e3' },
     ]);
     expect(slices.repoMap).toEqual({ files: { 'a.ts': 1 } });
+    expect(slices.docGraph).toEqual({ nodes: [{ path: 'README.md' }], edges: [] });
     expect('toolData' in slices).toBe(true);
   });
 
@@ -68,6 +70,7 @@ describe('splitDataset', () => {
     expect(boot.aggregates.models).toBe(2); // opus, sonnet (deduped)
     expect(boot.counts.entries).toBe(3);
     expect(boot.counts.repoMap).toBe(1); // non-array object counts as 1
+    expect(boot.counts.docGraph).toBe(1);
     // sliceKeys lists only present, non-empty heavy keys
     expect(boot.sliceKeys).toContain('entries');
     expect(boot.sliceKeys).toContain('repoMap');
@@ -87,13 +90,15 @@ describe('mergeDataset (inverse of splitDataset)', () => {
     for (const [k, v] of Object.entries(ds)) expect(merged[k]).toEqual(v);
   });
 
-  it('defaults an unfetched array slice to [] and repoMap to null', () => {
+  it('defaults unfetched arrays to [] and non-array objects to null', () => {
     const { boot } = splitDataset(sampleDataset());
     const merged = mergeDataset(boot.meta, {}); // fetched nothing
     expect(merged.entries).toEqual([]);
     expect(merged.timelines).toEqual([]);
     expect(merged.repoMap).toBeNull(); // non-array default
+    expect(merged.docGraph).toBeNull();
     expect(NON_ARRAY_SLICE_KEYS.has('repoMap')).toBe(true);
+    expect(NON_ARRAY_SLICE_KEYS.has('docGraph')).toBe(true);
   });
 });
 

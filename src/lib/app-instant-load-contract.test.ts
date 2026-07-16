@@ -33,6 +33,7 @@ describe('App instant-load boundary', () => {
     expect(source).toContain('const applyDatasetSlice = useCallback');
     expect(reload).toContain('applySlice: applyDatasetSlice');
     expect(source).toContain('const exhaustive: never = key');
+    expect(progressiveDispatcher).toContain("case 'docGraph':");
     expect(progressiveDispatcher).not.toContain("case 'workflows':");
   });
 });

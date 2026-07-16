@@ -17,7 +17,15 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { execFileSyncMock } = vi.hoisted(() => ({
+  execFileSyncMock: vi.fn((): string => {
+    throw new Error('not a git repository');
+  }),
+}));
+
+vi.mock('node:child_process', () => ({ execFileSync: execFileSyncMock }));
 import {
   buildDocGraph,
   classifyIndex,
@@ -227,21 +235,26 @@ describe('buildDocGraph', () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'parse-docs-'));
+    execFileSyncMock.mockReset();
+    execFileSyncMock.mockImplementation((): string => {
+      throw new Error('not a git repository');
+    });
   });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
   });
 
   it('returns an empty graph for a missing root', () => {
-    const graph = buildDocGraph(join(root, 'does-not-exist'));
-    expect(graph).toEqual<DocGraph>({ nodes: [], edges: [] });
+    const missing = join(root, 'does-not-exist');
+    const graph = buildDocGraph(missing);
+    expect(graph).toEqual<DocGraph>({ root: missing, nodes: [], edges: [] });
   });
 
   it('returns an empty graph when there are no docs', () => {
     mkdirSync(join(root, 'src', 'lib'), { recursive: true });
     writeFileSync(join(root, 'src', 'lib', 'code.ts'), 'export const x = 1;');
     const graph = buildDocGraph(root);
-    expect(graph).toEqual<DocGraph>({ nodes: [], edges: [] });
+    expect(graph).toEqual<DocGraph>({ root, nodes: [], edges: [] });
   });
 
   it('indexes repo-root *.md and docs/** and skips excluded/non-docs trees', () => {
@@ -254,6 +267,7 @@ describe('buildDocGraph', () => {
     write(root, '.worktrees/wt/docs/x.md', '# ignored\n');
 
     const graph = buildDocGraph(root);
+    expect(graph.root).toBe(root);
     const slugs = graph.nodes.map((n) => n.path).sort();
     expect(slugs).toEqual([
       'README.md',
@@ -326,6 +340,65 @@ describe('buildDocGraph', () => {
     const mtime = byslug.get('REFERENCES')?.gitMtimeIso;
     expect(typeof mtime).toBe('string');
     expect(Number.isNaN(Date.parse(mtime as string))).toBe(false);
+  });
+
+  it('resolves every tracked mtime with one bounded git history query', () => {
+    write(root, 'README.md', '# Readme\n');
+    write(root, 'docs/a.md', '# A\n');
+    write(root, 'docs/untracked.md', '# Untracked\n');
+    execFileSyncMock.mockReturnValue(
+      'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
+        'CHD-DATE:2026-07-13T09:00:00-04:00\0\0\ndocs/a.md\0'
+    );
+
+    const graph = buildDocGraph(root);
+    const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
+
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining([
+        '-C',
+        root,
+        'log',
+        '--max-count=4096',
+        '--name-only',
+        '-z',
+        '--relative',
+        '--',
+        ':(glob)*.md',
+        ':(glob)docs/**/*.md',
+      ]),
+      expect.objectContaining({ encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+    );
+    expect(byPath.get('README.md')?.gitMtimeIso).toBe(
+      '2026-07-14T10:00:00-04:00'
+    );
+    expect(byPath.get('docs/a.md')?.gitMtimeIso).toBe(
+      '2026-07-13T09:00:00-04:00'
+    );
+    expect(Date.parse(byPath.get('docs/untracked.md')?.gitMtimeIso ?? '')).not.toBeNaN();
+  });
+
+  it('preserves git mtimes emitted before a bounded history walk fails', () => {
+    write(root, 'README.md', '# Readme\n');
+    write(root, 'docs/older.md', '# Older\n');
+    execFileSyncMock.mockImplementation((): string => {
+      throw Object.assign(new Error('missing historical tree'), {
+        stdout: 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0',
+      });
+    });
+
+    const graph = buildDocGraph(root);
+    const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
+
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+    expect(byPath.get('README.md')?.gitMtimeIso).toBe(
+      '2026-07-14T10:00:00-04:00'
+    );
+    expect(
+      Date.parse(byPath.get('docs/older.md')?.gitMtimeIso ?? '')
+    ).not.toBeNaN();
   });
 
   it('produces deterministic, sorted, de-duplicated output', () => {

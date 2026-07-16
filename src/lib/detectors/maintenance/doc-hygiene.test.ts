@@ -27,7 +27,11 @@ const srcRef = (from: string, path: string): DocEdge => ({
   kind: 'src-ref',
 });
 
-const graph = (nodes: DocNode[], edges: DocEdge[] = []): DocGraph => ({ nodes, edges });
+const graph = (
+  nodes: DocNode[],
+  edges: DocEdge[] = [],
+  root = '/repo'
+): DocGraph => ({ root, nodes, edges });
 
 function repoMap(paths: string[], over: Record<string, unknown> = {}): RepoMapDataset {
   return {
@@ -485,10 +489,59 @@ describe('maintenance.doc-hygiene — dangling-src-ref (signal 3)', () => {
     expect(run(g, rm)).toBeNull();
   });
 
+  it('stays silent when structured file rows do not cover fileCount', () => {
+    const g = graph([refDoc()], [srcRef('REFERENCES', 'src/lib/parse-gone.ts')]);
+    const rm = repoMap(['src/lib/parse-docs.ts'], { fileCount: 2 });
+    expect(run(g, rm)).toBeNull();
+  });
+
   it('does not flag a ref whose extension the inventory never covers', () => {
     // A TS-only map cannot judge a `.css` reference — that is a coverage gap,
     // not a dead reference.
     const g = graph([refDoc()], [srcRef('REFERENCES', 'src/styles/app.css')]);
+    expect(run(g, repoMap(['src/lib/parse-docs.ts']))).toBeNull();
+  });
+
+  it('stays silent when the only repo map belongs to another checkout', () => {
+    const g = graph([refDoc()], [srcRef('REFERENCES', 'src/lib/parse-gone.ts')]);
+    const unrelated = repoMap(['src/lib/parse-docs.ts'], {
+      root: '/user-project',
+    });
+    expect(run(g, unrelated)).toBeNull();
+  });
+
+  it('checks only the matching root when another project contains the target', () => {
+    const g = graph([refDoc()], [srcRef('REFERENCES', 'src/lib/parse-gone.ts')]);
+    const maps = repoMap(['src/lib/parse-docs.ts']);
+    maps.projects.push(
+      repoMap(['src/lib/parse-gone.ts'], { root: '/user-project' }).projects[0]
+    );
+
+    const rec = run(g, maps);
+    expect(rec).not.toBeNull();
+    expect(rec!.evidence).toContain(
+      'REFERENCES.md -> src/lib/parse-gone.ts — source reference no longer exists'
+    );
+  });
+
+  it('ignores an unrelated truncated map when the matching inventory is complete', () => {
+    const g = graph([refDoc()], [srcRef('REFERENCES', 'src/lib/parse-gone.ts')]);
+    const maps = repoMap(['src/lib/parse-docs.ts']);
+    maps.projects.push(
+      repoMap(['src/lib/other.ts'], {
+        root: '/user-project',
+        truncated: true,
+      }).projects[0]
+    );
+
+    expect(run(g, maps)).not.toBeNull();
+  });
+
+  it('fails closed for a legacy graph with no root identity', () => {
+    const g = {
+      nodes: [refDoc()],
+      edges: [srcRef('REFERENCES', 'src/lib/parse-gone.ts')],
+    } as unknown as DocGraph;
     expect(run(g, repoMap(['src/lib/parse-docs.ts']))).toBeNull();
   });
 });

@@ -39,6 +39,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { DETECTORS } from '../src/lib/detectors/index.ts';
 
 function assistantLine({ text, toolName, toolInput, ts, model }) {
@@ -412,6 +413,108 @@ test('#2182 the light dataset skips dataset-only fields and matches recs-consume
     else process.env.HOME = origHome;
     if (origDb === undefined) delete process.env.CHD_DB_PATH;
     else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('#2380 repo docs reach both datasets and invalidate both cache gates', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origDocRoot = process.env.CHD_DOC_GRAPH_ROOT;
+  const home = buildFixtureHome();
+  const gitRoot = join(tmpdir(), `chd-2380-docs-${randomUUID()}`);
+  // Exercise the production override as a subdirectory of a larger checkout.
+  // Git pathspecs and emitted names must stay relative to this selected root.
+  const docRoot = join(gitRoot, 'package');
+  mkdirSync(join(docRoot, 'docs'), { recursive: true });
+  writeFileSync(join(docRoot, 'README.md'), '# First\n');
+  const guidePath = join(docRoot, 'docs', 'guide.md');
+  writeFileSync(guidePath, '# Guide\n');
+
+  try {
+    process.env.CHD_DOC_GRAPH_ROOT = docRoot;
+    const ingest = await loadIngest(home);
+    ingest.ingest();
+
+    const full = ingest.assembleDataset();
+    const light = ingest.assembleRecommendationDataset();
+    assert.deepEqual(light.docGraph, full.docGraph);
+    assert.equal(
+      full.docGraph.root,
+      docRoot,
+      'the serialized graph carries the exact root used for repo-map identity'
+    );
+    assert.deepEqual(
+      full.docGraph.nodes.map((node) => node.path).sort(),
+      ['README.md', 'docs/guide.md'],
+      'the serialized client dataset carries the same local doc graph as recommendations'
+    );
+
+    const baselineSignature = ingest.sourceSignature();
+    const baselineHash = ingest.ingest().contentHash;
+    const before = statSync(guidePath);
+    writeFileSync(guidePath, '# Other\n');
+    assert.equal(statSync(guidePath).size, before.size, 'fixture preserves byte length');
+    utimesSync(guidePath, before.atime, before.mtime);
+
+    assert.notEqual(
+      ingest.sourceSignature(),
+      baselineSignature,
+      'a repo-doc edit invalidates the cheap response signature'
+    );
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      baselineHash,
+      'a repo-doc edit invalidates the persisted dataset cache key'
+    );
+
+    // Git history is part of docGraph output (`gitMtimeIso`) even when the
+    // working-tree bytes and stat metadata stay unchanged. Moving the same
+    // files from untracked to committed must therefore invalidate both gates.
+    const untrackedSignature = ingest.sourceSignature();
+    const untrackedHash = ingest.ingest().contentHash;
+    execFileSync('git', ['init'], { cwd: gitRoot, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: gitRoot });
+    execFileSync('git', ['config', 'user.name', 'CHD Test'], { cwd: gitRoot });
+    execFileSync('git', ['add', 'package/README.md', 'package/docs/guide.md'], {
+      cwd: gitRoot,
+    });
+    execFileSync('git', ['commit', '-m', 'Track docs'], {
+      cwd: gitRoot,
+      stdio: 'ignore',
+    });
+
+    assert.notEqual(
+      ingest.sourceSignature(),
+      untrackedSignature,
+      'committing unchanged repo docs invalidates the cheap response signature'
+    );
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      untrackedHash,
+      'committing unchanged repo docs invalidates the persisted dataset cache key'
+    );
+    const expectedGuideMtime = execFileSync(
+      'git',
+      ['log', '-1', '--format=%cI', '--', 'package/docs/guide.md'],
+      { cwd: gitRoot, encoding: 'utf8' }
+    ).trim();
+    assert.equal(
+      ingest
+        .assembleDataset()
+        .docGraph.nodes.find((node) => node.path === 'docs/guide.md')
+        ?.gitMtimeIso,
+      expectedGuideMtime,
+      'a nested doc root keeps git history paths relative to that root'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(gitRoot, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+    if (origDocRoot === undefined) delete process.env.CHD_DOC_GRAPH_ROOT;
+    else process.env.CHD_DOC_GRAPH_ROOT = origDocRoot;
   }
 });
 

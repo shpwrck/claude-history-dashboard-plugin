@@ -69,6 +69,7 @@ import type { AdoptionReceipt } from './adoption-receipts';
 import type { ModelEvalSummary } from './model-eval-ingest';
 import type { ExternalGuidance } from './external-guidance';
 import type { RepoMapDataset } from './parse-repo-map-join';
+import type { DocGraph } from './parse-docs';
 import type { OrganizationReviewEventsDataset } from './organization-review-events';
 import type { ShadowCallAggregate } from './parse-shadow-calls';
 import type { EvidenceRef } from './evidence';
@@ -302,6 +303,8 @@ export interface ViewData {
   secretsAtRest: SecretsAtRestSignal[];
   liveConfig: LiveConfig | null;
   repoMap: RepoMapDataset | null;
+  /** Local repository Markdown graph; null on SPA/upload datasets. */
+  docGraph: DocGraph | null;
   shadowCalls: ShadowCallAggregate | null;
   memories: ProjectMemories[];
   workflows: WorkflowRun[];

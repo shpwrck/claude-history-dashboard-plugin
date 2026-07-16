@@ -1,0 +1,1 @@
+import{t as e}from"./doc-hygiene-B-fiSQBw.js";export{e as detector};

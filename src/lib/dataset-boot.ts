@@ -23,6 +23,7 @@
  * its slice. `repoMap` (the repo-map context join, #1650) is a non-array OBJECT
  * that can reach several MB; it feeds only the Context view, so it is deferred
  * and defaults to `null` (not `[]`) when unfetched — see {@link NON_ARRAY_SLICE_KEYS}.
+ * `docGraph` is likewise a non-array object and is large enough to defer.
  */
 export const HEAVY_SLICE_KEYS = [
   'entries',
@@ -44,6 +45,7 @@ export const HEAVY_SLICE_KEYS = [
   'workflows',
   'tasks',
   'repoMap',
+  'docGraph',
 ] as const;
 
 export type HeavySliceKey = (typeof HEAVY_SLICE_KEYS)[number];
@@ -63,7 +65,7 @@ export interface DatasetSlicePatch {
  * Heavy keys whose value is a non-array object (or null) rather than an array,
  * so an unfetched slice must default to `null`, not `[]`.
  */
-export const NON_ARRAY_SLICE_KEYS = new Set<string>(['repoMap']);
+export const NON_ARRAY_SLICE_KEYS = new Set<string>(['repoMap', 'docGraph']);
 
 const HEAVY_SET = new Set<string>(HEAVY_SLICE_KEYS);
 

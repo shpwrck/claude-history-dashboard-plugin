@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Claude Coach — digest-led nav (prototype)</title>
+<style>
+  :root{
+    --bg:#0f1214; --bg2:#16191c; --card:#1f2327; --card2:#262b30;
+    --bd:#3a4047; --bd2:#4a525a; --tx:#e3e6e8; --tx2:#9aa3ab; --tx3:#6b747c;
+    --accent:#3fa9ff; --accent-bg:#0e2a40;
+    --crit:#ff5d52; --crit-bg:#3a1512; --warn:#f0ab00; --warn-bg:#332600; --ok:#5bbd6b; --ok-bg:#13290f;
+    --radius:8px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  button{font:inherit;cursor:pointer}
+  a{color:var(--accent);text-decoration:none}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  /* mode strip */
+  .modebar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 18px;background:#0b0e10;border-bottom:1px solid var(--bd);font-size:12.5px;color:var(--tx2)}
+  .seg{display:inline-flex;border:1px solid var(--bd2);border-radius:7px;overflow:hidden}
+  .seg button{background:var(--card);color:var(--tx2);border:none;padding:5px 13px;font-weight:600}
+  .seg button.active{background:var(--accent);color:#04243d}
+  .seg.sm button{padding:4px 10px;font-size:11.5px}
+  .modebar .lbl{color:var(--tx3)}
+
+  /* top bar */
+  .topbar{display:flex;align-items:center;gap:16px;padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--bd)}
+  .brand{font-weight:700;font-size:16px;display:flex;align-items:center;gap:8px}
+  .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+  .find{flex:0 0 300px;display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:6px 14px;color:var(--tx2)}
+  .find input{flex:1;background:none;border:none;color:var(--tx);outline:none}
+  .topnav{display:flex;gap:4px;margin-left:auto}
+  .topnav button{background:none;border:1px solid transparent;color:var(--tx2);padding:6px 13px;border-radius:6px}
+  .topnav button.active{background:var(--accent-bg);color:var(--accent);border-color:var(--accent)}
+
+  /* shell: rail + main */
+  .shell{display:grid;grid-template-columns:236px 1fr;min-height:560px}
+  .shell.railcollapsed{grid-template-columns:52px 1fr}
+  .rail{background:var(--bg2);border-right:1px solid var(--bd);padding:10px 8px;overflow:auto}
+  .rail .railhead{display:flex;align-items:center;gap:8px;color:var(--tx3);font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px 8px}
+  .railcollapsed .rail .full{display:none}
+  .rail .grp{margin-bottom:10px}
+  .rail .glabel{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;color:var(--tx2);padding:5px 8px}
+  .rail .gdot{width:9px;height:9px;border-radius:3px;flex:0 0 auto}
+  .rail .ri{padding:5px 8px 5px 24px;border-radius:6px;color:var(--tx2);font-size:13px;cursor:pointer}
+  .rail .ri:hover{background:var(--accent-bg);color:var(--accent)}
+  .railcollapsed .rail .glabel span.gt,.railcollapsed .rail .ri{display:none}
+  .railcollapsed .rail .glabel{justify-content:center;padding:6px 0}
+  .railtoggle{width:100%;background:var(--card);border:1px solid var(--bd);color:var(--tx2);border-radius:6px;padding:5px;margin-bottom:8px}
+
+  .main{padding:20px 24px 50px;overflow:auto}
+  .pagehead{display:flex;align-items:baseline;gap:12px;margin:0 0 6px}
+  .pagehead h1{font-size:19px;margin:0;font-weight:700}
+  .pagehead .sub{color:var(--tx2);font-size:13px}
+  .cap{color:var(--tx3);font-size:12px;margin:2px 0 16px}
+
+  /* digest spine */
+  .verdict{display:flex;gap:14px;align-items:flex-start;background:var(--crit-bg);border:1px solid var(--crit);border-radius:var(--radius);padding:14px 16px;margin-bottom:8px}
+  .verdict .vi{font-size:12px;font-weight:800;color:var(--crit);text-transform:uppercase;letter-spacing:.5px;background:#0009;border:1px solid var(--crit);border-radius:6px;padding:4px 8px;white-space:nowrap}
+  .verdict .vt{font-size:14.5px;color:var(--tx)}
+  .verdict .vt b{color:#fff}
+  .verdict.ok{background:var(--ok-bg);border-color:var(--ok)} .verdict.ok .vi{color:var(--ok);border-color:var(--ok)}
+
+  .beat{margin-top:20px}
+  .beat .bh{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+  .beat .bn{font-size:11px;color:var(--tx3);font-weight:700;border:1px solid var(--bd);border-radius:50%;width:20px;height:20px;display:grid;place-items:center}
+  .beat h2{font-size:15px;margin:0;font-weight:700}
+  .beat .bsub{color:var(--tx3);font-size:12px}
+
+  .finding{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--bd2);border-radius:7px;padding:11px 13px;margin-bottom:8px}
+  .finding.crit{border-left-color:var(--crit)} .finding.warn{border-left-color:var(--warn)} .finding.info{border-left-color:var(--accent)}
+  .finding .dchip{width:11px;height:11px;border-radius:3px;flex:0 0 auto}
+  .finding .fbody{flex:1}
+  .finding .ft{font-weight:600}
+  .finding .fm{color:var(--tx2);font-size:12.5px}
+  .finding .dom{font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:var(--tx3);border:1px solid var(--bd);border-radius:10px;padding:1px 7px;margin-left:6px}
+  .finding .fact{display:flex;gap:8px;align-items:center;white-space:nowrap}
+  .btn{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#04243d;border:none;font-weight:700;padding:6px 11px;border-radius:6px;font-size:12.5px}
+  .btn.ghost{background:none;color:var(--accent);border:1px solid var(--accent)}
+  .openraw{color:var(--tx2);font-size:12.5px}.openraw:hover{color:var(--accent)}
+  .where{display:flex;gap:10px;flex-wrap:wrap}
+  .wcell{flex:1;min-width:150px;background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:10px 12px;cursor:pointer}
+  .wcell:hover{border-color:var(--accent)}
+  .wcell .wv{font-size:17px;font-weight:700}.wcell .wl{color:var(--tx2);font-size:12px}.wcell .wa{color:var(--accent);font-size:11px}
+
+  /* expert sticky banner */
+  .sticky{display:flex;align-items:center;gap:10px;background:var(--accent-bg);border:1px solid var(--accent);border-radius:7px;padding:8px 12px;margin-bottom:14px;font-size:13px;color:var(--tx)}
+
+  /* compare: 6 cards */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .ocard{background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:13px;min-height:120px}
+  .ocard .oh{display:flex;align-items:center;gap:9px;margin-bottom:8px}
+  .ocard h3{margin:0;font-size:14px}
+  .ocard .ok{font-size:12px;color:var(--tx2)}
+  .whichdoor{margin-top:12px;font-size:12.5px;color:var(--warn);border:1px dashed var(--warn);border-radius:6px;padding:8px 10px}
+  /* compare: flat */
+  .flatlist{display:flex;flex-wrap:wrap;gap:6px}
+  .flatlist .fi{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:6px 11px;color:var(--tx2);font-size:13px}
+  .flatnote{margin-top:12px;font-size:12.5px;color:var(--crit);border:1px dashed var(--crit);border-radius:6px;padding:8px 10px}
+
+  .ghostview{margin-top:8px;border:1px dashed var(--bd2);border-radius:8px;padding:24px;color:var(--tx2);text-align:center}
+  .crumb{color:var(--tx2);font-size:13px;margin-bottom:12px}
+  .drawer{margin-top:20px;border:1px solid var(--bd);border-radius:8px;background:var(--bg2)}
+  .drawer summary{cursor:pointer;padding:11px 15px;color:var(--tx2);font-weight:600;list-style:none}
+  .drawer summary::-webkit-details-marker{display:none}
+  .drawer .inner{padding:0 15px 14px;display:flex;flex-wrap:wrap;gap:9px}
+  .rawtile{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:9px 13px;color:var(--tx3);font-size:12.5px}
+  .hidden{display:none}
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok);padding:9px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+  <div class="modebar">
+    <span class="lbl">Home structure:</span>
+    <div class="seg sm">
+      <button id="hm-digest" class="active" onclick="setHome('digest')">Digest spine (proposed)</button>
+      <button id="hm-cards" onclick="setHome('cards')">6 outcome cards</button>
+      <button id="hm-flat" onclick="setHome('flat')">Flat 20 views</button>
+    </div>
+    <span class="lbl" style="margin-left:8px">I'm a:</span>
+    <div class="seg sm">
+      <button id="bd-new" class="active" onclick="setBand('newcomer')">Newcomer</button>
+      <button id="bd-exp" onclick="setBand('expert')">Expert</button>
+    </div>
+    <span class="lbl">— band changes disclosure depth, not the data. Click rail items, findings, "where" cells, Find.</span>
+  </div>
+
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span>Claude Coach</div>
+    <div class="find"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="10.5" cy="10.5" r="7"/><line x1="21" y1="21" x2="15.8" y2="15.8"/></svg><input placeholder="Find a session, project, transcript…" /></div>
+    <div class="topnav">
+      <button class="active" data-tab="home" onclick="tab('home')">Home</button>
+      <button data-tab="recs" onclick="tab('recs')">Recommendations</button>
+      <button data-tab="raw" onclick="tab('raw')">Raw data</button>
+    </div>
+  </div>
+
+  <div class="shell" id="shell">
+    <div class="rail" id="rail"></div>
+    <div class="main" id="main"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+// ---- data ----
+const DOMAINS=[
+  {key:'cost', name:'Cut Cost', color:'var(--crit)', views:['cost','tokens']},
+  {key:'speed', name:'Go Faster', color:'var(--warn)', views:['evaluator','agents (telemetry)']},
+  {key:'fail', name:'Fail Less', color:'var(--warn)', views:['errors','tools']},
+  {key:'safe', name:'Stay Safe', color:'var(--crit)', views:['permissions','automation']},
+  {key:'ctx', name:'Tame Context', color:'var(--warn)', views:['context','files']},
+  {key:'wf', name:'Clean Workflow', color:'var(--ok)', views:['config-hygiene','agents','patterns']},
+];
+// ranked ACROSS domains, safety first
+const FINDINGS=[
+  {sev:'crit', dom:'safety', title:'6 sessions ran with bypassPermissions; 2 unattended', meta:'Review entrypoints & tighten policy', act:'Apply policy', raw:'permissions'},
+  {sev:'crit', dom:'cost', title:'Opus→Sonnet on 3 routine projects saves ~$48/wk', meta:'settings.json model key', act:'Apply swap', raw:'cost'},
+  {sev:'warn', dom:'context', title:'Session a1f2 compacted 4× — compact earlier', meta:'Paste /compact at 60% context', act:'Copy /compact', raw:'context'},
+  {sev:'warn', dom:'reliability', title:'Edit tool failing 11% — wrap retries', meta:'Clustered in 4 sessions', act:'View errors', raw:'errors'},
+  {sev:'info', dom:'workflow', title:'4 skills + 2 MCP servers unused 30d', meta:'CLAUDE.md is 1.8k lines', act:'Copy prune', raw:'config-hygiene'},
+  {sev:'info', dom:'speed', title:'p95 tool latency 14.2s; hook overhead 2.1s/turn', meta:'Thin signal — wiring in progress', act:'View speed', raw:'evaluator'},
+];
+const WHERE=[
+  {v:'$96', l:'biggest project — acme-api (45% of spend)', a:'→ Cost', raw:'cost'},
+  {v:'2.1s', l:'per-turn hook overhead (2 hooks)', a:'→ Speed', raw:'evaluator'},
+  {v:'4', l:'sessions holding 80% of errors', a:'→ Errors', raw:'errors'},
+];
+
+let band='newcomer', homeMode='digest', curTab='home';
+
+function el(h){const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstChild}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._x);t._x=setTimeout(()=>t.classList.remove('show'),1400)}
+const sevColor=s=>s==='crit'?'var(--crit)':s==='warn'?'var(--warn)':'var(--accent)';
+const domColor=d=>({safety:'var(--crit)',cost:'var(--crit)',context:'var(--warn)',reliability:'var(--warn)',workflow:'var(--ok)',speed:'var(--warn)'})[d]||'var(--accent)';
+
+function renderRail(){
+  const r=document.getElementById('rail');
+  const collapsed=band==='newcomer';
+  document.getElementById('shell').classList.toggle('railcollapsed',collapsed);
+  let h=`<button class="railtoggle" onclick="toggleRail()" title="raw views">${collapsed?'»':'« Raw views'}</button>`;
+  h+=`<div class="railhead"><span class="full">Every view, one click</span></div>`;
+  DOMAINS.forEach(d=>{
+    h+=`<div class="grp"><div class="glabel"><span class="gdot" style="background:${d.color}"></span><span class="gt">${d.name}</span></div>`;
+    d.views.forEach(v=>h+=`<div class="ri" onclick="drill('${v}')">${v}</div>`);
+    h+=`</div>`;
+  });
+  r.innerHTML=h;
+}
+function toggleRail(){ band = band==='newcomer'?'expert':'newcomer'; syncBandButtons(); renderRail(); }
+function syncBandButtons(){
+  document.getElementById('bd-new').classList.toggle('active',band==='newcomer');
+  document.getElementById('bd-exp').classList.toggle('active',band==='expert');
+}
+
+function digestHTML(){
+  let h='';
+  // expert lands sticky in a raw view (disclosure depth)
+  if(band==='expert'){
+    h+=`<div class="sticky">↩ Welcome back — you were last in <b>tokens</b>. <a href="#" onclick="drill('tokens');return false">Resume raw view →</a> &nbsp;·&nbsp; the digest is below if you want the summary.</div>`;
+  }
+  h+=`<div class="pagehead"><h1>What should I fix?</h1><span class="sub">One ranked answer across every domain — safety first.</span></div>`;
+  if(band==='newcomer') h+=`<div class="cap">New here? This page reads top to bottom: are you OK → where it went → what to fix. You never pick a data-type.</div>`;
+  // beat 1: verdict (safety-first)
+  h+=`<div class="verdict"><span class="vi">Action needed</span><span class="vt"><b>1 critical safety issue</b> needs attention. You're at <b>72%</b> of the 5-hour cap, on pace for ~95% of the weekly cap by Friday. Spend and errors are concentrated — see below.</span></div>`;
+  // beat 2: where it went
+  h+=`<div class="beat"><div class="bh"><span class="bn">2</span><h2>Where did it go?</h2><span class="bsub">the concentrations worth knowing</span></div><div class="where">`;
+  WHERE.forEach(w=>h+=`<div class="wcell" onclick="drill('${w.raw}')"><div class="wv">${w.v}</div><div class="wl">${w.l}</div><div class="wa">${w.a}</div></div>`);
+  h+=`</div></div>`;
+  // beat 3: what to fix (ranked across domains)
+  h+=`<div class="beat"><div class="bh"><span class="bn">3</span><h2>What to fix</h2><span class="bsub">ranked across all six domains — not six separate tabs</span></div>`;
+  FINDINGS.forEach(f=>{
+    const onAct=f.act.startsWith('Copy')?`toast('Copied to clipboard ✓')`:(f.act.startsWith('Apply')?`toast('Preview diff → confirm → writes settings.json')`:`drill('${f.raw}')`);
+    const ghost=f.act.startsWith('View')?'ghost':'';
+    h+=`<div class="finding ${f.sev}"><span class="dchip" style="background:${domColor(f.dom)}"></span>
+      <div class="fbody"><div class="ft">${f.title}<span class="dom">${f.dom}</span></div><div class="fm">${f.meta}</div></div>
+      <div class="fact"><button class="btn ${ghost}" onclick="${onAct}">${f.act}</button><a class="openraw" href="#" onclick="drill('${f.raw}');return false">open raw →</a></div></div>`;
+  });
+  h+=`</div>`;
+  h+=drawerHTML();
+  return h;
+}
+function cardsHTML(){
+  let h=`<div class="pagehead"><h1>Home — 6 outcome cards</h1><span class="sub">the earlier sketch</span></div>`;
+  h+=`<div class="grid">`;
+  DOMAINS.forEach(d=>{
+    const f=FINDINGS.find(x=>x.raw===d.views[0])||FINDINGS[0];
+    h+=`<div class="ocard"><div class="oh"><span class="dchip" style="background:${d.color}"></span><h3>${d.name}</h3></div><div class="ok">${f?f.title:''}</div></div>`;
+  });
+  h+=`</div><div class="whichdoor">(!) Six co-equal doors still ask "which one first?" — open <b>Cut Cost</b> and you might never see the critical <b>Stay Safe</b> finding. The digest spine ranks them together, safety on top.</div>`;
+  return h;
+}
+function flatHTML(){
+  const FLAT=['evaluator','insights','recommendations','sessions','projects','search','stats','tokens','tools','files','cost','timeline','activity','automation','errors','permissions','agents','context','conversation','patterns'];
+  let h=`<div class="pagehead"><h1>Home — flat 20 views (current)</h1><span class="sub">organized by data-type</span></div><div class="flatlist">`;
+  FLAT.forEach(v=>h+=`<div class="fi" onclick="drill('${v}')">${v}</div>`);
+  h+=`</div><div class="flatnote">✗ You must already know which of 20 data-type screens holds the lever for your question — and several show the fix with no button. 78 of 83 dead-ends live here.</div>`;
+  return h;
+}
+function drawerHTML(){
+  return `<details class="drawer"><summary>▸ Raw data — usage overview (orientation, no actions)</summary><div class="inner">
+    <div class="rawtile">Total sessions: 1,284</div><div class="rawtile">Avg msgs/session: 41</div>
+    <div class="rawtile">Activity heatmap (90d)</div><div class="rawtile">Peak hour: 14:00</div><div class="rawtile">Usage narrative</div></div></details>`;
+}
+
+function renderMain(){
+  const m=document.getElementById('main');
+  if(curTab==='home'){ m.innerHTML = homeMode==='digest'?digestHTML():homeMode==='cards'?cardsHTML():flatHTML(); }
+  else if(curTab==='recs'){
+    let h=`<div class="pagehead"><h1>Recommendations</h1><span class="sub">cross-domain ranked list — the digest's "what to fix" beat, as a full page</span></div>`;
+    FINDINGS.forEach((f,i)=>h+=`<div class="finding ${f.sev}"><span class="dchip" style="background:${domColor(f.dom)}"></span><div class="fbody"><div class="ft">${i+1}. ${f.title}<span class="dom">${f.dom}</span></div><div class="fm">${f.meta}</div></div><a class="openraw" href="#" onclick="drill('${f.raw}');return false">open raw →</a></div>`);
+    m.innerHTML=h;
+  }
+  else if(curTab==='raw'){ m.innerHTML=`<div class="pagehead"><h1>Raw data</h1><span class="sub">orientation surfaces, off the action path</span></div>`+drawerHTML().replace('▸','▾'); }
+  else if(curTab==='drill'){ m.innerHTML=m._drill; }
+}
+function tab(t){
+  curTab=t;
+  document.querySelectorAll('.topnav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===(t==='drill'?'home':t)));
+  renderMain(); document.getElementById('main').scrollTop=0;
+}
+function drill(view){
+  const m=document.getElementById('main');
+  m._drill=`<div class="crumb"><a href="#" onclick="tab('home');return false">← Home (digest)</a> / raw / <b>${view}</b></div>
+    <div class="pagehead"><h1>${view}</h1><span class="sub">first-class, deep-linkable raw view</span></div>
+    <div class="ghostview">The existing detailed <b>${view}</b> view — a peer destination, reachable directly from the rail or by deep link, <b>not</b> buried under a digest card.<br/>Digest cards and the rail both land here (one URL space).</div>`;
+  tab('drill');
+}
+function setHome(mode){ homeMode=mode; ['digest','cards','flat'].forEach(x=>document.getElementById('hm-'+x).classList.toggle('active',x===mode)); if(curTab!=='home')tab('home'); else renderMain(); }
+function setBand(b){ band=b; syncBandButtons(); renderRail(); if(curTab==='home'&&homeMode==='digest')renderMain(); }
+
+renderRail(); renderMain();
+</script>
+</body>
+</html>

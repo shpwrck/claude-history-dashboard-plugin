@@ -22,9 +22,9 @@ import type { RecommendationViews } from './recommendations';
 
 /**
  * Engine-consumed fields the client envelope does not supply. `gitOutcomes`,
- * `memoryStores`, `docGraph`, `docHygieneArtifact`, and `organizationIdentity` are server-side ingest
- * artifacts no client dataset carries (`docGraph` is built at ingest from a
- * local repo-docs walk, #2258, and omitted in SPA/upload datasets).
+ * `memoryStores`, `docHygieneArtifact`, and `organizationIdentity` are
+ * server-only inputs no client dataset carries. `docGraph` is different: the
+ * live dataset carries it while SPA/upload datasets normalize it to null.
  * `modelPinSavings` is different: not supplied here, but
  * `assembleRecommendationInput` derives it from `tokenData`, so its detectors
  * still run on every surface (it is excluded from `listOmittedEngineSignals`
@@ -33,7 +33,6 @@ import type { RecommendationViews } from './recommendations';
 export const CLIENT_ABSENT_ENGINE_FIELDS: readonly string[] = [
   'gitOutcomes',
   'memoryStores',
-  'docGraph',
   'docHygieneArtifact',
   'modelPinSavings',
   'organizationIdentity',
@@ -80,6 +79,7 @@ export function recommendationViewsFromViewData(
     mcpAuth: d.mcpAuth,
     configBackups: d.configBackups,
     repoMap: d.repoMap,
+    docGraph: d.docGraph,
     externalGuidance: d.externalGuidance,
   };
 }

@@ -96,6 +96,7 @@ const emptyData: ViewData = {
   secretsAtRest: [],
   liveConfig: null,
   repoMap: null,
+  docGraph: null,
   shadowCalls: null,
   memories: [],
   workflows: [],

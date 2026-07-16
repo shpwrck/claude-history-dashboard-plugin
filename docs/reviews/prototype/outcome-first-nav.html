@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Claude Coach — outcome-first nav (prototype)</title>
+<style>
+  :root{
+    --bg:#0f1214; --bg2:#16191c; --card:#1f2327; --card2:#262b30;
+    --bd:#3a4047; --bd2:#4a525a; --tx:#e3e6e8; --tx2:#9aa3ab; --tx3:#6b747c;
+    --accent:#3fa9ff; --accent-bg:#0e2a40;
+    --crit:#ff5d52; --crit-bg:#3a1512; --warn:#f0ab00; --warn-bg:#332600; --ok:#5bbd6b; --ok-bg:#13290f;
+    --radius:8px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  button{font:inherit;cursor:pointer}
+  a{color:var(--accent);text-decoration:none}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  /* top bar */
+  .topbar{display:flex;align-items:center;gap:16px;padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--bd)}
+  .brand{font-weight:700;font-size:16px;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+  .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+  .find{flex:0 0 320px;display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:6px 14px;color:var(--tx2)}
+  .find input{flex:1;background:none;border:none;color:var(--tx);outline:none}
+  .topnav{display:flex;gap:4px;margin-left:auto}
+  .topnav button{background:none;border:1px solid transparent;color:var(--tx2);padding:6px 14px;border-radius:6px}
+  .topnav button.active{background:var(--accent-bg);color:var(--accent);border-color:var(--accent)}
+  .topnav button:hover{color:var(--tx)}
+  .gear{color:var(--tx2);font-size:18px;padding:0 4px}
+
+  /* before/after toggle */
+  .modebar{display:flex;align-items:center;gap:10px;padding:8px 18px;background:#0b0e10;border-bottom:1px solid var(--bd);font-size:12.5px;color:var(--tx2)}
+  .seg{display:inline-flex;border:1px solid var(--bd2);border-radius:7px;overflow:hidden}
+  .seg button{background:var(--card);color:var(--tx2);border:none;padding:6px 16px;font-weight:600}
+  .seg button.active{background:var(--accent);color:#04243d}
+  .modebar .note{margin-left:6px}
+
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 18px 60px}
+
+  /* ===== AFTER: outcome-first ===== */
+  .pagehead{display:flex;align-items:baseline;gap:12px;margin:2px 0 18px}
+  .pagehead h1{font-size:20px;margin:0;font-weight:700}
+  .pagehead .sub{color:var(--tx2);font-size:13px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:900px){.grid{grid-template-columns:1fr 1fr}}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:12px;min-height:208px}
+  .card:hover{border-color:var(--bd2)}
+  .card .ch{display:flex;align-items:center;gap:10px}
+  .card .ico{width:14px;height:14px;border-radius:4px;background:var(--accent);flex:0 0 auto}
+  .card h3{margin:0;font-size:15px;font-weight:700}
+  .card .sevline{display:flex;align-items:center;gap:8px;font-size:13px}
+  .pill{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px}
+  .pill.crit{background:var(--crit-bg);color:var(--crit)} .pill.warn{background:var(--warn-bg);color:var(--warn)} .pill.ok{background:var(--ok-bg);color:var(--ok)}
+  .finding{font-size:13px;color:var(--tx);background:var(--bg2);border:1px solid var(--bd);border-left:3px solid var(--warn);border-radius:6px;padding:8px 10px}
+  .finding.crit{border-left-color:var(--crit)} .finding.ok{border-left-color:var(--ok)}
+  .kpis{display:flex;flex-wrap:wrap;gap:8px;margin-top:auto}
+  .kpi{background:var(--card2);border:1px solid var(--bd);border-radius:6px;padding:6px 10px;display:flex;flex-direction:column;line-height:1.25;min-width:74px}
+  .kpi:hover{border-color:var(--accent);background:var(--accent-bg)}
+  .kpi .v{font-size:16px;font-weight:700} .kpi .l{font-size:10.5px;color:var(--tx2)} .kpi .arrow{font-size:10px;color:var(--accent)}
+  .cardfoot{display:flex;align-items:center;gap:10px;justify-content:space-between;border-top:1px solid var(--bd);padding-top:10px}
+  .act{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#04243d;border:none;font-weight:700;padding:6px 12px;border-radius:6px;font-size:12.5px}
+  .act.ghost{background:none;color:var(--accent);border:1px solid var(--accent)}
+  .openfull{color:var(--tx2);font-size:12.5px}
+  .openfull:hover{color:var(--accent)}
+
+  /* drill-down */
+  .drill{background:var(--card);border:1px solid var(--bd);border-radius:var(--radius);padding:22px}
+  .crumb{color:var(--tx2);font-size:13px;margin-bottom:14px}
+  .crumb a{color:var(--accent)}
+  .ghostview{margin-top:14px;border:1px dashed var(--bd2);border-radius:8px;padding:26px;color:var(--tx2);text-align:center}
+
+  /* recommendations standalone */
+  .reclist{display:flex;flex-direction:column;gap:10px}
+  .recrow{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:12px 14px}
+  .recrow .rank{font-weight:800;color:var(--tx3);width:22px;text-align:center}
+  .recrow .body{flex:1}
+  .recrow .body .t{font-weight:600}
+  .recrow .body .m{color:var(--tx2);font-size:12.5px}
+  .recrow .save{color:var(--ok);font-weight:700;font-size:13px;white-space:nowrap}
+
+  /* raw data drawer */
+  .drawer{margin-top:22px;border:1px solid var(--bd);border-radius:8px;background:var(--bg2)}
+  .drawer summary{cursor:pointer;padding:12px 16px;color:var(--tx2);font-weight:600;list-style:none;display:flex;align-items:center;gap:8px}
+  .drawer summary::-webkit-details-marker{display:none}
+  .drawer summary .chev{transition:transform .15s} details[open] .chev{transform:rotate(90deg)}
+  .drawer .inner{padding:0 16px 16px;display:flex;flex-wrap:wrap;gap:10px}
+  .rawtile{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:10px 14px;color:var(--tx3);font-size:12.5px}
+  .rawtag{font-size:10px;color:var(--tx3);border:1px solid var(--bd);border-radius:10px;padding:1px 7px;margin-left:6px}
+
+  /* ===== BEFORE: flat nav ===== */
+  .flat{display:grid;grid-template-columns:212px 1fr;gap:0;border:1px solid var(--bd);border-radius:8px;overflow:hidden;min-height:440px}
+  .side{background:var(--bg2);border-right:1px solid var(--bd);padding:8px}
+  .side .si{padding:7px 12px;border-radius:6px;color:var(--tx2);font-size:13px;display:flex;align-items:center;gap:8px}
+  .side .si.active{background:var(--accent-bg);color:var(--accent)}
+  .side .si:hover{color:var(--tx)}
+  .flatmain{padding:24px}
+  .flatmain h2{margin:0 0 4px;font-size:18px}
+  .flatmain .sub{color:var(--tx2);font-size:13px;margin-bottom:18px}
+  .statrow{display:flex;flex-wrap:wrap;gap:12px}
+  .stat{background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:14px 18px;min-width:130px}
+  .stat .v{font-size:22px;font-weight:700} .stat .l{color:var(--tx2);font-size:12px}
+  .deadtag{display:inline-block;margin-top:8px;font-size:10.5px;color:var(--crit);border:1px solid var(--crit);border-radius:10px;padding:1px 8px}
+  .hidden{display:none}
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok);padding:9px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+  <div class="modebar">
+    <span>Prototype:</span>
+    <div class="seg">
+      <button id="m-after" class="active" onclick="setMode('after')">After — outcome-first</button>
+      <button id="m-before" onclick="setMode('before')">Before — flat nav (current)</button>
+    </div>
+    <span class="note">Throwaway mock for #490. Click cards, KPIs, tabs, the Find box, and the Raw-data drawer.</span>
+  </div>
+
+  <!-- ============ AFTER ============ -->
+  <div id="after">
+    <div class="topbar">
+      <div class="brand"><span class="dot"></span>Claude Coach</div>
+      <div class="find"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="10.5" cy="10.5" r="7"/><line x1="21" y1="21" x2="15.8" y2="15.8"/></svg><input placeholder="Find a session, project, transcript…" /></div>
+      <div class="topnav">
+        <button class="active" data-tab="home" onclick="tab('home')">Home</button>
+        <button data-tab="recs" onclick="tab('recs')">Recommendations</button>
+        <button data-tab="raw" onclick="tab('raw')">Raw data</button>
+      </div>
+      <span class="gear">⚙︎</span>
+    </div>
+
+    <div class="wrap">
+      <!-- HOME: 6 outcome cards -->
+      <div id="tab-home">
+        <div class="pagehead"><h1>What should I fix?</h1><span class="sub">Six outcomes. Every number links somewhere.</span></div>
+        <div class="grid" id="cards"></div>
+        <details class="drawer">
+          <summary><span class="chev">▸</span> Raw data — usage overview (no actions here)</summary>
+          <div class="inner">
+            <div class="rawtile">Total sessions: 1,284 <span class="rawtag">orientation</span></div>
+            <div class="rawtile">Avg msgs / session: 41 <span class="rawtag">orientation</span></div>
+            <div class="rawtile">Activity heatmap (90d) <span class="rawtag">stats</span></div>
+            <div class="rawtile">Peak hour: 14:00 <span class="rawtag">activity</span></div>
+            <div class="rawtile">Hour × weekday grid <span class="rawtag">activity</span></div>
+            <div class="rawtile">Usage narrative / big wins <span class="rawtag">insights</span></div>
+          </div>
+        </details>
+      </div>
+
+      <!-- DRILL-DOWN placeholder -->
+      <div id="tab-drill" class="hidden">
+        <div class="drill">
+          <div class="crumb"><a href="#" onclick="tab('home');return false">← Home</a> / <span id="drill-name">view</span></div>
+          <h1 style="margin:0;font-size:19px" id="drill-title">Full view</h1>
+          <p style="color:var(--tx2)" id="drill-desc"></p>
+          <div class="ghostview">This is the existing detailed view, reached as a <b>drill-down</b> from its outcome card.<br/>All 22 current views survive here — none deleted.</div>
+        </div>
+      </div>
+
+      <!-- RECOMMENDATIONS standalone -->
+      <div id="tab-recs" class="hidden">
+        <div class="pagehead"><h1>Recommendations</h1><span class="sub">The one cross-domain ranked list — what to fix first, across every outcome.</span></div>
+        <div class="reclist" id="reclist"></div>
+      </div>
+
+      <!-- RAW tab (same content as drawer, full page) -->
+      <div id="tab-raw" class="hidden">
+        <div class="pagehead"><h1>Raw data</h1><span class="sub">Orientation surfaces, off the action path. Kept for reference, not for acting.</span></div>
+        <div class="grid">
+          <div class="card"><div class="ch"><div class="ico" style="background:var(--tx3)"></div><h3>Stats</h3></div><p style="color:var(--tx2);font-size:13px;margin:0">Totals, averages, project distribution, calendar heatmap. (project-distribution slice promoted to Cut Cost.)</p></div>
+          <div class="card"><div class="ch"><div class="ico" style="background:var(--tx3)"></div><h3>Activity</h3></div><p style="color:var(--tx2);font-size:13px;margin:0">Active days, peak hour, hour×weekday grid. No action originates here.</p></div>
+          <div class="card"><div class="ch"><div class="ico" style="background:var(--tx3)"></div><h3>Conversation shape</h3></div><p style="color:var(--tx2);font-size:13px;margin:0">Question counts, code-block counts, durations. (friction slice promoted to Fail Less.)</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ BEFORE ============ -->
+  <div id="before" class="hidden">
+    <div class="topbar"><div class="brand"><span class="dot"></span>Claude Coach</div><span class="gear" style="margin-left:auto">⚙︎</span></div>
+    <div class="wrap">
+      <div class="pagehead"><h1>Current: 20 flat views</h1><span class="sub">Data organized by data-type, not by outcome. The user has to know which screen holds the lever.</span></div>
+      <div class="flat">
+        <div class="side" id="flatside"></div>
+        <div class="flatmain">
+          <h2>Stats</h2>
+          <div class="sub">A representative flat view — pure orientation, every tile a dead-end.</div>
+          <div class="statrow">
+            <div class="stat"><div class="v">1,284</div><div class="l">Total Sessions</div></div>
+            <div class="stat"><div class="v">52k</div><div class="l">User Messages</div></div>
+            <div class="stat"><div class="v">41</div><div class="l">Avg Msgs/Session</div></div>
+            <div class="stat"><div class="v">18m</div><div class="l">Avg Duration</div></div>
+          </div>
+          <div class="deadtag">0 of these 4 tiles link anywhere · 78 of 83 dead-ends live in views like this</div>
+          <p style="color:var(--tx2);margin-top:22px;max-width:640px">To actually cut cost you must already know to open <span class="mono">cost</span> or <span class="mono">tokens</span>; to reduce errors, <span class="mono">errors</span>; to clean config, <span class="mono">config-hygiene</span> — and several of those screens show the fix but no button. The flat list never tells you which lever moves which outcome.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+const CARDS=[
+  {key:'cost',ico:'💸',title:'Cut Cost',sev:'crit',finding:'Opus→Sonnet on 3 routine projects would save ~$48/wk',act:'Apply swap',actGhost:false,
+   kpis:[{v:'72%',l:'5h cap used',a:1},{v:'$214',l:'wk spend',a:1},{v:'$48',l:'recoverable',a:1}],full:'cost',desc:'Cost Attribution + Tokens — expensive sessions, swap-ceiling, per-project/tool spend.'},
+  {key:'speed',ico:'⚡',title:'Go Faster',sev:'warn',finding:'p95 tool latency 14.2s; hook overhead 2.1s/turn on 2 hooks',act:'Copy hook tip',actGhost:true,
+   kpis:[{v:'14.2s',l:'p95 latency',a:1},{v:'2.1s',l:'hook overhead',a:1},{v:'31',l:'retry storms',a:1}],full:'evaluator',desc:'Evaluator + runtime telemetry — latency, hook overhead, retry pressure. (sparse until detectors land)'},
+  {key:'fail',ico:'🛟',title:'Fail Less',sev:'warn',finding:'Edit tool 11% error rate; 429s clustered in 4 sessions',act:'View errors',actGhost:true,
+   kpis:[{v:'4.3%',l:'error rate',a:1},{v:'Edit',l:'worst tool',a:1},{v:'18',l:'retries',a:1}],full:'errors',desc:'Errors + Tool effectiveness — error rates, status-code guidance, friction.'},
+  {key:'safe',ico:'🛡️',title:'Stay Safe',sev:'crit',finding:'6 sessions ran bypassPermissions; 2 unattended',act:'Open Policy',actGhost:false,
+   kpis:[{v:'6',l:'bypass runs',a:1},{v:'2',l:'unattended',a:1},{v:'3',l:'dangerous cmds',a:1}],full:'permissions',desc:'Permissions + PolicyBuilder + Automation — bypass, unattended runs, dangerous commands.'},
+  {key:'ctx',ico:'🧠',title:'Tame Context',sev:'warn',finding:'Session a1f2 compacted 4×; paste /compact earlier',act:'Copy /compact',actGhost:true,
+   kpis:[{v:'63%',l:'cache hit',a:1},{v:'12',l:'compactions',a:1},{v:'5',l:'reread loops',a:1}],full:'context',desc:'Context Health + Files — cache hit, compaction risk, @path pins, re-read waste.'},
+  {key:'wf',ico:'🧹',title:'Clean Workflow',sev:'ok',finding:'4 skills + 2 MCP servers unused 30d; CLAUDE.md 1.8k lines',act:'Copy prune',actGhost:true,
+   kpis:[{v:'4',l:'unused skills',a:1},{v:'2',l:'idle MCP',a:1},{v:'1.8k',l:'CLAUDE.md',a:1}],full:'config-hygiene',desc:'Config-hygiene + Tools + Agents — unused resources, native-tool bypass, CLAUDE.md bloat.'},
+];
+const RECS=[
+  {t:'Switch 3 routine projects Opus→Sonnet',m:'Cost · settings.json model key',save:'~$48/wk',card:'cost'},
+  {t:'6 sessions ran with bypassPermissions',m:'Safety · review entrypoints + tighten policy',save:'risk',card:'safe'},
+  {t:'Edit tool failing 11% — wrap retries',m:'Reliability · 4 sessions',save:'',card:'fail'},
+  {t:'Compaction thrash in session a1f2 (4×)',m:'Context · paste /compact at 60% context',save:'',card:'ctx'},
+  {t:'Prune 4 unused skills + 2 idle MCP servers',m:'Workflow · settings.json',save:'',card:'wf'},
+];
+const FLAT=['evaluator','insights','recommendations','sessions','projects','search','stats','tokens','tools','files','cost','timeline','activity','automation','errors','permissions','agents','context','conversation','patterns'];
+
+function el(h){const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstChild}
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._x);t._x=setTimeout(()=>t.classList.remove('show'),1400)}
+
+function renderCards(){
+  const g=document.getElementById('cards');g.innerHTML='';
+  CARDS.forEach(c=>{
+    const kpis=c.kpis.map(k=>`<button class="kpi" onclick="drill('${c.full}')"><span class="v">${k.v} <span class="arrow">↗</span></span><span class="l">${k.l}</span></button>`).join('');
+    const actClass=c.actGhost?'act ghost':'act';
+    const onAct=c.act.startsWith('Copy')?`toast('Copied to clipboard ✓')`:(c.act.startsWith('Apply')?`toast('Preview diff → confirm → writes settings.json')`:`drill('${c.full}')`);
+    const sevColor=c.sev==='crit'?'var(--crit)':c.sev==='warn'?'var(--warn)':'var(--ok)';
+    g.appendChild(el(`<div class="card">
+      <div class="ch"><div class="ico" style="background:${sevColor}"></div><h3>${c.title}</h3><span class="pill ${c.sev}" style="margin-left:auto">${c.sev==='ok'?'healthy':c.sev}</span></div>
+      <div class="finding ${c.sev}">${c.finding}</div>
+      <div class="kpis">${kpis}</div>
+      <div class="cardfoot">
+        <button class="${actClass}" onclick="${onAct}">${c.act}</button>
+        <a class="openfull" href="#" onclick="drill('${c.full}');return false">Open full view →</a>
+      </div>
+    </div>`));
+  });
+}
+function renderRecs(){
+  const r=document.getElementById('reclist');r.innerHTML='';
+  RECS.forEach((x,i)=>r.appendChild(el(`<div class="recrow">
+    <div class="rank">${i+1}</div>
+    <div class="body"><div class="t">${x.t}</div><div class="m">${x.m}</div></div>
+    ${x.save?`<div class="save">${x.save}</div>`:''}
+    <a class="openfull" href="#" onclick="drill('${x.card}');return false">Fix →</a>
+  </div>`)));
+}
+function renderFlat(){
+  const s=document.getElementById('flatside');s.innerHTML='';
+  FLAT.forEach((v,i)=>s.appendChild(el(`<div class="si ${v==='stats'?'active':''}">${i===0?'▸ ':''}${v}</div>`)));
+}
+
+function tab(t){
+  ['home','drill','recs','raw'].forEach(x=>document.getElementById('tab-'+x).classList.toggle('hidden',x!==t));
+  document.querySelectorAll('.topnav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
+}
+function drill(name){
+  document.getElementById('drill-name').textContent=name;
+  document.getElementById('drill-title').textContent=name+' (full view)';
+  const c=CARDS.find(x=>x.full===name);
+  document.getElementById('drill-desc').textContent=c?c.desc:'Existing detailed view.';
+  tab('drill');
+  // keep top nav highlighting Home since drill lives under Home
+  document.querySelectorAll('.topnav button').forEach(b=>b.classList.toggle('active',b.dataset.tab==='home'));
+  window.scrollTo(0,0);
+}
+function setMode(m){
+  document.getElementById('after').classList.toggle('hidden',m!=='after');
+  document.getElementById('before').classList.toggle('hidden',m!=='before');
+  document.getElementById('m-after').classList.toggle('active',m==='after');
+  document.getElementById('m-before').classList.toggle('active',m==='before');
+}
+renderCards();renderRecs();renderFlat();
+</script>
+</body>
+</html>

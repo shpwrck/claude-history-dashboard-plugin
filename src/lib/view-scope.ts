@@ -242,6 +242,8 @@ export const VIEW_DATA_FILTER_POLICIES = {
   // Repo-map structure is cross-project infrastructure metadata for static
   // analysis.
   repoMap: { time: 'global', project: 'global' },
+  // Repository documentation structure is a whole-checkout artifact.
+  docGraph: { time: 'global', project: 'global' },
   // Shadow-call aggregate is server-side telemetry, not session-scoped for
   // this picker.
   shadowCalls: { time: 'global', project: 'global' },

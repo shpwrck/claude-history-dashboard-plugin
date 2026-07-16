@@ -25,10 +25,10 @@
  *   3. dangling-src-ref   — a `src-ref` edge to a `src/…` path that is absent
  *      from the repo-map file inventory (the REFERENCES.md drift AGENTS.md
  *      polices by hand). The graph itself has no source-file oracle, so this
- *      signal is checked against `input.repoMap`, and only when that inventory is
- *      trustworthy: present, NOT truncated (an incomplete map cannot prove
- *      absence), and only for file extensions the inventory actually covers (a
- *      `.css` ref against a TS-only map is never flagged).
+ *      signal is checked against the `input.repoMap` project whose root exactly
+ *      matches the graph root, and only when that inventory is trustworthy:
+ *      present, complete, NOT truncated, and for file extensions the inventory
+ *      actually covers (a `.css` ref against a TS-only map is never flagged).
  *
  * #2487 adds two checker-native signals from the commit-bound, allowlisted
  * agents-lint adapter: missing non-source context paths and missing npm scripts.
@@ -102,6 +102,12 @@ const STRUCTURAL: ReadonlySet<DocHygieneSignal> = new Set([
 /** Normalise a path for comparison: backslashes → slashes, strip a `./` prefix. */
 function normPath(p: string): string {
   return p.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/** Browser-safe root normalization for an exact graph-to-repo-map join. */
+function normRoot(p: string): string {
+  const normalized = p.replace(/\\/g, '/');
+  return normalized === '/' ? normalized : normalized.replace(/\/+$/, '');
 }
 
 /** Match URI-escaped graph targets to Lychee's decoded file-URL paths. */
@@ -201,9 +207,11 @@ function scanOrphans(graph: DocGraph): DocHygieneItem[] {
 
 /**
  * Signal 3: `src-ref` edges to `src/…` paths absent from the repo-map inventory.
- * The doc graph has no source-file oracle, so this uses `repoMap` — and only
- * when it is a trustworthy inventory (present, non-truncated, and for extensions
- * it actually covers) so absence is real, not a coverage gap.
+ * The doc graph has no source-file oracle, so this uses only the `repoMap`
+ * project(s) whose absolute root exactly matches `graph.root`. A map from some
+ * other user project cannot prove anything about this graph. The matched
+ * inventory must also be complete, non-truncated, and cover the referenced
+ * extension so absence is real rather than a coverage gap.
  */
 function scanDanglingSrcRefs(
   graph: DocGraph,
@@ -211,12 +219,29 @@ function scanDanglingSrcRefs(
   pathBySlug: ReadonlyMap<string, string>
 ): DocHygieneItem[] {
   if (!repoMap || repoMap.projects.length === 0) return [];
-  // A truncated map is an incomplete inventory — it cannot prove a file is gone.
-  if (repoMap.projects.some((p) => p.truncated)) return [];
+  // Legacy/uploaded graphs without a root fail closed: there is no safe join.
+  if (typeof graph.root !== 'string' || graph.root.length === 0) return [];
+  const graphRoot = normRoot(graph.root);
+  if (graphRoot.length === 0) return [];
+  const projects = repoMap.projects.filter(
+    (project) =>
+      typeof project.root === 'string' && normRoot(project.root) === graphRoot
+  );
+  if (projects.length === 0) return [];
+  // A partial inventory cannot prove a file is gone. `truncated` covers the
+  // established rendered-map guard; fileCount also catches size-bound artifact
+  // compaction that can drop structured file rows independently of that flag.
+  if (
+    projects.some(
+      (project) => project.truncated || project.files.length !== project.fileCount
+    )
+  ) {
+    return [];
+  }
 
   const known = new Set<string>();
   const coveredExts = new Set<string>();
-  for (const proj of repoMap.projects) {
+  for (const proj of projects) {
     for (const file of proj.files) {
       const p = normPath(file.path);
       known.add(p);
@@ -448,7 +473,8 @@ export const detector: Detector = {
       observations.push({
         claim: `${graphDanglingSrcCount} source reference(s) absent from the repo-map file inventory`,
         source: 'parse-repo-map-join',
-        field: 'repoMap.projects[].files[].path',
+        field:
+          'docGraph.root + repoMap.projects[root=docGraph.root].files[].path',
         value: graphDanglingSrcCount,
       });
     }

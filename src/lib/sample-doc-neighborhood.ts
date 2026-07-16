@@ -51,6 +51,7 @@ function node(
 
 /** The hand-built sample doc graph the sample neighborhood is retrieved from. */
 export const SAMPLE_DOC_GRAPH: DocGraph = {
+  root: '/sample/claude-history-dashboard',
   nodes: [
     node('AGENTS', 'root', '2026-06-01T00:00:00Z', { status: 'active' }),
     node('docs/adr/0008-server-llm-governance', 'adr', '2026-05-01T00:00:00Z', {
