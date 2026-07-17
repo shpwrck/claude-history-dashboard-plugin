@@ -124,6 +124,32 @@ from flaking on a busy runner while still tripping the moment a regression pushe
 real content past ~1.5 s, which would be a serious cold-load degradation. As with
 the others, tighten once a CI baseline is observed.
 
+## #2444 instant-load shell — why the budgets did NOT change
+
+#2444 (epic #1852, Layer B) injects the above-the-fold shell into the
+**server-flavor** `index.html`: the vite build bakes a skeleton shell into `#root`
+(so the harness path paints at parse), and `scripts/server.mjs` upgrades it to real
+KPIs at runtime (a plain module-var read + string splice — it never triggers a
+dataset assemble, so the HTML serve stays ~2–4 ms). React then hydrates the shell
+(`dangerouslySetInnerHTML`, so no mismatch) and flips to the real app.
+
+**The harness under-measures this win, by construction.** The `server` flavor is
+`vite build --outDir dist-server` served by `vite preview` — a *static* build with
+**no `~/.claude` mount**, so `serveStatic`'s runtime upgrade never runs and the
+empty app already mounted fast. Measured locally: server CP `107 → 95 ms`, FCP
+`116 → 112 ms`, CLS stays `0.0000`. That ~12 ms CP delta is within CI noise, and no
+sane `cpMaxMs` distinguishes shell-from-no-shell on the data-less harness path
+(both land ~100 ms). So the cold-load budgets are **left unchanged** — tightening
+them here would be false precision, not a real gate.
+
+**The real win is on the deployed server path** (real data), which this harness
+cannot exercise. Measured directly against `scripts/server.mjs` over real
+`~/.claude` data: cold-load CP `~343 → ~146 ms`, with the real KPIs
+(e.g. `874 sessions`) present in `#root` **before any JS runs**. The meaningful
+regression guards for the shell are therefore `src/lib/instant-shell.test.ts` (the
+render/inject/rewrite contract) and the vite-plugin wiring test
+(`src/vite-plugin-instant-shell.test.ts`), not a cold-load ceiling.
+
 ## Running it
 
 ```sh

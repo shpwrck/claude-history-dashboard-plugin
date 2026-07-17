@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { appendFile, chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, normalize, resolve, extname, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, normalize, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createCipheriv,
@@ -222,6 +222,14 @@ const { buildDatasetBody } = await import(
 // lazy slices, so the client paints from the boot without the ~98 MB monolith.
 const { splitDataset, isSliceKey } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'dataset-boot.ts')
+);
+// Tier-3 instant-load shell (#2444, epic #1852, Layer B): projects the boot payload
+// to the above-the-fold shell KPIs and rewrites the served index.html in place so
+// deployed users see real numbers at HTML parse. Dependency-free (same
+// zero-node_modules class as dataset-boot.ts above), so it is safe under the runtime
+// register-ts import guard.
+const { deriveBootShell, rewriteServedHtml } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'instant-shell.ts')
 );
 // Restores the zero-valued tokenData numerics that buildDatasetBody slims out of
 // the wire (#2107), for the one server path that re-parses the slimmed cache JSON
@@ -3157,11 +3165,24 @@ async function compressedPayload(value, version) {
 // Build the /api/dataset/boot payload: the tiny metadata + aggregates + counts
 // half of the split (the ~98 MB heavy slices are dropped). Reuses the assembled
 // dataset per contentHash (#2071) so it shares the recs/dataset assembly.
+// #2444 (Tier-3 instant-load shell): the above-the-fold shell projection derived
+// from the most recent GLOBAL boot build. serveStatic() reads this to upgrade the
+// build-time skeleton index.html to real KPIs WITHOUT itself triggering a dataset
+// assemble (that work would block the event loop on the HTML critical path). It is
+// populated only for globalDatasetState below, so it can only ever hold non-scoped
+// (host) counts — never one principal's data — and serveStatic additionally
+// suppresses the upgrade under scope enforcement. null until the first boot build.
+let lastInstantShell = null;
+
 async function buildBootPayload(state, api) {
   const stats = api.ingest();
   const ds = memoizedAssembleDataset(state, api, stats.contentHash);
   const boot = splitDataset(ds).boot;
   boot.version = stats.contentHash;
+  // Cache the shell projection for the instant-shell HTML upgrade (#2444). Only
+  // for the global (non-scoped) state, so this module var never carries a scoped
+  // principal's counts. deriveBootShell reads only the three masthead aggregates.
+  if (state === globalDatasetState) lastInstantShell = deriveBootShell(boot);
   return compressedPayload(boot, stats.contentHash);
 }
 
@@ -3756,7 +3777,38 @@ async function serveStatic(req, pathname, res) {
   // Vary. Use a cheaper brotli level than the cached dataset since these are
   // compressed on every request. Stream oversized or binary assets raw.
   if (COMPRESSIBLE_STATIC.has(ext) && info.size <= STATIC_COMPRESS_MAX_BYTES) {
-    sendBody(req, res, await readFile(filePath), { quality: 5 });
+    const raw = await readFile(filePath);
+    // #2444 (Tier-3 instant-load shell): upgrade the build-time SKELETON in the app
+    // shell index.html to REAL KPIs using `lastInstantShell` — the shell the boot
+    // builder last derived, populated for free by the client's own /api/dataset/boot
+    // fetch (see buildBootPayload). This is a plain module-var read + a cheap string
+    // splice: it NEVER triggers a dataset assemble, so the HTML serve stays instant
+    // (no event-loop blocking — an earlier inline-assemble attempt added ~180 ms
+    // warm / seconds cold and regressed the static ~5 ms serve). Cold, before the
+    // first boot build => skeleton; warm => real numbers; the client's boot fetch
+    // fills/corrects the masthead regardless. Guarded to the resolved index.html.
+    // `lastInstantShell` only ever holds GLOBAL (non-scoped) data (buildBootPayload
+    // sets it only for globalDatasetState). We ALSO suppress the upgrade whenever
+    // enterprise auth is on: `/` is served PRE-AUTH (it is not an enterprise-protected
+    // path — the login page must render), and non-admin principals are scoped to their
+    // own dataRoot, so baking the global host counts into this HTML would disclose them
+    // to unauthenticated visitors and to scoped principals walled off from global data.
+    // Gate on ENTERPRISE_AUTH_ON (NOT the opt-in DASHBOARD_AUTH_ENFORCE_SCOPES flag,
+    // which is off in the default enterprise posture): under any enterprise auth serve
+    // the skeleton and let each client's own scoped /api/dataset/boot fetch fill the
+    // masthead. Single-user/local (auth off) keeps the real-count upgrade — there the
+    // global data IS the user's own. rewriteServedHtml is a no-op when the markers are
+    // absent (an spa build served here), so that path stays byte-identical. HEAD is
+    // fine: sendBody derives Content-Length from the served body, then ends no payload.
+    if (ext === '.html' && basename(filePath) === 'index.html') {
+      const shell = ENTERPRISE_AUTH_ON ? null : lastInstantShell;
+      const body = shell
+        ? Buffer.from(rewriteServedHtml(raw.toString('utf8'), shell))
+        : raw;
+      sendBody(req, res, body, { quality: 5 });
+      return;
+    }
+    sendBody(req, res, raw, { quality: 5 });
     return;
   }
   createReadStream(filePath).pipe(res);
