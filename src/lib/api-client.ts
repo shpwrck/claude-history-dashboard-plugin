@@ -1156,6 +1156,9 @@ export async function analyzeLocal(
         analysis: null,
         model: null,
         reason: `Analyze request failed (HTTP ${res.status})`,
+        rankedFindingIds: null,
+        repairRounds: 0,
+        schemaValid: false,
       };
     }
     return (await res.json()) as LocalAnalyzeResult;
@@ -1166,6 +1169,9 @@ export async function analyzeLocal(
       analysis: null,
       model: null,
       reason: err instanceof Error ? err.message : 'Network error while analyzing',
+      rankedFindingIds: null,
+      repairRounds: 0,
+      schemaValid: false,
     };
   }
 }

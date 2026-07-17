@@ -543,6 +543,9 @@ export async function analyzeLocal(): Promise<LocalAnalyzeResult> {
     analysis: null,
     model: null,
     reason: UNAVAILABLE,
+    rankedFindingIds: null,
+    repairRounds: 0,
+    schemaValid: false,
   };
 }
 

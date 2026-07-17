@@ -245,7 +245,7 @@ const { getLlmUsageEntry } = await import(
 const { callLocalModel, readLocalModelConfig } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'local-model-client.ts')
 );
-const { buildLocalAnalyzePrompt, degradedResult, extractRecommendations } =
+const { runLocalAnalyze, degradedResult, extractRecommendations } =
   await import(join(PROJECT_DIR, 'src', 'lib', 'local-analyze.ts'));
 // Tier-3 judge-audit harness (#605/#738) lives in src/lib/audit/judge.ts.
 // The route injects a governed chat function rather than letting the audit core
@@ -5033,24 +5033,24 @@ async function handleAnalyzeLocal(req, res) {
     );
   }
 
-  const { system, user } = buildLocalAnalyzePrompt(recommendations);
-  try {
-    const result = await callLocalModel({
+  // Schema-constrained call (#2682): each chat turn routes through the SAME
+  // loopback-guarded transport; runLocalAnalyze validates the {summary,
+  // rankedFindingIds} output and repairs against domain-phrased errors in a
+  // bounded loop, degrading to the deterministic result on exhaustion.
+  const send = (messages) =>
+    callLocalModel({
       endpoint: config.endpoint,
       model: config.model,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
+      messages,
       maxTokens: 512,
     });
-    return sendJson(res, 200, {
-      source: 'local-model',
+  try {
+    const result = await runLocalAnalyze({
+      send,
       recommendations,
-      analysis: result.text,
-      model: result.model,
-      reason: null,
+      model: config.model,
     });
+    return sendJson(res, 200, result);
   } catch (err) {
     // Loopback-guard refusal, unreachable endpoint, timeout, non-OK, bad JSON —
     // all degrade to the deterministic engine result WITHOUT erroring.
