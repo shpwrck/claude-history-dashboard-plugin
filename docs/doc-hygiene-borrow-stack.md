@@ -137,6 +137,57 @@ spans or checker-specific status.
   stale-claim wording demoted per the recommendation actionability contract. The
   `src-ref` extraction plus file-exists check for source refs is #2258's
   dangling-src-ref signal, not #2259's.
+- #2488: the DECLARED-freshness signal (`stale-declared-freshness`) is a
+  deterministic, opt-in contract, distinct from #2259's derived/NL staleness. It
+  fires only when a document declares its own expectation in frontmatter AND the
+  authoritative Git time (#2707 `gitMtimeProvenance` of `git` or a commit-bound
+  `manifest`) is past it — no heuristics, no content inspection. The canonical
+  grammar is below.
+
+## Declared-freshness contract (#2488)
+
+A document opts in to a freshness expectation with two flat frontmatter keys,
+both optional:
+
+```yaml
+---
+freshness.warn_after: 90d
+freshness.error_after: 180d
+---
+```
+
+- **Duration grammar.** Each value is a positive integer followed by exactly one
+  unit: `d`, `w`, or `m`. Windows are FIXED, not calendar: `d` = 24 h, `w` =
+  7 days, `m` = 30 days (the same convention as the memory-lifecycle
+  `revalidateEvery` interval). Leading zeros, a sign, a missing/other unit, a
+  zero value, and any value large enough to overflow a safe integer are all
+  malformed.
+- **Either threshold may appear alone.** When both appear, `warn_after <=
+  error_after`; reversed ordering is a contradiction that **invalidates the
+  contract and suppresses any verdict**. Equal thresholds are valid.
+- **Verdict.** Let `age = evaluationNow - lastGitCommitTime`. At `age >=
+  error_after` the verdict is `error`; otherwise at `age >= warn_after` it is
+  `warn`; otherwise `pass`. Equal thresholds resolve to `error` at their shared
+  boundary (error is checked first). Only `warn`/`error` produce a finding;
+  `pass` is silent.
+- **Authoritative time only.** The verdict is evaluated ONLY against a node whose
+  time provenance is `git` or a valid commit-bound `manifest` (#2707). A missing
+  declaration, a malformed/zero/negative/overflow duration, reversed ordering, a
+  null/non-authoritative (`filesystem`/`unavailable`/absent) time, and a
+  future-dated or implausibly old (clock-skew) timestamp all yield no finding.
+  The production image's Docker-COPY (`filesystem`) mtime can never fire this
+  signal.
+- **Wording.** A `warn`/`error` finding says only that the last Git modification
+  is past the document's declared threshold as of the evaluation time. It never
+  claims the content is wrong or currently stale. The suggested action is manual
+  review: refresh the document or intentionally revise its contract.
+
+The pure grammar and evaluation live in
+`src/lib/detectors/maintenance/doc-hygiene.ts`
+(`parseFreshnessDurationMs` / `readFreshnessContract` /
+`evaluateDeclaredFreshness`). Seeded contracts (`REFERENCES.md` and two
+competitive-analysis surveys) are self-consistent and clean on the source commit
+because a freshly committed document has age ~0.
 
 ## License note
 

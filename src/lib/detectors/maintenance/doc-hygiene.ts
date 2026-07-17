@@ -35,16 +35,27 @@
  * An adapted `src/…` finding maps to dangling-src-ref and replaces the graph
  * copy when both identify the same source-doc/target pair, preserving its line.
  *
- * The higher-signal / lower-certainty signals (staleness, declared-vs-derived,
- * dangling issue-ref) are #2259, a separate slice — not this one.
+ * #2488 adds a fourth graph-native signal, `stale-declared-freshness`: an
+ * OPT-IN, per-document freshness contract (`freshness.warn_after` /
+ * `freshness.error_after` frontmatter keys) evaluated against the AUTHORITATIVE
+ * Git modification time carried by #2707 (`gitMtimeProvenance` of `git` or a
+ * valid commit-bound `manifest` — never the Docker/filesystem mtime). It is
+ * deterministic and declared, not heuristic: a document with no contract, a
+ * malformed/reversed contract, or a non-authoritative time is silent. The
+ * higher-signal / lower-certainty DERIVED staleness (declared-vs-derived,
+ * dangling issue-ref, NL stale-claims) is still #2259, a separate slice.
  *
  * Reads `input.docGraph` (built by `buildDocGraph` in `parse-docs.ts`, #2257),
  * `input.repoMap` for signal 3, and `input.docHygieneArtifact` for the host
  * checkers. Recommend-only: the output is advisory and never edits or deletes a
- * doc. Every finding is current commit/filesystem state, not a time-derived
- * trend, so it carries structured `provenance` but needs no staleness demotion.
+ * doc. The link/reference/orphan signals are current commit/filesystem state,
+ * so they need no staleness demotion; the declared-freshness verdict IS
+ * time-derived, but it is recomputed live against the injected evaluation `now`
+ * (never a stale ingest), so it embeds an explicit "as of <date>" in its
+ * wording instead of a provenance-level demotion, and never asserts the
+ * content itself is wrong or currently stale.
  *
- * Issues: #2258, #2487 (epic #2256 — doc artifact hygiene)
+ * Issues: #2258, #2487, #2488 (epic #2256 — doc artifact hygiene)
  */
 
 import type {
@@ -54,8 +65,9 @@ import type {
   RecObservation,
   RecSeverity,
 } from '../types';
-import type { DocGraph, DocNode } from '../../parse-docs';
+import type { DocFrontmatter, DocGraph, DocNode } from '../../parse-docs';
 import type { RepoMapDataset } from '../../parse-repo-map-join';
+import { DOC_GIT_TIMES_MIN_TIME_MS } from '../../doc-git-times';
 import type {
   DocHygieneArtifact,
   DocHygieneFinding,
@@ -67,7 +79,8 @@ export type DocHygieneSignal =
   | 'orphan'
   | 'dangling-src-ref'
   | 'dangling-context-ref'
-  | 'dangling-npm-script';
+  | 'dangling-npm-script'
+  | 'stale-declared-freshness';
 
 /** One flagged doc-hygiene item: which doc, which signal, what to do. */
 export interface DocHygieneItem {
@@ -79,7 +92,17 @@ export interface DocHygieneItem {
   /** One-based checker line, when tool-native evidence supplied a span. */
   line?: number | null;
   /** Exact local source used to reproduce this item. */
-  origin: 'doc-graph' | 'lychee.local-links' | 'agents-lint.context-refs';
+  origin:
+    | 'doc-graph'
+    | 'doc-graph.freshness'
+    | 'lychee.local-links'
+    | 'agents-lint.context-refs';
+  /**
+   * Set only on a `stale-declared-freshness` item: the full declared-freshness
+   * verdict (authoritative Git time, provenance, crossed threshold, evaluation
+   * `asOf`, verdict) used to render its evidence line and pick its severity.
+   */
+  freshness?: DeclaredFreshnessFinding;
 }
 
 /** Short label per signal for evidence rows. */
@@ -89,6 +112,7 @@ const SIGNAL_LABEL: Record<DocHygieneSignal, string> = {
   'dangling-src-ref': 'source reference no longer exists',
   'dangling-context-ref': 'context file reference no longer exists',
   'dangling-npm-script': 'npm script no longer exists',
+  'stale-declared-freshness': 'document past its declared freshness threshold',
 };
 
 /** Signals that are structural breakage (dead pointers), not just sprawl. */
@@ -98,6 +122,182 @@ const STRUCTURAL: ReadonlySet<DocHygieneSignal> = new Set([
   'dangling-context-ref',
   'dangling-npm-script',
 ]);
+
+// ── Declared-freshness contract (#2488) ────────────────────────────────────
+//
+// A document may OPT IN to a freshness expectation with two flat frontmatter
+// keys. The grammar is deliberately tiny and deterministic — no calendar math,
+// no NL — so a verdict is fully reproducible from the parsed graph.
+
+/** Frontmatter key declaring the warn-after threshold. */
+export const FRESHNESS_WARN_KEY = 'freshness.warn_after';
+/** Frontmatter key declaring the error-after threshold. */
+export const FRESHNESS_ERROR_KEY = 'freshness.error_after';
+
+/**
+ * Milliseconds per freshness-duration unit. FIXED windows, not calendar months:
+ * `d` = 24 h, `w` = 7 days, `m` = 30 days — the same convention as the
+ * memory-lifecycle `revalidateEvery` grammar, so a `30d`/`1m` reader is never
+ * surprised.
+ */
+const FRESHNESS_UNIT_MS: Record<'d' | 'w' | 'm', number> = {
+  d: 24 * 60 * 60 * 1000,
+  w: 7 * 24 * 60 * 60 * 1000,
+  m: 30 * 24 * 60 * 60 * 1000,
+};
+
+/**
+ * A positive integer (no leading zero, no sign) followed by exactly one unit.
+ * Mirrors the memory-lifecycle interval grammar `/^[1-9][0-9]*[dwm]$/`, so a
+ * malformed, zero, or negative value simply fails to match.
+ */
+const FRESHNESS_DURATION_RE = /^([1-9][0-9]*)([dwm])$/;
+
+/**
+ * Parse a `<positive-int><d|w|m>` duration to milliseconds, or `null` when it is
+ * malformed, zero, negative, or overflows a safe integer. Pure and total.
+ */
+export function parseFreshnessDurationMs(raw: string): number | null {
+  const match = FRESHNESS_DURATION_RE.exec(raw.trim());
+  if (!match) return null;
+  const n = Number(match[1]);
+  // The regex already excludes zero, negatives, and leading zeros, so the only
+  // remaining failure is a digit string long enough to lose integer precision —
+  // an overflow, not a real threshold. Reject it rather than silently rounding.
+  if (!Number.isSafeInteger(n)) return null;
+  const ms = n * FRESHNESS_UNIT_MS[match[2] as 'd' | 'w' | 'm'];
+  return Number.isSafeInteger(ms) ? ms : null;
+}
+
+/** A declared, self-consistent freshness contract (either threshold optional). */
+export interface DeclaredFreshnessContract {
+  /** Warn-after threshold in ms, or `null` when the key is absent. */
+  warnAfterMs: number | null;
+  /** Error-after threshold in ms, or `null` when the key is absent. */
+  errorAfterMs: number | null;
+  /** Verbatim declared strings, kept for auditable evidence. */
+  warnRaw?: string;
+  errorRaw?: string;
+}
+
+/**
+ * Classify the freshness contract declared in a doc's frontmatter:
+ *  - `none`    — neither key present (the doc did not opt in; stay silent).
+ *  - `invalid` — a present key is malformed/zero/negative/overflow, or both are
+ *                present but reversed (`warn_after > error_after`). Suppresses.
+ *  - `ok`      — a self-consistent contract (equal thresholds are valid).
+ */
+export function readFreshnessContract(
+  frontmatter: DocFrontmatter
+):
+  | { kind: 'none' }
+  | { kind: 'invalid' }
+  | { kind: 'ok'; contract: DeclaredFreshnessContract } {
+  const warnRaw = frontmatter[FRESHNESS_WARN_KEY];
+  const errorRaw = frontmatter[FRESHNESS_ERROR_KEY];
+  if (warnRaw === undefined && errorRaw === undefined) return { kind: 'none' };
+  const warnAfterMs = warnRaw === undefined ? null : parseFreshnessDurationMs(warnRaw);
+  const errorAfterMs = errorRaw === undefined ? null : parseFreshnessDurationMs(errorRaw);
+  // A present-but-unparseable threshold invalidates the whole contract — a doc
+  // that tried to declare a threshold and got it wrong gets no partial verdict.
+  if (warnRaw !== undefined && warnAfterMs === null) return { kind: 'invalid' };
+  if (errorRaw !== undefined && errorAfterMs === null) return { kind: 'invalid' };
+  // Reversed ordering when both appear is a contradiction, not a contract.
+  if (warnAfterMs !== null && errorAfterMs !== null && warnAfterMs > errorAfterMs) {
+    return { kind: 'invalid' };
+  }
+  return {
+    kind: 'ok',
+    contract: { warnAfterMs, errorAfterMs, warnRaw, errorRaw },
+  };
+}
+
+/** A fired declared-freshness verdict, carrying every auditable evidence field. */
+export interface DeclaredFreshnessFinding {
+  /** Repo-relative POSIX path of the document. */
+  path: string;
+  /** `error` at/after `error_after`, else `warn` at/after `warn_after`. */
+  verdict: 'warn' | 'error';
+  /** Authoritative Git modification time (ISO 8601). */
+  gitIso: string;
+  /** `gitIso` truncated to `YYYY-MM-DD` for evidence wording. */
+  gitDate: string;
+  /** Authoritative provenance of `gitIso` (`git` or a commit-bound `manifest`). */
+  provenance: 'git' | 'manifest';
+  /** Which declared threshold was crossed. */
+  thresholdKey: 'warn_after' | 'error_after';
+  /** The verbatim declared threshold string that was crossed (e.g. `180d`). */
+  thresholdRaw: string;
+  /** Evaluation date (`YYYY-MM-DD`) the age was measured as of. */
+  asOf: string;
+}
+
+/** `YYYY-MM-DD` for an epoch-ms instant (UTC), matching memory-hygiene's asOf. */
+function isoDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * Evaluate a node's OPT-IN declared-freshness contract against its authoritative
+ * Git time at the injected `now`. Returns a `warn`/`error` finding, or `null`
+ * when the doc did not opt in, the contract is invalid, or the time is not
+ * authoritative/usable (missing, non-`git`/`manifest` provenance, unparseable,
+ * implausibly old, or future/clock-skewed). A `pass` (still fresh) also yields
+ * `null` — only a crossed threshold is a finding. Pure: no I/O, deterministic
+ * in `now`.
+ */
+export function evaluateDeclaredFreshness(
+  node: DocNode,
+  now: number
+): DeclaredFreshnessFinding | null {
+  const parsed = readFreshnessContract(node.frontmatter);
+  if (parsed.kind !== 'ok') return null;
+  // Only authoritative Git time may be judged. An absent provenance is treated
+  // exactly like `filesystem`/`unavailable` — never as Git history (#2707).
+  const provenance = node.gitMtimeProvenance;
+  if (provenance !== 'git' && provenance !== 'manifest') return null;
+  const iso = node.gitMtimeIso;
+  if (!iso) return null;
+  const gitMs = Date.parse(iso);
+  if (!Number.isFinite(gitMs)) return null;
+  // Epoch-adjacent or future/clock-skewed times are not trustworthy evidence.
+  if (gitMs < DOC_GIT_TIMES_MIN_TIME_MS) return null;
+  if (gitMs > now) return null;
+  const age = now - gitMs;
+  const { warnAfterMs, errorAfterMs, warnRaw, errorRaw } = parsed.contract;
+  const base = {
+    path: node.path,
+    gitIso: iso,
+    gitDate: isoDate(gitMs),
+    provenance,
+    asOf: isoDate(now),
+  } as const;
+  // error wins at/after its boundary; equal thresholds therefore resolve to
+  // error at the shared boundary because error is checked first.
+  if (errorAfterMs !== null && age >= errorAfterMs) {
+    return { ...base, verdict: 'error', thresholdKey: 'error_after', thresholdRaw: errorRaw! };
+  }
+  if (warnAfterMs !== null && age >= warnAfterMs) {
+    return { ...base, verdict: 'warn', thresholdKey: 'warn_after', thresholdRaw: warnRaw! };
+  }
+  return null;
+}
+
+/** Signal 4: docs whose authoritative Git time is past their declared contract. */
+function scanDeclaredFreshness(graph: DocGraph, now: number): DocHygieneItem[] {
+  const items: DocHygieneItem[] = [];
+  for (const node of graph.nodes) {
+    const finding = evaluateDeclaredFreshness(node, now);
+    if (!finding) continue;
+    items.push({
+      path: finding.path,
+      signal: 'stale-declared-freshness',
+      origin: 'doc-graph.freshness',
+      freshness: finding,
+    });
+  }
+  return items;
+}
 
 /** Normalise a path for comparison: backslashes → slashes, strip a `./` prefix. */
 function normPath(p: string): string {
@@ -373,11 +573,32 @@ function mergeGraphAndArtifactItems(
   });
 }
 
+/**
+ * One evidence row for an item. A `stale-declared-freshness` item renders its
+ * full auditable verdict — path, authoritative Git date + provenance, the
+ * crossed declared threshold, the evaluation `asOf`, and the verdict — and, by
+ * design, makes NO claim that the document's content is wrong or currently
+ * stale; it reports only that the last Git edit is past a declared threshold.
+ */
+function evidenceLine(it: DocHygieneItem): string {
+  if (it.signal === 'stale-declared-freshness' && it.freshness) {
+    const f = it.freshness;
+    return (
+      `${it.path} — last Git modification ${f.gitDate} (${f.provenance}) is past its ` +
+      `declared ${f.thresholdKey} threshold (${f.thresholdRaw}) as of ${f.asOf} → ${f.verdict}`
+    );
+  }
+  return (
+    `${it.path}${it.line ? `:${it.line}` : ''}` +
+    `${it.target ? ` -> ${it.target}` : ''} — ${SIGNAL_LABEL[it.signal]}`
+  );
+}
+
 export const detector: Detector = {
   id: 'maintenance.doc-hygiene',
   category: 'maintenance',
   dataDeps: ['docGraph', 'repoMap', 'docHygieneArtifact'],
-  rule(input: RecommendationInput): Recommendation | null {
+  rule(input: RecommendationInput, now: number): Recommendation | null {
     const graph = input.docGraph;
     const artifactItems = scanArtifactFindings(input.docHygieneArtifact);
     let graphItems: DocHygieneItem[] = [];
@@ -388,6 +609,7 @@ export const detector: Detector = {
         ...scanBrokenLinks(graph, nodeSlugs, pathBySlug),
         ...scanOrphans(graph),
         ...scanDanglingSrcRefs(graph, input.repoMap, pathBySlug),
+        ...scanDeclaredFreshness(graph, now),
       ];
     }
 
@@ -403,6 +625,7 @@ export const detector: Detector = {
       'dangling-src-ref',
       'dangling-context-ref',
       'dangling-npm-script',
+      'stale-declared-freshness',
       'orphan',
     ];
     const breakdown = order
@@ -410,24 +633,27 @@ export const detector: Detector = {
       .map((s) => `${counts[s]} ${SIGNAL_LABEL[s]}`)
       .join(', ');
 
-    const severity: RecSeverity = items.some((it) => STRUCTURAL.has(it.signal))
+    // Structural breakage and an `error`-level freshness verdict both raise the
+    // card to a warning; a `warn` verdict and sprawl stay informational.
+    const severity: RecSeverity = items.some(
+      (it) => STRUCTURAL.has(it.signal) || it.freshness?.verdict === 'error'
+    )
       ? 'warning'
       : 'info';
 
-    // A handful of supporting rows, structural breakage first.
+    // A handful of supporting rows, most severe first: structural breakage,
+    // then `error`-level freshness, then everything else.
+    const rank = (it: DocHygieneItem): number =>
+      STRUCTURAL.has(it.signal) ? 2 : it.freshness?.verdict === 'error' ? 1 : 0;
     const evidence = [...items]
       .sort(
         (a, b) =>
-          Number(STRUCTURAL.has(b.signal)) - Number(STRUCTURAL.has(a.signal)) ||
+          rank(b) - rank(a) ||
           a.path.localeCompare(b.path) ||
           (a.line ?? 0) - (b.line ?? 0)
       )
       .slice(0, 8)
-      .map(
-        (it) =>
-          `${it.path}${it.line ? `:${it.line}` : ''}` +
-          `${it.target ? ` -> ${it.target}` : ''} — ${SIGNAL_LABEL[it.signal]}`
-      );
+      .map(evidenceLine);
 
     const graphItemCount = items.filter((item) => item.origin === 'doc-graph').length;
     const artifactItemCount = items.filter((item) => item.origin === 'lychee.local-links').length;
@@ -436,6 +662,9 @@ export const detector: Detector = {
     ).length;
     const graphDanglingSrcCount = items.filter(
       (item) => item.origin === 'doc-graph' && item.signal === 'dangling-src-ref',
+    ).length;
+    const freshnessCount = items.filter(
+      (item) => item.signal === 'stale-declared-freshness',
     ).length;
     const trackedDocs = Math.max(
       graph?.nodes.length ?? 0,
@@ -478,6 +707,17 @@ export const detector: Detector = {
         value: graphDanglingSrcCount,
       });
     }
+    // Signal 4's oracle is the node's declared frontmatter contract joined to the
+    // authoritative Git time (#2707) — cite both the keys and the provenance.
+    if (freshnessCount > 0) {
+      observations.push({
+        claim: `${freshnessCount} document(s) whose authoritative Git modification time is past their own declared freshness threshold`,
+        source: 'parse-docs',
+        field:
+          'docGraph.nodes[].{frontmatter[freshness.warn_after|freshness.error_after], gitMtimeIso, gitMtimeProvenance}',
+        value: freshnessCount,
+      });
+    }
 
     const n = items.length;
     return {
@@ -490,7 +730,11 @@ export const detector: Detector = {
         `Broken links and dead file or npm-script references rot the doc graph the same way an unmaintained REFERENCES.md does.`,
       action:
         `Review the flagged docs (recommend-only — nothing is edited for you): fix or drop the broken internal links, ` +
-        `update stale file and npm-script references, and link or retire the orphaned docs.`,
+        `update stale file and npm-script references, and link or retire the orphaned docs.` +
+        (freshnessCount > 0
+          ? ` For a document past its declared freshness threshold, manually refresh it or intentionally revise its ` +
+            `\`freshness.warn_after\`/\`freshness.error_after\` contract.`
+          : ''),
       affected: n,
       // No honest dollar unit — score on minutes to review each flagged item.
       estTimeReclaimedMin: n,
@@ -500,7 +744,11 @@ export const detector: Detector = {
         inference:
           `Each issue is read from the parsed doc graph or a commit-bound adapted host-checker artifact; overlapping missing-link and source-reference facts prefer exact checker line spans, while ` +
           `graph-native source references use the repo-map inventory and adapted source references use the commit-bound host checker, so all ${n} are reproducible — ` +
-          `a maintenance pass to keep the repo doc corpus linked and its references live.`,
+          `a maintenance pass to keep the repo doc corpus linked and its references live.` +
+          (freshnessCount > 0
+            ? ` Declared-freshness verdicts compare each document's authoritative Git modification time (provenance \`git\` or a commit-bound \`manifest\`, never the Docker/filesystem mtime) ` +
+              `against its own opt-in \`freshness.warn_after\`/\`freshness.error_after\` threshold as of the evaluation time, and never assert the content is wrong or currently stale.`
+            : ''),
       },
     };
   },

@@ -1,7 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { detector } from './doc-hygiene';
+import { readFileSync } from 'node:fs';
+import {
+  detector,
+  parseFreshnessDurationMs,
+  readFreshnessContract,
+  evaluateDeclaredFreshness,
+  FRESHNESS_WARN_KEY,
+  FRESHNESS_ERROR_KEY,
+} from './doc-hygiene';
 import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
+import { parseFrontmatter } from '../../parse-docs';
 import type { DocEdge, DocGraph, DocNode } from '../../parse-docs';
 import type { RepoMapDataset } from '../../parse-repo-map-join';
 import type { DocHygieneArtifact } from '../../doc-hygiene-artifact';
@@ -60,14 +69,15 @@ function repoMap(paths: string[], over: Record<string, unknown> = {}): RepoMapDa
 function run(
   docGraph: DocGraph | null | undefined,
   rm?: RepoMapDataset | null,
-  docHygieneArtifact?: DocHygieneArtifact | null
+  docHygieneArtifact?: DocHygieneArtifact | null,
+  now = 0
 ) {
   const input = {
     docGraph,
     repoMap: rm,
     docHygieneArtifact,
   } as unknown as RecommendationInput;
-  return detector.rule(input, 0);
+  return detector.rule(input, now);
 }
 
 function lycheeArtifact(
@@ -600,5 +610,332 @@ describe('maintenance.doc-hygiene — grouped card + contract', () => {
     const rec = run(g);
     expect(rec).not.toBeNull();
     expect(rec!.affected).toBe(2);
+  });
+});
+
+// ── Signal 4: stale-declared-freshness (#2488) ─────────────────────────────
+
+const NOW = Date.parse('2026-07-16T00:00:00.000Z');
+const DAY = 24 * 60 * 60 * 1000;
+
+/** A doc committed `ageDays` before NOW with an opt-in freshness contract. */
+function freshNode(
+  slug: string,
+  opts: {
+    warn?: string;
+    error?: string;
+    ageDays?: number;
+    provenance?: DocNode['gitMtimeProvenance'];
+    gitMtimeIso?: string | null;
+  } = {}
+): DocNode {
+  const frontmatter: Record<string, string> = {};
+  if (opts.warn !== undefined) frontmatter[FRESHNESS_WARN_KEY] = opts.warn;
+  if (opts.error !== undefined) frontmatter[FRESHNESS_ERROR_KEY] = opts.error;
+  const gitMtimeIso =
+    opts.gitMtimeIso !== undefined
+      ? opts.gitMtimeIso
+      : new Date(NOW - (opts.ageDays ?? 0) * DAY).toISOString();
+  return node(slug, {
+    frontmatter,
+    gitMtimeIso,
+    gitMtimeProvenance: opts.provenance ?? 'git',
+  });
+}
+
+describe('parseFreshnessDurationMs — duration grammar', () => {
+  it('parses a positive integer + d/w/m into FIXED windows', () => {
+    expect(parseFreshnessDurationMs('90d')).toBe(90 * DAY);
+    expect(parseFreshnessDurationMs('2w')).toBe(14 * DAY);
+    expect(parseFreshnessDurationMs('1m')).toBe(30 * DAY);
+    expect(parseFreshnessDurationMs('  180d  ')).toBe(180 * DAY); // trims
+  });
+
+  it('rejects malformed, zero, negative, leading-zero, and bad-unit values', () => {
+    for (const bad of ['0d', '-5d', '01d', '5', '5y', '90days', '', 'd', '1.5d', '1 d', '+5d']) {
+      expect(parseFreshnessDurationMs(bad), bad).toBeNull();
+    }
+  });
+
+  it('rejects a duration that overflows a safe integer', () => {
+    expect(parseFreshnessDurationMs('999999999999999999999d')).toBeNull();
+    // safe-integer days, but the ms product overflows MAX_SAFE_INTEGER:
+    expect(parseFreshnessDurationMs('9999999999999d')).toBeNull();
+  });
+});
+
+describe('readFreshnessContract — contract classification', () => {
+  it('is `none` when neither key is declared', () => {
+    expect(readFreshnessContract({}).kind).toBe('none');
+    expect(readFreshnessContract({ title: 'x' }).kind).toBe('none');
+  });
+
+  it('accepts a single warn-only or error-only contract', () => {
+    expect(readFreshnessContract({ [FRESHNESS_WARN_KEY]: '30d' })).toEqual({
+      kind: 'ok',
+      contract: expect.objectContaining({ warnAfterMs: 30 * DAY, errorAfterMs: null }),
+    });
+    expect(readFreshnessContract({ [FRESHNESS_ERROR_KEY]: '60d' })).toEqual({
+      kind: 'ok',
+      contract: expect.objectContaining({ warnAfterMs: null, errorAfterMs: 60 * DAY }),
+    });
+  });
+
+  it('accepts both when warn <= error, including equal thresholds', () => {
+    expect(
+      readFreshnessContract({ [FRESHNESS_WARN_KEY]: '90d', [FRESHNESS_ERROR_KEY]: '180d' }).kind
+    ).toBe('ok');
+    expect(
+      readFreshnessContract({ [FRESHNESS_WARN_KEY]: '90d', [FRESHNESS_ERROR_KEY]: '90d' }).kind
+    ).toBe('ok');
+  });
+
+  it('invalidates reversed ordering and any malformed threshold', () => {
+    expect(
+      readFreshnessContract({ [FRESHNESS_WARN_KEY]: '180d', [FRESHNESS_ERROR_KEY]: '90d' }).kind
+    ).toBe('invalid');
+    expect(readFreshnessContract({ [FRESHNESS_WARN_KEY]: '0d' }).kind).toBe('invalid');
+    expect(
+      readFreshnessContract({ [FRESHNESS_WARN_KEY]: '30d', [FRESHNESS_ERROR_KEY]: 'soon' }).kind
+    ).toBe('invalid');
+  });
+});
+
+describe('evaluateDeclaredFreshness — verdict + suppression', () => {
+  it('passes silently when age is below the warn threshold', () => {
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '90d', error: '180d', ageDays: 10 }), NOW)
+    ).toBeNull();
+  });
+
+  it('warns at exactly the warn boundary, with auditable fields', () => {
+    const v = evaluateDeclaredFreshness(
+      freshNode('docs/a', { warn: '90d', error: '180d', ageDays: 90 }),
+      NOW
+    );
+    expect(v?.verdict).toBe('warn');
+    expect(v?.thresholdKey).toBe('warn_after');
+    expect(v?.thresholdRaw).toBe('90d');
+    expect(v?.provenance).toBe('git');
+    expect(v?.asOf).toBe('2026-07-16');
+    expect(v?.gitDate).toBe('2026-04-17'); // NOW - 90d
+  });
+
+  it('warns between warn and error, errors at/after the error boundary', () => {
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '90d', error: '180d', ageDays: 120 }), NOW)
+        ?.verdict
+    ).toBe('warn');
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '90d', error: '180d', ageDays: 180 }), NOW)
+        ?.verdict
+    ).toBe('error'); // boundary
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '90d', error: '180d', ageDays: 400 }), NOW)
+        ?.verdict
+    ).toBe('error');
+  });
+
+  it('honours single-threshold contracts', () => {
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '30d', ageDays: 40 }), NOW)?.verdict
+    ).toBe('warn');
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '30d', ageDays: 10 }), NOW)
+    ).toBeNull();
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { error: '60d', ageDays: 80 }), NOW)?.verdict
+    ).toBe('error');
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { error: '60d', ageDays: 30 }), NOW)
+    ).toBeNull();
+  });
+
+  it('resolves equal thresholds to error at the shared boundary', () => {
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '90d', error: '90d', ageDays: 90 }), NOW)
+        ?.verdict
+    ).toBe('error');
+    // just under the shared boundary is a pass, not a warn
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '90d', error: '90d', ageDays: 89 }), NOW)
+    ).toBeNull();
+  });
+
+  it('suppresses a reversed, malformed, or overflow contract', () => {
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '180d', error: '90d', ageDays: 400 }), NOW)
+    ).toBeNull();
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: 'later', ageDays: 400 }), NOW)
+    ).toBeNull();
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { warn: '9999999999999d', ageDays: 400 }), NOW)
+    ).toBeNull();
+  });
+
+  it('suppresses when no contract is declared', () => {
+    expect(evaluateDeclaredFreshness(freshNode('docs/a', { ageDays: 999 }), NOW)).toBeNull();
+  });
+
+  it('suppresses non-authoritative or absent time provenance (never Docker mtime)', () => {
+    for (const provenance of ['filesystem', 'unavailable'] as const) {
+      expect(
+        evaluateDeclaredFreshness(
+          freshNode('docs/a', { error: '30d', ageDays: 400, provenance }),
+          NOW
+        ),
+        provenance
+      ).toBeNull();
+    }
+    // An older serialized graph with an ABSENT provenance is treated like filesystem.
+    const noProvenance = node('docs/a', {
+      frontmatter: { [FRESHNESS_ERROR_KEY]: '30d' },
+      gitMtimeIso: new Date(NOW - 400 * DAY).toISOString(),
+    });
+    expect(evaluateDeclaredFreshness(noProvenance, NOW)).toBeNull();
+  });
+
+  it('suppresses a null, future, or implausibly old timestamp (clock skew)', () => {
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { error: '30d', gitMtimeIso: null }), NOW)
+    ).toBeNull();
+    expect(
+      evaluateDeclaredFreshness(freshNode('docs/a', { error: '30d', ageDays: -5 }), NOW)
+    ).toBeNull(); // future / skew
+    expect(
+      evaluateDeclaredFreshness(
+        freshNode('docs/a', { error: '30d', gitMtimeIso: '1994-01-01T00:00:00.000Z' }),
+        NOW
+      )
+    ).toBeNull(); // before the 2000 plausibility floor
+  });
+
+  it('evaluates a valid commit-bound manifest time as authoritative', () => {
+    expect(
+      evaluateDeclaredFreshness(
+        freshNode('docs/a', { error: '30d', ageDays: 400, provenance: 'manifest' }),
+        NOW
+      )?.verdict
+    ).toBe('error');
+  });
+});
+
+describe('maintenance.doc-hygiene — declared-freshness card (#2488)', () => {
+  it('flags an error verdict as a warning-severity card with auditable, no-content-claim evidence', () => {
+    const rec = run(
+      graph([freshNode('docs/refstale', { warn: '90d', error: '180d', ageDays: 400 })]),
+      undefined,
+      undefined,
+      NOW
+    );
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.severity).toBe('warning');
+    const line = rec!.evidence![0];
+    expect(line).toContain('docs/refstale.md');
+    expect(line).toContain('(git)');
+    expect(line).toContain('error_after');
+    expect(line).toContain('180d');
+    expect(line).toContain('as of 2026-07-16');
+    expect(line).toContain('→ error');
+    // Wording never asserts the content is wrong or currently stale.
+    expect(line).not.toMatch(/wrong|incorrect|outdated content|currently stale/i);
+    expect(rec!.fix).toBeUndefined();
+    expect(
+      rec!.provenance!.observations.some(
+        (o) => o.source === 'parse-docs' && String(o.field).includes('gitMtimeProvenance')
+      )
+    ).toBe(true);
+    // The declared-freshness verdict recomputes live at `now`, so it embeds
+    // "as of <date>" in wording rather than demoting via a rec-level asOf.
+    expect(rec!.provenance!.asOf).toBeUndefined();
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('flags a warn verdict as an info-severity card', () => {
+    const rec = run(
+      graph([freshNode('docs/warnme', { warn: '90d', error: '180d', ageDays: 120 })]),
+      undefined,
+      undefined,
+      NOW
+    );
+    expect(rec).not.toBeNull();
+    expect(rec!.severity).toBe('info');
+    expect(rec!.evidence![0]).toContain('→ warn');
+    expect(rec!.detail).toContain('document past its declared freshness threshold');
+    expect(rec!.action).toContain('freshness.warn_after');
+  });
+
+  it('stays silent for a passing, undeclared, or non-authoritative corpus', () => {
+    expect(
+      run(
+        graph([freshNode('docs/fresh', { warn: '90d', error: '180d', ageDays: 5 })]),
+        undefined,
+        undefined,
+        NOW
+      )
+    ).toBeNull();
+    expect(run(graph([node('docs/plain')]), undefined, undefined, NOW)).toBeNull();
+    expect(
+      run(
+        graph([freshNode('docs/dockertime', { error: '30d', ageDays: 400, provenance: 'filesystem' })]),
+        undefined,
+        undefined,
+        NOW
+      )
+    ).toBeNull();
+  });
+
+  it('combines freshness with a structural signal in one card', () => {
+    const g = graph(
+      [node('docs/a'), freshNode('docs/old', { error: '30d', ageDays: 400 })],
+      [mdLink('docs/a', 'docs/gone')]
+    );
+    const rec = run(g, undefined, undefined, NOW);
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(2);
+    expect(rec!.severity).toBe('warning');
+    expect(rec!.detail).toContain('broken internal doc link or fragment');
+    expect(rec!.detail).toContain('document past its declared freshness threshold');
+    // Structural breakage sorts ahead of the freshness row in the evidence.
+    expect(rec!.evidence![0]).toContain('docs/a.md');
+    expect(rec!.evidence!.some((e) => e.includes('docs/old.md'))).toBe(true);
+  });
+});
+
+describe('maintenance.doc-hygiene — seeded freshness contracts (#2488)', () => {
+  const SEED_FILES = [
+    '../../../../REFERENCES.md',
+    '../../../../docs/competitive-analysis/anthropic-official-analytics.md',
+    '../../../../docs/competitive-analysis/claude-code-dashboards.md',
+  ];
+
+  it('every seeded contract parses to a self-consistent, valid contract', () => {
+    for (const rel of SEED_FILES) {
+      const content = readFileSync(new URL(rel, import.meta.url), 'utf8');
+      const { frontmatter } = parseFrontmatter(content);
+      const parsed = readFreshnessContract(frontmatter);
+      expect(parsed.kind, `${rel} freshness contract`).toBe('ok');
+      if (parsed.kind === 'ok') {
+        const { warnAfterMs, errorAfterMs } = parsed.contract;
+        expect(warnAfterMs, rel).not.toBeNull();
+        expect(errorAfterMs, rel).not.toBeNull();
+        expect(warnAfterMs!, rel).toBeLessThanOrEqual(errorAfterMs!);
+      }
+    }
+  });
+
+  it('a freshly committed seed (age ~0) produces no finding', () => {
+    for (const rel of SEED_FILES) {
+      const content = readFileSync(new URL(rel, import.meta.url), 'utf8');
+      const { frontmatter } = parseFrontmatter(content);
+      const justCommitted = node(rel, {
+        frontmatter,
+        gitMtimeIso: new Date(NOW).toISOString(),
+        gitMtimeProvenance: 'git',
+      });
+      expect(evaluateDeclaredFreshness(justCommitted, NOW), rel).toBeNull();
+    }
   });
 });

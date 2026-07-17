@@ -1,3 +1,13 @@
+---
+# Declared doc-freshness contract (#2488). This map of ~/.claude artifacts ->
+# parsers drifts as code moves, and AGENTS.md polices that drift by hand. The
+# opt-in windows below make the expectation explicit: warn/error when the last
+# authoritative Git edit is older than the window. Refresh the map or revise the
+# contract when it fires; a fresh commit resets the clock.
+freshness.warn_after: 180d
+freshness.error_after: 365d
+---
+
 # External references
 
 This dashboard reads most of its data **live** from the Claude Code install on

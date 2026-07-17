@@ -1,3 +1,11 @@
+---
+# Declared doc-freshness contract (#2488). The competitive dashboard landscape
+# gains and loses tools quickly, so this survey needs a periodic re-check;
+# warn/error when the last authoritative Git edit is older than the window.
+freshness.warn_after: 90d
+freshness.error_after: 180d
+---
+
 # Claude Code dashboard cluster
 
 ## Source

@@ -1,3 +1,11 @@
+---
+# Declared doc-freshness contract (#2488). A competitor's shipping feature set
+# moves fast, so this analysis needs a periodic re-check; warn/error when the
+# last authoritative Git edit is older than the window.
+freshness.warn_after: 90d
+freshness.error_after: 180d
+---
+
 # Anthropic official Claude Code analytics
 
 ## Source
