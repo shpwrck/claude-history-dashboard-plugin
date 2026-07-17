@@ -45,17 +45,38 @@
  * higher-signal / lower-certainty DERIVED staleness (declared-vs-derived,
  * dangling issue-ref, NL stale-claims) is still #2259, a separate slice.
  *
- * Reads `input.docGraph` (built by `buildDocGraph` in `parse-docs.ts`, #2257),
- * `input.repoMap` for signal 3, and `input.docHygieneArtifact` for the host
- * checkers. Recommend-only: the output is advisory and never edits or deletes a
- * doc. The link/reference/orphan signals are current commit/filesystem state,
- * so they need no staleness demotion; the declared-freshness verdict IS
- * time-derived, but it is recomputed live against the injected evaluation `now`
- * (never a stale ingest), so it embeds an explicit "as of <date>" in its
- * wording instead of a provenance-level demotion, and never asserts the
- * content itself is wrong or currently stale.
+ * #2489 adds four signals from the strictly parsed, versioned `docs/docs-map.json`
+ * declaration (`input.docsMap`, #2709 wrapper): `docs-map-missing-document` (a
+ * mapped document is not a node in the doc graph), `docs-map-missing-source` (a
+ * declared source file no longer exists in the identity-matched repo-map
+ * project), `docs-map-unreferenced-source` (the mapped document exists but has
+ * no derived `src-ref` edge to a declared source — declaration drift, not a
+ * dead pointer), and `docs-map-missing-symbol` (a declared source-bound symbol
+ * is absent from that exact file's repo-map symbols). Direction is strictly
+ * ONE-WAY: only paths `docs/docs-map.json` itself declares are ever judged —
+ * a body-only `src-ref` to a path the map never opted into is always silent,
+ * never treated as an implicit declaration. The repo-map-backed pair
+ * (missing-source / missing-symbol) fires only when the wrapper's
+ * `repository`+`commit` identity resolves to EXACTLY ONE complete,
+ * non-truncated repo-map project — zero, multiple, or a stale/mismatched
+ * identity suppresses both entirely, computed once per run. A missing
+ * document also suppresses unreferenced-source for it (a gone doc trivially
+ * "fails to reference" everything), but its declared sources still get judged
+ * for existence/symbols independently, since those are repo-map claims.
  *
- * Issues: #2258, #2487, #2488 (epic #2256 — doc artifact hygiene)
+ * Reads `input.docGraph` (built by `buildDocGraph` in `parse-docs.ts`, #2257),
+ * `input.repoMap` for signal 3 and the #2489 repo-map-backed pair,
+ * `input.docsMap` for the #2489 declared-map signals, and
+ * `input.docHygieneArtifact` for the host checkers. Recommend-only: the output
+ * is advisory and never edits or deletes a doc. The link/reference/orphan/
+ * docs-map signals are current commit/filesystem state, so they need no
+ * staleness demotion; the declared-freshness verdict IS time-derived, but it
+ * is recomputed live against the injected evaluation `now` (never a stale
+ * ingest), so it embeds an explicit "as of <date>" in its wording instead of a
+ * provenance-level demotion, and never asserts the content itself is wrong or
+ * currently stale.
+ *
+ * Issues: #2258, #2487, #2488, #2489 (epic #2256 — doc artifact hygiene)
  */
 
 import type {
@@ -66,8 +87,9 @@ import type {
   RecSeverity,
 } from '../types';
 import type { DocFrontmatter, DocGraph, DocNode } from '../../parse-docs';
-import type { RepoMapDataset } from '../../parse-repo-map-join';
+import type { RepoMapDataset, RepoMapProjectJoin } from '../../parse-repo-map-join';
 import { DOC_GIT_TIMES_MIN_TIME_MS } from '../../doc-git-times';
+import type { DocsMapArtifact } from '../../parse-docs-map';
 import type {
   DocHygieneArtifact,
   DocHygieneFinding,
@@ -80,7 +102,11 @@ export type DocHygieneSignal =
   | 'dangling-src-ref'
   | 'dangling-context-ref'
   | 'dangling-npm-script'
-  | 'stale-declared-freshness';
+  | 'stale-declared-freshness'
+  | 'docs-map-missing-document'
+  | 'docs-map-missing-source'
+  | 'docs-map-unreferenced-source'
+  | 'docs-map-missing-symbol';
 
 /** One flagged doc-hygiene item: which doc, which signal, what to do. */
 export interface DocHygieneItem {
@@ -96,13 +122,19 @@ export interface DocHygieneItem {
     | 'doc-graph'
     | 'doc-graph.freshness'
     | 'lychee.local-links'
-    | 'agents-lint.context-refs';
+    | 'agents-lint.context-refs'
+    | 'docs-map';
   /**
    * Set only on a `stale-declared-freshness` item: the full declared-freshness
    * verdict (authoritative Git time, provenance, crossed threshold, evaluation
    * `asOf`, verdict) used to render its evidence line and pick its severity.
    */
   freshness?: DeclaredFreshnessFinding;
+  /**
+   * Set only on a `docs-map-missing-symbol` item: the declared symbol name
+   * that is absent from the source file's repo-map symbols.
+   */
+  symbol?: string;
 }
 
 /** Short label per signal for evidence rows. */
@@ -113,6 +145,10 @@ const SIGNAL_LABEL: Record<DocHygieneSignal, string> = {
   'dangling-context-ref': 'context file reference no longer exists',
   'dangling-npm-script': 'npm script no longer exists',
   'stale-declared-freshness': 'document past its declared freshness threshold',
+  'docs-map-missing-document': 'docs-map document no longer exists',
+  'docs-map-missing-source': 'declared source no longer exists',
+  'docs-map-unreferenced-source': 'declared source is not referenced by its document',
+  'docs-map-missing-symbol': 'declared source symbol no longer exists',
 };
 
 /** Signals that are structural breakage (dead pointers), not just sprawl. */
@@ -121,6 +157,9 @@ const STRUCTURAL: ReadonlySet<DocHygieneSignal> = new Set([
   'dangling-src-ref',
   'dangling-context-ref',
   'dangling-npm-script',
+  'docs-map-missing-document',
+  'docs-map-missing-source',
+  'docs-map-missing-symbol',
 ]);
 
 // ── Declared-freshness contract (#2488) ────────────────────────────────────
@@ -472,6 +511,130 @@ function scanDanglingSrcRefs(
   return items;
 }
 
+/**
+ * Resolve the SINGLE repo-map project the docs-map wrapper's declared
+ * `repository`+`commit` identity matches (#2489), or `null` when the
+ * repo-map-backed pair (missing-source / missing-symbol) must suppress.
+ * Identity is repository+commit ONLY — never a declared file, never the doc
+ * graph root — and both sides are case-folded since they are independently
+ * produced lowercase. A missing wrapper identity, zero or multiple candidate
+ * projects, or a candidate that is truncated / has an incomplete file list all
+ * suppress: there is no safe partial match.
+ */
+function matchDocsMapProject(
+  wrapper: DocsMapArtifact,
+  repoMap: RepoMapDataset | null | undefined
+): RepoMapProjectJoin | null {
+  if (wrapper.repository === null || wrapper.commit === null) return null;
+  if (!repoMap) return null;
+  const repoLower = wrapper.repository.toLowerCase();
+  const commitLower = wrapper.commit.toLowerCase();
+  const candidates = repoMap.projects.filter(
+    (project) =>
+      project.repository !== null &&
+      project.generatedAtGitSha !== null &&
+      project.repository.toLowerCase() === repoLower &&
+      project.generatedAtGitSha.toLowerCase() === commitLower
+  );
+  if (candidates.length !== 1) return null;
+  const project = candidates[0];
+  if (project.truncated || project.files.length !== project.fileCount) return null;
+  return project;
+}
+
+/**
+ * Signals 1/2/3/4 (#2489): drift between the STRICTLY declared
+ * `docs/docs-map.json` wrapper and its two oracles — the doc graph (document
+ * existence + `src-ref` edges) and the identity-matched repo-map project
+ * (source-file + symbol existence). Walks ONLY `wrapper.map.documents`; a
+ * body-only `src-ref` edge to a path the map never declared is never in scope
+ * (one-way direction — the map is the sole source of what to check). The
+ * caller guarantees `graph.nodes.length > 0` (empty-graph suppression is
+ * handled once, centrally, in `rule()`).
+ */
+function scanDocsMapDrift(
+  wrapper: DocsMapArtifact,
+  graph: DocGraph,
+  repoMap: RepoMapDataset | null | undefined
+): DocHygieneItem[] {
+  const items: DocHygieneItem[] = [];
+
+  const nodeByNormPath = new Map<string, DocNode>();
+  for (const n of graph.nodes) nodeByNormPath.set(normPath(n.path), n);
+
+  const matchedProject = matchDocsMapProject(wrapper, repoMap);
+  const fileByNormPath = new Map<string, RepoMapProjectJoin['files'][number]>();
+  if (matchedProject) {
+    for (const file of matchedProject.files) {
+      fileByNormPath.set(normPath(file.path), file);
+    }
+  }
+
+  for (const [documentPath, doc] of Object.entries(wrapper.map.documents)) {
+    const node = nodeByNormPath.get(normPath(documentPath));
+    const docExists = node !== undefined;
+    if (!docExists) {
+      items.push({
+        path: documentPath,
+        signal: 'docs-map-missing-document',
+        origin: 'docs-map',
+      });
+    }
+
+    for (const source of doc.sources) {
+      // Signal 3: only meaningful once the document itself exists — a missing
+      // doc would trivially "fail to reference" every one of its sources.
+      if (docExists) {
+        const sourceNormPath = normPath(source.path);
+        const isReferenced = graph.edges.some(
+          (edge) =>
+            edge.kind === 'src-ref' &&
+            edge.from === node!.slug &&
+            normPath(edge.to.startsWith('src:') ? edge.to.slice(4) : edge.to) ===
+              sourceNormPath
+        );
+        if (!isReferenced) {
+          items.push({
+            path: documentPath,
+            signal: 'docs-map-unreferenced-source',
+            target: source.path,
+            origin: 'docs-map',
+          });
+        }
+      }
+
+      // Signals 2 + 4: independent of document existence — these are repo-map
+      // claims about the source file, not doc-graph claims.
+      if (matchedProject) {
+        const file = fileByNormPath.get(normPath(source.path));
+        if (!file) {
+          items.push({
+            path: documentPath,
+            signal: 'docs-map-missing-source',
+            target: source.path,
+            origin: 'docs-map',
+          });
+          continue; // no symbol claim about a file that is gone
+        }
+        const symbolNames = new Set(file.symbols.map((s) => s.name));
+        for (const symbol of source.symbols) {
+          if (!symbolNames.has(symbol)) {
+            items.push({
+              path: documentPath,
+              signal: 'docs-map-missing-symbol',
+              target: source.path,
+              symbol,
+              origin: 'docs-map',
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return items;
+}
+
 function artifactBrokenLink(finding: DocHygieneFinding): boolean {
   return (
     finding.check === 'lychee.local-links' &&
@@ -588,6 +751,15 @@ function evidenceLine(it: DocHygieneItem): string {
       `declared ${f.thresholdKey} threshold (${f.thresholdRaw}) as of ${f.asOf} → ${f.verdict}`
     );
   }
+  if (it.origin === 'docs-map') {
+    const target = it.target
+      ? ` -> ${it.target}${it.symbol ? ` (symbol ${it.symbol})` : ''}`
+      : '';
+    return (
+      `${it.path}${target} — ${SIGNAL_LABEL[it.signal]} ` +
+      `(declared in docs/docs-map.json)`
+    );
+  }
   return (
     `${it.path}${it.line ? `:${it.line}` : ''}` +
     `${it.target ? ` -> ${it.target}` : ''} — ${SIGNAL_LABEL[it.signal]}`
@@ -597,7 +769,7 @@ function evidenceLine(it: DocHygieneItem): string {
 export const detector: Detector = {
   id: 'maintenance.doc-hygiene',
   category: 'maintenance',
-  dataDeps: ['docGraph', 'repoMap', 'docHygieneArtifact'],
+  dataDeps: ['docGraph', 'repoMap', 'docHygieneArtifact', 'docsMap'],
   rule(input: RecommendationInput, now: number): Recommendation | null {
     const graph = input.docGraph;
     const artifactItems = scanArtifactFindings(input.docHygieneArtifact);
@@ -610,6 +782,7 @@ export const detector: Detector = {
         ...scanOrphans(graph),
         ...scanDanglingSrcRefs(graph, input.repoMap, pathBySlug),
         ...scanDeclaredFreshness(graph, now),
+        ...(input.docsMap ? scanDocsMapDrift(input.docsMap, graph, input.repoMap) : []),
       ];
     }
 
@@ -625,6 +798,10 @@ export const detector: Detector = {
       'dangling-src-ref',
       'dangling-context-ref',
       'dangling-npm-script',
+      'docs-map-missing-document',
+      'docs-map-missing-source',
+      'docs-map-missing-symbol',
+      'docs-map-unreferenced-source',
       'stale-declared-freshness',
       'orphan',
     ];
@@ -666,6 +843,22 @@ export const detector: Detector = {
     const freshnessCount = items.filter(
       (item) => item.signal === 'stale-declared-freshness',
     ).length;
+    // #2489's two docs-map oracles are cited separately: 1+3 read the map's
+    // own declarations against the doc graph, 2+4 read them against the
+    // identity-matched repo-map project.
+    const docsMapGraphCount = items.filter(
+      (item) =>
+        item.origin === 'docs-map' &&
+        (item.signal === 'docs-map-missing-document' ||
+          item.signal === 'docs-map-unreferenced-source'),
+    ).length;
+    const docsMapRepoCount = items.filter(
+      (item) =>
+        item.origin === 'docs-map' &&
+        (item.signal === 'docs-map-missing-source' ||
+          item.signal === 'docs-map-missing-symbol'),
+    ).length;
+    const docsMapCount = docsMapGraphCount + docsMapRepoCount;
     const trackedDocs = Math.max(
       graph?.nodes.length ?? 0,
       input.docHygieneArtifact?.repo.markdownFiles ?? 0
@@ -718,6 +911,28 @@ export const detector: Detector = {
         value: freshnessCount,
       });
     }
+    // #2489 signals 1+3: the declared map itself against the doc graph's
+    // document existence and derived src-ref edges.
+    if (docsMapGraphCount > 0) {
+      observations.push({
+        claim: `${docsMapGraphCount} docs/docs-map.json declaration(s) whose document is missing from the doc graph or is not referenced by that document's own src-ref edges`,
+        source: 'parse-docs-map',
+        field:
+          'docsMap.map.{version,documents[<path>].sources} + docGraph.edges[kind=src-ref].{from,to}',
+        value: docsMapGraphCount,
+      });
+    }
+    // #2489 signals 2+4: the declared map against the identity-matched
+    // repo-map project's file and symbol inventory.
+    if (docsMapRepoCount > 0) {
+      observations.push({
+        claim: `${docsMapRepoCount} docs/docs-map.json declaration(s) whose source file or bound symbol is absent from the identity-matched repo-map project`,
+        source: 'parse-repo-map-join',
+        field:
+          'repoMap.projects[repository=docsMap.repository,generatedAtGitSha=docsMap.commit].files[].{path,symbols[].name}',
+        value: docsMapRepoCount,
+      });
+    }
 
     const n = items.length;
     return {
@@ -734,6 +949,10 @@ export const detector: Detector = {
         (freshnessCount > 0
           ? ` For a document past its declared freshness threshold, manually refresh it or intentionally revise its ` +
             `\`freshness.warn_after\`/\`freshness.error_after\` contract.`
+          : '') +
+        (docsMapCount > 0
+          ? ` For a docs-map declaration drift, update the document (or the source/symbol it describes) to match, ` +
+            `or correct the stale entry in \`docs/docs-map.json\` itself.`
           : ''),
       affected: n,
       // No honest dollar unit — score on minutes to review each flagged item.

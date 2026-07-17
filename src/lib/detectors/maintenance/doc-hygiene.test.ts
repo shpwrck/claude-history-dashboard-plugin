@@ -12,8 +12,11 @@ import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import { parseFrontmatter } from '../../parse-docs';
 import type { DocEdge, DocGraph, DocNode } from '../../parse-docs';
-import type { RepoMapDataset } from '../../parse-repo-map-join';
+import type { RepoMapDataset, RepoMapProjectJoin } from '../../parse-repo-map-join';
+import type { RepoSymbol } from '../../repo-map/types';
 import type { DocHygieneArtifact } from '../../doc-hygiene-artifact';
+import { parseDocsMap } from '../../parse-docs-map';
+import type { DocsMapArtifact } from '../../parse-docs-map';
 
 // ── Fixture builders ───────────────────────────────────────────────────────
 
@@ -70,14 +73,78 @@ function run(
   docGraph: DocGraph | null | undefined,
   rm?: RepoMapDataset | null,
   docHygieneArtifact?: DocHygieneArtifact | null,
-  now = 0
+  now = 0,
+  docsMap?: DocsMapArtifact | null
 ) {
   const input = {
     docGraph,
     repoMap: rm,
     docHygieneArtifact,
+    docsMap,
   } as unknown as RecommendationInput;
   return detector.rule(input, now);
+}
+
+// ── docs-map fixtures (#2489) ───────────────────────────────────────────────
+
+const DOCS_MAP_REPO = 'shpwrck/claude-history-dashboard';
+const DOCS_MAP_COMMIT = 'a'.repeat(40);
+
+/** A validated `DocsMapArtifact` wrapper around a small hand-built map, with
+ *  the wrapper identity defaulted to match `repoMapProject`'s defaults below.
+ *  Symbols default to `[]` (a file-level binding) when omitted. */
+function docsMapWrapper(
+  documents: Record<string, { sources: { path: string; symbols?: string[] }[] }>,
+  over: Partial<{ repository: string | null; commit: string | null }> = {}
+): DocsMapArtifact {
+  return {
+    map: {
+      version: 1,
+      repository: DOCS_MAP_REPO,
+      documents: Object.fromEntries(
+        Object.entries(documents).map(([path, doc]) => [
+          path,
+          { sources: doc.sources.map((s) => ({ path: s.path, symbols: s.symbols ?? [] })) },
+        ])
+      ),
+    },
+    repository: 'repository' in over ? over.repository! : DOCS_MAP_REPO,
+    commit: 'commit' in over ? over.commit! : DOCS_MAP_COMMIT,
+  };
+}
+
+function symbol(name: string): RepoSymbol {
+  return { name, kind: 'function', exported: true, signature: `function ${name}()`, line: 1 };
+}
+
+/** One repo-map project, identity-matching `docsMapWrapper`'s defaults unless
+ *  overridden. Files carry named symbols (default `[]`). */
+function repoMapProject(
+  files: { path: string; symbols?: string[] }[],
+  over: Record<string, unknown> = {}
+): RepoMapProjectJoin {
+  return {
+    root: '/repo',
+    generatedAtGitSha: DOCS_MAP_COMMIT,
+    repository: DOCS_MAP_REPO,
+    fileCount: files.length,
+    truncated: false,
+    text: '',
+    files: files.map((f) => ({
+      path: f.path,
+      symbols: (f.symbols ?? []).map(symbol),
+      imports: [],
+      configSections: [],
+      recommendations: [],
+    })),
+    configSections: [],
+    configAttribution: [],
+    ...over,
+  } as unknown as RepoMapProjectJoin;
+}
+
+function repoMapDataset(projects: RepoMapProjectJoin[]): RepoMapDataset {
+  return { projects } as unknown as RepoMapDataset;
 }
 
 function lycheeArtifact(
@@ -937,5 +1004,393 @@ describe('maintenance.doc-hygiene — seeded freshness contracts (#2488)', () =>
       });
       expect(evaluateDeclaredFreshness(justCommitted, NOW), rel).toBeNull();
     }
+  });
+});
+
+// ── docs-map declared drift (#2489) ─────────────────────────────────────────
+
+describe('maintenance.doc-hygiene — docs-map declared drift (#2489)', () => {
+  it('stays silent on a fully consistent docs-map declaration', () => {
+    const g = graph(
+      [node('docs/guide', { path: 'docs/guide.md' })],
+      [srcRef('docs/guide', 'src/lib/foo.ts')]
+    );
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: ['doThing'] }] },
+    });
+    const rm = repoMapDataset([repoMapProject([{ path: 'src/lib/foo.ts', symbols: ['doThing'] }])]);
+    expect(run(g, rm, null, 0, wrapper)).toBeNull();
+  });
+
+  it('flags docs-map-missing-document when the mapped doc is not a node in the graph', () => {
+    const g = graph([node('docs/other')], []);
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: [] }] },
+    });
+    const rec = run(g, null, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.severity).toBe('warning'); // structural
+    expect(rec!.evidence).toEqual([
+      'docs/guide.md — docs-map document no longer exists (declared in docs/docs-map.json)',
+    ]);
+  });
+
+  it('flags docs-map-missing-source when the declared source is absent from the matched repo-map project', () => {
+    // Root deliberately does NOT match the repo-map project's root, so the
+    // legacy (#2258) root-matched dangling-src-ref signal stays silent and
+    // only the identity-matched (repository+commit) docs-map signal fires.
+    const g = graph(
+      [node('docs/guide', { path: 'docs/guide.md' })],
+      [srcRef('docs/guide', 'src/lib/gone.ts')],
+      '/no-such-root'
+    );
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/gone.ts', symbols: [] }] },
+    });
+    const rm = repoMapDataset([repoMapProject([{ path: 'src/lib/other.ts' }])]);
+    const rec = run(g, rm, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.severity).toBe('warning'); // structural
+    expect(rec!.evidence![0]).toContain('src/lib/gone.ts');
+    expect(rec!.evidence![0]).toContain('declared source no longer exists');
+  });
+
+  it('flags docs-map-unreferenced-source when the doc exists but has no src-ref edge to the declared source', () => {
+    const g = graph([node('docs/guide', { path: 'docs/guide.md' })], []);
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: [] }] },
+    });
+    const rec = run(g, null, null, 0, wrapper); // no repoMap → 2/4 suppressed regardless
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.severity).toBe('info'); // declaration drift, not structural
+    expect(rec!.evidence![0]).toContain('src/lib/foo.ts');
+    expect(rec!.evidence![0]).toContain('declared source is not referenced by its document');
+  });
+
+  it('flags docs-map-missing-symbol when the declared symbol is absent from the source file symbols', () => {
+    const g = graph(
+      [node('docs/guide', { path: 'docs/guide.md' })],
+      [srcRef('docs/guide', 'src/lib/foo.ts')]
+    );
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: ['missingFn'] }] },
+    });
+    const rm = repoMapDataset([repoMapProject([{ path: 'src/lib/foo.ts', symbols: ['realFn'] }])]);
+    const rec = run(g, rm, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.severity).toBe('warning'); // structural
+    expect(rec!.evidence![0]).toContain('src/lib/foo.ts');
+    expect(rec!.evidence![0]).toContain('missingFn');
+    expect(rec!.evidence![0]).toContain('declared source symbol no longer exists');
+  });
+
+  it('never treats a body-only src-ref edge as an implicit docs-map declaration (one-way direction)', () => {
+    const g = graph(
+      [node('docs/guide', { path: 'docs/guide.md' })],
+      [
+        srcRef('docs/guide', 'src/lib/foo.ts'), // declared, satisfied
+        srcRef('docs/guide', 'src/lib/undeclared.ts'), // never in the map — out of scope
+      ]
+    );
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: [] }] },
+    });
+    expect(run(g, null, null, 0, wrapper)).toBeNull();
+  });
+
+  it('suppresses unreferenced-source for a missing document but still checks its declared sources against the repo map', () => {
+    const g = graph([node('docs/other')], []); // docs/guide.md is absent
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': {
+        sources: [
+          { path: 'src/lib/gone.ts', symbols: [] },
+          { path: 'src/lib/foo.ts', symbols: ['missingSym'] },
+        ],
+      },
+    });
+    const rm = repoMapDataset([
+      repoMapProject([{ path: 'src/lib/foo.ts', symbols: ['realSym'] }]),
+    ]);
+    const rec = run(g, rm, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    // missing-document + missing-source(gone.ts) + missing-symbol(foo.ts) = 3, no unreferenced-source.
+    expect(rec!.affected).toBe(3);
+    expect(rec!.evidence!.some((e) => e.includes('docs-map document no longer exists'))).toBe(true);
+    expect(
+      rec!.evidence!.some(
+        (e) => e.includes('src/lib/gone.ts') && e.includes('declared source no longer exists')
+      )
+    ).toBe(true);
+    expect(
+      rec!.evidence!.some(
+        (e) => e.includes('missingSym') && e.includes('declared source symbol no longer exists')
+      )
+    ).toBe(true);
+    expect(
+      rec!.evidence!.some((e) => e.includes('declared source is not referenced by its document'))
+    ).toBe(false);
+  });
+
+  it('suppresses missing-symbol for a source whose file itself is missing', () => {
+    // Root deliberately does NOT match the repo-map project's root — see the
+    // missing-source test above for why.
+    const g = graph(
+      [node('docs/guide', { path: 'docs/guide.md' })],
+      [srcRef('docs/guide', 'src/lib/gone.ts')],
+      '/no-such-root'
+    );
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/gone.ts', symbols: ['someSymbol'] }] },
+    });
+    const rm = repoMapDataset([repoMapProject([{ path: 'src/lib/other.ts' }])]); // gone.ts absent
+    const rec = run(g, rm, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1); // only missing-source
+    expect(rec!.evidence![0]).toContain('declared source no longer exists');
+    expect(
+      rec!.evidence!.some((e) => e.includes('declared source symbol no longer exists'))
+    ).toBe(false);
+  });
+
+  it('does not let a same-named file in an unrelated (non-matching) project hide a genuinely missing source', () => {
+    const g = graph(
+      [node('docs/guide', { path: 'docs/guide.md' })],
+      [srcRef('docs/guide', 'src/lib/foo.ts')]
+    );
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: [] }] },
+    });
+    const rm = repoMapDataset([
+      repoMapProject([]), // identity-matched project: does NOT have foo.ts
+      repoMapProject([{ path: 'src/lib/foo.ts' }], {
+        root: '/other',
+        repository: 'other-org/other-repo',
+        generatedAtGitSha: 'c'.repeat(40),
+      }), // unrelated project: HAS it, but is not a candidate
+    ]);
+    const rec = run(g, rm, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(
+      rec!.evidence!.some(
+        (e) => e.includes('src/lib/foo.ts') && e.includes('declared source no longer exists')
+      )
+    ).toBe(true);
+  });
+
+  it('does not let an unrelated (non-matching) project missing the file create a false finding when the matched project has it', () => {
+    const g = graph(
+      [node('docs/guide', { path: 'docs/guide.md' })],
+      [srcRef('docs/guide', 'src/lib/foo.ts')]
+    );
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: ['realFn'] }] },
+    });
+    const rm = repoMapDataset([
+      repoMapProject([{ path: 'src/lib/foo.ts', symbols: ['realFn'] }]), // matched: HAS it
+      repoMapProject([], {
+        root: '/other',
+        repository: 'other-org/other-repo',
+        generatedAtGitSha: 'c'.repeat(40),
+      }), // unrelated: lacks it, but is not a candidate
+    ]);
+    expect(run(g, rm, null, 0, wrapper)).toBeNull();
+  });
+
+  it('stays silent when docsMap is absent, even with matching graph/repo-map data', () => {
+    const g = graph([node('docs/guide', { path: 'docs/guide.md' })], []);
+    expect(run(g)).toBeNull();
+    expect(run(g, null, null, 0, null)).toBeNull();
+  });
+
+  it('stays silent for all four docs-map signals when the doc graph is absent or empty, even with a valid wrapper + matched project', () => {
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: ['realFn'] }] },
+    });
+    const rm = repoMapDataset([repoMapProject([{ path: 'src/lib/foo.ts', symbols: ['realFn'] }])]);
+    expect(run(null, rm, null, 0, wrapper)).toBeNull();
+    expect(run(undefined, rm, null, 0, wrapper)).toBeNull();
+    expect(run(graph([]), rm, null, 0, wrapper)).toBeNull();
+  });
+
+  it('carries docs-map observations with the cited source/field when items fire', () => {
+    const g = graph([node('docs/other')], []); // docs/guide.md absent
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: ['missingSym'] }] },
+    });
+    const rm = repoMapDataset([repoMapProject([{ path: 'src/lib/foo.ts', symbols: ['realSym'] }])]);
+    const rec = run(g, rm, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(
+      rec!.provenance!.observations.some(
+        (o) => o.source === 'parse-docs-map' && String(o.field).includes('documents[<path>].sources')
+      )
+    ).toBe(true);
+    expect(
+      rec!.provenance!.observations.some(
+        (o) => o.source === 'parse-repo-map-join' && String(o.field).includes('symbols[].name')
+      )
+    ).toBe(true);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('extends the action text and stays recommend-only when docs-map items fire', () => {
+    const g = graph([node('docs/other')], []);
+    const wrapper = docsMapWrapper({
+      'docs/guide.md': { sources: [{ path: 'src/lib/foo.ts', symbols: [] }] },
+    });
+    const rec = run(g, null, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(rec!.action).toContain('docs/docs-map.json');
+    expect(rec!.fix).toBeUndefined();
+  });
+});
+
+describe('maintenance.doc-hygiene — docs-map identity suppression matrix (#2489)', () => {
+  // Shared "would-fire" shape: the doc exists (no missing-document) and has NO
+  // src-ref edge to its declared source, so unreferenced-source (signal 3)
+  // ALWAYS fires regardless of repo-map identity — proving the graph-side
+  // signal keeps working. The declared source is absent from every
+  // constructed repo-map project, so missing-source (signal 2) WOULD fire if
+  // identity matched; each case breaks the match a different way.
+  const guide = () => node('docs/guide', { path: 'docs/guide.md' });
+  const wrapperWith = (over: Partial<{ repository: string | null; commit: string | null }>) =>
+    docsMapWrapper(
+      { 'docs/guide.md': { sources: [{ path: 'src/lib/gone.ts', symbols: [] }] } },
+      over
+    );
+
+  const cases: Array<[string, () => { wrapper: DocsMapArtifact; rm: RepoMapDataset }]> = [
+    [
+      'wrapper.repository is null',
+      () => ({
+        wrapper: wrapperWith({ repository: null }),
+        rm: repoMapDataset([repoMapProject([{ path: 'src/lib/other.ts' }])]),
+      }),
+    ],
+    [
+      'wrapper.commit is null',
+      () => ({
+        wrapper: wrapperWith({ commit: null }),
+        rm: repoMapDataset([repoMapProject([{ path: 'src/lib/other.ts' }])]),
+      }),
+    ],
+    [
+      'zero matching projects (fully unrelated project)',
+      () => ({
+        wrapper: wrapperWith({}),
+        rm: repoMapDataset([
+          repoMapProject([{ path: 'src/lib/other.ts' }], {
+            repository: 'zzz/unrelated',
+            generatedAtGitSha: 'd'.repeat(40),
+          }),
+        ]),
+      }),
+    ],
+    [
+      'two matching projects (ambiguous)',
+      () => ({
+        wrapper: wrapperWith({}),
+        rm: repoMapDataset([
+          repoMapProject([{ path: 'src/lib/other.ts' }]),
+          repoMapProject([{ path: 'src/lib/other2.ts' }]),
+        ]),
+      }),
+    ],
+    [
+      'matched project is truncated',
+      () => ({
+        wrapper: wrapperWith({}),
+        rm: repoMapDataset([
+          repoMapProject([{ path: 'src/lib/other.ts' }], { truncated: true }),
+        ]),
+      }),
+    ],
+    [
+      'files.length !== fileCount',
+      () => ({
+        wrapper: wrapperWith({}),
+        rm: repoMapDataset([
+          repoMapProject([{ path: 'src/lib/other.ts' }], { fileCount: 2 }),
+        ]),
+      }),
+    ],
+    [
+      'repository mismatch',
+      () => ({
+        wrapper: wrapperWith({}),
+        rm: repoMapDataset([
+          repoMapProject([{ path: 'src/lib/other.ts' }], { repository: 'other-org/other-repo' }),
+        ]),
+      }),
+    ],
+    [
+      'generatedAtGitSha mismatch (stale commit)',
+      () => ({
+        wrapper: wrapperWith({}),
+        rm: repoMapDataset([
+          repoMapProject([{ path: 'src/lib/other.ts' }], { generatedAtGitSha: 'b'.repeat(40) }),
+        ]),
+      }),
+    ],
+  ];
+
+  it.each(cases)('%s suppresses signals 2+4 while signal 3 still fires', (_label, build) => {
+    const { wrapper, rm } = build();
+    const g = graph([guide()], []);
+    const rec = run(g, rm, null, 0, wrapper);
+    expect(rec).not.toBeNull();
+    expect(
+      rec!.evidence!.some((e) => e.includes('declared source is not referenced by its document'))
+    ).toBe(true);
+    expect(rec!.evidence!.some((e) => e.includes('declared source no longer exists'))).toBe(false);
+    expect(
+      rec!.evidence!.some((e) => e.includes('declared source symbol no longer exists'))
+    ).toBe(false);
+  });
+});
+
+describe('maintenance.doc-hygiene — seeded docs-map self-consistency (#2489)', () => {
+  it('emits zero docs-map items for a synthetic graph/repo-map built to exactly mirror the real seed', () => {
+    const content = readFileSync(
+      new URL('../../../../docs/docs-map.json', import.meta.url),
+      'utf8'
+    );
+    const map = parseDocsMap(JSON.parse(content));
+    expect(map).not.toBeNull();
+    if (!map) return;
+
+    const nodes: DocNode[] = Object.keys(map.documents).map((docPath) =>
+      node(docPath.replace(/\.md$/, ''), { path: docPath })
+    );
+    const edges: DocEdge[] = [];
+    const filesByPath = new Map<string, { path: string; symbols: string[] }>();
+    for (const [docPath, doc] of Object.entries(map.documents)) {
+      const slug = docPath.replace(/\.md$/, '');
+      for (const source of doc.sources) {
+        edges.push(srcRef(slug, source.path));
+        const existing = filesByPath.get(source.path) ?? { path: source.path, symbols: [] };
+        existing.symbols = [...new Set([...existing.symbols, ...source.symbols])];
+        filesByPath.set(source.path, existing);
+      }
+    }
+
+    const g = graph(nodes, edges);
+    const wrapper: DocsMapArtifact = {
+      map,
+      repository: map.repository,
+      commit: DOCS_MAP_COMMIT,
+    };
+    const rm = repoMapDataset([
+      repoMapProject([...filesByPath.values()], {
+        generatedAtGitSha: DOCS_MAP_COMMIT,
+        repository: map.repository,
+      }),
+    ]);
+
+    expect(run(g, rm, null, 0, wrapper)).toBeNull();
   });
 });
