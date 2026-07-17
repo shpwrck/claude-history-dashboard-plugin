@@ -854,3 +854,188 @@ test('#2558 memory-store ingest reads an in-root symlinked memory directory', as
     else process.env.CHD_DB_PATH = origDb;
   }
 });
+
+test('#2709 docs-map contract reaches both datasets, binds checkout identity, and invalidates both cache gates', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origDocRoot = process.env.CHD_DOC_GRAPH_ROOT;
+  const origGitSha = process.env.GIT_SHA;
+  const origRepoEnv = process.env.CHD_DOCS_MAP_REPOSITORY;
+  const home = buildFixtureHome();
+  const docRoot = join(tmpdir(), `chd-2709-docs-${randomUUID()}`);
+  mkdirSync(join(docRoot, 'docs'), { recursive: true });
+  writeFileSync(join(docRoot, 'README.md'), '# First\n');
+  const mapPath = join(docRoot, 'docs', 'docs-map.json');
+  const declaration = {
+    version: 1,
+    repository: 'acme/widgets',
+    documents: {
+      'docs/guide.md': {
+        sources: [{ path: 'src/lib/example.ts', symbols: ['buildExample'] }],
+      },
+    },
+  };
+  writeFileSync(mapPath, JSON.stringify(declaration));
+
+  try {
+    delete process.env.GIT_SHA;
+    delete process.env.CHD_DOCS_MAP_REPOSITORY;
+    process.env.CHD_DOC_GRAPH_ROOT = docRoot;
+    const ingest = await loadIngest(home);
+    ingest.ingest();
+
+    // (1) Parity + shape: both assemblies carry the same validated wrapper.
+    const full = ingest.assembleDataset();
+    const light = ingest.assembleRecommendationDataset();
+    assert.deepEqual(light.docsMap, full.docsMap, 'light/full docsMap parity');
+    // Compare the SERIALIZED form (what every client surface receives): the
+    // in-memory `documents` record is deliberately null-prototype, which
+    // strict deepEqual would reject against a plain literal.
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(full.docsMap.map)),
+      declaration,
+      'the validated declaration is carried whole'
+    );
+    assert.equal(
+      full.docsMap.repository,
+      null,
+      'no checkout and no locator env means missing identity (suppression)'
+    );
+    assert.equal(full.docsMap.commit, null);
+
+    // (2) Gitless-runtime fallback: the deploy locators fill the wrapper the
+    // way the container image (no git for this root) relies on. A shaped-but-
+    // SHORT stamp (the published image-tag convention) can never match a full
+    // repo-map sha, so it must read as unknown rather than silently binding.
+    process.env.CHD_DOCS_MAP_REPOSITORY = 'ACME/Widgets';
+    process.env.GIT_SHA = 'abc1234';
+    const shortStamp = ingest.assembleDataset().docsMap;
+    assert.equal(
+      shortStamp.repository,
+      'acme/widgets',
+      'the locator slug is case-folded to the canonical form'
+    );
+    assert.equal(shortStamp.commit, null, 'a short stamp must not bind a commit');
+    process.env.GIT_SHA = 'a'.repeat(40);
+    const stamped = ingest.assembleDataset().docsMap;
+    assert.equal(stamped.repository, 'acme/widgets');
+    assert.equal(stamped.commit, 'a'.repeat(40));
+    // Declared-vs-derived reconciliation: an identity naming a DIFFERENT
+    // repository than the declaration rejects the whole wrapper — a cross-repo
+    // copy must never bind.
+    process.env.CHD_DOCS_MAP_REPOSITORY = 'someone-else/fork';
+    assert.equal(
+      ingest.assembleDataset().docsMap,
+      null,
+      'a declared/derived repository mismatch suppresses the wrapper'
+    );
+    delete process.env.CHD_DOCS_MAP_REPOSITORY;
+    delete process.env.GIT_SHA;
+
+    // (3) Invalidation: a byte-length-preserving, mtime-restored JSON edit
+    // moves BOTH cache gates without touching any Markdown.
+    const baselineSignature = ingest.sourceSignature();
+    const baselineHash = ingest.ingest().contentHash;
+    const before = statSync(mapPath);
+    writeFileSync(
+      mapPath,
+      JSON.stringify({ ...declaration, repository: 'acme/gadgets' })
+    );
+    assert.equal(statSync(mapPath).size, before.size, 'fixture preserves byte length');
+    utimesSync(mapPath, before.atime, before.mtime);
+    assert.notEqual(
+      ingest.sourceSignature(),
+      baselineSignature,
+      'a docs-map-only edit invalidates the cheap response signature'
+    );
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      baselineHash,
+      'a docs-map-only edit invalidates the persisted dataset cache key'
+    );
+
+    // (4) Whole-map rejection: ONE malformed entry nulls the wrapper — no
+    // partially trusted map is ever serialized.
+    writeFileSync(
+      mapPath,
+      JSON.stringify({
+        ...declaration,
+        documents: {
+          ...declaration.documents,
+          'docs/bad.md': { sources: [{ path: '../escape.ts', symbols: ['x'] }] },
+        },
+      })
+    );
+    assert.equal(
+      ingest.assembleDataset().docsMap,
+      null,
+      'any bad entry rejects the whole map'
+    );
+
+    // (5) Git identity binding: a clean committed checkout with an origin
+    // remote binds repository+commit; only the docs-map file's OWN tracked
+    // dirtiness suppresses the commit.
+    writeFileSync(mapPath, JSON.stringify(declaration));
+    execFileSync('git', ['init'], { cwd: docRoot, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: docRoot });
+    execFileSync('git', ['config', 'user.name', 'CHD Test'], { cwd: docRoot });
+    execFileSync(
+      'git',
+      ['remote', 'add', 'origin', 'git@github.com:acme/widgets.git'],
+      { cwd: docRoot }
+    );
+    execFileSync('git', ['add', '-A'], { cwd: docRoot });
+    execFileSync('git', ['commit', '-m', 'Bind docs map'], {
+      cwd: docRoot,
+      stdio: 'ignore',
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: docRoot,
+      encoding: 'utf8',
+    }).trim();
+    const bound = ingest.assembleDataset().docsMap;
+    assert.equal(bound.repository, 'acme/widgets', 'normalized remote identity');
+    assert.equal(bound.commit, head, 'clean HEAD commit binds the wrapper');
+
+    // Tracked dirt ELSEWHERE cannot change the committed map bytes: the dirty
+    // probe is scoped to the docs-map file with tracked-only semantics (#2709
+    // review — a host checkout perpetually carries scratch, which must not
+    // permanently commit-suppress the wrapper).
+    writeFileSync(join(docRoot, 'README.md'), '# Dirty\n');
+    const scratchDirty = ingest.assembleDataset().docsMap;
+    assert.equal(scratchDirty.repository, 'acme/widgets');
+    assert.equal(
+      scratchDirty.commit,
+      head,
+      'unrelated tracked dirt must not suppress the commit claim'
+    );
+
+    // Dirtying the docs-map file ITSELF is exactly what must suppress: the
+    // working bytes no longer match any commit.
+    writeFileSync(mapPath, `${JSON.stringify(declaration, null, 2)}\n`);
+    const mapDirty = ingest.assembleDataset().docsMap;
+    assert.equal(mapDirty.repository, 'acme/widgets');
+    assert.equal(
+      mapDirty.commit,
+      null,
+      'a dirty docs-map file suppresses the commit claim'
+    );
+
+    // (6) Absence is silent null.
+    rmSync(mapPath);
+    assert.equal(ingest.assembleDataset().docsMap, null, 'absent map is null');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(docRoot, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+    if (origDocRoot === undefined) delete process.env.CHD_DOC_GRAPH_ROOT;
+    else process.env.CHD_DOC_GRAPH_ROOT = origDocRoot;
+    if (origGitSha === undefined) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = origGitSha;
+    if (origRepoEnv === undefined) delete process.env.CHD_DOCS_MAP_REPOSITORY;
+    else process.env.CHD_DOCS_MAP_REPOSITORY = origRepoEnv;
+  }
+});

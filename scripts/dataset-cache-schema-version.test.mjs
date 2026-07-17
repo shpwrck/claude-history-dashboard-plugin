@@ -35,8 +35,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      27,
-      'edit format-churn metrics (#2507) must turn over persisted v26 datasets'
+      28,
+      'the serialized docsMap contract wrapper must turn over persisted v27 datasets'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -49,6 +49,9 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
       key,
       `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`
     );
+    // The immediately-preceding v27 key needs no dedicated notEqual: the exact
+    // equal(28) assertion above already excludes every other version (#2709
+    // review item; avoids accumulating one dead assertion per bump).
     assert.notEqual(
       key,
       `dataset-schema:v26:parser-${ingest.PARSER_SIG_VERSION}`,

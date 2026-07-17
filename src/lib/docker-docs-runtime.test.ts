@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DOC_GIT_TIMES_RELPATH } from './doc-git-times';
+import { DOCS_MAP_RELPATH } from './parse-docs-map';
 
 describe('runtime image doc-graph inputs (#2380)', () => {
   it('copies root markdown and docs into the zero-node_modules runtime stage', () => {
@@ -9,6 +10,18 @@ describe('runtime image doc-graph inputs (#2380)', () => {
 
     expect(dockerfile).toMatch(/COPY --from=build \/app\/\*\.md \.\//);
     expect(dockerfile).toContain('COPY --from=build /app/docs ./docs');
+  });
+
+  it('packages the versioned docs-map contract via the docs COPY (#2709)', () => {
+    const dockerfile = readFileSync(join(process.cwd(), 'Dockerfile'), 'utf8');
+
+    // readDocsMap() reads <DOC_GRAPH_ROOT>/<DOCS_MAP_RELPATH>; the runtime
+    // image must carry the committed declaration for the container deploy.
+    // The docs/ COPY is what packages it, so the seam relpath must stay
+    // inside docs/.
+    expect(dockerfile).toContain('COPY --from=build /app/docs ./docs');
+    expect(DOCS_MAP_RELPATH.startsWith('docs/')).toBe(true);
+    expect(existsSync(join(process.cwd(), DOCS_MAP_RELPATH))).toBe(true);
   });
 });
 

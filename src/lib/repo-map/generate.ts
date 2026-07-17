@@ -250,6 +250,7 @@ export async function generateRepoMap(
   return {
     root,
     generatedAtGitSha: opts.gitSha ?? null,
+    repository: opts.repository ?? null,
     fileCount: files.length,
     files: ranked,
     text,

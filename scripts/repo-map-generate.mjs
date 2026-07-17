@@ -35,6 +35,9 @@ const {
   repoMapParserCacheSalt,
   DEFAULT_REPO_MAP_FILE_CACHE_MAX_BYTES,
 } = await import(join(PROJECT_DIR, 'src', 'lib', 'repo-map', 'index.ts'));
+const { normalizeGitRemoteUrl } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'parse-docs-map.ts')
+);
 
 /** Best-effort git sha of the root for the staleness stamp; null if not a repo.
  *  A DIRTY tree returns null too, so the mtime watermark (not a stale sha)
@@ -50,6 +53,29 @@ function gitShaOf(root) {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** Normalized `owner/repo` slug of the root's Git remote (#2709), or null when
+ *  the root is not a repo / has no `origin` / the URL has no two-segment slug.
+ *  Derived deterministically beside `gitShaOf` so the artifact's identity and
+ *  staleness stamp always describe the same checkout; the shared pure
+ *  normalizer keeps this identity byte-identical to the ingest-side docs-map
+ *  wrapper derivation. */
+function repositoryOf(root) {
+  try {
+    const remote = execFileSync('git', ['-C', root, 'remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      // Match ingest's docsMapGitOutput probe environment: both sides derive
+      // "the SAME identity", so the probes must not diverge (a lazy-fetch
+      // side effect here could stall or alter the derivation). Full probe
+      // consolidation is tracked separately (#2745).
+      env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+    }).trim();
+    return normalizeGitRemoteUrl(remote);
   } catch {
     return null;
   }
@@ -145,6 +171,7 @@ const fileCache = createRepoMapFileCache({
 
 const map = await generateRepoMap(root, {
   gitSha,
+  repository: repositoryOf(root),
   tokenBudget,
   maxFiles,
   maxDirEntries,

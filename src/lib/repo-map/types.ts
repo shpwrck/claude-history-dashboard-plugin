@@ -77,6 +77,15 @@ export interface RepoMap {
   root: string;
   /** Git sha (or other signature) the map was generated against, or null. */
   generatedAtGitSha: string | null;
+  /**
+   * Normalized `owner/repo` slug of the root's Git remote (#2709), derived
+   * deterministically by the producer beside `generatedAtGitSha`, or null when
+   * the root has no repo/remote. Together with a non-null sha it is the
+   * commit-bound identity the docs-map wrapper must match before the #2489
+   * detector may make absence claims. Optional for backward compatibility with
+   * older/uploaded artifacts (a missing value reads as null → suppression).
+   */
+  repository?: string | null;
   /** Total source files discovered (before any token-budget truncation). */
   fileCount: number;
   /** Structured per-file index, ranked most-referenced-first. */
@@ -92,6 +101,9 @@ export interface GenerateRepoMapOptions {
   tokenBudget?: number;
   /** Staleness stamp to record (the caller resolves the git sha). */
   gitSha?: string | null;
+  /** Normalized `owner/repo` remote identity to record (#2709); the caller
+   *  derives it (see `normalizeGitRemoteUrl` in `../parse-docs-map`). */
+  repository?: string | null;
   /** Parser to use. Defaults to the WASM Tree-sitter TS/JS parser; tests inject
    *  a fake so the walk/render is exercised without the grammar. */
   parseFile?: ParseFile;

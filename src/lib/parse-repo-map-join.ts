@@ -34,6 +34,11 @@ export interface RepoMapFileJoin {
 export interface RepoMapProjectJoin {
   root: string;
   generatedAtGitSha: string | null;
+  /** Normalized `owner/repo` remote identity from the artifact (#2709), or
+   *  null when underivable/absent — with `generatedAtGitSha` and `truncated`
+   *  this is the suppression-relevant identity the #2489 detector matches the
+   *  docs-map wrapper against. */
+  repository: string | null;
   fileCount: number;
   truncated: boolean;
   text: string;
@@ -181,6 +186,7 @@ export function buildRepoMapDataset({
     return {
       root: map.root,
       generatedAtGitSha: map.generatedAtGitSha,
+      repository: map.repository ?? null,
       fileCount: map.fileCount,
       truncated: map.truncated,
       text: map.text,

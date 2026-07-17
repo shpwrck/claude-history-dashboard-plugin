@@ -42,7 +42,7 @@ export function useRecommendations(views: RecommendationViews): {
       views.modelEvalSummary, views.updateResults, views.mcpAuth, views.configBackups,
       views.repoMap, views.externalGuidance, views.promptAnalysis, views.modelPinSavings,
       views.gitOutcomes, views.memoryStores, views.organizationIdentity, views.shadowCalls,
-      views.valueFlow, views.docGraph,
+      views.valueFlow, views.docGraph, views.docsMap,
     ]
   );
   const recommendations = useMemo(() => buildRecommendations(input), [input]);

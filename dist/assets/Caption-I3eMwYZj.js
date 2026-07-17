@@ -1,0 +1,1 @@
+import{F as e,N as t,P as n}from"./Spinner-DTC27OcH.js";import{c as r}from"./Td-Bsz-o9Mp.js";var i=n(),a=n=>{var{children:a,className:o}=n,s=e(n,[`children`,`className`]);return(0,i.jsx)(`caption`,Object.assign({className:t(r.tableCaption,o)},s,{children:a}))};a.displayName=`Caption`;export{a as t};

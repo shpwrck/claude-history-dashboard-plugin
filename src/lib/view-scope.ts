@@ -244,6 +244,8 @@ export const VIEW_DATA_FILTER_POLICIES = {
   repoMap: { time: 'global', project: 'global' },
   // Repository documentation structure is a whole-checkout artifact.
   docGraph: { time: 'global', project: 'global' },
+  // The docs-map contract wrapper is likewise a whole-checkout artifact.
+  docsMap: { time: 'global', project: 'global' },
   // Shadow-call aggregate is server-side telemetry, not session-scoped for
   // this picker.
   shadowCalls: { time: 'global', project: 'global' },

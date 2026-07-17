@@ -117,6 +117,7 @@ const emptyData: ViewData = {
   externalGuidance: [],
   enterpriseSession: null,
   sampleAdoptionReceipts: [],
+  docsMap: null,
 };
 
 const noop = () => {};

@@ -98,7 +98,11 @@ export const SESSION_BLOB_OUTPUT = {
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
-  version: 4,
+  // v5 (#2709): the structural map records the root's normalized `owner/repo`
+  // remote identity (`map.repository`) beside `generatedAtGitSha`; pre-field
+  // v4 artifacts must regenerate so identity-bound consumers never read a
+  // missing field as "no remote" on a root that has one.
+  version: 5,
   contract: ['version', 'cacheKey', 'sizeBounded', 'droppedFiles', 'map'],
   consumedBy:
     'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version)',

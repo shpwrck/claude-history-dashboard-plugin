@@ -685,6 +685,23 @@ const {
   docHygieneArtifactFilename,
   parseDocHygieneArtifact,
 } = await import(join(LIB, 'doc-hygiene-artifact.ts'));
+// Versioned docs-map contract (#2709, epic #2256). parseDocsMap is the PURE,
+// browser-safe strict validator (whole-map reject to null); the bounded read
+// and the Git identity wrap live HERE, server-side, mirroring the
+// external-guidance pure-core/node-reader split. normalizeGitRemoteUrl is the
+// SAME pure normalizer the repo-map producer uses, so the wrapper identity and
+// the repo-map artifact identity can only match when they truly agree.
+const {
+  parseDocsMap,
+  normalizeGitRemoteUrl,
+  isRepositorySlug,
+  DOCS_MAP_MAX_FILE_BYTES,
+  DOCS_MAP_RELPATH,
+} = await import(join(LIB, 'parse-docs-map.ts'));
+// The source-bound declaration rides the SAME corpus root as the doc graph,
+// so its wrapper identity always describes the checkout whose docs are being
+// analyzed. Location comes from the exported seam constant (parity-fenced).
+const DOCS_MAP_PATH = join(DOC_GRAPH_ROOT, DOCS_MAP_RELPATH);
 // Local snapshot root. The override is a test/deployment seam for supplying an
 // isolated committed-snapshot mirror; unset keeps the shipped repo path exactly
 // as before. It never fetches or writes guidance.
@@ -1294,6 +1311,322 @@ function hashDocGraphContent(hash) {
   hash.update(`count:${count}\n`);
 }
 
+// ── Versioned docs-map contract (#2709, epic #2256) ─────────────────────────
+// docs/docs-map.json is read bounded and validated STRICTLY (parseDocsMap:
+// unknown version or ANY malformed/partial entry rejects the WHOLE map to
+// null — partial acceptance could fabricate reverse drift). The parsed map is
+// wrapped with the supplying checkout's identity: the normalized lowercase
+// `owner/repo` remote slug plus the clean full-length HEAD commit. The later
+// #2489 detector may make absence claims only when exactly one non-truncated
+// repo-map project matches BOTH wrapper fields, so a null here is a deliberate
+// suppression signal, not a soft default.
+
+// Full-length lowercase commit binding only (#2736's FULL_COMMIT_RE lesson):
+// repo-map `generatedAtGitSha` is a full lowercase sha, so a short or
+// uppercase stamp would pass a loose check yet can NEVER match — silent
+// permanent suppression. A shaped-but-short stamp (the published image-tag
+// convention) warns once instead: loud rejection beats silent suppression.
+const DOCS_MAP_FULL_COMMIT_RE = /^[0-9a-f]{40,64}$/;
+const DOCS_MAP_SHORT_COMMIT_RE = /^[0-9a-fA-F]{7,39}$/;
+
+// Per-cause warn latches (#2709 review): one latch per distinct failure so a
+// NEW failure class still warns after an earlier different one, and a return
+// to a valid map re-arms them all.
+const docsMapWarnedCauses = new Set();
+function warnDocsMapOnce(cause, message) {
+  if (docsMapWarnedCauses.has(cause)) return;
+  docsMapWarnedCauses.add(cause);
+  console.warn(message);
+}
+
+function docsMapCommitOrNull(value, source) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const normalized = trimmed.toLowerCase();
+  if (DOCS_MAP_FULL_COMMIT_RE.test(normalized)) return normalized;
+  if (DOCS_MAP_SHORT_COMMIT_RE.test(trimmed)) {
+    warnDocsMapOnce(
+      `short-commit:${source}`,
+      `[ingest] docs-map commit stamp from ${source} (${trimmed}) is not a full sha; ` +
+        'repo-map identities are full-length, so it can never match — treating the commit as unknown'
+    );
+  }
+  return null;
+}
+
+function docsMapGitOutput(args) {
+  return execFileSync('git', ['-C', DOC_GRAPH_ROOT, ...args], {
+    encoding: 'utf8',
+    // Capture stderr: the error taxonomy below must distinguish "not a git
+    // repository" from a genuine git failure on a real repo.
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 10 * 1024 * 1024,
+    env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+  }).trim();
+}
+
+// Git is truly UNAVAILABLE only when the binary is missing (ENOENT) or the
+// root is not a repository — the canonical container image is exactly both.
+// Anything else (huge output, corrupt repo, killed subprocess) is a git
+// FAILURE on a real checkout: identity must go null, never fall through to
+// the env stamps, or a dirty/unknown tree could get bound to the image sha.
+function docsMapGitUnavailable(error) {
+  if (error?.code === 'ENOENT') return true;
+  return /not a git repository/i.test(String(error?.stderr ?? ''));
+}
+
+// Deploy-provided locators for gitless runtimes: CHD_DOCS_MAP_REPOSITORY (the
+// slug deploy.sh derives host-side through the SAME normalizer) and the
+// image's GIT_SHA build stamp — the stamp readDocHygieneArtifact also trusts.
+function docsMapEnvIdentity() {
+  const configured = process.env.CHD_DOCS_MAP_REPOSITORY;
+  return {
+    repository: isRepositorySlug(configured) ? configured.toLowerCase() : null,
+    commit: docsMapCommitOrNull(process.env.GIT_SHA, 'GIT_SHA'),
+  };
+}
+
+// Derive the checkout identity via git. Called only inside the memoized
+// recompute below (probe-read-probe), so subprocess cost is per-invalidation,
+// never per-request. Dirtiness is scoped to the docs-map file itself with
+// tracked-only semantics (#2709 review): untracked scratch or edits elsewhere
+// in the tree cannot change the committed map bytes, so only THIS file's
+// tracked state may suppress the commit claim.
+function deriveDocsMapIdentity() {
+  try {
+    docsMapGitOutput(['rev-parse', '--is-inside-work-tree']);
+  } catch (error) {
+    return docsMapGitUnavailable(error)
+      ? docsMapEnvIdentity()
+      : { repository: null, commit: null };
+  }
+  let repository = null;
+  try {
+    repository = normalizeGitRemoteUrl(
+      docsMapGitOutput(['remote', 'get-url', 'origin'])
+    );
+  } catch (error) {
+    // A remoteless checkout is legitimate (repository stays null); any other
+    // failure poisons the whole identity per the taxonomy above.
+    if (!/no such remote/i.test(String(error?.stderr ?? ''))) {
+      return { repository: null, commit: null };
+    }
+  }
+  try {
+    const dirty = docsMapGitOutput([
+      'status',
+      '--porcelain',
+      '--untracked-files=no',
+      '--',
+      DOCS_MAP_RELPATH,
+    ]);
+    if (dirty) return { repository, commit: null };
+    return {
+      repository,
+      commit: docsMapCommitOrNull(docsMapGitOutput(['rev-parse', 'HEAD']), 'HEAD'),
+    };
+  } catch {
+    return { repository: null, commit: null };
+  }
+}
+
+// JSON.parse collapses duplicate keys last-wins BEFORE validation — a silently
+// dropped earlier binding is exactly the reverse-drift fabrication whole-map
+// rejection exists to prevent. The reader has the raw text, so reject any
+// declared document path that occurs more than once as a quoted key. In the
+// v1 shape document paths are the only keys that can legitimately repeat
+// nowhere, and validated paths contain no characters JSON would escape, so
+// the literal-text scan is exact for well-formed input; an escape-encoded
+// evasion only defeats the author's own map (repo-controlled), which is
+// outside the threat model. Conservative false positives cost an explicit
+// re-author, never a silent drop.
+function docsMapHasDuplicateDocumentKeys(raw, map) {
+  for (const documentPath of Object.keys(map.documents)) {
+    const escaped = documentPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const occurrences = raw.match(new RegExp(`"${escaped}"\\s*:`, 'g'));
+    if (occurrences && occurrences.length > 1) return true;
+  }
+  return false;
+}
+
+// Process-level memo (the stat-gated-cache pattern, #1573): identity, bytes,
+// and parse recompute only when the observable fingerprint moves. The
+// fingerprint is statSync-only — the docs-map file stat, the checkout's git
+// marker files (HEAD/index/config under the resolved gitdir: commits,
+// checkouts, and remote edits touch at least one), and the env locators — so
+// sourceSignature(), the documented CHEAP request-time gate, spawns ZERO
+// subprocesses in the steady state. Accepted gaps (documented deliberately):
+// a repository APPEARING mid-process without any docs-map/env change keeps
+// the previous classification until the next fingerprint move, and ref
+// surgery that bypasses the index (raw `git update-ref`) waits for the next
+// marker move; both are vanishing-rare against a per-request git spawn.
+let docsMapGitDir = null; // absolute gitdir, or null when gitless/unresolved
+let docsMapMemo = null; // { fingerprint, state }
+
+function docsMapStatPart(path) {
+  try {
+    const s = statSync(path);
+    return `${s.mtimeMs}:${s.size}:${s.ctimeMs}:${s.ino}`;
+  } catch {
+    return 'absent';
+  }
+}
+
+function docsMapFingerprint() {
+  const parts = [
+    `file:${docsMapStatPart(DOCS_MAP_PATH)}`,
+    `env:${process.env.CHD_DOCS_MAP_REPOSITORY ?? ''}\0${process.env.GIT_SHA ?? ''}`,
+  ];
+  if (docsMapGitDir) {
+    for (const marker of ['HEAD', 'index', 'config']) {
+      parts.push(`${marker}:${docsMapStatPart(join(docsMapGitDir, marker))}`);
+    }
+  } else {
+    parts.push('git:unavailable');
+  }
+  return parts.join('|');
+}
+
+function computeDocsMapState() {
+  const state = {
+    raw: null,
+    readErrorCode: null,
+    identity: { repository: null, commit: null },
+    artifact: null,
+  };
+  // TOCTOU guard (#2709 review): probe-read-probe. The identity must describe
+  // the exact bytes read; if HEAD or the file's tracked dirtiness moved across
+  // the read, bind nothing.
+  const identityBefore = deriveDocsMapIdentity();
+  try {
+    state.raw = readTextFileCappedSync(DOCS_MAP_PATH, DOCS_MAP_MAX_FILE_BYTES);
+  } catch (error) {
+    state.readErrorCode = String(error?.code || 'error');
+    state.identity = identityBefore;
+    if (state.readErrorCode !== 'ENOENT') {
+      warnDocsMapOnce(
+        'unreadable',
+        `[ingest] docs map at ${DOCS_MAP_PATH} is unreadable (${state.readErrorCode}); treating as absent`
+      );
+    }
+    return state;
+  }
+  const identityAfter = deriveDocsMapIdentity();
+  const identityStable =
+    identityBefore.repository === identityAfter.repository &&
+    identityBefore.commit === identityAfter.commit;
+  state.identity = identityStable
+    ? identityAfter
+    : { repository: null, commit: null };
+
+  let map = null;
+  try {
+    map = parseDocsMap(JSON.parse(state.raw));
+  } catch {
+    map = null;
+  }
+  if (!map) {
+    warnDocsMapOnce(
+      'malformed',
+      `[ingest] docs map at ${DOCS_MAP_PATH} is malformed; rejecting the whole map`
+    );
+    return state;
+  }
+  if (docsMapHasDuplicateDocumentKeys(state.raw, map)) {
+    warnDocsMapOnce(
+      'duplicate-keys',
+      `[ingest] docs map at ${DOCS_MAP_PATH} declares a document path more than once; rejecting the whole map`
+    );
+    return state;
+  }
+  // Declared-vs-derived reconciliation (#2709 review): a map declaring
+  // repository X wrapped with checkout Y's identity is a cross-repo copy —
+  // binding it would let Y's repo-map coincidentally satisfy the #2489 match.
+  // Comparison is case-folded (GitHub slugs are case-insensitive; the derived
+  // side is already lowercase canonical).
+  if (
+    state.identity.repository !== null &&
+    state.identity.repository !== map.repository.toLowerCase()
+  ) {
+    warnDocsMapOnce(
+      'repository-mismatch',
+      `[ingest] docs map declares repository ${map.repository} but the checkout derives ${state.identity.repository}; rejecting the whole map`
+    );
+    return state;
+  }
+  state.artifact = {
+    map,
+    repository: state.identity.repository,
+    commit: state.identity.commit,
+  };
+  // A valid map re-arms every rejection latch so a NEW failure warns again.
+  docsMapWarnedCauses.clear();
+  return state;
+}
+
+function docsMapState() {
+  if (docsMapMemo && docsMapMemo.fingerprint === docsMapFingerprint()) {
+    return docsMapMemo.state;
+  }
+  // Re-resolve the gitdir on every recompute so a checkout gaining/losing a
+  // repository is reclassified whenever anything observable moves.
+  try {
+    docsMapGitDir = docsMapGitOutput(['rev-parse', '--absolute-git-dir']) || null;
+  } catch {
+    docsMapGitDir = null;
+  }
+  // Fingerprint is captured BEFORE the compute (with the freshly resolved
+  // gitdir): if the file changes mid-compute the stored key is already stale,
+  // so the next call recomputes — fail-fresh, never fail-stale.
+  const fingerprint = docsMapFingerprint();
+  const state = computeDocsMapState();
+  docsMapMemo = { fingerprint, state };
+  return state;
+}
+
+// Bounded read + strict parse + identity wrap. Absent map is null, silent; a
+// present-but-rejected map (malformed JSON, unknown version, any bad entry,
+// duplicate keys, identity mismatch, over-cap bytes) is null with a per-cause
+// one-time warning. No partially trusted map is ever returned.
+function readDocsMap() {
+  return docsMapState().artifact;
+}
+
+// Cheap request-time gate half: JSON stat surface (same replacement-safe
+// mtime/size/ctime/inode convention as the doc-graph/memory signatures) PLUS
+// the memoized checkout identity — the wrapper's repository/commit are part
+// of the serialized dataset, so a moved HEAD or changed remote must
+// invalidate even when the JSON bytes are untouched.
+function docsMapSourceSignature() {
+  const hash = createHash('sha1');
+  const state = docsMapState();
+  hash.update(
+    `identity:${state.identity.repository ?? ''}\0${state.identity.commit ?? ''}\n`
+  );
+  hash.update(`file:${docsMapStatPart(DOCS_MAP_PATH)}`);
+  return hash.digest('hex');
+}
+
+// Persisted-cache gate half: identity + stat + raw JSON bytes, folded into
+// ingest()'s contentHash so the compressed dataset cache (and everything
+// keyed on it: light memo, recs worker, response caches) turns over on any
+// change. Reuses the memoized state so the file is read once per
+// invalidation, not once per gate.
+function hashDocsMapContent(hash) {
+  const state = docsMapState();
+  hash.update(
+    `identity:${state.identity.repository ?? ''}\0${state.identity.commit ?? ''}\n`
+  );
+  if (state.raw !== null) {
+    hash.update(`file:${docsMapStatPart(DOCS_MAP_PATH)}\0`);
+    hash.update(state.raw);
+  } else {
+    hash.update('unreadable\0');
+    hash.update(state.readErrorCode ?? 'error');
+  }
+  hash.update('\n');
+}
+
 // Host-produced checker output (#2486, epic #2256). A direct host ingest uses
 // the repo-map producer's collision-safe absolute-root encoder. Canonical
 // deploys instead pass a safe repo-identity key + expected host commit: `/app`
@@ -1863,7 +2196,11 @@ export const PARSER_SIG_VERSION = 'v4';
 // distillation drops them, feeding cost.edit-format-churn. SESSION_BLOB_OUTPUT
 // v18 reparses tool_json; this paired turnover rejects persisted v26 bodies
 // that lack the metric and would keep the detector inert on deployed data.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 27;
+// v28 (#2709): the serialized full/light datasets now carry the `docsMap`
+// contract wrapper (strictly validated docs/docs-map.json + checkout
+// repository/commit identity), so a persisted v27 body can never be served as
+// if it had observed the docs-map declaration.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 28;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2947,6 +3284,10 @@ export function sourceSignature() {
     `external-guidance:${EXTERNAL_GUIDANCE_DIR}:${externalGuidanceSourceSignature()}`
   );
   parts.push(`doc-graph:${DOC_GRAPH_ROOT}:${docGraphSourceSignature()}`);
+  // Docs-map contract (#2709): stat + identity. Without this a docs-map edit
+  // (or a moved HEAD changing the wrapper identity) with no other source
+  // change would early-hit both response caches forever.
+  parts.push(`docs-map:${DOCS_MAP_PATH}:${docsMapSourceSignature()}`);
   if (!SCOPED_INGEST) {
     for (const root of liveConfigProjectRoots(repoMapArtifactRoots())) {
       for (const name of ['AGENTS.md', 'CLAUDE.md', 'REFERENCES.md']) {
@@ -3182,6 +3523,13 @@ export function ingest() {
   hash.update(DOC_GRAPH_ROOT);
   hash.update('\0');
   hashDocGraphContent(hash);
+  // Docs-map contract (#2709): identity + stat + raw JSON bytes feed the
+  // serialized `docsMap` wrapper, so the persisted dataset cache must turn
+  // over when either the declaration or the checkout identity moves.
+  hash.update('docs-map\n');
+  hash.update(DOCS_MAP_PATH);
+  hash.update('\0');
+  hashDocsMapContent(hash);
   const contentHash = hash.digest('hex');
   return {
     total: sessions.length,
@@ -3676,6 +4024,7 @@ function assembleDatasetCore() {
   } = assembleArtifacts();
   const externalGuidance = readExternalGuidance();
   const docGraph = readDocGraph();
+  const docsMap = readDocsMap();
 
   // Artifact-derived experiment sources (#2151): proof receipts + model-eval
   // batches join the ledger's uniform (source, axis) cells so every experiment
@@ -3775,6 +4124,7 @@ function assembleDatasetCore() {
     externalGuidance,
     gitOutcomes,
     docGraph,
+    docsMap,
     // repoMap inputs (each caller builds repoMap; only the full path folds in
     // the embedded recommendations)
     maps,
@@ -3833,6 +4183,7 @@ export function assembleDataset() {
     externalGuidance,
     gitOutcomes,
     docGraph,
+    docsMap,
     maps,
     configSections,
     configAttribution,
@@ -3869,6 +4220,7 @@ export function assembleDataset() {
       externalGuidance,
       gitOutcomes,
       docGraph,
+      docsMap,
       promptAnalysis,
     })
   );
@@ -3968,6 +4320,7 @@ export function assembleDataset() {
     // Git delivery-outcome rows (#1757); empty unless CHD_GIT_OUTCOMES is set.
     gitOutcomes,
     docGraph,
+    docsMap,
   };
 }
 
@@ -4041,6 +4394,7 @@ export function assembleRecommendationDataset() {
     externalGuidance: core.externalGuidance,
     gitOutcomes: core.gitOutcomes,
     docGraph: core.docGraph,
+    docsMap: core.docsMap,
     repoMap,
   };
 }
@@ -4143,6 +4497,14 @@ function assembleRecommendationContext(options = {}) {
     // this repo's own Markdown; empty on the SPA/upload dataset or when docs are
     // absent, so the detector simply emits nothing there.
     docGraph: dataset.docGraph ?? readDocGraph(),
+    // Versioned docs-map contract wrapper (#2709): non-signal aggregate, the
+    // strictly validated declaration bound to the supplying checkout's
+    // repository/commit identity. SIGNAL ONLY — no detector reads it yet
+    // (#2489). Key-presence (not ??): a carried null is a LEGITIMATE value
+    // (absent/rejected map), so re-deriving on null could observe a NEWER map
+    // than the dataset's contentHash was stamped against. Only a dataset that
+    // never carried the key (pre-v28 injected bodies) derives fresh.
+    docsMap: 'docsMap' in dataset ? (dataset.docsMap ?? null) : readDocsMap(),
     // Optional host-produced Lychee output. Flag-off runner operation is local
     // and offline; ingest only reads the persisted JSON and never invokes a
     // checker or makes an external call.

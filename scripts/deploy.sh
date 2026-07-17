@@ -39,6 +39,29 @@ if [ -z "${GIT_SHA:-}" ] && [ -n "$CHD_DOC_HYGIENE_EXPECTED_COMMIT" ]; then
   export GIT_SHA="$CHD_DOC_HYGIENE_EXPECTED_COMMIT"
 fi
 
+# Docs-map wrapper identity locator (#2709), the CHD_DOC_HYGIENE_* sibling: the
+# gitless runtime cannot derive the checkout's owner/repo slug, so derive it
+# host-side through the SAME normalizer ingest uses and pass it through BASE
+# compose (never an override — podman-compose 1.5.0 drops override env
+# additions). Empty on remoteless checkouts or Node-less hosts safely leaves
+# the wrapper identity missing (suppression), never a fabricated slug.
+CHD_DOCS_MAP_REPOSITORY=''
+if command -v git >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  CHD_DOCS_MAP_REPOSITORY="$(node --import "$DIR/scripts/register-ts.mjs" --input-type=module -e '
+    const { execFileSync } = await import("node:child_process");
+    const { normalizeGitRemoteUrl } = await import(process.argv[1]);
+    try {
+      const url = execFileSync(
+        "git",
+        ["-C", process.argv[2], "remote", "get-url", "origin"],
+        { encoding: "utf8", env: { ...process.env, GIT_NO_LAZY_FETCH: "1" } }
+      ).trim();
+      process.stdout.write(normalizeGitRemoteUrl(url) ?? "");
+    } catch {}
+  ' "$DIR/src/lib/parse-docs-map.ts" "$DIR" 2>/dev/null || true)"
+fi
+export CHD_DOCS_MAP_REPOSITORY
+
 # podman and docker are interchangeable here (README); prefer podman.
 if command -v podman >/dev/null 2>&1; then
   ENGINE=podman

@@ -80,9 +80,9 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from before parser/cohort identity binding', () => {
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(4);
-    expect(isCacheValid({ ...persisted, version: 3 }, base)).toBe(false);
+  it('invalidates artifacts from before the remote-identity field (#2709)', () => {
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(5);
+    expect(isCacheValid({ ...persisted, version: 4 }, base)).toBe(false);
   });
 
   it('is valid when the clean-repo sha matches (mtime ignored)', () => {

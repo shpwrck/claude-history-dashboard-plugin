@@ -80,6 +80,7 @@ export function recommendationViewsFromViewData(
     configBackups: d.configBackups,
     repoMap: d.repoMap,
     docGraph: d.docGraph,
+    docsMap: d.docsMap,
     externalGuidance: d.externalGuidance,
   };
 }

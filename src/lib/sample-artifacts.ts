@@ -526,6 +526,9 @@ export function buildSampleRepoMap(): RepoMapDataset {
       {
         root: '/home/dev/acme-web',
         generatedAtGitSha: '9f83a1c7d2e4b6058a1c3f7e9b2d4068c5a7e1f3',
+        // Fabricated sample data carries no real remote identity (#2709); null
+        // is the honest suppression default.
+        repository: null,
         fileCount: 6,
         truncated: false,
         text:

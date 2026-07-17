@@ -58,6 +58,7 @@ import type {
 import type { ModelEvalSummary } from '../model-eval-ingest';
 import type { GitOutcome } from '../parse-git-outcome';
 import type { DocGraph } from '../parse-docs';
+import type { DocsMapArtifact } from '../parse-docs-map';
 import type { DocHygieneArtifact } from '../doc-hygiene-artifact';
 import type { EvidenceRef } from '../evidence';
 // RecCategory and SavingsAttributionTier are defined in a dependency-free leaf
@@ -717,6 +718,21 @@ export interface RecommendationInput {
    * means downstream detectors emit nothing.
    */
   docGraph?: DocGraph | null;
+  /**
+   * Versioned docs-map contract wrapper (#2709, epic #2256), dataset key
+   * `docsMap`. The strictly parsed `docs/docs-map.json` declaration — whole-map
+   * rejected to `null` on ANY malformed/partial entry, because a partially
+   * trusted map could fabricate reverse drift — wrapped at ingest with the
+   * normalized `owner/repo` Git-remote slug and clean HEAD commit of the
+   * checkout that supplied it. The later #2489 detector may make absence
+   * claims only against exactly one non-truncated repo-map project whose
+   * `repository` identity and commit BOTH match this wrapper; zero, multiple,
+   * missing-identity, dirty/unknown, or stale matches suppress. Matching never
+   * depends on whether a declared source path exists. SIGNAL ONLY — no
+   * detector consumes it yet. Optional: `undefined`/`null` (absent or rejected
+   * map, or the SPA/upload dataset) means downstream detectors emit nothing.
+   */
+  docsMap?: DocsMapArtifact | null;
   /**
    * Normalized host-side checker output for the repository's committed
    * Markdown surface (#2486). Produced locally under
