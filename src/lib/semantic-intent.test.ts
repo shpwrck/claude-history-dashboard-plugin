@@ -69,8 +69,16 @@ describe('sanitizeSemanticIntentRow', () => {
     // them would let a hedged corpus look like a small clean one.
     const out = sanitizeSemanticIntentRow(row({ confidence: DEFAULT_MIN_CONFIDENCE - 0.01 }));
     expect(out?.row.intentClass).toBe(UNKNOWN_INTENT_CLASS);
-    expect(out?.row.canonicalTaskClass).toBeNull();
     expect(out?.suppression).toBe('low-confidence');
+  });
+
+  it('keeps the SCOPE on a degraded row so it stays countable', () => {
+    // Only the class claim degrades. Nulling the scope too would drop the row
+    // out of consumers' joins, making a hedged corpus look confident — the
+    // denominator has to include the rows the classifier was unsure about.
+    const out = sanitizeSemanticIntentRow(row({ confidence: 0.1 }));
+    expect(out?.row.intentClass).toBe(UNKNOWN_INTENT_CLASS);
+    expect(out?.row.canonicalTaskClass).toBe('search');
   });
 
   it('keeps the row but nulls a malformed canonical task class', () => {

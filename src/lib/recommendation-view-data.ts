@@ -10,9 +10,9 @@
  * newly-ingested signal is wired once and reaches all surfaces together.
  *
  * Fields the client dataset does not carry at all — `gitOutcomes`,
- * `modelPinSavings`, `organizationIdentity`, `memoryStores` (server-side
- * ingest artifacts; `ViewData.memories` is a different artifact than the
- * engine's `memoryStores`) — are equally absent for every surface here;
+ * `modelPinSavings`, `organizationIdentity`, `semanticIntent`, `memoryStores`
+ * (server-side ingest artifacts; `ViewData.memories` is a different artifact
+ * than the engine's `memoryStores`) — are equally absent for every surface here;
  * `assembleRecommendationInput` normalizes them to explicit nulls. The parity
  * test (`recommendation-view-data.test.ts`) pins this list so a new detector
  * dependency on a client-carried field cannot be silently dropped.
@@ -36,6 +36,12 @@ export const CLIENT_ABSENT_ENGINE_FIELDS: readonly string[] = [
   'docHygieneArtifact',
   'modelPinSavings',
   'organizationIdentity',
+  // #2574/#2647: server-only AND opt-in (CHD_SEMANTIC_INTENT=1). No client
+  // dataset carries it, and it is null even server-side with the flag unset. The
+  // routing-gap detector's semantic scoping therefore stays dark on every client
+  // surface, which is correct: absent the intent rows it emits its unenriched
+  // card, so the surfaces agree on the finding and differ only in its scope.
+  'semanticIntent',
 ];
 
 export function recommendationViewsFromViewData(

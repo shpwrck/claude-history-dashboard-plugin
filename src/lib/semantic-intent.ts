@@ -157,11 +157,71 @@ function isoDate(value: unknown): string | null {
  * An intent class name must look like a taxonomy key, not free text. Rejecting
  * anything else is what keeps prompt prose from reaching the dataset through a
  * field that is nominally a label.
+ *
+ * This is the right validator for `intentClass`, which this module OWNS. It is
+ * the wrong one for `canonicalTaskClass` — see {@link canonicalScopeKey}.
  */
 function intentClassName(value: unknown): string | null {
   const s = boundedString(value);
   if (!s || s.length > 64) return null;
   return /^[a-z0-9][a-z0-9._-]*$/.test(s) ? s : null;
+}
+
+/**
+ * A classifier `id` / `revision`, constrained to an identifier shape.
+ *
+ * These strings are PROVENANCE, and provenance gets interpolated into places
+ * that are not inert: the routing-gap detector writes them into the copy-paste
+ * `CLAUDE.md` fix snippet. `boundedString` alone only trims and length-bounds,
+ * so a receipt carrying a revision like `r7)\n## Injected instructions` could
+ * inject arbitrary guidance into a block the user is invited to paste into their
+ * own config. The receipts come off disk from a runner this repo does not
+ * control, so they are untrusted input by definition.
+ *
+ * Constraining at the INGEST boundary (rather than escaping at each use) means
+ * every current and future consumer inherits the guarantee, and a malformed
+ * identity rejects the artifact through the existing `unknown-classifier` path
+ * instead of flowing onward as an unattributable row.
+ */
+function classifierIdentity(value: unknown): string | null {
+  const s = boundedString(value);
+  if (!s || s.length > 64) return null;
+  return /^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(s) ? s : null;
+}
+
+/** Longest accepted scope key. Matches the model-eval side's `MAX_ID_LEN`. */
+export const MAX_SCOPE_KEY_LENGTH = 256;
+
+/**
+ * Normalize a scope key — a FOREIGN KEY into the model-eval scope namespace.
+ *
+ * `canonicalTaskClass` is not a label this module coins; it names a scope some
+ * other producer already defined. `EvalRoutingRecommendation.scope` is validated
+ * over there as a bounded string ("a cluster id or bucket"), and real ones are
+ * cluster IDs like `gap:haiku-sonnet:failure:small`. Validating it with this
+ * module's own taxonomy-label rule was a category error: the label charset has
+ * no colon, so every real cluster ID normalized to null and the #2647 join could
+ * never match in production — a defect the unit tests missed because their
+ * fixtures were built around the validator instead of around real data.
+ *
+ * So this is the ONE definition of the join contract, called by BOTH the row
+ * sanitizer and `semanticRoutingScope`'s join. Normalizing both sides through
+ * the same function is what makes that class of drift structurally impossible
+ * rather than merely tested-against.
+ *
+ * KNOWN LIMITATION, stated rather than hidden: whitespace is rejected. Prose has
+ * spaces and cluster IDs do not, so this is the prose guard for a field that
+ * otherwise inherits the producer's permissive bounds. A producer that emits a
+ * scope containing a space will not join, and the enrichment will suppress to
+ * the unenriched card — the safe direction, but a real gap if such scopes ever
+ * appear.
+ */
+export function canonicalScopeKey(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s || s.length > MAX_SCOPE_KEY_LENGTH) return null;
+  // Printable ASCII, no whitespace and no control characters.
+  return /^[\x21-\x7e]+$/.test(s) ? s : null;
 }
 
 /**
@@ -196,17 +256,29 @@ export function sanitizeSemanticIntentRow(
 
   // `canonicalTaskClass` is optional; a malformed one is dropped to null rather
   // than sinking the row, since the row's own intent evidence is still usable.
+  // Validated as a FOREIGN KEY into the model-eval scope namespace, not as one
+  // of this module's own labels — see canonicalScopeKey.
   const canonicalTaskClass =
-    r.canonicalTaskClass == null ? null : intentClassName(r.canonicalTaskClass);
+    r.canonicalTaskClass == null ? null : canonicalScopeKey(r.canonicalTaskClass);
 
   const trusted = confidence >= minConfidence && intentClass !== UNKNOWN_INTENT_CLASS;
   return {
     row: {
       evidenceRef,
       contentSha256: r.contentSha256,
+      // Only the CLASS CLAIM degrades. The scope does not.
       intentClass: trusted ? intentClass : UNKNOWN_INTENT_CLASS,
       confidence,
-      canonicalTaskClass: trusted ? canonicalTaskClass : null,
+      // `canonicalTaskClass` is retained even for a degraded row, and that is
+      // load-bearing rather than lax. Nulling it looked conservative but
+      // destroyed denominator information: consumers measure "was this corpus
+      // mostly unclassified?" by counting rows joined to a scope, so a degraded
+      // row that drops out of the join makes a hedged corpus look confident.
+      // Five sure rows plus fifty unsure ones for the same scope read as 5/5
+      // instead of 5/55, defeating the unknown-heavy suppression in the #2647
+      // routing-gap enrichment. The row still asserts nothing — its class is
+      // `unknown` — it only remains COUNTABLE against the scope it was about.
+      canonicalTaskClass,
       classifiedAt,
     },
     suppression: trusted ? null : 'low-confidence',
@@ -239,8 +311,8 @@ function readArtifactHeader(
 
   const c = a.classifier;
   if (!c || typeof c !== 'object' || Array.isArray(c)) return { reject: 'unknown-classifier' };
-  const id = boundedString((c as Record<string, unknown>).id);
-  const revision = boundedString((c as Record<string, unknown>).revision);
+  const id = classifierIdentity((c as Record<string, unknown>).id);
+  const revision = classifierIdentity((c as Record<string, unknown>).revision);
   if (!id || !revision) return { reject: 'unknown-classifier' };
 
   if (!Array.isArray(a.rows)) return { reject: 'malformed' };
@@ -290,7 +362,12 @@ export function ingestSemanticIntent(
     const { header } = parsed;
     artifactCount += 1;
     taxonomyVersions.add(header.taxonomyVersion);
-    const key = `${header.classifier.id} ${header.classifier.revision}`;
+    // Injective encoding. `classifierIdentity` already forbids whitespace, so
+    // the {id:"a b",revision:"c"} / {id:"a",revision:"b c"} collision that would
+    // defeat `semanticRoutingScope`'s single-identity guard is unreachable — but
+    // that guarantee lives in a validator someone could later relax, whereas
+    // this encoding cannot be wrong. Defence in depth, deliberately cheap.
+    const key = JSON.stringify([header.classifier.id, header.classifier.revision]);
     if (!classifiers.has(key)) classifiers.set(key, header.classifier);
 
     if (header.rows.length > MAX_ROWS_PER_ARTIFACT) {
