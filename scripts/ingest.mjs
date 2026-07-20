@@ -562,6 +562,17 @@ const TASKS_DIR = join(CLAUDE, 'tasks');
 const TEAMS_DIR = join(CLAUDE, 'teams');
 const PLANS_DIR = join(CLAUDE, 'plans');
 const MODEL_EVAL_RESULTS_DIR = join(CLAUDE, 'model-evals', 'results');
+// Offline semantic-intent receipts (#2574, epic #2177). OPT-IN via
+// CHD_SEMANTIC_INTENT=1: a local classifier (an existing vLLM Semantic
+// Router / mmBERT deployment, reached over loopback by a host-side runner
+// OUTSIDE this repo) tags already-captured calls and drops bounded receipts
+// here. UNSET => this dir is never opened, the parser module is never even
+// imported, the cache signature is unchanged, and `semanticIntent` ships null,
+// so the default deployment path is byte-identical (AGENTS.md local-first rule).
+// The repo defines the artifact contract + parser only; it never invokes the
+// classifier, downloads weights, or opens a socket.
+const SEMANTIC_INTENT_DIR = join(CLAUDE, 'model-evals', 'semantic-intent');
+const SEMANTIC_INTENT_ENABLED = process.env.CHD_SEMANTIC_INTENT === '1';
 const LAST_UPDATE = join(CLAUDE, '.last-update-result.json');
 const MCP_AUTH = join(CLAUDE, 'mcp-needs-auth-cache.json');
 const BACKUPS_DIR = join(CLAUDE, 'backups');
@@ -1808,6 +1819,12 @@ const { parsePlansDir } = await import(join(LIB, 'parse-plans.ts'));
 const { ingestModelEvalResults } = await import(
   join(LIB, 'model-eval-ingest.ts')
 );
+// #2574 semantic-intent receipts. Imported alongside its model-eval sibling:
+// the module is pure, dependency-free, and side-effect-free, so importing it
+// costs nothing and changes no output. The OPT-IN gate that matters is on the
+// I/O — with CHD_SEMANTIC_INTENT unset nothing here is ever called, no path is
+// stat'ed or read, and `semanticIntent` ships null.
+const { ingestSemanticIntent } = await import(join(LIB, 'semantic-intent.ts'));
 const { parseLastUpdate } = await import(join(LIB, 'parse-last-update.ts'));
 const { parseMcpAuthCache } = await import(join(LIB, 'parse-mcp-auth.ts'));
 const { parseBackupsDir, diffConfigDrift } = await import(
@@ -3260,6 +3277,18 @@ export function sourceSignature() {
   } catch {
     parts.push(`${MODEL_EVAL_RESULTS_DIR}:0`);
   }
+  // #2574: contributes to the signature ONLY when the flag is on, so a flag-off
+  // deploy emits the exact same parts list as a pre-#2574 build — no stat, and
+  // no signature drift that would force a spurious re-ingest.
+  if (SEMANTIC_INTENT_ENABLED) {
+    try {
+      parts.push(
+        `${SEMANTIC_INTENT_DIR}:${Math.floor(statSync(SEMANTIC_INTENT_DIR).mtimeMs)}`
+      );
+    } catch {
+      parts.push(`${SEMANTIC_INTENT_DIR}:0`);
+    }
+  }
   try {
     parts.push(`${REPO_MAP_DIR}:${Math.floor(statSync(REPO_MAP_DIR).mtimeMs)}`);
   } catch {
@@ -3494,6 +3523,13 @@ export function ingest() {
     hash.update('model-evals\n');
     hashTree(MODEL_EVAL_RESULTS_DIR, '', hash);
   }
+  // #2574: gated on the flag FIRST, so a flag-off deploy contributes nothing to
+  // the signature — the cache key stays byte-identical to a pre-#2574 build even
+  // on a host that happens to have the receipts dir lying around.
+  if (SEMANTIC_INTENT_ENABLED && existsSync(SEMANTIC_INTENT_DIR)) {
+    hash.update('semantic-intent\n');
+    hashTree(SEMANTIC_INTENT_DIR, '', hash);
+  }
   hash.update('source-artifacts\n');
   for (const artifact of sourceArtifactInputs()) {
     hash.update(artifact.source.id);
@@ -3571,6 +3607,7 @@ export function assembleArtifacts() {
   let fileHistory = [];
   let plans = [];
   let modelEvalSummary = null;
+  let semanticIntent = null;
   let updateResults = [];
   let mcpAuth = null;
   let configBackups = [];
@@ -3742,6 +3779,46 @@ export function assembleArtifacts() {
     }
   } catch { /* ignore */ }
   try {
+    // #2574 semantic-intent receipts. The flag is checked BEFORE the existsSync,
+    // so a flag-off deploy performs no stat and no read — `semanticIntent` stays
+    // null and the dataset is byte-identical to a pre-#2574 build.
+    if (SEMANTIC_INTENT_ENABLED && existsSync(SEMANTIC_INTENT_DIR)) {
+      semanticIntent = cachedArtifact(
+        'semantic-intent',
+        SEMANTIC_INTENT_DIR,
+        () => {
+          // Same discipline as the model-eval artifacts above: name-sorted,
+          // entry-capped *.json, each parsed under its own guard, folded through
+          // the pure summarizer (which sanitizes per artifact, so a malformed
+          // file is dropped rather than fatal).
+          const names = [];
+          const dir = opendirSync(SEMANTIC_INTENT_DIR);
+          try {
+            let ent;
+            while ((ent = dir.readSync()) !== null) {
+              if (names.length >= ARTIFACT_DIR_MAX_ENTRIES) break;
+              if (ent.isFile() && ent.name.endsWith('.json')) names.push(ent.name);
+            }
+          } finally {
+            dir.closeSync();
+          }
+          names.sort();
+          const raws = [];
+          for (const name of names.slice(0, ARTIFACT_DIR_MAX_ENTRIES)) {
+            try {
+              raws.push(
+                JSON.parse(
+                  readArtifactTextCappedSync(join(SEMANTIC_INTENT_DIR, name))
+                )
+              );
+            } catch { /* malformed artifact file — skip */ }
+          }
+          return ingestSemanticIntent(raws);
+        }
+      );
+    }
+  } catch { /* ignore */ }
+  try {
     if (existsSync(LAST_UPDATE)) {
       const u = parseLastUpdate(readArtifactTextCappedSync(LAST_UPDATE));
       updateResults = u ? [u] : [];
@@ -3773,6 +3850,7 @@ export function assembleArtifacts() {
     fileHistory,
     plans,
     modelEvalSummary,
+    semanticIntent,
     updateResults,
     mcpAuth,
     configBackups,
@@ -4018,6 +4096,7 @@ function assembleDatasetCore() {
     fileHistory,
     plans,
     modelEvalSummary,
+    semanticIntent,
     updateResults,
     mcpAuth,
     configBackups,
@@ -4118,6 +4197,7 @@ function assembleDatasetCore() {
     fileHistory,
     plans,
     modelEvalSummary,
+    semanticIntent,
     updateResults,
     mcpAuth,
     configBackups,
@@ -4177,6 +4257,7 @@ export function assembleDataset() {
     fileHistory,
     plans,
     modelEvalSummary,
+    semanticIntent,
     updateResults,
     mcpAuth,
     configBackups,
@@ -4214,6 +4295,7 @@ export function assembleDataset() {
       fileHistory,
       plans,
       modelEvalSummary,
+      semanticIntent,
       updateResults,
       mcpAuth,
       configBackups,
@@ -4313,6 +4395,7 @@ export function assembleDataset() {
     fileHistory,
     plans,
     modelEvalSummary,
+    semanticIntent,
     updateResults,
     mcpAuth,
     configBackups,
@@ -4475,6 +4558,10 @@ function assembleRecommendationContext(options = {}) {
     // Model-eval results rollup (#1085/#1242): non-signal aggregate, like the
     // other server artifacts — feeds the #1086 act-now routing-gap detector.
     modelEvalSummary: dataset.modelEvalSummary,
+    // #2574: null unless CHD_SEMANTIC_INTENT=1, so the routing-gap detector's
+    // semantic enrichment (#2647) is dark by default and the flag-off
+    // recommendation set is unchanged.
+    semanticIntent: dataset.semanticIntent,
     updateResults: dataset.updateResults,
     mcpAuth: dataset.mcpAuth,
     configBackups: dataset.configBackups,

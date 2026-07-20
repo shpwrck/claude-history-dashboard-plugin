@@ -715,3 +715,15 @@ export interface LiveConfig {
  * erased at compile time, so the server boot graph is unaffected.
  */
 export type { ModelEvalSummary } from './lib/model-eval-ingest';
+
+/**
+ * Offline semantic-intent receipts (#2574, epic #2177). Server dataset key
+ * `semanticIntent`; null unless `CHD_SEMANTIC_INTENT=1` AND
+ * `~/.claude/model-evals/semantic-intent` exists (and always null in the
+ * SPA/upload dataset). Type-only re-export — erased at compile time, so the
+ * server boot graph is unaffected.
+ */
+export type {
+  SemanticIntentRow,
+  SemanticIntentSummary,
+} from './lib/semantic-intent';

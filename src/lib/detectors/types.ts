@@ -56,6 +56,7 @@ import type {
   ExternalGuidanceRef,
 } from '../parse-external-guidance';
 import type { ModelEvalSummary } from '../model-eval-ingest';
+import type { SemanticIntentSummary } from '../semantic-intent';
 import type { GitOutcome } from '../parse-git-outcome';
 import type { DocGraph } from '../parse-docs';
 import type { DocsMapArtifact } from '../parse-docs-map';
@@ -668,6 +669,19 @@ export interface RecommendationInput {
    * the routing-gap detector (#1086) emits nothing then.
    */
   modelEvalSummary?: ModelEvalSummary | null;
+  /**
+   * Offline semantic-intent receipts (#2574, epic #2177), dataset key
+   * `semanticIntent`. Server-only AND opt-in: `undefined`/`null` on the
+   * SPA/upload dataset, when `CHD_SEMANTIC_INTENT` is unset, and when
+   * `~/.claude/model-evals/semantic-intent` is absent.
+   *
+   * SCOPE, NOT PROOF. These rows say what a call was *about*; they say nothing
+   * about whether a cheaper model handles it well. A consumer may use an intent
+   * class to NARROW a claim that already clears its own evidence bar — never to
+   * establish one. Semantic intent refines the canonical task taxonomy; it does
+   * not replace it.
+   */
+  semanticIntent?: SemanticIntentSummary | null;
   /**
    * Per-project agent memory store + `MEMORY.md` index from
    * `~/.claude/projects/<slug>/memory/` (#1965, foundation for the #1779
