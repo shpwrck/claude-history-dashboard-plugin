@@ -83,11 +83,19 @@ export interface TaskClassInput {
   opener?: string;
 }
 
+/**
+ * Which signal decided a classification: a matched `opener` pattern, or the
+ * conservative no-signal `default`. Single source of truth for the union so the
+ * per-class provenance carrier on `TaskClassCostBreakdown.classification`
+ * cannot drift from what {@link classifyTaskClassDetailed} actually returns.
+ */
+export type TaskClassSignal = 'opener' | 'default';
+
 /** A classification plus the evidence that drove it (for auditability). */
 export interface TaskClassResult {
   taskClass: TaskClass;
   /** Which signal decided the bucket. */
-  signal: 'opener' | 'default';
+  signal: TaskClassSignal;
   /** Short, human-readable reason citing the matched pattern. */
   reason: string;
 }

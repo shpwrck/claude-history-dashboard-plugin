@@ -555,6 +555,16 @@ Load these files once into context, then reuse that copy instead of re-reading t
     "taskClassBreakdown": [
       {
         "autoCostUsd": 100,
+        "classification": [
+          {
+            "reason": "no role signal in opener — conservative default (authoring)",
+            "sessionRefs": [
+              "automate",
+            ],
+            "sessions": 1,
+            "signal": "default",
+          },
+        ],
         "savingsAttribution": {
           "interventionKey": "cost.automation-share",
           "predictedSavingsUsd": 80,
@@ -568,6 +578,7 @@ Load these files once into context, then reuse that copy instead of re-reading t
       },
       {
         "autoCostUsd": 0,
+        "classification": [],
         "savingsAttribution": {
           "interventionKey": "cost.automation-share",
           "predictedSavingsUsd": 0,
@@ -581,6 +592,7 @@ Load these files once into context, then reuse that copy instead of re-reading t
       },
       {
         "autoCostUsd": 0,
+        "classification": [],
         "savingsAttribution": {
           "interventionKey": "cost.automation-share",
           "predictedSavingsUsd": 0,

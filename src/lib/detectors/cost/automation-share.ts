@@ -281,6 +281,10 @@ export const detector: Detector = {
         now,
         DOWN_MODEL_PROOF_FRESHNESS_DAYS
       ),
+      // Per-class classifier provenance (#2376): the matched reasons +
+      // representative session refs behind this class's partition, so the split
+      // is auditable/reproducible rather than an opaque bucket.
+      classification: c.classification,
     }));
     const measuredSavings = input.modelPinSavings
       ? computeModelPinSavings({

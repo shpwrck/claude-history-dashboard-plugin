@@ -47,7 +47,7 @@ import type { ModelLatencySample, TelemetryEvent } from '../parse-telemetry';
 import type { DebugSessionMetrics } from '../parse-debug';
 import type { WorkflowRun } from '../parse-workflows';
 import type { ReclaimClaim } from '../reclaim';
-import type { TaskClass } from '../task-class';
+import type { TaskClass, TaskClassSignal } from '../task-class';
 import type { RepoMapDataset } from '../parse-repo-map-join';
 import type { OrganizationIdentityDataset } from '../organization-identity';
 import type { OrganizationReviewEventsDataset } from '../organization-review-events';
@@ -369,6 +369,47 @@ export interface TaskClassCostBreakdown {
    * is fabricated. Additive and optional.
    */
   savingsAttribution?: RecommendationSavingsAttribution;
+  /**
+   * Classifier provenance for the split (#2376). One row per distinct matched
+   * reason that assigned sessions to THIS class, so a reader/agent can audit
+   * WHY the partition landed the way it did instead of trusting an opaque
+   * bucket. Each row carries the exact {@link TaskClassClassificationReason}
+   * from `classifyTaskClassDetailed` plus a bounded, representative sample of
+   * the assigned session ids to open and re-classify. The per-row `sessions`
+   * counts sum to this entry's {@link TaskClassCostBreakdown.sessions} — the
+   * classification partitions the class with nothing dropped, mirroring how the
+   * class figures partition the card. Additive and optional.
+   */
+  classification?: TaskClassClassificationReason[];
+}
+
+/**
+ * One matched classification reason behind a task-class partition (#2376). The
+ * auditable "why" for `cost.automation-share`'s per-class split: it exposes the
+ * deterministic evidence `classifyTaskClassDetailed` used (which `opener`
+ * pattern matched, or the conservative no-signal default) together with a
+ * bounded sample of the session ids it applied to, so the classification is
+ * reproducible from local artifacts (open a referenced session, re-run the
+ * classifier on its `opener`, confirm the reason) rather than asserted.
+ */
+export interface TaskClassClassificationReason {
+  /**
+   * The human-readable reason string from `classifyTaskClassDetailed().reason`,
+   * e.g. `"opener matched coder role"` or
+   * `"no role signal in opener — conservative default (authoring)"`.
+   */
+  reason: string;
+  /** Whether an `opener` pattern matched, or the conservative `default` fired. */
+  signal: TaskClassSignal;
+  /** Distinct unattended sessions in this class assigned by this reason. */
+  sessions: number;
+  /**
+   * A bounded, representative sample of the session ids assigned by this reason
+   * (not the full list — a fixed cap keeps the payload small while staying
+   * auditable). An auditor opens one, reads its `opener`, and re-runs the
+   * classifier to reproduce the reason.
+   */
+  sessionRefs: string[];
 }
 
 export interface Recommendation {

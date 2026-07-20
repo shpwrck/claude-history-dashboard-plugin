@@ -10,9 +10,18 @@
  * `DANGEROUS_DENY_RULES`, `BASH_SAFE_ALLOW_RULES`) for back-compat.
  */
 import type { LiveConfig, LiveSettings, SessionTokenData } from '../../types';
-import type { AppliedMarkers, RecSeverity } from './types';
+import type {
+  AppliedMarkers,
+  RecSeverity,
+  TaskClassClassificationReason,
+} from './types';
 import { estimateCost, isUnattendedEntrypoint } from '../parse-sessions';
-import { classifyTaskClass, TASK_CLASSES, type TaskClass } from '../task-class';
+import {
+  classifyTaskClassDetailed,
+  TASK_CLASSES,
+  type TaskClass,
+  type TaskClassResult,
+} from '../task-class';
 import { resolveModelPricing, entryCostAtModel, CHEAPEST_MODEL } from '../pricing';
 import { scopeKeyOf } from '../reclaim';
 import {
@@ -341,7 +350,24 @@ export interface AutomationClassCost {
    * as the `asOf` date so a reader can gate on data freshness.
    */
   latestTimestampMs: number | null;
+  /**
+   * Classifier provenance for this class (#2376): one row per distinct matched
+   * reason (`classifyTaskClassDetailed`) that assigned sessions here, with a
+   * bounded sample of the session ids, so the partition is auditable. The rows'
+   * `sessions` counts sum to {@link AutomationClassCost.sessions}. Surfaced by
+   * the detector as `TaskClassCostBreakdown.classification`.
+   */
+  classification: TaskClassClassificationReason[];
 }
+
+/**
+ * Representative session-id sample cap per matched reason (#2376). Small on
+ * purpose: the sample only needs to let an auditor open a session and re-run the
+ * classifier — the full membership is recoverable from the raw sessions — so a
+ * handful keeps the `cost.automation-share` payload bounded no matter how many
+ * sessions share a reason.
+ */
+export const MAX_CLASS_SESSION_REFS_PER_REASON = 3;
 
 export interface AutomationCostByClass {
   /** Grand automation spend — identical to {@link automationCostShare}().autoCost. */
@@ -386,11 +412,40 @@ export function automationCostByClass(
     sessions: 0,
     sampleSize: 0,
     latestTimestampMs: null,
+    classification: [],
   });
   const byClass: Record<TaskClass, AutomationClassCost> = {
     authoring: mkClass('authoring'),
     mechanical: mkClass('mechanical'),
     review: mkClass('review'),
+  };
+  // Per-class classifier provenance (#2376), keyed by the matched reason. Built
+  // alongside the cost partition so the "why" of the split is derived from the
+  // exact same per-session classification, never a second re-run that could drift.
+  const reasonsByClass: Record<TaskClass, Map<string, TaskClassClassificationReason>> = {
+    authoring: new Map(),
+    mechanical: new Map(),
+    review: new Map(),
+  };
+  const recordReason = (result: TaskClassResult, sessionId: string): void => {
+    const reasons = reasonsByClass[result.taskClass];
+    const existing = reasons.get(result.reason);
+    if (existing) {
+      existing.sessions += 1;
+      if (
+        existing.sessionRefs.length < MAX_CLASS_SESSION_REFS_PER_REASON &&
+        !existing.sessionRefs.includes(sessionId)
+      ) {
+        existing.sessionRefs.push(sessionId);
+      }
+      return;
+    }
+    reasons.set(result.reason, {
+      reason: result.reason,
+      signal: result.signal,
+      sessions: 1,
+      sessionRefs: [sessionId],
+    });
   };
   const sessionIds = new Set<string>();
   const scopeKeys = new Set<string>();
@@ -400,11 +455,20 @@ export function automationCostByClass(
 
   for (const d of tokenData) {
     if (!isUnattendedEntrypoint(d.entrypoint)) continue;
-    const bucket = byClass[classifyTaskClass({ entrypoint: d.entrypoint, opener: d.opener })];
+    // Classify with the DETAILED classifier so the matched reason/signal is
+    // retained as auditable per-class provenance (#2376), not discarded. The
+    // resolved `taskClass` is identical to the label-only `classifyTaskClass`,
+    // so the cost partition is unchanged.
+    const classification = classifyTaskClassDetailed({
+      entrypoint: d.entrypoint,
+      opener: d.opener,
+    });
+    const bucket = byClass[classification.taskClass];
     // Count every unattended session (matches the detector's `sessions` set,
     // which is populated before the per-entry loop) so nothing is dropped.
     sessionIds.add(d.sessionId);
     bucket.sessions += 1;
+    recordReason(classification, d.sessionId);
     const c = estimateCost(d);
     autoCost += c;
     bucket.autoCost += c;
@@ -446,6 +510,15 @@ export function automationCostByClass(
           entry.cacheReadTokens;
       }
     }
+  }
+
+  // Freeze each class's provenance in a deterministic order (#2376): the
+  // heaviest reason first, then reason text as a stable tiebreak, so the same
+  // input always renders the same auditable rows.
+  for (const c of TASK_CLASSES) {
+    byClass[c].classification = [...reasonsByClass[c].values()].sort(
+      (a, b) => b.sessions - a.sessions || a.reason.localeCompare(b.reason)
+    );
   }
 
   return {

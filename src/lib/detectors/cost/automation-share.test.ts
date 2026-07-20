@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { detector, DOWN_MODEL_PROOF_FRESHNESS_DAYS } from './automation-share';
-import { automationCostShare } from '../shared';
+import { automationCostShare, MAX_CLASS_SESSION_REFS_PER_REASON } from '../shared';
 import { effectiveFixKind, isBlanketModelPinSnippet } from '../fix-validity';
 import { validateRecommendationProvenance } from '../provenance';
 import { CHEAPEST_MODEL, entryCostAtModel } from '../../pricing';
+import { classifyTaskClassDetailed } from '../../task-class';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData, TokenEntry } from '../../../types';
 
@@ -153,6 +154,144 @@ describe('cost.automation-share task-class breakdown (#2139, epic #2138)', () =>
     expect(rec?.detail).toContain('By task class');
     expect(rec?.detail).toMatch(/mechanical/);
     expect(rec?.detail).toMatch(/authoring/);
+  });
+});
+
+describe('cost.automation-share per-class classification provenance (#2376)', () => {
+  it('exposes the matched reason + representative session refs behind each class', () => {
+    const tokenData = [
+      session('author', 'sdk-cli', 'coder: implement issue #2139', [
+        entry('claude-opus-4-8', 5_000_000, 1_000_000),
+      ]),
+      session('mech', 'sdk-cli', 'route-loose classify + groom-pick dry-run', [
+        entry('claude-opus-4-8', 3_000_000, 600_000),
+      ]),
+      session('rev', 'sdk-py', 'reviewer: review and merge the open PRs', [
+        entry('claude-opus-4-8', 2_000_000, 400_000),
+      ]),
+    ];
+    const rec = detector.rule(input({ tokenData }), 0);
+    const by = Object.fromEntries(
+      (rec?.taskClassBreakdown ?? []).map((c) => [c.taskClass, c])
+    );
+
+    // Every non-empty class carries at least one classifier-provenance row.
+    for (const cls of ['authoring', 'mechanical', 'review'] as const) {
+      expect(by[cls].classification).toBeDefined();
+      expect(by[cls].classification!.length).toBeGreaterThan(0);
+    }
+
+    // Each top reason REPRODUCES `classifyTaskClassDetailed` on the driving
+    // opener — the auditability property (open the ref, re-run, confirm).
+    expect(by.authoring.classification![0].reason).toBe(
+      classifyTaskClassDetailed({ opener: 'coder: implement issue #2139' }).reason
+    );
+    expect(by.authoring.classification![0].signal).toBe('opener');
+    expect(by.mechanical.classification![0].reason).toBe(
+      classifyTaskClassDetailed({
+        opener: 'route-loose classify + groom-pick dry-run',
+      }).reason
+    );
+    expect(by.review.classification![0].reason).toBe(
+      classifyTaskClassDetailed({
+        opener: 'reviewer: review and merge the open PRs',
+      }).reason
+    );
+
+    // Representative refs point at the sessions actually assigned to the class.
+    expect(by.authoring.classification![0].sessionRefs).toContain('author');
+    expect(by.mechanical.classification![0].sessionRefs).toContain('mech');
+    expect(by.review.classification![0].sessionRefs).toContain('rev');
+  });
+
+  it('per-class reason sessions sum to the class session count (nothing dropped)', () => {
+    const tokenData = [
+      session('a1', 'sdk-cli', 'coder: implement x', [
+        entry('claude-opus-4-8', 2_000_000, 400_000),
+      ]),
+      session('a2', 'sdk-cli', 'burn-epic iteration', [
+        entry('claude-opus-4-8', 2_000_000, 400_000),
+      ]),
+      // No opener -> conservative default -> authoring, still recorded.
+      session('a3', 'sdk-cli', undefined, [
+        entry('claude-opus-4-8', 2_000_000, 400_000),
+      ]),
+      session('m1', 'sdk-cli', 'pick the next issue', [
+        entry('claude-opus-4-8', 1_000_000, 200_000),
+      ]),
+    ];
+    const rec = detector.rule(input({ tokenData }), 0);
+    for (const c of rec?.taskClassBreakdown ?? []) {
+      const reasonSessions = sum((c.classification ?? []).map((r) => r.sessions));
+      expect(reasonSessions).toBe(c.sessions);
+    }
+  });
+
+  it('aggregates sessions sharing a reason and bounds the representative sample', () => {
+    const authors = Array.from({ length: 5 }, (_, i) =>
+      session(`author-${i}`, 'sdk-cli', 'coder: implement the feature', [
+        entry('claude-opus-4-8', 2_000_000, 400_000),
+      ])
+    );
+    const rec = detector.rule(input({ tokenData: authors }), 0);
+    const authoring = rec?.taskClassBreakdown?.find(
+      (c) => c.taskClass === 'authoring'
+    );
+    expect(authoring?.sessions).toBe(5);
+    // All five share one reason, so there is a single aggregated row.
+    expect(authoring?.classification?.length).toBe(1);
+    const row = authoring!.classification![0];
+    expect(row.sessions).toBe(5);
+    // The ref list is a bounded, representative sample of real ids.
+    expect(row.sessionRefs.length).toBeGreaterThan(0);
+    expect(row.sessionRefs.length).toBeLessThanOrEqual(
+      MAX_CLASS_SESSION_REFS_PER_REASON
+    );
+    for (const ref of row.sessionRefs) {
+      expect(ref).toMatch(/^author-\d$/);
+    }
+  });
+
+  it('records the conservative default signal for a no-opener automation session', () => {
+    const tokenData = [
+      session('nosignal', 'sdk-cli', undefined, [
+        entry('claude-opus-4-8', 5_000_000, 1_000_000),
+      ]),
+    ];
+    const rec = detector.rule(input({ tokenData }), 0);
+    const authoring = rec?.taskClassBreakdown?.find(
+      (c) => c.taskClass === 'authoring'
+    );
+    const row = authoring?.classification?.find((r) => r.signal === 'default');
+    expect(row).toBeDefined();
+    expect(row?.reason).toBe(classifyTaskClassDetailed({ opener: undefined }).reason);
+    expect(row?.sessionRefs).toContain('nosignal');
+  });
+
+  it('orders classification rows by session weight, heaviest first, deterministically', () => {
+    const tokenData = [
+      session('c1', 'sdk-cli', 'coder go', [
+        entry('claude-opus-4-8', 1_000_000, 200_000),
+      ]),
+      session('c2', 'sdk-cli', 'coder go', [
+        entry('claude-opus-4-8', 1_000_000, 200_000),
+      ]),
+      session('i1', 'sdk-cli', 'implement the fix', [
+        entry('claude-opus-4-8', 1_000_000, 200_000),
+      ]),
+    ];
+    const rec = detector.rule(input({ tokenData }), 0);
+    const authoring = rec?.taskClassBreakdown?.find(
+      (c) => c.taskClass === 'authoring'
+    );
+    const rows = authoring?.classification ?? [];
+    // Two distinct authoring reasons: coder role (x2) outranks implement (x1).
+    expect(rows.length).toBe(2);
+    expect(rows[0].sessions).toBeGreaterThanOrEqual(rows[1].sessions);
+    expect(rows[0].reason).toBe(classifyTaskClassDetailed({ opener: 'coder go' }).reason);
+    expect(rows[1].reason).toBe(
+      classifyTaskClassDetailed({ opener: 'implement the fix' }).reason
+    );
   });
 });
 

@@ -434,6 +434,74 @@ describe('automationCostShare shared helper (#299)', () => {
     expect(backfillReclaimSavings([rec!], tokenData)[0].estSavingsUsd).toBeUndefined();
   });
 
+  it('reconciles per-class swap ceilings with the cascade when an overlapping lever books the same sdk-* tokens (#2378)', () => {
+    // One unattended session on LEGACY-priced Opus ($15/MTok input). This single
+    // token stream is claimed two ways that OVERLAP on the same tokens:
+    //   - cost.legacy-model-overpay books a cascade reclaim (reprice legacy Opus
+    //     input -> current Opus), so its estSavingsUsd is a REAL booked marginal.
+    //   - cost.automation-share reprices the SAME tokens to Haiku as a per-class
+    //     swap CEILING — non-bookable metadata (#2548), never a reclaim.
+    // #2378 reconciliation invariant: the per-class ceilings must never inflate
+    // the reclaimable/booked total even though they overlap tokens the cascade
+    // books elsewhere. (The issue's original premise — backfill rewriting an
+    // automation-share estSavingsUsd — is moot post-#2548: the card sets none.)
+    const tokenData = [
+      costingSession(
+        'legacy-auto',
+        'sdk-cli',
+        [entry('claude-opus-4-1-20250414', 5_000_000, 1_000_000)],
+        'coder: implement issue #2378'
+      ),
+    ];
+    const recs = buildRecommendations(baseInput({ tokenData }));
+    const legacy = recs.find((r) => r.id === 'cost.legacy-model-overpay');
+    const auto = recs.find((r) => r.id === 'cost.automation-share');
+    expect(legacy).toBeDefined();
+    expect(auto).toBeDefined();
+
+    // The overlapping lever is genuinely booked in the cascade; the ceiling is not.
+    expect(legacy?.reclaim).toBeDefined();
+    expect(auto?.estSavingsUsd).toBeUndefined();
+    expect(auto?.reclaim).toBeUndefined();
+
+    // The per-class swap ceilings are a real, positive UPPER BOUND over the same
+    // legacy tokens the cascade books — the raw pre-cascade figure #2378 flagged.
+    const ceilingSum = (auto?.taskClassBreakdown ?? []).reduce(
+      (acc, c) => acc + c.swapSavingsUsd,
+      0
+    );
+    expect(ceilingSum).toBeGreaterThan(0);
+
+    // Run the full server-path backfill (build -> cascade). It books the
+    // overlapping lever and MUST leave the per-class ceilings untouched/unbooked.
+    const backfilled = backfillReclaimSavings(recs, tokenData);
+    const legacyAfter = backfilled.find((r) => r.id === 'cost.legacy-model-overpay');
+    const autoAfter = backfilled.find((r) => r.id === 'cost.automation-share');
+
+    expect(legacyAfter?.estSavingsUsd).toBeGreaterThan(0);
+    expect(autoAfter?.estSavingsUsd).toBeUndefined();
+
+    // Ceilings are unchanged by the backfill — raw, never reconciled INTO a
+    // bookable figure (the correct post-#2548 behaviour: they stay a ceiling).
+    const ceilingSumAfter = (autoAfter?.taskClassBreakdown ?? []).reduce(
+      (acc, c) => acc + c.swapSavingsUsd,
+      0
+    );
+    expect(ceilingSumAfter).toBe(ceilingSum);
+
+    // THE INVARIANT: the reclaimable total counts only the booked lever's
+    // marginal — the automation-share ceilings add NOTHING to it, even though
+    // they sum to MORE than that marginal (the exact double-count #2378 guards
+    // against). Removing the automation-share card leaves the total unchanged.
+    const totalWithAuto = totalEstimatedSavings(backfilled);
+    const totalWithoutAuto = totalEstimatedSavings(
+      backfilled.filter((r) => r.id !== 'cost.automation-share')
+    );
+    expect(totalWithAuto).toBe(totalWithoutAuto);
+    expect(totalWithAuto).toBeGreaterThanOrEqual(legacyAfter?.estSavingsUsd ?? 0);
+    expect(ceilingSum).toBeGreaterThan(totalWithAuto);
+  });
+
   it('attaches model-pin before/after attribution when a measurement window is available', () => {
     const tokenData = [
       costingSession('baseline-auto', 'sdk-cli', [
