@@ -8,6 +8,8 @@ const RUNTIME_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../../'
 );
+const CONTRACTS_ROOT = resolve(RUNTIME_ROOT, 'contracts');
+const CONTRACT_ROOTS = [CONTRACTS_ROOT, resolve(RUNTIME_ROOT, 'schemas')];
 
 function filesBelow(root: string): string[] {
   return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
@@ -34,7 +36,9 @@ function localSchemaRefs(value: unknown, path = '$'): string[] {
 describe('experiment runtime contract import boundary', () => {
   it('depends only on its package, node:crypto, and Ajv', () => {
     const violations: string[] = [];
-    const runtimeFiles = filesBelow(RUNTIME_ROOT).filter(
+    // This is the contract-package fence. Harness-specific bridges are allowed
+    // beside it, but must not weaken the portable contracts they consume.
+    const runtimeFiles = filesBelow(CONTRACTS_ROOT).filter(
       (path) => path.endsWith('.ts') && !path.endsWith('.test.ts')
     );
     const importPattern = /(?:from\s+|import\s*\()(['"])([^'"]+)\1/g;
@@ -51,10 +55,10 @@ describe('experiment runtime contract import boundary', () => {
           continue;
         }
         const target = resolve(dirname(path), specifier);
-        if (
-          target !== RUNTIME_ROOT &&
-          !target.startsWith(`${RUNTIME_ROOT}/`)
-        ) {
+        const insideContractPackage = CONTRACT_ROOTS.some(
+          (root) => target === root || target.startsWith(`${root}/`)
+        );
+        if (!insideContractPackage) {
           violations.push(
             `${relative(RUNTIME_ROOT, path)} escapes to ${specifier}`
           );
