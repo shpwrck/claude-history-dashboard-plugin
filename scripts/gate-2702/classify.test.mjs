@@ -562,6 +562,7 @@ function createEvidenceFixture({
     stateRoot,
     trialId,
     trialRoot,
+    baseSha,
     toolLog,
     installDescendants,
     installInvocations,
@@ -685,6 +686,16 @@ test("a genuine declared-check failure stays eligible treatment evidence", () =>
       classification.behaviorVerification.behaviorContextDigest,
       /^sha256:[0-9a-f]{64}$/,
     );
+    assert.equal(classification.worktreeEvidence.baseSha, fixture.baseSha);
+    assert.match(
+      classification.worktreeEvidence.contentDigest,
+      /^sha256:[0-9a-f]{64}$/,
+    );
+    assert.match(
+      classification.worktreeEvidence.trackedPatch.contentDigest,
+      /^sha256:[0-9a-f]{64}$/,
+    );
+    assert.ok(classification.worktreeEvidence.aggregateBytes >= 0);
     assert.deepEqual(
       classification.checkResults.map(({ checkId, status }) => ({
         checkId,

@@ -26,6 +26,7 @@ import {
   gate2702ResolvedSidekickConfig,
   gate2702SidekickEnvironment,
 } from "./behavior-context.mjs";
+import { captureGate2702WorktreeEvidence } from "./worktree-evidence.mjs";
 
 const SCHEMA_VERSION = 1;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
@@ -3697,6 +3698,12 @@ async function classify(plan, options) {
               maximumAttempt: 2,
             },
           };
+  const worktreeEvidence = classification.eligible
+    ? captureGate2702WorktreeEvidence({
+        worktreePath: registration.worktreePath,
+        baseSha: registration.baseSha,
+      }).evidence
+    : null;
   const receipt = writeImmutableReceipt(paths.classification, {
     schemaVersion: SCHEMA_VERSION,
     kind: "Gate2702ArmClassification",
@@ -3715,6 +3722,7 @@ async function classify(plan, options) {
       verifiedAt: behaviorVerifiedAt,
     },
     workerArtifacts: { stdout, stderr },
+    ...(worktreeEvidence ? { worktreeEvidence } : {}),
     checkResults,
   });
   return receipt;
