@@ -35,6 +35,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'cost.automation-share',
   'workflow.review-bottleneck',
   'workflow.native-bypass',
+  'workflow.shadow-prompt',
   'cost.model-eval-routing-gap',
   'context.cross-session-reread',
   'reliability.passive-wait-stall',

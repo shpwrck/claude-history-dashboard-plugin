@@ -400,6 +400,46 @@ const memoryHygieneStore = (): ProjectMemoryStore[] => [
 ];
 
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
+  'workflow.shadow-prompt': () => {
+    // A qualifying prompt VARIATION (#2643 receipts): 5/6 decided shadow wins,
+    // dated fresh, no current proof → observational lead with cited provenance.
+    const now = Date.parse('2026-06-20T00:00:00.000Z');
+    return {
+      now,
+      input: baseInput({
+        shadowCalls: {
+          total: 6,
+          counted: 6,
+          synthetic: 0,
+          skipped: 0,
+          live: 4,
+          replay: 2,
+          byAxis: [],
+          bySourceAxis: [],
+          variationSkipped: 0,
+          byVariation: [
+            {
+              axis: 'prompt',
+              variation: 'structured',
+              samples: 6,
+              live: 4,
+              trustedLive: 4,
+              replay: 2,
+              shadowWins: 5,
+              mainWins: 1,
+              ties: 0,
+              decided: 6,
+              costDeltaSum: -0.6,
+              costDeltaCount: 6,
+              latestTs: '2026-06-19T00:00:00.000Z',
+              untimed: 0,
+              proofStatusCounts: { unknown: 6, current: 0, stale: 0, revoked: 0 },
+            },
+          ],
+        } as unknown as RecommendationInput['shadowCalls'],
+      }),
+    };
+  },
   'cost.edit-format-churn': () => {
     // 12 recent formatting-only Edit hunks (pure reindent) on a non-excluded
     // extension → clears every floor gate with cited parse-tools provenance.

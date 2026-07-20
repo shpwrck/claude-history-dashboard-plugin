@@ -1,6 +1,6 @@
 import type { AppliedMarkers, Detector, RecSeverity, Recommendation, RecProvenance } from '../types';
 import { avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding, configScopingEvidence } from '../../parse-shadow-calls';
-import type { AxisAggregate, RecsFindingAggregate } from '../../parse-shadow-calls';
+import type { AxisAggregate, RecsFindingAggregate, VariationAggregate } from '../../parse-shadow-calls';
 
 /**
  * Shadow-calls experiments (epic #513) run the same task two ways — your default (Main)
@@ -69,6 +69,19 @@ export function clearsShadowWinThresholds(a: AxisAggregate): boolean {
   const d = decided(a);
   if (d < MIN_DECIDED) return false;
   return a.shadowWins / d >= MIN_SHADOW_WIN_RATE;
+}
+
+/**
+ * The same evidence bar applied to ONE per-variation receipt (#2555, #2643).
+ * Owned here alongside {@link clearsShadowWinThresholds} and the MIN_* constants
+ * so `workflow.shadow-prompt` and this detector share ONE definition (no cycle:
+ * shadow-prompt imports from here, never the reverse). `decided` is precomputed
+ * on the receipt (shadow + main wins).
+ */
+export function clearsVariationThresholds(v: VariationAggregate): boolean {
+  if (v.samples < MIN_SAMPLES) return false;
+  if (v.decided < MIN_DECIDED) return false;
+  return v.shadowWins / v.decided >= MIN_SHADOW_WIN_RATE;
 }
 
 type Cand = { a: AxisAggregate; winRate: number; cheaper: boolean; costDelta: number | null; tokenDelta: number | null; score: number };
@@ -261,6 +274,19 @@ export const detector: Detector = {
     const candidates: Cand[] = [];
     for (const a of agg.byAxis) {
       if (a.axis === 'recs') continue; // handled by the per-finding verdict above
+      // The prompt axis has its own auditable per-variation card
+      // (`workflow.shadow-prompt`, #2555); exclude it here ONLY when that card can
+      // actually fire — i.e. some prompt variation receipt clears the SAME bar.
+      // When prompt wins in aggregate but its wins are split across labels that
+      // each fall short (or a legacy `rehydrateLegacyShadowCalls` aggregate has
+      // no byVariation at all), this generic card stays as the fallback so the
+      // winning signal is never silently dropped.
+      if (
+        a.axis === 'prompt' &&
+        agg.byVariation?.some((cell) => cell.axis === 'prompt' && clearsVariationThresholds(cell))
+      ) {
+        continue;
+      }
       if (!clearsShadowWinThresholds(a)) continue; // samples + decided (#545) + win-rate bar
       const winRate = a.shadowWins / decided(a);
       // Price-aware "cheaper" ($ when available, else raw tokens) — #536.

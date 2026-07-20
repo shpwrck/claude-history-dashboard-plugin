@@ -30,9 +30,9 @@ const AXIS_COVERAGE: Record<string, string[]> = {
   tools: ['workflow.native-bypass'], // already nudge tool strategy
   context: ['context.over-window', 'context.repeated-compactions'], // already nudge context mgmt
   'config-scoping': ['context.over-scoped-config-section'], // #1270 graduation gate consumes this axis
+  prompt: ['workflow.shadow-prompt'], // #2555 — dedicated auditable per-variation prompt card
   // Uncovered — no rule recommends adopting these per task class:
   reasoning: [],
-  prompt: [],
   skills: [],
   plugins: [],
   mcp: [],
@@ -40,8 +40,11 @@ const AXIS_COVERAGE: Record<string, string[]> = {
   mode: [],
 };
 
+// Only UNCOVERED axes need a suggested category. `prompt` is intentionally
+// absent: it is covered by `workflow.shadow-prompt` (AXIS_COVERAGE above), so it
+// never reaches the new-rule suggestion path — same as the other covered axes.
 const SUGGESTED_CATEGORY: Record<string, RecCategory> = {
-  reasoning: 'context', prompt: 'workflow', skills: 'workflow', plugins: 'workflow',
+  reasoning: 'context', skills: 'workflow', plugins: 'workflow',
   mcp: 'workflow', subagents: 'workflow', mode: 'workflow',
 };
 

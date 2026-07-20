@@ -2727,6 +2727,45 @@ function fixtureBank(): Fixture[] {
     }),
   });
 
+  // workflow.shadow-prompt (#2555): a qualifying prompt VARIATION (per-treatment
+  // receipt, #2643) wins >=60% over >=5 samples / >=3 decided. `byAxis` is empty
+  // so this fires ONLY the per-variation card, not the generic axis cards.
+  out.push({
+    now,
+    input: bankBase({
+      shadowCalls: {
+        total: 6,
+        counted: 6,
+        synthetic: 0,
+        skipped: 0,
+        live: 4,
+        replay: 2,
+        byAxis: [],
+        bySourceAxis: [],
+        variationSkipped: 0,
+        byVariation: [
+          {
+            axis: 'prompt',
+            variation: 'structured',
+            samples: 6,
+            live: 4,
+            trustedLive: 4,
+            replay: 2,
+            shadowWins: 5,
+            mainWins: 1,
+            ties: 0,
+            decided: 6,
+            costDeltaSum: -0.6,
+            costDeltaCount: 6,
+            latestTs: new Date(now - 86_400_000).toISOString(),
+            untimed: 0,
+            proofStatusCounts: { unknown: 6, current: 0, stale: 0, revoked: 0 },
+          },
+        ],
+      },
+    }),
+  });
+
   // ── #539 ingest-artifact detectors (#559–#569, #572) ──────────────────────
   const day = 24 * 60 * 60 * 1000;
   const tRec = (over: Record<string, unknown>) => ({

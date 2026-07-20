@@ -265,6 +265,7 @@ describe('parseShadowCalls — bounded per-variation receipts (#2643)', () => {
       variation: 'structured',
       samples: 3,
       live: 2,
+      trustedLive: 2,
       replay: 1,
       shadowWins: 1,
       mainWins: 1,
@@ -288,6 +289,19 @@ describe('parseShadowCalls — bounded per-variation receipts (#2643)', () => {
       aggregate.byVariation.reduce((sum, cell) => sum + cell.samples, 0) +
         aggregate.variationSkipped
     ).toBe(aggregate.counted);
+  });
+
+  it('counts trustedLive only for live rows from a trusted (organic/race) source (#2555)', () => {
+    const jsonl = [
+      receipt({ variation: 'framed' }), // organic live (unstamped) → trusted
+      receipt({ variation: 'framed', raceGoal: 'ship X' }), // race-live → trusted
+      receipt({ variation: 'framed', source: 'model-eval' }), // batch live → NOT trusted
+      receipt({ variation: 'framed', mode: 'replay' }), // replay → neither
+    ].join('\n');
+    const cell = parseShadowCalls(jsonl).byVariation.find((c) => c.variation === 'framed')!;
+    expect(cell.live).toBe(3); // 3 live-mode rows
+    expect(cell.trustedLive).toBe(2); // organic + race only
+    expect(cell.replay).toBe(1);
   });
 
   it('refuses missing/non-string/over-bound identities without pooling shared prefixes', () => {

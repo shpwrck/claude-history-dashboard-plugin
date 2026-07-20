@@ -1,1 +1,0 @@
-import{t as e}from"./over-scoped-config-section-N4L3KKSk.js";export{e as detector};

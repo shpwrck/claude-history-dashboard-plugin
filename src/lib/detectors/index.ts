@@ -88,6 +88,7 @@ import { detector as unusedInstalledPlugins } from './workflow/unused-installed-
 import { detector as toolUndoRate } from './workflow/tool-undo-rate';
 import { detector as lowToolEffectiveness } from './workflow/low-tool-effectiveness';
 import { detector as shadowAxisWins } from './workflow/shadow-axis-wins';
+import { detector as shadowPrompt } from './workflow/shadow-prompt';
 import { detector as uncoveredShadowAxis } from './workflow/uncovered-shadow-axis';
 import { detector as abandonedTasks } from './workflow/abandoned-tasks';
 import { detector as blockedTaskPileup } from './workflow/blocked-task-pileup';
@@ -245,6 +246,10 @@ export const DETECTORS: Detector[] = [
 
   // ── Epic #513 — shadow-calls experiment detectors (#518/#523, #530) ───
   shadowAxisWins,
+  // #2555 (epic #2561) — auditable per-VARIATION prompt-axis card consuming the
+  // #2643 receipts; the prompt axis is excluded from shadowAxisWins and marked
+  // covered in uncoveredShadowAxis so this never duplicates generic guidance.
+  shadowPrompt,
   uncoveredShadowAxis,
 
   // ── Epic #539 — uncaptured ~/.claude artifact detectors (#559–#569, #572) ─

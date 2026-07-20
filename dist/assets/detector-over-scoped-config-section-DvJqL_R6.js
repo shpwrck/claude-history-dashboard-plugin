@@ -1,0 +1,1 @@
+import{t as e}from"./over-scoped-config-section-BiSI4ZbF.js";export{e as detector};

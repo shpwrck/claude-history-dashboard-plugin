@@ -383,6 +383,14 @@ export interface VariationAggregate {
   variation: string;
   samples: number;
   live: number;
+  /**
+   * Live receipts from a {@link LIVE_TRUST_SOURCES} source only (organic rotation
+   * or `/race`) — the per-variation analogue of {@link AxisAggregate.liveShadowWins}'s
+   * trust gate (#2151). A batch source (model-eval, proof) that stamps `mode:'live'`
+   * counts in `live` but NOT here, so a consumer can tell genuine in-the-loop
+   * confirmation from batch/benchmark evidence without re-deriving the source.
+   */
+  trustedLive: number;
   replay: number;
   shadowWins: number;
   mainWins: number;
@@ -612,6 +620,7 @@ function emptyVariation(axis: string, variation: string): VariationAggregate {
     variation,
     samples: 0,
     live: 0,
+    trustedLive: 0,
     replay: 0,
     shadowWins: 0,
     mainWins: 0,
@@ -638,6 +647,8 @@ interface SourceAxisIdentity {
 interface VariationContribution {
   identity: VariationIdentity;
   mode: 'live' | 'replay';
+  /** Live AND from a trusted (organic/race) source — see {@link LIVE_TRUST_SOURCES}. */
+  trustedLive: boolean;
   winner: 'main' | 'shadow' | 'tie' | null;
   costDelta: number | null;
   ts: string | null;
@@ -693,6 +704,9 @@ function variationContribution(
   return {
     identity: { axis, variation },
     mode,
+    // Trust is gated on the SOURCE, not just the mode (#2151): a batch writer
+    // stamping mode:'live' must not read as in-the-loop confirmation.
+    trustedLive: mode === 'live' && LIVE_TRUST_SOURCES.has(classifyExperimentSource(rec)),
     winner: winner === 'main' || winner === 'shadow' || winner === 'tie' ? winner : null,
     costDelta:
       mainCost !== null && shadowCost !== null ? shadowCost - mainCost : null,
@@ -1015,6 +1029,7 @@ function aggregateVariations(
     cell.samples++;
     if (contribution.mode === 'live') cell.live++;
     else cell.replay++;
+    if (contribution.trustedLive) cell.trustedLive++;
 
     const { winner } = contribution;
     if (winner === 'shadow') {

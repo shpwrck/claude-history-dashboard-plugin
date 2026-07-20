@@ -104,6 +104,10 @@ export const MARKERS_SHADOW_AXIS_WINS: AppliedMarkers = {
   headings: [/^##\s+default approach/i],
   bodyPhrases: ['Revisit if live shadows stop favouring it'],
 };
+export const MARKERS_SHADOW_PROMPT: AppliedMarkers = {
+  headings: [/^##\s+Winning prompt framing\b/i],
+  bodyPhrases: ['the tasks these prompt shadow experiments sampled'],
+};
 // Hook fixes (#1783): the fix snippet is JSON pasted into settings.json, not
 // CLAUDE.md prose, so there is no snippet to match in the merged CLAUDE.md.
 // These key on the adopt-block wrapper the opt-in helper writes. Dangerous-
@@ -198,6 +202,7 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['context.reclaim-potential', MARKERS_RECLAIM_POTENTIAL],
   ['workflow.plan-missing-verification', MARKERS_PLAN_VERIFICATION],
   ['workflow.shadow-axis-wins', MARKERS_SHADOW_AXIS_WINS],
+  ['workflow.shadow-prompt', MARKERS_SHADOW_PROMPT],
   ['reliability.tool-errors', MARKERS_TOOL_ERRORS],
   ['reliability.cwd-drift-execution', MARKERS_CWD_DRIFT_EXECUTION],
   ['reliability.stale-state-assertion', MARKERS_STALE_STATE_ASSERTION],
