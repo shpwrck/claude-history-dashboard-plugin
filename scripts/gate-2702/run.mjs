@@ -28,9 +28,17 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  GATE_2702_SIDEKICK_ENV_KEYS,
+  GATE_2702_SIDEKICK_VERSION,
+  gate2702ExecutionMode,
+  gate2702ModelIds,
+  gate2702SidekickEnvironment,
+} from "./behavior-context.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = dirname(SCRIPT_PATH);
+const CLASSIFIER_PATH = join(SCRIPT_DIR, "classify.mjs");
 const PROJECT_ROOT = resolve(SCRIPT_DIR, "..", "..");
 const REPOSITORY = "shpwrck/claude-history-dashboard";
 const SCHEMA_VERSION = 1;
@@ -41,6 +49,52 @@ const UUID_PATTERN =
 
 function fail(message) {
   throw new Error(message);
+}
+
+function assertSidekickLaunchReady(repoPath) {
+  const pausePath = join(process.env.HOME || homedir(), ".sidekick", "paused");
+  if (existsSync(pausePath)) {
+    fail("C5 launch requires Sidekick to be unpaused");
+  }
+  if (process.env.CHD_EXPERIMENT_2702_TEST_MODE === "1") {
+    if (
+      process.env.CHD_EXPERIMENT_2702_TEST_SIDEKICK_VERSION !==
+        GATE_2702_SIDEKICK_VERSION ||
+      process.env.CHD_EXPERIMENT_2702_TEST_SIDEKICK_ENABLED === "0"
+    ) {
+      fail("C5 launch requires the enabled pinned Sidekick plugin");
+    }
+    return;
+  }
+  const result = spawnSync("claude", ["plugin", "list", "--json"], {
+    cwd: repoPath,
+    env: process.env,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 60_000,
+    maxBuffer: 256 * 1024,
+    windowsHide: true,
+  });
+  let plugins;
+  try {
+    plugins = JSON.parse(String(result.stdout ?? ""));
+  } catch {
+    plugins = null;
+  }
+  const matches = Array.isArray(plugins)
+    ? plugins.filter(
+        (plugin) => plugin?.id === "claude-sidekick@claude-sidekick",
+      )
+    : [];
+  if (
+    result.status !== 0 ||
+    result.signal !== null ||
+    matches.length !== 1 ||
+    matches[0].enabled !== true ||
+    matches[0].version !== GATE_2702_SIDEKICK_VERSION
+  ) {
+    fail("C5 launch requires the enabled pinned Sidekick plugin");
+  }
 }
 
 function canonicalValue(value) {
@@ -76,7 +130,11 @@ function withDigest(receipt) {
 }
 
 function verifyReceipt(receipt, expectedKind) {
-  if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) {
+  if (
+    receipt === null ||
+    typeof receipt !== "object" ||
+    Array.isArray(receipt)
+  ) {
     fail(`${expectedKind} receipt is not an object`);
   }
   if (receipt.schemaVersion !== SCHEMA_VERSION) {
@@ -144,7 +202,12 @@ function sameValue(left, right) {
 
 function isWithin(root, candidate) {
   const rel = relative(resolve(root), resolve(candidate));
-  return rel !== "" && rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(rel);
+  return (
+    rel !== "" &&
+    rel !== ".." &&
+    !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
+    !isAbsolute(rel)
+  );
 }
 
 function shellQuote(value) {
@@ -153,9 +216,18 @@ function shellQuote(value) {
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
-  if (!["launch", "status", "cleanup", "__supervise"].includes(command)) {
+  if (
+    ![
+      "launch",
+      "status",
+      "cleanup",
+      "retry",
+      "__supervise",
+      "__retry",
+    ].includes(command)
+  ) {
     fail(
-      "usage: run.mjs <launch|status|cleanup> --trial <uuid> [--repo <path>] [--state-root <path>]",
+      "usage: run.mjs <launch|status|cleanup|retry> --trial <uuid> [--subject <issue> --treatment <id> --retry-of 1] [--repo <path>] [--state-root <path>]",
     );
   }
   const options = { command };
@@ -166,7 +238,11 @@ function parseArgs(argv) {
       fail(`invalid argument near ${String(key)}`);
     }
     const name = key.slice(2);
-    if (!["trial", "repo", "state-root", "lock-token"].includes(name)) {
+    const allowed = ["trial", "repo", "state-root", "lock-token"];
+    if (["retry", "__retry"].includes(command)) {
+      allowed.push("subject", "treatment", "retry-of");
+    }
+    if (!allowed.includes(name)) {
       fail(`unknown option ${key}`);
     }
     if (options[name] !== undefined) fail(`duplicate option ${key}`);
@@ -175,11 +251,23 @@ function parseArgs(argv) {
   if (!UUID_PATTERN.test(options.trial ?? "")) {
     fail("--trial must be an RFC 4122 UUID");
   }
-  if (command !== "__supervise" && options["lock-token"] !== undefined) {
+  const internal = ["__supervise", "__retry"].includes(command);
+  if (!internal && options["lock-token"] !== undefined) {
     fail("--lock-token is internal-only");
   }
-  if (command === "__supervise" && !UUID_PATTERN.test(options["lock-token"] ?? "")) {
+  if (internal && !UUID_PATTERN.test(options["lock-token"] ?? "")) {
     fail("the internal supervisor requires a valid lock token");
+  }
+  if (["retry", "__retry"].includes(command)) {
+    const subject = Number(options.subject);
+    if (!Number.isSafeInteger(subject) || subject <= 0) {
+      fail("retry requires --subject <issue>");
+    }
+    if (!["haiku-solo", "haiku-sonnet-sidekick"].includes(options.treatment)) {
+      fail("retry requires one C5 --treatment");
+    }
+    if (options["retry-of"] !== "1") fail("retry requires --retry-of 1");
+    options.subject = subject;
   }
   return options;
 }
@@ -218,6 +306,39 @@ function runSync(program, args, options = {}) {
   return result.stdout;
 }
 
+function invokeClassifier(command, paths, trialId, subject, registration) {
+  const args = [
+    CLASSIFIER_PATH,
+    command,
+    "--trial",
+    trialId,
+    "--subject",
+    String(subject),
+    "--state-root",
+    dirname(dirname(paths.trialRoot)),
+  ];
+  if (["classify", "preflight-retry"].includes(command)) {
+    args.push(
+      "--treatment",
+      registration.treatmentId,
+      "--attempt",
+      String(registration.attempt),
+    );
+  }
+  const output = runSync(process.execPath, args, {
+    cwd: PROJECT_ROOT,
+    // A pair preflight may legally spend 2 x 20 minutes in sequential npm ci,
+    // plus the fixed Git/tool probes. Keep the supervisor outside that sum.
+    timeout: command === "preflight" ? 3_000_000 : 2_000_000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  try {
+    return JSON.parse(output);
+  } catch {
+    fail(`gate-2702 ${command} returned malformed JSON`);
+  }
+}
+
 function git(repoPath, args, options = {}) {
   return runSync("git", ["-C", repoPath, ...args], options).trim();
 }
@@ -232,13 +353,22 @@ function resolveRepo(input) {
 }
 
 function pinOriginMaster(repoPath) {
-  const sha = git(repoPath, ["rev-parse", "--verify", "origin/master^{commit}"]);
-  if (!/^[0-9a-f]{40}$/i.test(sha)) fail("origin/master did not resolve to a commit SHA");
+  const sha = git(repoPath, [
+    "rev-parse",
+    "--verify",
+    "origin/master^{commit}",
+  ]);
+  if (!/^[0-9a-f]{40}$/i.test(sha))
+    fail("origin/master did not resolve to a commit SHA");
   return sha.toLowerCase();
 }
 
 function verifyPinnedCommit(repoPath, baseSha) {
-  const resolvedSha = git(repoPath, ["rev-parse", "--verify", `${baseSha}^{commit}`]);
+  const resolvedSha = git(repoPath, [
+    "rev-parse",
+    "--verify",
+    `${baseSha}^{commit}`,
+  ]);
   if (resolvedSha.toLowerCase() !== baseSha.toLowerCase()) {
     fail(`pinned base commit is unavailable: ${baseSha}`);
   }
@@ -268,27 +398,28 @@ function pathsFor(stateRoot, definitionRef, trialId) {
     worktrees: join(trialRoot, "worktrees"),
     seal: join(trialRoot, "seal", "verified.json"),
     cleanup: join(trialRoot, "cleanup.json"),
+    retrySets: join(trialRoot, "retries", "sets"),
   };
 }
 
-function registrationPath(paths, subject, treatmentId) {
+function registrationPath(paths, subject, treatmentId, attempt = ATTEMPT) {
   return join(
     paths.runs,
     `issue-${subject}`,
     treatmentId,
-    `attempt-${ATTEMPT}`,
+    `attempt-${attempt}`,
     "registration.json",
   );
 }
 
-function runDirectory(paths, subject, treatmentId) {
-  return dirname(registrationPath(paths, subject, treatmentId));
+function runDirectory(paths, subject, treatmentId, attempt = ATTEMPT) {
+  return dirname(registrationPath(paths, subject, treatmentId, attempt));
 }
 
-function worktreePath(paths, subject, treatmentId) {
+function worktreePath(paths, subject, treatmentId, attempt = ATTEMPT) {
   return join(
     paths.worktrees,
-    `issue-${subject}.${treatmentId}.attempt-${ATTEMPT}`,
+    `issue-${subject}.${treatmentId}.attempt-${attempt}`,
   );
 }
 
@@ -310,7 +441,9 @@ function processExists(target) {
 }
 
 function isManagedProcessActive(pid) {
-  return Number.isSafeInteger(pid) && pid > 1 && processExists(processTarget(pid));
+  return (
+    Number.isSafeInteger(pid) && pid > 1 && processExists(processTarget(pid))
+  );
 }
 
 function signalManagedProcess(pid, signal) {
@@ -330,15 +463,25 @@ async function waitForManagedProcessExit(pid, timeoutMs) {
 }
 
 async function quiesceManagedProcessGroup(pid) {
+  const configuredTestGrace = Number(
+    process.env.CHD_EXPERIMENT_2702_TEST_PROCESS_GRACE_MS,
+  );
+  const graceMs =
+    process.env.CHD_EXPERIMENT_2702_TEST_MODE === "1" &&
+    Number.isSafeInteger(configuredTestGrace) &&
+    configuredTestGrace > 0
+      ? configuredTestGrace
+      : 5_000;
   if (!isManagedProcessActive(pid)) return true;
   signalManagedProcess(pid, "SIGTERM");
-  if (await waitForManagedProcessExit(pid, 5_000)) return true;
+  if (await waitForManagedProcessExit(pid, graceMs)) return true;
   signalManagedProcess(pid, "SIGKILL");
-  return waitForManagedProcessExit(pid, 5_000);
+  return waitForManagedProcessExit(pid, graceMs);
 }
 
 function isOwnerActive(owner) {
-  if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 1) return false;
+  if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 1)
+    return false;
   return owner.phase === "supervising"
     ? isManagedProcessActive(owner.pid)
     : processExists(owner.pid);
@@ -360,9 +503,81 @@ function readLockOwner(paths) {
   }
 }
 
-function removeStaleLock(paths) {
+function sameLockGeneration(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameLockOwner(left, right) {
+  if (left === null || right === null) return left === right;
+  return (
+    left.token === right.token &&
+    left.pid === right.pid &&
+    left.phase === right.phase &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+function removeOwnedReclaimMarker(markerPath, token) {
+  try {
+    const marker = readJson(markerPath);
+    if (marker?.kind === "Gate2702LockReclaim" && marker.token === token) {
+      unlinkSync(markerPath);
+    }
+  } catch {
+    // Fail closed: never remove a marker whose ownership cannot be proved.
+  }
+}
+
+function reclaimStaleLock(paths, observedOwner, observedGeneration, trialId) {
+  const markerPath = join(paths.lock, "reclaim.json");
+  const token = randomUUID();
+  try {
+    writeFileSync(
+      markerPath,
+      `${JSON.stringify({
+        schemaVersion: SCHEMA_VERSION,
+        kind: "Gate2702LockReclaim",
+        trialId,
+        token,
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+      })}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      fail(`trial ${trialId} lock reclamation is already in progress`);
+    }
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+
+  let currentGeneration;
+  let currentOwner;
+  try {
+    currentGeneration = statSync(paths.lock);
+    currentOwner = readLockOwner(paths);
+  } catch {
+    removeOwnedReclaimMarker(markerPath, token);
+    return false;
+  }
+  if (
+    !sameLockGeneration(observedGeneration, currentGeneration) ||
+    !sameLockOwner(observedOwner, currentOwner) ||
+    (currentOwner !== null && isOwnerActive(currentOwner))
+  ) {
+    removeOwnedReclaimMarker(markerPath, token);
+    return false;
+  }
+
   if (existsSync(paths.lockOwner)) unlinkSync(paths.lockOwner);
+  const marker = readJson(markerPath);
+  if (marker?.kind !== "Gate2702LockReclaim" || marker.token !== token) {
+    fail(`trial ${trialId} lock reclamation ownership changed`);
+  }
+  unlinkSync(markerPath);
   rmdirSync(paths.lock);
+  return true;
 }
 
 function acquireLock(paths, trialId) {
@@ -387,19 +602,22 @@ function acquireLock(paths, trialId) {
       if (owner && isOwnerActive(owner)) {
         fail(`trial ${trialId} is already active under pid ${owner.pid}`);
       }
-      let ageMs = 0;
+      let generation;
       try {
-        ageMs = Date.now() - statSync(paths.lock).mtimeMs;
+        generation = statSync(paths.lock);
       } catch {
         continue;
       }
+      const ageMs = Date.now() - generation.mtimeMs;
       if (!owner && ageMs < 30_000) {
         fail(`trial ${trialId} lock is being prepared`);
       }
       try {
-        removeStaleLock(paths);
+        if (!reclaimStaleLock(paths, owner, generation, trialId)) continue;
       } catch (removeError) {
-        fail(`trial ${trialId} has an unrecoverable lock: ${removeError.message}`);
+        fail(
+          `trial ${trialId} has an unrecoverable lock: ${removeError.message}`,
+        );
       }
     }
   }
@@ -423,11 +641,22 @@ function releaseLock(paths, token) {
     unlinkSync(paths.lockOwner);
     rmdirSync(paths.lock);
   } catch (error) {
-    process.stderr.write(`gate-2702: could not release trial lock: ${error.message}\n`);
+    process.stderr.write(
+      `gate-2702: could not release trial lock: ${error.message}\n`,
+    );
   }
 }
 
-function buildRegistration({ definitionRef, trialId, baseSha, paths, subject, treatmentId }) {
+function buildRegistration({
+  definitionRef,
+  trialId,
+  baseSha,
+  paths,
+  subject,
+  treatmentId,
+  attempt = ATTEMPT,
+  retryOf,
+}) {
   return withDigest({
     schemaVersion: SCHEMA_VERSION,
     kind: "Gate2702ArmRegistration",
@@ -436,10 +665,12 @@ function buildRegistration({ definitionRef, trialId, baseSha, paths, subject, tr
     subject,
     subjectRef: `github:${REPOSITORY}#${subject}`,
     treatmentId,
-    attempt: ATTEMPT,
+    attempt,
     baseSha,
-    runDir: runDirectory(paths, subject, treatmentId),
-    worktreePath: worktreePath(paths, subject, treatmentId),
+    executionMode: gate2702ExecutionMode(),
+    runDir: runDirectory(paths, subject, treatmentId, attempt),
+    worktreePath: worktreePath(paths, subject, treatmentId, attempt),
+    ...(retryOf ? { retryOf } : {}),
   });
 }
 
@@ -480,18 +711,20 @@ function verifyTrial(trial, plan, paths, trialId) {
   if (resolve(trial.worktreeRoot) !== resolve(paths.worktrees)) {
     fail("trial receipt worktree root does not match its storage path");
   }
-  if (trial.repository !== REPOSITORY || !/^[0-9a-f]{40}$/.test(trial.baseSha ?? "")) {
+  if (
+    trial.repository !== REPOSITORY ||
+    trial.executionMode !== gate2702ExecutionMode() ||
+    !/^[0-9a-f]{40}$/.test(trial.baseSha ?? "")
+  ) {
     fail("trial receipt has an invalid repository or base SHA");
   }
-  if (!Array.isArray(trial.registrations) || trial.registrations.length !== 12) {
+  if (
+    !Array.isArray(trial.registrations) ||
+    trial.registrations.length !== 12
+  ) {
     fail("trial receipt must contain exactly 12 arm registrations");
   }
-  const expected = expectedRegistrations(
-    plan,
-    trialId,
-    trial.baseSha,
-    paths,
-  );
+  const expected = expectedRegistrations(plan, trialId, trial.baseSha, paths);
   for (const [index, registration] of trial.registrations.entries()) {
     verifyReceipt(registration, "Gate2702ArmRegistration");
     if (!sameValue(registration, expected[index])) {
@@ -526,6 +759,8 @@ function assertSubjectSnapshotIdentity(snapshot, registration, expectedDigest) {
     !sameValue(snapshot.definitionRef, registration.definitionRef) ||
     snapshot.trialId !== registration.trialId ||
     snapshot.repository !== REPOSITORY ||
+    snapshot.executionMode !==
+      (registration.executionMode ?? gate2702ExecutionMode()) ||
     snapshot.subject !== registration.subject ||
     snapshot.baseSha !== registration.baseSha ||
     (expectedDigest !== undefined && snapshot.contentDigest !== expectedDigest)
@@ -542,14 +777,23 @@ function assertSubjectSnapshotIdentity(snapshot, registration, expectedDigest) {
   return snapshot;
 }
 
-function snapshotSubject(paths, subject, repoPath, definitionRef, trialId, baseSha) {
+function snapshotSubject(
+  paths,
+  subject,
+  repoPath,
+  definitionRef,
+  trialId,
+  baseSha,
+) {
   const path = subjectPath(paths, subject);
   if (existsSync(path)) {
     const receipt = readReceipt(path, "Gate2702SubjectSnapshot");
-    assertSubjectSnapshotIdentity(
-      receipt,
-      { definitionRef, trialId, subject, baseSha },
-    );
+    assertSubjectSnapshotIdentity(receipt, {
+      definitionRef,
+      trialId,
+      subject,
+      baseSha,
+    });
     return receipt;
   }
   const gh = process.env.CHD_EXPERIMENT_2702_GH_BIN || "gh";
@@ -586,6 +830,7 @@ function snapshotSubject(paths, subject, repoPath, definitionRef, trialId, baseS
     definitionRef,
     trialId,
     repository: REPOSITORY,
+    executionMode: gate2702ExecutionMode(),
     subject,
     baseSha,
     title: issue.title,
@@ -624,6 +869,7 @@ function prepareTrial({ plan, paths, trialId, repoPath, baseSha }) {
     definitionRef: plan.definitionRef,
     trialId,
     repository: REPOSITORY,
+    executionMode: gate2702ExecutionMode(),
     repoPath,
     stateRoot: dirname(dirname(paths.trialRoot)),
     worktreeRoot: paths.worktrees,
@@ -641,7 +887,11 @@ function prepareTrial({ plan, paths, trialId, repoPath, baseSha }) {
 function validateRegistrationFiles(trial, paths) {
   const result = [];
   for (const embedded of trial.registrations) {
-    const path = registrationPath(paths, embedded.subject, embedded.treatmentId);
+    const path = registrationPath(
+      paths,
+      embedded.subject,
+      embedded.treatmentId,
+    );
     const receipt = readReceipt(path, "Gate2702ArmRegistration");
     if (!sameValue(receipt, embedded)) {
       fail(`registration receipt does not match trial manifest: ${path}`);
@@ -653,7 +903,10 @@ function validateRegistrationFiles(trial, paths) {
 
 function validateSubjectSnapshotFiles(plan, trial, paths) {
   const bySubject = new Map(
-    trial.subjectSnapshots.map((snapshot) => [snapshot.subject, snapshot.contentDigest]),
+    trial.subjectSnapshots.map((snapshot) => [
+      snapshot.subject,
+      snapshot.contentDigest,
+    ]),
   );
   for (const subject of plan.subjects) {
     const registration = trial.registrations.find(
@@ -664,7 +917,11 @@ function validateSubjectSnapshotFiles(plan, trial, paths) {
       subjectPath(paths, subject),
       "Gate2702SubjectSnapshot",
     );
-    assertSubjectSnapshotIdentity(snapshot, registration, bySubject.get(subject));
+    assertSubjectSnapshotIdentity(
+      snapshot,
+      registration,
+      bySubject.get(subject),
+    );
   }
 }
 
@@ -682,12 +939,159 @@ function assertArmReceiptIdentity(receipt, registration, label) {
   return receipt;
 }
 
+function retryRegistrationManifest(registrations) {
+  return [...registrations]
+    .sort(
+      (left, right) =>
+        left.subject - right.subject ||
+        left.treatmentId.localeCompare(right.treatmentId),
+    )
+    .map((registration) => ({
+      subject: registration.subject,
+      treatmentId: registration.treatmentId,
+      attempt: registration.attempt,
+      registrationDigest: registration.contentDigest,
+      retryOf: registration.retryOf,
+      worktreePath: registration.worktreePath,
+    }));
+}
+
+function retrySetPath(paths, registrationSetDigest) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(registrationSetDigest)) {
+    fail("retry registration set has an invalid digest");
+  }
+  return join(
+    paths.retrySets,
+    `${registrationSetDigest.replace(":", "-")}.json`,
+  );
+}
+
+function persistRetryRegistrationSet(trial, paths, registrations) {
+  const manifest = retryRegistrationManifest(registrations);
+  const registrationSetDigest = valueDigest(manifest);
+  const receipt = writeImmutableReceipt(
+    retrySetPath(paths, registrationSetDigest),
+    {
+      schemaVersion: SCHEMA_VERSION,
+      kind: "Gate2702RetryRegistrationSet",
+      definitionRef: trial.definitionRef,
+      trialId: trial.trialId,
+      baseSha: trial.baseSha,
+      registrationSetDigest,
+      registrations: manifest,
+    },
+  );
+  return { registrations, registrationSetDigest, receipt };
+}
+
+function readRetryRegistrationState(plan, trial, paths, requireSet = true) {
+  const registrations = [];
+  for (const subject of plan.subjects) {
+    for (const treatment of plan.treatments) {
+      const path = registrationPath(paths, subject, treatment.id, 2);
+      if (!existsSync(path)) continue;
+      const registration = readReceipt(path, "Gate2702ArmRegistration");
+      const attempt1 = trial.registrations.find(
+        (candidate) =>
+          candidate.subject === subject &&
+          candidate.treatmentId === treatment.id,
+      );
+      if (!attempt1) fail("retry has no registered attempt 1");
+      const classification1 = readReceipt(
+        join(attempt1.runDir, "classification.json"),
+        "Gate2702ArmClassification",
+      );
+      assertArmReceiptIdentity(
+        classification1,
+        attempt1,
+        "retry-authorizing classification",
+      );
+      const retryOf = {
+        attempt: 1,
+        registrationDigest: attempt1.contentDigest,
+        classificationDigest: classification1.contentDigest,
+      };
+      const expected = buildRegistration({
+        definitionRef: trial.definitionRef,
+        trialId: trial.trialId,
+        baseSha: trial.baseSha,
+        paths,
+        subject,
+        treatmentId: treatment.id,
+        attempt: 2,
+        retryOf,
+      });
+      if (
+        classification1.registrationDigest !== attempt1.contentDigest ||
+        classification1.retry?.authorized !== true ||
+        !sameValue(registration, expected)
+      ) {
+        fail("attempt 2 registration is not authorized by attempt 1");
+      }
+      registrations.push(registration);
+    }
+  }
+  const manifest = retryRegistrationManifest(registrations);
+  const registrationSetDigest = valueDigest(manifest);
+  let receipt = null;
+  if (registrations.length > 0 && requireSet) {
+    receipt = readReceipt(
+      retrySetPath(paths, registrationSetDigest),
+      "Gate2702RetryRegistrationSet",
+    );
+    if (
+      !sameValue(receipt.definitionRef, trial.definitionRef) ||
+      receipt.trialId !== trial.trialId ||
+      receipt.baseSha !== trial.baseSha ||
+      receipt.registrationSetDigest !== registrationSetDigest ||
+      !sameValue(receipt.registrations, manifest)
+    ) {
+      fail("retry registration set receipt does not match its registrations");
+    }
+  }
+  return { registrations, registrationSetDigest, receipt };
+}
+
 function assertLogFile(path) {
   if (!existsSync(path)) fail(`required arm log is missing: ${path}`);
   const metadata = lstatSync(path);
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     fail(`arm log is not a regular file: ${path}`);
   }
+}
+
+function ensureEmptyPreflightLog(path) {
+  if (!existsSync(path)) {
+    writeFileSync(path, "", {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    return;
+  }
+  const metadata = lstatSync(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size !== 0) {
+    fail(`partial preflight-failure log is not an empty regular file: ${path}`);
+  }
+}
+
+function readArmClassification(registration, terminal) {
+  const path = join(registration.runDir, "classification.json");
+  if (!existsSync(path)) return null;
+  const classification = assertArmReceiptIdentity(
+    readReceipt(path, "Gate2702ArmClassification"),
+    registration,
+    "classification receipt",
+  );
+  if (
+    classification.registrationDigest !== registration.contentDigest ||
+    classification.terminalDigest !== terminal.contentDigest ||
+    !["succeeded", "failed", "cancelled"].includes(classification.status) ||
+    typeof classification.eligible !== "boolean"
+  ) {
+    fail("classification receipt is not bound to its terminal arm evidence");
+  }
+  return classification;
 }
 
 function inspectArm(registration) {
@@ -700,13 +1104,42 @@ function inspectArm(registration) {
 
   try {
     if (!existsSync(preDispatchPath)) {
-      if (
-        existsSync(processPath) ||
-        existsSync(terminalPath) ||
-        existsSync(stdoutPath) ||
-        existsSync(stderrPath)
-      ) {
+      if (existsSync(terminalPath) && !existsSync(processPath)) {
+        const terminal = assertArmReceiptIdentity(
+          readReceipt(terminalPath, "Gate2702Terminal"),
+          registration,
+          "terminal receipt",
+        );
+        if (
+          terminal.outcome !== "preflight-failed" ||
+          !/^sha256:[0-9a-f]{64}$/.test(terminal.preflightDigest ?? "")
+        ) {
+          fail(
+            "terminal without pre-dispatch is not a bound preflight failure",
+          );
+        }
+        assertLogFile(stdoutPath);
+        assertLogFile(stderrPath);
+        return {
+          state: "terminal",
+          terminal,
+          classification: readArmClassification(registration, terminal),
+        };
+      }
+      if (existsSync(processPath) || existsSync(terminalPath)) {
         fail("arm artifacts exist without a pre-dispatch receipt");
+      }
+      for (const path of [stdoutPath, stderrPath]) {
+        if (existsSync(path)) {
+          const metadata = lstatSync(path);
+          if (
+            !metadata.isFile() ||
+            metadata.isSymbolicLink() ||
+            metadata.size !== 0
+          ) {
+            fail("arm artifacts exist without a pre-dispatch receipt");
+          }
+        }
       }
       return { state: "pending" };
     }
@@ -763,15 +1196,29 @@ function inspectArm(registration) {
     if (terminal.preDispatchDigest !== preDispatch.contentDigest) {
       fail("terminal receipt is not bound to its pre-dispatch receipt");
     }
+    if (
+      typeof terminal.durationMs !== "number" ||
+      !Number.isFinite(terminal.durationMs) ||
+      terminal.durationMs < 0
+    ) {
+      fail("dispatched terminal receipt has no monotonic duration");
+    }
     if (terminal.outcome === "spawn-error") {
       if (processReceipt || terminal.processDigest !== undefined) {
         fail("spawn-error terminal unexpectedly has a process receipt");
       }
       assertLogFile(stdoutPath);
       assertLogFile(stderrPath);
-      return { state: "terminal", terminal };
+      return {
+        state: "terminal",
+        terminal,
+        classification: readArmClassification(registration, terminal),
+      };
     }
-    if (!["exited", "timed-out"].includes(terminal.outcome) || !processReceipt) {
+    if (
+      !["exited", "timed-out"].includes(terminal.outcome) ||
+      !processReceipt
+    ) {
       fail("terminal receipt has an invalid outcome or no process receipt");
     }
     if (terminal.processDigest !== processReceipt.contentDigest) {
@@ -780,7 +1227,12 @@ function inspectArm(registration) {
     if (isManagedProcessActive(processReceipt.pid)) {
       return { state: "active", processReceipt, terminal };
     }
-    return { state: "terminal", terminal, processReceipt };
+    return {
+      state: "terminal",
+      terminal,
+      processReceipt,
+      classification: readArmClassification(registration, terminal),
+    };
   } catch (error) {
     return { state: "recovery-required", error };
   }
@@ -792,11 +1244,14 @@ function scanTrial(plan, trial, paths) {
     pending: 0,
     active: 0,
     terminal: 0,
+    classified: 0,
     recoveryRequired: 0,
   };
   let registrations;
   try {
-    registrations = validateRegistrationFiles(trial, paths);
+    const baseRegistrations = validateRegistrationFiles(trial, paths);
+    const retryState = readRetryRegistrationState(plan, trial, paths);
+    registrations = [...baseRegistrations, ...retryState.registrations];
     validateSubjectSnapshotFiles(plan, trial, paths);
     counts.registered = registrations.length;
   } catch {
@@ -808,8 +1263,10 @@ function scanTrial(plan, trial, paths) {
     const arm = inspectArm(registration);
     if (arm.state === "pending") counts.pending += 1;
     else if (arm.state === "active") counts.active += 1;
-    else if (arm.state === "terminal") counts.terminal += 1;
-    else counts.recoveryRequired += 1;
+    else if (arm.state === "terminal") {
+      counts.terminal += 1;
+      if (arm.classification) counts.classified += 1;
+    } else counts.recoveryRequired += 1;
   }
 
   const owner = readLockOwner(paths);
@@ -817,7 +1274,12 @@ function scanTrial(plan, trial, paths) {
   let state = "pending";
   if (counts.recoveryRequired > 0) state = "recovery-required";
   else if (counts.active > 0 || lockActive) state = "active";
-  else if (counts.terminal === trial.registrations.length) state = "terminal";
+  else if (
+    counts.terminal === registrations.length &&
+    counts.classified === registrations.length
+  ) {
+    state = "terminal";
+  }
   return { state, counts };
 }
 
@@ -839,6 +1301,7 @@ function assertWorktreeIdentity(receipt, registration, gitDirectory) {
   assertArmReceiptIdentity(receipt, registration, "worktree identity receipt");
   if (
     receipt.registrationDigest !== registration.contentDigest ||
+    receipt.executionMode !== registration.executionMode ||
     resolve(receipt.worktreePath) !== resolve(registration.worktreePath) ||
     resolve(receipt.gitDirectory) !== resolve(gitDirectory) ||
     !UUID_PATTERN.test(receipt.identityToken ?? "")
@@ -874,7 +1337,9 @@ function ensureWorktreeIdentity(registration) {
   const externalExists = existsSync(externalPath);
 
   if (externalExists && !markerExists) {
-    fail(`worktree identity marker is missing; path may have been reincarnated: ${registration.worktreePath}`);
+    fail(
+      `worktree identity marker is missing; path may have been reincarnated: ${registration.worktreePath}`,
+    );
   }
   if (markerExists) {
     assertRegularReceiptFile(markerPath);
@@ -912,6 +1377,7 @@ function ensureWorktreeIdentity(registration) {
     treatmentId: registration.treatmentId,
     attempt: registration.attempt,
     baseSha: registration.baseSha,
+    executionMode: gate2702ExecutionMode(),
     worktreePath: registration.worktreePath,
     gitDirectory,
     identityToken: randomUUID(),
@@ -919,7 +1385,8 @@ function ensureWorktreeIdentity(registration) {
   };
   const marker = writeImmutableReceipt(markerPath, undigested);
   const external = writeImmutableReceipt(externalPath, undigested);
-  if (!sameValue(marker, external)) fail("could not persist one worktree identity");
+  if (!sameValue(marker, external))
+    fail("could not persist one worktree identity");
   return marker;
 }
 
@@ -949,11 +1416,14 @@ function verifyWorktreeIdentity(registration) {
 
 function ensureWorktree(repoPath, registration, worktreeRoot) {
   const path = resolve(registration.worktreePath);
-  if (!isWithin(worktreeRoot, path)) fail(`worktree escapes trial root: ${path}`);
+  if (!isWithin(worktreeRoot, path))
+    fail(`worktree escapes trial root: ${path}`);
   if (existsSync(path)) {
-    if (lstatSync(path).isSymbolicLink()) fail(`worktree path is a symlink: ${path}`);
+    if (lstatSync(path).isSymbolicLink())
+      fail(`worktree path is a symlink: ${path}`);
     const registered = gitWorktreePaths(repoPath);
-    if (!registered.has(path)) fail(`existing path is not a registered Git worktree: ${path}`);
+    if (!registered.has(path))
+      fail(`existing path is not a registered Git worktree: ${path}`);
     const head = git(path, ["rev-parse", "HEAD"]);
     if (head.toLowerCase() !== registration.baseSha.toLowerCase()) {
       fail(`worktree HEAD drifted from pinned base: ${path}`);
@@ -995,14 +1465,19 @@ function ensureWorktree(repoPath, registration, worktreeRoot) {
 function armCommand(plan) {
   if (process.env.CHD_EXPERIMENT_2702_TEST_MODE === "1") {
     const encoded = process.env.CHD_EXPERIMENT_2702_TEST_ARM_COMMAND_JSON;
-    if (!encoded) fail("test mode requires CHD_EXPERIMENT_2702_TEST_ARM_COMMAND_JSON");
+    if (!encoded)
+      fail("test mode requires CHD_EXPERIMENT_2702_TEST_ARM_COMMAND_JSON");
     let argv;
     try {
       argv = JSON.parse(encoded);
     } catch {
       fail("test arm command is not valid JSON");
     }
-    if (!Array.isArray(argv) || argv.length === 0 || argv.some((arg) => typeof arg !== "string" || !arg)) {
+    if (
+      !Array.isArray(argv) ||
+      argv.length === 0 ||
+      argv.some((arg) => typeof arg !== "string" || !arg)
+    ) {
       fail("test arm command must be a non-empty JSON string array");
     }
     return argv;
@@ -1011,7 +1486,7 @@ function armCommand(plan) {
     "claude",
     "-p",
     "--model",
-    "haiku",
+    gate2702ModelIds().worker,
     "--output-format",
     "json",
     "--dangerously-skip-permissions",
@@ -1021,15 +1496,9 @@ function armCommand(plan) {
   ];
 }
 
-function armEnvironment(registration, treatment) {
+function armEnvironment(registration, sidekickEnvironment) {
   const env = { ...process.env };
-  for (const key of [
-    "SIDEKICK_ENABLE",
-    "SIDEKICK_GATE",
-    "SIDEKICK_MODEL",
-    "SIDEKICK_SESSION_BUDGET_USD",
-    "SIDEKICK_CALL_BUDGET_USD",
-  ]) {
+  for (const key of GATE_2702_SIDEKICK_ENV_KEYS) {
     delete env[key];
   }
   env.CHD_EXPERIMENT_2702_RUN_DIR = registration.runDir;
@@ -1038,19 +1507,7 @@ function armEnvironment(registration, treatment) {
   env.CHD_EXPERIMENT_2702_ATTEMPT = String(registration.attempt);
   env.CHD_EXPERIMENT_2702_TRIAL_ID = registration.trialId;
   env.CHD_EXPERIMENT_2702_BASE_SHA = registration.baseSha;
-  if (treatment.configuration.sidekick.enabled) {
-    env.SIDEKICK_ENABLE = "1";
-    env.SIDEKICK_GATE = treatment.configuration.sidekick.gate;
-    env.SIDEKICK_MODEL = treatment.configuration.sidekick.reviewerTier;
-    env.SIDEKICK_SESSION_BUDGET_USD = String(
-      treatment.configuration.sidekick.sessionBudgetUsd,
-    );
-    env.SIDEKICK_CALL_BUDGET_USD = String(
-      treatment.configuration.sidekick.perCallBudgetUsd,
-    );
-  } else {
-    env.SIDEKICK_ENABLE = "0";
-  }
+  Object.assign(env, sidekickEnvironment);
   return env;
 }
 
@@ -1083,6 +1540,28 @@ function writeTerminal(runDir, registration, fields) {
     attempt: registration.attempt,
     baseSha: registration.baseSha,
     ...fields,
+  });
+}
+
+function writePreflightFailureArm(registration, preflight) {
+  const existing = inspectArm(registration);
+  if (existing.state === "terminal") return existing.terminal;
+  if (existing.state !== "pending") {
+    fail(
+      `cannot record preflight failure over ${existing.state} arm ${registration.subject}/${registration.treatmentId}`,
+    );
+  }
+  for (const name of ["stdout.log", "stderr.log"]) {
+    ensureEmptyPreflightLog(join(registration.runDir, name));
+  }
+  return writeTerminal(registration.runDir, registration, {
+    preflightDigest: preflight.contentDigest,
+    outcome: "preflight-failed",
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    processGroupQuiescent: true,
+    endedAt: new Date().toISOString(),
   });
 }
 
@@ -1120,9 +1599,12 @@ async function executeArm(plan, paths, trial, registration) {
   );
   if (!treatment) fail(`unknown treatment ${registration.treatmentId}`);
   const argv = armCommand(plan);
+  const sidekickEnvironment = gate2702SidekickEnvironment(treatment);
+  const environment = armEnvironment(registration, sidekickEnvironment);
   const prompt = workerPrompt(snapshot, registration);
   const worktreeIdentity = readOperationalWorktreeIdentity(registration);
   const startedAt = new Date().toISOString();
+  const startedNs = process.hrtime.bigint();
   const preDispatch = writeImmutableReceipt(preDispatchPath, {
     schemaVersion: SCHEMA_VERSION,
     kind: "Gate2702PreDispatch",
@@ -1134,7 +1616,10 @@ async function executeArm(plan, paths, trial, registration) {
     treatmentId: registration.treatmentId,
     attempt: registration.attempt,
     baseSha: registration.baseSha,
+    executionMode: gate2702ExecutionMode(),
     argv,
+    sidekickEnvironment,
+    sidekickEnvironmentDigest: valueDigest(sidekickEnvironment),
     cwd: registration.worktreePath,
     promptDigest: sha256(prompt),
     startedAt,
@@ -1165,7 +1650,7 @@ async function executeArm(plan, paths, trial, registration) {
   try {
     child = spawn(argv[0], argv.slice(1), {
       cwd: registration.worktreePath,
-      env: armEnvironment(registration, treatment),
+      env: environment,
       detached: true,
       windowsHide: true,
       stdio: ["pipe", stdoutFd, stderrFd],
@@ -1177,6 +1662,7 @@ async function executeArm(plan, paths, trial, registration) {
       preDispatchDigest: preDispatch.contentDigest,
       outcome: "spawn-error",
       error: error.message,
+      durationMs: Number(process.hrtime.bigint() - startedNs) / 1_000_000,
       endedAt: new Date().toISOString(),
     });
     return;
@@ -1192,6 +1678,7 @@ async function executeArm(plan, paths, trial, registration) {
       preDispatchDigest: preDispatch.contentDigest,
       outcome: "spawn-error",
       error: spawnError.message,
+      durationMs: Number(process.hrtime.bigint() - startedNs) / 1_000_000,
       endedAt: new Date().toISOString(),
     });
     return;
@@ -1230,21 +1717,26 @@ async function executeArm(plan, paths, trial, registration) {
       try {
         signalManagedProcess(child.pid, "SIGTERM");
       } catch (error) {
-        if (error?.code !== "ESRCH") finish({ exitCode: null, signal: "SIGTERM" });
+        if (error?.code !== "ESRCH")
+          finish({ exitCode: null, signal: "SIGTERM" });
       }
       killTimer = setTimeout(() => {
         try {
           signalManagedProcess(child.pid, "SIGKILL");
         } catch (error) {
-          if (error?.code !== "ESRCH") finish({ exitCode: null, signal: "SIGKILL" });
+          if (error?.code !== "ESRCH")
+            finish({ exitCode: null, signal: "SIGKILL" });
         }
       }, 5_000);
       killTimer.unref?.();
     }, plan.limits.wallTimeMs);
-    child.once("error", (error) => finish({ exitCode: null, signal: null, error: error.message }));
+    child.once("error", (error) =>
+      finish({ exitCode: null, signal: null, error: error.message }),
+    );
     child.once("close", (exitCode, signal) => finish({ exitCode, signal }));
     child.stdin.on("error", (error) => {
-      if (error?.code !== "EPIPE") finish({ exitCode: null, signal: null, error: error.message });
+      if (error?.code !== "EPIPE")
+        finish({ exitCode: null, signal: null, error: error.message });
     });
     child.stdin.end(prompt);
   });
@@ -1260,6 +1752,7 @@ async function executeArm(plan, paths, trial, registration) {
     signal: result.signal,
     timedOut: result.timedOut,
     processGroupQuiescent,
+    durationMs: Number(process.hrtime.bigint() - startedNs) / 1_000_000,
     ...(result.error ? { error: result.error } : {}),
     endedAt: new Date().toISOString(),
   });
@@ -1288,20 +1781,110 @@ async function supervise(plan, paths, trial, token) {
     for (const registration of registrations) {
       ensureWorktree(trial.repoPath, registration, trial.worktreeRoot);
     }
-
     for (const subject of plan.subjects) {
-      const pair = plan.treatments.map((treatment) => {
+      const pairRegistrations = plan.treatments.map((treatment) => {
         const registration = registrations.find(
           (candidate) =>
-            candidate.subject === subject && candidate.treatmentId === treatment.id,
+            candidate.subject === subject &&
+            candidate.treatmentId === treatment.id,
         );
-        if (!registration) fail(`missing registration for #${subject}/${treatment.id}`);
-        return executeArm(plan, paths, trial, registration);
+        if (!registration)
+          fail(`missing registration for #${subject}/${treatment.id}`);
+        return registration;
       });
-      const results = await Promise.allSettled(pair);
-      const rejected = results.find((result) => result.status === "rejected");
-      if (rejected) throw rejected.reason;
+      const completedPair = pairRegistrations.every(
+        (registration) => inspectArm(registration).state === "terminal",
+      );
+      if (completedPair) {
+        for (const registration of pairRegistrations) {
+          invokeClassifier(
+            "classify",
+            paths,
+            trial.trialId,
+            subject,
+            registration,
+          );
+        }
+        continue;
+      }
+      const preflight = invokeClassifier(
+        "preflight",
+        paths,
+        trial.trialId,
+        subject,
+      );
+      if (preflight.status === "failed") {
+        for (const registration of pairRegistrations) {
+          writePreflightFailureArm(registration, preflight);
+        }
+      } else if (preflight.status === "passed") {
+        const results = await Promise.allSettled(
+          pairRegistrations.map((registration) =>
+            executeArm(plan, paths, trial, registration),
+          ),
+        );
+        const rejected = results.find((result) => result.status === "rejected");
+        if (rejected) throw rejected.reason;
+      } else {
+        fail(
+          `preflight for #${subject} has invalid status ${String(preflight.status)}`,
+        );
+      }
+      for (const registration of pairRegistrations) {
+        invokeClassifier(
+          "classify",
+          paths,
+          trial.trialId,
+          subject,
+          registration,
+        );
+      }
     }
+  } finally {
+    releaseLock(paths, token);
+  }
+}
+
+async function superviseRetry(plan, paths, trial, registration, token) {
+  const owner = readLockOwner(paths);
+  if (!owner || owner.token !== token || owner.trialId !== trial.trialId) {
+    fail("retry supervisor could not prove trial lock ownership");
+  }
+  updateLock(paths, token, { phase: "supervising", pid: process.pid });
+  try {
+    verifyPinnedCommit(trial.repoPath, trial.baseSha);
+    ensureWorktree(trial.repoPath, registration, trial.worktreeRoot);
+    if (inspectArm(registration).state === "terminal") {
+      invokeClassifier(
+        "classify",
+        paths,
+        trial.trialId,
+        registration.subject,
+        registration,
+      );
+      return;
+    }
+    const preflight = invokeClassifier(
+      "preflight-retry",
+      paths,
+      trial.trialId,
+      registration.subject,
+      registration,
+    );
+    if (preflight.status === "failed") {
+      writePreflightFailureArm(registration, preflight);
+    } else if (preflight.status === "passed") {
+      await executeArm(plan, paths, trial, registration);
+    } else {
+      fail(`retry preflight has invalid status ${String(preflight.status)}`);
+    }
+    invokeClassifier(
+      "classify",
+      paths,
+      trial.trialId,
+      registration.subject,
+      registration,
+    );
   } finally {
     releaseLock(paths, token);
   }
@@ -1346,6 +1929,51 @@ function spawnSupervisor(options, paths, token) {
   return child.pid;
 }
 
+function spawnRetrySupervisor(options, paths, token) {
+  mkdirSync(dirname(paths.supervisorLog), { recursive: true });
+  const logFd = openSync(
+    paths.supervisorLog,
+    fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_APPEND,
+    0o600,
+  );
+  const args = [
+    SCRIPT_PATH,
+    "__retry",
+    "--trial",
+    options.trial,
+    "--subject",
+    String(options.subject),
+    "--treatment",
+    options.treatment,
+    "--retry-of",
+    "1",
+    "--repo",
+    options.repoPath,
+    "--state-root",
+    options.stateRoot,
+    "--lock-token",
+    token,
+  ];
+  let child;
+  try {
+    child = spawn(process.execPath, args, {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+  } finally {
+    closeSync(logFd);
+  }
+  if (!Number.isSafeInteger(child.pid) || child.pid <= 1) {
+    fail("failed to start the detached retry supervisor");
+  }
+  child.unref();
+  updateLock(paths, token, { phase: "supervising", pid: child.pid });
+  return child.pid;
+}
+
 async function commandLaunch(plan, options) {
   const stateRoot = stateRootFor(options);
   const paths = pathsFor(stateRoot, plan.definitionRef, options.trial);
@@ -1353,10 +1981,13 @@ async function commandLaunch(plan, options) {
   if (existing) {
     const status = scanTrial(plan, existing, paths);
     if (status.state === "terminal") {
-      process.stdout.write(`${JSON.stringify({ trialId: options.trial, ...status })}\n`);
+      process.stdout.write(
+        `${JSON.stringify({ trialId: options.trial, ...status })}\n`,
+      );
       return;
     }
-    if (status.state === "active") fail(`trial ${options.trial} is already active`);
+    if (status.state === "active")
+      fail(`trial ${options.trial} is already active`);
     if (status.state === "recovery-required") {
       fail(`trial ${options.trial} requires recovery before it can resume`);
     }
@@ -1370,9 +2001,11 @@ async function commandLaunch(plan, options) {
     if (existing && resolve(existing.repoPath) !== resolve(repoPath)) {
       fail("resume repository does not match the original trial");
     }
+    assertSidekickLaunchReady(repoPath);
     const baseSha = existing ? existing.baseSha : pinOriginMaster(repoPath);
     if (existing) verifyPinnedCommit(repoPath, baseSha);
-    const trial = existing ??
+    const trial =
+      existing ??
       prepareTrial({
         plan,
         paths,
@@ -1382,7 +2015,9 @@ async function commandLaunch(plan, options) {
       });
     const status = scanTrial(plan, trial, paths);
     if (status.state === "terminal") {
-      process.stdout.write(`${JSON.stringify({ trialId: options.trial, ...status })}\n`);
+      process.stdout.write(
+        `${JSON.stringify({ trialId: options.trial, ...status })}\n`,
+      );
       return;
     }
     if (status.state === "recovery-required") {
@@ -1416,7 +2051,121 @@ function commandStatus(plan, options) {
   const trial = readExistingTrial(plan, paths, options.trial);
   if (!trial) fail(`trial ${options.trial} does not exist`);
   const status = scanTrial(plan, trial, paths);
-  process.stdout.write(`${JSON.stringify({ trialId: options.trial, ...status })}\n`);
+  process.stdout.write(
+    `${JSON.stringify({ trialId: options.trial, ...status })}\n`,
+  );
+}
+
+async function commandRetry(plan, options) {
+  const stateRoot = stateRootFor(options);
+  const paths = pathsFor(stateRoot, plan.definitionRef, options.trial);
+  const trial = readExistingTrial(plan, paths, options.trial);
+  if (!trial) fail(`trial ${options.trial} does not exist`);
+  const repoPath = resolveRepo(options.repo || trial.repoPath);
+  if (resolve(repoPath) !== resolve(trial.repoPath)) {
+    fail("retry repository does not match the original trial");
+  }
+  if (options.treatment === "haiku-sonnet-sidekick") {
+    assertSidekickLaunchReady(repoPath);
+  }
+  const token = acquireLock(paths, options.trial);
+  let handedOff = false;
+  try {
+    if (existsSync(paths.seal) || existsSync(paths.cleanup)) {
+      fail("cannot retry after the trial has been sealed or cleaned");
+    }
+    if (
+      existsSync(
+        join(
+          paths.trialRoot,
+          "pair-selection",
+          `issue-${options.subject}.json`,
+        ),
+      )
+    ) {
+      fail("cannot retry after the subject pair has been selected");
+    }
+    const attempt1 = readReceipt(
+      registrationPath(paths, options.subject, options.treatment, 1),
+      "Gate2702ArmRegistration",
+    );
+    const classification1 = assertArmReceiptIdentity(
+      invokeClassifier(
+        "classify",
+        paths,
+        trial.trialId,
+        options.subject,
+        attempt1,
+      ),
+      attempt1,
+      "retry-authorizing classification",
+    );
+    if (
+      classification1.registrationDigest !== attempt1.contentDigest ||
+      classification1.retry?.authorized !== true
+    ) {
+      fail("attempt 1 classification does not authorize a manual retry");
+    }
+    const retryOf = {
+      attempt: 1,
+      registrationDigest: attempt1.contentDigest,
+      classificationDigest: classification1.contentDigest,
+    };
+    const expected = buildRegistration({
+      definitionRef: trial.definitionRef,
+      trialId: trial.trialId,
+      baseSha: trial.baseSha,
+      paths,
+      subject: options.subject,
+      treatmentId: options.treatment,
+      attempt: 2,
+      retryOf,
+    });
+    const path = registrationPath(paths, options.subject, options.treatment, 2);
+    let registration;
+    if (existsSync(path)) {
+      registration = readReceipt(path, "Gate2702ArmRegistration");
+      if (!sameValue(registration, expected)) {
+        fail("existing attempt 2 registration has different immutable bytes");
+      }
+      const existing = inspectArm(registration);
+      if (existing.state === "terminal" && existing.classification) {
+        fail("attempt 2 has already completed and cannot be allocated twice");
+      }
+    } else {
+      registration = writeImmutableReceipt(path, {
+        ...expected,
+        contentDigest: undefined,
+      });
+    }
+    const retryState = readRetryRegistrationState(plan, trial, paths, false);
+    persistRetryRegistrationSet(trial, paths, retryState.registrations);
+    const pid = spawnRetrySupervisor(
+      {
+        trial: trial.trialId,
+        subject: options.subject,
+        treatment: options.treatment,
+        repoPath,
+        stateRoot,
+      },
+      paths,
+      token,
+    );
+    handedOff = true;
+    process.stdout.write(
+      `${JSON.stringify({
+        trialId: trial.trialId,
+        subject: options.subject,
+        treatmentId: options.treatment,
+        attempt: 2,
+        state: "active",
+        supervisorPid: pid,
+        registrationDigest: registration.contentDigest,
+      })}\n`,
+    );
+  } finally {
+    if (!handedOff) releaseLock(paths, token);
+  }
 }
 
 function recoveryCommand(trialId, repoPath, stateRoot) {
@@ -1432,29 +2181,42 @@ function cleanupFailure(message, trialId, repoPath, stateRoot) {
   process.exitCode = 1;
 }
 
-function validateSeal(seal, trial) {
+function validateSeal(seal, trial, retryState) {
   verifyReceipt(seal, "Gate2702VerifiedSeal");
   if (seal.verified !== true) fail("verified seal does not authorize cleanup");
   if (!sameValue(seal.definitionRef, trial.definitionRef)) {
     fail("verified seal Definition does not match the trial");
   }
-  if (seal.trialId !== trial.trialId) fail("verified seal trial ID does not match");
-  if (seal.baseSha !== trial.baseSha) fail("verified seal base SHA does not match");
+  if (seal.trialId !== trial.trialId)
+    fail("verified seal trial ID does not match");
+  if (seal.baseSha !== trial.baseSha)
+    fail("verified seal base SHA does not match");
   if (seal.worktreeManifestDigest !== trial.worktreeManifestDigest) {
     fail("verified seal worktree manifest does not match");
   }
-  if (typeof seal.sealedAt !== "string" || !Number.isFinite(Date.parse(seal.sealedAt))) {
+  if (
+    retryState.registrations.length > 0 &&
+    seal.retryRegistrationSetDigest !== retryState.registrationSetDigest
+  ) {
+    fail("verified seal does not bind the exact retry registration set");
+  }
+  if (
+    typeof seal.sealedAt !== "string" ||
+    !Number.isFinite(Date.parse(seal.sealedAt))
+  ) {
     fail("verified seal has no valid sealedAt timestamp");
   }
 }
 
-function validateCleanupReceipt(receipt, trial) {
+function validateCleanupReceipt(receipt, trial, registrations, retryState) {
   verifyReceipt(receipt, "Gate2702Cleanup");
   if (
     !sameValue(receipt.definitionRef, trial.definitionRef) ||
     receipt.trialId !== trial.trialId ||
     receipt.baseSha !== trial.baseSha ||
-    receipt.worktreeManifestDigest !== trial.worktreeManifestDigest
+    receipt.worktreeManifestDigest !== trial.worktreeManifestDigest ||
+    (retryState.registrations.length > 0 &&
+      receipt.retryRegistrationSetDigest !== retryState.registrationSetDigest)
   ) {
     fail("cleanup receipt identity does not match the trial");
   }
@@ -1462,7 +2224,7 @@ function validateCleanupReceipt(receipt, trial) {
     ...(receipt.removedWorktrees ?? []),
     ...(receipt.alreadyAbsentWorktrees ?? []),
   ].map((path) => resolve(path));
-  const expectedPaths = trial.registrations.map((registration) =>
+  const expectedPaths = registrations.map((registration) =>
     resolve(registration.worktreePath),
   );
   if (
@@ -1479,6 +2241,8 @@ function commandCleanup(plan, options) {
   const stateRoot = stateRootFor(options);
   const paths = pathsFor(stateRoot, plan.definitionRef, options.trial);
   let trial;
+  let retryState;
+  let registrations;
   let repoPath = resolve(options.repo || process.cwd());
   try {
     trial = readExistingTrial(plan, paths, options.trial);
@@ -1488,11 +2252,15 @@ function commandCleanup(plan, options) {
       fail("cleanup repository does not match the original trial");
     }
     if (!existsSync(paths.seal)) fail("verified seal is missing");
-    validateSeal(readJson(paths.seal), trial);
-    validateRegistrationFiles(trial, paths);
+    const baseRegistrations = validateRegistrationFiles(trial, paths);
+    retryState = readRetryRegistrationState(plan, trial, paths);
+    registrations = [...baseRegistrations, ...retryState.registrations];
+    validateSeal(readJson(paths.seal), trial, retryState);
     const status = scanTrial(plan, trial, paths);
     if (status.state !== "terminal") {
-      fail(`trial is ${status.state}; cleanup requires all 12 terminal receipts`);
+      fail(
+        `trial is ${status.state}; cleanup requires every registered arm to be terminal and classified`,
+      );
     }
   } catch (error) {
     cleanupFailure(error.message, options.trial, repoPath, stateRoot);
@@ -1502,7 +2270,7 @@ function commandCleanup(plan, options) {
   try {
     const registeredByGit = gitWorktreePaths(repoPath);
     const actions = [];
-    for (const registration of trial.registrations) {
+    for (const registration of registrations) {
       const path = resolve(registration.worktreePath);
       if (!isWithin(trial.worktreeRoot, path)) {
         fail(`registered worktree escapes the trial root: ${path}`);
@@ -1520,7 +2288,12 @@ function commandCleanup(plan, options) {
     }
 
     if (existsSync(paths.cleanup)) {
-      validateCleanupReceipt(readJson(paths.cleanup), trial);
+      validateCleanupReceipt(
+        readJson(paths.cleanup),
+        trial,
+        registrations,
+        retryState,
+      );
       if (actions.some((action) => action.present || action.gitRegistered)) {
         fail("cleanup receipt exists but a registered worktree reappeared");
       }
@@ -1533,7 +2306,8 @@ function commandCleanup(plan, options) {
     for (const action of actions) {
       if (!action.gitRegistered) continue;
       git(repoPath, ["worktree", "remove", "--force", action.path]);
-      if (existsSync(action.path)) fail(`Git did not remove worktree ${action.path}`);
+      if (existsSync(action.path))
+        fail(`Git did not remove worktree ${action.path}`);
     }
     const receipt = writeImmutableReceipt(paths.cleanup, {
       schemaVersion: SCHEMA_VERSION,
@@ -1542,8 +2316,15 @@ function commandCleanup(plan, options) {
       trialId: trial.trialId,
       baseSha: trial.baseSha,
       worktreeManifestDigest: trial.worktreeManifestDigest,
-      removedWorktrees: actions.filter((action) => action.gitRegistered).map((action) => action.path),
-      alreadyAbsentWorktrees: actions.filter((action) => !action.gitRegistered).map((action) => action.path),
+      ...(retryState.registrations.length > 0
+        ? { retryRegistrationSetDigest: retryState.registrationSetDigest }
+        : {}),
+      removedWorktrees: actions
+        .filter((action) => action.gitRegistered)
+        .map((action) => action.path),
+      alreadyAbsentWorktrees: actions
+        .filter((action) => !action.gitRegistered)
+        .map((action) => action.path),
       cleanedAt: new Date().toISOString(),
     });
     process.stdout.write(
@@ -1556,9 +2337,8 @@ function commandCleanup(plan, options) {
 
 async function loadDefinitionPlan() {
   await import("../register-ts.mjs");
-  const definitionModule = await import(
-    "../../src/lib/experiment-runtime/bridges/gate-2702/definition.ts"
-  );
+  const definitionModule =
+    await import("../../src/lib/experiment-runtime/bridges/gate-2702/definition.ts");
   const projection = definitionModule.projectGate2702C5Definition(
     definitionModule.GATE_2702_C5_DEFINITION,
   );
@@ -1583,6 +2363,7 @@ async function main() {
   const plan = await loadDefinitionPlan();
   if (options.command === "launch") await commandLaunch(plan, options);
   else if (options.command === "status") commandStatus(plan, options);
+  else if (options.command === "retry") await commandRetry(plan, options);
   else if (options.command === "cleanup") commandCleanup(plan, options);
   else {
     const stateRoot = stateRootFor(options);
@@ -1593,7 +2374,29 @@ async function main() {
     if (resolve(repoPath) !== resolve(trial.repoPath)) {
       fail("supervisor repository does not match the trial");
     }
-    await supervise(plan, paths, trial, options["lock-token"]);
+    if (options.command === "__retry") {
+      const registration = readReceipt(
+        registrationPath(paths, options.subject, options.treatment, 2),
+        "Gate2702ArmRegistration",
+      );
+      const retryState = readRetryRegistrationState(plan, trial, paths);
+      if (
+        !retryState.registrations.some(
+          (candidate) => candidate.contentDigest === registration.contentDigest,
+        )
+      ) {
+        fail("retry supervisor registration is not in the current retry set");
+      }
+      await superviseRetry(
+        plan,
+        paths,
+        trial,
+        registration,
+        options["lock-token"],
+      );
+    } else {
+      await supervise(plan, paths, trial, options["lock-token"]);
+    }
   }
 }
 
