@@ -386,9 +386,14 @@ present behavior.
 prose retained). Data: `promptAnalysis` (`src/lib/parse-prompt-analysis.ts`),
 `timelines`, `apiErrors`. Empty state: large inline `EmptyState`
 (`PromptAnalyzer.tsx`); filtered-empty aware.
-MISMATCH: evidence-class aggregates with no drill to the contributing
-sessions, so the low-specificity / follow-up claims cannot be verified from
-the page (audit, "Prompt Analyzer").
+PARTIALLY RESOLVED #2366: a Contributing Sessions table drills each row to the
+Sessions view via the canonical `onOpenSession` handoff — a real improvement over
+the prior no-drill state. Residual (#2830): the table lists the top ten sessions
+by prompt-turn volume (`topPromptSessions`), whereas the aggregate coaching claim
+(low-specificity vs comparison follow-up gap + correlation) is computed by
+`buildCoachingSignal` over all `promptAnalysis` rows, so a drill from this
+volume-ranked subset cannot reproduce that aggregate claim. Per-trait rows also
+stay aggregate-only until the Sessions route owns prompt-trait filters.
 
 **shadow-calls** — Shadow A/B experiment ledger (epic #513). Data:
 `shadowCalls` (`src/lib/parse-shadow-calls.ts`, from
@@ -524,6 +529,11 @@ time/project filters (#2367).
 Each line is a follow-up-issue candidate (epic #2345). File paths above give
 the receipts.
 
+Status: every item below is accounted for — behavior fixed with its doc row
+updated, explicitly re-classed with rationale, or (item 7, `prompts`) partially
+resolved with the residual tracked as a follow-up issue (#2830) — and no
+`MISMATCH` marker remains anywhere in this document. Reconciled under #2363.
+
 1. `home` — resolved in #2366; finding cards now preserve canonical scoped
    evidence filters.
 2. `permissions` — resolved in #2476; enterprise policy writes require
@@ -547,11 +557,18 @@ the receipts.
    enter clusters and validated per-cluster replay specs, and the deterministic
    JSON array has a copy handoff (execution remains external). Persisted and
    current-pass counts are explicitly separate populations.
-7. `prompts` — resolved in #2366: adds a contributing-sessions table with
-   session drill-ins. Trait rows stay aggregate-only until the Sessions route
-   owns prompt-trait filters.
-8. `teams` — evidence-class rows do not join to canonical task/session/PR
-    context; "next step" is prose, not a redispatch/copy action.
+7. `prompts` — partially resolved in #2366 (adds a contributing-sessions table
+   with session drill-ins); residual tracked in #2830. The table is ranked by
+   prompt-turn volume, so a drill from it cannot reproduce the all-rows aggregate
+   coaching claim; per-trait rows also stay aggregate-only until the Sessions
+   route owns prompt-trait filters.
+8. `teams` — resolved in #2479; dropped-assignment rows now join to canonical
+   task/session/PR context on exact task ID + subject (assignment agent / task
+   owner only breaks a tie), drill a matched in-dataset session through
+   `SessionIdLinkPf`, and expose copy actions for the exact identifiers plus a
+   Weekly Digest next step that copies the aggregated exact-only payload — never
+   a generated redispatch command. Ambiguous, missing, and out-of-dataset
+   matches stay plain with an explicit reason.
 9. `timeline` — resolved in #2480: the raw-class replay page keeps its secondary
    evidence-overlay role, and every visible row now drills to its exact Sessions
    evidence reference (with an honest session-only fallback when exact evidence
