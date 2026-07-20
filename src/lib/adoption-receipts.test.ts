@@ -427,6 +427,142 @@ describe('readAdoptionReceiptIndex (#576)', () => {
     expect([...index.suppressedFindingIds]).toEqual(['cost.a']);
   });
 
+  it('reopens a suppressed finding after a newer surface and re-closes it on the next suppression', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    const surface = (ts: string, sessionHash: string) => ({
+      kind: 'SURFACED',
+      ts,
+      sessionHash,
+      findingIds: ['workflow.shadow-prompt'],
+    });
+    const suppression = (ts: string) => ({
+      kind: 'SUPPRESSED',
+      ts,
+      findingId: 'workflow.shadow-prompt',
+      markerHeading: 'Winning prompt framing',
+      contentFingerprint: `sha256:${ts}`,
+    });
+    const reopened = [
+      surface('2026-07-01T00:00:00.000Z', 's1'),
+      suppression('2026-07-02T00:00:00.000Z'),
+      surface('2026-07-03T00:00:00.000Z', 's3'),
+    ];
+    await writeFile(file, `${reopened.map((record) => JSON.stringify(record)).join('\n')}\n`);
+
+    let index = await readAdoptionReceiptIndex(file);
+    expect(index.surfacedFindingIds.has('workflow.shadow-prompt')).toBe(true);
+    expect(index.suppressedFindingIds.has('workflow.shadow-prompt')).toBe(false);
+
+    await writeFile(
+      file,
+      `${[...reopened, suppression('2026-07-04T00:00:00.000Z')]
+        .map((record) => JSON.stringify(record))
+        .join('\n')}\n`
+    );
+    index = await readAdoptionReceiptIndex(file);
+    expect(index.suppressedFindingIds.has('workflow.shadow-prompt')).toBe(true);
+  });
+
+  it('uses append order only to break equal receipt timestamps', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    const surface = {
+      kind: 'SURFACED',
+      ts: '2026-07-01T00:00:00.000Z',
+      sessionHash: 'same-ts',
+      findingIds: ['ordinary.finding'],
+    };
+    const suppression = {
+      kind: 'SUPPRESSED',
+      ts: '2026-07-01T00:00:00.000Z',
+      findingId: 'ordinary.finding',
+      markerHeading: 'Ordinary',
+      contentFingerprint: 'sha256:same-ts',
+    };
+
+    await writeFile(file, `${JSON.stringify(surface)}\n${JSON.stringify(suppression)}\n`);
+    expect(
+      (await readAdoptionReceiptIndex(file)).suppressedFindingIds.has('ordinary.finding')
+    ).toBe(true);
+
+    await writeFile(file, `${JSON.stringify(suppression)}\n${JSON.stringify(surface)}\n`);
+    expect(
+      (await readAdoptionReceiptIndex(file)).suppressedFindingIds.has('ordinary.finding')
+    ).toBe(false);
+  });
+
+  it('does not let a delayed older surface reopen a newer suppression', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    await writeFile(
+      file,
+      [
+        {
+          kind: 'SURFACED',
+          ts: '2026-07-01T00:00:00.000Z',
+          sessionHash: 's1',
+          findingIds: ['ordinary.finding'],
+        },
+        {
+          kind: 'SUPPRESSED',
+          ts: '2026-07-03T00:00:00.000Z',
+          findingId: 'ordinary.finding',
+          markerHeading: 'Ordinary',
+          contentFingerprint: 'sha256:newer',
+        },
+        {
+          kind: 'SURFACED',
+          ts: '2026-07-02T00:00:00.000Z',
+          sessionHash: 'delayed',
+          findingIds: ['ordinary.finding'],
+        },
+      ].map((record) => JSON.stringify(record)).join('\n') + '\n'
+    );
+
+    const index = await readAdoptionReceiptIndex(file);
+    expect(index.suppressedFindingIds.has('ordinary.finding')).toBe(true);
+  });
+
+  it('does not let an invalid or far-future surface reopen a valid suppression', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    await writeFile(
+      file,
+      [
+        {
+          kind: 'SURFACED',
+          ts: '2026-07-01T00:00:00.000Z',
+          sessionHash: 'valid-surface',
+          findingIds: ['ordinary.finding'],
+        },
+        {
+          kind: 'SUPPRESSED',
+          ts: '2026-07-03T00:00:00.000Z',
+          findingId: 'ordinary.finding',
+          markerHeading: 'Ordinary',
+          contentFingerprint: 'sha256:valid-suppression',
+        },
+        {
+          kind: 'SURFACED',
+          ts: 'not-a-timestamp',
+          sessionHash: 'invalid-time',
+          findingIds: ['ordinary.finding'],
+        },
+        {
+          kind: 'SURFACED',
+          ts: '9999-01-01T00:00:00.000Z',
+          sessionHash: 'future-time',
+          findingIds: ['ordinary.finding'],
+        },
+      ].map((record) => JSON.stringify(record)).join('\n') + '\n'
+    );
+
+    const index = await readAdoptionReceiptIndex(file);
+    expect(index.surfacedFindingIds.has('ordinary.finding')).toBe(true);
+    expect(index.suppressedFindingIds.has('ordinary.finding')).toBe(true);
+  });
+
   it('ignores REJECTED receipts — the suppression-transition index is untouched (#2206)', async () => {
     const dir = await makeDir();
     const file = join(dir, 'adoption-receipts.jsonl');
@@ -566,6 +702,76 @@ describe('parseAdoptionReceiptLines (#1003)', () => {
     expect(skipped).toBe(1);
   });
 
+  it('rejects missing and invalid persisted timestamps instead of restamping them', () => {
+    const raw = [
+      JSON.stringify({
+        kind: 'SURFACED',
+        sessionHash: 'missing-time',
+        findingIds: ['cost.a'],
+      }),
+      JSON.stringify({
+        kind: 'SURFACED',
+        ts: 'not-a-timestamp',
+        sessionHash: 'invalid-time',
+        findingIds: ['cost.b'],
+      }),
+    ].join('\n');
+
+    const firstRead = parseAdoptionReceiptLines(raw, now);
+    const laterRead = parseAdoptionReceiptLines(
+      raw,
+      () => new Date('2026-06-10T12:00:00.000Z')
+    );
+    expect(firstRead).toEqual({ receipts: [], skipped: 2 });
+    expect(laterRead).toEqual(firstRead);
+  });
+
+  it('accepts bounded clock skew but rejects timestamps beyond it', () => {
+    const record = (ts: string) =>
+      JSON.stringify({
+        kind: 'SURFACED',
+        ts,
+        sessionHash: ts,
+        findingIds: ['cost.a'],
+      });
+    const raw = [
+      record('2026-06-09T12:05:00.000Z'),
+      record('2026-06-09T12:05:00.001Z'),
+    ].join('\n');
+
+    const { receipts, skipped } = parseAdoptionReceiptLines(raw, now);
+    expect(receipts.map((receipt) => receipt.ts)).toEqual([
+      '2026-06-09T12:05:00.000Z',
+    ]);
+    expect(skipped).toBe(1);
+  });
+
+  it('uses one timestamp boundary for the whole in-memory replay', () => {
+    const raw = [
+      JSON.stringify({
+        kind: 'SURFACED',
+        ts: '2026-06-09T12:00:00.000Z',
+        sessionHash: 'one',
+        findingIds: ['cost.a'],
+      }),
+      JSON.stringify({
+        kind: 'SURFACED',
+        ts: '2026-06-09T12:00:01.000Z',
+        sessionHash: 'two',
+        findingIds: ['cost.b'],
+      }),
+    ].join('\n');
+    let clockReads = 0;
+
+    const result = parseAdoptionReceiptLines(raw, () => {
+      clockReads += 1;
+      return new Date('2026-06-09T12:00:00.000Z');
+    });
+
+    expect(result.receipts).toHaveLength(2);
+    expect(clockReads).toBe(1);
+  });
+
   it('drops a receipt whose field is oversized (fail-closed allowlist)', () => {
     const raw = [
       JSON.stringify({
@@ -624,6 +830,37 @@ describe('readAdoptionReceipts (#1003)', () => {
       join(dir, 'does-not-exist.jsonl')
     );
     expect(result).toEqual({ receipts: [], skipped: 0 });
+  });
+
+  it('uses one timestamp boundary for the whole streamed replay', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'adoption-receipts.jsonl');
+    await writeFile(
+      file,
+      [
+        JSON.stringify({
+          kind: 'SURFACED',
+          ts: '2026-06-09T12:00:00.000Z',
+          sessionHash: 'one',
+          findingIds: ['cost.a'],
+        }),
+        JSON.stringify({
+          kind: 'SURFACED',
+          ts: '2026-06-09T12:00:01.000Z',
+          sessionHash: 'two',
+          findingIds: ['cost.b'],
+        }),
+      ].join('\n') + '\n'
+    );
+    let clockReads = 0;
+
+    const result = await readAdoptionReceipts(file, () => {
+      clockReads += 1;
+      return new Date('2026-06-09T12:00:00.000Z');
+    });
+
+    expect(result.receipts).toHaveLength(2);
+    expect(clockReads).toBe(1);
   });
 
   it('reads + sanitizes the log through the shared primitive', async () => {

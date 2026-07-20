@@ -1,9 +1,9 @@
 /**
  * Adoption scorecard — the read-side join behind the Adoption Card + Scorecard
- * view (issue #577, ADR 0005 "Demo artifact"). Pure functions only: given the
- * append-only adoption receipts (`SURFACED` / `SUPPRESSED`, from #575) and the
- * live config bundle, it derives one per-finding row a viewer reads in 10
- * seconds plus the index header metrics.
+ * view (issue #577, ADR 0005 "Demo artifact"). Given the append-only adoption
+ * receipts (`SURFACED` / `SUPPRESSED`, from #575) and the live config bundle, it
+ * derives one per-finding row a viewer reads in 10 seconds plus the index header
+ * metrics.
  *
  * Load-bearing honesty rules carried verbatim from ADR 0005:
  *  - The ADOPTED row's CLAUDE.md hunk is rendered from `liveConfig` **at render
@@ -33,9 +33,9 @@ export interface AdoptionScorecardRow {
   /** Stable finding id — the join key, e.g. `reliability.rate-limits`. */
   findingId: string;
   status: AdoptionStatus;
-  /** Earliest `SURFACED` receipt for this finding, when one exists. */
+  /** First `SURFACED` receipt in this finding's current lifecycle, when present. */
   surfaced: SurfacedReceipt | null;
-  /** First `SUPPRESSED` receipt for this finding, when one exists. */
+  /** Terminal `SUPPRESSED` receipt in the current lifecycle, when present. */
   suppressed: SuppressedReceipt | null;
   /**
    * The matching CLAUDE.md hunk rendered live from `liveConfig`. For a
@@ -43,12 +43,13 @@ export interface AdoptionScorecardRow {
    * `markerHeading`; for a SURFACED-only finding it is resolved from the
    * finding's detector markers in the catalog (#1785). `null` when no live
    * section matches (e.g. the user deleted it), the markers are not yet present,
-   * or no marker catalog was supplied.
+   * no marker catalog was supplied, or the finding is treatment-scoped and its
+   * finding-level receipts cannot identify which treatment owns the hunk.
    */
   liveHunk: string | null;
   /**
-   * Whole days from the finding's first surface to its first suppression, when
-   * both are present. Feeds the median-days-to-adopt header metric.
+   * Whole days from the current lifecycle's first surface to its terminal
+   * suppression, when both are present. Feeds the median-days-to-adopt metric.
    */
   daysToAdopt: number | null;
   /**
@@ -63,8 +64,9 @@ export interface AdoptionScorecardHeader {
   /** Distinct findings that were ever surfaced. */
   surfacedCount: number;
   /**
-   * Distinct findings that surfaced AND later suppressed (the coached `M`). A
-   * lower bound: prose adoptions that miss the strict-AND markers undercount.
+   * Distinct findings whose current lifecycle surfaced AND later suppressed
+   * (the coached `M`). A lower bound: prose adoptions that miss strict-AND
+   * markers undercount.
    */
   adoptedCount: number;
   /** Median whole-days-to-adopt across attributed adoptions, or `null`. */
@@ -75,6 +77,25 @@ export interface AdoptionScorecard {
   header: AdoptionScorecardHeader;
   rows: AdoptionScorecardRow[];
 }
+
+/**
+ * Finding ids where ONE id spans MULTIPLE distinct treatments whose adoption is
+ * per-treatment (#2842). `workflow.shadow-prompt` is the first: it re-fires for a
+ * different winning prompt variation once an earlier one is adopted, so its
+ * GENERIC CLAUDE.md marker ("## Winning prompt framing") certifies only that
+ * SOME treatment was adopted — never that THIS finding is adopted.
+ *
+ * For these, the SURFACED-only marker-based ADOPTED inference is disabled: a
+ * treatment-scoped finding stays SURFACED until the engine's real FIRING→
+ * SUPPRESSED transition (the detector stops firing entirely = every qualifying
+ * treatment is adopted). This keeps a later, different, still-unadopted treatment
+ * from being reported as adopted, and keeps the earlier treatment's hunk from
+ * being resolved as the new one's adoption evidence. (The finding still reaches
+ * SUPPRESSED via a genuine suppression receipt.)
+ */
+export const TREATMENT_SCOPED_FINDING_IDS: ReadonlySet<string> = new Set([
+  'workflow.shadow-prompt',
+]);
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -196,9 +217,11 @@ function median(values: number[]): number | null {
 
 /**
  * Join `SURFACED` + `SUPPRESSED` receipts on finding id and derive the
- * per-finding scorecard rows plus the index header. Pure — order of `receipts`
- * does not matter; the earliest surface and first suppression per finding are
- * selected deterministically by timestamp.
+ * per-finding scorecard rows plus the index header. Events are ordered by
+ * timestamp, with receipt-array order breaking equal timestamps. A surface
+ * after a terminal suppression starts a new lifecycle; repeated surfaces in an
+ * active lifecycle retain its first surface, and its first suppression closes
+ * it. The row exposes only that latest lifecycle pair.
  */
 export function buildAdoptionScorecard(
   receipts: AdoptionReceipt[],
@@ -215,43 +238,75 @@ export function buildAdoptionScorecard(
    */
   findingMarkers?: ReadonlyMap<string, AppliedMarkers>
 ): AdoptionScorecard {
-  // Earliest SURFACED per finding id.
-  const surfacedByFinding = new Map<string, SurfacedReceipt>();
-  for (const r of receipts) {
-    if (!isSurfaced(r)) continue;
-    for (const findingId of r.findingIds) {
-      const prev = surfacedByFinding.get(findingId);
-      if (!prev || (ts(r.ts) ?? Infinity) < (ts(prev.ts) ?? Infinity)) {
-        surfacedByFinding.set(findingId, r);
+  type LifecycleEvent =
+    | {
+        kind: 'SURFACED';
+        receipt: SurfacedReceipt;
+        timestamp: number;
+        ordinal: number;
       }
+    | {
+        kind: 'SUPPRESSED';
+        receipt: SuppressedReceipt;
+        timestamp: number;
+        ordinal: number;
+      };
+  const eventsByFinding = new Map<string, LifecycleEvent[]>();
+  const everSurfacedFindingIds = new Set<string>();
+  const addEvent = (findingId: string, event: LifecycleEvent): void => {
+    const events = eventsByFinding.get(findingId) ?? [];
+    events.push(event);
+    eventsByFinding.set(findingId, events);
+  };
+  receipts.forEach((receipt, ordinal) => {
+    // The server read path already applies the future-skew trust boundary. The
+    // browser must only require a syntactically usable time: comparing trusted
+    // receipts with the viewer's clock can discard valid server events.
+    const timestamp = ts(receipt.ts);
+    if (timestamp === null) return;
+    if (isSurfaced(receipt)) {
+      for (const findingId of receipt.findingIds) {
+        everSurfacedFindingIds.add(findingId);
+        addEvent(findingId, { kind: 'SURFACED', receipt, timestamp, ordinal });
+      }
+    } else if (isSuppressed(receipt)) {
+      addEvent(receipt.findingId, {
+        kind: 'SUPPRESSED',
+        receipt,
+        timestamp,
+        ordinal,
+      });
     }
-  }
-
-  // First SUPPRESSED per finding id.
-  const suppressedByFinding = new Map<string, SuppressedReceipt>();
-  for (const r of receipts) {
-    if (!isSuppressed(r)) continue;
-    const prev = suppressedByFinding.get(r.findingId);
-    if (!prev || (ts(r.ts) ?? Infinity) < (ts(prev.ts) ?? Infinity)) {
-      suppressedByFinding.set(r.findingId, r);
-    }
-  }
-
-  const findingIds = new Set<string>([
-    ...surfacedByFinding.keys(),
-    ...suppressedByFinding.keys(),
-  ]);
+  });
 
   const rows: AdoptionScorecardRow[] = [];
   const adoptDays: number[] = [];
 
-  for (const findingId of findingIds) {
-    const surfaced = surfacedByFinding.get(findingId) ?? null;
-    const suppressed = suppressedByFinding.get(findingId) ?? null;
+  for (const [findingId, unorderedEvents] of eventsByFinding) {
+    const events = [...unorderedEvents].sort(
+      (a, b) => a.timestamp - b.timestamp || a.ordinal - b.ordinal
+    );
+    let surfaced: SurfacedReceipt | null = null;
+    let suppressed: SuppressedReceipt | null = null;
+    for (const event of events) {
+      if (event.kind === 'SURFACED') {
+        if (surfaced === null || suppressed !== null) {
+          surfaced = event.receipt;
+          suppressed = null;
+        }
+      } else if (suppressed === null) {
+        suppressed = event.receipt;
+      }
+    }
     const attributionPending = suppressed !== null && surfaced === null;
 
+    // Treatment scoping affects only generic marker-based ADOPTED inference.
+    // Lifecycle recency itself is universal: any newer surface reopens a closed
+    // finding id, while per-treatment rows remain the follow-up in #2850.
+    const isTreatmentScoped = TREATMENT_SCOPED_FINDING_IDS.has(findingId);
+
     let liveHunk: string | null = null;
-    if (suppressed) {
+    if (suppressed && !isTreatmentScoped) {
       // Prefer marker-based resolution (#1915): the stored `markerHeading` can
       // be shared by several findings. A retired suppression-only signature
       // keeps historical receipts disambiguated without making a new SURFACED
@@ -263,11 +318,16 @@ export function buildAdoptionScorecard(
       liveHunk = markers
         ? liveHunkFromMarkers(liveConfig, markers)
         : liveClaudeMdHunk(liveConfig, suppressed.markerHeading);
-    } else if (surfaced) {
+    } else if (surfaced && !isTreatmentScoped) {
       // SURFACED-only: no stored markerHeading, so resolve the finding's markers
       // from the live detector catalog and read the hunk live (#1785). A
       // non-null hunk means the fix's markers landed in CLAUDE.md before any
       // suppression receipt — "fix landed, awaiting quiet" → ADOPTED below.
+      //
+      // Skipped for a TREATMENT-SCOPED finding (#2842): its generic marker can be
+      // present because a DIFFERENT treatment was adopted, so config-state marker
+      // presence must NOT mark it ADOPTED here — it stays SURFACED until a genuine
+      // FIRING→SUPPRESSED transition (every treatment adopted) is recorded.
       liveHunk = liveHunkFromMarkers(liveConfig, findingMarkers?.get(findingId));
     }
 
@@ -316,15 +376,17 @@ export function buildAdoptionScorecard(
       a.findingId.localeCompare(b.findingId)
   );
 
-  // M = distinct findings with BOTH a prior surface and a suppression
-  // (attributed). attribution-pending suppressions are excluded.
+  // M = distinct findings currently in the attributed adopted (SUPPRESSED) state
+  // with a prior surface. Status-aware so a treatment-scoped finding that has
+  // re-fired (now SURFACED again, #2842) is not double-counted as adopted, and
+  // attribution-pending suppressions (no prior surface) are excluded.
   const adoptedCount = rows.filter(
-    (r) => r.suppressed !== null && r.surfaced !== null
+    (r) => r.status === 'SUPPRESSED' && r.surfaced !== null
   ).length;
 
   return {
     header: {
-      surfacedCount: surfacedByFinding.size,
+      surfacedCount: everSurfacedFindingIds.size,
       adoptedCount,
       medianDaysToAdopt: median(adoptDays),
     },

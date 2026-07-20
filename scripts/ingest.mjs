@@ -4732,12 +4732,13 @@ export function assembleScopedRecommendationResult(
 /**
  * Engine-loop suppression-transition emit (#576, epic #573; ADR 0005). Computes
  * the `claudeMdMarksApplied()` FIRING→SUPPRESSED transition over the current
- * dataset and writes one `SUPPRESSED` adoption receipt per finding's first
- * attributed flip through #575's allowlist-drop, killswitch-aware writer. The
+ * dataset and writes one `SUPPRESSED` adoption receipt per currently eligible
+ * lifecycle through #575's allowlist-drop, killswitch-aware writer. The
  * prior-receipt index gates the diff: a finding needs a prior `SURFACED` entry
- * to be coached, and one already-written `SUPPRESSED` entry makes a re-run a
- * no-op (idempotent). Returns the result for logging; never throws on a write
- * error (best-effort, like the rest of the recs route's side effects).
+ * to be coached, and a terminal latest `SUPPRESSED` event makes a re-run a
+ * no-op. A newer `SURFACED` event reopens the lifecycle. Returns the result for
+ * logging; never throws on a write error (best-effort, like the rest of the
+ * recs route's side effects).
  */
 export async function recordSuppressionTransitions(receiptsFile, opts = {}) {
   const { organizationIdentity = null, dataset = undefined, ...receiptOpts } = opts;

@@ -140,6 +140,7 @@ const MAX_HEADING_LEN = 160;
 const MAX_FINGERPRINT_LEN = 128;
 const MAX_FINDINGS = 50;
 export const ADOPTION_RECEIPT_LINE_MAX_BYTES = 65_536;
+const ADOPTION_RECEIPT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const MAX_TEXT_LEN = 2000;
 const MAX_GATES = 50;
 const MAX_DELTA_DIMENSIONS = 50;
@@ -175,6 +176,22 @@ function cleanTimestamp(value: unknown, now: () => Date): string {
     if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
   }
   return now().toISOString();
+}
+
+/** Persisted receipt times fail closed before they participate in ordering. */
+function parseUsablePersistedReceiptTime(
+  value: unknown,
+  referenceTimeMs: number
+): number | null {
+  if (typeof value !== 'string' || !Number.isFinite(referenceTimeMs)) return null;
+  const parsed = Date.parse(value);
+  if (
+    !Number.isFinite(parsed) ||
+    parsed > referenceTimeMs + ADOPTION_RECEIPT_MAX_FUTURE_SKEW_MS
+  ) {
+    return null;
+  }
+  return parsed;
 }
 
 export function sanitizeAdoptionReceipt(
@@ -344,9 +361,9 @@ export function sanitizeAdoptionReceipt(
 /**
  * The canonical read-side parse loop shared by every consumer of the append-only
  * adoption-receipt JSONL. Split the raw text on newlines, bound each line before
- * JSON.parse, run each parsed value through the same fail-closed allowlist
- * (`sanitizeAdoptionReceipt`), and drop the nulls — so the read path can never
- * drift from the write path's allowlist drop.
+ * JSON.parse, require a stable usable persisted timestamp, run each parsed value
+ * through the same fail-closed allowlist (`sanitizeAdoptionReceipt`), and drop
+ * the nulls — so the read path can never drift from the write path's allowlist.
  *
  * Returns the surviving receipts in file order; blank lines and any line that
  * fails to parse or sanitize are silently skipped. `skipped` counts every line
@@ -358,8 +375,9 @@ export function parseAdoptionReceiptLines(
 ): { receipts: AdoptionReceipt[]; skipped: number } {
   const receipts: AdoptionReceipt[] = [];
   let skipped = 0;
+  const scanNow = oncePerReceiptScanClock(now);
   for (const line of raw.split('\n')) {
-    const record = parseAdoptionReceiptLine(line, now);
+    const record = parseAdoptionReceiptLine(line, scanNow);
     if (record === undefined) continue;
     if (record === null) {
       skipped += 1;
@@ -368,6 +386,20 @@ export function parseAdoptionReceiptLines(
     receipts.push(record);
   }
   return { receipts, skipped };
+}
+
+/** Capture a single ordering boundary lazily and reuse it for a whole replay. */
+function oncePerReceiptScanClock(now: () => Date): () => Date {
+  let attempted = false;
+  let readAt: Date | undefined;
+  return () => {
+    if (!attempted) {
+      attempted = true;
+      readAt = now();
+    }
+    if (!readAt) throw new Error('Receipt replay clock did not return a Date');
+    return readAt;
+  };
 }
 
 function parseAdoptionReceiptLine(
@@ -385,7 +417,25 @@ function parseAdoptionReceiptLine(
   } catch {
     return null;
   }
-  return sanitizeAdoptionReceipt(parsed, now);
+  // Writes may omit `ts` and are stamped by `sanitizeAdoptionReceipt`, but a
+  // persisted line must already carry a usable time. Re-stamping malformed
+  // history on every replay would make that record perpetually newest and could
+  // reopen a terminal lifecycle forever. Bound future skew for the same reason.
+  let readAt: Date;
+  try {
+    readAt = now();
+  } catch {
+    return null;
+  }
+  const readAtMs = readAt.getTime();
+  const rawTimestamp =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).ts
+      : undefined;
+  if (parseUsablePersistedReceiptTime(rawTimestamp, readAtMs) === null) {
+    return null;
+  }
+  return sanitizeAdoptionReceipt(parsed, () => readAt);
 }
 
 /**
@@ -475,9 +525,10 @@ export async function streamAdoptionReceipts(
     encoding: 'utf8',
     highWaterMark: ADOPTION_RECEIPT_LINE_MAX_BYTES,
   });
+  const scanNow = oncePerReceiptScanClock(now);
 
   async function processLine(line: string): Promise<void> {
-    const record = parseAdoptionReceiptLine(line, now);
+    const record = parseAdoptionReceiptLine(line, scanNow);
     if (record === undefined) return;
     if (record === null) {
       skipped += 1;
@@ -581,31 +632,64 @@ export async function appendAdoptionReceipt(
 
 /**
  * The prior-receipt index the suppression-transition diff (#576) needs: which
- * finding ids have a prior `SURFACED` entry (eligible to be coached) and which
- * already have a prior `SUPPRESSED` entry (so a re-run stays idempotent).
+ * finding ids have ever had a `SURFACED` entry (eligible to be coached) and
+ * which are currently terminally `SUPPRESSED` (so a re-run stays idempotent
+ * until a later surface starts a new lifecycle).
  *
  * Streams the append-only log through the shared receipt-line parser and
- * partitions the surviving receipts into the surfaced/suppressed sets — a
- * missing file is simply an empty index, so a first-ever run doesn't error.
+ * The terminal state is chosen by receipt timestamp, with append order breaking
+ * equal timestamps. A delayed older record therefore cannot reopen newer state.
+ * A missing file is simply an empty index, so a first-ever run doesn't error.
  */
 export async function readAdoptionReceiptIndex(file: string): Promise<{
   surfacedFindingIds: Set<string>;
   suppressedFindingIds: Set<string>;
 }> {
   const surfacedFindingIds = new Set<string>();
-  const suppressedFindingIds = new Set<string>();
+  const latestLifecycleEvent = new Map<
+    string,
+    { kind: 'SURFACED' | 'SUPPRESSED'; timestamp: number; ordinal: number }
+  >();
+  let ordinal = 0;
   const result = await streamAdoptionReceipts(
     file,
     () => new Date(),
     (record) => {
+      const eventOrdinal = ordinal;
+      ordinal += 1;
+      const timestamp = Date.parse(record.ts);
+      const recordLatest = (
+        findingId: string,
+        kind: 'SURFACED' | 'SUPPRESSED'
+      ): void => {
+        const previous = latestLifecycleEvent.get(findingId);
+        if (
+          !previous ||
+          timestamp > previous.timestamp ||
+          (timestamp === previous.timestamp && eventOrdinal > previous.ordinal)
+        ) {
+          latestLifecycleEvent.set(findingId, {
+            kind,
+            timestamp,
+            ordinal: eventOrdinal,
+          });
+        }
+      };
       if (record.kind === 'SURFACED') {
-        for (const id of record.findingIds) surfacedFindingIds.add(id);
+        for (const id of record.findingIds) {
+          surfacedFindingIds.add(id);
+          recordLatest(id, 'SURFACED');
+        }
       } else if (record.kind === 'SUPPRESSED') {
         // A PROOF receipt (#1074) is neither surfaced- nor suppressed-indexed.
-        suppressedFindingIds.add(record.findingId);
+        recordLatest(record.findingId, 'SUPPRESSED');
       }
     }
   );
+  const suppressedFindingIds = new Set<string>();
+  for (const [findingId, event] of latestLifecycleEvent) {
+    if (event.kind === 'SUPPRESSED') suppressedFindingIds.add(findingId);
+  }
   if (!result.read) {
     surfacedFindingIds.clear();
     suppressedFindingIds.clear();

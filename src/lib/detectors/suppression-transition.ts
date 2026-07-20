@@ -16,14 +16,15 @@
  * gate, observed only through the public detector emission contract (`emitAll`
  * when present, otherwise `rule`; no 12-file sweep or private-constant export).
  *
- * Join key = finding id. We emit exactly one `SUPPRESSED` receipt the FIRST time
- * a previously-*surfaced* (hook-stamped) finding flips to marker-suppressed:
+ * Join key = finding id. We emit one `SUPPRESSED` receipt when a currently
+ * surfaced (hook-stamped) lifecycle flips to marker-suppressed:
  *
  *   - Requires a prior `SURFACED` receipt for the finding id. A suppression with
  *     no prior surface is "organic / not attributed" — reported separately and
  *     excluded from the coached count (ADR 0005).
- *   - Idempotent: a finding that already has a prior `SUPPRESSED` receipt emits
- *     nothing on re-run.
+ *   - Idempotent while terminal: a finding whose latest lifecycle event is
+ *     already `SUPPRESSED` emits nothing. A newer `SURFACED` receipt reopens it
+ *     and makes the next real transition eligible again.
  *
  * This module computes the records; it does NOT write them. The server route
  * (#575's allowlist-drop, killswitch-aware `appendAdoptionReceipt`) persists
@@ -57,7 +58,7 @@ export interface OrganicSuppression {
 }
 
 export interface SuppressionTransitionResult {
-  /** New `SUPPRESSED` receipts to write — one per finding's FIRST attributed flip. */
+  /** New `SUPPRESSED` receipts to write — one per currently eligible lifecycle. */
   transitions: SuppressionTransition[];
   /** Marker-suppressed findings with no prior surface (excluded from the count). */
   organic: OrganicSuppression[];
@@ -69,7 +70,7 @@ export interface SuppressionTransitionResult {
 export interface PriorReceipts {
   /** Finding ids that have at least one prior hook-stamped `SURFACED` entry. */
   surfacedFindingIds: Iterable<string>;
-  /** Finding ids that already have a prior `SUPPRESSED` entry (idempotency). */
+  /** Finding ids whose latest lifecycle event is `SUPPRESSED` (idempotency). */
   suppressedFindingIds: Iterable<string>;
 }
 
@@ -153,7 +154,7 @@ export async function computeSuppressionTransitions(
   now: number = Date.now()
 ): Promise<SuppressionTransitionResult> {
   const surfaced = new Set(prior.surfacedFindingIds);
-  const alreadySuppressed = new Set(prior.suppressedFindingIds);
+  const currentlySuppressed = new Set(prior.suppressedFindingIds);
   const blankedInput = withClaudeMdBlanked(input);
   const mergedText = mergedClaudeMdText(input.liveConfig);
 
@@ -177,7 +178,7 @@ export async function computeSuppressionTransitions(
       if (seenBlankedIds.has(findingId)) continue;
       seenBlankedIds.add(findingId);
       if (realIds.has(findingId)) continue;
-      if (alreadySuppressed.has(findingId)) continue;
+      if (currentlySuppressed.has(findingId)) continue;
       if (!surfaced.has(findingId)) {
         organic.push({ findingId });
         continue;

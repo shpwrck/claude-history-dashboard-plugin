@@ -24,10 +24,10 @@ sentinel exists.
 ## Read path & the Adoption Scorecard (#577)
 
 `GET /api/adoption/receipts` replays the log read-only as
-`{ ok, receipts: [...] }`. Each line is re-sanitized through the **same**
-allowlist-drop writer used on write, so a hand-edited or legacy line can never
-surface a field outside the allowlist. The route is server-only; the SPA's
-`@api-client` stub returns `[]`.
+`{ ok, receipts: [...] }`. Each line must carry a valid, bounded timestamp and is
+re-sanitized through the **same** allowlist-drop writer used on write, so a
+hand-edited or legacy line can never surface a field outside the allowlist. The
+route is server-only; the SPA's `@api-client` stub returns `[]`.
 
 The **Adoption Scorecard** view (`src/components/AdoptionScorecard.tsx`, joined
 by `src/lib/adoption-scorecard.ts`) joins `SURFACED` + `SUPPRESSED` on finding
@@ -36,6 +36,8 @@ id and renders one card per finding:
 - **SURFACED** — `<id> injected <date>, session <hash>`.
 - **ADOPTED** — the matching `CLAUDE.md` hunk, extracted **live from
   `liveConfig` at render time by the receipt's `markerHeading`, never stored**.
+  Treatment-scoped findings with several fixes under one finding id withhold the
+  hunk because finding-level receipts cannot attribute it to one treatment.
 - **SUPPRESSED** — `engine went silent <date>, markers now match`, with a
   **non-causal** "no recurrence" sub-line (a deleted `CLAUDE.md` section also
   reads as quiet).

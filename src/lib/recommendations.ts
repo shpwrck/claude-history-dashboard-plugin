@@ -492,8 +492,9 @@ export function buildRecommendationResult(
  * {@link computeSuppressionTransitionsOver}: diffs the real run against a
  * CLAUDE.md-blanked counterfactual run to find findings now suppressed by their
  * markers, gates each on a prior hook-stamped `SURFACED` receipt, and returns
- * one `SUPPRESSED` record per finding's first attributed flip (organic, never-
- * surfaced suppressions are returned separately and excluded). Pure — the
+ * one `SUPPRESSED` record per currently eligible lifecycle (a newer surface
+ * reopens a previously terminal finding; organic, never-surfaced suppressions
+ * are returned separately and excluded). Pure — the
  * caller (server route) writes the records through #575's allowlist-drop,
  * killswitch-aware writer.
  */

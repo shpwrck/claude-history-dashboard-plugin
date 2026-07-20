@@ -140,7 +140,7 @@ describe('buildAdoptionScorecard', () => {
     expect(sc.header.medianDaysToAdopt).toBe(4);
   });
 
-  it('uses the earliest surface and first suppression per finding', () => {
+  it('uses the latest lifecycle when receipts arrive out of timestamp order', () => {
     const receipts: AdoptionReceipt[] = [
       surfaced('2026-05-28T00:00:00.000Z', ['x']),
       surfaced('2026-05-25T00:00:00.000Z', ['x']),
@@ -149,8 +149,8 @@ describe('buildAdoptionScorecard', () => {
     ];
     const sc = buildAdoptionScorecard(receipts, config(CLAUDE_MD));
     const row = sc.rows[0];
-    expect(row.surfaced?.ts).toBe('2026-05-25T00:00:00.000Z');
-    expect(row.suppressed?.ts).toBe('2026-05-27T00:00:00.000Z');
+    expect(row.surfaced?.ts).toBe('2026-05-28T00:00:00.000Z');
+    expect(row.suppressed?.ts).toBe('2026-05-30T00:00:00.000Z');
     expect(row.daysToAdopt).toBe(2);
   });
 
@@ -339,5 +339,236 @@ describe('buildAdoptionScorecard', () => {
 
     expect(sc.rows[0].status).toBe('SURFACED');
     expect(sc.rows[0].liveHunk).toBeNull();
+  });
+});
+
+describe('treatment-scoped findings (#2842)', () => {
+  // A CLAUDE.md carrying the shadow-prompt marker signature (heading + body
+  // phrase) — i.e. ONE prompt treatment ("structured") has been adopted.
+  const SHADOW_PROMPT_ADOPTED = [
+    '# Project conventions',
+    '',
+    '## Winning prompt framing (from shadow-calls #513)',
+    '',
+    'For the tasks these prompt shadow experiments sampled, prefer the "structured" prompt framing — it won 83% of 6 decided shadow comparisons.',
+    '',
+    '## Another section',
+    '',
+    'Unrelated.',
+  ].join('\n');
+
+  it('does NOT mark a treatment-scoped finding ADOPTED from generic marker presence', () => {
+    // "structured" adopted (marker section present), but a different treatment
+    // ("concise") is still live-surfaced — the finding must not read as adopted.
+    const sc = buildAdoptionScorecard(
+      [surfaced('2026-07-01T00:00:00.000Z', ['workflow.shadow-prompt'])],
+      config(SHADOW_PROMPT_ADOPTED),
+      findingMarkerCatalog()
+    );
+    const row = sc.rows.find((r) => r.findingId === 'workflow.shadow-prompt')!;
+    expect(row.status).toBe('SURFACED'); // NOT ADOPTED
+    expect(row.liveHunk).toBeNull(); // the earlier treatment's hunk is not attributed
+    expect(sc.header.adoptedCount).toBe(0);
+  });
+
+  it('still reaches SUPPRESSED when quiet (a suppression with no newer surface)', () => {
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-07-01T00:00:00.000Z', ['workflow.shadow-prompt']),
+        suppressed('2026-07-03T00:00:00.000Z', 'workflow.shadow-prompt', 'Winning prompt framing'),
+      ],
+      config(SHADOW_PROMPT_ADOPTED),
+      findingMarkerCatalog()
+    );
+    const row = sc.rows.find((r) => r.findingId === 'workflow.shadow-prompt')!;
+    expect(row.status).toBe('SUPPRESSED');
+    expect(sc.header.adoptedCount).toBe(1);
+  });
+
+  it('re-fired treatment supersedes an OLDER terminal suppression (the realistic lifecycle)', () => {
+    // structured surfaced -> adopted (SUPPRESSED) -> later "concise" qualifies and
+    // re-fires: a SURFACED receipt newer than the suppression. The finding is live
+    // again (a different unadopted treatment), NOT terminally adopted (#2842 P1).
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-07-01T00:00:00.000Z', ['workflow.shadow-prompt']),
+        suppressed('2026-07-03T00:00:00.000Z', 'workflow.shadow-prompt', 'Winning prompt framing'),
+        surfaced('2026-07-05T00:00:00.000Z', ['workflow.shadow-prompt']),
+      ],
+      config(SHADOW_PROMPT_ADOPTED),
+      findingMarkerCatalog()
+    );
+    const row = sc.rows.find((r) => r.findingId === 'workflow.shadow-prompt')!;
+    expect(row.status).toBe('SURFACED'); // re-fired, not terminally SUPPRESSED
+    expect(row.surfaced?.ts).toBe('2026-07-05T00:00:00.000Z');
+    expect(row.suppressed).toBeNull();
+    expect(row.daysToAdopt).toBeNull();
+    expect(sc.header.adoptedCount).toBe(0);
+  });
+
+  it('a newer surface starts a fresh lifecycle for an ordinary finding too', () => {
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-07-01T00:00:00.000Z', ['reliability.api-errors'], 's1'),
+        suppressed('2026-07-03T00:00:00.000Z', 'reliability.api-errors'),
+        surfaced('2026-07-05T00:00:00.000Z', ['reliability.api-errors'], 's3'),
+      ],
+      null,
+      findingMarkerCatalog()
+    );
+    const row = sc.rows.find((r) => r.findingId === 'reliability.api-errors')!;
+    expect(row.status).toBe('SURFACED');
+    expect(row.surfaced?.sessionHash).toBe('s3');
+    expect(row.suppressed).toBeNull();
+    expect(row.daysToAdopt).toBeNull();
+    expect(sc.header.adoptedCount).toBe(0);
+  });
+
+  it('uses the latest lifecycle pair after a re-fired finding is suppressed again', () => {
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-07-01T00:00:00.000Z', ['workflow.shadow-prompt'], 's1'),
+        suppressed('2026-07-02T00:00:00.000Z', 'workflow.shadow-prompt'),
+        surfaced('2026-07-05T00:00:00.000Z', ['workflow.shadow-prompt'], 's3'),
+        suppressed('2026-07-07T00:00:00.000Z', 'workflow.shadow-prompt'),
+      ],
+      config(SHADOW_PROMPT_ADOPTED),
+      findingMarkerCatalog()
+    );
+    const row = sc.rows.find((candidate) => candidate.findingId === 'workflow.shadow-prompt')!;
+
+    expect(row.status).toBe('SUPPRESSED');
+    expect(row.surfaced?.sessionHash).toBe('s3');
+    expect(row.suppressed?.ts).toBe('2026-07-07T00:00:00.000Z');
+    expect(row.daysToAdopt).toBe(2);
+    expect(sc.header.adoptedCount).toBe(1);
+    expect(sc.header.medianDaysToAdopt).toBe(2);
+  });
+
+  it('withholds cross-treatment live evidence after the re-fired treatment is suppressed', () => {
+    const twoTreatments = [
+      '# Project conventions',
+      '',
+      '## Winning prompt framing (structured)',
+      '',
+      'For the tasks these prompt shadow experiments sampled, prefer the "structured" framing.',
+      '',
+      '## Winning prompt framing (concise)',
+      '',
+      'For the tasks these prompt shadow experiments sampled, prefer the "concise" framing.',
+    ].join('\n');
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-07-01T00:00:00.000Z', ['workflow.shadow-prompt'], 'structured'),
+        suppressed(
+          '2026-07-02T00:00:00.000Z',
+          'workflow.shadow-prompt',
+          'Winning prompt framing',
+          'sha256:structured'
+        ),
+        surfaced('2026-07-05T00:00:00.000Z', ['workflow.shadow-prompt'], 'concise'),
+        suppressed(
+          '2026-07-07T00:00:00.000Z',
+          'workflow.shadow-prompt',
+          'Winning prompt framing',
+          'sha256:concise'
+        ),
+      ],
+      config(twoTreatments),
+      findingMarkerCatalog()
+    );
+    const row = sc.rows.find((candidate) => candidate.findingId === 'workflow.shadow-prompt')!;
+
+    expect(row.status).toBe('SUPPRESSED');
+    expect(row.surfaced?.sessionHash).toBe('concise');
+    expect(row.suppressed?.contentFingerprint).toBe('sha256:concise');
+    expect(row.liveHunk).toBeNull();
+  });
+
+  it('uses append order for equal timestamps in either event order', () => {
+    const surface = surfaced(
+      '2026-07-01T00:00:00.000Z',
+      ['workflow.shadow-prompt'],
+      'same-ts'
+    );
+    const suppression = suppressed(
+      '2026-07-01T00:00:00.000Z',
+      'workflow.shadow-prompt'
+    );
+
+    const surfaceThenSuppress = buildAdoptionScorecard(
+      [surface, suppression],
+      null,
+      findingMarkerCatalog()
+    ).rows[0];
+    const suppressThenSurface = buildAdoptionScorecard(
+      [suppression, surface],
+      null,
+      findingMarkerCatalog()
+    ).rows[0];
+
+    expect(surfaceThenSuppress.status).toBe('SUPPRESSED');
+    expect(surfaceThenSuppress.suppressed).toBe(suppression);
+    expect(suppressThenSurface.status).toBe('SURFACED');
+    expect(suppressThenSurface.surfaced).toBe(surface);
+    expect(suppressThenSurface.suppressed).toBeNull();
+  });
+
+  it('does not let a delayed older surface reopen a newer terminal suppression', () => {
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-07-01T00:00:00.000Z', ['ordinary.finding'], 's1'),
+        suppressed('2026-07-03T00:00:00.000Z', 'ordinary.finding'),
+        surfaced('2026-07-02T00:00:00.000Z', ['ordinary.finding'], 'delayed'),
+      ],
+      null,
+      findingMarkerCatalog()
+    );
+    const row = sc.rows[0];
+
+    expect(row.status).toBe('SUPPRESSED');
+    expect(row.surfaced?.sessionHash).toBe('s1');
+    expect(row.suppressed?.ts).toBe('2026-07-03T00:00:00.000Z');
+  });
+
+  it('ignores invalid lifecycle timestamps', () => {
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('2026-07-01T00:00:00.000Z', ['ordinary.finding'], 'valid-surface'),
+        suppressed('2026-07-03T00:00:00.000Z', 'ordinary.finding'),
+        surfaced('not-a-timestamp', ['ordinary.finding'], 'invalid-time'),
+      ],
+      null,
+      findingMarkerCatalog()
+    );
+    const row = sc.rows[0];
+
+    expect(row.status).toBe('SUPPRESSED');
+    expect(row.surfaced?.sessionHash).toBe('valid-surface');
+    expect(row.suppressed?.ts).toBe('2026-07-03T00:00:00.000Z');
+  });
+
+  it('trusts a valid server-supplied timestamp without comparing the browser clock', () => {
+    const sc = buildAdoptionScorecard(
+      [
+        surfaced('9999-01-01T00:00:00.000Z', ['ordinary.finding'], 'server-validated'),
+      ],
+      null,
+      findingMarkerCatalog()
+    );
+
+    expect(sc.rows).toHaveLength(1);
+    expect(sc.rows[0].status).toBe('SURFACED');
+    expect(sc.rows[0].surfaced?.sessionHash).toBe('server-validated');
+  });
+
+  it('a NON-treatment-scoped finding still reaches ADOPTED from markers (guard is specific)', () => {
+    const sc = buildAdoptionScorecard(
+      [surfaced('2026-07-01T00:00:00.000Z', ['reliability.api-errors'])],
+      config(CLAUDE_MD_RATE_LIMIT_ADOPTED),
+      findingMarkerCatalog()
+    );
+    const row = sc.rows.find((r) => r.findingId === 'reliability.api-errors')!;
+    expect(row.status).toBe('ADOPTED');
   });
 });
