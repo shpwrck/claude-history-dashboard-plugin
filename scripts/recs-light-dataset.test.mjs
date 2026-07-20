@@ -265,6 +265,57 @@ test('#2182 recs body is byte-identical over the light dataset vs the full datas
   }
 });
 
+test('#2574 semantic intent is carried byte-identically by the light recommendation dataset', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origSemantic = process.env.CHD_SEMANTIC_INTENT;
+  const home = buildFixtureHome();
+  const artifactDir = join(home, '.claude', 'model-evals', 'semantic-intent');
+  mkdirSync(artifactDir, { recursive: true });
+  writeFileSync(
+    join(artifactDir, 'receipt.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: 'semantic-intent-receipts',
+      taxonomyVersion: 'v1',
+      classifier: { id: 'mmbert-intent', revision: 'r7' },
+      rows: [
+        {
+          evidenceRef: 'prompt-hash-light-parity',
+          contentSha256: 'a'.repeat(64),
+          intentClass: 'bug-triage',
+          confidence: 0.9,
+          canonicalTaskClass: 'debug',
+          classifiedAt: '2026-07-19T12:00:00.000Z',
+        },
+      ],
+    })
+  );
+
+  try {
+    process.env.CHD_SEMANTIC_INTENT = '1';
+    const ingest = await loadIngest(home);
+    ingest.ingest();
+    const full = ingest.assembleDataset();
+    const light = ingest.assembleRecommendationDataset();
+
+    assert.equal(light.semanticIntent?.rowCount, 1);
+    assert.deepEqual(
+      light.semanticIntent,
+      full.semanticIntent,
+      'the served-light path carries the same opt-in semantic artifact'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+    if (origSemantic === undefined) delete process.env.CHD_SEMANTIC_INTENT;
+    else process.env.CHD_SEMANTIC_INTENT = origSemantic;
+  }
+});
+
 test('#2182 the recs-context build never triggers the full assembleDataset()', async () => {
   const origHome = process.env.HOME;
   const origDb = process.env.CHD_DB_PATH;

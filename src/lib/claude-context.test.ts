@@ -20,6 +20,7 @@ import {
 import type { RepoMapDataset } from './parse-repo-map-join';
 import type { ProjectStats, Session } from '../types';
 import type { SessionOverview } from './session-overview';
+import type { Recommendation } from './detectors/types';
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -260,42 +261,71 @@ describe('buildContext repo-map injection', () => {
   });
 });
 
-describe('buildContext recommendations signal coverage (#2352)', () => {
-  const baseSix = {
-    tokenData: [],
-    toolData: [],
-    sessions: [],
-    projects: [],
-    permissionRows: [],
-    apiErrors: [],
-  };
+describe('buildContext recommendations (viewer-only, #2719)', () => {
+  // Ask Claude no longer runs the engine — the recommendations context is built
+  // from the SAME server-computed findings the Recommendations page shows, passed
+  // in pre-built. There are no "omitted signals" to label (the server computes the
+  // full detector set), and buildRecommendationsContext never touches the engine.
+  const recs = [
+    {
+      id: 'cost.output-heavy',
+      category: 'cost',
+      severity: 'warning',
+      title: 'Trim output tokens on mechanical tasks',
+      detail: 'Output tokens dominate spend on short tasks.',
+      action: 'Ask for terser answers.',
+      estSavingsUsd: 12.5,
+      affected: 3,
+    },
+    {
+      id: 'safety.dangerous-rule',
+      category: 'safety',
+      severity: 'critical',
+      title: 'Remove a dangerous allow rule',
+      detail: 'A broad allow rule bypasses confirmation.',
+      action: 'Scope the rule down.',
+      affected: 1,
+    },
+  ] as unknown as Recommendation[];
 
-  it('labels omitted engine signals when only the base fields are supplied', () => {
+  it('formats the shared server findings without running the engine or labelling omitted signals', () => {
     const out = buildContext({
       view: 'recommendations',
-      data: baseSix,
+      data: { recommendations: recs },
     }) as Record<string, unknown>;
-    const coverage = out.signalCoverage as
-      | { omitted: string[]; note: string }
-      | undefined;
-    expect(coverage).toBeDefined();
-    expect(coverage!.omitted).toContain('repoMap');
-    expect(coverage!.omitted).toContain('modelEvalSummary');
-    // The note must not claim other client surfaces see these signals — they
-    // don't (Codex review on #2359); it may only point at supplied surfaces.
-    expect(coverage!.note).toMatch(/surfaces supplied with them/);
+    expect(out.view).toBe('recommendations');
+    expect(out.totalRecommendations).toBe(2);
+    expect(out.bySeverity).toEqual({ critical: 1, warning: 1, info: 0 });
+    expect(out.totalEstimatedSavingsUsd).toBeCloseTo(12.5, 2);
+    // Viewer-only: no signalCoverage key (the server sees the full detector set).
+    expect(out.signalCoverage).toBeUndefined();
+    expect(Array.isArray(out.recommendations)).toBe(true);
+    expect((out.recommendations as unknown[]).length).toBe(2);
   });
 
-  it('shrinks the omission list as the envelope widens', () => {
+  it('renders an empty context for an empty ready result', () => {
     const out = buildContext({
       view: 'recommendations',
-      data: { ...baseSix, repoMap: null, modelEvalSummary: null },
+      data: { recommendations: [], analysisStatus: 'ready' },
     }) as Record<string, unknown>;
-    const coverage = out.signalCoverage as
-      | { omitted: string[] }
-      | undefined;
-    expect(coverage).toBeDefined();
-    expect(coverage!.omitted).not.toContain('repoMap');
-    expect(coverage!.omitted).not.toContain('modelEvalSummary');
+    expect(out.totalRecommendations).toBe(0);
+    expect(out.bySeverity).toEqual({ critical: 0, warning: 0, info: 0 });
+    expect(out.signalCoverage).toBeUndefined();
+  });
+
+  it('preserves a non-ready analysis state instead of claiming zero findings', () => {
+    const out = buildContext({
+      view: 'recommendations',
+      data: {
+        recommendations: [],
+        analysisStatus: 'error',
+        analysisError: 'Analysis request failed',
+      },
+    }) as Record<string, unknown>;
+
+    expect(out.analysisStatus).toBe('error');
+    expect(out.analysisError).toBe('Analysis request failed');
+    expect(out.totalRecommendations).toBeNull();
+    expect(out.bySeverity).toBeUndefined();
   });
 });

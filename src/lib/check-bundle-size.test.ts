@@ -34,6 +34,9 @@ const budget = JSON.parse(
 // Real measured sizes from clean origin/master (e321189) builds. The matcher
 // keys on the logical chunk name (filename minus the trailing 8-char hash), so
 // we hand it hashed-looking names. Index differs by flavor; the fixture is split.
+// #2719 (epic #2443): the viewer-only refactor removed the ~324 KB browser
+// `recommendations` engine chunk; the fixture now models the real `nav-prefs`
+// shared chunk that split out in its place (41,234 B in CI).
 const MEASURED_BY_FLAVOR = {
   server: {
     'index-hEGllWjd.js': 474756,
@@ -41,7 +44,7 @@ const MEASURED_BY_FLAVOR = {
     'Td-bFoBaAnL.js': 69499,
     'FlexItem-BNF1Yxa1.js': 24287,
     'MenuList-aaaaaaaa.js': 18530,
-    'recommendations-UfDmvBmg.js': 159744,
+    'nav-prefs-UfDmvBmg.js': 41234,
     'Recommendations-bw21B0pw.js': 65137,
     'upload-pipeline-worker-BITohlXt.js': 82319,
     'AskClaude-FlL7G4vj.js': 31034,
@@ -56,7 +59,7 @@ const MEASURED_BY_FLAVOR = {
     'Td-CHlWUViI.js': 69495,
     'FlexItem-BpXImNgo.js': 24287,
     'MenuList-22n1dG9Q.js': 18529,
-    'recommendations-B0UrwUTf.js': 159744,
+    'nav-prefs-B0UrwUTf.js': 41234,
     'Recommendations-BytKFQei.js': 65142,
     'upload-pipeline-worker-BITohlXt.js': 82319,
     'AskClaude-CWmj1sbA.js': 31034,
@@ -112,11 +115,11 @@ describe('evaluateStructuredBudget (#1852 Phase C / ADR 0016)', () => {
       const { files, sizeOf } = fixtureFor(flavor);
       const tightened = {
         ...budget[flavor],
-        routes: { ...budget[flavor].routes, recommendations: 100000 },
+        routes: { ...budget[flavor].routes, 'nav-prefs': 40000 },
       };
       const { ok, failures, rows } = evaluateStructuredBudget(files, sizeOf, tightened);
       expect(ok).toBe(false);
-      expect(failures.some((f: string) => f.includes('recommendations'))).toBe(true);
+      expect(failures.some((f: string) => f.includes('nav-prefs'))).toBe(true);
       // Shell + vendor + every OTHER route remain green.
       expect(rows.filter((r: { ok: boolean }) => !r.ok)).toHaveLength(1);
     });

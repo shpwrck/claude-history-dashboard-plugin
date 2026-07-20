@@ -4471,6 +4471,7 @@ export function assembleRecommendationDataset() {
     fileHistory: core.fileHistory,
     plans: core.plans,
     modelEvalSummary: core.modelEvalSummary,
+    semanticIntent: core.semanticIntent,
     updateResults: core.updateResults,
     mcpAuth: core.mcpAuth,
     configBackups: core.configBackups,
@@ -4705,6 +4706,13 @@ export function assembleScopedRecommendationResult(
   } else {
     views = {
       ...recommendationViewsFromViewData(scoped),
+      // #2574/#2647/#2719: raw browser ViewData intentionally does not carry
+      // this server-only opt-in artifact, but the browser now consumes THIS
+      // server-computed surface. Restore it here so viewer-only Home,
+      // Recommendations, and Ask Claude receive the same semantic narrowing as
+      // the canonical server engine instead of silently regressing to the
+      // unenriched card.
+      semanticIntent: dataset.semanticIntent,
       // The browser dataset has no organization identity, but enterprise server
       // requests do. Preserve that server-side enrichment on the global typed
       // surface so owner/reviewer alias grouping and provenance match the legacy

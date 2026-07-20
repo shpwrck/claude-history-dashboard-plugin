@@ -1,82 +1,229 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
-import { renderHook } from '@testing-library/react';
-import type { SecretsAtRestSignal } from './parse-secrets-at-rest';
-import type { RecommendationViews } from './recommendations';
-import { useRecommendations } from './use-recommendations';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import type { Recommendation } from './detectors/types';
+import type {
+  RecommendationSurfaceRequest,
+  RecommendationSurfaceResponse,
+} from './recommendation-surface';
 
-const BASE_VIEWS: RecommendationViews = {
-  tokenData: [],
-  toolData: [],
-  sessions: [],
-  projects: [],
-  permissionRows: [],
-  apiErrors: [],
+// Viewer-only (#2719): the hook fetches the server-computed surface via the
+// `@api-client` reader instead of running the engine. Mock the reader; keep
+// SERVER_AVAILABLE true so the hook takes the fetch path.
+const fetchMock = vi.hoisted(() =>
+  vi.fn<
+    (
+      req: RecommendationSurfaceRequest,
+      signal?: AbortSignal
+    ) => Promise<RecommendationSurfaceResponse>
+  >()
+);
+vi.mock('@api-client', () => ({
+  SERVER_AVAILABLE: true,
+  fetchRecommendationSurface: fetchMock,
+}));
+
+import { useRecommendationSurface } from './use-recommendations';
+
+const GLOBAL_REQ: RecommendationSurfaceRequest = {
+  surface: 'global',
+  dashboard: { time: '24h', project: 'All projects' },
 };
 
-const SIGNAL: SecretsAtRestSignal = {
-  sessionId: 'secret-session-coordinate',
-  totalCount: 2,
-  countsByKind: { 'anthropic-key': 1, 'private-key': 1 },
-  evidenceRefs: [
-    {
-      sessionId: 'secret-session-coordinate',
-      entryIndex: 4,
-      timestamp: '2026-07-15T10:00:00.000Z',
-      toolUseId: 'tool-use-coordinate',
+function ready(recs: Array<{ id: string }> = []): RecommendationSurfaceResponse {
+  return {
+    kind: 'ready',
+    result: {
+      recommendations: recs as unknown as Recommendation[],
+      domainCoverage: [],
     },
-  ],
-};
+  };
+}
 
-describe('useRecommendations', () => {
-  it('recomputes privacy-safe secrets-at-rest findings when only that signal changes', () => {
+afterEach(() => {
+  fetchMock.mockReset();
+});
+
+describe('useRecommendationSurface', () => {
+  it('starts loading, then resolves to ready with the server envelope', async () => {
+    fetchMock.mockResolvedValue(ready([{ id: 'cost.x' }]));
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+
+    expect(result.current.status).toBe('loading');
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.recommendations).toEqual([{ id: 'cost.x' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a fetch failure as error, never a clean empty result', async () => {
+    fetchMock.mockRejectedValue(new Error('boom'));
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    // The trust contract: an error carries NO findings list.
+    expect(result.current.recommendations).toBeNull();
+    expect(result.current.error).toBe('boom');
+  });
+
+  it('maps the SPA unavailable response to the unavailable state', async () => {
+    fetchMock.mockResolvedValue({ kind: 'unavailable' });
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+
+    await waitFor(() => expect(result.current.status).toBe('unavailable'));
+    expect(result.current.recommendations).toBeNull();
+  });
+
+  it('clears to loading and refetches when the scope changes (no stale leak)', async () => {
+    fetchMock.mockImplementation(async (req) => ready([{ id: req.dashboard.time }]));
     const { result, rerender } = renderHook(
-      ({ secretsAtRest }: { secretsAtRest?: SecretsAtRestSignal[] }) =>
-        useRecommendations({ ...BASE_VIEWS, secretsAtRest }),
-      { initialProps: { secretsAtRest: [] as SecretsAtRestSignal[] } }
+      ({ req }: { req: RecommendationSurfaceRequest }) =>
+        useRecommendationSurface(req),
+      { initialProps: { req: GLOBAL_REQ } }
     );
 
-    expect(
-      result.current.recommendations.find(
-        (rec) => rec.id === 'security.secrets-at-rest'
-      )
-    ).toBeUndefined();
-
-    rerender({ secretsAtRest: [SIGNAL] });
-
-    const finding = result.current.recommendations.find(
-      (rec) => rec.id === 'security.secrets-at-rest'
-    );
-    expect(finding).toMatchObject({
-      id: 'security.secrets-at-rest',
-      title: '2 secret-shaped value(s) persisted in plaintext transcripts',
-      evidence: [
-        'secret-s: 2 secret-shaped value(s) [anthropic-key, private-key]',
-      ],
-      evidenceRefs: SIGNAL.evidenceRefs,
-    });
-    expect(JSON.stringify(finding)).not.toContain('sk-ant-');
+    await waitFor(() => expect(result.current.recommendations).toEqual([{ id: '24h' }]));
 
     rerender({
-      secretsAtRest: [
-        {
-          ...SIGNAL,
-          totalCount: 3,
-          countsByKind: { 'anthropic-key': 2, 'private-key': 1 },
-        },
-      ],
+      req: {
+        surface: 'global',
+        dashboard: { time: '7d', project: 'All projects' },
+      },
     });
-    expect(
-      result.current.recommendations.find(
-        (rec) => rec.id === 'security.secrets-at-rest'
-      )?.title
-    ).toBe('3 secret-shaped value(s) persisted in plaintext transcripts');
+    // The scope changed: prior-scope findings are dropped immediately.
+    expect(result.current.status).toBe('loading');
+    expect(result.current.recommendations).toBeNull();
+    await waitFor(() => expect(result.current.recommendations).toEqual([{ id: '7d' }]));
+  });
 
-    rerender({ secretsAtRest: [] });
-    expect(
-      result.current.recommendations.find(
-        (rec) => rec.id === 'security.secrets-at-rest'
-      )
-    ).toBeUndefined();
+  it('waits for an authenticated local dataset before fetching', async () => {
+    fetchMock.mockResolvedValue(ready([{ id: 'local' }]));
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) =>
+        useRecommendationSurface(GLOBAL_REQ, { enabled }),
+      { initialProps: { enabled: false } }
+    );
+
+    expect(result.current.status).toBe('unavailable');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+    expect(result.current.status).toBe('loading');
+    await waitFor(() => expect(result.current.recommendations).toEqual([{ id: 'local' }]));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops stale findings and refetches when the local dataset generation changes', async () => {
+    fetchMock.mockResolvedValueOnce(ready([{ id: 'before-reload' }]));
+    const { result, rerender } = renderHook(
+      ({ refreshKey }: { refreshKey: number }) =>
+        useRecommendationSurface(GLOBAL_REQ, { refreshKey }),
+      { initialProps: { refreshKey: 1 } }
+    );
+
+    await waitFor(() =>
+      expect(result.current.recommendations).toEqual([{ id: 'before-reload' }])
+    );
+
+    fetchMock.mockResolvedValueOnce(ready([{ id: 'after-reload' }]));
+    rerender({ refreshKey: 2 });
+
+    expect(result.current.status).toBe('loading');
+    expect(result.current.recommendations).toBeNull();
+    await waitFor(() =>
+      expect(result.current.recommendations).toEqual([{ id: 'after-reload' }])
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retry refetches the current scope without blanking the prior findings', async () => {
+    fetchMock.mockResolvedValue(ready([{ id: 'a' }]));
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+    await waitFor(() => expect(result.current.recommendations).toEqual([{ id: 'a' }]));
+
+    fetchMock.mockResolvedValue(ready([{ id: 'b' }]));
+    let retryPromise!: ReturnType<typeof result.current.retry>;
+    act(() => {
+      retryPromise = result.current.retry();
+    });
+
+    // Same scope: no flash back to loading — the prior findings stay on screen
+    // until the refetch confirms (the reject-refetch UX).
+    expect(result.current.status).toBe('ready');
+    expect(result.current.recommendations).toEqual([{ id: 'a' }]);
+    await act(async () => {
+      await retryPromise;
+    });
+    expect(result.current.recommendations).toEqual([{ id: 'b' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns the confirmed retry result to the caller', async () => {
+    fetchMock.mockResolvedValueOnce(ready([{ id: 'before' }]));
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    fetchMock.mockResolvedValueOnce(ready([{ id: 'after' }]));
+    let refreshResult: Awaited<ReturnType<typeof result.current.retry>> | undefined;
+    await act(async () => {
+      refreshResult = await result.current.retry();
+    });
+
+    expect(refreshResult).toEqual({
+      ok: true,
+      recommendations: [{ id: 'after' }],
+      domainCoverage: [],
+    });
+  });
+
+  it('keeps the last confirmed findings when a retry fails', async () => {
+    fetchMock.mockResolvedValueOnce(ready([{ id: 'still-visible' }]));
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+    await waitFor(() =>
+      expect(result.current.recommendations).toEqual([{ id: 'still-visible' }])
+    );
+
+    fetchMock.mockRejectedValueOnce(new Error('confirmation failed'));
+    let refreshResult: Awaited<ReturnType<typeof result.current.retry>> | undefined;
+    await act(async () => {
+      refreshResult = await result.current.retry();
+    });
+
+    expect(refreshResult).toEqual({ ok: false, error: 'confirmation failed' });
+    expect(result.current.status).toBe('ready');
+    expect(result.current.recommendations).toEqual([{ id: 'still-visible' }]);
+  });
+
+  it('ignores an obsolete local response after the loader is disabled', async () => {
+    let resolveOld!: (value: RecommendationSurfaceResponse) => void;
+    fetchMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      })
+    );
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) =>
+        useRecommendationSurface(GLOBAL_REQ, { enabled }),
+      { initialProps: { enabled: true } }
+    );
+
+    rerender({ enabled: false });
+    expect(result.current.status).toBe('unavailable');
+
+    await act(async () => {
+      resolveOld(ready([{ id: 'obsolete-local' }]));
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('unavailable');
+    expect(result.current.recommendations).toBeNull();
+  });
+
+  it('is unavailable and never fetches when the server is absent (SPA)', async () => {
+    // Re-mock @api-client with SERVER_AVAILABLE false via the hook's guard: the
+    // hook short-circuits to unavailable when the build has no server.
+    // (Covered structurally by the hook's SERVER_AVAILABLE guard; here we assert
+    // the request-null path yields unavailable without a fetch.)
+    const { result } = renderHook(() => useRecommendationSurface(null));
+    await waitFor(() => expect(result.current.status).toBe('unavailable'));
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

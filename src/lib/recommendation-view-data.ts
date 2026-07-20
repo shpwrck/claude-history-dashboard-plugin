@@ -1,13 +1,11 @@
 /**
  * Canonical client-side recommendation input envelope (#2352, epic #2345).
  *
- * The three client action surfaces that imply the same recommendation truth —
- * Home Digest, Recommendations, and Ask Claude — used to each hand-list the
- * engine fields they passed, and drifted: the digest missed model-eval and
- * repo-map data, Ask Claude passed only the six required base fields. This
- * module is the ONE mapping from the loaded {@link ViewData} to the engine's
- * {@link RecommendationViews} envelope; every client surface consumes it, so a
- * newly-ingested signal is wired once and reaches all surfaces together.
+ * Canonical mapping from loaded {@link ViewData} to the engine's
+ * {@link RecommendationViews} envelope. Since #2719 the browser is a viewer of
+ * server-computed analysis; this mapping remains the server typed-surface seam
+ * and the compatibility envelope for presentation props, rather than a browser
+ * engine invocation.
  *
  * Fields the client dataset does not carry at all — `gitOutcomes`,
  * `modelPinSavings`, `organizationIdentity`, `semanticIntent`, `memoryStores`
@@ -36,11 +34,11 @@ export const CLIENT_ABSENT_ENGINE_FIELDS: readonly string[] = [
   'docHygieneArtifact',
   'modelPinSavings',
   'organizationIdentity',
-  // #2574/#2647: server-only AND opt-in (CHD_SEMANTIC_INTENT=1). No client
-  // dataset carries it, and it is null even server-side with the flag unset. The
-  // routing-gap detector's semantic scoping therefore stays dark on every client
-  // surface, which is correct: absent the intent rows it emits its unenriched
-  // card, so the surfaces agree on the finding and differ only in its scope.
+  // #2574/#2647: server-only AND opt-in (CHD_SEMANTIC_INTENT=1), so the raw
+  // browser ViewData envelope cannot supply it. The #2719 global typed server
+  // surface explicitly restores `dataset.semanticIntent` after this mapping;
+  // viewer-only Home, Recommendations, and Ask Claude therefore receive the
+  // enriched server result when enabled without exposing the artifact client-side.
   'semanticIntent',
 ];
 

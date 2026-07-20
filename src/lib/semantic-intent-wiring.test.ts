@@ -101,8 +101,8 @@ describe('semantic-intent boot wiring (#2574)', () => {
     expect(dataset.slice(retIdx)).toContain('semanticIntent,');
   });
 
-  it('threads semanticIntent into BOTH recommendation-input build sites', () => {
-    // Missing either one leaves the #2647 enrichment permanently dark on that
+  it('threads semanticIntent into every recommendation-input build site', () => {
+    // Missing any one leaves the #2647 enrichment permanently dark on that
     // route — the exact defect the #1086 review caught for modelEvalSummary.
     const ctxIdx = src.indexOf('function assembleRecommendationContext');
     expect(ctxIdx, 'assembleRecommendationContext() found').toBeGreaterThan(-1);
@@ -115,6 +115,18 @@ describe('semantic-intent boot wiring (#2574)', () => {
     expect(recsCall, 'inline recs input call found').toBeGreaterThan(-1);
     const callEnd = dataset.indexOf('})', recsCall);
     expect(dataset.slice(recsCall, callEnd)).toContain('semanticIntent,');
+
+    // #2719 moves Home, Recommendations, and Ask Claude onto this typed server
+    // surface. The raw browser ViewData envelope intentionally lacks the
+    // server-only artifact, so the server must restore it explicitly here.
+    const scopedIdx = src.indexOf('function assembleScopedRecommendationResult');
+    expect(scopedIdx, 'assembleScopedRecommendationResult() found').toBeGreaterThan(-1);
+    expect(src.slice(scopedIdx, scopedIdx + 8000)).toContain(
+      'semanticIntent: dataset.semanticIntent,'
+    );
+
+    const light = section('assembleRecommendationDataset');
+    expect(light).toContain('semanticIntent: core.semanticIntent,');
   });
 
   it('caps and guards the artifact read like its sibling readers', () => {

@@ -21,6 +21,10 @@ import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
 import type { LocalAnalyzeResult } from './local-analyze';
 import type { CheckpointAnswerRecord } from './checkpoint-instrumentation';
+import type {
+  RecommendationSurfaceRequest,
+  RecommendationSurfaceResponse,
+} from './recommendation-surface';
 
 /** False in the SPA build — gates all server-only UI off. */
 export const SERVER_AVAILABLE = false;
@@ -518,6 +522,21 @@ export async function writePolicy(): Promise<PolicyWriteResult> {
 export type RejectSignalWriteResult = { ok: true } | { ok: false; error: string };
 export async function postRejectSignal(): Promise<RejectSignalWriteResult> {
   return { ok: false, error: UNAVAILABLE };
+}
+
+// Recommendation analysis (#2719) is computed by the server; the upload-only SPA
+// has no server and does NOT run the detector catalog in the browser, so this
+// twin returns the network-free `unavailable` viewer state — no server URL, no
+// fetch, no detector import. Views degrade to the "run the local server for
+// analysis" state. Signature mirrors the real reader so the alias swap is
+// transparent.
+export async function fetchRecommendationSurface(
+  _request: RecommendationSurfaceRequest,
+  _signal?: AbortSignal
+): Promise<RecommendationSurfaceResponse> {
+  void _request;
+  void _signal;
+  return { kind: 'unavailable' };
 }
 
 // Checkpoint answer persistence is server-tier. The upload-only SPA keeps the

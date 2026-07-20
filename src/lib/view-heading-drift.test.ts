@@ -142,6 +142,17 @@ const emptyContext: ViewContext = {
     onActiveDomains: noop,
   },
   serverAvailable: false,
+  analysisLoadOptions: { enabled: false, refreshKey: 0 },
+  // Viewer-only (#2719): Home/Recommendations consume this shared analysis. A
+  // ready-empty result reproduces the pre-change empty-recs render the heading
+  // hierarchy is asserted against.
+  analysis: {
+    status: 'ready',
+    recommendations: [],
+    domainCoverage: [],
+    error: null,
+    retry: async () => ({ ok: false, error: 'unavailable' }),
+  },
 };
 
 function textFor(element: Element): string {

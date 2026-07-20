@@ -25,13 +25,7 @@ import {
   type ToolEffectivenessRow,
 } from './parse-tool-effectiveness';
 import type { SessionOverview } from './session-overview';
-import {
-  assembleRecommendationInput,
-  buildRecommendations,
-  listOmittedEngineSignals,
-  type Recommendation,
-  type RecommendationViews,
-} from './recommendations';
+import type { Recommendation } from './recommendations';
 import type {
   RepoMapDataset,
   RepoMapProjectJoin,
@@ -220,13 +214,18 @@ export interface ProjectPayload {
 }
 
 /**
- * #2352: the recommendations context accepts the full engine envelope — the
- * same {@link RecommendationViews} the Recommendations page and Home Digest
- * assemble — so Ask Claude no longer computes a narrower finding set. Callers
- * that only have the six required base fields still type-check; whatever they
- * omit is labelled in the context via `signalCoverage.omitted`.
+ * Viewer-only (#2719, epic #2443): Ask Claude no longer runs the detector
+ * catalog. The recommendations context is built from the SAME server-computed
+ * findings the Recommendations page shows, passed in as a pre-built list. There
+ * are no "omitted signals" to label — the server computes the full set — so this
+ * context formats the shared result and never touches `buildRecommendations`.
  */
-export type RecommendationsPayload = RecommendationViews;
+export interface RecommendationsPayload {
+  recommendations: Recommendation[];
+  /** Missing only for legacy callers; treated as a successful ready result. */
+  analysisStatus?: 'loading' | 'ready' | 'error' | 'unavailable';
+  analysisError?: string | null;
+}
 
 export interface ToolsPayload {
   toolData: ToolUsageData[];
@@ -368,33 +367,30 @@ function buildProjectContext(p: ProjectPayload): unknown {
 }
 
 function buildRecommendationsContext(p: RecommendationsPayload): unknown {
-  // #2352: run the engine on the full envelope the caller supplies (App now
-  // passes the canonical client envelope), normalized exactly like the
-  // Recommendations page and Home Digest do, so the three surfaces agree.
-  const recs: Recommendation[] = buildRecommendations(
-    assembleRecommendationInput(p)
-  );
-  // Signals the caller did not supply are labelled explicitly rather than
-  // silently narrowing the finding set — the model (and the user reading the
-  // context) can see which detector families were not computable here.
-  const omittedSignals = listOmittedEngineSignals(p);
+  // Viewer-only (#2719): the findings are the server-computed result the user is
+  // looking at — passed in pre-built, never recomputed here. No engine run, no
+  // detector-catalog import, no "omitted signals" (the server computes the full
+  // set), so this stays a pure formatting pass over the shared list.
+  const recs: Recommendation[] = p.recommendations;
+
+  // Trust contract: a non-ready analysis is not a successful empty analysis.
+  // Preserve the status in the JSON Ask Claude receives and keep counts null so
+  // neither the model nor a user can read a transport/auth/SPA state as "zero
+  // findings". Recommendation-specific quick prompts remain disabled upstream;
+  // free-form questions can still be answered with this honest state attached.
+  if (p.analysisStatus && p.analysisStatus !== 'ready') {
+    return {
+      view: 'recommendations',
+      analysisStatus: p.analysisStatus,
+      analysisError: p.analysisError ?? null,
+      totalRecommendations: null,
+      recommendations: [],
+    };
+  }
 
   return {
     view: 'recommendations',
-    ...(omittedSignals.length > 0
-      ? {
-          signalCoverage: {
-            omitted: omittedSignals,
-            // Wording notes: keep this free of server-route literals like
-            // "/api/…" — the string ships in the SPA bundle and the
-            // spa-boundary gate greps the emitted assets for them (#324). And
-            // make no claims about what OTHER surfaces see: the client pages
-            // lack the server-only signals too, so "the Recommendations page
-            // sees the full set" would be a false coverage claim.
-            note: 'Findings that depend on these signals are not computed in this context; surfaces supplied with them (such as the server recommendations endpoint) may report additional findings.',
-          },
-        }
-      : {}),
+    analysisStatus: p.analysisStatus ?? 'ready',
     totalRecommendations: recs.length,
     bySeverity: {
       critical: recs.filter((r) => r.severity === 'critical').length,

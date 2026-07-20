@@ -24,6 +24,10 @@ import { lazy } from 'react';
 import type { ReactNode } from 'react';
 import { isDashboardFilterActive } from './filtered-empty';
 import { recommendationViewsFromViewData } from './recommendation-view-data';
+import type {
+  RecommendationSurfaceLoadOptions,
+  RecommendationSurfaceState,
+} from './use-recommendations';
 import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
 import { navigateDrillThroughWithFilter } from '../components/affordance/DrillThrough';
 import type {
@@ -369,6 +373,14 @@ export interface ViewContext {
   nav: ViewNav;
   /** Whether a backend is present (server build) vs. the read-only SPA. */
   serverAvailable: boolean;
+  /**
+   * Viewer-only recommendation analysis (#2719): the server-computed `global`
+   * surface state, loaded once at the App level and shared by Home, the
+   * Recommendations page, and Ask Claude so they never run the engine or drift.
+   */
+  analysis: RecommendationSurfaceState;
+  /** Source identity shared by every independently scoped analysis loader. */
+  analysisLoadOptions: RecommendationSurfaceLoadOptions;
 }
 
 export interface ViewAnchorTarget {
@@ -389,7 +401,7 @@ export const VIEW_ANCHORS: Partial<Record<View, ViewAnchorTarget>> = {
 // deep-link redirects (#14, e.g. `stats` → `activity`) while no longer owning a
 // renderer of its own. `renderView` already null-guards a missing entry.
 function renderCostAttributionView(
-  { data: d, nav: n, filter, routeFilter }: ViewContext,
+  { data: d, nav: n, filter, routeFilter, analysisLoadOptions }: ViewContext,
   focusSignalId?: string
 ): ReactNode {
   return (
@@ -399,6 +411,7 @@ function renderCostAttributionView(
       sessions={d.sessions}
       activeFilter={filter}
       routeFilter={routeFilter}
+      analysisLoadOptions={analysisLoadOptions}
       focusSignalId={focusSignalId}
       onOpenSession={n.openSession}
       onNavigate={n.navigateTo}
@@ -579,18 +592,20 @@ export const VIEW_RENDERERS: Partial<
   // envelope (recommendationViewsFromViewData) instead of hand-listing fields,
   // so Home Digest and Recommendations cannot drift apart in what they feed
   // the engine. Only non-engine props stay explicit here.
-  home: ({ data: d, nav: n, serverAvailable }) => (
+  home: ({ data: d, nav: n, serverAvailable, analysis }) => (
     <DigestSpine
       {...recommendationViewsFromViewData(d)}
+      analysis={analysis}
       serverAvailable={serverAvailable}
       onNavigate={n.navigateWithFilter}
       onOpenSession={n.openSession}
       onActiveDomains={n.onActiveDomains}
     />
   ),
-  recommendations: ({ data: d, nav: n, filter, routeFilter, serverAvailable }) => (
+  recommendations: ({ data: d, nav: n, filter, routeFilter, serverAvailable, analysis }) => (
     <Recommendations
       {...recommendationViewsFromViewData(d)}
+      analysis={analysis}
       serverAvailable={serverAvailable}
       activeFilter={filter}
       routeFilter={routeFilter}

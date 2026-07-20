@@ -40,6 +40,12 @@ import type { ToolUsageData } from './parse-tools';
 import type { HybridSearchResponse } from './hybrid-search';
 import type { LocalAnalyzeResult } from './local-analyze';
 import type { CheckpointAnswerRecord } from './checkpoint-instrumentation';
+import {
+  parseRecommendationResult,
+  recommendationSurfaceQuery,
+  type RecommendationSurfaceRequest,
+  type RecommendationSurfaceResponse,
+} from './recommendation-surface';
 import { parseHistoryJsonl } from './parse-history';
 
 /** True in the server build; the SPA stub exports `false`. */
@@ -1080,6 +1086,33 @@ export async function postRejectSignal(
       error: err instanceof Error ? err.message : 'Network error while recording reject signal',
     };
   }
+}
+
+/**
+ * Fetch server-computed recommendation analysis for a scoped view surface
+ * (#2719, epic #2443). The browser is a viewer: it consumes the typed #2718
+ * `{ recommendations, domainCoverage }` envelope instead of running the detector
+ * catalog. The `/api/recommendations.json` literal is owned here so the SPA build
+ * (aliased to api-client.spa.ts, which returns `unavailable` without a fetch)
+ * carries no server string. A non-OK response or transport failure THROWS — the
+ * caller maps that to an `error` state — so a failed load can never render as a
+ * clean "no findings". Pass an `AbortSignal` to cancel an obsolete scope's
+ * request; the caller owns the controller.
+ */
+export async function fetchRecommendationSurface(
+  request: RecommendationSurfaceRequest,
+  signal?: AbortSignal
+): Promise<RecommendationSurfaceResponse> {
+  const query = recommendationSurfaceQuery(request);
+  const res = await serverFetch(
+    `/api/recommendations.json?${query}`,
+    signal ? { signal } : {}
+  );
+  if (!res.ok) {
+    throw new Error(`Recommendation analysis request failed (HTTP ${res.status})`);
+  }
+  const result = parseRecommendationResult(await res.json());
+  return { kind: 'ready', result };
 }
 
 /** Client-facing outcome of persisting checkpoint answer-time instrumentation. */

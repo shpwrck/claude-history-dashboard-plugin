@@ -45,6 +45,7 @@
  * compiling unchanged.
  */
 import type { RecCategory } from './detectors/rec-enums';
+import type { Recommendation } from './detectors/types';
 import type { SessionTokenData, TokenEntry } from '../types';
 import { getModelPricing } from './pricing';
 
@@ -789,4 +790,65 @@ export function rollupCascade(result: ReclaimCascadeResult): ReclaimRollupWithBi
     coverageByCategory: result.coverageByCategory,
     totalBill: result.billOriginal,
   };
+}
+
+// ── Recommendation-list cascade helpers ──────────────────────────────────
+// Pure aggregation over a `Recommendation[]` + `tokenData` — NO detector run,
+// so these live in this detector-free module (#2719). They were extracted from
+// `recommendations.ts` (which pulls the whole detector catalog) so browser
+// surfaces can roll up reclaim dollars over a server-supplied rec list without
+// bundling the engine. `recommendations.ts` re-exports them for existing
+// server/test importers.
+
+/** The claims a rec list carries, in stable rec order. */
+function reclaimClaims(recs: Recommendation[]): ReclaimClaim[] {
+  const claims: ReclaimClaim[] = [];
+  for (const rec of recs) if (rec.reclaim) claims.push(rec.reclaim);
+  return claims;
+}
+
+/**
+ * Run the guarded-marginal cascade over the claims a rec list carries, against
+ * the actual token usage. Returns the full cascade result (`billOriginal`,
+ * `billFinal`, `total`, per-category split, and the per-claim bookings) so a
+ * caller can both roll up dollars and back-fill each rec's `estSavingsUsd`.
+ */
+export function reclaimCascade(
+  recs: Recommendation[],
+  tokenData: SessionTokenData[],
+  onReject?: (msg: string) => void
+): ReclaimCascadeResult {
+  return runReclaimCascade(reclaimClaims(recs), tokenData, onReject);
+}
+
+/**
+ * Deduped, overflow-proof reclaim rollup with the repriced `totalBill`
+ * denominator — the cascade replacement for `rollupReclaim`. Use this when the
+ * actual `tokenData` is available (the engine input always has it).
+ */
+export function rollupReclaimCascade(
+  recs: Recommendation[],
+  tokenData: SessionTokenData[]
+): ReclaimRollupWithBill {
+  return rollupCascade(reclaimCascade(recs, tokenData));
+}
+
+/**
+ * Back-fill each rec's `estSavingsUsd` from its booked cascade marginal so the
+ * per-card dollar figure equals the lever's disjoint slice (not its raw,
+ * possibly-overlapping estimate). Recs without a claim, or whose claim was
+ * rejected, are returned unchanged. Returns a NEW array; inputs are not mutated.
+ */
+export function backfillReclaimSavings(
+  recs: Recommendation[],
+  tokenData: SessionTokenData[]
+): Recommendation[] {
+  const result = reclaimCascade(recs, tokenData);
+  const booked = new Map(result.booked.map((b) => [b.leverId, b]));
+  return recs.map((rec) => {
+    if (!rec.reclaim) return rec;
+    const b = booked.get(rec.reclaim.leverId);
+    if (!b || b.rejected) return rec;
+    return { ...rec, estSavingsUsd: b.marginalUsd };
+  });
 }

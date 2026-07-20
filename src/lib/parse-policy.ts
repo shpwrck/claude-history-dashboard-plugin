@@ -1,5 +1,8 @@
 import type { DangerousCommand, ToolPromptFriction } from './parse-permissions';
-import { BASH_SAFE_ALLOW_RULES } from './recommendations';
+// #2719: import from the detector-free `detectors/shared` leaf, NOT the
+// `recommendations` barrel, so browser importers of this module (Permissions,
+// PolicyBuilder) never transitively bundle the detector catalog.
+import { BASH_SAFE_ALLOW_RULES } from './detectors/shared';
 
 /**
  * Policy Builder (#133) — turns the scattered permission recommendations into

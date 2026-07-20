@@ -184,6 +184,15 @@ export {
 // `RULES` order, then the 15 epic-#411 detectors in their original
 // `NEW_DETECTORS` order. New detectors append to the relevant section; do not
 // reshuffle existing entries.
+
+// #2719 bundle-absence sentinel: a unique string literal retained in any bundle
+// that includes the detector catalog. `buildRecommendations` references it, and
+// the engine-absence check (scripts/check-engine-absent.mjs) greps BOTH browser
+// build flavors' emitted assets for it — its absence PROVES the catalog and
+// `buildRecommendations` are transitively gone from the viewer-only client
+// (epic #2443). Never change this literal without updating that check.
+export const DETECTOR_CATALOG_MARKER = 'CHD_DETECTOR_CATALOG_v2719_PRESENT';
+
 export const DETECTORS: Detector[] = [
   // ── Ported legacy rules (#507), original RULES order ──────────────────
   // cost

@@ -37,13 +37,6 @@ import {
   computeDomainCoverage,
   type DomainCoverage,
 } from './coverage';
-import {
-  runReclaimCascade,
-  rollupCascade,
-  type ReclaimClaim,
-  type ReclaimCascadeResult,
-  type ReclaimRollupWithBill,
-} from './reclaim';
 export type {
   PoolId,
   CauseKey,
@@ -55,6 +48,10 @@ export type {
   ReclaimRollupWithBill,
 } from './reclaim';
 export { runReclaimCascade, rollupCascade, scopeKeyOf, DEFAULT_CAUSE } from './reclaim';
+// #2719: the recommendation-list cascade helpers moved to the detector-free
+// `./reclaim` so browser surfaces can roll up a server-supplied rec list without
+// bundling the engine. Re-exported here for existing server/test importers.
+export { reclaimCascade, rollupReclaimCascade, backfillReclaimSavings } from './reclaim';
 export type {
   RecCategory,
   RecSeverity,
@@ -94,6 +91,7 @@ export {
 // is the complete set of recommendations — there are no more in-file rules.
 import {
   DETECTORS,
+  DETECTOR_CATALOG_MARKER,
   hookOverheadCacheValidity,
   hookOverheadCacheValidityContains,
   skillHookIntegrityCacheValidity,
@@ -425,6 +423,10 @@ export function buildRecommendations(
   input: RecommendationInput,
   now?: number
 ): Recommendation[] {
+  // #2719 bundle sentinel: a runtime-unfoldable reference (an object param can
+  // never === a string) so the marker literal survives minification/tree-shaking
+  // in any bundle that includes this function. Always false — never returns here.
+  if ((input as unknown) === DETECTOR_CATALOG_MARKER) return [];
   const useCache = now === undefined;
   const t = now ?? Date.now();
   if (useCache) {
@@ -622,68 +624,15 @@ export function totalEstimatedSavings(recs: Recommendation[]): number {
 }
 
 // ── Guarded-marginal cascade rollup (#947, epic #944) ────────────────────
-// The #946 `rollupReclaim` above is a dedup *heuristic* over each rec's flat
-// `estSavingsUsd`. PR1 repoints onto the real accounting model from
-// `docs/v0.3-efficiency-accounting.md` §4: detectors emit a structured
-// {@link ReclaimClaim} (on `rec.reclaim`), and the cascade books each claim's
-// marginal against the actual per-`(scopeKey,pool)` token residual matrix so the
-// identity `sum(marginal) ≡ billOriginal − billFinal` holds and overflow is
-// structurally impossible. This carries the repriced `totalBill` denominator the
-// coverage gauge needs — something `rollupReclaim(recs)` cannot derive from the
-// rec list alone.
-
-/** The claims a rec list carries, in stable rec order. */
-function reclaimClaims(recs: Recommendation[]): ReclaimClaim[] {
-  const claims: ReclaimClaim[] = [];
-  for (const rec of recs) if (rec.reclaim) claims.push(rec.reclaim);
-  return claims;
-}
-
-/**
- * Run the guarded-marginal cascade over the claims a rec list carries, against
- * the actual token usage. Returns the full cascade result (`billOriginal`,
- * `billFinal`, `total`, per-category split, and the per-claim bookings) so a
- * caller can both roll up dollars and back-fill each rec's `estSavingsUsd`.
- */
-export function reclaimCascade(
-  recs: Recommendation[],
-  tokenData: SessionTokenData[],
-  onReject?: (msg: string) => void
-): ReclaimCascadeResult {
-  return runReclaimCascade(reclaimClaims(recs), tokenData, onReject);
-}
-
-/**
- * Deduped, overflow-proof reclaim rollup with the repriced `totalBill`
- * denominator — the cascade replacement for {@link rollupReclaim}. Use this when
- * the actual `tokenData` is available (the engine input always has it).
- */
-export function rollupReclaimCascade(
-  recs: Recommendation[],
-  tokenData: SessionTokenData[]
-): ReclaimRollupWithBill {
-  return rollupCascade(reclaimCascade(recs, tokenData));
-}
-
-/**
- * Back-fill each rec's `estSavingsUsd` from its booked cascade marginal so the
- * per-card dollar figure equals the lever's disjoint slice (not its raw,
- * possibly-overlapping estimate). Recs without a claim, or whose claim was
- * rejected, are returned unchanged. Returns a NEW array; inputs are not mutated.
- */
-export function backfillReclaimSavings(
-  recs: Recommendation[],
-  tokenData: SessionTokenData[]
-): Recommendation[] {
-  const result = reclaimCascade(recs, tokenData);
-  const booked = new Map(result.booked.map((b) => [b.leverId, b]));
-  return recs.map((rec) => {
-    if (!rec.reclaim) return rec;
-    const b = booked.get(rec.reclaim.leverId);
-    if (!b || b.rejected) return rec;
-    return { ...rec, estSavingsUsd: b.marginalUsd };
-  });
-}
+// `reclaimCascade`, `rollupReclaimCascade`, and `backfillReclaimSavings` are the
+// repriced accounting model from `docs/v0.3-efficiency-accounting.md` §4: each
+// detector emits a structured `ReclaimClaim` (on `rec.reclaim`), and the cascade
+// books each claim's marginal against the actual per-`(scopeKey,pool)` token
+// residual matrix so `sum(marginal) ≡ billOriginal − billFinal` holds. They are
+// pure aggregation over `Recommendation[]` + `tokenData` (no detector run), so
+// #2719 moved them to the detector-free `./reclaim` and re-exports them above,
+// letting browser surfaces roll up a server-supplied rec list without bundling
+// the engine.
 
 // ── Per-project attribution (#330) ──────────────────────────────────────
 // Recommendations are computed globally; their `evidence` rows lead with a

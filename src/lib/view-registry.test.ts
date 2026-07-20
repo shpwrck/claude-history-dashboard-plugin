@@ -267,6 +267,15 @@ function viewContext(
     filter,
     routeFilter: {},
     serverAvailable: true,
+    analysisLoadOptions: { enabled: true, refreshKey: 0 },
+    // Viewer-only (#2719): the shared server analysis, ready + empty here.
+    analysis: {
+      status: 'ready',
+      recommendations: [],
+      domainCoverage: [],
+      error: null,
+      retry: async () => ({ ok: false, error: 'unavailable' }),
+    },
     nav: {
       navigateTo: () => {},
       navigateWithFilter: () => {},
