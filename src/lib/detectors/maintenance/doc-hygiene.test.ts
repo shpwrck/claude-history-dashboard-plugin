@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   detector,
   parseFreshnessDurationMs,
@@ -10,8 +11,9 @@ import {
 } from './doc-hygiene';
 import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
-import { parseFrontmatter } from '../../parse-docs';
+import { parseFrontmatter, buildDocGraph } from '../../parse-docs';
 import type { DocEdge, DocGraph, DocNode } from '../../parse-docs';
+import { isDocCategory } from '../../doc-contract';
 import type { RepoMapDataset, RepoMapProjectJoin } from '../../parse-repo-map-join';
 import type { RepoSymbol } from '../../repo-map/types';
 import type { DocHygieneArtifact } from '../../doc-hygiene-artifact';
@@ -1392,5 +1394,184 @@ describe('maintenance.doc-hygiene — seeded docs-map self-consistency (#2489)',
     ]);
 
     expect(run(g, rm, null, 0, wrapper)).toBeNull();
+  });
+});
+
+// ── Declared category (#2472) ───────────────────────────────────────────────
+
+const catNode = (slug: string, category: DocNode['category'], declared?: string): DocNode =>
+  node(slug, {
+    path: `${slug}.md`,
+    category,
+    frontmatter: declared === undefined ? {} : { category: declared },
+  });
+
+/** The evidence line for the doc under test, wherever it sorts in the (capped) list. */
+const lineFor = (rec: ReturnType<typeof run>, path: string): string => {
+  const line = rec!.evidence!.find((e) => e.includes(path));
+  expect(line, `evidence line for ${path}`).toBeDefined();
+  return line!;
+};
+
+describe('maintenance.doc-hygiene — declared category (#2472)', () => {
+  it('is silent when a doc declares no category (opt-in: absence is neutral)', () => {
+    expect(run(graph([catNode('docs/adr/0007-x', 'adr')]))).toBeNull();
+  });
+
+  it('is silent when the declared category matches the derived category', () => {
+    expect(run(graph([catNode('docs/adr/0007-x', 'adr', 'adr')]))).toBeNull();
+    expect(run(graph([catNode('docs/audits/x', 'audit', 'audit')]))).toBeNull();
+    expect(run(graph([catNode('docs/plain', 'doc', 'doc')]))).toBeNull();
+  });
+
+  it('stays silent when a matching parsed declaration has a YAML inline comment', () => {
+    const { frontmatter } = parseFrontmatter(
+      `---\ncategory: adr # canonical path category\n---\n`
+    );
+    const parsedNode = node('docs/adr/0007-x', {
+      category: 'adr',
+      frontmatter,
+    });
+
+    expect(run(graph([parsedNode]))).toBeNull();
+  });
+
+  it('flags a valid declaration that differs from the derived category, citing both sides neutrally', () => {
+    const rec = run(graph([catNode('docs/adr/0007-x', 'adr', 'plan')]));
+    expect(rec).not.toBeNull();
+    expect(rec!.severity).toBe('info'); // declaration drift is sprawl, not structural
+    const line = lineFor(rec, 'docs/adr/0007-x.md');
+    expect(line).toContain('declared category "plan"');
+    expect(line).toContain('location implies "adr"');
+    expect(line).toContain('reconcile');
+    // A valid mismatch must NOT be described as an unrecognized token.
+    expect(line).not.toContain('not a recognized category');
+    expect(rec!.action).toContain('move the file or correct the label');
+    expect(rec!.action).not.toContain('replace it with a recognized category');
+    // The observation cites the two node fields it read.
+    expect(
+      rec!.provenance!.observations.some(
+        (o) => o.source === 'parse-docs' && /frontmatter\[category\]/.test(o.field ?? '')
+      )
+    ).toBe(true);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('flags an unrecognized (wrong-case) declaration as a DISTINCT invalid item, not a mismatch', () => {
+    const rec = run(graph([catNode('docs/adr/0007-x', 'adr', 'ADR')]));
+    expect(rec).not.toBeNull();
+    const line = lineFor(rec, 'docs/adr/0007-x.md');
+    expect(line).toContain('declared category "ADR" is not a recognized category');
+    expect(line).toContain('expected one of');
+    // Distinguishable from a mismatch: no "location implies" framing, no misfile claim.
+    expect(line).not.toContain('location implies');
+    expect(rec!.action).toContain('replace it with a recognized category');
+    expect(rec!.action).not.toContain('move the file');
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('treats an explicitly empty category as invalid rather than absent', () => {
+    const rec = run(graph([catNode('docs/adr/0007-x', 'adr', '')]));
+
+    expect(rec).not.toBeNull();
+    expect(rec!.detail).toContain('1 declared category is not a recognized value');
+    expect(rec!.action).toContain('replace it with a recognized category');
+    expect(rec!.action).not.toContain('move the file');
+    expect(lineFor(rec, 'docs/adr/0007-x.md')).toContain(
+      'declared category "" is not a recognized category'
+    );
+  });
+
+  it('flags a mismatch against the catch-all derived "doc" category (per the design decision)', () => {
+    // deriveCategory collapses an unrecognized docs/<sub>/ subtree to "doc"; a
+    // declaration that differs is still flagged so a misfile/new-subtree is seen.
+    const rec = run(graph([catNode('docs/newsub/x', 'doc', 'plan')]));
+    expect(rec).not.toBeNull();
+    const line = lineFor(rec, 'docs/newsub/x.md');
+    expect(line).toContain('declared category "plan"');
+    expect(line).toContain('location implies "doc"');
+  });
+
+  it('counts mismatch and invalid items separately in the breakdown', () => {
+    const rec = run(
+      graph([
+        catNode('docs/adr/0001-x', 'adr', 'plan'), // valid mismatch
+        catNode('docs/adr/0002-x', 'adr', 'nope'), // invalid token
+      ])
+    );
+    expect(rec).not.toBeNull();
+    expect(rec!.detail).toContain('1 declared category does not match its location');
+    expect(rec!.detail).toContain('1 declared category is not a recognized value');
+    expect(rec!.action).toContain('move the file or correct the label');
+    expect(rec!.action).toContain('replace it with a recognized category');
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('reserves auditable evidence for every active category subtype at the row cap', () => {
+    const structuralFindings = Array.from({ length: 8 }, (_, index) =>
+      localLinkFinding({
+        id: `doc-link:lychee.local-links:${index}`,
+        path: `docs/broken-${index}.md`,
+        line: index + 1,
+        target: `docs/gone-${index}.md`,
+      })
+    );
+    const rec = run(
+      graph([
+        catNode('docs/adr/category-mismatch', 'adr', 'plan'),
+        catNode('docs/adr/category-invalid', 'adr', 'ADR'),
+      ]),
+      null,
+      lycheeArtifact(structuralFindings)
+    );
+
+    expect(rec).not.toBeNull();
+    expect(rec!.evidence).toHaveLength(8);
+    expect(lineFor(rec, 'docs/adr/category-mismatch.md')).toContain(
+      'declared category "plan"'
+    );
+    expect(lineFor(rec, 'docs/adr/category-invalid.md')).toContain(
+      'declared category "ADR"'
+    );
+  });
+
+  it('a declared-category item never raises the card above info on its own', () => {
+    const rec = run(graph([catNode('docs/adr/0007-x', 'adr', 'plan')]));
+    expect(rec!.severity).toBe('info');
+  });
+});
+
+describe('maintenance.doc-hygiene — seeded declared categories are clean on the shipped tree (#2472)', () => {
+  // The three seeds must produce ZERO declared-category findings, and no other
+  // shipped doc may carry a category declaration that would fire the signal.
+  // scanDeclaredCategory fires ONLY on an invalid or mismatched declaration, so
+  // an exhaustive node-level check over the real graph is equivalent to
+  // "zero findings against the shipped tree".
+  const SEEDS: Record<string, string> = {
+    'docs/doc-hygiene-borrow-stack.md': 'doc',
+    'docs/adr/0019-leave-behind-contract.md': 'adr',
+    'docs/audits/2026-07-portable-signal-inventory.md': 'audit',
+  };
+
+  it('every category declaration in the tree is valid and matches its path-derived category', () => {
+    const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
+    const g = buildDocGraph(repoRoot);
+    const declared = g.nodes.filter((n) => n.frontmatter['category'] !== undefined);
+
+    // The three intended seeds are present and self-consistent.
+    for (const [path, expected] of Object.entries(SEEDS)) {
+      const seed = declared.find((n) => n.path === path);
+      expect(seed, `seed present with category frontmatter: ${path}`).toBeDefined();
+      expect(seed!.frontmatter['category']).toBe(expected);
+      expect(seed!.category).toBe(expected);
+    }
+
+    // No declaration anywhere in the shipped tree is invalid or mismatched.
+    for (const n of declared) {
+      expect(isDocCategory(n.frontmatter['category']), `${n.path} declares a valid category`).toBe(
+        true
+      );
+      expect(n.frontmatter['category'], `${n.path} declared matches derived`).toBe(n.category);
+    }
   });
 });

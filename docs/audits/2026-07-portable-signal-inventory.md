@@ -1,3 +1,7 @@
+---
+category: audit
+---
+
 # Portable signal inventory for harness-agnostic experiments
 
 Date: 2026-07-13

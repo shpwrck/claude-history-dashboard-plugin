@@ -35,29 +35,19 @@ import {
   parseDocGitTimesManifest,
   type DocTimeProvenance,
 } from './doc-git-times';
+import type { DocCategory } from './doc-contract';
 
 export type { DocTimeProvenance } from './doc-git-times';
-
-// ── Types ────────────────────────────────────────────────────────────────────
-
 /**
  * Coarse doc category, derived purely from a doc's directory (never its
- * contents). One bucket per top-level docs subtree, plus `root` for repo-root
- * markdown and `other` for anything outside the recognised layout.
+ * contents). The vocabulary itself now lives in the browser-safe
+ * `doc-contract` module (#2472) so the bundled doc-hygiene detector can consume
+ * it at runtime; re-exported here so existing `parse-docs` importers are
+ * unaffected.
  */
-export type DocCategory =
-  | 'root'
-  | 'doc'
-  | 'adr'
-  | 'audit'
-  | 'competitive'
-  | 'plan'
-  | 'experiment'
-  | 'product'
-  | 'review'
-  | 'backlog'
-  | 'perf'
-  | 'other';
+export type { DocCategory } from './doc-contract';
+
+// ── Types ────────────────────────────────────────────────────────────────────
 
 /**
  * Which hand-maintained partial index a node participates in, so the hygiene
@@ -177,6 +167,7 @@ export interface BuildDocGraphOptions {
 
 const FRONTMATTER_RE = /^\uFEFF?---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/;
 const FRONTMATTER_LINE_RE = /^\s*([A-Za-z0-9_.$-]+):\s*(.+)$/;
+const TOP_LEVEL_CATEGORY_LINE_RE = /^category:\s*(.*)$/;
 
 function stripQuotes(s: string): string {
   const t = s.trim();
@@ -190,11 +181,49 @@ function stripQuotes(s: string): string {
 }
 
 /**
+ * Remove a YAML inline comment from the tiny scalar grammar used by
+ * `category:`. A `#` starts a comment only outside quotes and after whitespace
+ * (or at the beginning), matching the ordinary YAML separation rule. Hashes
+ * inside quoted values remain part of the value.
+ */
+function stripYamlInlineComment(s: string): string {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < s.length; i += 1) {
+    const char = s[i];
+    if (quote !== null) {
+      if (quote === '"' && char === '\\') {
+        i += 1;
+        continue;
+      }
+      if (char === quote) {
+        if (quote === "'" && s[i + 1] === "'") {
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '#' && (i === 0 || /\s/.test(s[i - 1]))) {
+      return s.slice(0, i).trimEnd();
+    }
+  }
+  return s;
+}
+
+/**
  * Split a doc into its parsed frontmatter map and its body. Tolerant: a doc
  * with no `---` fenced frontmatter yields `{ frontmatter: {}, body: content }`.
- * Frontmatter is parsed line-by-line into a flat `key -> value` map (nested
- * keys are flattened to their leaf key, last-wins) — enough for a hygiene
- * graph without dragging in a YAML dependency.
+ * Frontmatter is parsed line-by-line into a flat `key -> value` map. Nested
+ * keys are flattened to their leaf key, last-wins, except for the product
+ * contract's `category` field: only an unindented, top-level `category:` is
+ * retained, including an explicitly empty value. That keeps nested metadata
+ * from accidentally opting a document into declared-category checks without
+ * dragging in a YAML dependency.
  */
 export function parseFrontmatter(content: string): {
   frontmatter: DocFrontmatter;
@@ -205,9 +234,16 @@ export function parseFrontmatter(content: string): {
   const [, block, body] = m;
   const frontmatter: DocFrontmatter = {};
   for (const line of block.split('\n')) {
+    const category = line.match(TOP_LEVEL_CATEGORY_LINE_RE);
+    if (category) {
+      frontmatter.category = stripQuotes(stripYamlInlineComment(category[1]));
+      continue;
+    }
     const mm = line.match(FRONTMATTER_LINE_RE);
     if (!mm) continue;
-    frontmatter[mm[1].trim()] = stripQuotes(mm[2]);
+    const key = mm[1].trim();
+    if (key === 'category') continue;
+    frontmatter[key] = stripQuotes(mm[2]);
   }
   return { frontmatter, body };
 }

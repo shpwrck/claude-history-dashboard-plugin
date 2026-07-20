@@ -64,6 +64,15 @@
  * "fails to reference" everything), but its declared sources still get judged
  * for existence/symbols independently, since those are repo-map claims.
  *
+ * #2472 adds two graph-native declared-category signals from an OPT-IN top-level
+ * `category:` frontmatter declaration, validated (exact-case) against the shared
+ * browser-safe vocabulary in `doc-contract.ts`: `declared-category-invalid` (the
+ * value is outside the vocabulary — replace the token) and
+ * `declared-category-mismatch` (a valid value that differs from the purely
+ * directory-derived category — the file may be misfiled OR the label wrong, so
+ * the evidence cites both and asserts neither). A missing declaration is neutral
+ * and a matching one is silent, so the corpus is not forced to declare anything.
+ *
  * Reads `input.docGraph` (built by `buildDocGraph` in `parse-docs.ts`, #2257),
  * `input.repoMap` for signal 3 and the #2489 repo-map-backed pair,
  * `input.docsMap` for the #2489 declared-map signals, and
@@ -76,7 +85,7 @@
  * provenance-level demotion, and never asserts the content itself is wrong or
  * currently stale.
  *
- * Issues: #2258, #2487, #2488, #2489 (epic #2256 — doc artifact hygiene)
+ * Issues: #2258, #2487, #2488, #2489, #2472 (epic #2256 — doc artifact hygiene)
  */
 
 import type {
@@ -87,6 +96,8 @@ import type {
   RecSeverity,
 } from '../types';
 import type { DocFrontmatter, DocGraph, DocNode } from '../../parse-docs';
+import { DOC_CATEGORIES, isDocCategory } from '../../doc-contract';
+import type { DocCategory } from '../../doc-contract';
 import type { RepoMapDataset, RepoMapProjectJoin } from '../../parse-repo-map-join';
 import { DOC_GIT_TIMES_MIN_TIME_MS } from '../../doc-git-times';
 import type { DocsMapArtifact } from '../../parse-docs-map';
@@ -106,7 +117,9 @@ export type DocHygieneSignal =
   | 'docs-map-missing-document'
   | 'docs-map-missing-source'
   | 'docs-map-unreferenced-source'
-  | 'docs-map-missing-symbol';
+  | 'docs-map-missing-symbol'
+  | 'declared-category-mismatch'
+  | 'declared-category-invalid';
 
 /** One flagged doc-hygiene item: which doc, which signal, what to do. */
 export interface DocHygieneItem {
@@ -121,6 +134,7 @@ export interface DocHygieneItem {
   origin:
     | 'doc-graph'
     | 'doc-graph.freshness'
+    | 'doc-graph.category'
     | 'lychee.local-links'
     | 'agents-lint.context-refs'
     | 'docs-map';
@@ -135,6 +149,12 @@ export interface DocHygieneItem {
    * that is absent from the source file's repo-map symbols.
    */
   symbol?: string;
+  /**
+   * Set only on a `declared-category-*` item (#2472): the opt-in `category:`
+   * frontmatter value and the path-derived category. Used to render neutral
+   * evidence that cites both sides without asserting which one is authoritative.
+   */
+  category?: { declared: string; derived: DocCategory };
 }
 
 /** Short label per signal for evidence rows. */
@@ -149,6 +169,8 @@ const SIGNAL_LABEL: Record<DocHygieneSignal, string> = {
   'docs-map-missing-source': 'declared source no longer exists',
   'docs-map-unreferenced-source': 'declared source is not referenced by its document',
   'docs-map-missing-symbol': 'declared source symbol no longer exists',
+  'declared-category-mismatch': 'declared category does not match its location',
+  'declared-category-invalid': 'declared category is not a recognized value',
 };
 
 /** Signals that are structural breakage (dead pointers), not just sprawl. */
@@ -334,6 +356,50 @@ function scanDeclaredFreshness(graph: DocGraph, now: number): DocHygieneItem[] {
       origin: 'doc-graph.freshness',
       freshness: finding,
     });
+  }
+  return items;
+}
+
+/**
+ * Signal (#2472): a document's OPT-IN `category:` frontmatter declaration drifts
+ * from its path-derived category. Two DISTINGUISHABLE items, because the fix
+ * differs:
+ *  - `declared-category-invalid` — the declared value is outside the exact-case
+ *    vocabulary (a typo, or a wrong-case token like `ADR`). The fix is to
+ *    replace the token, so it must never be described as an ordinary mismatch.
+ *  - `declared-category-mismatch` — a VALID declaration that differs from the
+ *    directory-derived category. `deriveCategory` is purely directory-based, so
+ *    neither side is assumed authoritative (the file may be misfiled OR the
+ *    label wrong); the evidence cites both and asks a human to reconcile either.
+ *
+ * The declaration is OPT-IN: a missing `category:` key is neutral (never a
+ * warning), and a declaration that matches its derived category is silent. The
+ * frontmatter value is already trimmed and unquoted by `parseFrontmatter`. An
+ * explicitly empty top-level value is retained and classified as invalid, so
+ * it cannot collapse into the neutral "missing declaration" state.
+ */
+function scanDeclaredCategory(graph: DocGraph): DocHygieneItem[] {
+  const items: DocHygieneItem[] = [];
+  for (const node of graph.nodes) {
+    const declared = node.frontmatter['category'];
+    if (declared === undefined) continue; // opt-in: no declaration → neutral
+    if (!isDocCategory(declared)) {
+      items.push({
+        path: node.path,
+        signal: 'declared-category-invalid',
+        origin: 'doc-graph.category',
+        category: { declared, derived: node.category },
+      });
+      continue;
+    }
+    if (declared !== node.category) {
+      items.push({
+        path: node.path,
+        signal: 'declared-category-mismatch',
+        origin: 'doc-graph.category',
+        category: { declared, derived: node.category },
+      });
+    }
   }
   return items;
 }
@@ -751,6 +817,23 @@ function evidenceLine(it: DocHygieneItem): string {
       `declared ${f.thresholdKey} threshold (${f.thresholdRaw}) as of ${f.asOf} → ${f.verdict}`
     );
   }
+  if (it.category) {
+    const { declared, derived } = it.category;
+    if (it.signal === 'declared-category-invalid') {
+      // Distinct from a mismatch: the token itself is unrecognised, so the fix
+      // is to replace it — never "the file is misfiled".
+      return (
+        `${it.path} — declared category "${declared}" is not a recognized category ` +
+        `(expected one of: ${DOC_CATEGORIES.join(', ')})`
+      );
+    }
+    // Neutral: cite the declared value and the location-derived value without
+    // asserting which is authoritative — reconcile either side.
+    return (
+      `${it.path} — declared category "${declared}" but its location implies "${derived}" ` +
+      `(reconcile the file's location or its \`category:\` label)`
+    );
+  }
   if (it.origin === 'docs-map') {
     const target = it.target
       ? ` -> ${it.target}${it.symbol ? ` (symbol ${it.symbol})` : ''}`
@@ -782,6 +865,7 @@ export const detector: Detector = {
         ...scanOrphans(graph),
         ...scanDanglingSrcRefs(graph, input.repoMap, pathBySlug),
         ...scanDeclaredFreshness(graph, now),
+        ...scanDeclaredCategory(graph),
         ...(input.docsMap ? scanDocsMapDrift(input.docsMap, graph, input.repoMap) : []),
       ];
     }
@@ -803,6 +887,8 @@ export const detector: Detector = {
       'docs-map-missing-symbol',
       'docs-map-unreferenced-source',
       'stale-declared-freshness',
+      'declared-category-mismatch',
+      'declared-category-invalid',
       'orphan',
     ];
     const breakdown = order
@@ -822,15 +908,32 @@ export const detector: Detector = {
     // then `error`-level freshness, then everything else.
     const rank = (it: DocHygieneItem): number =>
       STRUCTURAL.has(it.signal) ? 2 : it.freshness?.verdict === 'error' ? 1 : 0;
-    const evidence = [...items]
-      .sort(
-        (a, b) =>
-          rank(b) - rank(a) ||
-          a.path.localeCompare(b.path) ||
-          (a.line ?? 0) - (b.line ?? 0)
-      )
-      .slice(0, 8)
-      .map(evidenceLine);
+    const evidenceOrder = (a: DocHygieneItem, b: DocHygieneItem): number =>
+      rank(b) - rank(a) ||
+      a.path.localeCompare(b.path) ||
+      (a.line ?? 0) - (b.line ?? 0);
+    const orderedItems = [...items].sort(evidenceOrder);
+    // A declared-category claim is only auditable when its path and both values
+    // remain visible. Reserve one row for each active category subtype before
+    // filling the eight-row cap with the normal severity ordering.
+    const selectedItems: DocHygieneItem[] = [];
+    const selected = new Set<DocHygieneItem>();
+    for (const signal of [
+      'declared-category-mismatch',
+      'declared-category-invalid',
+    ] as const) {
+      const representative = orderedItems.find((item) => item.signal === signal);
+      if (!representative) continue;
+      selectedItems.push(representative);
+      selected.add(representative);
+    }
+    for (const item of orderedItems) {
+      if (selectedItems.length >= 8) break;
+      if (selected.has(item)) continue;
+      selectedItems.push(item);
+      selected.add(item);
+    }
+    const evidence = selectedItems.sort(evidenceOrder).map(evidenceLine);
 
     const graphItemCount = items.filter((item) => item.origin === 'doc-graph').length;
     const artifactItemCount = items.filter((item) => item.origin === 'lychee.local-links').length;
@@ -843,6 +946,10 @@ export const detector: Detector = {
     const freshnessCount = items.filter(
       (item) => item.signal === 'stale-declared-freshness',
     ).length;
+    const declaredCategoryMismatchCount = counts['declared-category-mismatch'] ?? 0;
+    const declaredCategoryInvalidCount = counts['declared-category-invalid'] ?? 0;
+    const declaredCategoryCount =
+      declaredCategoryMismatchCount + declaredCategoryInvalidCount;
     // #2489's two docs-map oracles are cited separately: 1+3 read the map's
     // own declarations against the doc graph, 2+4 read them against the
     // identity-matched repo-map project.
@@ -911,6 +1018,16 @@ export const detector: Detector = {
         value: freshnessCount,
       });
     }
+    // #2472: the opt-in `category:` declaration read against the path-derived
+    // category — both sides come straight from the parsed doc graph node.
+    if (declaredCategoryCount > 0) {
+      observations.push({
+        claim: `${declaredCategoryCount} document(s) whose opt-in category: declaration is unrecognized or does not match the path-derived category`,
+        source: 'parse-docs',
+        field: 'docGraph.nodes[].{frontmatter[category], category}',
+        value: declaredCategoryCount,
+      });
+    }
     // #2489 signals 1+3: the declared map itself against the doc graph's
     // document existence and derived src-ref edges.
     if (docsMapGraphCount > 0) {
@@ -953,6 +1070,13 @@ export const detector: Detector = {
         (docsMapCount > 0
           ? ` For a docs-map declaration drift, update the document (or the source/symbol it describes) to match, ` +
             `or correct the stale entry in \`docs/docs-map.json\` itself.`
+          : '') +
+        (declaredCategoryMismatchCount > 0
+          ? ` For a document whose declared \`category:\` does not match its location, either move the file or correct the ` +
+            `label.`
+          : '') +
+        (declaredCategoryInvalidCount > 0
+          ? ` For an unrecognized \`category:\` value, replace it with a recognized category.`
           : ''),
       affected: n,
       // No honest dollar unit — score on minutes to review each flagged item.
@@ -967,6 +1091,9 @@ export const detector: Detector = {
           (freshnessCount > 0
             ? ` Declared-freshness verdicts compare each document's authoritative Git modification time (provenance \`git\` or a commit-bound \`manifest\`, never the Docker/filesystem mtime) ` +
               `against its own opt-in \`freshness.warn_after\`/\`freshness.error_after\` threshold as of the evaluation time, and never assert the content is wrong or currently stale.`
+            : '') +
+          (declaredCategoryCount > 0
+            ? ` A declared-category item compares each document's opt-in \`category:\` frontmatter against its directory-derived category, citing both sides without asserting which is authoritative — a valid mismatch and an unrecognized value are distinct items with distinct fixes.`
             : ''),
       },
     };

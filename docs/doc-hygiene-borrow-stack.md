@@ -1,3 +1,7 @@
+---
+category: doc
+---
+
 # Doc-hygiene borrow stack decision
 
 Status: accepted for #2260 on 2026-07-09. This decides the #2256 borrow/build
@@ -133,7 +137,10 @@ spans or checker-specific status.
   open but closed/nonexistent, resolved against issue-state data), stale-claims
   (an "as of \<date\>"/version string older than the active milestone, or a
   draft doc whose referenced issue is closed), and declared-vs-derived mismatches
-  (frontmatter category/status disagreeing with path/git-derived reality). Keep
+  (frontmatter category/status disagreeing with path/git-derived reality). The
+  declared-**category** leg of that family shipped separately as #2472 (see the
+  Declared-category contract below); #2259's residue is the issue-ref and NL
+  stale-claim signals. Keep
   stale-claim wording demoted per the recommendation actionability contract. The
   `src-ref` extraction plus file-exists check for source refs is #2258's
   dangling-src-ref signal, not #2259's.
@@ -188,6 +195,48 @@ The pure grammar and evaluation live in
 `evaluateDeclaredFreshness`). Seeded contracts (`REFERENCES.md` and two
 competitive-analysis surveys) are self-consistent and clean on the source commit
 because a freshly committed document has age ~0.
+
+## Declared-category contract (#2472)
+
+A document may OPT IN to declaring its category with a single top-level
+frontmatter key. It is the declared-category leg of the declared-vs-derived
+family and, like the freshness contract, is deterministic — no heuristics, no
+content inspection:
+
+```yaml
+---
+category: adr
+---
+```
+
+- **Vocabulary (exact-case).** The value must be exactly one of the recognised
+  categories: `root`, `doc`, `adr`, `audit`, `competitive`, `plan`,
+  `experiment`, `product`, `review`, `backlog`, `perf`, `other`. This is the same
+  vocabulary `deriveCategory` maps a path onto, and it now lives in the
+  browser-safe `src/lib/doc-contract.ts` (`DOC_CATEGORIES`) so the bundled
+  detector can validate a declaration at runtime without importing the
+  server-only `parse-docs.ts`.
+- **Opt-in and silent by default.** A **missing** `category:` key is neutral —
+  the corpus is never forced to declare anything, and absence is never a warning.
+  A declaration that **matches** the path-derived category is silent.
+- **Two distinguishable findings.** A declaration that is **valid but differs**
+  from the directory-derived category fires `declared-category-mismatch`. Because
+  `deriveCategory` is purely directory-based, neither side is assumed
+  authoritative: the file may be misfiled OR the label wrong, so the evidence
+  cites both the declared value and the location-derived value and asks a human
+  to reconcile either. A declaration **outside the vocabulary** (a typo, or a
+  wrong-case token like `ADR`) fires `declared-category-invalid` instead — a
+  distinct item whose fix is to replace the token, never described as a misfile.
+- **Recommend-only.** Both signals are advisory (`info`); nothing is edited, and
+  no validated copy-paste fix is emitted.
+
+The pure logic lives alongside the other graph-native signals in
+`src/lib/detectors/maintenance/doc-hygiene.ts` (`scanDeclaredCategory`). Three
+representative declarations are seeded so the path is live against the shipped
+tree without imposing corpus-wide coverage: `category: doc` on this file,
+`category: adr` on `docs/adr/0019-leave-behind-contract.md`, and `category:
+audit` on `docs/audits/2026-07-portable-signal-inventory.md` — each matches its
+directory, so all three are silent.
 
 ## License note
 

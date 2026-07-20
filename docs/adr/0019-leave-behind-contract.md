@@ -1,3 +1,7 @@
+---
+category: adr
+---
+
 # 0019 — One-artifact leave-behind contract for durable state
 
 - **Status:** Accepted (2026-07-15)

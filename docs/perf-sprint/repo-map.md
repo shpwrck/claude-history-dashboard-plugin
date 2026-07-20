@@ -69,6 +69,14 @@ integrated working set: `recommendations.ts` -> `project-identity.ts` and
 recalibration does not change runtime output or claim an improvement in ranking
 quality.
 
+#2472 widens the same bounded probe slice from 64 to 67 after its
+declared-category parser and detector add legitimate dependencies to the
+integrated working set. Against current master plus that slice, top-64 measures
+129/168 (76.8%); top-65 and top-66 measure 130/168 (77.4%), only barely above
+the unchanged 77% floor; and top-67 measures 131/168 (78.0%), restoring normal
+gate headroom. This is a gate-only rebaseline for a larger working set: it does
+not affect runtime output or claim that ranking quality improved.
+
 ### Baseline (2026-06-09, this repo, 426 source files)
 
 | Metric | Measured | Budget |

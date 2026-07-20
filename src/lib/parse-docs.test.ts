@@ -37,8 +37,10 @@ import {
   parseFrontmatter,
   resolveDocLink,
   slugForPath,
+  type DocCategory,
   type DocGraph,
 } from './parse-docs';
+import { DOC_CATEGORIES, isDocCategory } from './doc-contract';
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
@@ -69,6 +71,81 @@ describe('deriveCategory (per directory)', () => {
   it('maps an unknown docs subtree to doc and a non-docs tree to other', () => {
     expect(deriveCategory('docs/unknown-sub/x.md')).toBe('doc');
     expect(deriveCategory('src/lib/parse-docs.ts')).toBe('other');
+  });
+});
+
+describe('doc-category contract (#2472)', () => {
+  it('exposes a single, deduplicated vocabulary', () => {
+    expect(new Set(DOC_CATEGORIES).size).toBe(DOC_CATEGORIES.length);
+    expect([...DOC_CATEGORIES].sort()).toEqual(
+      [
+        'adr',
+        'audit',
+        'backlog',
+        'competitive',
+        'doc',
+        'experiment',
+        'other',
+        'perf',
+        'plan',
+        'product',
+        'review',
+        'root',
+      ].sort()
+    );
+  });
+
+  it('deriveCategory only ever returns a member of the shared vocabulary', () => {
+    const paths = [
+      'README.md',
+      'REFERENCES.md',
+      'docs/x.md',
+      'docs/adr/0001-x.md',
+      'docs/audits/a.md',
+      'docs/competitive/x.md',
+      'docs/competitive-analysis/x.md',
+      'docs/plans/x.md',
+      'docs/experiments/x.md',
+      'docs/product/x.md',
+      'docs/reviews/x.md',
+      'docs/backlog/x.md',
+      'docs/perf-sprint/x.md',
+      'docs/unknown-sub/x.md',
+      'src/lib/parse-docs.ts',
+    ];
+    for (const p of paths) {
+      expect(DOC_CATEGORIES).toContain(deriveCategory(p));
+    }
+  });
+
+  it('every vocabulary member is reachable from some path (parser and contract share one vocabulary)', () => {
+    const reachable = new Set<DocCategory>([
+      deriveCategory('README.md'),
+      deriveCategory('docs/x.md'),
+      deriveCategory('docs/adr/0001-x.md'),
+      deriveCategory('docs/audits/a.md'),
+      deriveCategory('docs/competitive/x.md'),
+      deriveCategory('docs/plans/x.md'),
+      deriveCategory('docs/experiments/x.md'),
+      deriveCategory('docs/product/x.md'),
+      deriveCategory('docs/reviews/x.md'),
+      deriveCategory('docs/backlog/x.md'),
+      deriveCategory('docs/perf-sprint/x.md'),
+      deriveCategory('src/lib/parse-docs.ts'), // 'other'
+    ]);
+    expect([...reachable].sort()).toEqual([...DOC_CATEGORIES].sort());
+  });
+
+  it('isDocCategory is exact-case (an uppercase or unknown token is not a category)', () => {
+    expect(isDocCategory('adr')).toBe(true);
+    expect(isDocCategory('ADR')).toBe(false);
+    expect(isDocCategory('bogus')).toBe(false);
+    expect(isDocCategory('')).toBe(false);
+  });
+
+  it('re-exports DocCategory through parse-docs for existing importers', () => {
+    const c: DocCategory = 'adr'; // compile-time proof the parse-docs re-export resolves
+    expect(isDocCategory(c)).toBe(true);
   });
 });
 
@@ -169,6 +246,47 @@ describe('parseFrontmatter (present + absent)', () => {
     const { frontmatter, body } = parseFrontmatter(content);
     expect(frontmatter).toEqual({});
     expect(body).toBe(content);
+  });
+
+  it('does not promote a nested-only category declaration to the top level', () => {
+    const content = `---\nmetadata:\n  category: plan\n---\n\n# Nested metadata\n`;
+    const { frontmatter } = parseFrontmatter(content);
+
+    expect(frontmatter['category']).toBeUndefined();
+  });
+
+  it('keeps a top-level category when a later nested mapping repeats the key', () => {
+    const content =
+      `---\ncategory: adr\nmetadata:\n  category: plan\n  owner: docs\n---\n\n# ADR\n`;
+    const { frontmatter } = parseFrontmatter(content);
+
+    expect(frontmatter['category']).toBe('adr');
+    // Existing flat-leaf behavior remains available for non-contract fields.
+    expect(frontmatter['owner']).toBe('docs');
+  });
+
+  it('preserves an empty top-level category as an explicit declaration', () => {
+    const content = `---\ncategory:\n---\n\n# Missing category token\n`;
+    const { frontmatter } = parseFrontmatter(content);
+
+    expect(Object.hasOwn(frontmatter, 'category')).toBe(true);
+    expect(frontmatter['category']).toBe('');
+  });
+
+  it('strips YAML comments outside quoted and unquoted category scalars', () => {
+    const unquoted = parseFrontmatter(
+      `---\ncategory: adr # canonical path category\n---\n`
+    ).frontmatter;
+    const quoted = parseFrontmatter(
+      `---\ncategory: "audit" # canonical path category\n---\n`
+    ).frontmatter;
+    const hashInsideQuotes = parseFrontmatter(
+      `---\ncategory: "audit # draft"\n---\n`
+    ).frontmatter;
+
+    expect(unquoted['category']).toBe('adr');
+    expect(quoted['category']).toBe('audit');
+    expect(hashInsideQuotes['category']).toBe('audit # draft');
   });
 });
 
@@ -313,6 +431,26 @@ describe('buildDocGraph', () => {
     expect(withFm?.frontmatter).toEqual({ title: 'Has FM', status: 'draft' });
     expect(withFm?.headings).toEqual(['Body']);
     expect(noFm?.frontmatter).toEqual({});
+  });
+
+  it('carries an opt-in category: frontmatter value onto the node (declared-category input, #2472)', () => {
+    write(root, 'docs/adr/0009-x.md', '---\ncategory: adr\n---\n\n# ADR 9\n');
+    const graph = buildDocGraph(root);
+    const n = graph.nodes.find((x) => x.slug === 'docs/adr/0009-x');
+    // The declared value the detector reads, and the derived value it compares against.
+    expect(n?.frontmatter['category']).toBe('adr');
+    expect(n?.category).toBe('adr');
+    // Frontmatter is stripped from the body, so headings are unaffected.
+    expect(n?.headings).toEqual(['ADR 9']);
+  });
+
+  it('carries an empty top-level category onto the node for invalid-declaration detection', () => {
+    write(root, 'docs/adr/0010-empty.md', '---\ncategory:\n---\n\n# Empty category\n');
+    const graph = buildDocGraph(root);
+    const n = graph.nodes.find((candidate) => candidate.path === 'docs/adr/0010-empty.md');
+
+    expect(Object.hasOwn(n?.frontmatter ?? {}, 'category')).toBe(true);
+    expect(n?.frontmatter['category']).toBe('');
   });
 
   it('derives a category per node and recognises declared indices + gitMtime', () => {
