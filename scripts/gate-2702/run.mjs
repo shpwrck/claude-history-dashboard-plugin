@@ -39,6 +39,7 @@ import {
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = dirname(SCRIPT_PATH);
 const CLASSIFIER_PATH = join(SCRIPT_DIR, "classify.mjs");
+const SEALER_PATH = join(SCRIPT_DIR, "seal.mjs");
 const PROJECT_ROOT = resolve(SCRIPT_DIR, "..", "..");
 const REPOSITORY = "shpwrck/claude-history-dashboard";
 const SCHEMA_VERSION = 1;
@@ -46,6 +47,7 @@ const ATTEMPT = 1;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 function fail(message) {
   throw new Error(message);
@@ -2208,6 +2210,58 @@ function validateSeal(seal, trial, retryState) {
   }
 }
 
+function invokeSealVerifier(options) {
+  const testOverride = process.env.CHD_EXPERIMENT_2702_TEST_SEALER_PATH;
+  if (
+    testOverride !== undefined &&
+    process.env.CHD_EXPERIMENT_2702_TEST_MODE !== "1"
+  ) {
+    fail("the C5 test sealer override is unavailable in production mode");
+  }
+  const sealerPath =
+    testOverride === undefined ? SEALER_PATH : resolve(testOverride);
+  const result = spawnSync(
+    process.execPath,
+    [
+      sealerPath,
+      "verify",
+      "--trial",
+      options.trial,
+      "--state-root",
+      stateRootFor(options),
+    ],
+    {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 300_000,
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+  if (result.error) {
+    fail(`verified bundle check failed: ${result.error.message}`);
+  }
+  if (result.status !== 0 || result.signal !== null) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    fail(`verified bundle check failed${detail ? `: ${detail}` : ""}`);
+  }
+  let response;
+  try {
+    response = JSON.parse(result.stdout.trim());
+  } catch {
+    fail("verified bundle check returned malformed output");
+  }
+  if (
+    response?.state !== "verified" ||
+    response?.trialId !== options.trial ||
+    !DIGEST_PATTERN.test(response?.bundleDigest ?? "")
+  ) {
+    fail("verified bundle check returned the wrong trial or bundle");
+  }
+}
+
 function validateCleanupReceipt(receipt, trial, registrations, retryState) {
   verifyReceipt(receipt, "Gate2702Cleanup");
   if (
@@ -2255,6 +2309,7 @@ function commandCleanup(plan, options) {
     const baseRegistrations = validateRegistrationFiles(trial, paths);
     retryState = readRetryRegistrationState(plan, trial, paths);
     registrations = [...baseRegistrations, ...retryState.registrations];
+    invokeSealVerifier(options);
     validateSeal(readJson(paths.seal), trial, retryState);
     const status = scanTrial(plan, trial, paths);
     if (status.state !== "terminal") {

@@ -137,6 +137,7 @@ function createFixture({
   const tools = join(root, "tools");
   const fakeGh = join(tools, "fake-gh.mjs");
   const fakeArm = join(tools, "fake-arm.mjs");
+  const fakeSealer = join(tools, "fake-sealer.mjs");
   const ghLog = join(root, "gh.jsonl");
   const armLog = join(root, "arms.jsonl");
   const armGate = join(root, "release-arms");
@@ -364,6 +365,18 @@ else process.exitCode = 2;
 printf '%s\n' '2.1.12 (Claude Code)'
 `,
   );
+  writeExecutable(
+    fakeSealer,
+    `#!/usr/bin/env node
+const argv = process.argv.slice(2);
+const trialId = argv[argv.indexOf('--trial') + 1];
+process.stdout.write(JSON.stringify({
+  state: 'verified',
+  trialId,
+  bundleDigest: 'sha256:' + 'a'.repeat(64),
+}) + '\\n');
+`,
+  );
 
   const env = {
     ...process.env,
@@ -371,6 +384,7 @@ printf '%s\n' '2.1.12 (Claude Code)'
     CHD_EXPERIMENT_2702: "1",
     CHD_EXPERIMENT_2702_TEST_MODE: "1",
     CHD_EXPERIMENT_2702_TEST_SIDEKICK_VERSION: "0.3.3",
+    CHD_EXPERIMENT_2702_TEST_SEALER_PATH: fakeSealer,
     CHD_EXPERIMENT_2702_TEST_PROCESS_GRACE_MS: "15000",
     CHD_EXPERIMENT_2702_TEST_ARM_COMMAND_JSON: JSON.stringify([
       process.execPath,
