@@ -177,10 +177,82 @@ reflect an earlier arm's delivery, not the O+S structure.
 
 ## Execution checklist (owned by #2098)
 
-- [ ] Pin model id + reasoning effort; record both here.
-- [ ] Draw and record the randomization seed; freeze the task→arm map + per-arm order.
-- [ ] Re-verify every assigned task is still eligible; resolve the two provisional O+S slots (or substitute same-size); record substitutions.
-- [ ] Run **C0**, **S**, **O** each in its own fresh 5h window (#2095 owner agent defs ready before **O**).
-- [ ] Run **O+S** last in its own window.
-- [ ] Confirm each session is arm-tagged so #2096's segment view ingests it.
-- [ ] Hand the per-arm metric table to #2099 for analysis + winner encoding.
+- [x] Pin model id + reasoning effort; record both here. — **`claude-opus-4-8[1m]`,
+      default effort**, forced by the repo `.claude/settings.json` pin at session
+      start (see the model note in Results below).
+- [x] Draw and record the randomization seed; freeze the task→arm map + per-arm order.
+      — seed `v060-block-m-2026-07-16`; see Assignments and Results.
+- [x] Re-verify every assigned task is still eligible; resolve the two provisional
+      O+S slots (or substitute same-size); record substitutions. — Block-M
+      `{#2682, #2488, #2489, #2444}` used as assigned; no substitutions.
+- [x] Run **C0**, **S**, **O** each in its own fresh 5h window. — merged
+      2026-07-17 as PRs #2748 / #2750 / #2751.
+- [x] Run **O+S** last in its own window. — merged 2026-07-17 as PR #2754.
+- [x] Confirm each session is arm-tagged so #2096's segment view ingests it. — all
+      four ingested and rendered in the ExperimentSegment view (see Results; two
+      dashboard bugs had to be fixed first).
+- [x] Hand the per-arm metric table to #2099 for analysis + winner encoding. — see
+      Results & verdict below.
+
+## Results & close-out (2026-07-21, #2098 / #2099)
+
+**Executed assignment.** Seed `v060-block-m-2026-07-16`; `sha256(seed)` bytes →
+Fisher-Yates over ascending task ids `[2444, 2488, 2489, 2682]`, zipped to the
+canonical arm order `(c0, s, o, os)` → **C0→#2682, S→#2488, O→#2489, O+S→#2444**.
+All four arms ran as tagged sessions (`exp-<arm>/…` branch + `exp-arm: <id>`
+kickoff marker) and merged 2026-07-17: C0 #2748, S #2750, O #2751, O+S #2754.
+**n = 1 per arm** (a single size block, Block-M) → **directional only**, per the
+small-n rule; no winner is encoded.
+
+**Model — this is an Opus 4.8 trial, NOT a Fable 5 trial.** The pre-registration
+froze `claude-fable-5`, but the repo `.claude/settings.json` model pin
+(`claude-opus-4-8[1m]`, #1517) overrides the saved user default at session start,
+so every arm actually ran **Opus 4.8**. Confirmed from the ingested transcripts:
+S and O are 100 % Opus by output tokens; O+S is Opus in the router session and in
+all **10** of its owner/specialist subagents (the agent-def `model: sonnet` field
+did not take — the settings pin governs). Model is therefore held ~constant across
+arms; the arm-structure contrast stands.
+
+**Deviations (recorded honestly).**
+- **C0 session reuse contaminates C0's cost/wall-clock.** C0's transcript
+  (`c6a52bad`) was resumed *after* the arm for unrelated work: its span is ~26.5 h
+  and ~45 % of its output tokens are Fable 5, with ~340 M cache-read tokens. Only
+  the arm portion (task #2682, Opus) is the treatment; C0's aggregate cost, tokens,
+  and wall-clock are **not comparable** and are excluded from the effect read.
+- **O+S ran `/model` first** (`claude-opus-4-8`), a protocol deviation (the
+  playbook said do not) — harmless to the held-constant model, but it displaced the
+  arm marker off the first entry and initially hid O+S from the segment view (fixed
+  — see below).
+
+**Per-arm figures** (as ingested by the dashboard; directional, not a winner
+signal — the four tasks differ in size and only within-block, n=1, comparison is
+even attempted):
+
+| Arm | Task | Session | Model | Msgs | Ctx-history tok | Output tok | Notes |
+|---|---|---|---|---|---|---|---|
+| C0 control | #2682 | `c6a52bad` | Opus (+Fable reuse tail) | — | — | — | metrics **excluded**: post-arm session reuse |
+| S specialists | #2488 | `5532c4dc` | Opus | 137 | 6.2 M | 109 K | solo + lens review swarm |
+| O owners | #2489 | `0369812e` | Opus | 26 | 0.2 M | 22 K | smallest; owners inline, no subagents spawned |
+| O+S combo | #2444 | `ceadfce7` | Opus | 276 | 34.8 M | 326 K | owners + 10 lens/owner subagents; ran last (order-biased) |
+
+**Verdict (#2099): no clear winner; do not encode a structure recommendation.**
+With n = 1 per arm, four heterogeneous tasks, C0's metrics excluded for reuse
+contamination, O+S order-biased (always last) and the O arm's session
+suspiciously small, no effect clears the pre-registered "trust only ≳2× robust
+gaps" bar. The honest result is a **directional null / methodology receipt**, not
+a component-owner win. Per #1264's "then recommend it" commitment, **nothing is
+encoded as a recs detector or playbook.** A larger, size-matched, un-reused,
+counterbalanced run (≥ Block-S refill; C0 and O+S order rotated) would be needed
+before any structure claim.
+
+**Load-bearing side outcome — the trial's own instrumentation was broken and is
+now fixed.** Producing this receipt required unfreezing the dashboard, which had
+been silently serving 4-day-stale data on this busy multi-agent host:
+- `resolveStatGatedCache` froze the boot/slice/digest/search caches (#2874/#2867,
+  PR #2875);
+- `rebuildDatasetCache` froze the monolith `/api/dataset.json` the view fetches
+  (#2882, PR #2884) — the actual blocker for arm ingestion;
+- `classifyArm` missed the O+S marker behind its leading `/model` command
+  (#2887, PR #2889).
+After these fixes the ExperimentSegment view shows **all four arms** — satisfying
+#2098's acceptance — and the dataset tracks the live corpus again.
