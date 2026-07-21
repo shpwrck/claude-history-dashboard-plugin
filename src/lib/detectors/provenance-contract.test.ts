@@ -465,6 +465,47 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now,
     };
   },
+  'cost.local-downroute': () => {
+    // A FRESH, fully-corroborated Tier B `pass` row → a proven down-route rec
+    // with cited calibration-report provenance.
+    const now = Date.parse('2026-06-20T00:00:00.000Z');
+    return {
+      now,
+      input: baseInput({
+        localCalibration: {
+          version: 1,
+          kind: 'tier-b-calibration',
+          thresholds: { minSamples: 5, minAgreement: 0.8 },
+          asOf: '2026-06-15',
+          classes: [
+            {
+              taskClass: 'mechanical',
+              localModel: 'local/qwen2.5-coder',
+              baselineModel: 'claude-opus-4-8',
+              nRecords: 8,
+              nSamples: 8,
+              blindJudgeAgreement: 0.9,
+              costLocal: 0.001,
+              costClaude: 0.12,
+              savingsUsdPerTask: 0.119,
+              latency: { localMeanMs: 1200, claudeMeanMs: 3400 },
+              parity: {
+                held: true,
+                source: 'judge-scores',
+                baselineMeanScore: 8.1,
+                candidateMeanScore: 8.0,
+                delta: -0.1,
+                rationale: null,
+              },
+              asOf: '2026-06-15',
+              verdict: 'pass',
+              reasons: ['quality parity held (delta -0.1)'],
+            },
+          ],
+        } as unknown as RecommendationInput['localCalibration'],
+      }),
+    };
+  },
   'maintenance.memory-hygiene': () => ({
     input: baseInput({ memoryStores: memoryHygieneStore() }),
     now: 0,

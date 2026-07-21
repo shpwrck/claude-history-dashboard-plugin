@@ -58,6 +58,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'workflow.session-restart-retype',
   'security.secrets-at-rest',
   'cost.edit-format-churn',
+  'cost.local-downroute',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */

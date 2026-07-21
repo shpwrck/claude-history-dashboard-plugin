@@ -34,6 +34,13 @@ export const CLIENT_ABSENT_ENGINE_FIELDS: readonly string[] = [
   'docHygieneArtifact',
   'modelPinSavings',
   'organizationIdentity',
+  // #2318: the Tier B calibration report is a server-only ingest artifact
+  // (readLocalCalibration) the raw browser ViewData envelope does not carry, so it
+  // is normalized out here — but the server RESTORES it on the typed surface=global
+  // path (assembleScopedRecommendationResult) exactly like semanticIntent, so the
+  // cost.local-downroute rec renders on Home/Recommendations/Ask Claude, not only
+  // on /recs. Absent only on the reclaim-compass surface and SPA/upload datasets.
+  'localCalibration',
   // #2574/#2647: server-only AND opt-in (CHD_SEMANTIC_INTENT=1), so the raw
   // browser ViewData envelope cannot supply it. The #2719 global typed server
   // surface explicitly restores `dataset.semanticIntent` after this mapping;

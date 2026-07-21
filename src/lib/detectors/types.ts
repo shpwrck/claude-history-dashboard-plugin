@@ -58,6 +58,7 @@ import type {
 import type { ModelEvalSummary } from '../model-eval-ingest';
 import type { SemanticIntentSummary } from '../semantic-intent';
 import type { GitOutcome } from '../parse-git-outcome';
+import type { LocalCalibrationReport } from '../parse-local-calibration';
 import type { DocGraph } from '../parse-docs';
 import type { DocsMapArtifact } from '../parse-docs-map';
 import type { DocIssueSnapshot } from '../doc-issue-snapshot';
@@ -759,6 +760,28 @@ export interface RecommendationInput {
    *    `RecProvenance.asOf`/`stale` path (#1102), so #2044 reuses one rule.
    */
   gitOutcomes?: GitOutcome[] | null;
+  /**
+   * Tier B per-task-class local-model CALIBRATION report (#2318, epic #2177),
+   * dataset key `localCalibration`. A non-signal aggregate (like `modelEvalSummary`
+   * / `shadowCalls`): the shadow-calls calibration report
+   * (`~/.claude/shadow-calls/lib/calibration-report.mjs`, #2317) read at ingest by
+   * `readLocalCalibration` in `scripts/ingest.mjs` — a pure local JSON read, no
+   * query-time shell-out and zero network/Anthropic egress. Per class it carries
+   * `nSamples`, `blindJudgeAgreement`, `costLocal`/`costClaude`, `savingsUsdPerTask`,
+   * a quality `parity` gate, an `asOf`, and a `verdict` in `pass | fail | insufficient`.
+   *
+   * RECEIPT-GATED, NOT MECHANISM-SHIPPED. The `cost.local-downroute` detector
+   * publishes a proven down-route claim ONLY for a `pass` row (blind-judge
+   * agreement cleared AND the quality floor held); a `fail` row renders an
+   * HONEST-NULL ("tested N samples, local model did not hold quality … as of
+   * <date>"), never a present-tense win; an `insufficient` row (thin evidence,
+   * "we do not know yet") is suppressed — never read as a failure. A row older than
+   * `LOCAL_CALIBRATION_FRESHNESS_DAYS` is demoted "as of <date>" via
+   * `detectors/provenance.ts`, exactly like the hosted down-model proof (#2142).
+   * Server-only: `undefined`/`null` on the SPA/upload dataset and when no report is
+   * present, so the detector emits nothing there.
+   */
+  localCalibration?: LocalCalibrationReport | null;
   /**
    * SCIP-style graph over the repository's own Markdown docs (#2257, epic
    * #2256), dataset key `docGraph`. A non-signal aggregate (like `memoryStores`

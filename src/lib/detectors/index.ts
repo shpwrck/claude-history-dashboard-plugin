@@ -52,6 +52,7 @@ import { detector as disproportionateThinking } from './cost/disproportionate-th
 import { detector as modelEvalRoutingGap } from './cost/model-eval-routing-gap';
 import { detector as outputVerbosity } from './cost/output-verbosity';
 import { detector as batchableWorkload } from './cost/batchable-workload';
+import { detector as localDownroute } from './cost/local-downroute';
 import { detector as editFormatChurn } from './cost/edit-format-churn';
 export {
   editFormatChurnCacheValidity,
@@ -368,6 +369,15 @@ export const DETECTORS: Detector[] = [
   // automation-share exposes only a separate non-booked same-token ceiling. The
   // batch-route shadow-calls axis is a separate meta follow-on.
   batchableWorkload,
+
+  // ── #2318 (epic #2177) — per-class local down-route, gated on Tier B calibration ─
+  // Reads the ingest-time `localCalibration` report (shadow-calls
+  // calibration-report.mjs, #2317). Publishes a PROVEN down-route rec only for a
+  // `pass` row (blind-judge agreement cleared AND quality parity held), an
+  // HONEST-NULL for a `fail` row, and nothing for an `insufficient` row or when no
+  // report exists — receipt-gated, never mechanism-shipped. Stale passes demote
+  // "as of <date>" via provenance.ts. Dark on the SPA/upload dataset.
+  localDownroute,
 
   // ── #2507 (epic #2199) — format-dominated Edit/MultiEdit churn (proxy) ─────
   // Counts hunks whose ordered nonblank lines are identical after per-line trim

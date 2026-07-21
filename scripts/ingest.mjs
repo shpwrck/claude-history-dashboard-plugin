@@ -438,6 +438,14 @@ function mergeStatsCaches(caches) {
 const SHADOW_CALLS_LEDGER =
   (!SCOPED_INGEST && process.env.CLAUDE_SHADOW_CALLS_LEDGER) ||
   join(CLAUDE, 'shadow-calls', 'ledger.jsonl');
+// Tier B per-task-class calibration report (#2318, epic #2177): the JSON output of
+// `~/.claude/shadow-calls/lib/calibration-report.mjs` (#2317), read as a plain local
+// file at ingest (see readLocalCalibration) — NO query-time shell-out and zero
+// network/Anthropic egress. Override is GLOBAL-ingest only, mirroring the ledger:
+// a scoped enterprise ingest derives its own root's report.
+const LOCAL_CALIBRATION_REPORT =
+  (!SCOPED_INGEST && process.env.CLAUDE_SHADOW_CALLS_CALIBRATION) ||
+  join(CLAUDE, 'shadow-calls', 'calibration-report.json');
 // Proof-batch receipts (#2151): finalized PROOF receipts appended by
 // scripts/proof-batch.mjs, one JSON line each. Repo-tracked (data/, not
 // ~/.claude) — the runner writes them next to the preregistration they answer.
@@ -667,6 +675,12 @@ const { buildMemoryStores } = await import(join(LIB, 'parse-memories.ts'));
 // HERE, server-side, in readGitOutcomes() below.
 const { buildGitOutcomes, gitOutcomesReposFromEnv } = await import(
   join(LIB, 'parse-git-outcome.ts')
+);
+// Tier B per-task-class calibration report (#2318). The parser is PURE (takes the
+// JSON text, no fs/network), safe under the zero-deps runtime import guard; the
+// local file read happens HERE, server-side, in readLocalCalibration() below.
+const { parseLocalCalibration } = await import(
+  join(LIB, 'parse-local-calibration.ts')
 );
 // Repo doc graph (#2257, epic #2256). buildDocGraph walks this repo's own
 // Markdown (root *.md + docs/**) into a SCIP-style node/edge graph the
@@ -2022,6 +2036,20 @@ function readGitOutcomes(sessions) {
     );
   } catch {
     return [];
+  }
+}
+
+// Read the Tier B calibration report (#2318, epic #2177): a plain local JSON read
+// of the shadow-calls calibration-report artifact, validated by the pure
+// parseLocalCalibration. Absent/unreadable/malformed ⇒ null, so the default path
+// (no report) ships no `localCalibration` key and the cost.local-downroute detector
+// stays silent. No query-time shell-out — this never runs the producer.
+function readLocalCalibration() {
+  if (!existsSync(LOCAL_CALIBRATION_REPORT)) return null;
+  try {
+    return parseLocalCalibration(readFileSync(LOCAL_CALIBRATION_REPORT, 'utf8'));
+  } catch {
+    return null;
   }
 }
 // #539 artifact parsers (server-only; each uses node:fs to walk a top-level
@@ -3764,6 +3792,14 @@ export function ingest() {
   // must be in the gate or new experiments would never invalidate the recs cache.
   hash.update('shadow-calls\n');
   hashFileSig(SHADOW_CALLS_LEDGER, hash);
+  // Tier B calibration report (#2318): read fresh per assemble, so a new/changed
+  // report must invalidate the recs cache or cost.local-downroute serves stale.
+  // Guarded so the absent-file case keeps the hash input byte-identical to before
+  // (and the default deployment path unchanged).
+  if (existsSync(LOCAL_CALIBRATION_REPORT)) {
+    hash.update('local-calibration\n');
+    hashFileSig(LOCAL_CALIBRATION_REPORT, hash);
+  }
   // Proof receipts feed the shadow-calls (source, axis) cells (#2151): a new
   // receipt must invalidate the dataset cache or the cells serve stale. Guarded
   // so the absent-file case keeps the hash input byte-identical to before.
@@ -4458,6 +4494,8 @@ function assembleDatasetCore() {
   // Git delivery-outcome signal (#1757): opt-in `gh` fetch + pure classify.
   // Empty unless CHD_GIT_OUTCOMES names a repo, so the default path is unchanged.
   const gitOutcomes = readGitOutcomes(recSessions);
+  // Tier B calibration report (#2318): local JSON read; null when no report exists.
+  const localCalibration = readLocalCalibration();
   const signalInput = {};
   for (const s of SESSION_SIGNALS) {
     if (s.datasetKey) signalInput[s.datasetKey] = {
@@ -4521,6 +4559,7 @@ function assembleDatasetCore() {
     configBackups,
     externalGuidance,
     gitOutcomes,
+    localCalibration,
     docGraph,
     docsMap,
     docIssueSnapshot,
@@ -4582,6 +4621,7 @@ export function assembleDataset() {
     configBackups,
     externalGuidance,
     gitOutcomes,
+    localCalibration,
     docGraph,
     docsMap,
     docIssueSnapshot,
@@ -4621,6 +4661,7 @@ export function assembleDataset() {
       configBackups,
       externalGuidance,
       gitOutcomes,
+      localCalibration,
       docGraph,
       docsMap,
       docIssueSnapshot,
@@ -4725,6 +4766,12 @@ export function assembleDataset() {
     gitOutcomes,
     docGraph,
     docsMap,
+    // Tier B calibration report (#2318). OMITTED entirely when there is no report
+    // (server-only; SPA/upload; or absent), so the default serialized dataset — and
+    // its ETag/contentHash — stays byte-identical and the client observes an absent
+    // key, exactly like docIssueSnapshot below. When present, the report file is
+    // folded into the dataset-cache content hash so a change forces a fresh build.
+    ...(localCalibration ? { localCalibration } : {}),
     // Opt-in GitHub issue-state snapshot (#2710). The key is OMITTED entirely
     // when there is no complete snapshot (flag unset/invalid, credential
     // missing, incomplete, stale, or SPA/upload), so the default serialized
@@ -4804,6 +4851,10 @@ export function assembleRecommendationDataset() {
     configBackups: core.configBackups,
     externalGuidance: core.externalGuidance,
     gitOutcomes: core.gitOutcomes,
+    // Tier B calibration report (#2318): omit when null so the light dataset
+    // matches the full serialized dataset (both absent when there is no report),
+    // preserving light/full recs-field parity.
+    ...(core.localCalibration ? { localCalibration: core.localCalibration } : {}),
     docGraph: core.docGraph,
     docsMap: core.docsMap,
     // Omit when null so the light dataset matches the full serialized dataset
@@ -4910,6 +4961,11 @@ function assembleRecommendationContext(options = {}) {
     // assembleDataset (opt-in `gh` fetch + pure classify). SIGNAL ONLY — no
     // detector reads it yet; empty unless CHD_GIT_OUTCOMES names a repo.
     gitOutcomes: dataset.gitOutcomes,
+    // Tier B calibration report (#2318): non-signal aggregate read at ingest
+    // (readLocalCalibration). The dataset is authoritative — when there is no
+    // report the key is absent, which is current truth, so the cost.local-downroute
+    // detector simply emits nothing. Null-coalesced so an absent key reads as null.
+    localCalibration: dataset.localCalibration ?? null,
     // Repo doc graph (#2257): non-signal aggregate, the seam the
     // doc-hygiene detector (epic #2256) reads. Built fresh from a LOCAL walk of
     // this repo's own Markdown; empty on the SPA/upload dataset or when docs are
@@ -5049,6 +5105,12 @@ export function assembleScopedRecommendationResult(
       // the canonical server engine instead of silently regressing to the
       // unenriched card.
       semanticIntent: dataset.semanticIntent,
+      // #2318: same as semanticIntent — the raw browser ViewData envelope does not
+      // carry this server-only ingest artifact (recommendationViewsFromViewData is
+      // an explicit field list), but Home/Recommendations/Ask Claude now consume
+      // THIS typed server surface (#2718/#2719). Restore it here so the
+      // cost.local-downroute rec renders on the human UI too, not only on /recs.
+      localCalibration: dataset.localCalibration ?? null,
       // The browser dataset has no organization identity, but enterprise server
       // requests do. Preserve that server-side enrichment on the global typed
       // surface so owner/reviewer alias grouping and provenance match the legacy

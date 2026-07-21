@@ -76,18 +76,30 @@ const ARM_MARKER_RE = /^\s*exp-arm:\s*(c0|os|o|s)\s*$/im;
  * Classify a session into its experiment arm from the two locally-parsed
  * signals: the git branch prefix (checked first) then the opener marker. Returns
  * `null` when neither carries an arm tag (i.e. the session is not enrolled).
+ *
+ * `opener` is the single session-opener string; `openers` is an ordered list of
+ * the session's first few prompt displays. Prefer `openers`: a session that
+ * begins with a slash-command (e.g. `/model`) emits harness command-wrapper
+ * entries with the earliest timestamps, so the arm-tagged kickoff prompt is not
+ * entry 0 and the marker would be missed if only the strict earliest opener were
+ * checked (#2887). The anchored `ARM_MARKER_RE` still requires a standalone
+ * marker line, so scanning a few early prompts stays a safe, non-substring match.
  */
 export function classifyArm(input: {
   gitBranch?: string | null;
   opener?: string | null;
+  openers?: readonly (string | null | undefined)[];
 }): ArmId | null {
   const branch = input.gitBranch ?? '';
   for (const [prefix, arm] of Object.entries(ARM_BRANCH_PREFIXES)) {
     if (branch.startsWith(prefix)) return arm;
   }
 
-  const marker = ARM_MARKER_RE.exec(input.opener ?? '');
-  if (marker) return marker[1].toLowerCase() as ArmId;
+  const candidates = input.openers ?? [input.opener];
+  for (const candidate of candidates) {
+    const marker = ARM_MARKER_RE.exec(candidate ?? '');
+    if (marker) return marker[1].toLowerCase() as ArmId;
+  }
 
   return null;
 }

@@ -54,6 +54,26 @@ describe('experiment-arms', () => {
     ).toBe('c0');
   });
 
+  it('finds the marker in a later opener when a slash-command precedes it (#2887)', () => {
+    // A session that ran `/model` first: the harness command wrappers are the
+    // earliest entries, so the arm-tagged kickoff prompt is not opener 0.
+    expect(
+      classifyArm({
+        openers: [
+          '<command-name>/model</command-name>',
+          '<local-command-stdout>Set model to claude-opus-4-8</local-command-stdout>',
+          'exp-arm: os\n\nTrial session — arm O+S (combo)…',
+        ],
+      })
+    ).toBe('os');
+    // No marker anywhere in the scanned openers stays unclassified.
+    expect(
+      classifyArm({ openers: ['<command-name>/help</command-name>', 'just work'] })
+    ).toBeNull();
+    // The single-`opener` form still works unchanged.
+    expect(classifyArm({ opener: 'exp-arm: s' })).toBe('s');
+  });
+
   it('keeps ARM_LABELS and ARM_BRANCH_PREFIXES in sync with ArmId', () => {
     const arms: ArmId[] = ['c0', 's', 'o', 'os'];
     for (const arm of arms) expect(ARM_LABELS[arm]).toBeTruthy();
