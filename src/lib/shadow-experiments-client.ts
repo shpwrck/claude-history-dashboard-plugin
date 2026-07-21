@@ -11,7 +11,7 @@
  * SPA boundary provable exactly like the main chokepoint.
  */
 import { serverFetch } from '@api-client';
-import type { ExperimentRow } from './shadow-experiments';
+import type { ExperimentRow, Gate2702Projection } from './shadow-experiments';
 
 /**
  * Wire shape of GET /api/shadow-experiments.json: the flat per-experiment row
@@ -30,6 +30,8 @@ export interface ShadowExperimentsResponse {
   limit: number;
   returned: number;
   rows: ExperimentRow[];
+  /** Verified, bounded C5 summaries; absent when no #2702 state root was found. */
+  gate2702?: Gate2702Projection;
 }
 
 const EMPTY: ShadowExperimentsResponse = {

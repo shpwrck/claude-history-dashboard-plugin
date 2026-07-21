@@ -23,6 +23,25 @@ import {
   type ExperimentProofStatus,
 } from './parse-shadow-calls';
 
+export {
+  DEFAULT_GATE_2702_MAX_EVALUATIONS,
+  DEFAULT_GATE_2702_MAX_ROWS,
+  projectGate2702C5,
+} from './gate-2702-shadow-projection';
+export type {
+  Gate2702CheckId,
+  Gate2702EvaluationOutcome,
+  Gate2702EvaluationProjection,
+  Gate2702GateId,
+  Gate2702JudgeState,
+  Gate2702ObjectiveCheck,
+  Gate2702Projection,
+  Gate2702ProjectionSource,
+  Gate2702RunProjection,
+  Gate2702TerminalClassification,
+  Gate2702TreatmentId,
+} from './gate-2702-shadow-projection';
+
 export interface ExperimentRow {
   /**
    * 1-based line number within the PARSED WINDOW — a stable row identity for

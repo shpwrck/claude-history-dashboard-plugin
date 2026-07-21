@@ -8,7 +8,7 @@
  * grep). The Shadow Calls view gates on `SERVER_AVAILABLE` anyway, so this is
  * never called on the SPA's live path.
  */
-import type { ExperimentRow } from './shadow-experiments';
+import type { ExperimentRow, Gate2702Projection } from './shadow-experiments';
 
 export interface ShadowExperimentsResponse {
   total: number;
@@ -21,6 +21,7 @@ export interface ShadowExperimentsResponse {
   limit: number;
   returned: number;
   rows: ExperimentRow[];
+  gate2702?: Gate2702Projection;
 }
 
 export async function fetchShadowExperiments(

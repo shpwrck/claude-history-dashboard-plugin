@@ -21,6 +21,10 @@ const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
 const REGISTER = './scripts/register-ts.mjs';
 const SERVER = 'scripts/server.mjs';
+const GATE_2702_DEFINITION_DIRECTORY =
+  'sha256-8fffa2337498bb06ee5eeb0ce234ba9c0c4af2fdd908fb3d88371c23d001f8ba';
+const UNSEALED_TRIAL = '22222222-2222-5222-8222-222222222222';
+const MALFORMED_TRIAL = '33333333-3333-5333-8333-333333333333';
 
 let failures = 0;
 async function check(label, fn) {
@@ -82,7 +86,7 @@ const LEDGER_LINES = [
   JSON.stringify({ ts: '2024-01-03T10:00:00.000Z', mode: 'replay-skip', axis: 'model' }),
 ];
 
-async function bootServer({ withLedger }) {
+async function bootServer({ withLedger, withC5Reconciliation = false }) {
   const port = await freePort();
   const claudeDir = await mkdtemp(join(tmpdir(), 'shadow-exp-claude-'));
   const distDir = await mkdtemp(join(tmpdir(), 'shadow-exp-dist-'));
@@ -96,6 +100,14 @@ async function bootServer({ withLedger }) {
   const ledgerPath = join(cacheDir, 'ledger.jsonl');
   if (withLedger) {
     await writeFile(ledgerPath, LEDGER_LINES.join('\n') + '\n');
+  }
+  const gate2702StateRoot = join(cacheDir, 'gate-2702');
+  if (withC5Reconciliation) {
+    const definitionRoot = join(gate2702StateRoot, GATE_2702_DEFINITION_DIRECTORY);
+    await mkdir(join(definitionRoot, UNSEALED_TRIAL), { recursive: true });
+    const malformedRoot = join(definitionRoot, MALFORMED_TRIAL);
+    await mkdir(join(malformedRoot, 'seal'), { recursive: true });
+    await writeFile(join(malformedRoot, 'seal', 'verified.json'), '{}\n');
   }
 
   const env = {
@@ -117,6 +129,7 @@ async function bootServer({ withLedger }) {
     CLAUDE_SHADOW_CALLS_LEDGER: withLedger
       ? ledgerPath
       : join(cacheDir, 'does-not-exist.jsonl'),
+    CHD_EXPERIMENT_2702_STATE_ROOT: gate2702StateRoot,
   };
 
   let stdout = '';
@@ -152,7 +165,7 @@ async function bootServer({ withLedger }) {
 
 // 1) Populated ledger: rows, dispositions, pagination, staleness.
 {
-  const srv = await bootServer({ withLedger: true });
+  const srv = await bootServer({ withLedger: true, withC5Reconciliation: true });
   try {
     const up = await waitUp(srv.base, srv.proc);
     await check('server came up (with ledger)', () => assert.equal(up, true, srv.getLogs()));
@@ -179,6 +192,38 @@ async function bootServer({ withLedger }) {
         assert.equal(evalRow.winner, 'shadow');
         assert.ok(Math.abs(evalRow.costDelta + 0.3) < 1e-9); // 0.1 − 0.4 (float-safe)
         assert.equal(evalRow.ts, '2024-01-01T10:00:00.000Z');
+      });
+      await check('legacy row fields stay unchanged when the C5 bridge is present', () => {
+        assert.deepEqual(Object.keys(body.rows[0]).sort(), [
+          'axis',
+          'costDelta',
+          'disposition',
+          'judgeBasis',
+          'line',
+          'mainCostUsd',
+          'mainTokens',
+          'mode',
+          'proofStatus',
+          'shadowCostUsd',
+          'shadowTokens',
+          'skipReason',
+          'source',
+          'task',
+          'tokenDelta',
+          'ts',
+          'variation',
+          'winner',
+        ]);
+      });
+      await check('adds bounded C5 reconciliation without mixing it into legacy rows', () => {
+        assert.deepEqual(body.gate2702.reconciliation, {
+          scanned: 2,
+          validated: 0,
+          unsealed: 1,
+          malformed: 1,
+        });
+        assert.equal(body.gate2702.total, 0);
+        assert.deepEqual(body.gate2702.rows, []);
       });
 
       const page = await fetch(`${srv.base}/api/shadow-experiments.json?limit=2&offset=1`);
@@ -227,6 +272,7 @@ async function bootServer({ withLedger }) {
         assert.equal(body.total, 0);
         assert.deepEqual(body.rows, []);
         assert.equal(body.ledgerTruncated, false);
+        assert.equal('gate2702' in body, false);
       });
       const post = await fetch(`${srv.base}/api/shadow-experiments.json`, { method: 'POST' });
       await check('non-GET returns 405', () => assert.equal(post.status, 405));

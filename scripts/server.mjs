@@ -173,6 +173,9 @@ const { evaluateExperiments } = await import(
 const { parseShadowCallRows } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'shadow-experiments.ts')
 );
+const { readGate2702ShadowProjection } = await import(
+  join(PROJECT_DIR, 'scripts', 'gate-2702', 'shadow-projection.mjs')
+);
 // Policy write-back core (#625) lives in src/lib/policy-writer.ts — the pure
 // validate/merge/dedupe steps + the backup/write contract for the one route
 // that mutates ~/.claude/settings.json. Imported dynamically (like the .ts
@@ -356,6 +359,8 @@ const SHADOW_CALLS_DIR = join(CLAUDE, 'shadow-calls');
 // overrides the path (tests / custom deploys).
 const SHADOW_CALLS_LEDGER =
   process.env.CLAUDE_SHADOW_CALLS_LEDGER || join(SHADOW_CALLS_DIR, 'ledger.jsonl');
+const GATE_2702_STATE_ROOT =
+  process.env.CHD_EXPERIMENT_2702_STATE_ROOT || join(SHADOW_CALLS_DIR, 'gate-2702');
 // Experiment-axis enrollment ledger (#2242): the append-only JSONL the
 // `/experiment-enroll` skill writes. Read live like the shadow-calls ledger;
 // CLAUDE_EXPERIMENT_LEDGER overrides the path (tests / custom deploys). The
@@ -9779,6 +9784,12 @@ function shadowLedgerPathFor(req) {
   return join(root, 'shadow-calls', 'ledger.jsonl');
 }
 
+function gate2702StateRootFor(req) {
+  const root = enterpriseRequestClaudeRoot(req);
+  if (root === CLAUDE) return GATE_2702_STATE_ROOT;
+  return join(root, 'shadow-calls', 'gate-2702');
+}
+
 function shadowLedgerSignature(ledgerPath) {
   try {
     const s = statSync(ledgerPath);
@@ -9796,6 +9807,7 @@ async function handleShadowExperimentsJson(req, res) {
   const limit = parseBoundedSearchInt(params, 'limit', 500, 1, 2000);
   const offset = parseBoundedSearchInt(params, 'offset', 0, 0, 1_000_000);
   const ledgerPath = shadowLedgerPathFor(req);
+  const gate2702StateRoot = gate2702StateRootFor(req);
 
   const { value: parsed, cache } = await resolveStatGatedCache({
     sourceSignature: () => shadowLedgerSignature(ledgerPath),
@@ -9823,6 +9835,10 @@ async function handleShadowExperimentsJson(req, res) {
   });
 
   const { result, ledgerTruncated } = parsed;
+  // Do not cache a “verified” projection behind marker metadata: #2822's full
+  // loader is what detects an in-place artifact tamper. Re-verify on each
+  // request so stale bytes can never outlive their validation.
+  const gate2702 = await readGate2702ShadowProjection({ stateRoot: gate2702StateRoot });
   // Newest-first pagination without copying/reversing the whole retained
   // array: index the requested page from the tail, then reverse just the page.
   const rows = result.rows;
@@ -9844,6 +9860,7 @@ async function handleShadowExperimentsJson(req, res) {
     limit,
     returned: page.length,
     rows: page,
+    ...(gate2702 ? { gate2702 } : {}),
   });
 }
 
