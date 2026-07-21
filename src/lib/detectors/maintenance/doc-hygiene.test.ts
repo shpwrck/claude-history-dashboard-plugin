@@ -17,6 +17,7 @@ import { isDocCategory } from '../../doc-contract';
 import type { RepoMapDataset, RepoMapProjectJoin } from '../../parse-repo-map-join';
 import type { RepoSymbol } from '../../repo-map/types';
 import type { DocHygieneArtifact } from '../../doc-hygiene-artifact';
+import type { DocIssueSnapshot, DocIssueState } from '../../doc-issue-snapshot';
 import { parseDocsMap } from '../../parse-docs-map';
 import type { DocsMapArtifact } from '../../parse-docs-map';
 
@@ -1573,5 +1574,213 @@ describe('maintenance.doc-hygiene — seeded declared categories are clean on th
       );
       expect(n.frontmatter['category'], `${n.path} declared matches derived`).toBe(n.category);
     }
+  });
+});
+
+// ── Issue-reference signals (#2711) ─────────────────────────────────────────
+
+/** An `issue-ref` edge to `#n`, mirroring how buildDocGraph records `issue:<n>`. */
+const issueRef = (from: string, n: number): DocEdge => ({
+  from,
+  to: `issue:${n}`,
+  kind: 'issue-ref',
+});
+
+/** The snapshot's "as of" instant; NOW so a same-day evaluation is fresh (age 0). */
+const ISSUE_ASOF = new Date(NOW).toISOString(); // 2026-07-16T00:00:00.000Z
+
+/** A complete, gate-shaped DocIssueSnapshot. The detector gate does not call the
+ *  strict schema validator, so `repo`/`fingerprint` are placeholders — only
+ *  `complete`, `asOf`, `refs`, and `records` drive the trust check. */
+function snapshot(over: Partial<DocIssueSnapshot> = {}): DocIssueSnapshot {
+  return {
+    repo: 'o/r',
+    refs: [],
+    records: [],
+    asOf: ISSUE_ASOF,
+    complete: true,
+    fingerprint: 'x',
+    ...over,
+  };
+}
+
+const issueRecord = (number: number, state: DocIssueState) => ({ number, state });
+
+/** `run()` forwarding a `docIssueSnapshot` (the only extra input #2711 reads). */
+function runWithIssues(
+  docGraph: DocGraph | null | undefined,
+  docIssueSnapshot: DocIssueSnapshot | null | undefined,
+  now = NOW
+) {
+  const input = {
+    docGraph,
+    repoMap: null,
+    docHygieneArtifact: null,
+    docsMap: null,
+    docIssueSnapshot,
+  } as unknown as RecommendationInput;
+  return detector.rule(input, now);
+}
+
+const draftOwner = (slug: string, issue: string) =>
+  node(slug, { path: `${slug}.md`, frontmatter: { status: 'draft', issue } });
+
+describe('maintenance.doc-hygiene — issue-reference signals (#2711)', () => {
+  it('flags a dangling-issue-ref when the fresh snapshot resolved the number to not-found', () => {
+    const g = graph([node('docs/a')], [issueRef('docs/a', 999)]);
+    const snap = snapshot({ refs: [999], records: [issueRecord(999, 'not-found')] });
+    const rec = runWithIssues(g, snap);
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.severity).toBe('warning'); // dead pointer is structural
+    const line = rec!.evidence![0];
+    expect(line).toContain('docs/a.md');
+    expect(line).toContain('#999');
+    expect(line).toContain('referenced issue no longer exists');
+    expect(line).toContain('as of 2026-07-16');
+    // Current-state signal recomputed live: no rec-level asOf demotion.
+    expect(rec!.provenance!.asOf).toBeUndefined();
+    expect(
+      rec!.provenance!.observations.some((o) => o.source === 'doc-issue-snapshot')
+    ).toBe(true);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('flags each nonexistent reference from the same doc distinctly (no item-dedup collapse)', () => {
+    const g = graph(
+      [node('docs/a')],
+      [issueRef('docs/a', 888), issueRef('docs/a', 999)]
+    );
+    const snap = snapshot({
+      refs: [888, 999],
+      records: [issueRecord(888, 'not-found'), issueRecord(999, 'not-found')],
+    });
+    const rec = runWithIssues(g, snap);
+
+    expect(rec).not.toBeNull();
+    // Both dead refs from the SAME doc must survive the item dedup (they share
+    // path+signal, so `target` is what keeps them distinct).
+    expect(rec!.affected).toBe(2);
+    const evidence = rec!.evidence!.join('\n');
+    expect(evidence).toContain('#888');
+    expect(evidence).toContain('#999');
+    const obs = rec!.provenance!.observations.find(
+      (o) => o.source === 'doc-issue-snapshot'
+    );
+    expect(obs!.value).toBe(2);
+  });
+
+  it('flags a closed-draft-owner when a draft doc owns a closed issue in frontmatter', () => {
+    const g = graph([draftOwner('docs/draft', '#123')], [issueRef('docs/draft', 123)]);
+    const snap = snapshot({ refs: [123], records: [issueRecord(123, 'closed')] });
+    const rec = runWithIssues(g, snap);
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.severity).toBe('info'); // advisory, not structural
+    const line = rec!.evidence![0];
+    expect(line).toContain('docs/draft.md');
+    expect(line).toContain('#123');
+    expect(line).toContain('draft document owns a closed issue');
+    expect(line).toContain('as of 2026-07-16');
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('stays silent on a historical prose #N that is closed with no frontmatter owner (both signals)', () => {
+    // dangling needs not-found (this is closed); owner needs frontmatter (absent).
+    const g = graph([node('docs/a')], [issueRef('docs/a', 123)]);
+    const snap = snapshot({ refs: [123], records: [issueRecord(123, 'closed')] });
+    expect(runWithIssues(g, snap)).toBeNull();
+  });
+
+  it('stays silent for a draft owner whose issue is still open', () => {
+    const g = graph([draftOwner('docs/draft', '#123')], [issueRef('docs/draft', 123)]);
+    const snap = snapshot({ refs: [123], records: [issueRecord(123, 'open')] });
+    expect(runWithIssues(g, snap)).toBeNull();
+  });
+
+  it('stays silent for malformed / non-exact draft-owner frontmatter even when the issue is closed', () => {
+    // `status` must be exactly `draft`: a capitalized status never owns, even
+    // with a matching gate and a genuinely closed issue.
+    const gCap = graph(
+      [node('docs/cap', { path: 'docs/cap.md', frontmatter: { status: 'Draft', issue: '#123' } })],
+      [issueRef('docs/cap', 123)]
+    );
+    expect(
+      runWithIssues(gCap, snapshot({ refs: [123], records: [issueRecord(123, 'closed')] }))
+    ).toBeNull();
+
+    // The owner must match /^#[1-9]\d*$/ exactly. Each of these is rejected by
+    // the grammar; an empty-ref snapshot makes the shared gate pass so ONLY the
+    // owner grammar is under test. ('' is the upstream result of an unquoted
+    // `issue: #123`, which YAML-comment-strips to empty.)
+    for (const issue of ['123', '#0', '#01', '#1, #2', '']) {
+      const g = graph([draftOwner('docs/x', issue)], []);
+      expect(runWithIssues(g, snapshot({ refs: [], records: [] })), issue).toBeNull();
+    }
+  });
+
+  it('stays silent when the snapshot is absent (null / undefined) even on a would-fire graph', () => {
+    const g = graph(
+      [node('docs/a'), draftOwner('docs/draft', '#123')],
+      [issueRef('docs/a', 999), issueRef('docs/draft', 123)]
+    );
+    expect(runWithIssues(g, null)).toBeNull();
+    expect(runWithIssues(g, undefined)).toBeNull();
+  });
+
+  it('suppresses BOTH signals on any ref-set mismatch (graph superset OR snapshot superset)', () => {
+    // Graph references 123 (a would-fire closed owner) AND a prose 999 the
+    // snapshot never resolved → graph is a superset → suppress everything.
+    const gSuper = graph(
+      [draftOwner('docs/draft', '#123')],
+      [issueRef('docs/draft', 123), issueRef('docs/draft', 999)]
+    );
+    expect(
+      runWithIssues(gSuper, snapshot({ refs: [123], records: [issueRecord(123, 'closed')] }))
+    ).toBeNull();
+
+    // Snapshot carries an extra 456 the graph never references → snapshot is a
+    // superset → suppress, even though 123 is a genuine not-found dangling ref.
+    const gSub = graph([node('docs/a')], [issueRef('docs/a', 123)]);
+    expect(
+      runWithIssues(
+        gSub,
+        snapshot({
+          refs: [123, 456],
+          records: [issueRecord(123, 'not-found'), issueRecord(456, 'open')],
+        })
+      )
+    ).toBeNull();
+  });
+
+  it('fires at exactly asOf+24h (inclusive) and suppresses one millisecond later', () => {
+    const g = graph([node('docs/a')], [issueRef('docs/a', 999)]);
+    const snap = snapshot({ refs: [999], records: [issueRecord(999, 'not-found')] });
+    const asOfMs = Date.parse(snap.asOf);
+    const twentyFourH = 24 * 60 * 60 * 1000;
+    expect(runWithIssues(g, snap, asOfMs + twentyFourH)).not.toBeNull();
+    expect(runWithIssues(g, snap, asOfMs + twentyFourH + 1)).toBeNull();
+  });
+
+  it('treats a closed record (e.g. a merged PR normalized to closed) as a closed-draft-owner', () => {
+    // #2711 reads only the normalized state enum — a MERGED PR that the snapshot
+    // producer normalized to `closed` fires identically to a closed issue.
+    const g = graph([draftOwner('docs/pr', '#123')], [issueRef('docs/pr', 123)]);
+    const snap = snapshot({ refs: [123], records: [issueRecord(123, 'closed')] });
+    const rec = runWithIssues(g, snap);
+    expect(rec).not.toBeNull();
+    expect(rec!.evidence![0]).toContain('draft document owns a closed issue');
+  });
+
+  it('is recommend-only and adds dated manual-review action copy when #2711 items fire', () => {
+    const g = graph([node('docs/a')], [issueRef('docs/a', 999)]);
+    const snap = snapshot({ refs: [999], records: [issueRecord(999, 'not-found')] });
+    const rec = runWithIssues(g, snap);
+    expect(rec).not.toBeNull();
+    expect(rec!.fix).toBeUndefined();
+    expect(rec!.action).toContain('manually re-verify the reference');
+    expect(rec!.action).toContain('as of 2026-07-16');
   });
 });

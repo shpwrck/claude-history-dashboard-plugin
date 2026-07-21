@@ -238,6 +238,54 @@ tree without imposing corpus-wide coverage: `category: doc` on this file,
 audit` on `docs/audits/2026-07-portable-signal-inventory.md` — each matches its
 directory, so all three are silent.
 
+## Lifecycle-owner contract (#2711)
+
+Two more recommend-only signals close a gap the doc graph alone cannot prove:
+whether a `#N` a document references still *exists*, and whether a draft that
+declares it *owns* an issue has outlived that issue. Neither is answerable from
+local artifacts — issue state lives on GitHub — so both are gated behind the
+OPT-IN, freshness-bounded issue-state snapshot (`input.docIssueSnapshot`, #2710)
+and are silent whenever the snapshot is absent (the default, zero-network path).
+
+- **`dangling-issue-ref` (structural).** An `issue-ref` edge to a `#N` the
+  snapshot resolved to an explicit `not-found`. A `not-found` is only ever an
+  explicit null resolution against a complete, error-free response — never
+  inferred from a missing record — so a flagged reference genuinely points at a
+  nonexistent issue. Fires off the graph edges, so a body-prose reference counts.
+- **`closed-draft-owner` (advisory / info).** A document whose frontmatter
+  declares `status: draft` (exact, lowercase) AND owns a single issue in
+  `issue:` matching `/^#[1-9]\d*$/` whose snapshot state is `closed`. This reads
+  frontmatter ONLY — never the edges — so a draft that merely *mentions* a
+  closed issue in its prose stays silent. `closed` also covers a merged PR,
+  which the snapshot producer normalizes to `closed`.
+
+**The two-field frontmatter grammar** is enforced upstream in
+`parseFrontmatter` (`parse-docs.ts`), which now gives `status:` and `issue:` the
+same top-level-only, inline-comment-aware, quote-stripping treatment `category:`
+already had. Only an unindented, top-level occurrence is retained (nested
+`metadata.status` never leaks up), and the YAML comment rule is load-bearing for
+`issue:`: an **unquoted** `issue: #123` is a YAML comment and strips to empty
+(so the owner check never matches it), while a **quoted** `issue: "#123"`
+survives to the exact `#123` the detector needs. That entanglement is deliberate
+— it forces authors to declare ownership unambiguously.
+
+**The shared snapshot gate** is computed ONCE and governs BOTH signals: the
+snapshot must be present, `complete`, still usable at the injected evaluation
+`now` (`isDocIssueSnapshotUsable`, `<= 24h`, inclusive), and its resolved ref
+set must EXACTLY equal the graph's current `issue-ref` numbers
+(`canonicalRefSet` on both, element-wise). A subset OR superset mismatch — the
+snapshot describing a different ref set than the graph now has — suppresses BOTH
+signals rather than risk a stale verdict. Like the declared-freshness contract,
+the verdict recomputes live, so the evidence embeds an explicit "as of <date>"
+in its wording instead of a rec-level `provenance.asOf`, and never asserts the
+reference is currently gone — only that the snapshot resolved it so as of that
+date. Both signals are recommend-only (no `fix`): a dead or outlived pointer
+needs a human to re-verify and update or remove it.
+
+The pure logic lives in `doc-hygiene.ts` (`issueSnapshotGate`,
+`scanDanglingIssueRefs`, `scanClosedDraftOwners`), reusing the browser-safe
+helpers from `doc-issue-snapshot.ts`.
+
 ## License note
 
 `zk` is GPL-3.0. Even if a later design invoked it as a host-side binary rather

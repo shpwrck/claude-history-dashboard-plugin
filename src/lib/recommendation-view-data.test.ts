@@ -51,6 +51,7 @@ function fullViewData(overrides: Partial<ViewData> = {}): ViewData {
     repoMap: null,
     docGraph: null,
     docsMap: null,
+    docIssueSnapshot: null,
     shadowCalls: null,
     memories: [],
     workflows: [],

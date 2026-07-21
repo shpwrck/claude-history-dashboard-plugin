@@ -214,6 +214,65 @@ describe('extractIssueRefs (#NNNN)', () => {
   it('returns [] when there are no refs', () => {
     expect(extractIssueRefs('no issues here')).toEqual([]);
   });
+
+  it('skips a #NNN inside a fenced code block (e.g. a hex colour) (#2871)', () => {
+    const md = [
+      'See #2257 in prose.',
+      '```css',
+      '.a { color: #123; background: #456456; }',
+      '```',
+      'And #2258 after.',
+    ].join('\n');
+    expect(extractIssueRefs(md)).toEqual([2257, 2258]);
+  });
+
+  it('skips a #NNN inside an inline code span (#2871)', () => {
+    expect(
+      extractIssueRefs('the token `#999` is code, but #123 is a real ref')
+    ).toEqual([123]);
+  });
+
+  it('handles ~~~ fences and an unterminated fence conservatively (#2871)', () => {
+    expect(
+      extractIssueRefs(['x #1 y', '~~~', '#2', '~~~', '#3'].join('\n'))
+    ).toEqual([1, 3]);
+    // An unterminated fence swallows the remainder (as with heading extraction).
+    expect(extractIssueRefs(['#1', '```', '#2', '#3'].join('\n'))).toEqual([1]);
+  });
+
+  it('honours GFM fence length + closing rules (nested / trailing-text fences) (#2871)', () => {
+    // A nested ```-block inside a ````-block does not close it early.
+    expect(
+      extractIssueRefs(
+        ['````markdown', '```css', '.x { color: #789; }', '```', '````', '#900'].join(
+          '\n'
+        )
+      )
+    ).toEqual([900]);
+    // A closing fence carrying trailing text does not close the block.
+    expect(
+      extractIssueRefs(
+        [
+          '```css',
+          '.foo { color: #111; }',
+          '``` end-of-block',
+          '.bar { color: #222; }',
+          '```',
+          '#333',
+        ].join('\n')
+      )
+    ).toEqual([333]);
+    // A shorter closer leaves a longer fence open (both in-block #N stay code).
+    expect(extractIssueRefs(['~~~~', '#301', '~~~', '#302'].join('\n'))).toEqual(
+      []
+    );
+  });
+
+  it('accepts only canonical positive decimals within the safe-integer range (#2871)', () => {
+    // #0 and leading-zero forms are rejected; a >= 2^53 token is rejected — the
+    // same grammar the #2711 consumer enforces.
+    expect(extractIssueRefs('#0 #007 #12 #99999999999999999999')).toEqual([12]);
+  });
 });
 
 describe('extractSrcRefs (src/lib/...)', () => {
@@ -287,6 +346,40 @@ describe('parseFrontmatter (present + absent)', () => {
     expect(unquoted['category']).toBe('adr');
     expect(quoted['category']).toBe('audit');
     expect(hashInsideQuotes['category']).toBe('audit # draft');
+  });
+
+  // ── Lifecycle-owner fields status/issue (#2711) — same top-level-only,
+  //    inline-comment-aware treatment as category ────────────────────────────
+
+  it('does not promote a nested-only status or issue declaration to the top level', () => {
+    const content =
+      `---\nmetadata:\n  status: draft\n  issue: "#123"\n---\n\n# Nested lifecycle metadata\n`;
+    const { frontmatter } = parseFrontmatter(content);
+
+    expect(frontmatter['status']).toBeUndefined();
+    expect(frontmatter['issue']).toBeUndefined();
+  });
+
+  it('keeps a top-level status/issue when a later nested mapping repeats the key', () => {
+    const content =
+      `---\nstatus: draft\nissue: "#123"\nmetadata:\n  status: closed\n  issue: "#999"\n  owner: docs\n---\n\n# Draft\n`;
+    const { frontmatter } = parseFrontmatter(content);
+
+    expect(frontmatter['status']).toBe('draft');
+    expect(frontmatter['issue']).toBe('#123');
+    // Existing flat-leaf behavior remains available for non-contract fields.
+    expect(frontmatter['owner']).toBe('docs');
+  });
+
+  it('strips an unquoted issue value to empty (YAML comment) but keeps a quoted hash', () => {
+    // An unquoted `#123` is a YAML comment: the value strips to empty, so the
+    // detector's `/^#[1-9]\\d*$/` owner check never matches it (silent).
+    const unquoted = parseFrontmatter(`---\nissue: #123\n---\n`).frontmatter;
+    // A quoted hash survives, giving the detector the exact `#123` it needs.
+    const quoted = parseFrontmatter(`---\nissue: "#123"\n---\n`).frontmatter;
+
+    expect(unquoted['issue']).toBe('');
+    expect(quoted['issue']).toBe('#123');
   });
 });
 

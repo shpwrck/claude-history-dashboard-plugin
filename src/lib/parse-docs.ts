@@ -168,6 +168,8 @@ export interface BuildDocGraphOptions {
 const FRONTMATTER_RE = /^\uFEFF?---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/;
 const FRONTMATTER_LINE_RE = /^\s*([A-Za-z0-9_.$-]+):\s*(.+)$/;
 const TOP_LEVEL_CATEGORY_LINE_RE = /^category:\s*(.*)$/;
+const TOP_LEVEL_STATUS_LINE_RE = /^status:\s*(.*)$/;
+const TOP_LEVEL_ISSUE_LINE_RE = /^issue:\s*(.*)$/;
 
 function stripQuotes(s: string): string {
   const t = s.trim();
@@ -220,9 +222,13 @@ function stripYamlInlineComment(s: string): string {
  * with no `---` fenced frontmatter yields `{ frontmatter: {}, body: content }`.
  * Frontmatter is parsed line-by-line into a flat `key -> value` map. Nested
  * keys are flattened to their leaf key, last-wins, except for the product
- * contract's `category` field: only an unindented, top-level `category:` is
- * retained, including an explicitly empty value. That keeps nested metadata
- * from accidentally opting a document into declared-category checks without
+ * contract's `category`, `status`, and `issue` fields: only an unindented,
+ * top-level occurrence of each is retained, including an explicitly empty
+ * value, and each is run through the same inline-comment + quote stripping.
+ * That keeps nested metadata from accidentally opting a document into the
+ * declared-category (#2472) or lifecycle-owner (#2711) checks, and enforces the
+ * exact quoted-hash syntax those checks need (an unquoted `issue: #123` is a
+ * YAML comment and strips to empty; a quoted `issue: "#123"` survives), without
  * dragging in a YAML dependency.
  */
 export function parseFrontmatter(content: string): {
@@ -239,10 +245,20 @@ export function parseFrontmatter(content: string): {
       frontmatter.category = stripQuotes(stripYamlInlineComment(category[1]));
       continue;
     }
+    const status = line.match(TOP_LEVEL_STATUS_LINE_RE);
+    if (status) {
+      frontmatter.status = stripQuotes(stripYamlInlineComment(status[1]));
+      continue;
+    }
+    const issue = line.match(TOP_LEVEL_ISSUE_LINE_RE);
+    if (issue) {
+      frontmatter.issue = stripQuotes(stripYamlInlineComment(issue[1]));
+      continue;
+    }
     const mm = line.match(FRONTMATTER_LINE_RE);
     if (!mm) continue;
     const key = mm[1].trim();
-    if (key === 'category') continue;
+    if (key === 'category' || key === 'status' || key === 'issue') continue;
     frontmatter[key] = stripQuotes(mm[2]);
   }
   return { frontmatter, body };
@@ -304,17 +320,69 @@ export function resolveDocLink(fromPath: string, target: string): string | null 
   return slugForPath(resolved);
 }
 
-/** `#NNNN` GitHub issue numbers, de-duplicated in first-seen order. */
+/**
+ * `#NNNN` GitHub issue numbers, de-duplicated in first-seen order.
+ *
+ * Lines inside fenced code blocks (``` / ~~~) and inline code spans
+ * (`` `...` ``) are skipped, so an incidental `#123` that is really a hex
+ * colour or a code token is not read as an issue reference — this is the one
+ * channel through which a `dangling-issue-ref` recommendation (#2711) could make
+ * a false product claim about a nonexistent issue (#2871). Genuine prose
+ * references (`fixes #123`, `(#123)`) are unaffected. Fences honour the GFM
+ * length/closing rules (a closing fence matches the opener's character, is at
+ * least as long, and carries no trailing text), so a nested or trailing-text
+ * fence does not close a block early and leak its `#N`. Residual (see #2871):
+ * a 4-space/tab-INDENTED code block is not modelled — precisely detecting one
+ * would risk dropping genuine refs in deeply-nested list items — so an
+ * incidental `#N` in an indented block can still leak.
+ *
+ * Only a canonical positive decimal within the safe-integer range is accepted
+ * (no `#0`, no leading zeros, no `>= 2^53` token). This is the SAME grammar the
+ * #2711 consumer (`issueNumberFromEdge`) enforces, so the producer can never
+ * emit an edge the consumer would reject and skew the exact-ref-set gate.
+ */
 export function extractIssueRefs(content: string): number[] {
   const out: number[] = [];
   const seen = new Set<number>();
   const re = /(?<![\w&])#(\d+)\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(content))) {
-    const n = Number(m[1]);
-    if (!seen.has(n)) {
-      seen.add(n);
-      out.push(n);
+  let fence: { char: string; len: number } | null = null;
+  for (const raw of content.split('\n')) {
+    const line = raw.trimEnd();
+    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence !== null) {
+      // Inside a fenced block, only a closing fence of the SAME character, at
+      // least as long as the opener, with nothing but whitespace after it, ends
+      // the block (GFM). A shorter run, a different marker, or trailing text is
+      // code content — so a nested ``` inside a ```` block, or a `` ``` end ``
+      // line, does not close early and leak the block's `#N`.
+      if (
+        fenceMatch &&
+        fenceMatch[1][0] === fence.char &&
+        fenceMatch[1].length >= fence.len &&
+        fenceMatch[2].trim() === ''
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fenceMatch) {
+      // Opening fence — an info string after the marker (```css) is allowed.
+      fence = { char: fenceMatch[1][0], len: fenceMatch[1].length };
+      continue;
+    }
+    // Blank out inline code spans so a `#123` inside backticks is not scanned.
+    const scan = line.replace(/`+[^`]*`+/g, ' ');
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(scan))) {
+      const digits = m[1];
+      if (!/^[1-9][0-9]*$/.test(digits)) continue;
+      const n = Number(digits);
+      if (!Number.isSafeInteger(n)) continue;
+      if (!seen.has(n)) {
+        seen.add(n);
+        out.push(n);
+      }
     }
   }
   return out;

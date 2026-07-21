@@ -73,9 +73,24 @@
  * the evidence cites both and asserts neither). A missing declaration is neutral
  * and a matching one is silent, so the corpus is not forced to declare anything.
  *
+ * #2711 adds two issue-reference signals gated on the OPT-IN, freshness-bounded
+ * GitHub issue-state snapshot (#2710, `input.docIssueSnapshot`): `dangling-issue-ref`
+ * (an `issue-ref` edge to a `#N` the snapshot resolved to an explicit `not-found`)
+ * and `closed-draft-owner` (a doc whose frontmatter declares `status: draft` and
+ * owns a `#N` in `issue:` whose snapshot state is `closed` — a merged PR
+ * normalizes to `closed` too). Both are gated by ONE shared trust check computed
+ * once: a present, `complete`, still-usable (<=24h at the injected `now`) snapshot
+ * whose resolved ref set EXACTLY equals the graph's current `issue-ref` numbers
+ * (any subset OR superset mismatch suppresses BOTH). Like declared-freshness, the
+ * verdict recomputes live, so it embeds an explicit "as of <date>" in its wording
+ * rather than demoting via a rec-level asOf, and never asserts the reference is
+ * currently gone — only that the snapshot resolved it so as of that date. The
+ * owner signal reads frontmatter ONLY, never the edges, so body prose stays silent.
+ *
  * Reads `input.docGraph` (built by `buildDocGraph` in `parse-docs.ts`, #2257),
  * `input.repoMap` for signal 3 and the #2489 repo-map-backed pair,
- * `input.docsMap` for the #2489 declared-map signals, and
+ * `input.docsMap` for the #2489 declared-map signals,
+ * `input.docIssueSnapshot` for the #2711 issue-reference pair, and
  * `input.docHygieneArtifact` for the host checkers. Recommend-only: the output
  * is advisory and never edits or deletes a doc. The link/reference/orphan/
  * docs-map signals are current commit/filesystem state, so they need no
@@ -85,7 +100,7 @@
  * provenance-level demotion, and never asserts the content itself is wrong or
  * currently stale.
  *
- * Issues: #2258, #2487, #2488, #2489, #2472 (epic #2256 — doc artifact hygiene)
+ * Issues: #2258, #2487, #2488, #2489, #2472, #2711 (epic #2256 — doc artifact hygiene)
  */
 
 import type {
@@ -98,6 +113,12 @@ import type {
 import type { DocFrontmatter, DocGraph, DocNode } from '../../parse-docs';
 import { DOC_CATEGORIES, isDocCategory } from '../../doc-contract';
 import type { DocCategory } from '../../doc-contract';
+import type { DocIssueSnapshot, DocIssueState } from '../../doc-issue-snapshot';
+import {
+  isDocIssueSnapshotUsable,
+  docIssueStateByNumber,
+  canonicalRefSet,
+} from '../../doc-issue-snapshot';
 import type { RepoMapDataset, RepoMapProjectJoin } from '../../parse-repo-map-join';
 import { DOC_GIT_TIMES_MIN_TIME_MS } from '../../doc-git-times';
 import type { DocsMapArtifact } from '../../parse-docs-map';
@@ -119,7 +140,9 @@ export type DocHygieneSignal =
   | 'docs-map-unreferenced-source'
   | 'docs-map-missing-symbol'
   | 'declared-category-mismatch'
-  | 'declared-category-invalid';
+  | 'declared-category-invalid'
+  | 'dangling-issue-ref'
+  | 'closed-draft-owner';
 
 /** One flagged doc-hygiene item: which doc, which signal, what to do. */
 export interface DocHygieneItem {
@@ -135,6 +158,7 @@ export interface DocHygieneItem {
     | 'doc-graph'
     | 'doc-graph.freshness'
     | 'doc-graph.category'
+    | 'doc-graph.issue-ref'
     | 'lychee.local-links'
     | 'agents-lint.context-refs'
     | 'docs-map';
@@ -155,6 +179,12 @@ export interface DocHygieneItem {
    * evidence that cites both sides without asserting which one is authoritative.
    */
   category?: { declared: string; derived: DocCategory };
+  /**
+   * Set only on a `dangling-issue-ref` / `closed-draft-owner` item (#2711): the
+   * referenced issue number, its snapshot-resolved state, and the snapshot's
+   * `YYYY-MM-DD` as-of date embedded in the evidence wording.
+   */
+  issueRef?: { number: number; state: DocIssueState; asOf: string };
 }
 
 /** Short label per signal for evidence rows. */
@@ -171,6 +201,8 @@ const SIGNAL_LABEL: Record<DocHygieneSignal, string> = {
   'docs-map-missing-symbol': 'declared source symbol no longer exists',
   'declared-category-mismatch': 'declared category does not match its location',
   'declared-category-invalid': 'declared category is not a recognized value',
+  'dangling-issue-ref': 'referenced issue no longer exists',
+  'closed-draft-owner': 'draft document owns a closed issue',
 };
 
 /** Signals that are structural breakage (dead pointers), not just sprawl. */
@@ -182,6 +214,9 @@ const STRUCTURAL: ReadonlySet<DocHygieneSignal> = new Set([
   'docs-map-missing-document',
   'docs-map-missing-source',
   'docs-map-missing-symbol',
+  // A reference to a nonexistent issue is a dead pointer; the closed-draft-owner
+  // signal is advisory (a draft that outlived its issue) and stays info-level.
+  'dangling-issue-ref',
 ]);
 
 // ── Declared-freshness contract (#2488) ────────────────────────────────────
@@ -400,6 +435,117 @@ function scanDeclaredCategory(graph: DocGraph): DocHygieneItem[] {
         category: { declared, derived: node.category },
       });
     }
+  }
+  return items;
+}
+
+// ── Issue-reference contract (#2711) ────────────────────────────────────────
+//
+// Two signals gated on the OPT-IN issue-state snapshot (#2710). Both are
+// recommend-only and share ONE trust check: the snapshot must be present,
+// complete, still usable at the injected `now` (<=24h), and its resolved ref
+// set must EXACTLY equal the graph's current `issue-ref` numbers (a subset OR a
+// superset mismatch means the snapshot no longer describes exactly this graph,
+// so BOTH signals suppress). No `fix` — the pointer needs a human.
+
+/** The frontmatter `issue:` owner grammar the closed-draft-owner signal accepts. */
+const DRAFT_ISSUE_OWNER_RE = /^#[1-9]\d*$/;
+
+/** Parse `issue:<n>` (an `issue-ref` edge target) to its positive integer, or null. */
+function issueNumberFromEdge(to: string): number | null {
+  const raw = to.startsWith('issue:') ? to.slice('issue:'.length) : to;
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/**
+ * The single shared trust gate for BOTH #2711 signals. Returns the
+ * number→state map when the snapshot may be trusted for exactly this graph, or
+ * `null` (suppress both) when it is absent, incomplete, stale at `now`, or its
+ * ref set does not EXACTLY match the graph's current `issue-ref` numbers. Uses
+ * the injected `now` — never `Date.now()` — so the verdict is deterministic.
+ */
+function issueSnapshotGate(
+  graph: DocGraph,
+  snapshot: DocIssueSnapshot | null | undefined,
+  now: number
+): Map<number, DocIssueState> | null {
+  if (!snapshot || snapshot.complete !== true) return null;
+  if (!isDocIssueSnapshotUsable(snapshot, now)) return null;
+  const graphRefs = canonicalRefSet(
+    graph.edges
+      .filter((edge) => edge.kind === 'issue-ref')
+      .map((edge) => issueNumberFromEdge(edge.to))
+      .filter((n): n is number => n !== null)
+  );
+  const snapshotRefs = canonicalRefSet(snapshot.refs);
+  if (graphRefs.length !== snapshotRefs.length) return null;
+  for (let i = 0; i < graphRefs.length; i += 1) {
+    if (graphRefs[i] !== snapshotRefs[i]) return null;
+  }
+  return docIssueStateByNumber(snapshot);
+}
+
+/**
+ * Signal (#2711): an `issue-ref` edge to a `#N` the snapshot resolved to an
+ * explicit `not-found`. Iterates the graph edges (a body-prose or frontmatter
+ * `#N` both qualify — the reference is dead either way); the path comes from the
+ * slug→path map the caller already built.
+ */
+function scanDanglingIssueRefs(
+  graph: DocGraph,
+  stateByNumber: ReadonlyMap<number, DocIssueState>,
+  asOf: string,
+  pathBySlug: ReadonlyMap<string, string>
+): DocHygieneItem[] {
+  const items: DocHygieneItem[] = [];
+  for (const edge of graph.edges) {
+    if (edge.kind !== 'issue-ref') continue;
+    const n = issueNumberFromEdge(edge.to);
+    if (n === null) continue;
+    if (stateByNumber.get(n) !== 'not-found') continue;
+    const fromPath = pathBySlug.get(edge.from) ?? edge.from;
+    items.push({
+      path: fromPath,
+      signal: 'dangling-issue-ref',
+      // `target` keeps two distinct dead refs from the SAME doc apart in the
+      // item dedup (which keys on signal+path+target); without it the second
+      // ref collapses into the first and is silently under-counted.
+      target: `#${n}`,
+      origin: 'doc-graph.issue-ref',
+      issueRef: { number: n, state: 'not-found', asOf },
+    });
+  }
+  return items;
+}
+
+/**
+ * Signal (#2711): a doc whose frontmatter declares `status: draft` (exact) and
+ * owns a `#N` in `issue:` (exact `/^#[1-9]\d*$/`) whose snapshot state is
+ * `closed`. Reads frontmatter ONLY — never the edges — so a doc that merely
+ * mentions a closed issue in its body prose stays silent. (`closed` also covers
+ * a merged PR, which the snapshot normalizes to `closed`.)
+ */
+function scanClosedDraftOwners(
+  graph: DocGraph,
+  stateByNumber: ReadonlyMap<number, DocIssueState>,
+  asOf: string
+): DocHygieneItem[] {
+  const items: DocHygieneItem[] = [];
+  for (const node of graph.nodes) {
+    if (node.frontmatter['status'] !== 'draft') continue;
+    const match = DRAFT_ISSUE_OWNER_RE.exec(node.frontmatter['issue'] ?? '');
+    if (!match) continue;
+    const n = Number(match[0].slice(1));
+    if (stateByNumber.get(n) !== 'closed') continue;
+    items.push({
+      path: node.path,
+      signal: 'closed-draft-owner',
+      target: `#${n}`,
+      origin: 'doc-graph.issue-ref',
+      issueRef: { number: n, state: 'closed', asOf },
+    });
   }
   return items;
 }
@@ -817,6 +963,13 @@ function evidenceLine(it: DocHygieneItem): string {
       `declared ${f.thresholdKey} threshold (${f.thresholdRaw}) as of ${f.asOf} → ${f.verdict}`
     );
   }
+  if (it.issueRef) {
+    // Recomputed live at `now`, so the wording carries an explicit "as of
+    // <date>" and never asserts the reference is currently gone — only that the
+    // snapshot resolved it so as of that date.
+    const r = it.issueRef;
+    return `${it.path} -> #${r.number} — ${SIGNAL_LABEL[it.signal]} (as of ${r.asOf})`;
+  }
   if (it.category) {
     const { declared, derived } = it.category;
     if (it.signal === 'declared-category-invalid') {
@@ -852,20 +1005,36 @@ function evidenceLine(it: DocHygieneItem): string {
 export const detector: Detector = {
   id: 'maintenance.doc-hygiene',
   category: 'maintenance',
-  dataDeps: ['docGraph', 'repoMap', 'docHygieneArtifact', 'docsMap'],
+  dataDeps: ['docGraph', 'repoMap', 'docHygieneArtifact', 'docsMap', 'docIssueSnapshot'],
   rule(input: RecommendationInput, now: number): Recommendation | null {
     const graph = input.docGraph;
     const artifactItems = scanArtifactFindings(input.docHygieneArtifact);
+    // The #2711 issue-reference pair recomputes its "as of" date live from the
+    // snapshot; kept in scope for the observation/action/inference wording.
+    const snapshot = input.docIssueSnapshot;
+    const issueSnapshotAsOf =
+      snapshot && Number.isFinite(Date.parse(snapshot.asOf))
+        ? isoDate(Date.parse(snapshot.asOf))
+        : null;
     let graphItems: DocHygieneItem[] = [];
     if (graph && graph.nodes.length > 0) {
       const pathBySlug = new Map(graph.nodes.map((n) => [n.slug, n.path]));
       const nodeSlugs = new Set(graph.nodes.map((n) => n.slug));
+      // ONE shared trust gate for both #2711 signals — computed once. A null
+      // gate (absent/incomplete/stale/ref-set-mismatch) suppresses BOTH.
+      const stateByNumber = issueSnapshotGate(graph, snapshot, now);
       graphItems = [
         ...scanBrokenLinks(graph, nodeSlugs, pathBySlug),
         ...scanOrphans(graph),
         ...scanDanglingSrcRefs(graph, input.repoMap, pathBySlug),
         ...scanDeclaredFreshness(graph, now),
         ...scanDeclaredCategory(graph),
+        ...(stateByNumber && issueSnapshotAsOf
+          ? scanDanglingIssueRefs(graph, stateByNumber, issueSnapshotAsOf, pathBySlug)
+          : []),
+        ...(stateByNumber && issueSnapshotAsOf
+          ? scanClosedDraftOwners(graph, stateByNumber, issueSnapshotAsOf)
+          : []),
         ...(input.docsMap ? scanDocsMapDrift(input.docsMap, graph, input.repoMap) : []),
       ];
     }
@@ -882,6 +1051,7 @@ export const detector: Detector = {
       'dangling-src-ref',
       'dangling-context-ref',
       'dangling-npm-script',
+      'dangling-issue-ref',
       'docs-map-missing-document',
       'docs-map-missing-source',
       'docs-map-missing-symbol',
@@ -889,6 +1059,7 @@ export const detector: Detector = {
       'stale-declared-freshness',
       'declared-category-mismatch',
       'declared-category-invalid',
+      'closed-draft-owner',
       'orphan',
     ];
     const breakdown = order
@@ -966,6 +1137,10 @@ export const detector: Detector = {
           item.signal === 'docs-map-missing-symbol'),
     ).length;
     const docsMapCount = docsMapGraphCount + docsMapRepoCount;
+    // #2711: the two issue-reference signals share one snapshot oracle.
+    const danglingIssueRefCount = counts['dangling-issue-ref'] ?? 0;
+    const closedDraftOwnerCount = counts['closed-draft-owner'] ?? 0;
+    const issueSnapshotCount = danglingIssueRefCount + closedDraftOwnerCount;
     const trackedDocs = Math.max(
       graph?.nodes.length ?? 0,
       input.docHygieneArtifact?.repo.markdownFiles ?? 0
@@ -1050,6 +1225,20 @@ export const detector: Detector = {
         value: docsMapRepoCount,
       });
     }
+    // #2711: the opt-in issue-state snapshot resolved a documentation issue
+    // reference to a nonexistent issue, or a draft doc's frontmatter owner to a
+    // closed issue. Both are gated on an exact ref-set match at `now`; cite the
+    // snapshot records plus the graph edge / frontmatter fields.
+    if (issueSnapshotCount > 0 && issueSnapshotAsOf) {
+      observations.push({
+        claim:
+          `${issueSnapshotCount} documentation issue reference(s) the opt-in issue-state snapshot resolved to a nonexistent issue or a draft-owned closed issue, as of ${issueSnapshotAsOf}`,
+        source: 'doc-issue-snapshot',
+        field:
+          'docIssueSnapshot.records[].{number,state} + docGraph.edges[kind=issue-ref].to + docGraph.nodes[].frontmatter[status|issue]',
+        value: issueSnapshotCount,
+      });
+    }
 
     const n = items.length;
     return {
@@ -1077,6 +1266,9 @@ export const detector: Detector = {
           : '') +
         (declaredCategoryInvalidCount > 0
           ? ` For an unrecognized \`category:\` value, replace it with a recognized category.`
+          : '') +
+        (issueSnapshotCount > 0 && issueSnapshotAsOf
+          ? ` For a documentation issue reference the snapshot resolved as nonexistent, or a \`status: draft\` doc that still owns a now-closed issue (as of ${issueSnapshotAsOf}), manually re-verify the reference and update or remove the stale pointer.`
           : ''),
       affected: n,
       // No honest dollar unit — score on minutes to review each flagged item.
@@ -1094,6 +1286,9 @@ export const detector: Detector = {
             : '') +
           (declaredCategoryCount > 0
             ? ` A declared-category item compares each document's opt-in \`category:\` frontmatter against its directory-derived category, citing both sides without asserting which is authoritative — a valid mismatch and an unrecognized value are distinct items with distinct fixes.`
+            : '') +
+          (issueSnapshotCount > 0 && issueSnapshotAsOf
+            ? ` Issue-reference verdicts compare each doc's \`issue-ref\` edge or \`status: draft\` frontmatter owner against the opt-in, freshness-bounded GitHub issue-state snapshot (as of ${issueSnapshotAsOf}), firing only on a present, complete, still-usable snapshot whose resolved ref set exactly matches the graph's; they never assert the reference is currently gone, only that the snapshot resolved it so as of that date.`
             : ''),
       },
     };
