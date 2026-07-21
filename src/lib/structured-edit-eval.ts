@@ -527,3 +527,119 @@ export function buildStructuredEditEvalResult(input: {
     totals: summarizeRuns(tasks),
   };
 }
+
+// ── Two-arm schema-constrained repair comparison (#2726) ──────────────────────
+// The report half of the structured-edit repair-lever eval. The generation half
+// (loopback endpoint, edit-DSL repair loop, deterministic apply) lives in
+// structured-edit-arm-eval.ts; the offline quality scoring reuses the existing
+// `scoreStructuredEdit` path. This module owns the shared record type + the pure
+// fold so a scripted-fixture run cannot be over-read as a live receipt.
+
+/** The two arms this eval compares. */
+export const STRUCTURED_EDIT_ARMS = ['free-form', 'constrained'] as const;
+export type StructuredEditArm = (typeof STRUCTURED_EDIT_ARMS)[number];
+
+/**
+ * Provenance of the endpoint that produced a comparison: `'scripted'` = an
+ * in-process synthetic fixture run (NOT a live receipt), `'live'` = a real
+ * local-model transport. Stamped into the record so #2138's confidence loop and
+ * this repo's publish-only-if-proven posture can never over-read a scripted
+ * fixture run as a live-model receipt. The committed/synthetic driver defaults
+ * to `'scripted'`.
+ */
+export type StructuredEditArmEndpointKind = 'scripted' | 'live';
+
+/**
+ * One task's two-arm outcome: whether each arm's produced file passed the
+ * deterministic quality gate (`verification_passed` from `scoreStructuredEdit`)
+ * and how many repair rounds the constrained arm spent (0 = first completion
+ * validated). This is the join of the offline quality receipt and the
+ * constrained arm's repair telemetry.
+ */
+export interface StructuredEditArmOutcome {
+  task_id: string;
+  task_class: TaskClass;
+  pass_free_form: boolean;
+  pass_constrained: boolean;
+  repair_rounds: number;
+}
+
+/** Per-class two-arm rollup: pass COUNTS per arm plus the repair-round histogram. */
+export interface StructuredEditArmClassComparison {
+  task_class: TaskClass;
+  n: number;
+  pass_free_form: number;
+  pass_constrained: number;
+  /**
+   * Maps a constrained-arm round count (string key) to how many samples in the
+   * class spent that many rounds. NOTE: the terminal bucket (`maxRepairRounds`)
+   * merges "passed after N repairs" and "failed, exhausted at N"; cross-reference
+   * `pass_constrained` to separate them.
+   */
+  repair_rounds_histogram: Record<string, number>;
+}
+
+/**
+ * The per-task-class two-arm comparison record consumed by #2138's confidence
+ * loop. `by_task_class` always carries all three {@link TASK_CLASSES} (n = 0 for
+ * an absent class) so a caller can partition without losing a class.
+ */
+export interface StructuredEditArmComparison {
+  schemaVersion: 1;
+  kind: 'structured-edit-arm-comparison';
+  source: 'model-eval';
+  /** Synthetic-vs-live provenance; see {@link StructuredEditArmEndpointKind}. */
+  endpointKind: StructuredEditArmEndpointKind;
+  /** The repair-round bound the constrained arm ran under. */
+  maxRepairRounds: number;
+  asOf: string;
+  n: number;
+  pass_free_form: number;
+  pass_constrained: number;
+  by_task_class: StructuredEditArmClassComparison[];
+  totals: Omit<StructuredEditArmClassComparison, 'task_class'>;
+}
+
+function summarizeArmOutcomes(
+  outcomes: readonly StructuredEditArmOutcome[]
+): Omit<StructuredEditArmClassComparison, 'task_class'> {
+  const repair_rounds_histogram: Record<string, number> = {};
+  let pass_free_form = 0;
+  let pass_constrained = 0;
+  for (const o of outcomes) {
+    if (o.pass_free_form) pass_free_form += 1;
+    if (o.pass_constrained) pass_constrained += 1;
+    const key = String(o.repair_rounds);
+    repair_rounds_histogram[key] = (repair_rounds_histogram[key] ?? 0) + 1;
+  }
+  return { n: outcomes.length, pass_free_form, pass_constrained, repair_rounds_histogram };
+}
+
+/**
+ * Fold per-task two-arm outcomes into the per-class comparison record. Pure and
+ * deterministic — the `asOf` and `endpointKind` are INJECTED (never read from
+ * the wall clock or defaulted here), so a fixture run is reproducible and its
+ * scripted provenance is explicit.
+ */
+export function buildStructuredEditArmComparison(
+  outcomes: readonly StructuredEditArmOutcome[],
+  meta: { asOf: string; maxRepairRounds: number; endpointKind: StructuredEditArmEndpointKind }
+): StructuredEditArmComparison {
+  const totals = summarizeArmOutcomes(outcomes);
+  return {
+    schemaVersion: 1,
+    kind: 'structured-edit-arm-comparison',
+    source: 'model-eval',
+    endpointKind: meta.endpointKind,
+    maxRepairRounds: meta.maxRepairRounds,
+    asOf: meta.asOf,
+    n: totals.n,
+    pass_free_form: totals.pass_free_form,
+    pass_constrained: totals.pass_constrained,
+    by_task_class: TASK_CLASSES.map((taskClass) => ({
+      task_class: taskClass,
+      ...summarizeArmOutcomes(outcomes.filter((o) => o.task_class === taskClass)),
+    })),
+    totals,
+  };
+}
