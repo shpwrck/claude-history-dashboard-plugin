@@ -9879,7 +9879,7 @@ function requiredTurn(value, label) {
 function requireZeroCost(row, label) {
 	if (row.costUsd !== 0 || Object.is(row.costUsd, -0)) fail$4(`${label} must have known zero cost`);
 }
-function normalizedCost(value) {
+function normalizeGate2702Cost(value) {
 	if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || Object.is(value, -0)) return null;
 	const normalized = Number(value.toFixed(12));
 	return Number.isFinite(normalized) && !Object.is(normalized, -0) ? normalized : null;
@@ -10081,7 +10081,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 			rowEvidence
 		};
 	}
-	const sidekickCostUsd = paidRows.every((row) => typeof row.costUsd === "number" && Number.isFinite(row.costUsd) && row.costUsd >= 0 && !Object.is(row.costUsd, -0)) ? normalizedCost(paidRows.reduce((total, row) => total + row.costUsd, 0)) : null;
+	const sidekickCostUsd = paidRows.every((row) => typeof row.costUsd === "number" && Number.isFinite(row.costUsd) && row.costUsd >= 0 && !Object.is(row.costUsd, -0)) ? normalizeGate2702Cost(paidRows.reduce((total, row) => total + row.costUsd, 0)) : null;
 	const costUnknownReasons = sidekickCostUsd === null ? ["sidekick-cost-unknown"] : [];
 	return {
 		sidekickCostUsd,
@@ -10136,7 +10136,7 @@ function deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) {
 		} catch {}
 		return untrustedSidekickValues("sidekick-ledger-malformed", ledger.entries);
 	})();
-	const allInCostUsd = worker.workerCostUsd === null || values.sidekickCostUsd === null ? null : normalizedCost(worker.workerCostUsd + values.sidekickCostUsd);
+	const allInCostUsd = worker.workerCostUsd === null || values.sidekickCostUsd === null ? null : normalizeGate2702Cost(worker.workerCostUsd + values.sidekickCostUsd);
 	const workerCostUnknownReasons = worker.workerCostUsd === null ? worker.unknownReasons.filter((reason) => reason !== "worker-session-id-unknown") : [];
 	const invalidAllInCost = worker.workerCostUsd !== null && values.sidekickCostUsd !== null && allInCostUsd === null;
 	const allInUnknownReasons = [...new Set([
@@ -13241,7 +13241,7 @@ function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
 		const stdoutEntry = byPath.get(`${prefix}/stdout.log`);
 		if (!stdoutEntry || workerSource?.contentDigest !== stdoutEntry.contentDigest || workerSource?.byteLength !== stdoutEntry.sizeBytes) fail$1("sealed accounting is not bound to its retained worker output");
 		const numericCost = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && !Object.is(value, -0);
-		if (accounting.allInCostUsd !== null && (!numericCost(accounting.workerCostUsd) || !numericCost(accounting.sidekickCostUsd) || !numericCost(accounting.allInCostUsd) || accounting.allInCostUsd !== accounting.workerCostUsd + accounting.sidekickCostUsd)) fail$1("sealed accounting all-in cost does not rederive");
+		if (accounting.allInCostUsd !== null && (!numericCost(accounting.workerCostUsd) || !numericCost(accounting.sidekickCostUsd) || !numericCost(accounting.allInCostUsd) || accounting.allInCostUsd !== normalizeGate2702Cost(accounting.workerCostUsd + accounting.sidekickCostUsd))) fail$1("sealed accounting all-in cost does not rederive");
 		if (accounting.bridgeEvidenceStatus === "eligible" && !numericCost(accounting.allInCostUsd)) fail$1("eligible sealed accounting has no finite all-in cost");
 		const sidekickSource = accounting.sourceEvidence?.sidekick;
 		let ledgerEntry = null;

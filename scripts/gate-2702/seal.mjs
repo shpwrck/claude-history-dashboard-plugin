@@ -38,7 +38,10 @@ import {
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { validateGate2702AccountingEvidence } from "./seal-accounting.mjs";
+import {
+  normalizeGate2702Cost,
+  validateGate2702AccountingEvidence,
+} from "./seal-accounting.mjs";
 import { validateGate2702ClassificationEvidence } from "./seal-classification.mjs";
 import { validateGate2702JudgeEvidence } from "./seal-judge.mjs";
 
@@ -2886,7 +2889,9 @@ function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
         !numericCost(accounting.sidekickCostUsd) ||
         !numericCost(accounting.allInCostUsd) ||
         accounting.allInCostUsd !==
-          accounting.workerCostUsd + accounting.sidekickCostUsd)
+          normalizeGate2702Cost(
+            accounting.workerCostUsd + accounting.sidekickCostUsd,
+          ))
     ) {
       fail("sealed accounting all-in cost does not rederive");
     }

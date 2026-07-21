@@ -171,7 +171,7 @@ function requireZeroCost(row, label) {
   }
 }
 
-function normalizedCost(value) {
+export function normalizeGate2702Cost(value) {
   if (
     typeof value !== "number" ||
     !Number.isFinite(value) ||
@@ -443,7 +443,9 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
       !Object.is(row.costUsd, -0),
   );
   const sidekickCostUsd = costsKnown
-    ? normalizedCost(paidRows.reduce((total, row) => total + row.costUsd, 0))
+    ? normalizeGate2702Cost(
+        paidRows.reduce((total, row) => total + row.costUsd, 0),
+      )
     : null;
   const costUnknownReasons =
     sidekickCostUsd === null ? ["sidekick-cost-unknown"] : [];
@@ -531,7 +533,9 @@ function deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) {
   const allInCostUsd =
     worker.workerCostUsd === null || values.sidekickCostUsd === null
       ? null
-      : normalizedCost(worker.workerCostUsd + values.sidekickCostUsd);
+      : normalizeGate2702Cost(
+          worker.workerCostUsd + values.sidekickCostUsd,
+        );
   const workerCostUnknownReasons =
     worker.workerCostUsd === null
       ? worker.unknownReasons.filter(

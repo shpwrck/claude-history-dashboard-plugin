@@ -1417,7 +1417,10 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
   return result;
 }
 
-function promoteSuccessfulSelectedPair(fixture) {
+function promoteSuccessfulSelectedPair(
+  fixture,
+  { treatmentWorkerCostUsd = 0.9, sidekickCostUsd = 0.2 } = {},
+) {
   const subject = SUBJECTS[0];
   const snapshot = readJson(
     join(fixture.trialRoot, "subjects", `issue-${subject}.json`),
@@ -1470,7 +1473,9 @@ function promoteSuccessfulSelectedPair(fixture) {
       is_error: false,
       session_id: sessionId,
       total_cost_usd:
-        arm.registration.treatmentId === "haiku-sonnet-sidekick" ? 0.9 : 1.4,
+        arm.registration.treatmentId === "haiku-sonnet-sidekick"
+          ? treatmentWorkerCostUsd
+          : 1.4,
       result: "bounded successful fixture result",
     };
     const workerBytes = Buffer.from(
@@ -1484,7 +1489,7 @@ function promoteSuccessfulSelectedPair(fixture) {
               model: "sync",
               trigger: "checkpoint",
               turn: 1,
-              costUsd: 0.2,
+              costUsd: sidekickCostUsd,
               shipped: true,
             })}\n`,
             "utf8",
@@ -2568,6 +2573,33 @@ test("a successful selected C5 pair emits strict canonical v1 Runs that verify",
     assert.deepEqual(JSON.parse(JSON.stringify(loaded.runs)), runs);
     assert.deepEqual(loaded.manifest, manifest);
     assert.equal(loaded.marker.bundleDigest, manifest.contentDigest);
+    assert.deepEqual(await verifyTrial(fixture.options), sealed);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fixture.cleanup();
+  }
+});
+
+test("normalized C5 currency seals when raw floating-point addition differs by machine epsilon", async () => {
+  const fixture = createFixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = fixture.home;
+  try {
+    const promoted = promoteSuccessfulSelectedPair(fixture, {
+      treatmentWorkerCostUsd: 0.9544985000000001,
+      sidekickCostUsd: 0.617274,
+    });
+    const accounting =
+      promoted.selectedByTreatment["haiku-sonnet-sidekick"].accounting;
+    assert.equal(accounting.allInCostUsd, 1.5717725);
+    assert.notEqual(
+      accounting.allInCostUsd,
+      accounting.workerCostUsd + accounting.sidekickCostUsd,
+    );
+
+    const sealed = await sealTrial(fixture.options, fixture.dependencies);
+    assert.equal(sealed.state, "verified");
     assert.deepEqual(await verifyTrial(fixture.options), sealed);
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
