@@ -386,14 +386,24 @@ present behavior.
 prose retained). Data: `promptAnalysis` (`src/lib/parse-prompt-analysis.ts`),
 `timelines`, `apiErrors`. Empty state: large inline `EmptyState`
 (`PromptAnalyzer.tsx`); filtered-empty aware.
-PARTIALLY RESOLVED #2366: a Contributing Sessions table drills each row to the
-Sessions view via the canonical `onOpenSession` handoff — a real improvement over
-the prior no-drill state. Residual (#2830): the table lists the top ten sessions
-by prompt-turn volume (`topPromptSessions`), whereas the aggregate coaching claim
-(low-specificity vs comparison follow-up gap + correlation) is computed by
-`buildCoachingSignal` over all `promptAnalysis` rows, so a drill from this
-volume-ranked subset cannot reproduce that aggregate claim. Per-trait rows also
-stay aggregate-only until the Sessions route owns prompt-trait filters.
+RESOLVED #2830 (over #2366): the Contributing Sessions table ranks/segments by
+the coaching proxy instead of prompt-turn volume. It draws the SAME per-session
+rows the aggregate claim is computed over (`buildPromptProxySamples`, consumed by
+both `buildCoachingSignal` and the table): primary sort is the proxy score
+(follow-up loops + API-error retries) the claim correlates against, then the
+low-specificity driver bucket, and prompt volume only as a secondary
+sort/annotation. Each row shows its low-specificity vs comparison bucket
+membership, follow-up turns, and the exact proxy score (so the rank — which the
+API-error component can drive — is reproducible from a visible column), and
+still drills to the Sessions view via the canonical `onOpenSession` handoff — so
+the sessions shown and drilled are the drivers that reproduce the surfaced
+aggregate coaching claim (evidence-class). Proxy ranking is gated on a gated
+coaching signal actually having fired: when none is in scope (no timelines, or
+too few samples to clear the claim gates) the table and its caption fall back to
+a volume-ranked, unclassified list rather than over-asserting a proxy rank or
+dropping the sessions a partial-timeline scope would otherwise show. Residual:
+per-trait rows stay aggregate-only until the Sessions route owns prompt-trait
+filters — this slice deliberately added no Sessions-view filter route.
 
 **shadow-calls** — Shadow A/B experiment ledger (epic #513). Data:
 `shadowCalls` (`src/lib/parse-shadow-calls.ts`, from
@@ -530,9 +540,10 @@ Each line is a follow-up-issue candidate (epic #2345). File paths above give
 the receipts.
 
 Status: every item below is accounted for — behavior fixed with its doc row
-updated, explicitly re-classed with rationale, or (item 7, `prompts`) partially
-resolved with the residual tracked as a follow-up issue (#2830) — and no
-`MISMATCH` marker remains anywhere in this document. Reconciled under #2363.
+updated, explicitly re-classed with rationale, or (item 7, `prompts`) resolved
+for the volume-ranking residual in #2830 with the narrower per-trait-filter
+residual left for the Sessions route — and no `MISMATCH` marker remains anywhere
+in this document. Reconciled under #2363.
 
 1. `home` — resolved in #2366; finding cards now preserve canonical scoped
    evidence filters.
@@ -557,11 +568,16 @@ resolved with the residual tracked as a follow-up issue (#2830) — and no
    enter clusters and validated per-cluster replay specs, and the deterministic
    JSON array has a copy handoff (execution remains external). Persisted and
    current-pass counts are explicitly separate populations.
-7. `prompts` — partially resolved in #2366 (adds a contributing-sessions table
-   with session drill-ins); residual tracked in #2830. The table is ranked by
-   prompt-turn volume, so a drill from it cannot reproduce the all-rows aggregate
-   coaching claim; per-trait rows also stay aggregate-only until the Sessions
-   route owns prompt-trait filters.
+7. `prompts` — volume-ranking residual resolved in #2830 (built on #2366's
+   contributing-sessions table with session drill-ins). The table now
+   ranks/segments by the coaching proxy — the same `buildPromptProxySamples`
+   rows `buildCoachingSignal` aggregates (proxy score = follow-up loops +
+   API-error retries, then the low-specificity driver bucket, with prompt volume
+   demoted to a secondary annotation) — and shows each row's low-specificity vs
+   comparison bucket membership and follow-up turns, so a drill from it
+   reproduces the all-rows aggregate coaching claim. Remaining residual:
+   per-trait rows stay aggregate-only until the Sessions route owns prompt-trait
+   filters (this slice deliberately added no Sessions-view filter route).
 8. `teams` — resolved in #2479; dropped-assignment rows now join to canonical
    task/session/PR context on exact task ID + subject (assignment agent / task
    owner only breaks a tie), drill a matched in-dataset session through
