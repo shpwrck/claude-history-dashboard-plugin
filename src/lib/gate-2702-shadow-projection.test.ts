@@ -93,6 +93,20 @@ function candidate(value: FixtureRun, attempt: 1 | 2 = 1) {
   };
 }
 
+function sealOnlyCandidate(subject: number, exclusion: string) {
+  return {
+    subject,
+    treatmentId: "haiku-solo",
+    attempt: 1,
+    status: "succeeded",
+    exclusion,
+  };
+}
+
+function judgeResult(subject: number, contentDigest = digest("a")) {
+  return { subject, contentDigest };
+}
+
 function verified(
   runs: FixtureRun[],
   candidates: Array<Record<string, unknown>>,
@@ -288,7 +302,7 @@ describe("projectGate2702C5 (#2834)", () => {
     ).toBe(kind);
   });
 
-  it("distinguishes sealed judge bindings from unavailable and not-evaluated exclusions", () => {
+  it("labels seal-only judge evidence without inventing a per-run result", () => {
     const candidates = [
       {
         subject: 2760,
@@ -328,12 +342,76 @@ describe("projectGate2702C5 (#2834)", () => {
     );
     expect(judgeState).toEqual(
       new Map([
-        [2760, "sealed-result"],
+        [2760, "not-evaluable"],
         [2719, "unavailable"],
-        [2713, "sealed-result"],
-        [2706, "not-evaluated"],
+        [2713, "subject-sealed-result"],
+        [2706, "not-available-in-run-summary"],
       ]),
     );
+    expect(
+      projected.rows.some(({ judgeState }) => judgeState === "exhausted"),
+    ).toBe(false);
+    expect(
+      projected.rows.some(({ judgeState }) => judgeState === "not-evaluated"),
+    ).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "not-evaluable candidate without a manifest judge result",
+      candidates: [sealOnlyCandidate(2760, "judge-quality-not-evaluable")],
+      judgeResults: [],
+    },
+    {
+      name: "judge-unavailable candidate with a manifest judge result",
+      candidates: [sealOnlyCandidate(2719, "selected-pair-judge-unavailable")],
+      judgeResults: [judgeResult(2719)],
+    },
+    {
+      name: "manifest judge subject absent from the candidates",
+      candidates: [
+        sealOnlyCandidate(2760, "unknown-all-in-cost:worker-cost-unknown"),
+      ],
+      judgeResults: [judgeResult(2719)],
+    },
+    {
+      name: "duplicate manifest judge subjects",
+      candidates: [
+        sealOnlyCandidate(2760, "unknown-all-in-cost:worker-cost-unknown"),
+      ],
+      judgeResults: [judgeResult(2760), judgeResult(2760, digest("b"))],
+    },
+    {
+      name: "unsupported manifest judge subject",
+      candidates: [
+        sealOnlyCandidate(2760, "unknown-all-in-cost:worker-cost-unknown"),
+      ],
+      judgeResults: [judgeResult(9999)],
+    },
+    {
+      name: "invalid manifest judge digest",
+      candidates: [
+        sealOnlyCandidate(2760, "unknown-all-in-cost:worker-cost-unknown"),
+      ],
+      judgeResults: [judgeResult(2760, "not-a-digest")],
+    },
+  ])("fails closed for $name", ({ candidates, judgeResults }) => {
+    const source = verified([], candidates);
+    if (source.state !== "verified") throw new Error("invalid test fixture");
+    source.manifest.judgeResults = judgeResults;
+
+    expect(projectGate2702C5([source])).toMatchObject({
+      total: 0,
+      rows: [],
+      evaluationTotal: 0,
+      evaluations: [],
+      reconciliation: {
+        scanned: 1,
+        validated: 0,
+        unsealed: 0,
+        malformed: 1,
+      },
+    });
   });
 
   it("excludes malformed/unsealed sources and surfaces the newest-row bound", () => {

@@ -67,7 +67,9 @@ export type Gate2702JudgeState =
   | "quality-loss"
   | "exhausted"
   | "unavailable"
-  | "sealed-result"
+  | "not-evaluable"
+  | "subject-sealed-result"
+  | "not-available-in-run-summary"
   | "not-evaluated";
 
 export interface Gate2702ObjectiveCheck {
@@ -441,6 +443,20 @@ function terminalClassification(
   return "failed";
 }
 
+function projectedJudgeState(
+  candidate: CandidateSummary,
+  run: RunSummary | null,
+  judgedSubjects: Set<number>,
+): Gate2702JudgeState {
+  if (run !== null) return run.judgeState;
+  if (candidate.exclusion === "judge-quality-not-evaluable")
+    return "not-evaluable";
+  if (candidate.exclusion === "selected-pair-judge-unavailable")
+    return "unavailable";
+  if (judgedSubjects.has(candidate.subject)) return "subject-sealed-result";
+  return "not-available-in-run-summary";
+}
+
 function sampleCounts(
   value: unknown,
 ): Array<{ treatmentId: Gate2702TreatmentId; n: number }> {
@@ -712,13 +728,7 @@ function projectVerified(
       finishedAt: run?.finishedAt ?? null,
       terminalClassification: terminalClassification(candidate, run),
       objectiveChecks: run?.objectiveChecks ?? [],
-      judgeState:
-        run?.judgeState ??
-        (judgedSubjects.has(candidate.subject)
-          ? "sealed-result"
-          : candidate.exclusion === "selected-pair-judge-unavailable"
-            ? "unavailable"
-            : "not-evaluated"),
+      judgeState: projectedJudgeState(candidate, run, judgedSubjects),
       wallTimeMs: run?.wallTimeMs ?? null,
       allInCostUsd: run?.allInCostUsd ?? null,
       sidekick: run?.sidekick ?? {
