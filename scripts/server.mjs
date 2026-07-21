@@ -2260,24 +2260,38 @@ async function rebuildDatasetCache(state, sig) {
       }
     }
 
-    // The source can move while ingest/assemble/compression is running. Commit
-    // only a candidate built under one stable source+snapshot state; retry once
-    // against the completed state, then fail without replacing last-good data.
+    // The source can move while ingest/assemble/compression is running. Prefer a
+    // candidate built under one stable source+snapshot state; if only the coarse
+    // signature moved, retry once against the completed state. The doc-issue trust
+    // state (the GitHub snapshot claims baked into the body) is the HARD gate and
+    // is never relaxed — we must never SWR-serve a body whose issue-state is stale.
     const completedSig = api.sourceSignature();
     const completedDocIssueState = currentDocIssueCacheState(api);
-    if (
-      completedSig === buildSig &&
+    const docIssueStable =
       docIssueCacheStatesEqual(buildDocIssueState, completedDocIssueState) &&
-      datasetCacheEntryMatchesDocIssueState(candidate, api)
-    ) {
+      datasetCacheEntryMatchesDocIssueState(candidate, api);
+    const sigStable = completedSig === buildSig;
+    // Commit a fully stable candidate; on the FINAL bounded attempt commit the
+    // freshest candidate even when only the coarse source signature moved. On a
+    // busy multi-agent host, concurrent writers keep bumping the scanned-dir
+    // mtimes every few seconds, so the signature never settles across two builds —
+    // throwing here froze /api/dataset.json's stale-while-revalidate cache on a
+    // days-old blob (#2882, follow-up to #2874). The candidate still corresponds to
+    // `stats.contentHash`, so persisting it stays sound. Mark a racy commit
+    // UNSETTLED (`lastSourceSig = null`) so the next request re-refreshes instead
+    // of skip-serving it, and let a later quiet build record the settled signature.
+    if (docIssueStable && (sigStable || attempt === 1)) {
       state.datasetCache = candidate;
       if (persist) api.saveDatasetCache(candidate, Date.now());
-      state.lastSourceSig = completedSig;
+      state.lastSourceSig = sigStable ? completedSig : null;
       return { stats, cached };
     }
 
     buildSig = completedSig;
   }
+  // Reached only when the doc-issue trust gate failed on the final attempt — the
+  // GitHub snapshot state moved under us, so serving or persisting the candidate
+  // would ship stale issue-state claims. Keep last-good rather than a wrong body.
   throw new Error(
     'Dataset source state changed across the bounded rebuild retry'
   );
