@@ -42,6 +42,31 @@ describe('fetchRecommendationSurface', () => {
     await expect(fetchRecommendationSurface(request)).rejects.toThrow('HTTP 503');
   });
 
+  it('preserves the optional snapshot validity boundary on a typed response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            recommendations: [],
+            domainCoverage: [],
+            validThrough: '2026-07-21T12:34:56.789Z',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+    );
+
+    await expect(fetchRecommendationSurface(request)).resolves.toEqual({
+      kind: 'ready',
+      result: {
+        recommendations: [],
+        domainCoverage: [],
+        validThrough: '2026-07-21T12:34:56.789Z',
+      },
+    });
+  });
+
   it.each([
     {},
     [],

@@ -9,8 +9,9 @@
  * prose.
  */
 
-import { existsSync, lstatSync, readdirSync } from "node:fs";
+import { lstatSync, opendirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const DEFINITION_DIRECTORY =
   "sha256-8fffa2337498bb06ee5eeb0ce234ba9c0c4af2fdd908fb3d88371c23d001f8ba";
@@ -31,6 +32,38 @@ function regularFile(path) {
   return metadata !== null && metadata.isFile() && !metadata.isSymbolicLink();
 }
 
+/**
+ * Read at most one entry beyond the producer contract. Overflow fails closed:
+ * returning an arbitrary filesystem-order prefix would let junk entries starve
+ * verified trials while still claiming the projected rows were complete/newest.
+ */
+function boundedTrialNames(path) {
+  let directory = null;
+  try {
+    directory = opendirSync(path);
+    const names = [];
+    while (names.length <= MAX_TRIAL_DIRECTORIES) {
+      const entry = directory.readSync();
+      if (entry === null) {
+        directory.closeSync();
+        directory = null;
+        return { state: "ok", names: names.sort() };
+      }
+      names.push(entry.name);
+    }
+    directory.closeSync();
+    directory = null;
+    return { state: "overflow", names: [] };
+  } catch {
+    try {
+      directory?.closeSync();
+    } catch {
+      // The directory is already unusable; the caller reports malformed state.
+    }
+    return { state: "malformed", names: [] };
+  }
+}
+
 async function projectionFunction(dependencies) {
   if (typeof dependencies?.projectGate2702C5 === "function") {
     return dependencies.projectGate2702C5;
@@ -47,9 +80,22 @@ async function evaluationLoader(dependencies) {
   if (typeof dependencies?.loadCurrentEvaluation === "function") {
     return dependencies.loadCurrentEvaluation;
   }
-  const module = await import("./evaluate.mjs");
+  const configuredBundle = process.env.CHD_GATE_2702_RUNTIME_VERIFIER;
+  const runtimeVerifierUrl = configuredBundle
+    ? pathToFileURL(resolve(configuredBundle)).href
+    : new URL("./runtime-verifier.bundle.mjs", import.meta.url).href;
+  let module;
+  try {
+    module = await import(runtimeVerifierUrl);
+  } catch (error) {
+    // Source checkouts do not carry generated artifacts. Production and an
+    // explicit test/deploy override must never fall back to the npm-dependent
+    // source graph that the zero-node_modules image cannot load.
+    if (process.env.NODE_ENV === "production" || configuredBundle) throw error;
+    module = await import("./evaluate.mjs");
+  }
   if (typeof module.loadCurrentEvaluation !== "function") {
-    throw new Error("#2823 loadCurrentEvaluation is unavailable");
+    throw new Error("#2823 runtime loadCurrentEvaluation is unavailable");
   }
   return module.loadCurrentEvaluation;
 }
@@ -69,30 +115,21 @@ export async function readGate2702ShadowProjection(
   }
   const resolvedStateRoot = resolve(stateRoot);
   const definitionRoot = join(resolvedStateRoot, DEFINITION_DIRECTORY);
-  if (!existsSync(definitionRoot)) return null;
-
   const rootMetadata = safeMetadata(definitionRoot);
+  if (rootMetadata === null) return null;
   const sources = [];
-  if (!rootMetadata?.isDirectory() || rootMetadata.isSymbolicLink()) {
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
     sources.push({ state: "malformed" });
   } else {
-    let entries;
-    try {
-      entries = readdirSync(definitionRoot).sort();
-    } catch {
-      entries = null;
-    }
-    if (entries === null) {
+    const discovery = boundedTrialNames(definitionRoot);
+    if (discovery.state === "malformed") {
       sources.push({ state: "malformed" });
-    } else if (entries.length > MAX_TRIAL_DIRECTORIES) {
-      // Do not select a lexicographic subset: UUID order says nothing about
-      // evaluation recency, so a partial scan could hide the newest verified
-      // trial. Fail the whole discovery set closed while preserving its exact
-      // source count without allocating one projection source per entry.
-      sources.push({ state: "malformed", count: entries.length });
+    } else if (discovery.state === "overflow") {
+      // Do not return a partial, filesystem-order-dependent view as complete.
+      sources.push({ state: "discovery-overflow" });
     } else {
       let loadCurrentEvaluation = null;
-      for (const name of entries) {
+      for (const name of discovery.names) {
         if (!UUID_PATTERN.test(name)) {
           sources.push({ state: "malformed" });
           continue;
@@ -104,11 +141,12 @@ export async function readGate2702ShadowProjection(
           continue;
         }
         const markerPath = join(trialRoot, "seal", "verified.json");
-        if (!existsSync(markerPath)) {
+        const markerMetadata = safeMetadata(markerPath);
+        if (markerMetadata === null) {
           sources.push({ state: "unsealed", trialId: name });
           continue;
         }
-        if (!regularFile(markerPath)) {
+        if (!markerMetadata.isFile() || markerMetadata.isSymbolicLink()) {
           sources.push({ state: "malformed", trialId: name });
           continue;
         }

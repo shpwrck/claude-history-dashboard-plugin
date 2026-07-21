@@ -87,6 +87,9 @@ import {
   readRejectedFindingIds,
   readCheckpointAnswerEfficacy,
   refreshReviewEvents,
+  refreshDocIssueSnapshotForServer,
+  docIssueSnapshotCacheStateForServer,
+  docIssueSnapshotCacheStateFromDataset,
 } from './ingest.mjs';
 import {
   readWorkflows,
@@ -97,7 +100,10 @@ import {
   WORKFLOW_FIELD_MAX_CHARS,
 } from './read-workflows.mjs';
 import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
-import { resolveStatGatedCache } from './lib/stat-gated-cache.mjs';
+import {
+  resolveStateBoundMemo,
+  resolveStatGatedCache,
+} from './lib/stat-gated-cache.mjs';
 import { readJsonlTailCappedSync } from './lib/host-producer.mjs';
 
 const PROJECT_DIR = join(fileURLToPath(import.meta.url), '..', '..');
@@ -1234,6 +1240,9 @@ const GLOBAL_INGEST_API = {
   readRejectedFindingIds,
   readCheckpointAnswerEfficacy,
   refreshReviewEvents,
+  refreshDocIssueSnapshotForServer,
+  docIssueSnapshotCacheStateForServer,
+  docIssueSnapshotCacheStateFromDataset,
 };
 
 function datasetState(apiPromise, key = 'global') {
@@ -1286,11 +1295,11 @@ function datasetState(apiPromise, key = 'global') {
     // the same content skip re-assembly entirely. Overwritten when contentHash
     // moves, so its memory cost is one dataset object bounded by the dataset's
     // own growth. null until the first recs build assembles.
-    assembledMemo: null, // { contentHash, dataset }
+    assembledMemo: null, // state-bound { key: contentHash, value: dataset, sourceState }
     // #2182: separate memo for the lighter recommendation dataset (recs-input
     // fields only), so the recs route doesn't build the full payload and doesn't
     // evict the full-dataset memo the digest/dataset routes reuse.
-    assembledRecoMemo: null, // { contentHash, hookConfigState, dataset }
+    assembledRecoMemo: null, // state-bound { key, value: dataset, sourceState }
   };
 }
 
@@ -1397,6 +1406,15 @@ async function refreshReviewEventsForIngest(ingestApi) {
   return ingestApi.refreshReviewEvents();
 }
 
+// Opt-in GitHub issue-state snapshot refresh (#2710). The ONLY doc-issue network
+// call: runs in the async preamble so the subsequent SYNC assembleDataset() read
+// sees a fresh cache. No-op when CHD_DOC_ISSUES is unset (default path) or while
+// the snapshot is still fresh (single-flight + 15m reuse gate live in ingest).
+async function refreshDocIssueSnapshotForIngest(ingestApi) {
+  if (typeof ingestApi.refreshDocIssueSnapshotForServer !== 'function') return null;
+  return ingestApi.refreshDocIssueSnapshotForServer();
+}
+
 // Shared ingest preamble for the dataset-bearing routes (#2076). Every one of
 // /api/dataset.json, /api/recommendations.json, /api/digest and /api/search
 // resolved the per-request dataset state, awaited its ingest API promise, and
@@ -1419,12 +1437,57 @@ async function loadIngestedDataset(req, { useCache = false } = {}) {
   const ingestState = enterpriseRequestDatasetState(req);
   const ingestApi = await ingestState.apiPromise;
   await refreshReviewEventsForIngest(ingestApi);
+  await refreshDocIssueSnapshotForIngest(ingestApi);
   if (!useCache) ingestApi.ingest();
   return { ingestState, ingestApi };
 }
 
+function currentDocIssueCacheState(api) {
+  if (typeof api.docIssueSnapshotCacheStateForServer !== 'function') return null;
+  return api.docIssueSnapshotCacheStateForServer();
+}
+
+function docIssueCacheStatesEqual(left, right) {
+  if (left === null || left === undefined) {
+    return right === null || right === undefined;
+  }
+  if (right === null || right === undefined) return false;
+  return (
+    left.identity === right.identity &&
+    left.usableThrough === right.usableThrough
+  );
+}
+
+function docIssueCacheStateIsUsable(state, now = Date.now()) {
+  return state === null || state === undefined ||
+    (Number.isFinite(state.usableThrough) && now <= state.usableThrough);
+}
+
+// A persisted/in-memory dataset body may be served only under the exact usable
+// issue-snapshot state that produced it. Unknown legacy metadata is accepted
+// solely for a body that visibly omits the snapshot while the current state is
+// also null; any possible claim-bearing legacy body hard-misses.
+function datasetCacheEntryMatchesDocIssueState(entry, api, now = Date.now()) {
+  if (!entry) return false;
+  const current = currentDocIssueCacheState(api);
+  if (!docIssueCacheStateIsUsable(current, now)) return false;
+  if (entry.docIssueCacheStateKnown !== true) {
+    return (
+      current === null &&
+      typeof entry.json === 'string' &&
+      !entry.json.includes('"docIssueSnapshot":')
+    );
+  }
+  return (
+    docIssueCacheStateIsUsable(entry.docIssueCacheState, now) &&
+    docIssueCacheStatesEqual(entry.docIssueCacheState, current)
+  );
+}
+
 async function buildDatasetCache(api, contentHash) {
   const dataset = api.assembleDataset();
+  const docIssueCacheState =
+    api.docIssueSnapshotCacheStateFromDataset(dataset);
   // Serialize the dataset exactly ONCE (#2070). buildDatasetBody serializes the
   // stable view (dataset minus the volatile generatedAt), then splices
   // generatedAt back into the served body without a second full stringify. The
@@ -1456,7 +1519,15 @@ async function buildDatasetCache(api, contentHash) {
     brotliAsync(buf, DATASET_BROTLI_QUALITY),
     gzipAsync(buf, { level: 6 }),
   ]);
-  return { etag, json, brBuf, gzBuf, contentHash };
+  return {
+    etag,
+    json,
+    brBuf,
+    gzBuf,
+    contentHash,
+    docIssueCacheState,
+    docIssueCacheStateKnown: true,
+  };
 }
 
 // Map an assembled dataset into the minimal per-session shape the tier-3 audits
@@ -2164,20 +2235,52 @@ function toMcpAdoptionInput(ds) {
 
 async function rebuildDatasetCache(state, sig) {
   const api = await state.apiPromise;
-  const stats = api.ingest();
-  let cached = !!state.datasetCache && state.datasetCache.contentHash === stats.contentHash;
-  if (!cached) {
-    const fromDisk = api.loadDatasetCache(stats.contentHash);
-    if (fromDisk) {
-      state.datasetCache = fromDisk;
+  let buildSig = sig;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const buildDocIssueState = currentDocIssueCacheState(api);
+    const stats = api.ingest();
+    let candidate = null;
+    let cached = false;
+    let persist = false;
+
+    if (
+      state.datasetCache?.contentHash === stats.contentHash &&
+      datasetCacheEntryMatchesDocIssueState(state.datasetCache, api)
+    ) {
+      candidate = state.datasetCache;
       cached = true;
     } else {
-      state.datasetCache = await buildDatasetCache(api, stats.contentHash);
-      api.saveDatasetCache(state.datasetCache, Date.now());
+      const fromDisk = api.loadDatasetCache(stats.contentHash);
+      if (fromDisk && datasetCacheEntryMatchesDocIssueState(fromDisk, api)) {
+        candidate = fromDisk;
+        cached = true;
+      } else {
+        candidate = await buildDatasetCache(api, stats.contentHash);
+        persist = true;
+      }
     }
+
+    // The source can move while ingest/assemble/compression is running. Commit
+    // only a candidate built under one stable source+snapshot state; retry once
+    // against the completed state, then fail without replacing last-good data.
+    const completedSig = api.sourceSignature();
+    const completedDocIssueState = currentDocIssueCacheState(api);
+    if (
+      completedSig === buildSig &&
+      docIssueCacheStatesEqual(buildDocIssueState, completedDocIssueState) &&
+      datasetCacheEntryMatchesDocIssueState(candidate, api)
+    ) {
+      state.datasetCache = candidate;
+      if (persist) api.saveDatasetCache(candidate, Date.now());
+      state.lastSourceSig = completedSig;
+      return { stats, cached };
+    }
+
+    buildSig = completedSig;
   }
-  state.lastSourceSig = sig;
-  return { stats, cached };
+  throw new Error(
+    'Dataset source state changed across the bounded rebuild retry'
+  );
 }
 
 function startDatasetRefresh(state, sig) {
@@ -2278,12 +2381,20 @@ function pruneRecommendationsBuilds(state) {
 // the contentHash moves. The exported assembleDataset() is intentionally left
 // un-memoized so the ingest parity tests still exercise the warm assembly path.
 function memoizedAssembleDataset(state, api, contentHash) {
-  if (state.assembledMemo && state.assembledMemo.contentHash === contentHash) {
-    return state.assembledMemo.dataset;
-  }
-  const dataset = api.assembleDataset();
-  state.assembledMemo = { contentHash, dataset };
-  return dataset;
+  const resolved = resolveStateBoundMemo({
+    memo: state.assembledMemo,
+    key: contentHash,
+    sourceState: currentDocIssueCacheState(api),
+    sourceStatesEqual: docIssueCacheStatesEqual,
+    build: () => api.assembleDataset(),
+    // Record what the assembled object ACTUALLY observed. If an A -> B -> A
+    // file/clock race leaves B under A's content hash, the outer bounded retry
+    // sees the mismatch and this memo refuses to replay B on its second pass.
+    builtSourceState: (dataset) =>
+      api.docIssueSnapshotCacheStateFromDataset(dataset),
+  });
+  state.assembledMemo = resolved.memo;
+  return resolved.value;
 }
 
 // #2182: the recs route's own memoized assemble. Mirrors memoizedAssembleDataset
@@ -2299,16 +2410,22 @@ function memoizedAssembleRecommendationDataset(
   contentHash
 ) {
   const hookConfigState = api.stopHookConfigState();
-  if (
-    state.assembledRecoMemo &&
-    state.assembledRecoMemo.contentHash === contentHash &&
-    state.assembledRecoMemo.hookConfigState === hookConfigState
-  ) {
-    return state.assembledRecoMemo.dataset;
-  }
-  const dataset = api.assembleRecommendationDataset();
-  state.assembledRecoMemo = { contentHash, hookConfigState, dataset };
-  return dataset;
+  const resolved = resolveStateBoundMemo({
+    memo: state.assembledRecoMemo,
+    // The hook bit is independently probed and result-affecting (#2554), so it
+    // remains part of this light-dataset memo key alongside the content hash.
+    key: JSON.stringify([contentHash, hookConfigState]),
+    sourceState: currentDocIssueCacheState(api),
+    sourceStatesEqual: docIssueCacheStatesEqual,
+    build: () => api.assembleRecommendationDataset(),
+    // As with the full dataset memo, bind reuse to the snapshot state the light
+    // dataset actually observed. Otherwise an A -> B -> A retry can replay B
+    // forever while the surrounding content hash and hook bit remain A.
+    builtSourceState: (dataset) =>
+      api.docIssueSnapshotCacheStateFromDataset(dataset),
+  });
+  state.assembledRecoMemo = resolved.memo;
+  return resolved.value;
 }
 
 // ── Off-main-thread recommendations rebuild worker (#2196, epic #2181) ───────
@@ -2434,7 +2551,26 @@ function requestRecsRebuildViaWorker(
     recsWorkerPending.set(id, {
       resolve: (v) => {
         clearTimeout(timer);
-        resolve(v);
+        const suppressionEmissionId = v.suppressionEmissionId;
+        let dispositionSent = false;
+        const sendSuppressionDisposition = (type) => {
+          if (dispositionSent || suppressionEmissionId == null) return;
+          dispositionSent = true;
+          try {
+            // Address the worker that produced this result. A replacement
+            // worker must never accept an acknowledgement for an old build id.
+            w.postMessage({ type, id: suppressionEmissionId });
+          } catch {
+            // Best-effort lifecycle telemetry must not fail the response.
+          }
+        };
+        resolve({
+          ...v,
+          acceptSuppressionTransitions: () =>
+            sendSuppressionDisposition('accept-suppression-transitions'),
+          discardSuppressionTransitions: () =>
+            sendSuppressionDisposition('discard-suppression-transitions'),
+        });
       },
       reject: (e) => {
         clearTimeout(timer);
@@ -2566,6 +2702,15 @@ function redecorateCachedGuidanceLabels(entry, now) {
 
 function recommendationsCacheEntryIsCurrent(entry, api, now) {
   if (
+    !docIssueCacheStateIsUsable(entry.docIssueCacheState, now) ||
+    !docIssueCacheStatesEqual(
+      entry.docIssueCacheState,
+      currentDocIssueCacheState(api)
+    )
+  ) {
+    return false;
+  }
+  if (
     !entry.guidanceCacheValidity ||
     !externalGuidanceCacheValidityContains(entry.guidanceCacheValidity, now)
   ) {
@@ -2593,7 +2738,6 @@ function recommendationsCacheEntryIsCurrent(entry, api, now) {
 async function buildRecommendationsCacheEntryViaWorker(
   state,
   key,
-  sourceSig,
   project,
   {
     emitSuppressionTransitions = false,
@@ -2601,6 +2745,13 @@ async function buildRecommendationsCacheEntryViaWorker(
     surfaceRequest = null,
   } = {}
 ) {
+  const workerResult =
+    await requestRecsRebuildViaWorker(
+      project,
+      organizationIdentity,
+      emitSuppressionTransitions,
+      surfaceRequest
+    );
   const {
     json,
     contentHash,
@@ -2610,25 +2761,31 @@ async function buildRecommendationsCacheEntryViaWorker(
     hookOverheadConfigState: hookConfigState,
     skillHookIntegrityCacheValidity: skillHookCacheValidity,
     editFormatChurnCacheValidity: editChurnCacheValidity,
-  } =
-    await requestRecsRebuildViaWorker(
-      project,
-      organizationIdentity,
-      emitSuppressionTransitions,
-      surfaceRequest
-    );
-  assertRecommendationsResponseSize(json);
+    sourceSig: workerSourceSig,
+    docIssueCacheState,
+    acceptSuppressionTransitions,
+    discardSuppressionTransitions,
+  } = workerResult;
+  try {
+    assertRecommendationsResponseSize(json);
+  } catch (error) {
+    discardSuppressionTransitions();
+    throw error;
+  }
   const entry = {
     etag: datasetEtagFrom(json),
     json,
     contentHash,
-    sourceSig,
+    sourceSig: workerSourceSig,
+    docIssueCacheState,
     guidanceTransitions,
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
     hookOverheadConfigState: hookConfigState,
     skillHookIntegrityCacheValidity: skillHookCacheValidity,
     editFormatChurnCacheValidity: editChurnCacheValidity,
+    emitAcceptedSuppressionTransitions: acceptSuppressionTransitions,
+    discardSuppressionTransitions,
     lastAccess: Date.now(),
   };
   return entry;
@@ -2661,6 +2818,8 @@ async function buildRecommendationsCacheEntry(
     api,
     stats.contentHash
   );
+  const docIssueCacheState =
+    api.docIssueSnapshotCacheStateFromDataset(dataset);
   // Pin one clock instant across label rendering and its cache metadata. A
   // request that finishes after the interval changes is redecorated before it
   // is returned below, so even a boundary crossed mid-build cannot leak.
@@ -2685,20 +2844,24 @@ async function buildRecommendationsCacheEntry(
     dataset,
     guidanceBuiltAt
   );
-  if (emitSuppressionTransitions) {
-    api
-      .recordSuppressionTransitions(ADOPTION_RECEIPTS, {
-        shadowCallsDir: SHADOW_CALLS_DIR,
-        organizationIdentity,
-        dataset,
-      })
-      .catch((err) => {
-        console.warn(
-          '[adoption] suppression-transition emit failed:',
-          err?.message || err
-        );
-      });
-  }
+  // Defer the side effect until the post-build source/clock gates accept this
+  // exact entry. A discarded racy attempt must never write lifecycle receipts.
+  const emitAcceptedSuppressionTransitions = emitSuppressionTransitions
+    ? () => {
+        api
+          .recordSuppressionTransitions(ADOPTION_RECEIPTS, {
+            shadowCallsDir: SHADOW_CALLS_DIR,
+            organizationIdentity,
+            dataset,
+          })
+          .catch((err) => {
+            console.warn(
+              '[adoption] suppression-transition emit failed:',
+              err?.message || err
+            );
+          });
+      }
+    : null;
   // User-reject suppression (#2206): read the active REJECTED receipts and drop
   // those findings from output. Best-effort like the rest of the route's receipt
   // I/O — a read failure yields an empty set (no suppression), never a 500.
@@ -2730,22 +2893,37 @@ async function buildRecommendationsCacheEntry(
     json,
     contentHash: stats.contentHash,
     sourceSig,
+    docIssueCacheState,
     guidanceTransitions,
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
     hookOverheadConfigState: hookConfigState,
     skillHookIntegrityCacheValidity: skillHookCacheValidity,
     editFormatChurnCacheValidity: editChurnCacheValidity,
+    emitAcceptedSuppressionTransitions,
     lastAccess: Date.now(),
   };
   return entry;
 }
 
 function commitRecommendationsCacheEntry(state, key, entry, buildOwner) {
+  const emitAcceptedSuppressionTransitions =
+    entry.emitAcceptedSuppressionTransitions;
+  delete entry.emitAcceptedSuppressionTransitions;
+  delete entry.discardSuppressionTransitions;
   entry.buildGeneration = buildOwner.generation;
   state.recommendationsCache.set(key, entry);
   pruneRecommendationsCache(state);
+  emitAcceptedSuppressionTransitions?.();
   return entry;
+}
+
+function discardRecommendationsCacheEntry(entry) {
+  if (!entry) return;
+  const discardSuppressionTransitions = entry.discardSuppressionTransitions;
+  delete entry.emitAcceptedSuppressionTransitions;
+  delete entry.discardSuppressionTransitions;
+  discardSuppressionTransitions?.();
 }
 
 function newerRecommendationsResult(state, key, buildOwner) {
@@ -2773,6 +2951,7 @@ async function ensureCurrentRecommendationsCacheEntry(
   retryBuild
 ) {
   let clockConfigRetriesRemaining = 1;
+  let sourceRetriesRemaining = 1;
   for (;;) {
     let newer = newerRecommendationsResult(state, key, buildOwner);
     if (newer) {
@@ -2783,6 +2962,7 @@ async function ensureCurrentRecommendationsCacheEntry(
       ) {
         console.log('[recs-cache-test] invalidated-build-superseded');
       }
+      discardRecommendationsCacheEntry(entry);
       return newer;
     }
 
@@ -2798,6 +2978,7 @@ async function ensureCurrentRecommendationsCacheEntry(
       // output rather than a transient 500.
       const currentBuild = state.recommendationsBuilds.get(key);
       if (currentBuild && currentBuild !== buildOwner) {
+        discardRecommendationsCacheEntry(entry);
         return currentBuild.promise;
       }
       if (!currentBuild) {
@@ -2808,17 +2989,54 @@ async function ensureCurrentRecommendationsCacheEntry(
         state.recommendationsInvalidationGeneration;
       const retrySourceSig = api.sourceSignature();
       buildOwner.sourceSig = retrySourceSig;
+      discardRecommendationsCacheEntry(entry);
       entry = await retryBuild(retrySourceSig);
+      clockConfigRetriesRemaining = 1;
+      sourceRetriesRemaining = 1;
+      continue;
+    }
+
+    const completedSourceSig = api.sourceSignature();
+    const completedDocIssueState = currentDocIssueCacheState(api);
+    if (
+      entry.sourceSig !== completedSourceSig ||
+      !docIssueCacheStatesEqual(
+        entry.docIssueCacheState,
+        completedDocIssueState
+      )
+    ) {
+      if (sourceRetriesRemaining <= 0) {
+        discardRecommendationsCacheEntry(entry);
+        throw new Error(
+          'Recommendation source state changed across the bounded rebuild retry'
+        );
+      }
+      sourceRetriesRemaining -= 1;
+      const currentBuild = state.recommendationsBuilds.get(key);
+      if (currentBuild && currentBuild !== buildOwner) {
+        discardRecommendationsCacheEntry(entry);
+        return currentBuild.promise;
+      }
+      if (currentBuild === buildOwner) {
+        buildOwner.sourceSig = completedSourceSig;
+      }
+      discardRecommendationsCacheEntry(entry);
+      entry = await retryBuild(completedSourceSig);
       clockConfigRetriesRemaining = 1;
       continue;
     }
 
     if (recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
       newer = newerRecommendationsResult(state, key, buildOwner);
-      return newer || commitRecommendationsCacheEntry(state, key, entry, buildOwner);
+      if (newer) {
+        discardRecommendationsCacheEntry(entry);
+        return newer;
+      }
+      return commitRecommendationsCacheEntry(state, key, entry, buildOwner);
     }
 
     if (clockConfigRetriesRemaining <= 0) {
+      discardRecommendationsCacheEntry(entry);
       throw new Error(
         'Recommendation clock/config metadata changed across the bounded rebuild retry'
       );
@@ -2831,9 +3049,11 @@ async function ensureCurrentRecommendationsCacheEntry(
     const retrySourceSig = api.sourceSignature();
     const currentBuild = state.recommendationsBuilds.get(key);
     if (currentBuild && currentBuild !== buildOwner) {
+      discardRecommendationsCacheEntry(entry);
       return currentBuild.promise;
     }
     if (currentBuild === buildOwner) buildOwner.sourceSig = retrySourceSig;
+    discardRecommendationsCacheEntry(entry);
     entry = await retryBuild(retrySourceSig);
   }
 }
@@ -2870,7 +3090,6 @@ async function recommendationsResponseCache(
     return buildRecommendationsCacheEntryViaWorker(
       state,
       key,
-      buildSourceSig,
       project,
       { emitSuppressionTransitions, organizationIdentity, surfaceRequest }
     ).catch((err) => {
@@ -2886,6 +3105,19 @@ async function recommendationsResponseCache(
   const now = Date.now();
   const currentHookConfigState = api.stopHookConfigState();
   let clockRefreshed = false;
+  if (
+    cached &&
+    (!docIssueCacheStateIsUsable(cached.docIssueCacheState, now) ||
+      !docIssueCacheStatesEqual(
+        cached.docIssueCacheState,
+        currentDocIssueCacheState(api)
+      ))
+  ) {
+    // Issue-state mismatch/expiry can add or remove an auditable claim. It is a
+    // hard miss: never take content-restamp or stale-while-revalidate paths.
+    state.recommendationsCache.delete(key);
+    cached = undefined;
+  }
   if (
     cached &&
     (cached.hookOverheadConfigState !== currentHookConfigState ||
@@ -3090,9 +3322,12 @@ async function recommendationsResponseCache(
 // (same key + same sourceSig) onto ONE build. The route-agnostic core lives in
 // ./lib/stat-gated-cache.mjs so it can be unit-tested directly; this wrapper just
 // supplies the ingest API's signature getter and the build invocation.
-function statGatedResponseCache(api, { cacheMap, buildsMap, key, max, build }) {
-  return resolveStatGatedCache({
+async function statGatedResponseCache(api, { cacheMap, buildsMap, key, max, build }) {
+  const resolved = await resolveStatGatedCache({
     sourceSignature: () => api.sourceSignature(),
+    sourceState: () => currentDocIssueCacheState(api),
+    builtSourceState: (built) => built.docIssueCacheState,
+    sourceStatesEqual: docIssueCacheStatesEqual,
     cacheMap,
     buildsMap,
     key,
@@ -3100,6 +3335,13 @@ function statGatedResponseCache(api, { cacheMap, buildsMap, key, max, build }) {
     build,
     buildArgs: [api],
   });
+  return {
+    value: resolved.value.value,
+    cache: resolved.cache,
+    ...(resolved.value.instantShell
+      ? { instantShell: resolved.value.instantShell }
+      : {}),
+  };
 }
 
 // /api/digest cache key: one entry per requested calendar date. The digest is a
@@ -3124,18 +3366,21 @@ function searchCacheKey(q, project, limit) {
 function buildDigestPayload(state, api, date) {
   const stats = api.ingest();
   const ds = memoizedAssembleDataset(state, api, stats.contentHash);
-  return buildDailyDigest(
-    {
-      sessions: groupBySessions(ds.entries || []),
-      tokenData: ds.tokenData || [],
-      toolData: ds.toolData || [],
-      timelines: ds.timelines || [],
-      apiErrors: ds.apiErrors || [],
-      taskSuccess: ds.taskSuccess || [],
-      statsCache: ds.statsCache || null,
-    },
-    date
-  );
+  return {
+    value: buildDailyDigest(
+      {
+        sessions: groupBySessions(ds.entries || []),
+        tokenData: ds.tokenData || [],
+        toolData: ds.toolData || [],
+        timelines: ds.timelines || [],
+        apiErrors: ds.apiErrors || [],
+        taskSuccess: ds.taskSuccess || [],
+        statsCache: ds.statsCache || null,
+      },
+      date
+    ),
+    docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+  };
 }
 
 // Serialize + precompress a JSON body once per content-change (#2443). Returned
@@ -3184,11 +3429,16 @@ async function buildBootPayload(state, api) {
   const ds = memoizedAssembleDataset(state, api, stats.contentHash);
   const boot = splitDataset(ds).boot;
   boot.version = stats.contentHash;
-  // Cache the shell projection for the instant-shell HTML upgrade (#2444). Only
-  // for the global (non-scoped) state, so this module var never carries a scoped
-  // principal's counts. deriveBootShell reads only the three masthead aggregates.
-  if (state === globalDatasetState) lastInstantShell = deriveBootShell(boot);
-  return compressedPayload(boot, stats.contentHash);
+  return {
+    value: await compressedPayload(boot, stats.contentHash),
+    docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+    // Commit this side effect only AFTER the surrounding state-bound cache
+    // accepts the build. A discarded A -> B -> A attempt must never leak B's
+    // counts through the next static index.html response.
+    ...(state === globalDatasetState
+      ? { instantShell: deriveBootShell(boot) }
+      : {}),
+  };
 }
 
 // Build one /api/dataset/slice/<key> payload — a single heavy dataset array,
@@ -3204,7 +3454,10 @@ async function buildSlicePayload(state, api, key) {
   // the lazy tokenData slice is never larger than the monolith's equivalent.
   const slimmed = slimDataset({ [key]: raw });
   const value = slimmed && typeof slimmed === 'object' ? slimmed[key] ?? raw : raw;
-  return compressedPayload(value, stats.contentHash);
+  return {
+    value: await compressedPayload(value, stats.contentHash),
+    docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+  };
 }
 
 // Build the /api/search payload for one (query, project, limit), reusing the
@@ -3221,7 +3474,10 @@ function buildSearchPayload(state, api, q, project, limit) {
     ...result,
     entry: { ...result.entry, pastedContents: {} },
   }));
-  return { mode: 'hybrid', semanticAvailable: true, results };
+  return {
+    value: { mode: 'hybrid', semanticAvailable: true, results },
+    docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+  };
 }
 
 // RFC 7232 If-None-Match check. Handles comma-separated lists and the "*" form.
@@ -5024,6 +5280,82 @@ async function handleCheckpointAnswerRead(req, res) {
 //  - Graceful degradation: an unset/unreachable/refused endpoint — or even a
 //    failed deterministic build — returns HTTP 200 with the deterministic engine
 //    result (source: 'deterministic'), never a 5xx.
+function localAnalyzeBuildIsCurrent(build, now = Date.now()) {
+  const currentDocIssueState = currentDocIssueCacheState(build.ingestApi);
+  return (
+    build.sourceSig === build.ingestApi.sourceSignature() &&
+    docIssueCacheStateIsUsable(build.docIssueCacheState, now) &&
+    docIssueCacheStateIsUsable(currentDocIssueState, now) &&
+    docIssueCacheStatesEqual(build.docIssueCacheState, currentDocIssueState)
+  );
+}
+
+async function buildLocalAnalyzeDeterministic(req, project) {
+  const { ingestState, ingestApi } = await loadIngestedDataset(req, {
+    useCache: true,
+  });
+  const organizationIdentity = enterpriseRecommendationIdentity(req);
+  let expectedSourceSig = ingestApi.sourceSignature();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const docIssueCacheState = currentDocIssueCacheState(ingestApi);
+    const stats = ingestApi.ingest();
+    const dataset = memoizedAssembleRecommendationDataset(
+      ingestState,
+      ingestApi,
+      stats.contentHash
+    );
+    const builtDocIssueCacheState =
+      ingestApi.docIssueSnapshotCacheStateFromDataset(dataset);
+    const rejectedFindingIds = await ingestApi.readRejectedFindingIds(
+      ADOPTION_RECEIPTS
+    );
+    const recs = ingestApi.assembleRecommendations(project || undefined, {
+      organizationIdentity,
+      dataset,
+      rejectedFindingIds,
+    });
+    const completedSourceSig = ingestApi.sourceSignature();
+    const completedDocIssueState = currentDocIssueCacheState(ingestApi);
+    if (
+      expectedSourceSig === completedSourceSig &&
+      docIssueCacheStatesEqual(
+        docIssueCacheState,
+        builtDocIssueCacheState
+      ) &&
+      docIssueCacheStatesEqual(docIssueCacheState, completedDocIssueState) &&
+      docIssueCacheStatesEqual(
+        builtDocIssueCacheState,
+        completedDocIssueState
+      ) &&
+      docIssueCacheStateIsUsable(completedDocIssueState, Date.now())
+    ) {
+      return {
+        ingestApi,
+        sourceSig: completedSourceSig,
+        docIssueCacheState: builtDocIssueCacheState,
+        recommendations: extractRecommendations(recs),
+      };
+    }
+    expectedSourceSig = completedSourceSig;
+  }
+  throw new Error(
+    'Recommendation source state changed across the bounded local-analysis retry'
+  );
+}
+
+async function ensureCurrentLocalAnalyzeBuild(req, project, build) {
+  return localAnalyzeBuildIsCurrent(build)
+    ? build
+    : buildLocalAnalyzeDeterministic(req, project);
+}
+
+function localAnalyzeResultWithValidity(result, build) {
+  const usableThrough = build.docIssueCacheState?.usableThrough;
+  return Number.isFinite(usableThrough)
+    ? { ...result, validThrough: new Date(usableThrough).toISOString() }
+    : result;
+}
+
 async function handleAnalyzeLocal(req, res) {
   // Optional JSON body { project?: string }; a missing/invalid body analyzes the
   // global scope. Reading it also drains the request stream before ingest.
@@ -5044,27 +5376,9 @@ async function handleAnalyzeLocal(req, res) {
   // (#2196/#2182): ingest -> memoized recommendation dataset -> assembleRecommendations.
   // Built directly (not through the recs response cache) so this route never
   // touches that route's single-flight/stale-while-revalidate slots.
-  let recommendations = [];
+  let deterministicBuild;
   try {
-    const { ingestState, ingestApi } = await loadIngestedDataset(req, {
-      useCache: true,
-    });
-    const stats = ingestApi.ingest();
-    const dataset = memoizedAssembleRecommendationDataset(
-      ingestState,
-      ingestApi,
-      stats.contentHash
-    );
-    const rejectedFindingIds = await ingestApi.readRejectedFindingIds(
-      ADOPTION_RECEIPTS
-    );
-    const organizationIdentity = enterpriseRecommendationIdentity(req);
-    const recs = ingestApi.assembleRecommendations(project || undefined, {
-      organizationIdentity,
-      dataset,
-      rejectedFindingIds,
-    });
-    recommendations = extractRecommendations(recs);
+    deterministicBuild = await buildLocalAnalyzeDeterministic(req, project);
   } catch (err) {
     // Even the deterministic build failed — still answer (no throw), empty recs.
     return sendJson(
@@ -5080,14 +5394,33 @@ async function handleAnalyzeLocal(req, res) {
   // Local endpoint unset => operator has not opted in => degrade with zero calls.
   const config = readLocalModelConfig();
   if (!config) {
-    return sendJson(
-      res,
-      200,
-      degradedResult(
-        recommendations,
-        'Local model endpoint not configured (set CHD_LOCAL_MODEL_ENDPOINT to a loopback OpenAI-compatible endpoint)'
-      )
-    );
+    try {
+      deterministicBuild = await ensureCurrentLocalAnalyzeBuild(
+        req,
+        project,
+        deterministicBuild
+      );
+      return sendJson(
+        res,
+        200,
+        localAnalyzeResultWithValidity(
+          degradedResult(
+            deterministicBuild.recommendations,
+            'Local model endpoint not configured (set CHD_LOCAL_MODEL_ENDPOINT to a loopback OpenAI-compatible endpoint)'
+          ),
+          deterministicBuild
+        )
+      );
+    } catch (err) {
+      return sendJson(
+        res,
+        200,
+        degradedResult(
+          [],
+          `Recommendation engine unavailable: ${err?.message || err}`
+        )
+      );
+    }
   }
 
   // Schema-constrained call (#2682): each chat turn routes through the SAME
@@ -5101,20 +5434,49 @@ async function handleAnalyzeLocal(req, res) {
       messages,
       maxTokens: 512,
     });
+  let result;
   try {
-    const result = await runLocalAnalyze({
+    result = await runLocalAnalyze({
       send,
-      recommendations,
+      recommendations: deterministicBuild.recommendations,
       model: config.model,
     });
-    return sendJson(res, 200, result);
   } catch (err) {
     // Loopback-guard refusal, unreachable endpoint, timeout, non-OK, bad JSON —
     // all degrade to the deterministic engine result WITHOUT erroring.
+    result = degradedResult(
+      deterministicBuild.recommendations,
+      `Local model unavailable: ${err?.message || err}`
+    );
+  }
+
+  try {
+    const currentBuild = await ensureCurrentLocalAnalyzeBuild(
+      req,
+      project,
+      deterministicBuild
+    );
+    if (currentBuild !== deterministicBuild) {
+      // The model analyzed an older deterministic finding set. Never attach that
+      // prose/ranking to newer evidence; return the rebuilt deterministic set.
+      result = degradedResult(
+        currentBuild.recommendations,
+        'Recommendation evidence changed while local analysis was running; run Analyze again for a fresh local summary'
+      );
+    }
     return sendJson(
       res,
       200,
-      degradedResult(recommendations, `Local model unavailable: ${err?.message || err}`)
+      localAnalyzeResultWithValidity(result, currentBuild)
+    );
+  } catch (err) {
+    return sendJson(
+      res,
+      200,
+      degradedResult(
+        [],
+        `Recommendation engine unavailable: ${err?.message || err}`
+      )
     );
   }
 }
@@ -9149,6 +9511,7 @@ async function enterpriseOrganizationRollup(req) {
   const ingestState = enterpriseRequestDatasetState(req);
   const ingestApi = await ingestState.apiPromise;
   await refreshReviewEventsForIngest(ingestApi);
+  await refreshDocIssueSnapshotForIngest(ingestApi);
   ingestApi.ingest();
   return buildEnterpriseOrganizationRollup(
     ingestApi.assembleDataset(),
@@ -9259,6 +9622,20 @@ async function handleDatasetJson(req, res) {
   if (!ingestState.datasetCache) {
     ingestState.datasetCache = ingestApi.loadLatestDatasetCache();
   }
+  if (
+    ingestState.datasetCache &&
+    !datasetCacheEntryMatchesDocIssueState(
+      ingestState.datasetCache,
+      ingestApi,
+      Date.now()
+    )
+  ) {
+    // Snapshot mismatch/expiry is a hard boundary: never SWR-serve a body whose
+    // GitHub state claims are no longer current. This also rejects a persisted
+    // flag-on body after a flag-off restart before the first response.
+    ingestState.datasetCache = null;
+    ingestState.lastSourceSig = null;
+  }
   const skipped =
     !!ingestState.datasetCache &&
     ingestState.lastSourceSig !== null &&
@@ -9364,8 +9741,9 @@ async function handleDatasetBoot(req, res) {
     useCache: true,
   });
   let value;
+  let instantShell;
   try {
-    ({ value } = await statGatedResponseCache(ingestApi, {
+    ({ value, instantShell } = await statGatedResponseCache(ingestApi, {
       cacheMap: ingestState.bootCache,
       buildsMap: ingestState.bootBuilds,
       key: 'boot',
@@ -9375,6 +9753,9 @@ async function handleDatasetBoot(req, res) {
   } catch (err) {
     if (isDatasetResponseTooLargeError(err)) return sendDatasetResponseTooLarge(res, err);
     throw err;
+  }
+  if (ingestState === globalDatasetState && instantShell) {
+    lastInstantShell = instantShell;
   }
   sendDatasetSplitPayload(req, res, value);
 }

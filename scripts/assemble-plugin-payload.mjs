@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { buildPluginMcp } from './build-plugin-mcp.mjs';
+import { buildGate2702Runtime } from './build-gate-2702-runtime.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
@@ -79,10 +80,7 @@ export async function assemblePluginPayload({
   // describes the exact deployed payload rather than the source checkout.
   for (const entry of await readdir(projectRoot, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith('.md')) {
-      await copy(
-        join(projectRoot, entry.name),
-        join(payloadRoot, entry.name)
-      );
+      await copy(join(projectRoot, entry.name), join(payloadRoot, entry.name));
     }
   }
   await copy(join(projectRoot, 'docs'), join(payloadRoot, 'docs'));
@@ -99,9 +97,22 @@ export async function assemblePluginPayload({
     projectDir: projectRoot,
     outputFile: join(payloadRoot, 'scripts', 'mcp-shim.mjs'),
   });
+  // The plugin server shares the container's zero-node_modules contract. Ship
+  // the same self-contained verifier used by the production image.
+  await buildGate2702Runtime({
+    projectDir: projectRoot,
+    outputFile: join(
+      payloadRoot,
+      'scripts',
+      'gate-2702',
+      'runtime-verifier.bundle.mjs'
+    ),
+  });
 }
 
-const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
+const invokedPath = process.argv[1]
+  ? pathToFileURL(resolve(process.argv[1])).href
+  : '';
 if (invokedPath === import.meta.url) {
   const outputDir = resolve(process.argv[2] || '_plugin_payload');
   await assemblePluginPayload({ outputDir });

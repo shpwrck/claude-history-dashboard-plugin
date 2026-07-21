@@ -30,17 +30,22 @@ const GLOBAL_REQ: RecommendationSurfaceRequest = {
   dashboard: { time: '24h', project: 'All projects' },
 };
 
-function ready(recs: Array<{ id: string }> = []): RecommendationSurfaceResponse {
+function ready(
+  recs: Array<{ id: string }> = [],
+  validThrough?: string
+): RecommendationSurfaceResponse {
   return {
     kind: 'ready',
     result: {
       recommendations: recs as unknown as Recommendation[],
       domainCoverage: [],
+      ...(validThrough === undefined ? {} : { validThrough }),
     },
   };
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   fetchMock.mockReset();
 });
 
@@ -191,6 +196,251 @@ describe('useRecommendationSurface', () => {
     expect(refreshResult).toEqual({ ok: false, error: 'confirmation failed' });
     expect(result.current.status).toBe('ready');
     expect(result.current.recommendations).toEqual([{ id: 'still-visible' }]);
+  });
+
+  it('keeps a snapshot result through its exact boundary, then clears it before a non-preserving refresh', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const start = Date.parse('2026-07-20T12:00:00.000Z');
+    vi.setSystemTime(start);
+
+    let rejectRefresh!: (reason: Error) => void;
+    fetchMock
+      .mockResolvedValueOnce(
+        ready(
+          [{ id: 'snapshot-backed' }],
+          new Date(start + 1_000).toISOString()
+        )
+      )
+      .mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          rejectRefresh = reject;
+        })
+      );
+
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('ready');
+    expect(result.current.recommendations).toEqual([{ id: 'snapshot-backed' }]);
+
+    // The named instant is inclusive.
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(result.current.status).toBe('ready');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // One millisecond later the old result is invalid. Cards are removed before
+    // the refresh settles, so even a failed refresh cannot retain them.
+    act(() => vi.advanceTimersByTime(1));
+    expect(result.current.status).toBe('loading');
+    expect(result.current.recommendations).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      rejectRefresh(new Error('refresh failed'));
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('error');
+    expect(result.current.recommendations).toBeNull();
+  });
+
+  it('fails closed on a later render even when the expiry timer has not run', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const start = Date.parse('2026-07-20T12:00:00.000Z');
+    vi.setSystemTime(start);
+    let resolveRefresh!: (value: RecommendationSurfaceResponse) => void;
+    fetchMock
+      .mockResolvedValueOnce(
+        ready([{ id: 'snapshot-backed' }], new Date(start + 1_000).toISOString())
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        })
+      );
+
+    const { result, rerender } = renderHook(() =>
+      useRecommendationSurface(GLOBAL_REQ)
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('ready');
+
+    // Move the wall clock without executing queued timers. A later React render
+    // must still hide the expired cards and begin a non-preserving refresh.
+    vi.setSystemTime(start + 1_001);
+    rerender();
+    expect(result.current.status).toBe('loading');
+    expect(result.current.recommendations).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.setSystemTime(start);
+    rerender();
+    expect(
+      result.current.status,
+      'a backward clock correction must not revive retired cards'
+    ).toBe('loading');
+    expect(result.current.recommendations).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveRefresh(
+        ready(
+          [{ id: 'same-retired-envelope' }],
+          new Date(start + 1_000).toISOString()
+        )
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      result.current.status,
+      'a late copy at the retired boundary must stay rejected after rollback'
+    ).toBe('error');
+    expect(result.current.recommendations).toBeNull();
+  });
+
+  it('does not replay a handled expiry refresh when the scope later changes', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const start = Date.parse('2026-07-20T12:00:00.000Z');
+    vi.setSystemTime(start);
+    fetchMock
+      .mockResolvedValueOnce(
+        ready([{ id: 'snapshot-backed' }], new Date(start + 1_000).toISOString())
+      )
+      .mockResolvedValueOnce(ready([{ id: 'post-expiry' }]))
+      .mockResolvedValueOnce(ready([{ id: 'new-scope' }]));
+
+    const { result, rerender } = renderHook(
+      ({ req }: { req: RecommendationSurfaceRequest }) =>
+        useRecommendationSurface(req),
+      { initialProps: { req: GLOBAL_REQ } }
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    vi.setSystemTime(start + 1_001);
+    rerender({ req: GLOBAL_REQ });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.recommendations).toEqual([{ id: 'post-expiry' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const nextScope: RecommendationSurfaceRequest = {
+      surface: 'global',
+      dashboard: { time: '7d', project: 'All projects' },
+    };
+    rerender({ req: nextScope });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.recommendations).toEqual([{ id: 'new-scope' }]);
+    expect(
+      fetchMock,
+      'the consumed expiry generation must not launch a second new-scope request'
+    ).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the retired boundary across a dataset refresh generation', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const start = Date.parse('2026-07-20T12:00:00.000Z');
+    const boundary = new Date(start + 1_000).toISOString();
+    vi.setSystemTime(start);
+    fetchMock
+      .mockResolvedValueOnce(ready([{ id: 'snapshot-backed' }], boundary))
+      .mockResolvedValueOnce(ready([{ id: 'same-retired-envelope' }], boundary));
+
+    const { result, rerender } = renderHook(
+      ({ refreshKey }: { refreshKey: number }) =>
+        useRecommendationSurface(GLOBAL_REQ, { refreshKey }),
+      { initialProps: { refreshKey: 0 } }
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('ready');
+
+    // First observe the crossed boundary in the SAME render that advances the
+    // dataset generation. The old full scope key is replaced immediately, but
+    // its logical surface boundary must still enter the retirement ledger.
+    vi.setSystemTime(start + 1_001);
+    rerender({ refreshKey: 1 });
+    expect(result.current.status).toBe('loading');
+
+    vi.setSystemTime(start);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe('error');
+    expect(result.current.recommendations).toBeNull();
+  });
+
+  it('never preserves an expired result when an in-flight retry fails late', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const start = Date.parse('2026-07-20T12:00:00.000Z');
+    vi.setSystemTime(start);
+    fetchMock.mockResolvedValueOnce(
+      ready([{ id: 'expires' }], new Date(start + 1_000).toISOString())
+    );
+
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('ready');
+
+    let rejectRetry!: (reason: Error) => void;
+    fetchMock.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectRetry = reject;
+      })
+    );
+    let retryPromise!: ReturnType<typeof result.current.retry>;
+    act(() => {
+      retryPromise = result.current.retry();
+    });
+
+    act(() => vi.advanceTimersByTime(1_001));
+    await act(async () => {
+      rejectRetry(new Error('late failure'));
+      await retryPromise;
+    });
+
+    expect(result.current.status).not.toBe('ready');
+    expect(result.current.recommendations).toBeNull();
+  });
+
+  it('fails closed when a response is already one millisecond past its boundary', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const now = Date.parse('2026-07-20T12:00:00.001Z');
+    vi.setSystemTime(now);
+    fetchMock.mockResolvedValueOnce(
+      ready([{ id: 'already-expired' }], new Date(now - 1).toISOString())
+    );
+
+    const { result } = renderHook(() => useRecommendationSurface(GLOBAL_REQ));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.status).toBe('error');
+    expect(result.current.error).toBe(
+      'Recommendation analysis response has expired'
+    );
+    expect(result.current.recommendations).toBeNull();
   });
 
   it('ignores an obsolete local response after the loader is disabled', async () => {

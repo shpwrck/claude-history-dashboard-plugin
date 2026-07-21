@@ -11,7 +11,9 @@ import { createServer as createNetServer } from 'node:net';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { buildGate2702Runtime } from './build-gate-2702-runtime.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
@@ -47,14 +49,18 @@ async function expectScriptRuntimeImportsBlocked() {
     const result = await new Promise((resolve) => {
       let probeStdout = '';
       let probeStderr = '';
-      const probe = spawn('node', ['--import', REGISTER, `scripts/${probeName}`], {
-        cwd: PROJECT_DIR,
-        env: {
-          ...process.env,
-          DASHBOARD_RUNTIME_IMPORT_GUARD: '1',
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      const probe = spawn(
+        'node',
+        ['--import', REGISTER, `scripts/${probeName}`],
+        {
+          cwd: PROJECT_DIR,
+          env: {
+            ...process.env,
+            DASHBOARD_RUNTIME_IMPORT_GUARD: '1',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }
+      );
       probe.stdout.on('data', (chunk) => {
         probeStdout += String(chunk);
       });
@@ -69,7 +75,9 @@ async function expectScriptRuntimeImportsBlocked() {
     check(
       'runtime script package imports are blocked',
       result.code !== 0 &&
-        /Server runtime import guard blocked bare package "web-tree-sitter"/.test(result.output),
+        /Server runtime import guard blocked bare package "web-tree-sitter"/.test(
+          result.output
+        ),
       result.output.slice(-2000)
     );
   } finally {
@@ -78,6 +86,71 @@ async function expectScriptRuntimeImportsBlocked() {
 }
 
 await expectScriptRuntimeImportsBlocked();
+
+const gateRuntimeDir = await mkdtemp(
+  join(tmpdir(), 'runtime-import-gate-2702-')
+);
+const gateRuntimeBundle = join(gateRuntimeDir, 'runtime-verifier.bundle.mjs');
+await buildGate2702Runtime({
+  projectDir: PROJECT_DIR,
+  outputFile: gateRuntimeBundle,
+});
+
+async function expectGate2702RuntimeBundleLoads() {
+  const bundleUrl = pathToFileURL(gateRuntimeBundle).href;
+  const missingStateRoot = join(gateRuntimeDir, 'missing-state');
+  const probeSource = `
+    const module = await import(${JSON.stringify(bundleUrl)});
+    if (typeof module.loadCurrentEvaluation !== 'function') process.exit(3);
+    try {
+      await module.loadCurrentEvaluation({
+        trial: '11111111-1111-5111-8111-111111111111',
+        stateRoot: ${JSON.stringify(missingStateRoot)},
+      });
+      process.exit(4);
+    } catch (error) {
+      if (/verified seal marker is not valid JSON/.test(String(error?.message))) {
+        process.exit(0);
+      }
+      console.error(error);
+      process.exit(5);
+    }
+  `;
+  const result = await new Promise((resolve) => {
+    let probeStdout = '';
+    let probeStderr = '';
+    const probe = spawn(
+      'node',
+      ['--import', REGISTER, '--input-type=module', '--eval', probeSource],
+      {
+        cwd: PROJECT_DIR,
+        env: {
+          ...process.env,
+          DASHBOARD_RUNTIME_IMPORT_GUARD: '1',
+          NODE_ENV: 'production',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    probe.stdout.on('data', (chunk) => {
+      probeStdout += String(chunk);
+    });
+    probe.stderr.on('data', (chunk) => {
+      probeStderr += String(chunk);
+    });
+    probe.on('close', (code) => {
+      resolve({ code, output: `${probeStdout}\n${probeStderr}`.trim() });
+    });
+  });
+
+  check(
+    'bundled #2702 verifier loads and executes with zero node_modules',
+    result.code === 0,
+    result.output.slice(-2000)
+  );
+}
+
+await expectGate2702RuntimeBundleLoads();
 
 const port = await freePort();
 const claudeDir = await mkdtemp(join(tmpdir(), 'runtime-import-claude-'));
@@ -105,6 +178,7 @@ const proc = spawn('node', ['--import', REGISTER, SERVER], {
     ENTERPRISE_AUDIT_LOG_PATH: join(cacheDir, 'enterprise-audit.jsonl'),
     ADOPTION_SPOOL_PATH: join(cacheDir, 'adoption-spool.jsonl'),
     DASHBOARD_REVIEW_EVENTS_CACHE_PATH: join(cacheDir, 'review-events.json'),
+    CHD_GATE_2702_RUNTIME_VERIFIER: gateRuntimeBundle,
     DASHBOARD_RUNTIME_IMPORT_GUARD: '1',
     DASHBOARD_AUTH_MODE: '',
     DASHBOARD_AUTH_TOKENS: '',
@@ -150,7 +224,11 @@ try {
   if (up) {
     const response = await fetch(`${base}/api/auth/session`);
     const body = await response.json().catch(() => null);
-    check('auth session route responds', response.status === 200, `got ${response.status}`);
+    check(
+      'auth session route responds',
+      response.status === 200,
+      `got ${response.status}`
+    );
     check('local mode remains unauthenticated', body?.authRequired === false);
 
     // #1576: exercise the function-scoped lazy import() chains that only resolve
@@ -215,6 +293,7 @@ try {
   await rm(distDir, { recursive: true, force: true });
   await rm(cacheDir, { recursive: true, force: true });
   await rm(ingestDir, { recursive: true, force: true });
+  await rm(gateRuntimeDir, { recursive: true, force: true });
 }
 
 if (/Server runtime import guard blocked bare package/.test(stderr)) {

@@ -582,7 +582,13 @@ paths:
       tags: [recommendations]
       operationId: getShadowExperiments
       summary: Shadow-calls per-experiment drill-down feed (#2152).
-      description: Fresh tail-capped ledger read per request, newest-first pagination, every bound surfaced.
+      description: |
+        Fresh tail-capped ledger read per request, newest-first pagination, every
+        bound surfaced. When local #2702 C5 state exists, the response also carries
+        an optional bounded projection of fully re-verified sealed evidence. Raw
+        prompts, transcripts, diffs, process output, and artifact bodies are never
+        projected. Trial-directory overflow fails closed and is surfaced in
+        reconciliation rather than returning an arbitrary partial history.
       parameters:
         - name: limit
           in: query
@@ -1523,7 +1529,297 @@ components:
           items:
             type: object
             additionalProperties: true
+        gate2702:
+          $ref: '#/components/schemas/Gate2702Projection'
       required: [total, offset, limit, returned, rows]
+    Gate2702Projection:
+      type: object
+      description: Bounded, redacted projection of locally verified #2702 C5 evidence.
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        returned:
+          type: integer
+          minimum: 0
+          maximum: 500
+        dropped:
+          type: integer
+          minimum: 0
+        rows:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/Gate2702RunProjection'
+        evaluationTotal:
+          type: integer
+          minimum: 0
+        evaluationReturned:
+          type: integer
+          minimum: 0
+          maximum: 100
+        evaluationsDropped:
+          type: integer
+          minimum: 0
+        evaluations:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Gate2702EvaluationProjection'
+        reconciliation:
+          $ref: '#/components/schemas/Gate2702Reconciliation'
+      required:
+        - total
+        - returned
+        - dropped
+        - rows
+        - evaluationTotal
+        - evaluationReturned
+        - evaluationsDropped
+        - evaluations
+        - reconciliation
+      additionalProperties: false
+    Gate2702Reconciliation:
+      type: object
+      properties:
+        scanned:
+          type: integer
+          minimum: 0
+        validated:
+          type: integer
+          minimum: 0
+        unsealed:
+          type: integer
+          minimum: 0
+        malformed:
+          type: integer
+          minimum: 0
+        discoveryOverflow:
+          type: integer
+          minimum: 0
+          description: State roots rejected because trial discovery exceeded its fixed bound.
+      required: [scanned, validated, unsealed, malformed, discoveryOverflow]
+      additionalProperties: false
+    Gate2702RunProjection:
+      type: object
+      properties:
+        rowId:
+          type: string
+        trialId:
+          type: string
+          format: uuid
+        runId:
+          type: [string, 'null']
+          format: uuid
+        subject:
+          type: integer
+          enum: [2760, 2719, 2713, 2706, 2710, 2670]
+        treatmentId:
+          type: string
+          enum: [haiku-solo, haiku-sonnet-sidekick]
+        attempt:
+          type: integer
+          enum: [1, 2]
+        finishedAt:
+          type: [string, 'null']
+          format: date-time
+        terminalClassification:
+          type: string
+          enum:
+            [
+              succeeded,
+              check-failed,
+              tooling-invalid,
+              cancelled,
+              cost-unknown,
+              failed,
+              excluded,
+            ]
+        objectiveChecks:
+          type: array
+          maxItems: 2
+          items:
+            $ref: '#/components/schemas/Gate2702ObjectiveCheck'
+        judgeState:
+          type: string
+          enum:
+            - quality-held
+            - quality-loss
+            - exhausted
+            - unavailable
+            - not-evaluable
+            - subject-sealed-result
+            - not-available-in-run-summary
+            - not-evaluated
+        wallTimeMs:
+          type: [number, 'null']
+          minimum: 0
+        allInCostUsd:
+          type: [number, 'null']
+          minimum: 0
+        sidekick:
+          type: object
+          properties:
+            triggerCount:
+              type: [integer, 'null']
+              minimum: 0
+            paidCallCount:
+              type: [integer, 'null']
+              minimum: 0
+            shippedInterventionCount:
+              type: [integer, 'null']
+              minimum: 0
+          required: [triggerCount, paidCallCount, shippedInterventionCount]
+          additionalProperties: false
+        exclusionReason:
+          type: [string, 'null']
+          maxLength: 256
+      required:
+        - rowId
+        - trialId
+        - runId
+        - subject
+        - treatmentId
+        - attempt
+        - finishedAt
+        - terminalClassification
+        - objectiveChecks
+        - judgeState
+        - wallTimeMs
+        - allInCostUsd
+        - sidekick
+        - exclusionReason
+      additionalProperties: false
+    Gate2702ObjectiveCheck:
+      type: object
+      properties:
+        checkId:
+          type: string
+          enum: [checks/gate-2702-typecheck, checks/gate-2702-vitest]
+        outcome:
+          type: string
+          enum: [passed, failed]
+      required: [checkId, outcome]
+      additionalProperties: false
+    Gate2702EvaluationProjection:
+      type: object
+      properties:
+        trialId:
+          type: string
+          format: uuid
+        evaluatedAt:
+          type: string
+          format: date-time
+        outcome:
+          $ref: '#/components/schemas/Gate2702EvaluationOutcome'
+        decision:
+          type: string
+          enum:
+            [
+              sidekick-clears,
+              sidekick-does-not-clear,
+              inconclusive,
+              invalid,
+              insufficient-evidence,
+            ]
+        sampleCounts:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: object
+            properties:
+              treatmentId:
+                type: string
+                enum: [haiku-solo, haiku-sonnet-sidekick]
+              n:
+                type: integer
+                minimum: 0
+            required: [treatmentId, n]
+            additionalProperties: false
+        gates:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            properties:
+              gateId:
+                type: string
+                enum:
+                  [
+                    parityFloor,
+                    netPositiveCost,
+                    attributableShips,
+                    minimumSample,
+                  ]
+              state:
+                type: string
+                enum: [passed, failed, not-evaluable]
+            required: [gateId, state]
+            additionalProperties: false
+        includedRunCount:
+          type: integer
+          minimum: 0
+        excludedRunCount:
+          type: integer
+          minimum: 0
+          description: Canonical Runs excluded by the evaluation.
+        preRunExclusionCount:
+          type: integer
+          minimum: 0
+          description: Candidates excluded before a canonical Run was produced.
+        exclusionCounts:
+          type: array
+          items:
+            type: object
+            properties:
+              reason:
+                type: string
+                maxLength: 256
+              count:
+                type: integer
+                minimum: 1
+            required: [reason, count]
+            additionalProperties: false
+      required:
+        - trialId
+        - evaluatedAt
+        - outcome
+        - decision
+        - sampleCounts
+        - gates
+        - includedRunCount
+        - excludedRunCount
+        - preRunExclusionCount
+        - exclusionCounts
+      additionalProperties: false
+    Gate2702EvaluationOutcome:
+      oneOf:
+        - type: object
+          properties:
+            kind:
+              const: winner
+            winningTreatmentId:
+              type: string
+              enum: [haiku-solo, haiku-sonnet-sidekick]
+          required: [kind, winningTreatmentId]
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: tie
+          required: [kind]
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              type: string
+              enum: [inconclusive, invalid, insufficient-evidence]
+            reason:
+              type: string
+              maxLength: 256
+          required: [kind, reason]
+          additionalProperties: false
     SessionTimeline:
       type: object
       description: The full per-session timeline. `SessionTimeline` in `src/lib/parse-timeline.ts`.
@@ -1697,7 +1993,16 @@ components:
             type: boolean
         error:
           type: string
-      required: [mode, authRequired, authenticated, configured, principal, organization, capabilities]
+      required:
+        [
+          mode,
+          authRequired,
+          authenticated,
+          configured,
+          principal,
+          organization,
+          capabilities,
+        ]
     EnterprisePrincipal:
       type: object
       description: '`EnterprisePrincipal` in `src/lib/api-client.ts`.'

@@ -25,11 +25,50 @@ export function pruneLruMap(map, max) {
   }
 }
 
+/**
+ * Resolve one synchronous assembled-value memo without letting its coarse key
+ * hide a trust-state mismatch. The memo records the state the VALUE actually
+ * observed, not the state sampled before assembly. If a bounded outer retry
+ * returns to an earlier key/state after a transient A -> B -> A race, the B
+ * value is therefore rebuilt instead of replayed forever under A's key.
+ */
+export function resolveStateBoundMemo({
+  memo,
+  key,
+  sourceState,
+  build,
+  builtSourceState,
+  sourceStatesEqual = Object.is,
+}) {
+  if (
+    memo &&
+    memo.key === key &&
+    Object.prototype.hasOwnProperty.call(memo, 'sourceState') &&
+    sourceStatesEqual(memo.sourceState, sourceState)
+  ) {
+    return { value: memo.value, memo, reused: true };
+  }
+
+  const value = build();
+  const nextMemo = {
+    key,
+    value,
+    sourceState: builtSourceState(value),
+  };
+  return { value, memo: nextMemo, reused: false };
+}
+
 // Resolve one request through the stat-gated cache.
 //
 //   sourceSignature()  — cheap stat signature of the source; when it matches a
 //                        cached entry's signature, the cached payload is served
 //                        with no ingest/assemble/score work.
+//   sourceState()      — optional exact trust-bearing state sampled alongside
+//                        the coarse signature (for example, a bounded external
+//                        snapshot identity). When supplied, `builtSourceState`
+//                        must project the state the returned payload ACTUALLY
+//                        observed; start, built, and completion states must all
+//                        match before the value can be cached.
 //   cacheMap / buildsMap — per-state Maps holding cached entries and in-flight
 //                        builds, keyed by `key`.
 //   key                — identifies the request's result-affecting inputs (date
@@ -41,8 +80,11 @@ export function pruneLruMap(map, max) {
 // Concurrency contract: N concurrent requests with the SAME key and an unchanged
 // sourceSignature share ONE build (single-flight) — the first installs the
 // in-flight promise; the rest await it. A source change moves the signature, so a
-// stale cached entry is rebuilt rather than served (invalidation). Returns the
-// payload plus a `cache` tag ('hit' | 'miss' | 'refresh') for X-*-Cache headers.
+// stale cached entry is rebuilt rather than served (invalidation). The signature
+// is sampled again AFTER the build: a mid-build change discards that value and
+// retries once from the new signature; a second change fails without committing
+// either unstable value. Returns the payload plus a `cache` tag ('hit' | 'miss'
+// | 'refresh') for X-*-Cache headers.
 export async function resolveStatGatedCache({
   sourceSignature,
   cacheMap,
@@ -51,26 +93,98 @@ export async function resolveStatGatedCache({
   max,
   build,
   buildArgs = [],
+  sourceState,
+  builtSourceState,
+  sourceStatesEqual = Object.is,
 }) {
   const sourceSig = sourceSignature();
+  const stateGateEnabled = typeof sourceState === 'function';
+  if (stateGateEnabled !== (typeof builtSourceState === 'function')) {
+    throw new TypeError(
+      'sourceState and builtSourceState must be provided together'
+    );
+  }
+  const initialSourceState = stateGateEnabled ? sourceState() : undefined;
+  const entryMatchesSourceState = (entry, currentState) =>
+    !stateGateEnabled ||
+    (Object.prototype.hasOwnProperty.call(entry, 'sourceState') &&
+      sourceStatesEqual(entry.sourceState, currentState));
   const cached = cacheMap.get(key);
-  if (cached && cached.sourceSig === sourceSig) {
+  if (
+    cached &&
+    cached.sourceSig === sourceSig &&
+    entryMatchesSourceState(cached, initialSourceState)
+  ) {
     cached.lastAccess = Date.now();
     return { value: cached.value, cache: 'hit' };
   }
   let inflight = buildsMap.get(key);
-  if (!inflight || inflight.sourceSig !== sourceSig) {
+  if (
+    !inflight ||
+    inflight.sourceSig !== sourceSig ||
+    !entryMatchesSourceState(inflight, initialSourceState)
+  ) {
+    const buildOwner = {
+      sourceSig,
+      ...(stateGateEnabled ? { sourceState: initialSourceState } : {}),
+      promise: null,
+      lastAccess: Date.now(),
+    };
     const promise = (async () => {
-      const value = await build(...buildArgs);
-      const entry = { value, sourceSig, lastAccess: Date.now() };
-      cacheMap.set(key, entry);
-      pruneLruMap(cacheMap, max);
-      return value;
+      let expectedSourceSig = sourceSig;
+      let expectedSourceState = initialSourceState;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const value = await build(...buildArgs);
+        const completedSourceSig = sourceSignature();
+        const completedSourceState = stateGateEnabled
+          ? sourceState()
+          : undefined;
+        const valueSourceState = stateGateEnabled
+          ? builtSourceState(value)
+          : undefined;
+        const stableState =
+          !stateGateEnabled ||
+          (sourceStatesEqual(expectedSourceState, valueSourceState) &&
+            sourceStatesEqual(expectedSourceState, completedSourceState) &&
+            sourceStatesEqual(valueSourceState, completedSourceState));
+        if (completedSourceSig === expectedSourceSig && stableState) {
+          const entry = {
+            value,
+            sourceSig: completedSourceSig,
+            ...(stateGateEnabled
+              ? { sourceState: completedSourceState }
+              : {}),
+            lastAccess: Date.now(),
+          };
+          cacheMap.set(key, entry);
+          pruneLruMap(cacheMap, max);
+          return value;
+        }
+
+        if (attempt === 1) {
+          const err = new Error(
+            'Source signature changed across the bounded rebuild retry'
+          );
+          err.code = 'SOURCE_CHANGED_DURING_BUILD';
+          throw err;
+        }
+
+        // Publish the retry signature on this owner so a request arriving
+        // during the retry can join it instead of starting duplicate work.
+        expectedSourceSig = completedSourceSig;
+        expectedSourceState = completedSourceState;
+        buildOwner.sourceSig = completedSourceSig;
+        if (stateGateEnabled) {
+          buildOwner.sourceState = completedSourceState;
+        }
+      }
+      throw new Error('Unreachable stat-gated cache build state');
     })().finally(() => {
       const current = buildsMap.get(key);
-      if (current?.promise === promise) buildsMap.delete(key);
+      if (current === buildOwner) buildsMap.delete(key);
     });
-    inflight = { sourceSig, promise, lastAccess: Date.now() };
+    buildOwner.promise = promise;
+    inflight = buildOwner;
     buildsMap.set(key, inflight);
     pruneLruMap(buildsMap, max);
   } else {

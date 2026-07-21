@@ -85,6 +85,7 @@ export function recommendationViewsFromViewData(
     repoMap: d.repoMap,
     docGraph: d.docGraph,
     docsMap: d.docsMap,
+    docIssueSnapshot: d.docIssueSnapshot,
     externalGuidance: d.externalGuidance,
   };
 }

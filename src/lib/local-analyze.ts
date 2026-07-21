@@ -77,6 +77,27 @@ export interface LocalAnalyzeResult {
   repairRounds: number;
   /** True iff the local model produced a schema-valid `{ summary, rankedFindingIds }`. */
   schemaValid: boolean;
+  /**
+   * Inclusive freshness boundary when any carried recommendation used the
+   * opt-in GitHub issue-state snapshot. Omitted for the local-only default.
+   */
+  validThrough?: string;
+}
+
+/** Fail-closed freshness check shared by the Local Analyze viewer. */
+export function isLocalAnalyzeResultUsable(
+  result: Pick<LocalAnalyzeResult, 'validThrough'>,
+  nowMs = Date.now()
+): boolean {
+  if (result.validThrough === undefined) return true;
+  if (typeof result.validThrough !== 'string') return false;
+  const boundary = Date.parse(result.validThrough);
+  if (!Number.isFinite(boundary) || nowMs > boundary) return false;
+  try {
+    return new Date(boundary).toISOString() === result.validThrough;
+  } catch {
+    return false;
+  }
 }
 
 /** Cap the number of findings summarized into the local-model prompt. */

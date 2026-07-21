@@ -12,11 +12,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
@@ -65,12 +66,20 @@ function buildFixtureHome() {
 
 // One rebuild round-trip against the worker; resolves the worker's reply. `extra`
 // carries the optional #2718 surface/filters so a scoped rebuild can be exercised.
-function workerRebuild(home, dbPath, extra = {}) {
+// Test-only `options.env` and `options.onLog` expose deterministic source-race
+// gates without changing the production request protocol.
+function workerRebuild(home, dbPath, extra = {}, options = {}) {
   return new Promise((resolve, reject) => {
     const w = new Worker(WORKER, {
       execArgv: ['--import', REGISTER],
       workerData: { projectDir: PROJECT_DIR },
-      env: { ...process.env, HOME: home, CLAUDE_DIR: join(home, '.claude'), CHD_DB_PATH: dbPath },
+      env: {
+        ...process.env,
+        HOME: home,
+        CLAUDE_DIR: join(home, '.claude'),
+        CHD_DB_PATH: dbPath,
+        ...(options.env ?? {}),
+      },
     });
     const id = 1;
     const timer = setTimeout(() => {
@@ -78,7 +87,17 @@ function workerRebuild(home, dbPath, extra = {}) {
       reject(new Error('worker timed out'));
     }, 60_000);
     w.on('message', (msg) => {
-      if (!msg || msg.type === 'ready' || msg.type === 'log') return;
+      if (!msg || msg.type === 'ready') return;
+      if (msg.type === 'log') {
+        try {
+          options.onLog?.(msg);
+        } catch (err) {
+          clearTimeout(timer);
+          w.terminate();
+          reject(err);
+        }
+        return;
+      }
       clearTimeout(timer);
       w.terminate();
       if (msg.id === id && msg.ok) resolve(msg);
@@ -100,6 +119,104 @@ function workerRebuild(home, dbPath, extra = {}) {
   });
 }
 
+function workerSuppressionDisposition(home, disposition) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(WORKER, {
+      execArgv: ['--import', REGISTER],
+      workerData: { projectDir: PROJECT_DIR },
+      env: {
+        ...process.env,
+        HOME: home,
+        CLAUDE_DIR: join(home, '.claude'),
+        CHD_DB_PATH: join(
+          tmpdir(),
+          `chd-2196-worker-disposition-${randomUUID()}.db`
+        ),
+        CHD_RECS_CACHE_TEST_EVENTS: '1',
+      },
+    });
+    const id = 1;
+    const expectedMarker =
+      disposition === 'accept'
+        ? '[recs-cache-test] worker-suppression-accepted'
+        : '[recs-cache-test] worker-suppression-discarded';
+    const forbiddenMarker =
+      disposition === 'accept'
+        ? '[recs-cache-test] worker-suppression-discarded'
+        : '[recs-cache-test] worker-suppression-accepted';
+    let replied = false;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void w.terminate();
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(
+      () => finish(new Error(`worker ${disposition} acknowledgement timed out`)),
+      60_000
+    );
+    w.on('error', finish);
+    w.on('message', (msg) => {
+      try {
+        if (!msg || msg.type === 'ready') return;
+        if (msg.type === 'log') {
+          assert.notEqual(msg.message, forbiddenMarker);
+          if (msg.message === expectedMarker) {
+            assert.equal(replied, true, 'side effect starts only after a result reply');
+            finish();
+          }
+          return;
+        }
+        assert.equal(msg.id, id);
+        assert.equal(msg.ok, true);
+        assert.equal(
+          msg.suppressionEmissionId,
+          id,
+          'the stable dataset is staged under the request id'
+        );
+        assert.equal(replied, false, 'the worker replies exactly once');
+        replied = true;
+        w.postMessage({
+          type:
+            disposition === 'accept'
+              ? 'accept-suppression-transitions'
+              : 'discard-suppression-transitions',
+          id: msg.suppressionEmissionId,
+        });
+      } catch (error) {
+        finish(error);
+      }
+    });
+    w.postMessage({
+      id,
+      project: null,
+      organizationIdentity: null,
+      emitSuppressionTransitions: true,
+      adoptionReceiptsPath: join(
+        home,
+        '.claude',
+        '.cache',
+        'chd',
+        'adoption-receipts.jsonl'
+      ),
+      shadowCallsDir: join(home, '.claude', 'shadow-calls'),
+    });
+  });
+}
+
+test('worker suppression side effects require parent acceptance', async () => {
+  const home = buildFixtureHome();
+  try {
+    await workerSuppressionDisposition(home, 'discard');
+    await workerSuppressionDisposition(home, 'accept');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('worker rebuild is byte-identical to the inline build (#2196)', async () => {
   const origHome = process.env.HOME;
   const origDb = process.env.CHD_DB_PATH;
@@ -120,6 +237,16 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
     // Worker build in a SEPARATE thread with its OWN db over the same corpus.
     const reply = await workerRebuild(home, join(tmpdir(), `chd-2196-worker-${randomUUID()}.db`));
     assert.equal(reply.ok, true, 'worker replied ok');
+    assert.equal(
+      reply.docIssueCacheState,
+      null,
+      'flag-off worker result carries no snapshot cache state'
+    );
+    assert.equal(
+      typeof reply.sourceSig,
+      'string',
+      'worker returns the source signature validated after the build'
+    );
     assert.equal(
       reply.json,
       jsonInline,
@@ -171,6 +298,208 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
     process.env.CHD_DB_PATH = origDb;
     if (origClaude === undefined) delete process.env.CLAUDE_DIR;
     else process.env.CLAUDE_DIR = origClaude;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('worker returns the validated opt-in snapshot cache identity and expiry boundary', async () => {
+  const home = buildFixtureHome();
+  const docsRoot = join(home, 'docs-root');
+  const cacheRoot = join(home, 'chd-cache');
+  const repo = 'acme/widgets';
+  const refs = [101, 202];
+  const asOf = new Date(Date.now() - 60_000).toISOString();
+  const fingerprint = createHash('sha256')
+    .update(`${repo}\n${refs.join(',')}`)
+    .digest('hex');
+  const snapshot = {
+    repo,
+    refs,
+    records: [
+      { number: 101, state: 'open' },
+      { number: 202, state: 'closed' },
+    ],
+    asOf,
+    complete: true,
+    fingerprint,
+  };
+  try {
+    mkdirSync(join(cacheRoot, 'doc-issues'), { recursive: true });
+    mkdirSync(docsRoot, { recursive: true });
+    writeFileSync(
+      join(docsRoot, 'REFERENCES.md'),
+      'Tracked in #101 and resolved by #202.\n'
+    );
+    writeFileSync(
+      join(cacheRoot, 'doc-issues', 'acme__widgets.json'),
+      JSON.stringify(snapshot)
+    );
+
+    const reply = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-2710-worker-${randomUUID()}.db`),
+      {},
+      {
+        env: {
+          CHD_CACHE_DIR: cacheRoot,
+          CHD_DOC_GRAPH_ROOT: docsRoot,
+          CHD_DOC_ISSUES: repo,
+          CHD_DOC_ISSUES_TOKEN: 'fixture-token',
+        },
+      }
+    );
+
+    assert.deepEqual(
+      JSON.parse(reply.docIssueCacheState.identity),
+      {
+        repo,
+        refs,
+        records: [
+          [101, 'open'],
+          [202, 'closed'],
+        ],
+        asOf,
+        fingerprint,
+      },
+      'worker exposes the canonical identity of every detector-visible snapshot field'
+    );
+    assert.equal(
+      reply.docIssueCacheState.usableThrough,
+      Date.parse(asOf) + 24 * 60 * 60 * 1000,
+      'worker exposes the inclusive 24-hour snapshot boundary for parent cache checks'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('worker discards a result when source state changes mid-build and retries once', async () => {
+  const home = buildFixtureHome();
+  const projectDir = join(home, '.claude', 'projects', '-tmp-proj');
+  const gate = join(home, 'worker-source-race.fifo');
+  try {
+    const baseline = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-2196-worker-baseline-${randomUUID()}.db`)
+    );
+    const fifo = spawnSync('mkfifo', [gate]);
+    assert.equal(fifo.status, 0, String(fifo.stderr || ''));
+
+    let retries = 0;
+    const raced = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-2196-worker-race-${randomUUID()}.db`),
+      {},
+      {
+        env: {
+          CHD_RECS_CACHE_TEST_EVENTS: '1',
+          CHD_RECS_WORKER_TEST_AFTER_RECEIPTS_GATE: gate,
+        },
+        onLog(msg) {
+          if (msg.message === '[recs-cache-test] worker-receipts-read') {
+            writeFileSync(
+              join(projectDir, 'sess-gamma.jsonl'),
+              sessionJsonl({
+                prompt: 'do the gamma thing',
+                text: 'Gamma result.',
+                toolName: 'Read',
+                toolInput: { file_path: '/tmp/gamma.txt' },
+                ts: '2026-01-03T00:00:00.000Z',
+                model: 'claude-opus-4',
+              })
+            );
+            // The worker is blocked reading this FIFO after posting the marker.
+            writeFileSync(gate, 'release');
+          }
+          if (
+            msg.message ===
+            '[recs-worker] source changed during rebuild; retrying once'
+          ) {
+            retries += 1;
+          }
+        },
+      }
+    );
+
+    assert.equal(retries, 1, 'one mid-build change triggers exactly one retry');
+    assert.notEqual(
+      raced.contentHash,
+      baseline.contentHash,
+      'the returned result reflects the source added while the first build was paused'
+    );
+    assert.notEqual(
+      raced.sourceSig,
+      baseline.sourceSig,
+      'the reply carries the validated post-retry source signature'
+    );
+    assert.equal(
+      raced.docIssueCacheState,
+      null,
+      'the source-race retry preserves the feature-off metadata shape'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('worker fails closed when source state changes again during its retry', async () => {
+  const home = buildFixtureHome();
+  const projectDir = join(home, '.claude', 'projects', '-tmp-proj');
+  const gate = join(home, 'worker-double-source-race.fifo');
+  try {
+    const fifo = spawnSync('mkfifo', [gate]);
+    assert.equal(fifo.status, 0, String(fifo.stderr || ''));
+
+    let retryStarted = false;
+    await assert.rejects(
+      workerRebuild(
+        home,
+        join(tmpdir(), `chd-2196-worker-double-race-${randomUUID()}.db`),
+        {},
+        {
+          env: {
+            CHD_RECS_CACHE_TEST_EVENTS: '1',
+            CHD_RECS_WORKER_TEST_AFTER_RECEIPTS_GATE: gate,
+          },
+          onLog(msg) {
+            if (msg.message === '[recs-cache-test] worker-receipts-read') {
+              writeFileSync(
+                join(projectDir, 'sess-gamma.jsonl'),
+                sessionJsonl({
+                  prompt: 'first concurrent change',
+                  text: 'Gamma result.',
+                  toolName: 'Read',
+                  toolInput: { file_path: '/tmp/gamma.txt' },
+                  ts: '2026-01-03T00:00:00.000Z',
+                  model: 'claude-opus-4',
+                })
+              );
+              writeFileSync(gate, 'release');
+            }
+            if (
+              msg.message ===
+              '[recs-worker] source changed during rebuild; retrying once'
+            ) {
+              retryStarted = true;
+              writeFileSync(
+                join(projectDir, 'sess-delta.jsonl'),
+                sessionJsonl({
+                  prompt: 'second concurrent change',
+                  text: 'Delta result.',
+                  toolName: 'Read',
+                  toolInput: { file_path: '/tmp/delta.txt' },
+                  ts: '2026-01-04T00:00:00.000Z',
+                  model: 'claude-opus-4',
+                })
+              );
+            }
+          },
+        }
+      ),
+      /source state changed across the bounded rebuild retry/i
+    );
+    assert.equal(retryStarted, true, 'the second mutation lands during the bounded retry');
+  } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });

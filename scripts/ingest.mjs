@@ -680,6 +680,24 @@ const {
   gitHistoryAvailability,
   DOC_GRAPH_MAX_FILE_BYTES,
 } = await import(join(LIB, 'parse-docs.ts'));
+// Opt-in GitHub issue-state snapshot (#2710, epic #2256). Ingest only READS the
+// validated cache the server preamble refreshes — it NEVER makes a network call.
+// With CHD_DOC_ISSUES unset the config is disabled and the read returns null, so
+// the default dataset omits the key and is byte-identical.
+const {
+  parseDocIssueConfig,
+  readDocIssueCache,
+  refreshDocIssueSnapshot,
+  isDocIssueSnapshotRetired,
+  retireDocIssueSnapshot,
+} = await import(join(LIB, 'doc-issue-fetch.ts'));
+const {
+  isDocIssueSnapshotUsable,
+  canonicalRefSet,
+  docIssueSnapshotFreshnessBoundaryMs,
+  docIssueSnapshotIdentity,
+  docIssueSnapshotUsableThroughMs,
+} = await import(join(LIB, 'doc-issue-snapshot.ts'));
 // Packaged per-doc Git-time manifest (#2707): buildDocGraph joins it into node
 // gitMtimeIso/gitMtimeProvenance, so its identity/content must feed the same
 // cache gates as the docs themselves (see docGraphSourceSignature /
@@ -1213,6 +1231,211 @@ function readDocGraph() {
   } catch {
     return { root: DOC_GRAPH_ROOT, nodes: [], edges: [] };
   }
+}
+
+// Opt-in GitHub issue-state snapshot (#2710, epic #2256). The cache dir shares
+// CHD_CACHE_DIR (like every other runtime write); the server preamble refreshes
+// it, ingest only reads it.
+const DOC_ISSUE_CACHE_DIR = join(CHD_CACHE_DIR, 'doc-issues');
+function docIssueConfig() {
+  return parseDocIssueConfig(process.env, { cacheDir: DOC_ISSUE_CACHE_DIR });
+}
+
+// The request preamble derives the current graph ref set before any cache gate
+// runs. Retain that bounded identity so the later synchronous source/cache
+// checks can validate the snapshot against the exact graph without rebuilding
+// the Markdown graph on every signature probe. Bind the memo to the exact graph
+// source identity: a doc edit after the preamble must invalidate the refs before
+// any dataset/recommendation cache can serve the old snapshot.
+let docIssueExpectedRefState = null;
+
+// The exact ref set a snapshot binds to: unique, sorted issue numbers referenced
+// anywhere in the doc graph (its `issue:<n>` edges).
+function docIssueRefsFromGraph(graph) {
+  const nums = [];
+  for (const edge of graph?.edges ?? []) {
+    if (edge.kind !== 'issue-ref') continue;
+    const raw = String(edge.to);
+    const n = Number(raw.startsWith('issue:') ? raw.slice(6) : raw);
+    if (Number.isInteger(n) && n > 0) nums.push(n);
+  }
+  return canonicalRefSet(nums);
+}
+
+function docIssueRefStateFromGraph(graph) {
+  return {
+    refs: docIssueRefsFromGraph(graph),
+    graphSourceSignature: docGraphSourceSignature(),
+  };
+}
+
+// Build the graph only under one stable source signature. A bounded retry keeps
+// a concurrent doc edit from binding old parsed refs to a newer stat identity.
+function readStableDocIssueRefState() {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const before = docGraphSourceSignature();
+    const graph = readDocGraph();
+    const after = docGraphSourceSignature();
+    if (before === after) {
+      return {
+        refs: docIssueRefsFromGraph(graph),
+        graphSourceSignature: after,
+      };
+    }
+  }
+  return null;
+}
+
+// Read the opt-in snapshot from the validated cache for the CURRENT doc-graph ref
+// set (NO network — ingest never fetches). Returns the complete snapshot only
+// while it is still usable (<=24h) and its fingerprint matches the current ref
+// set; otherwise null — flag unset, SPA/upload, ref-set changed, stale, or
+// absent all keep the #2711 issue-reference signals silent.
+function readDocIssueSnapshot(graph) {
+  const config = docIssueConfig();
+  if (!config.enabled) return null;
+  const refs = docIssueRefsFromGraph(graph);
+  docIssueExpectedRefState = docIssueRefStateFromGraph(graph);
+  const cached = readDocIssueCache(config, refs);
+  if (!cached) return null;
+  return docIssueSnapshotUsableForIngest(config, cached.snapshot, Date.now())
+    ? cached.snapshot
+    : null;
+}
+
+function docIssueSnapshotUsableForIngest(config, snapshot, now) {
+  if (isDocIssueSnapshotRetired(config, snapshot)) return false;
+  if (isDocIssueSnapshotUsable(snapshot, now)) return true;
+  const usableThrough = docIssueSnapshotUsableThroughMs(snapshot);
+  if (Number.isFinite(usableThrough) && now > usableThrough) {
+    retireDocIssueSnapshot(config, snapshot);
+  }
+  return false;
+}
+
+// Server-preamble ONLY (#2710): the SINGLE place doc-issue makes a network call.
+// Builds the current doc-graph ref set and single-flight refreshes the cache so
+// the subsequent SYNCHRONOUS assembleDataset() read sees a fresh snapshot. It is
+// NEVER called by assembleDataset itself, so the dataset assembly path stays
+// network-free. No-op (null) when CHD_DOC_ISSUES is unset or on any failure.
+export async function refreshDocIssueSnapshotForServer() {
+  const config = docIssueConfig();
+  if (!config.enabled) return null;
+  try {
+    // Reuse refs only while their exact bounded graph-source identity remains
+    // current. Rebuilding the full Markdown graph (including Git provenance)
+    // on every dataset slice adds substantial synchronous boot cost; the cheap
+    // signature still makes a doc edit invalidate immediately, while the
+    // refresh helper owns the separate 15-minute snapshot reuse decision.
+    const currentGraphSourceSignature = docGraphSourceSignature();
+    let refState = docIssueExpectedRefState;
+    if (
+      !refState ||
+      refState.graphSourceSignature !== currentGraphSourceSignature
+    ) {
+      refState = readStableDocIssueRefState();
+    }
+    if (!refState) {
+      docIssueExpectedRefState = null;
+      return null;
+    }
+    docIssueExpectedRefState = refState;
+    return await refreshDocIssueSnapshot(config, refState.refs);
+  } catch {
+    return null;
+  }
+}
+
+// Canonical cache state for every downstream cache layer. The identity contains
+// every detector-visible field; usableThrough is the inclusive 24-hour boundary.
+// `null` means no usable snapshot (flag off, absent, invalid, ref-mismatched, or
+// expired). This function is synchronous and network-free.
+function docIssueCacheDescriptorForServer(now = Date.now()) {
+  const config = docIssueConfig();
+  if (!config.enabled) return { enabled: false, signature: null, state: null };
+
+  const currentGraphSourceSignature = docGraphSourceSignature();
+  let refState = docIssueExpectedRefState;
+  if (
+    !refState ||
+    refState.graphSourceSignature !== currentGraphSourceSignature
+  ) {
+    refState = readStableDocIssueRefState();
+    docIssueExpectedRefState = refState;
+  }
+  if (!refState) {
+    return {
+      enabled: true,
+      signature: `${config.repo}:graph-unstable`,
+      state: null,
+    };
+  }
+  const refs = refState.refs;
+  const cached = readDocIssueCache(config, refs);
+  if (!cached) {
+    return {
+      enabled: true,
+      signature: `${config.repo}:unavailable`,
+      state: null,
+    };
+  }
+
+  const identity = docIssueSnapshotIdentity(cached.snapshot);
+  const refreshAt = docIssueSnapshotFreshnessBoundaryMs(cached.snapshot);
+  const usableThrough = docIssueSnapshotUsableThroughMs(cached.snapshot);
+  if (!Number.isFinite(refreshAt) || !Number.isFinite(usableThrough)) {
+    return {
+      enabled: true,
+      signature: `${config.repo}:invalid`,
+      state: null,
+    };
+  }
+  const usable = docIssueSnapshotUsableForIngest(
+    config,
+    cached.snapshot,
+    now
+  );
+  const phase = !usable
+    ? now > usableThrough
+      ? 'expired'
+      : 'invalid'
+    : now < refreshAt
+      ? 'reusable'
+      : 'refresh-eligible';
+  const identityDigest = createHash('sha256').update(identity).digest('hex');
+  return {
+    enabled: true,
+    signature: `${config.repo}:${phase}:${identityDigest}:${usableThrough}`,
+    state: usable ? { identity, usableThrough } : null,
+  };
+}
+
+export function docIssueSnapshotCacheStateForServer() {
+  return docIssueCacheDescriptorForServer().state;
+}
+
+// Metadata derived from what an assemble call ACTUALLY included, rather than
+// from a pre-build cache probe. Every server cache gate compares this state to
+// both its start/completion state, closing A -> B -> A clock/file races where
+// the surrounding signatures match but the serialized body observed B.
+export function docIssueSnapshotCacheStateFromDataset(dataset) {
+  const snapshot = dataset?.docIssueSnapshot;
+  if (!snapshot) return null;
+  const usableThrough = docIssueSnapshotUsableThroughMs(snapshot);
+  if (!Number.isFinite(usableThrough)) return null;
+  return {
+    identity: docIssueSnapshotIdentity(snapshot),
+    usableThrough,
+  };
+}
+
+// Source-gate identity for the opt-in cache. It is based on validated snapshot
+// content and asOf-derived 15m/24h phases, never file mtime. A same-size rewrite,
+// restored mtime, failed refresh, or clock-only expiry therefore cannot alias.
+// Callers omit this part entirely when the feature is disabled, preserving the
+// pre-feature flag-off signature and avoiding any cache-file access.
+function docIssueSourceSignature() {
+  return docIssueCacheDescriptorForServer().signature;
 }
 
 // The graph reader and both cache gates share this exact bounded source list.
@@ -2064,6 +2287,16 @@ try {
   /* column already present (added on a prior boot) */
 }
 
+// #2710: bind persisted compressed bodies to the exact issue-snapshot state
+// they were assembled from. SQL NULL means a legacy row with UNKNOWN state;
+// new flag-off/no-snapshot rows store the explicit JSON token `null`, so a cold
+// restart can distinguish them from an older unpartitioned row.
+try {
+  db.exec('ALTER TABLE dataset_cache ADD COLUMN doc_issue_state TEXT');
+} catch {
+  /* column already present (added on a prior boot) */
+}
+
 // Keep the last few rows for rollback/debugging rather than just the live one —
 // a recently-superseded build can be inspected after a regression. Cheap: each
 // row is the compressed dataset (~2–3 MB), so a handful costs single-digit MB.
@@ -2217,7 +2450,13 @@ export const PARSER_SIG_VERSION = 'v4';
 // contract wrapper (strictly validated docs/docs-map.json + checkout
 // repository/commit identity), so a persisted v27 body can never be served as
 // if it had observed the docs-map declaration.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 28;
+// v29 (#2710): when the opt-in is ENABLED, the serialized full/light datasets
+// may carry `docIssueSnapshot` (bounded GitHub issue-state for the doc graph's
+// issue refs), so a persisted v28 body must not be served as though it observed
+// that state. Flag-off stays on v28: the dataset shape is unchanged and the
+// local-first default retains its exact pre-feature signature/content hash.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 29;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 28;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2227,28 +2466,61 @@ export const DATASET_ASSEMBLY_SCHEMA_VERSION = 28;
 // meaning changes without a source-file change, pair that bump with this dataset
 // schema version so a restart cannot serve an old assembled body while reparsing.
 export function datasetAssemblySchemaKey() {
-  return `dataset-schema:v${DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${PARSER_SIG_VERSION}`;
+  const version = docIssueConfig().enabled
+    ? DATASET_ASSEMBLY_SCHEMA_VERSION
+    : FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION;
+  return `dataset-schema:v${version}:parser-${PARSER_SIG_VERSION}`;
 }
 
 const selDatasetCache = db.prepare(
-  'SELECT etag, json_br, json_gz FROM dataset_cache WHERE content_hash = ?'
+  'SELECT etag, json_br, json_gz, doc_issue_state FROM dataset_cache WHERE content_hash = ?'
 );
 const selLatestDatasetCache = db.prepare(
-  'SELECT content_hash, etag, json_br, json_gz FROM dataset_cache WHERE schema_key = ? ORDER BY created_at DESC LIMIT 1'
+  'SELECT content_hash, etag, json_br, json_gz, doc_issue_state FROM dataset_cache WHERE schema_key = ? ORDER BY created_at DESC LIMIT 1'
 );
 const insDatasetCache = db.prepare(`
-  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key)
-  VALUES (?, ?, ?, ?, ?, ?)
+  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(content_hash) DO UPDATE SET
     etag=excluded.etag, json_br=excluded.json_br,
     json_gz=excluded.json_gz, created_at=excluded.created_at,
-    schema_key=excluded.schema_key
+    schema_key=excluded.schema_key,
+    doc_issue_state=excluded.doc_issue_state
 `);
 const pruneDatasetCache = db.prepare(`
   DELETE FROM dataset_cache WHERE content_hash NOT IN (
     SELECT content_hash FROM dataset_cache ORDER BY created_at DESC LIMIT ?
   )
 `);
+
+function decodePersistedDocIssueCacheState(raw) {
+  if (typeof raw !== 'string') {
+    return { docIssueCacheStateKnown: false, docIssueCacheState: null };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed === null) {
+      return { docIssueCacheStateKnown: true, docIssueCacheState: null };
+    }
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      typeof parsed.identity !== 'string' ||
+      !Number.isFinite(parsed.usableThrough)
+    ) {
+      return { docIssueCacheStateKnown: false, docIssueCacheState: null };
+    }
+    return {
+      docIssueCacheStateKnown: true,
+      docIssueCacheState: {
+        identity: parsed.identity,
+        usableThrough: parsed.usableThrough,
+      },
+    };
+  } catch {
+    return { docIssueCacheStateKnown: false, docIssueCacheState: null };
+  }
+}
 
 // Load a persisted compressed dataset by its content fingerprint. Returns the
 // same shape the server's in-memory cache uses ({ etag, json, brBuf, gzBuf,
@@ -2274,7 +2546,14 @@ export function loadDatasetCache(contentHash) {
   } catch {
     return null; // corrupt/partial blob — rebuild instead of serving garbage
   }
-  return { etag: row.etag, json, brBuf, gzBuf, contentHash };
+  return {
+    etag: row.etag,
+    json,
+    brBuf,
+    gzBuf,
+    contentHash,
+    ...decodePersistedDocIssueCacheState(row.doc_issue_state),
+  };
 }
 
 export function loadLatestDatasetCache() {
@@ -2295,7 +2574,14 @@ export function loadLatestDatasetCache() {
   } catch {
     return null;
   }
-  return { etag: row.etag, json, brBuf, gzBuf, contentHash: row.content_hash };
+  return {
+    etag: row.etag,
+    json,
+    brBuf,
+    gzBuf,
+    contentHash: row.content_hash,
+    ...decodePersistedDocIssueCacheState(row.doc_issue_state),
+  };
 }
 
 // Persist a freshly built compressed dataset so the next cold start can reuse
@@ -2304,11 +2590,19 @@ export function loadLatestDatasetCache() {
 // rather than failing the request. `createdAt` is injected by the caller (the
 // server) to keep this module free of wall-clock reads.
 export function saveDatasetCache(
-  { contentHash, etag, brBuf, gzBuf },
+  { contentHash, etag, brBuf, gzBuf, docIssueCacheState = null },
   createdAt
 ) {
   try {
-    insDatasetCache.run(contentHash, etag, brBuf, gzBuf, createdAt, datasetAssemblySchemaKey());
+    insDatasetCache.run(
+      contentHash,
+      etag,
+      brBuf,
+      gzBuf,
+      createdAt,
+      datasetAssemblySchemaKey(),
+      JSON.stringify(docIssueCacheState)
+    );
     pruneDatasetCache.run(DATASET_CACHE_KEEP);
   } catch (err) {
     console.error('dataset_cache persist failed:', err?.message ?? err);
@@ -3317,6 +3611,14 @@ export function sourceSignature() {
   // (or a moved HEAD changing the wrapper identity) with no other source
   // change would early-hit both response caches forever.
   parts.push(`docs-map:${DOCS_MAP_PATH}:${docsMapSourceSignature()}`);
+  // Opt-in doc-issue snapshot (#2710): a GitHub refresh rewrites the cache with
+  // no local source change, so without this a refreshed snapshot would early-hit
+  // the response caches forever. Omit the part ENTIRELY when disabled: flag-off
+  // keeps the pre-feature signature and never reads the cache surface.
+  const docIssueSignature = docIssueSourceSignature();
+  if (docIssueSignature !== null) {
+    parts.push(`doc-issues:${docIssueSignature}`);
+  }
   if (!SCOPED_INGEST) {
     for (const root of liveConfigProjectRoots(repoMapArtifactRoots())) {
       for (const name of ['AGENTS.md', 'CLAUDE.md', 'REFERENCES.md']) {
@@ -3566,6 +3868,21 @@ export function ingest() {
   hash.update(DOCS_MAP_PATH);
   hash.update('\0');
   hashDocsMapContent(hash);
+  // Opt-in issue state is detector-visible input assembled outside the local
+  // source tree. Hash the canonical validated identity plus its asOf-derived
+  // freshness phase so a state-only refresh, same-stat replacement, 15-minute
+  // retry boundary, or 24-hour expiry cannot reuse/restamp an older dataset.
+  // Flag off contributes NO section, preserving the default cache key surface.
+  const docIssueDescriptor = docIssueCacheDescriptorForServer();
+  if (docIssueDescriptor.enabled) {
+    hash.update('doc-issues\n');
+    hash.update(docIssueDescriptor.signature ?? 'unavailable');
+    hash.update('\n');
+    if (docIssueDescriptor.state) {
+      hash.update(docIssueDescriptor.state.identity);
+      hash.update('\n');
+    }
+  }
   const contentHash = hash.digest('hex');
   return {
     total: sessions.length,
@@ -4104,6 +4421,7 @@ function assembleDatasetCore() {
   const externalGuidance = readExternalGuidance();
   const docGraph = readDocGraph();
   const docsMap = readDocsMap();
+  const docIssueSnapshot = readDocIssueSnapshot(docGraph);
 
   // Artifact-derived experiment sources (#2151): proof receipts + model-eval
   // batches join the ledger's uniform (source, axis) cells so every experiment
@@ -4205,6 +4523,7 @@ function assembleDatasetCore() {
     gitOutcomes,
     docGraph,
     docsMap,
+    docIssueSnapshot,
     // repoMap inputs (each caller builds repoMap; only the full path folds in
     // the embedded recommendations)
     maps,
@@ -4265,6 +4584,7 @@ export function assembleDataset() {
     gitOutcomes,
     docGraph,
     docsMap,
+    docIssueSnapshot,
     maps,
     configSections,
     configAttribution,
@@ -4303,6 +4623,7 @@ export function assembleDataset() {
       gitOutcomes,
       docGraph,
       docsMap,
+      docIssueSnapshot,
       promptAnalysis,
     })
   );
@@ -4404,6 +4725,12 @@ export function assembleDataset() {
     gitOutcomes,
     docGraph,
     docsMap,
+    // Opt-in GitHub issue-state snapshot (#2710). The key is OMITTED entirely
+    // when there is no complete snapshot (flag unset/invalid, credential
+    // missing, incomplete, stale, or SPA/upload), so the default serialized
+    // dataset — and its ETag/contentHash — stays byte-identical and the client
+    // observes an absent key.
+    ...(docIssueSnapshot ? { docIssueSnapshot } : {}),
   };
 }
 
@@ -4479,6 +4806,9 @@ export function assembleRecommendationDataset() {
     gitOutcomes: core.gitOutcomes,
     docGraph: core.docGraph,
     docsMap: core.docsMap,
+    // Omit when null so the light dataset matches the full serialized dataset
+    // (both absent when disabled), preserving light/full recs-field parity.
+    ...(core.docIssueSnapshot ? { docIssueSnapshot: core.docIssueSnapshot } : {}),
     repoMap,
   };
 }
@@ -4593,6 +4923,12 @@ function assembleRecommendationContext(options = {}) {
     // than the dataset's contentHash was stamped against. Only a dataset that
     // never carried the key (pre-v28 injected bodies) derives fresh.
     docsMap: 'docsMap' in dataset ? (dataset.docsMap ?? null) : readDocsMap(),
+    // Opt-in GitHub issue-state snapshot (#2710): v29 intentionally OMITS the
+    // key when the authoritative value is null. Absence is therefore current
+    // dataset truth, not a legacy cue to re-read a live cache after an await.
+    // Treating the supplied dataset as authoritative keeps detector input bound
+    // to the contentHash/source state that produced it.
+    docIssueSnapshot: dataset.docIssueSnapshot ?? null,
     // Optional host-produced Lychee output. Flag-off runner operation is local
     // and offline; ingest only reads the persisted JSON and never invokes a
     // checker or makes an external call.
@@ -4726,7 +5062,19 @@ export function assembleScopedRecommendationResult(
     result.recommendations,
     options.rejectedFindingIds ?? new Set()
   );
-  return { recommendations, domainCoverage: result.domainCoverage };
+  const usableThrough = dataset.docIssueSnapshot
+    ? docIssueSnapshotUsableThroughMs(dataset.docIssueSnapshot)
+    : null;
+  return {
+    recommendations,
+    domainCoverage: result.domainCoverage,
+    // Typed browser surfaces can retain issue-state-backed claims only through
+    // the server-validated snapshot boundary. Omit this field entirely when the
+    // opt-in snapshot is absent so flag-off wire bytes remain unchanged.
+    ...(Number.isFinite(usableThrough)
+      ? { validThrough: new Date(usableThrough).toISOString() }
+      : {}),
+  };
 }
 
 /**

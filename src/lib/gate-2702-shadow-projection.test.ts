@@ -273,6 +273,17 @@ describe("projectGate2702C5 (#2834)", () => {
       allInCostUsd: null,
       exclusionReason: "unknown-all-in-cost:sidekick-ledger-unsettled",
     });
+    expect(projected.evaluations[0]).toMatchObject({
+      includedRunCount: 2,
+      excludedRunCount: 2,
+      preRunExclusionCount: 1,
+    });
+    expect(
+      projected.evaluations[0].exclusionCounts.reduce(
+        (total, value) => total + value.count,
+        0,
+      ),
+    ).toBe(3);
     const wire = JSON.stringify(projected);
     for (const forbidden of [
       "private prompt",
@@ -443,6 +454,7 @@ describe("projectGate2702C5 (#2834)", () => {
       validated: 1,
       unsealed: 1,
       malformed: 2,
+      discoveryOverflow: 0,
     });
     expect(projected).toMatchObject({ total: 2, returned: 1, dropped: 1 });
     expect(projected.rows[0].subject).toBe(2719);

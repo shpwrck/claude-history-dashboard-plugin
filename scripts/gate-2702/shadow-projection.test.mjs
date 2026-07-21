@@ -103,6 +103,63 @@ test("C5 shadow projection is absent when its local state root is absent", async
   assert.equal(called, false);
 });
 
+test("C5 shadow projection reports a dangling Definition-root symlink as malformed", async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "gate-2702-shadow-root-link-"));
+  try {
+    const definitionRoot = join(stateRoot, DEFINITION_DIGEST.replace(":", "-"));
+    symlinkSync(
+      join(stateRoot, "missing-definition-root"),
+      definitionRoot,
+      "dir",
+    );
+    const projection = await readGate2702ShadowProjection({ stateRoot });
+
+    assert.ok(projection);
+    assert.deepEqual(projection.reconciliation, {
+      scanned: 1,
+      validated: 0,
+      unsealed: 0,
+      malformed: 1,
+      discoveryOverflow: 0,
+    });
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("C5 shadow projection reports a dangling verification-marker symlink as malformed", async () => {
+  const stateRoot = mkdtempSync(
+    join(tmpdir(), "gate-2702-shadow-marker-link-"),
+  );
+  try {
+    const root = trialRoot(stateRoot, VERIFIED_TRIAL);
+    mkdirSync(join(root, "seal"), { recursive: true });
+    symlinkSync("missing-verified.json", join(root, "seal", "verified.json"));
+    let called = false;
+    const projection = await readGate2702ShadowProjection(
+      { stateRoot },
+      {
+        loadCurrentEvaluation: async () => {
+          called = true;
+          return verifiedZeroRunEvaluation();
+        },
+      },
+    );
+
+    assert.ok(projection);
+    assert.equal(called, false);
+    assert.deepEqual(projection.reconciliation, {
+      scanned: 1,
+      validated: 0,
+      unsealed: 0,
+      malformed: 1,
+      discoveryOverflow: 0,
+    });
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test("C5 shadow projection verifies eligible trials and reconciles unsealed/malformed ones", async () => {
   const stateRoot = mkdtempSync(join(tmpdir(), "gate-2702-shadow-projection-"));
   try {
@@ -128,6 +185,7 @@ test("C5 shadow projection verifies eligible trials and reconciles unsealed/malf
       validated: 1,
       unsealed: 1,
       malformed: 1,
+      discoveryOverflow: 0,
     });
     assert.equal(projection.total, 1);
     assert.equal(projection.rows[0].terminalClassification, "cost-unknown");
@@ -152,7 +210,37 @@ test("C5 shadow projection verifies eligible trials and reconciles unsealed/malf
   }
 });
 
-test("C5 discovery fails closed with exact reconciliation when the trial-directory bound is exceeded", async () => {
+test("C5 shadow projection uses the configured self-contained runtime verifier", async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "gate-2702-shadow-runtime-"));
+  const priorBundle = process.env.CHD_GATE_2702_RUNTIME_VERIFIER;
+  const priorNodeEnv = process.env.NODE_ENV;
+  try {
+    touchPublishedTrial(stateRoot, VERIFIED_TRIAL);
+    const bundlePath = join(stateRoot, "runtime-verifier.bundle.mjs");
+    writeFileSync(
+      bundlePath,
+      `export async function loadCurrentEvaluation() { return ${JSON.stringify(
+        verifiedZeroRunEvaluation(),
+      )}; }\n`,
+    );
+    process.env.CHD_GATE_2702_RUNTIME_VERIFIER = bundlePath;
+    process.env.NODE_ENV = "production";
+
+    const projection = await readGate2702ShadowProjection({ stateRoot });
+    assert.ok(projection);
+    assert.equal(projection.reconciliation.validated, 1);
+    assert.equal(projection.reconciliation.malformed, 0);
+  } finally {
+    if (priorBundle === undefined)
+      delete process.env.CHD_GATE_2702_RUNTIME_VERIFIER;
+    else process.env.CHD_GATE_2702_RUNTIME_VERIFIER = priorBundle;
+    if (priorNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = priorNodeEnv;
+    rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("C5 discovery fails closed without loading a partial trial-directory prefix", async () => {
   const stateRoot = mkdtempSync(join(tmpdir(), "gate-2702-shadow-overflow-"));
   try {
     for (let index = 0; index < 256; index += 1) {
@@ -178,10 +266,11 @@ test("C5 discovery fails closed with exact reconciliation when the trial-directo
 
     assert.ok(projection);
     assert.deepEqual(projection.reconciliation, {
-      scanned: 257,
+      scanned: 1,
       validated: 0,
       unsealed: 0,
-      malformed: 257,
+      malformed: 0,
+      discoveryOverflow: 1,
     });
     assert.deepEqual(projection.rows, []);
     assert.deepEqual(projection.evaluations, []);
@@ -235,6 +324,7 @@ test("C5 shadow projection re-verifies underlying sealed objects on the next rea
       validated: 0,
       unsealed: 0,
       malformed: 1,
+      discoveryOverflow: 0,
     });
     assert.deepEqual(after.rows, []);
     assert.deepEqual(after.evaluations, []);

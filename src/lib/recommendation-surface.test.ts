@@ -84,6 +84,37 @@ describe('parseRecommendationResult', () => {
       );
     }
   });
+
+  it('accepts an omitted expiry or a canonical snapshot expiry, but rejects malformed boundaries', () => {
+    expect(
+      parseRecommendationResult({
+        recommendations: [],
+        domainCoverage: [],
+        validThrough: '2026-07-21T12:34:56.789Z',
+      })
+    ).toEqual({
+      recommendations: [],
+      domainCoverage: [],
+      validThrough: '2026-07-21T12:34:56.789Z',
+    });
+
+    for (const validThrough of [
+      null,
+      0,
+      '',
+      'not-a-date',
+      '2026-07-21T12:34:56Z',
+      '2026-07-21T08:34:56.789-04:00',
+    ]) {
+      expect(() =>
+        parseRecommendationResult({
+          recommendations: [],
+          domainCoverage: [],
+          validThrough,
+        })
+      ).toThrow('Invalid recommendation analysis response');
+    }
+  });
 });
 
 // ── Viewer-only engine boundary (#2719) — source-contract proof, no build ──────
@@ -138,6 +169,12 @@ describe('viewer-only engine boundary (#2719)', () => {
 
     const registry = read('./view-registry.tsx');
     expect(registry).toContain('analysisLoadOptions={analysisLoadOptions}');
+    expect(registry).toContain(
+      'datasetGeneration={analysisLoadOptions.refreshKey}'
+    );
+    expect(registry).toContain(
+      'sourceEnabled={analysisLoadOptions.enabled ?? true}'
+    );
 
     const cost = read('../components/CostAttribution.tsx');
     expect(cost).toContain(

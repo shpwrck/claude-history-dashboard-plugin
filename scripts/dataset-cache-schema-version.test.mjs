@@ -27,16 +27,22 @@ async function loadIngest(home) {
 test('dataset assembly schema key feeds sourceSignature and ingest content hash (#1543)', async () => {
   const origHome = process.env.HOME;
   const origDb = process.env.CHD_DB_PATH;
+  const origDocIssues = process.env.CHD_DOC_ISSUES;
+  const origDocIssuesToken = process.env.CHD_DOC_ISSUES_TOKEN;
+  const origDocIssuesTokenFile = process.env.CHD_DOC_ISSUES_TOKEN_FILE;
   const home = join(tmpdir(), `chd-1543-home-${randomUUID()}`);
   mkdirSync(join(home, '.claude', 'projects'), { recursive: true });
 
   try {
+    delete process.env.CHD_DOC_ISSUES;
+    delete process.env.CHD_DOC_ISSUES_TOKEN;
+    delete process.env.CHD_DOC_ISSUES_TOKEN_FILE;
     const ingest = await loadIngest(home);
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      28,
-      'the serialized docsMap contract wrapper must turn over persisted v27 datasets'
+      29,
+      'enabled docIssueSnapshot datasets (#2710) use the next schema version'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -47,7 +53,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.PARSER_SIG_VERSION, 'string');
     assert.equal(
       key,
-      `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`
+      `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
+      'flag-off retains the exact pre-feature v28 cache key'
     );
     // The immediately-preceding v27 key needs no dedicated notEqual: the exact
     // equal(28) assertion above already excludes every other version (#2709
@@ -92,6 +99,38 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
       new RegExp(`(^|\\\\|)${key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}(\\\\||$)`)
     );
 
+    const flagOffSourceSignature = ingest.sourceSignature();
+    const flagOffContentHash = ingest.ingest().contentHash;
+    process.env.CHD_DOC_ISSUES = 'not-a-repo';
+    process.env.CHD_DOC_ISSUES_TOKEN_FILE = join(home, 'must-not-be-read');
+    assert.equal(
+      ingest.sourceSignature(),
+      flagOffSourceSignature,
+      'an invalid/disabled flag leaves the pre-feature source signature byte-identical'
+    );
+    assert.equal(
+      ingest.ingest().contentHash,
+      flagOffContentHash,
+      'an invalid/disabled flag leaves the pre-feature content hash byte-identical'
+    );
+
+    process.env.CHD_DOC_ISSUES = 'acme/widgets';
+    process.env.CHD_DOC_ISSUES_TOKEN = 'fixture-token';
+    delete process.env.CHD_DOC_ISSUES_TOKEN_FILE;
+    const enabledKey = ingest.datasetAssemblySchemaKey();
+    assert.equal(
+      enabledKey,
+      `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
+      'an enabled snapshot turns over persisted v28 datasets'
+    );
+    assert.notEqual(ingest.sourceSignature(), flagOffSourceSignature);
+    assert.notEqual(ingest.ingest().contentHash, flagOffContentHash);
+
+    delete process.env.CHD_DOC_ISSUES;
+    delete process.env.CHD_DOC_ISSUES_TOKEN;
+    assert.equal(ingest.sourceSignature(), flagOffSourceSignature);
+    assert.equal(ingest.ingest().contentHash, flagOffContentHash);
+
     const src = readFileSync(join(HERE, 'ingest.mjs'), 'utf8');
     assert.match(
       src,
@@ -104,6 +143,12 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     else process.env.HOME = origHome;
     if (origDb === undefined) delete process.env.CHD_DB_PATH;
     else process.env.CHD_DB_PATH = origDb;
+    if (origDocIssues === undefined) delete process.env.CHD_DOC_ISSUES;
+    else process.env.CHD_DOC_ISSUES = origDocIssues;
+    if (origDocIssuesToken === undefined) delete process.env.CHD_DOC_ISSUES_TOKEN;
+    else process.env.CHD_DOC_ISSUES_TOKEN = origDocIssuesToken;
+    if (origDocIssuesTokenFile === undefined) delete process.env.CHD_DOC_ISSUES_TOKEN_FILE;
+    else process.env.CHD_DOC_ISSUES_TOKEN_FILE = origDocIssuesTokenFile;
   }
 });
 
@@ -129,6 +174,12 @@ test('loadLatestDatasetCache fences on the schema key: a NEWER row from another 
     assert.ok(current, 'a current-schema row must be a cache hit');
     assert.equal(current.contentHash, 'cur-hash');
     assert.equal(current.json, body, 'round-trips the gunzipped body');
+    assert.equal(
+      current.docIssueCacheStateKnown,
+      true,
+      'new flag-off rows persist an explicit known-null snapshot state'
+    );
+    assert.equal(current.docIssueCacheState, null);
 
     // A row built under a DIFFERENT (older) schema, with a NEWER created_at —
     // exactly the persisted-volume-across-a-schema-bump case. Inserted directly
@@ -151,6 +202,42 @@ test('loadLatestDatasetCache fences on the schema key: a NEWER row from another 
       'cur-hash',
       'the newer stale-schema row leaked through the fence'
     );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('persisted dataset rows round-trip exact doc-issue identity and expiry metadata', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = join(tmpdir(), `chd-2710-state-home-${randomUUID()}`);
+  mkdirSync(join(home, '.claude', 'projects'), { recursive: true });
+  try {
+    const ingest = await loadIngest(home);
+    const body = '{"docIssueSnapshot":{"complete":true}}';
+    const state = {
+      identity: '{"repo":"acme/widgets","refs":[101]}',
+      usableThrough: Date.parse('2026-07-21T12:00:00.000Z'),
+    };
+    ingest.saveDatasetCache(
+      {
+        contentHash: 'doc-state-hash',
+        etag: '"doc-state"',
+        brBuf: brotliCompressSync(body),
+        gzBuf: gzipSync(body),
+        docIssueCacheState: state,
+      },
+      2_000
+    );
+
+    const loaded = ingest.loadDatasetCache('doc-state-hash');
+    assert.ok(loaded);
+    assert.equal(loaded.docIssueCacheStateKnown, true);
+    assert.deepEqual(loaded.docIssueCacheState, state);
   } finally {
     rmSync(home, { recursive: true, force: true });
     if (origHome === undefined) delete process.env.HOME;

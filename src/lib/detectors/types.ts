@@ -60,6 +60,7 @@ import type { SemanticIntentSummary } from '../semantic-intent';
 import type { GitOutcome } from '../parse-git-outcome';
 import type { DocGraph } from '../parse-docs';
 import type { DocsMapArtifact } from '../parse-docs-map';
+import type { DocIssueSnapshot } from '../doc-issue-snapshot';
 import type { DocHygieneArtifact } from '../doc-hygiene-artifact';
 import type { EvidenceRef } from '../evidence';
 // RecCategory and SavingsAttributionTier are defined in a dependency-free leaf
@@ -788,6 +789,19 @@ export interface RecommendationInput {
    * map, or the SPA/upload dataset) means downstream detectors emit nothing.
    */
   docsMap?: DocsMapArtifact | null;
+  /**
+   * Bounded, opt-in GitHub issue-state snapshot for the documentation issue
+   * references in the doc graph (#2710, epic #2256), dataset key
+   * `docIssueSnapshot`. A COMPLETE, freshness-bounded map of each referenced
+   * issue/PR number to `open`/`closed`/`not-found`, bound to the exact ref set
+   * it resolved. Produced ONLY when `CHD_DOC_ISSUES=owner/repo` is set with a
+   * credential — the default path omits it and makes zero network calls. The
+   * #2711 detector may make a `not-found`/closed-owner claim only against a
+   * present, complete, fresh (`<=24h`) snapshot whose fingerprint matches the
+   * current ref set. Optional: `undefined`/`null` (flag unset, incomplete, stale,
+   * or the SPA/upload dataset) means the issue-reference signals stay silent.
+   */
+  docIssueSnapshot?: DocIssueSnapshot | null;
   /**
    * Normalized host-side checker output for the repository's committed
    * Markdown surface (#2486). Produced locally under

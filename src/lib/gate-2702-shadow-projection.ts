@@ -121,7 +121,10 @@ export interface Gate2702EvaluationProjection {
     state: "passed" | "failed" | "not-evaluable";
   }>;
   includedRunCount: number;
+  /** Canonical Runs excluded by the evaluation. */
   excludedRunCount: number;
+  /** Candidates excluded before a canonical Run could be produced. */
+  preRunExclusionCount: number;
   exclusionCounts: Array<{ reason: string; count: number }>;
 }
 
@@ -141,12 +144,15 @@ export interface Gate2702Projection {
     validated: number;
     unsealed: number;
     malformed: number;
+    /** Trial discovery exceeded its fixed bound, so that root failed closed. */
+    discoveryOverflow: number;
   };
 }
 
 export type Gate2702ProjectionSource =
-  | { state: "unsealed"; trialId?: string; count?: number }
-  | { state: "malformed"; trialId?: string; count?: number }
+  | { state: "unsealed"; trialId?: string }
+  | { state: "malformed"; trialId?: string }
+  | { state: "discovery-overflow" }
   | {
       state: "verified";
       marker: Record<string, unknown>;
@@ -640,9 +646,10 @@ function projectVerified(
   let includedRunCount = 0;
   let excludedRunCount = 0;
   const verdictExclusionByRun = new Map<string, string>();
-  const allExclusionReasons = candidates.flatMap((candidate) =>
+  const preRunExclusionReasons = candidates.flatMap((candidate) =>
     candidate.exclusion ? [candidate.exclusion] : [],
   );
+  const allExclusionReasons = [...preRunExclusionReasons];
 
   if (evaluation.kind === "Gate2702InsufficientEvidence") {
     if (
@@ -658,7 +665,6 @@ function projectVerified(
     decision = "insufficient-evidence";
     projectedSampleCounts = sampleCounts(evaluation.sampleCounts);
     gates = [];
-    excludedRunCount = candidates.length;
   } else if (evaluation.kind === "ExperimentVerdict") {
     const extensions = record(evaluation.extensions);
     if (extensions["gate-2702/bundleDigest"] !== bundleDigest) fail();
@@ -752,6 +758,7 @@ function projectVerified(
       gates,
       includedRunCount,
       excludedRunCount,
+      preRunExclusionCount: preRunExclusionReasons.length,
       exclusionCounts: exclusionCounts(allExclusionReasons),
     },
   };
@@ -784,27 +791,24 @@ export function projectGate2702C5(
     validated: 0,
     unsealed: 0,
     malformed: 0,
+    discoveryOverflow: 0,
   };
   const rows: ProjectionItem[] = [];
   const evaluations: Gate2702EvaluationProjection[] = [];
   const trialIds = new Set<string>();
 
   for (const source of sources) {
-    const count =
-      source.state === "verified"
-        ? 1
-        : source.count === undefined
-          ? 1
-          : safeCount(source.count);
-    if (count < 1 || !Number.isSafeInteger(reconciliation.scanned + count))
-      fail();
-    reconciliation.scanned += count;
+    reconciliation.scanned++;
     if (source.state === "unsealed") {
-      reconciliation.unsealed += count;
+      reconciliation.unsealed++;
       continue;
     }
     if (source.state === "malformed") {
-      reconciliation.malformed += count;
+      reconciliation.malformed++;
+      continue;
+    }
+    if (source.state === "discovery-overflow") {
+      reconciliation.discoveryOverflow++;
       continue;
     }
     try {

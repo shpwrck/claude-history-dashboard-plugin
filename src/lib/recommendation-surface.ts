@@ -15,14 +15,24 @@
 import type { DashboardFilter, RouteFilter } from './routing';
 import type { Recommendation, RecSeverity } from './detectors/types';
 import type { DomainCoverage, DomainCoverageStatus } from './coverage-types';
-import type { RecommendationResult } from './recommendations';
+import type { RecommendationResult as EngineRecommendationResult } from './recommendations';
 
 export type {
   Recommendation,
   RecSeverity,
   DomainCoverage,
   DomainCoverageStatus,
-  RecommendationResult,
+};
+
+/**
+ * Server recommendation envelope consumed by browser viewers.
+ *
+ * `validThrough` is present only when the server analysis used a bounded
+ * doc-issue snapshot. It is omitted for the normal local-only result so the
+ * flag-off wire response remains byte-for-byte unchanged.
+ */
+export type RecommendationResult = EngineRecommendationResult & {
+  validThrough?: string;
 };
 
 /** The typed recommendation surfaces the server serves (#2718). */
@@ -57,16 +67,29 @@ export type RecommendationSurfaceResponse =
  * consumer's `?? []` fallback into a false clean result.
  */
 export function parseRecommendationResult(value: unknown): RecommendationResult {
+  const record = value as Record<string, unknown>;
   if (
     typeof value !== 'object' ||
     value === null ||
     Array.isArray(value) ||
-    !Array.isArray((value as Record<string, unknown>).recommendations) ||
-    !Array.isArray((value as Record<string, unknown>).domainCoverage)
+    !Array.isArray(record.recommendations) ||
+    !Array.isArray(record.domainCoverage) ||
+    ('validThrough' in record && !isCanonicalIsoInstant(record.validThrough))
   ) {
     throw new Error('Invalid recommendation analysis response');
   }
   return value as RecommendationResult;
+}
+
+function isCanonicalIsoInstant(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const epochMs = Date.parse(value);
+  if (!Number.isFinite(epochMs)) return false;
+  try {
+    return new Date(epochMs).toISOString() === value;
+  } catch {
+    return false;
+  }
 }
 
 // Only these four RouteFilter keys are valid params on the `reclaim-compass`

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveStatGatedCache,
+  resolveStateBoundMemo,
   pruneLruMap,
 } from './lib/stat-gated-cache.mjs';
 
@@ -102,6 +103,237 @@ test('a source-signature change invalidates the cache (rebuild)', async () => {
   assert.equal(counter.count, 2, 'no extra build for the unchanged source');
 });
 
+test('a source change during the build discards the stale value and retries once', async () => {
+  const { cacheMap, buildsMap } = newState();
+  let sig = 'sig-A';
+  let builds = 0;
+
+  const result = await resolveStatGatedCache({
+    sourceSignature: () => sig,
+    cacheMap,
+    buildsMap,
+    key: 'q:racy',
+    max: 16,
+    build: async () => {
+      builds += 1;
+      const builtFrom = sig;
+      if (builds === 1) sig = 'sig-B';
+      return `payload-${builtFrom}`;
+    },
+  });
+
+  assert.equal(builds, 2, 'the changed source gets exactly one bounded retry');
+  assert.equal(result.value, 'payload-sig-B', 'the pre-change value is never returned');
+  assert.equal(result.cache, 'miss');
+  assert.deepEqual(
+    cacheMap.get('q:racy'),
+    {
+      value: 'payload-sig-B',
+      sourceSig: 'sig-B',
+      lastAccess: cacheMap.get('q:racy').lastAccess,
+    },
+    'only the value built from the stable post-change signature is committed'
+  );
+});
+
+test('two source changes fail without committing either stale build', async () => {
+  const { cacheMap, buildsMap } = newState();
+  cacheMap.set('q:racy', {
+    value: 'last-known-good',
+    sourceSig: 'sig-old',
+    lastAccess: 1,
+  });
+  let sig = 'sig-A';
+  let builds = 0;
+
+  await assert.rejects(
+    resolveStatGatedCache({
+      sourceSignature: () => sig,
+      cacheMap,
+      buildsMap,
+      key: 'q:racy',
+      max: 16,
+      build: async () => {
+        builds += 1;
+        const builtFrom = sig;
+        sig = builds === 1 ? 'sig-B' : 'sig-C';
+        return `payload-${builtFrom}`;
+      },
+    }),
+    /source signature changed across the bounded rebuild retry/i
+  );
+
+  assert.equal(builds, 2, 'only the initial build and one retry run');
+  assert.equal(
+    cacheMap.get('q:racy').value,
+    'last-known-good',
+    'the cache is not overwritten by either unstable build'
+  );
+  assert.equal(buildsMap.has('q:racy'), false, 'the failed in-flight owner is cleared');
+});
+
+test('an A -> B -> A build retries when the payload observed a different source state', async () => {
+  const { cacheMap, buildsMap } = newState();
+  let builds = 0;
+
+  const result = await resolveStatGatedCache({
+    sourceSignature: () => 'sig-A',
+    sourceState: () => 'state-A',
+    builtSourceState: (value) => value.observedState,
+    sourceStatesEqual: (left, right) => left === right,
+    cacheMap,
+    buildsMap,
+    key: 'boot',
+    max: 16,
+    build: async () => {
+      builds += 1;
+      return builds === 1
+        ? { body: 'payload-from-B', observedState: 'state-B' }
+        : { body: 'payload-from-A', observedState: 'state-A' };
+    },
+  });
+
+  assert.equal(builds, 2, 'the payload assembled from the transient state is retried');
+  assert.equal(result.value.body, 'payload-from-A');
+  assert.equal(cacheMap.get('boot').value.body, 'payload-from-A');
+  assert.equal(cacheMap.get('boot').sourceState, 'state-A');
+});
+
+test('a warm entry whose built state differs from current state is never a hit', async () => {
+  const { cacheMap, buildsMap } = newState();
+  let sourceState = 'state-A';
+  let builds = 0;
+  const run = () =>
+    resolveStatGatedCache({
+      // Deliberately stable: the independent state gate must protect callers
+      // even when a coarse/ABA signature aliases two source states.
+      sourceSignature: () => 'same-signature',
+      sourceState: () => sourceState,
+      builtSourceState: (value) => value.observedState,
+      sourceStatesEqual: (left, right) => left === right,
+      cacheMap,
+      buildsMap,
+      key: 'slice:repoMap',
+      max: 16,
+      build: async () => {
+        builds += 1;
+        return {
+          body: `payload-from-${sourceState}`,
+          observedState: sourceState,
+        };
+      },
+    });
+
+  assert.equal((await run()).value.body, 'payload-from-state-A');
+  sourceState = 'state-B';
+  const refreshed = await run();
+
+  assert.equal(refreshed.cache, 'refresh');
+  assert.equal(refreshed.value.body, 'payload-from-state-B');
+  assert.equal(builds, 2, 'the state mismatch forces a rebuild despite the aliased signature');
+});
+
+test('a transient boot snapshot cannot poison a memo under the surrounding content hash', () => {
+  let memo = null;
+  let builds = 0;
+  const build = (snapshot, recommendationIds) => {
+    builds += 1;
+    return {
+      boot: {
+        meta: snapshot ? { docIssueSnapshot: snapshot } : {},
+      },
+      repoMap: {
+        projects: [
+          {
+            files: [{ recommendations: recommendationIds }],
+          },
+        ],
+      },
+    };
+  };
+
+  // The first assemble observed transient B even though the caller's current
+  // trust state is A. Store what the value actually observed in the memo.
+  let resolved = resolveStateBoundMemo({
+    memo,
+    key: 'content-hash-A',
+    sourceState: 'state-A',
+    builtSourceState: () => 'state-B',
+    sourceStatesEqual: (left, right) => left === right,
+    build: () => build({ asOf: 'snapshot-B' }, ['doc-issue-B']),
+  });
+  memo = resolved.memo;
+  assert.equal(resolved.value.boot.meta.docIssueSnapshot.asOf, 'snapshot-B');
+
+  // A bounded retry under A must rebuild rather than replay B merely because
+  // the coarse/content hash returned to A.
+  resolved = resolveStateBoundMemo({
+    memo,
+    key: 'content-hash-A',
+    sourceState: 'state-A',
+    builtSourceState: () => 'state-A',
+    sourceStatesEqual: (left, right) => left === right,
+    build: () => build(null, []),
+  });
+
+  assert.equal(builds, 2);
+  assert.equal(
+    Object.hasOwn(resolved.value.boot.meta, 'docIssueSnapshot'),
+    false,
+    'the retried boot omits the transient raw snapshot'
+  );
+  assert.deepEqual(
+    resolved.value.repoMap.projects[0].files[0].recommendations,
+    [],
+    'the retried repo-map slice omits transient snapshot-derived links'
+  );
+  assert.equal(resolved.memo.sourceState, 'state-A');
+});
+
+test('a recommendations-only memo recovers after assembling a transient snapshot', () => {
+  let memo = null;
+  let builds = 0;
+  const key = JSON.stringify(['content-hash-A', 'configured']);
+
+  // Model the first light recommendation assemble observing transient B while
+  // the request's start/completion gates both observe A.
+  let resolved = resolveStateBoundMemo({
+    memo,
+    key,
+    sourceState: 'state-A',
+    builtSourceState: (dataset) => dataset.observedState,
+    sourceStatesEqual: (left, right) => left === right,
+    build: () => {
+      builds += 1;
+      return {
+        observedState: 'state-B',
+        recommendations: ['stale-doc-issue-finding'],
+      };
+    },
+  });
+  memo = resolved.memo;
+
+  // The bounded retry returns to the same content/hook key and state A. It
+  // must be able to recover by assembling A, rather than replaying the poisoned
+  // light dataset and failing every retry until some unrelated source changes.
+  resolved = resolveStateBoundMemo({
+    memo,
+    key,
+    sourceState: 'state-A',
+    builtSourceState: (dataset) => dataset.observedState,
+    sourceStatesEqual: (left, right) => left === right,
+    build: () => {
+      builds += 1;
+      return { observedState: 'state-A', recommendations: [] };
+    },
+  });
+
+  assert.equal(resolved.reused, false);
+  assert.equal(builds, 2);
+  assert.deepEqual(resolved.value.recommendations, []);
+  assert.equal(resolved.memo.sourceState, 'state-A');
+});
+
 test('distinct keys (different query/date) are cached independently', async () => {
   const { cacheMap, buildsMap } = newState();
   const counter = { count: 0 };
@@ -140,7 +372,6 @@ test('the response cache is LRU-bounded under a varied key stream', async () => 
   const { cacheMap, buildsMap } = newState();
   const counter = { count: 0 };
   for (let i = 0; i < 10; i += 1) {
-    // eslint-disable-next-line no-await-in-loop
     await resolveStatGatedCache({
       sourceSignature: () => 'sig-A',
       cacheMap,

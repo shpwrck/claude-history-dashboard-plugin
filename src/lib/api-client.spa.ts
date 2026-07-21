@@ -555,7 +555,10 @@ export async function postCheckpointAnswer(
 // the upload-only SPA has no server, so this degrades to a deterministic result
 // with no recommendations rather than erroring — matching the real client's
 // graceful-degradation contract. Carries no `/api/` literal.
-export async function analyzeLocal(): Promise<LocalAnalyzeResult> {
+export async function analyzeLocal(
+  _options: { project?: string | null; signal?: AbortSignal } = {}
+): Promise<LocalAnalyzeResult> {
+  void _options;
   return {
     source: 'deterministic',
     recommendations: [],

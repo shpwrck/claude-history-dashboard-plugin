@@ -77,7 +77,9 @@ function parseTextResult(result) {
 }
 
 async function assertDestructiveOutputGuard() {
-  const safetyRoot = await mkdtemp(join(tmpdir(), 'chd-plugin-assembly-guard-'));
+  const safetyRoot = await mkdtemp(
+    join(tmpdir(), 'chd-plugin-assembly-guard-')
+  );
   try {
     const projectDir = join(safetyRoot, 'project');
     const marker = join(safetyRoot, 'keep-me');
@@ -121,8 +123,15 @@ try {
   } else {
     const fixtureDist = join(tempRoot, 'fixture-dist');
     await mkdir(fixtureDist, { recursive: true });
-    await writeFile(join(fixtureDist, 'index.html'), '<!doctype html>\n', 'utf8');
-    await assemblePluginPayload({ outputDir: payloadRoot, distDir: fixtureDist });
+    await writeFile(
+      join(fixtureDist, 'index.html'),
+      '<!doctype html>\n',
+      'utf8'
+    );
+    await assemblePluginPayload({
+      outputDir: payloadRoot,
+      distDir: fixtureDist,
+    });
   }
 
   await assert.rejects(
@@ -137,6 +146,9 @@ try {
   );
   await access(join(payloadRoot, 'REFERENCES.md'));
   await access(join(payloadRoot, 'docs', 'adding-a-recommendation.md'));
+  await access(
+    join(payloadRoot, 'scripts', 'gate-2702', 'runtime-verifier.bundle.mjs')
+  );
   assert.equal(
     await readFile(join(payloadRoot, 'README.md'), 'utf8'),
     await readFile(resolve('docs/plugin-mirror-README.md'), 'utf8'),
@@ -147,7 +159,10 @@ try {
     await readFile(join(payloadRoot, '.claude-plugin', 'plugin.json'), 'utf8')
   );
   const declaration = manifest.mcpServers?.['claude-history-dashboard'];
-  assert(declaration, 'plugin manifest must declare claude-history-dashboard MCP');
+  assert(
+    declaration,
+    'plugin manifest must declare claude-history-dashboard MCP'
+  );
 
   stateServer = await listen('state-file', true);
   fallbackServer = await listen('configured-fallback', false);

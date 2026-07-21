@@ -81,9 +81,18 @@ const LEDGER_LINES = [
     judge: { winner: 'main' },
   }),
   // synthetic seed row — surfaced, never hidden
-  JSON.stringify({ mode: 'live', axis: 'model', synthetic: true, judge: { winner: 'shadow' } }),
+  JSON.stringify({
+    mode: 'live',
+    axis: 'model',
+    synthetic: true,
+    judge: { winner: 'shadow' },
+  }),
   // replay-skip row — skipped with reason
-  JSON.stringify({ ts: '2024-01-03T10:00:00.000Z', mode: 'replay-skip', axis: 'model' }),
+  JSON.stringify({
+    ts: '2024-01-03T10:00:00.000Z',
+    mode: 'replay-skip',
+    axis: 'model',
+  }),
 ];
 
 async function bootServer({ withLedger, withC5Reconciliation = false }) {
@@ -94,7 +103,10 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
   const base = `http://127.0.0.1:${port}`;
 
   await mkdir(join(claudeDir, 'projects'), { recursive: true });
-  await writeFile(join(distDir, 'index.html'), '<!doctype html><main>ok</main>');
+  await writeFile(
+    join(distDir, 'index.html'),
+    '<!doctype html><main>ok</main>'
+  );
   await writeFile(join(claudeDir, 'history.jsonl'), '');
 
   const ledgerPath = join(cacheDir, 'ledger.jsonl');
@@ -103,7 +115,10 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
   }
   const gate2702StateRoot = join(cacheDir, 'gate-2702');
   if (withC5Reconciliation) {
-    const definitionRoot = join(gate2702StateRoot, GATE_2702_DEFINITION_DIRECTORY);
+    const definitionRoot = join(
+      gate2702StateRoot,
+      GATE_2702_DEFINITION_DIRECTORY
+    );
     await mkdir(join(definitionRoot, UNSEALED_TRIAL), { recursive: true });
     const malformedRoot = join(definitionRoot, MALFORMED_TRIAL);
     await mkdir(join(malformedRoot, 'seal'), { recursive: true });
@@ -165,10 +180,15 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
 
 // 1) Populated ledger: rows, dispositions, pagination, staleness.
 {
-  const srv = await bootServer({ withLedger: true, withC5Reconciliation: true });
+  const srv = await bootServer({
+    withLedger: true,
+    withC5Reconciliation: true,
+  });
   try {
     const up = await waitUp(srv.base, srv.proc);
-    await check('server came up (with ledger)', () => assert.equal(up, true, srv.getLogs()));
+    await check('server came up (with ledger)', () =>
+      assert.equal(up, true, srv.getLogs())
+    );
     if (up) {
       const res = await fetch(`${srv.base}/api/shadow-experiments.json`);
       const body = await res.json();
@@ -183,50 +203,62 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
         assert.equal(body.rowsDropped, 0);
         assert.equal(body.returned, 4);
       });
-      await check('rows are newest-first with per-row disposition + source', () => {
-        assert.equal(body.rows[0].skipReason, 'bad-mode'); // the replay-skip line
-        assert.equal(body.rows[0].disposition, 'skipped');
-        assert.equal(body.rows[1].disposition, 'synthetic');
-        const evalRow = body.rows.find((r) => r.source === 'model-eval');
-        assert.ok(evalRow);
-        assert.equal(evalRow.winner, 'shadow');
-        assert.ok(Math.abs(evalRow.costDelta + 0.3) < 1e-9); // 0.1 − 0.4 (float-safe)
-        assert.equal(evalRow.ts, '2024-01-01T10:00:00.000Z');
-      });
-      await check('legacy row fields stay unchanged when the C5 bridge is present', () => {
-        assert.deepEqual(Object.keys(body.rows[0]).sort(), [
-          'axis',
-          'costDelta',
-          'disposition',
-          'judgeBasis',
-          'line',
-          'mainCostUsd',
-          'mainTokens',
-          'mode',
-          'proofStatus',
-          'shadowCostUsd',
-          'shadowTokens',
-          'skipReason',
-          'source',
-          'task',
-          'tokenDelta',
-          'ts',
-          'variation',
-          'winner',
-        ]);
-      });
-      await check('adds bounded C5 reconciliation without mixing it into legacy rows', () => {
-        assert.deepEqual(body.gate2702.reconciliation, {
-          scanned: 2,
-          validated: 0,
-          unsealed: 1,
-          malformed: 1,
-        });
-        assert.equal(body.gate2702.total, 0);
-        assert.deepEqual(body.gate2702.rows, []);
-      });
+      await check(
+        'rows are newest-first with per-row disposition + source',
+        () => {
+          assert.equal(body.rows[0].skipReason, 'bad-mode'); // the replay-skip line
+          assert.equal(body.rows[0].disposition, 'skipped');
+          assert.equal(body.rows[1].disposition, 'synthetic');
+          const evalRow = body.rows.find((r) => r.source === 'model-eval');
+          assert.ok(evalRow);
+          assert.equal(evalRow.winner, 'shadow');
+          assert.ok(Math.abs(evalRow.costDelta + 0.3) < 1e-9); // 0.1 − 0.4 (float-safe)
+          assert.equal(evalRow.ts, '2024-01-01T10:00:00.000Z');
+        }
+      );
+      await check(
+        'legacy row fields stay unchanged when the C5 bridge is present',
+        () => {
+          assert.deepEqual(Object.keys(body.rows[0]).sort(), [
+            'axis',
+            'costDelta',
+            'disposition',
+            'judgeBasis',
+            'line',
+            'mainCostUsd',
+            'mainTokens',
+            'mode',
+            'proofStatus',
+            'shadowCostUsd',
+            'shadowTokens',
+            'skipReason',
+            'source',
+            'task',
+            'tokenDelta',
+            'ts',
+            'variation',
+            'winner',
+          ]);
+        }
+      );
+      await check(
+        'adds bounded C5 reconciliation without mixing it into legacy rows',
+        () => {
+          assert.deepEqual(body.gate2702.reconciliation, {
+            scanned: 2,
+            validated: 0,
+            unsealed: 1,
+            malformed: 1,
+            discoveryOverflow: 0,
+          });
+          assert.equal(body.gate2702.total, 0);
+          assert.deepEqual(body.gate2702.rows, []);
+        }
+      );
 
-      const page = await fetch(`${srv.base}/api/shadow-experiments.json?limit=2&offset=1`);
+      const page = await fetch(
+        `${srv.base}/api/shadow-experiments.json?limit=2&offset=1`
+      );
       const pageBody = await page.json();
       await check('limit/offset paginate the newest-first order', () => {
         assert.equal(pageBody.returned, 2);
@@ -246,12 +278,15 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
       );
       const after = await fetch(`${srv.base}/api/shadow-experiments.json`);
       const afterBody = await after.json();
-      await check('a record appended between fetches is visible on the next fetch', () => {
-        assert.equal(afterBody.total, 5);
-        assert.equal(afterBody.counted, 3);
-        assert.equal(afterBody.rows[0].axis, 'prompt'); // newest-first
-        assert.equal(afterBody.rows[0].winner, 'tie');
-      });
+      await check(
+        'a record appended between fetches is visible on the next fetch',
+        () => {
+          assert.equal(afterBody.total, 5);
+          assert.equal(afterBody.counted, 3);
+          assert.equal(afterBody.rows[0].axis, 'prompt'); // newest-first
+          assert.equal(afterBody.rows[0].winner, 'tie');
+        }
+      );
     }
   } finally {
     await srv.cleanup();
@@ -263,7 +298,9 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
   const srv = await bootServer({ withLedger: false });
   try {
     const up = await waitUp(srv.base, srv.proc);
-    await check('server came up (no ledger)', () => assert.equal(up, true, srv.getLogs()));
+    await check('server came up (no ledger)', () =>
+      assert.equal(up, true, srv.getLogs())
+    );
     if (up) {
       const res = await fetch(`${srv.base}/api/shadow-experiments.json`);
       const body = await res.json();
@@ -274,7 +311,9 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
         assert.equal(body.ledgerTruncated, false);
         assert.equal('gate2702' in body, false);
       });
-      const post = await fetch(`${srv.base}/api/shadow-experiments.json`, { method: 'POST' });
+      const post = await fetch(`${srv.base}/api/shadow-experiments.json`, {
+        method: 'POST',
+      });
       await check('non-GET returns 405', () => assert.equal(post.status, 405));
     }
   } finally {
