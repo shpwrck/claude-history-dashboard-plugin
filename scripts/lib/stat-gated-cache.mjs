@@ -82,9 +82,15 @@ export function resolveStateBoundMemo({
 // in-flight promise; the rest await it. A source change moves the signature, so a
 // stale cached entry is rebuilt rather than served (invalidation). The signature
 // is sampled again AFTER the build: a mid-build change discards that value and
-// retries once from the new signature; a second change fails without committing
-// either unstable value. Returns the payload plus a `cache` tag ('hit' | 'miss'
-// | 'refresh') for X-*-Cache headers.
+// retries once from the new signature; if it STILL has not settled, the freshest
+// build is served WITHOUT being cached (never thrown), so a source that never
+// settles — e.g. a busy multi-agent host whose concurrent writers keep bumping
+// the scanned-dir mtimes — degrades to always-fresh-but-uncached instead of
+// freezing on a stale entry (#2874). Skipping the cache write preserves the
+// invariant that a cached entry's signature/state matches what its value
+// observed, so a later same-signature request can never replay an unstable value.
+// Returns the payload plus a `cache` tag ('hit' | 'miss' | 'refresh') for
+// X-*-Cache headers.
 export async function resolveStatGatedCache({
   sourceSignature,
   cacheMap,
@@ -162,11 +168,18 @@ export async function resolveStatGatedCache({
         }
 
         if (attempt === 1) {
-          const err = new Error(
-            'Source signature changed across the bounded rebuild retry'
-          );
-          err.code = 'SOURCE_CHANGED_DURING_BUILD';
-          throw err;
+          // Bounded retries exhausted: the source kept moving across every
+          // build. On a busy multi-agent host, unrelated file creates/renames in
+          // the scanned dirs bump the coarse dir-mtime signature every few
+          // seconds, so no build ever observes a stable pre/post signature.
+          // Throwing here froze the dataset on a days-old last-good blob (#2874)
+          // and surfaced as a bare 500 on the digest/search/boot/slice routes
+          // (#2867) — the opposite of what a freshness cache should do. Serve the
+          // freshest build instead, but do NOT cache it: a value is always safe
+          // to serve, while caching an unstable value under a coarse key that a
+          // later same-signature request could replay is not. Once the source
+          // settles, the stable branch above commits and fast hits resume.
+          return value;
         }
 
         // Publish the retry signature on this owner so a request arriving

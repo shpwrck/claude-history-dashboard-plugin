@@ -136,7 +136,7 @@ test('a source change during the build discards the stale value and retries once
   );
 });
 
-test('two source changes fail without committing either stale build', async () => {
+test('a source that never settles serves the freshest build uncached instead of throwing', async () => {
   const { cacheMap, buildsMap } = newState();
   cacheMap.set('q:racy', {
     value: 'last-known-good',
@@ -146,30 +146,37 @@ test('two source changes fail without committing either stale build', async () =
   let sig = 'sig-A';
   let builds = 0;
 
-  await assert.rejects(
-    resolveStatGatedCache({
-      sourceSignature: () => sig,
-      cacheMap,
-      buildsMap,
-      key: 'q:racy',
-      max: 16,
-      build: async () => {
-        builds += 1;
-        const builtFrom = sig;
-        sig = builds === 1 ? 'sig-B' : 'sig-C';
-        return `payload-${builtFrom}`;
-      },
-    }),
-    /source signature changed across the bounded rebuild retry/i
-  );
+  // The source moves during BOTH builds (a busy multi-agent host bumping the
+  // scanned-dir mtime every few seconds), so neither build observes a stable
+  // pre/post signature. Rather than throw and freeze on the stale entry (#2874),
+  // the freshest build is served without being cached.
+  const result = await resolveStatGatedCache({
+    sourceSignature: () => sig,
+    cacheMap,
+    buildsMap,
+    key: 'q:racy',
+    max: 16,
+    build: async () => {
+      builds += 1;
+      const builtFrom = sig;
+      sig = builds === 1 ? 'sig-B' : 'sig-C';
+      return `payload-${builtFrom}`;
+    },
+  });
 
   assert.equal(builds, 2, 'only the initial build and one retry run');
   assert.equal(
+    result.value,
+    'payload-sig-B',
+    'the freshest (last) build is served, never the days-old cached blob'
+  );
+  assert.equal(result.cache, 'refresh', 'a pre-existing stale entry marks the serve a refresh');
+  assert.equal(
     cacheMap.get('q:racy').value,
     'last-known-good',
-    'the cache is not overwritten by either unstable build'
+    'the unstable value is served but NOT cached — the cache invariant is preserved',
   );
-  assert.equal(buildsMap.has('q:racy'), false, 'the failed in-flight owner is cleared');
+  assert.equal(buildsMap.has('q:racy'), false, 'the in-flight owner is cleared');
 });
 
 test('an A -> B -> A build retries when the payload observed a different source state', async () => {
