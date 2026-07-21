@@ -36,9 +36,16 @@ import { claudeMdMarksApplied, short } from '../shared';
  * - RE-DISCOVERY (accounting when present): a later session in the same project
  *   spends its early turns asking "where/how was this set up?" and is billed
  *   back to the prior no-leave-behind durable-state session.
- * - TIME VALUE (hypothesis): `estTimeReclaimedMin` floors each missing-handoff
- *   session and rediscovery burst at 15 minutes, using the observed burst span
- *   when longer. The wording does not call the minutes proven.
+ * - TIME VALUE (gated publish, #2314): the human-minute figure publishes as a
+ *   present-tense recommendation ONLY with a calibrated receipt -- at least
+ *   `MIN_HANDOFF_RECEIPT_SAMPLES` genuinely observed re-discovery bursts for the
+ *   task class, aggregated to a measured (T2 `observational`) cost from
+ *   unfloored `RediscoveryBurst.observedMinutes`. Below that floor (including
+ *   every cold-start pre-signal, which has zero measured bursts by construction)
+ *   the detector emits an HONEST NULL ("not enough history to size the handoff
+ *   cost yet") and asserts no `estTimeReclaimedMin`, rather than presenting the
+ *   15-minute preset floor as a proven saving. The pre-signal itself (the
+ *   missing-handoff accounting finding + the fix) fires either way.
  *
  * The detector reads only existing local artifacts: `toolData` for durable
  * mutations and structural leave-behind candidates, `timelines` for rediscovery language, and
@@ -51,6 +58,13 @@ const DETECTOR_ID = 'workflow.value-of-agent-handoff';
 const CANDIDATE_VERIFICATION_ID = 'workflow.leave-behind-candidate-verification';
 
 const CONSERVATIVE_PRESET_MIN = 15;
+// #2314 calibration floor: the human-minute figure only publishes once a task
+// class has at least this many genuinely observed re-discovery bursts to
+// aggregate into a measured (T2 observational) receipt. Below it, the detector
+// emits an honest null instead of asserting the preset floor as proven. Mirrors
+// the sample-size gate precedents (shadow-axis-wins MIN_DECIDED,
+// human-input-leverage MIN_BASELINE_SPANS).
+const MIN_HANDOFF_RECEIPT_SAMPLES = 3;
 const REDISCOVERY_WINDOW_MS = 20 * 60 * 1000;
 const REDISCOVERY_MIN_HITS = 2;
 const FRESHNESS_DAYS = 30;
@@ -1102,7 +1116,24 @@ function buildRollups(
     roll.estimatedMinutes = preset + billedFloor;
   }
 
-  return [...byClass.values()].sort((a, b) => {
+  // Only the top rollup is surfaced, so a class with a calibrated (publishable)
+  // receipt must outrank one without -- otherwise the preset-floored hypothesis
+  // total below could starve a measured receipt out of the single emitted
+  // recommendation, letting the 15-minute preset silently decide WHICH claim
+  // publishes (#2314; fable-review finding 1). Receipts first (by measured
+  // total); honest-null classes keep the prior hypothesis-total ordering, which
+  // is an internal ranking heuristic that never reaches a published figure.
+  const rolls = [...byClass.values()];
+  const receiptByClass = new Map(
+    rolls.map((roll) => [roll.taskClass, handoffReceipt(roll)])
+  );
+  return rolls.sort((a, b) => {
+    const ra = receiptByClass.get(a.taskClass);
+    const rb = receiptByClass.get(b.taskClass);
+    if (!!ra !== !!rb) return (rb ? 1 : 0) - (ra ? 1 : 0);
+    if (ra && rb && rb.totalMinutes !== ra.totalMinutes) {
+      return rb.totalMinutes - ra.totalMinutes;
+    }
     if (b.estimatedMinutes !== a.estimatedMinutes) return b.estimatedMinutes - a.estimatedMinutes;
     return b.preSignals.length - a.preSignals.length;
   });
@@ -1583,6 +1614,52 @@ function clip(text: string, max = 96): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}...`;
 }
 
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * The calibrated per-task-class handoff receipt (#2314). A receipt exists only
+ * once the class has at least `MIN_HANDOFF_RECEIPT_SAMPLES` genuinely observed
+ * re-discovery bursts; the figure is aggregated purely from the unfloored
+ * measured `observedMinutes` spans, so it never mixes the 15-minute preset floor
+ * into the published number. Returns `null` below the floor (cold-start classes,
+ * with zero measured bursts, always fall here), and the caller then emits an
+ * honest null rather than asserting a minutes saving.
+ */
+interface HandoffReceipt {
+  sampleSize: number;
+  medianMinutes: number;
+  totalMinutes: number;
+  /** Latest contributing burst end (ms) — the freshness clock for the published
+   *  figure, distinct from `roll.latestMs` which also tracks non-billing
+   *  pre-signal mutations. */
+  latestMs: number;
+  asOf: string;
+}
+
+function handoffReceipt(roll: ClassRollup): HandoffReceipt | null {
+  if (roll.rediscoveries.length < MIN_HANDOFF_RECEIPT_SAMPLES) return null;
+  const minutes = roll.rediscoveries.map((r) => r.burst.observedMinutes);
+  const totalMinutes = minutes.reduce((sum, m) => sum + m, 0);
+  // A calibrated sample of bursts that measured ~0 re-discovery minutes has no
+  // material cost to publish, so it is not treated as a receipt: fall through to
+  // the honest null rather than asserting a 0-minute causal claim.
+  if (totalMinutes <= 0) return null;
+  const latestMs = Math.max(...roll.rediscoveries.map((r) => r.burst.endMs));
+  return {
+    sampleSize: roll.rediscoveries.length,
+    medianMinutes: medianOf(minutes),
+    totalMinutes,
+    latestMs,
+    asOf: isoDate(latestMs),
+  };
+}
+
 function toRecommendation(
   input: Parameters<Detector['rule']>[0],
   roll: ClassRollup,
@@ -1708,7 +1785,6 @@ function toRecommendation(
       : undefined;
   const stale =
     roll.latestMs != null ? now - roll.latestMs > FRESHNESS_DAYS * DAY_MS : undefined;
-  const asOfPrefix = stale && latestDate ? `As of ${latestDate}, ` : '';
   const invalidationTimingCaveat = invalidationHasUnknownTime
     ? 'at least one relevant same-scope transition has timestamp unavailable'
     : invalidationHasFutureTime
@@ -1777,6 +1853,21 @@ function toRecommendation(
     0
   );
   const displayedTaskClass = taskClassDisplay(roll.taskClass);
+  // #2314: publish the human-minute figure only with a calibrated receipt; below
+  // the sample floor (and for every cold-start pre-signal) `receipt` is null and
+  // the recommendation emits an honest null instead of the preset floor.
+  const receipt = handoffReceipt(roll);
+  // The published present-tense figure is only "current" if the bursts backing it
+  // are recent, so its staleness is gated on the receipt's own freshness -- NOT
+  // on roll.latestMs, which a fresh non-billing pre-signal mutation in the same
+  // project would keep recent and thereby suppress a needed demotion. The
+  // honest-null branch (no minutes claim) keeps the pre-signal-based freshness.
+  const receiptStale =
+    receipt != null && now - receipt.latestMs > FRESHNESS_DAYS * DAY_MS;
+  const publishAsOf = receipt ? receipt.asOf : latestDate;
+  const publishStale = receipt ? receiptStale : stale;
+  const publishAsOfPrefix =
+    publishStale && publishAsOf ? `As of ${publishAsOf}, ` : '';
   const orderingScope = roll.taskClass.startsWith(UNKNOWN_PROJECT_PREFIX)
     ? 'within the same transcript; cross-session state ordering was not attempted because project identity is unresolved'
     : 'in the same project';
@@ -1823,7 +1914,7 @@ function toRecommendation(
             `(${clip(roll.rediscoveries[0].burst.sample)})`,
         ]
       : [
-          `cold-start pre-signal only: no historical rediscovery is required; uses the conservative ${CONSERVATIVE_PRESET_MIN} minute floor per durable-state session`,
+          `cold-start pre-signal only: no measured re-discovery burst exists for this task class yet, so no human-minute figure is asserted`,
         ]),
   ];
 
@@ -1902,11 +1993,34 @@ function toRecommendation(
       claim:
         roll.rediscoveries.length > 0
           ? `${roll.rediscoveries.length} later session(s) in the same task class had early-turn rediscovery language, spanning ${fmtMin(observedRediscoveryMin)} observed (unfloored measured span, not the hypothesis preset)`
-          : `no later rediscovery session is required for the day-one pre-signal; the conservative preset floor is ${CONSERVATIVE_PRESET_MIN} minute(s) per no-leave-behind durable-state session`,
+          : `no later rediscovery session is recorded for this task class yet, so no human-minute figure is asserted for the day-one pre-signal`,
       source: 'parse-timeline',
       field: 'entries[].rediscovery (derived at parse time from the full turn text; survives slimming) in the first 20 minutes',
-      value: roll.rediscoveries.length > 0 ? observedRediscoveryMin : CONSERVATIVE_PRESET_MIN,
+      value: roll.rediscoveries.length > 0 ? observedRediscoveryMin : 0,
     },
+    receipt
+      ? ({
+          claim:
+            `${receipt.sampleSize} measured rediscovery burst(s) in ${displayedTaskClass} clear the ` +
+            `${MIN_HANDOFF_RECEIPT_SAMPLES}-sample calibration floor: median ${fmtMin(receipt.medianMinutes)} ` +
+            `observed per occurrence, ${fmtMin(receipt.totalMinutes)} total, so the human-minute figure is ` +
+            `published as an observational (T2) measurement rather than the preset hypothesis`,
+          source: 'parse-timeline',
+          field:
+            'aggregated per taskClass from RediscoveryBurst.observedMinutes (unfloored measured span)',
+          value: receipt.totalMinutes,
+        } satisfies RecObservation)
+      : ({
+          claim:
+            (roll.rediscoveries.length < MIN_HANDOFF_RECEIPT_SAMPLES
+              ? `only ${roll.rediscoveries.length} measured rediscovery burst(s) in ${displayedTaskClass}, below the ${MIN_HANDOFF_RECEIPT_SAMPLES}-sample calibration floor`
+              : `${roll.rediscoveries.length} measured rediscovery burst(s) in ${displayedTaskClass} carry no material re-discovery time`) +
+            `, so no human-minute figure is asserted (honest null)`,
+          source: 'parse-timeline',
+          field:
+            'RediscoveryBurst count and unfloored observedMinutes total per taskClass vs MIN_HANDOFF_RECEIPT_SAMPLES',
+          value: roll.rediscoveries.length,
+        } satisfies RecObservation),
     ...(attribution.tokenRowsMeasured > 0
       ? [
           {
@@ -1963,27 +2077,42 @@ function toRecommendation(
     severity: roll.rediscoveries.length > 0 ? 'warning' : 'info',
     title: 'Leave a handoff when agents establish durable state',
     detail:
-      `${asOfPrefix}${roll.preSignals.length} durable-state session(s) in ${displayedTaskClass} ` +
+      `${publishAsOfPrefix}${roll.preSignals.length} durable-state session(s) in ${displayedTaskClass} ` +
       `changed remote/config/install state without an uninvalidated final v1 structural candidate written after the latest durable mutation in the transcript and remaining uninvalidated by later observed file mutations ${orderingScope}. ` +
       aggregateFreshnessDetail +
       (roll.rediscoveries.length > 0
         ? `${roll.rediscoveries.length} later session(s) then spent early turns re-discovering that setup (~${fmtMin(observedRediscoveryMin)} observed). `
         : `This is a cold-start pre-signal: no later historical corpus is needed. `) +
-      `The ${fmtMin(roll.estimatedMinutes)} estimate is a hypothesis, using a conservative ` +
-      `${CONSERVATIVE_PRESET_MIN} minute floor per no-leave-behind session and per rediscovery burst (or its observed span when longer); it is not a calibrated causal saving.`,
+      (receipt
+        ? `Across ${receipt.sampleSize} measured re-discovery burst(s) in ${displayedTaskClass} ` +
+          `(median ${fmtMin(receipt.medianMinutes)} per occurrence, as of ${receipt.asOf}), ` +
+          `re-discovering that un-handed-off durable state has cost ~${fmtMin(receipt.totalMinutes)} of ` +
+          `human time -- a measured observational (T2) figure aggregated from the unfloored burst spans, ` +
+          `not the preset floor.`
+        : `Not enough history to size the handoff cost for ${displayedTaskClass} yet: ` +
+          (roll.rediscoveries.length < MIN_HANDOFF_RECEIPT_SAMPLES
+            ? `${roll.rediscoveries.length} measured re-discovery burst(s) is below the ` +
+              `${MIN_HANDOFF_RECEIPT_SAMPLES} needed to calibrate a per-task-class human-minute figure`
+            : `the ${roll.rediscoveries.length} measured re-discovery burst(s) carry no material ` +
+              `re-discovery time`) +
+          `, so no time saving is asserted. The missing-handoff pre-signal is still tracked.`),
     action:
       `For tasks in ${displayedTaskClass} that mutate material durable external state, follow docs/leave-behind-contract.md and update docs/runbooks/<state-scope>/README.md with both Operability and Decision log halves. Skip trivial local-only changes.`,
     affected: roll.preSignals.length,
-    estTimeReclaimedMin: roll.estimatedMinutes,
+    // #2314: only a calibrated receipt puts a minutes figure into the ledger.
+    // Honest-null classes omit the field entirely (never the preset floor under
+    // a different label), so no reclaimed-minutes badge renders for them.
+    ...(receipt ? { estTimeReclaimedMin: receipt.totalMinutes } : {}),
     view: 'timeline',
     evidence,
-    claimClass: 'causal',
-    proofTier: 'auditable',
+    claimClass: receipt ? 'causal' : 'accounting',
+    proofTier: receipt ? 'observational' : 'auditable',
     provenance: {
       observations,
-      inference:
-        'A missing handoff after a durable-state mutation is an accounting pre-signal; a later early-turn rediscovery burst confirms real re-engagement work. Treating the estimated minutes as saved time is a causal hypothesis until the sibling profiling receipt calibrates the artifact policy.',
-      ...(latestDate ? { asOf: latestDate, stale: !!stale } : {}),
+      inference: receipt
+        ? `A missing handoff after a durable-state mutation is an accounting pre-signal; the ${receipt.sampleSize} measured early-turn rediscovery burst(s) in this task class calibrate a per-task-class re-discovery cost (median ${fmtMin(receipt.medianMinutes)} per occurrence), so the ~${fmtMin(receipt.totalMinutes)} human-minute figure is published as an observational (T2) measurement, not a preset hypothesis.`
+        : `A missing handoff after a durable-state mutation is an accounting pre-signal. Fewer than ${MIN_HANDOFF_RECEIPT_SAMPLES} measured early-turn rediscovery bursts exist for this task class, so no human-minute saving is asserted; the pre-signal is tracked until enough bursts accrue to calibrate an observational receipt.`,
+      ...(publishAsOf ? { asOf: publishAsOf, stale: !!publishStale } : {}),
     },
     fix: buildFix(),
   };

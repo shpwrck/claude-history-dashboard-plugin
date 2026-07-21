@@ -187,7 +187,12 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.affected).toBe(2);
-    expect(rec?.estTimeReclaimedMin).toBeGreaterThan(30);
+    // One measured burst is below the 3-sample calibration floor, so no minutes
+    // figure publishes (honest null) even though the burst is billed. Billing to
+    // the right prior session is still proven via the evidence + freshness
+    // observation below, and severity stays warning (a rediscovery was billed).
+    expect(rec?.severity).toBe('warning');
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.evidence?.[1]).toContain('setup-n');
     expect(rec?.evidence?.[1]).toContain('rediscover');
     expect(rec?.provenance?.observations.some((o) => String(o.value).includes('new-durable'))).toBe(true);
@@ -225,7 +230,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.detail).toMatch(/cold-start pre-signal/i);
     expect(rec?.detail).not.toMatch(/later session\(s\).*re-discovering/i);
     expect(rec?.detail).toMatch(/unresolved project identity/i);
@@ -274,7 +279,8 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.severity).toBe('warning');
     expect(rec?.evidence?.join(' ')).toMatch(/billed back/i);
-    expect(rec?.estTimeReclaimedMin).toBeGreaterThan(15);
+    // Single measured burst -> below the calibration floor -> honest null.
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(
       filterRecommendationsByProject(
         [rec!],
@@ -325,7 +331,7 @@ describe('workflow.value-of-agent-handoff', () => {
     expect(rec?.severity).toBe('info');
     expect(rec?.detail).toMatch(/unresolved project identity/i);
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     for (const project of ['/repo/app', '/repo/other']) {
       expect(
         filterRecommendationsByProject(
@@ -445,7 +451,7 @@ describe('workflow.value-of-agent-handoff', () => {
     ).toEqual([]);
   });
 
-  it('fires cold-start from the pre-signal alone with a conservative hypothesis floor', () => {
+  it('fires cold-start from the pre-signal alone but emits an honest null for the minutes (no calibrated receipt)', () => {
     const setupBase = Date.parse('2026-07-01T10:00:00.000Z');
     const rec = detector.rule(
       input({
@@ -456,13 +462,20 @@ describe('workflow.value-of-agent-handoff', () => {
       NOW
     );
 
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.detail).toMatch(/cold-start pre-signal/i);
-    expect(rec?.detail).toMatch(/hypothesis/i);
+    // #2314: a cold-start class has zero measured bursts, so the minutes figure
+    // is withheld as an honest null rather than asserting the preset floor.
+    expect(rec?.detail).toMatch(/not enough history to size the handoff cost/i);
+    expect(rec?.detail).not.toMatch(/hypothesis/i);
     expect(rec?.detail).not.toMatch(/\bproven\b/i);
-    expect(rec?.claimClass).toBe('causal');
+    expect(rec?.claimClass).toBe('accounting');
     expect(rec?.proofTier).toBe('auditable');
-    expect(rec?.provenance?.observations[2].claim).toMatch(/conservative preset floor/i);
+    // Honest-null: the pre-signal observation must NOT present the 15-minute
+    // preset as an operative figure (a /recs consumer could otherwise adopt it).
+    expect(rec?.provenance?.observations[2].claim).toMatch(/no human-minute figure is asserted/i);
+    expect(rec?.provenance?.observations[2].claim).not.toMatch(/preset floor|15 minute/i);
+    expect(rec?.evidence?.join(' ')).not.toMatch(/conservative 15 minute floor/i);
   });
 
   it('demotes stale signals to "As of <date>" with provenance.asOf and stale=true', () => {
@@ -538,7 +551,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.affected).toBe(2);
-    expect(rec?.estTimeReclaimedMin).toBe(30);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.detail).not.toMatch(/^As of /);
     expect(rec?.detail).toMatch(/aggregate freshness cannot be established/i);
     expect(rec?.evidence?.join(' ')).toMatch(
@@ -714,7 +727,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.evidence?.join(' ')).not.toMatch(/final structural candidate/i);
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
   });
 
   it.each([
@@ -2908,7 +2921,7 @@ describe('workflow.value-of-agent-handoff', () => {
     );
 
     expect(rec?.title).toBe('Leave a handoff when agents establish durable state');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.provenance?.observations[0].claim).toMatch(
       /did not end with an uninvalidated v1 structural candidate written after the latest durable external-state mutation/i
     );
@@ -3264,11 +3277,284 @@ describe('workflow.value-of-agent-handoff', () => {
     const observedObs = rec.provenance?.observations[2];
     expect(observedObs?.value).toBe(8);
     expect(observedObs?.claim).toContain('observed');
-    // The 15-minute floor lives ONLY in the hypothesis total: one pre-signal
-    // (15) + one burst floored at 15 = 30.
-    expect(rec.estTimeReclaimedMin).toBe(30);
-    expect(rec.detail).toContain('per rediscovery burst');
-    expect(rec.detail).toContain('observed span when longer');
+    // #2314: with a single measured burst (below the 3-sample calibration
+    // floor) no minutes figure is published. The unfloored observed 8 is still
+    // surfaced above in the detail and provenance; the preset floor is never
+    // asserted as a saving.
+    expect(rec.estTimeReclaimedMin).toBeUndefined();
+    expect(rec.detail).toMatch(/not enough history to size the handoff cost/i);
+    expect(rec.detail).not.toMatch(/\bproven\b/i);
+  });
+
+  it('publishes an observational human-minute figure once >=3 measured bursts calibrate a receipt (#2314 evidence)', () => {
+    const setupBase = Date.parse('2026-07-01T10:00:00.000Z');
+    const b1 = Date.parse('2026-07-03T10:00:00.000Z');
+    const b2 = Date.parse('2026-07-04T10:00:00.000Z');
+    const b3 = Date.parse('2026-07-05T10:00:00.000Z');
+    const rec = detector.rule(
+      input({
+        toolData: [
+          toolSession('setup-calibrated', [
+            bash(durableCommand, at(setupBase, 0), 'calibrated-durable'),
+          ]),
+        ],
+        timelines: [
+          // Three genuinely observed re-discovery bursts (10 / 15 / 20 min
+          // spans) in the same project, each billed back to the setup session:
+          // median 15, unfloored total 45.
+          timeline('rediscover-1', b1, [
+            redUser(at(b1, 0), 'where is the remote config for this service?'),
+            redUser(at(b1, 10), 'which template created the deployed config?'),
+          ]),
+          timeline('rediscover-2', b2, [
+            redUser(at(b2, 0), 'where is the remote config for this service?'),
+            redUser(at(b2, 15), 'which template created the deployed config?'),
+          ]),
+          timeline('rediscover-3', b3, [
+            redUser(at(b3, 0), 'where is the remote config for this service?'),
+            redUser(at(b3, 20), 'which template created the deployed config?'),
+          ]),
+        ],
+        sessions: [
+          sessionMeta('setup-calibrated'),
+          sessionMeta('rediscover-1'),
+          sessionMeta('rediscover-2'),
+          sessionMeta('rediscover-3'),
+        ],
+        tokenData: [tokenMeta('setup-calibrated')],
+      }),
+      NOW
+    );
+
+    expect(rec?.id).toBe('workflow.value-of-agent-handoff');
+    expect(rec?.severity).toBe('warning');
+    // The receipt clears the sample floor -> published as a measured (T2)
+    // observational figure = the unfloored total 45, median 15 per occurrence.
+    expect(rec?.proofTier).toBe('observational');
+    expect(rec?.claimClass).toBe('causal');
+    expect(rec?.estTimeReclaimedMin).toBe(45);
+    expect(rec?.detail).toMatch(/3 measured re-discovery burst\(s\)/i);
+    expect(rec?.detail).toMatch(/median 15 minute\(s\) per occurrence/i);
+    expect(rec?.detail).toMatch(/measured observational \(T2\) figure/i);
+    expect(rec?.detail).not.toMatch(/not enough history/i);
+    expect(rec?.detail).not.toMatch(/hypothesis/i);
+    expect(
+      rec?.provenance?.observations.some((observation) =>
+        /clear the .*calibration floor/i.test(observation.claim)
+      )
+    ).toBe(true);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    expect(validateFixSnippet(rec!.fix!)).toEqual([]);
+  });
+
+  it('demotes a calibrated (published) receipt older than the decay window to "As of <date>" (#2314 stale)', () => {
+    const setupBase = Date.parse('2026-04-01T10:00:00.000Z');
+    const b1 = Date.parse('2026-04-03T10:00:00.000Z');
+    const b2 = Date.parse('2026-04-04T10:00:00.000Z');
+    const b3 = Date.parse('2026-04-05T10:00:00.000Z');
+    const rec = detector.rule(
+      input({
+        toolData: [
+          toolSession('setup-stale-cal', [
+            bash(durableCommand, at(setupBase, 0), 'stale-cal-durable'),
+          ]),
+        ],
+        timelines: [
+          timeline('stale-red-1', b1, [
+            redUser(at(b1, 0), 'where is the remote config for this service?'),
+            redUser(at(b1, 10), 'which template created the deployed config?'),
+          ]),
+          timeline('stale-red-2', b2, [
+            redUser(at(b2, 0), 'where is the remote config for this service?'),
+            redUser(at(b2, 15), 'which template created the deployed config?'),
+          ]),
+          timeline('stale-red-3', b3, [
+            redUser(at(b3, 0), 'where is the remote config for this service?'),
+            redUser(at(b3, 20), 'which template created the deployed config?'),
+          ]),
+        ],
+        sessions: [
+          sessionMeta('setup-stale-cal'),
+          sessionMeta('stale-red-1'),
+          sessionMeta('stale-red-2'),
+          sessionMeta('stale-red-3'),
+        ],
+        tokenData: [tokenMeta('setup-stale-cal')],
+      }),
+      NOW
+    );
+
+    // Still published (the receipt cleared the floor) but every contributing
+    // burst is older than the 30-day decay window, so the present-tense claim
+    // is demoted to an "As of <date>" figure with provenance.stale = true.
+    expect(rec?.proofTier).toBe('observational');
+    expect(rec?.estTimeReclaimedMin).toBe(45);
+    expect(rec?.detail).toMatch(/^As of 2026-04-05,/);
+    expect(rec?.provenance?.asOf).toBe('2026-04-05');
+    expect(rec?.provenance?.stale).toBe(true);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('demotes a stale published receipt even when a fresh non-billing pre-signal keeps roll.latestMs recent (#2314 stale routing)', () => {
+    const oldSetup = Date.parse('2026-04-01T10:00:00.000Z');
+    const b1 = Date.parse('2026-04-03T10:00:00.000Z');
+    const b2 = Date.parse('2026-04-04T10:00:00.000Z');
+    const b3 = Date.parse('2026-04-05T10:00:00.000Z');
+    // A fresh (2 days before NOW) durable-state pre-signal in the SAME project
+    // that bills no rediscovery: it must not make the months-old measured figure
+    // read as current.
+    const freshSetup = Date.parse('2026-07-07T10:00:00.000Z');
+    const rec = detector.rule(
+      input({
+        toolData: [
+          toolSession('setup-old-billed', [
+            bash(durableCommand, at(oldSetup, 0), 'old-billed-durable'),
+          ]),
+          toolSession('setup-fresh-unbilled', [
+            bash(durableCommand, at(freshSetup, 0), 'fresh-unbilled-durable'),
+          ]),
+        ],
+        timelines: [
+          timeline('old-red-1', b1, [
+            redUser(at(b1, 0), 'where is the remote config for this service?'),
+            redUser(at(b1, 10), 'which template created the deployed config?'),
+          ]),
+          timeline('old-red-2', b2, [
+            redUser(at(b2, 0), 'where is the remote config for this service?'),
+            redUser(at(b2, 15), 'which template created the deployed config?'),
+          ]),
+          timeline('old-red-3', b3, [
+            redUser(at(b3, 0), 'where is the remote config for this service?'),
+            redUser(at(b3, 20), 'which template created the deployed config?'),
+          ]),
+        ],
+        sessions: [
+          sessionMeta('setup-old-billed'),
+          sessionMeta('setup-fresh-unbilled'),
+          sessionMeta('old-red-1'),
+          sessionMeta('old-red-2'),
+          sessionMeta('old-red-3'),
+        ],
+        tokenData: [
+          tokenMeta('setup-old-billed'),
+          tokenMeta('setup-fresh-unbilled'),
+        ],
+      }),
+      NOW
+    );
+
+    // roll.latestMs is the fresh July mutation, but the receipt's freshness is
+    // the latest April burst, so the published figure demotes to "As of" and
+    // provenance.stale = true (adversarial-review #1).
+    expect(rec?.proofTier).toBe('observational');
+    expect(rec?.estTimeReclaimedMin).toBe(45);
+    expect(rec?.affected).toBe(2);
+    expect(rec?.detail).toMatch(/^As of 2026-04-05,/);
+    expect(rec?.provenance?.asOf).toBe('2026-04-05');
+    expect(rec?.provenance?.stale).toBe(true);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('withholds the minutes figure (honest null) when >=3 bursts all measure ~0 minutes (#2314 material floor)', () => {
+    const setupBase = Date.parse('2026-07-01T10:00:00.000Z');
+    const b1 = Date.parse('2026-07-03T10:00:00.000Z');
+    const b2 = Date.parse('2026-07-04T10:00:00.000Z');
+    const b3 = Date.parse('2026-07-05T10:00:00.000Z');
+    const rec = detector.rule(
+      input({
+        toolData: [
+          toolSession('setup-zero', [
+            bash(durableCommand, at(setupBase, 0), 'zero-durable'),
+          ]),
+        ],
+        timelines: [
+          // Both rediscovery turns land at session start -> observedMinutes 0.
+          timeline('zero-red-1', b1, [
+            redUser(at(b1, 0), 'where is the remote config for this service?'),
+            redUser(at(b1, 0), 'which template created the deployed config?'),
+          ]),
+          timeline('zero-red-2', b2, [
+            redUser(at(b2, 0), 'where is the remote config for this service?'),
+            redUser(at(b2, 0), 'which template created the deployed config?'),
+          ]),
+          timeline('zero-red-3', b3, [
+            redUser(at(b3, 0), 'where is the remote config for this service?'),
+            redUser(at(b3, 0), 'which template created the deployed config?'),
+          ]),
+        ],
+        sessions: [
+          sessionMeta('setup-zero'),
+          sessionMeta('zero-red-1'),
+          sessionMeta('zero-red-2'),
+          sessionMeta('zero-red-3'),
+        ],
+        tokenData: [tokenMeta('setup-zero')],
+      }),
+      NOW
+    );
+
+    // Three bursts clear the sample count, but the measured total is 0, so no
+    // causal/observational claim publishes; it stays an honest null.
+    expect(rec?.proofTier).toBe('auditable');
+    expect(rec?.claimClass).toBe('accounting');
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
+    expect(rec?.detail).toMatch(/not enough history to size the handoff cost/i);
+  });
+
+  it('surfaces a calibrated receipt class over a higher-hypothesis honest-null class (no preset starvation, #2314)', () => {
+    const baseA = Date.parse('2026-07-01T10:00:00.000Z');
+    const baseB = Date.parse('2026-07-01T10:00:00.000Z');
+    const b1 = Date.parse('2026-07-03T10:00:00.000Z');
+    const b2 = Date.parse('2026-07-04T10:00:00.000Z');
+    const b3 = Date.parse('2026-07-05T10:00:00.000Z');
+    const rec = detector.rule(
+      input({
+        toolData: [
+          // Class A (/repo/a): 5 cold-start pre-signals -> hypothesis total 75,
+          // honest-null (no measured bursts).
+          ...[0, 1, 2, 3, 4].map((i) =>
+            toolSession(`setup-a${i}`, [
+              bash(durableCommand, at(baseA, i), `a-durable-${i}`),
+            ])
+          ),
+          // Class B (/repo/b): 1 pre-signal + 3 bursts -> hypothesis total 65
+          // (< 75) but a real receipt (measured total 45).
+          toolSession('setup-b', [bash(durableCommand, at(baseB, 0), 'b-durable')]),
+        ],
+        timelines: [
+          timeline('red-b1', b1, [
+            redUser(at(b1, 0), 'where is the remote config for this service?'),
+            redUser(at(b1, 10), 'which template created the deployed config?'),
+          ]),
+          timeline('red-b2', b2, [
+            redUser(at(b2, 0), 'where is the remote config for this service?'),
+            redUser(at(b2, 15), 'which template created the deployed config?'),
+          ]),
+          timeline('red-b3', b3, [
+            redUser(at(b3, 0), 'where is the remote config for this service?'),
+            redUser(at(b3, 20), 'which template created the deployed config?'),
+          ]),
+        ],
+        // Sessions carry project identity; no tokenData (its default project
+        // would conflict with the two distinct projects here).
+        sessions: [
+          ...[0, 1, 2, 3, 4].map((i) => sessionMeta(`setup-a${i}`, '/repo/a')),
+          sessionMeta('setup-b', '/repo/b'),
+          sessionMeta('red-b1', '/repo/b'),
+          sessionMeta('red-b2', '/repo/b'),
+          sessionMeta('red-b3', '/repo/b'),
+        ],
+      }),
+      NOW
+    );
+
+    // A's hypothesis total (75) exceeds B's (65), but only B has a calibrated
+    // receipt, so B must be the single surfaced rollup and publish the measured
+    // figure -- the 15-minute preset must not decide WHICH class publishes.
+    expect(rec?.proofTier).toBe('observational');
+    expect(rec?.estTimeReclaimedMin).toBe(45);
+    expect(rec?.detail).toMatch(/3 measured re-discovery burst\(s\)/i);
+    expect(rec?.detail).toContain('/repo/b');
   });
 
   it('stays silent for a routine project-level install (npm/pip/yarn are not durable state) (#2312, finding 3)', () => {
@@ -3325,7 +3611,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.detail).toMatch(/cold-start pre-signal/i);
     expect(rec?.detail).toMatch(/aggregate freshness cannot be established/i);
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
@@ -3363,7 +3649,7 @@ describe('workflow.value-of-agent-handoff', () => {
     );
 
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
     expect(rec?.provenance?.asOf).toBeUndefined();
   });
@@ -3435,7 +3721,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
     expect(rec?.detail).toMatch(/aggregate freshness cannot be established/i);
   });
@@ -3514,7 +3800,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.provenance?.asOf).toBeUndefined();
     expect(rec?.provenance?.stale).toBeUndefined();
     expect(rec?.evidence?.join(' ')).toMatch(
@@ -3553,7 +3839,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
   });
 
@@ -3582,7 +3868,7 @@ describe('workflow.value-of-agent-handoff', () => {
     );
 
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
   });
 
@@ -3615,7 +3901,7 @@ describe('workflow.value-of-agent-handoff', () => {
     );
 
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(30);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
   });
 
@@ -3648,7 +3934,7 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.severity).toBe('info');
-    expect(rec?.estTimeReclaimedMin).toBe(15);
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.provenance?.asOf).toBe('2026-07-01');
     expect(rec?.evidence?.join(' ')).not.toMatch(/billed back/i);
     expect(rec?.detail).not.toContain('2099');
