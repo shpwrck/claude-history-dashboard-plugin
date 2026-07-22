@@ -2100,20 +2100,19 @@ function parseArtifactJson(objectBytes, entry, expectedKind) {
     : value;
 }
 
-function verifySealedTrialSet(
-  runtime,
-  paths,
-  marker,
-  manifest,
-  objectBytes,
-  byPath,
-) {
+function verifySealedTrialSet(runtime, marker, manifest, objectBytes, byPath) {
   const trial = parseArtifactJson(
     objectBytes,
     byPath.get("trial.json"),
     "Gate2702Trial",
   );
-  const expectedStateRoot = dirname(dirname(paths.trialRoot));
+  // A post-seal consumer may see the immutable tree through a different bind
+  // mount. Recorded absolute paths remain launcher provenance: validate their
+  // relationships against the recorded root, not the consumer mount path.
+  const recordedPaths =
+    typeof trial.stateRoot === "string" && isAbsolute(trial.stateRoot)
+      ? trialPaths({ stateRoot: trial.stateRoot, trial: trial.trialId })
+      : null;
   if (
     trial.contentDigest !== marker.trialDigest ||
     trial.contentDigest !== manifest.trialDigest ||
@@ -2123,9 +2122,11 @@ function verifySealedTrialSet(
     !sameValue(trial.definitionRef, DEFINITION_REF) ||
     trial.repository !== REPOSITORY ||
     trial.executionMode !== "production" ||
-    resolve(trial.stateRoot) !== resolve(expectedStateRoot) ||
+    recordedPaths === null ||
+    typeof trial.worktreeRoot !== "string" ||
+    !isAbsolute(trial.worktreeRoot) ||
     resolve(trial.worktreeRoot) !==
-      resolve(join(paths.trialRoot, "worktrees")) ||
+      resolve(join(recordedPaths.trialRoot, "worktrees")) ||
     !Array.isArray(trial.registrations) ||
     trial.registrations.length !== SUBJECTS.length * TREATMENTS.length ||
     !Array.isArray(trial.subjectSnapshots) ||
@@ -2186,8 +2187,10 @@ function verifySealedTrialSet(
         registration.executionMode !== "production" ||
         registration.trialId !== trial.trialId ||
         registration.baseSha !== trial.baseSha ||
+        typeof registration.runDir !== "string" ||
+        !isAbsolute(registration.runDir) ||
         resolve(registration.runDir) !==
-          resolve(runDirectory(paths, subject, treatmentId, 1)) ||
+          resolve(runDirectory(recordedPaths, subject, treatmentId, 1)) ||
         !isWithin(trial.worktreeRoot, registration.worktreePath)
       ) {
         fail(
@@ -2226,15 +2229,34 @@ function verifySealedTrialSet(
 
   const retryRegistrations = manifest.runCandidates
     .filter((candidate) => candidate.attempt === 2)
-    .map((candidate) =>
-      parseArtifactJson(
+    .map((candidate) => {
+      const registration = parseArtifactJson(
         objectBytes,
         byPath.get(
           `runs/issue-${candidate.subject}/${candidate.treatmentId}/attempt-2/registration.json`,
         ),
         "Gate2702ArmRegistration",
-      ),
-    );
+      );
+      if (
+        typeof registration.runDir !== "string" ||
+        !isAbsolute(registration.runDir) ||
+        resolve(registration.runDir) !==
+          resolve(
+            runDirectory(
+              recordedPaths,
+              candidate.subject,
+              candidate.treatmentId,
+              2,
+            ),
+          ) ||
+        !isWithin(trial.worktreeRoot, registration.worktreePath)
+      ) {
+        fail(
+          `sealed retry registration drifted for #${candidate.subject}/${candidate.treatmentId}`,
+        );
+      }
+      return registration;
+    });
   const retryPaths = [...byPath.keys()].filter((path) =>
     path.startsWith("retries/sets/"),
   );
@@ -3743,7 +3765,7 @@ function verifyBundleDirectory(runtime, paths, marker, bundleDirectory) {
   if (!trialEntry) {
     fail("verified marker does not bind the exact trial receipt");
   }
-  verifySealedTrialSet(runtime, paths, marker, manifest, objectBytes, byPath);
+  verifySealedTrialSet(runtime, marker, manifest, objectBytes, byPath);
   verifyArtifactCoverage(manifest, objectBytes, byPath);
   const judgeSubjects = manifest.judgeResults.map((entry) => entry.subject);
   if (new Set(judgeSubjects).size !== judgeSubjects.length) {

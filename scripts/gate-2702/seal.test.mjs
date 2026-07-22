@@ -19,6 +19,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
+import { buildGate2702Runtime } from "../build-gate-2702-runtime.mjs";
+import { evaluateTrial } from "./evaluate.mjs";
 import { deriveGate2702AccountingEvidence } from "./seal-accounting.mjs";
 import { loadVerifiedTrial, sealTrial, verifyTrial } from "./seal.mjs";
 
@@ -2170,7 +2172,12 @@ function artifactFor(sourcePath, bytes) {
   };
 }
 
-function publishReplacementBundle(fixture, manifestInput, extraObjects) {
+function publishReplacementBundle(
+  fixture,
+  manifestInput,
+  extraObjects,
+  markerOverrides = {},
+) {
   const current = markerAndManifest(fixture);
   const manifest = withDigest({ ...manifestInput, contentDigest: undefined });
   const bundleRoot = join(
@@ -2198,6 +2205,7 @@ function publishReplacementBundle(fixture, manifestInput, extraObjects) {
     bundleDigest: manifest.contentDigest,
     bundleManifestDigest: manifest.contentDigest,
     bundleDirectory: join("bundles", manifest.contentDigest.replace(":", "-")),
+    ...markerOverrides,
   });
   writeFileSync(
     fixture.markerPath,
@@ -2205,6 +2213,44 @@ function publishReplacementBundle(fixture, manifestInput, extraObjects) {
     "utf8",
   );
   return { marker, manifest, bundleRoot };
+}
+
+function tamperRecordedWorktreeRootAndRepublish(fixture) {
+  const current = markerAndManifest(fixture);
+  const existing = current.manifest.artifacts.find(
+    (entry) => entry.sourcePath === "trial.json",
+  );
+  assert.ok(existing);
+  const trial = readJson(
+    join(current.bundleRoot, "objects", existing.objectName),
+  );
+  const tampered = withDigest({
+    ...trial,
+    contentDigest: undefined,
+    worktreeRoot: join(trial.stateRoot, "unbound-worktrees"),
+  });
+  const bytes = objectBytes(tampered);
+  const replacement = artifactFor("trial.json", bytes);
+  const artifacts = current.manifest.artifacts
+    .map((entry) => (entry.sourcePath === "trial.json" ? replacement : entry))
+    .sort((left, right) => left.sourcePath.localeCompare(right.sourcePath));
+  const published = publishReplacementBundle(
+    fixture,
+    {
+      ...current.manifest,
+      contentDigest: undefined,
+      trialDigest: tampered.contentDigest,
+      artifacts,
+    },
+    new Map([[replacement.objectName, bytes]]),
+    { trialDigest: tampered.contentDigest },
+  );
+  if (
+    existing.objectName !== replacement.objectName &&
+    !artifacts.some((entry) => entry.objectName === existing.objectName)
+  ) {
+    rmSync(join(published.bundleRoot, "objects", existing.objectName));
+  }
 }
 
 function score(value) {
@@ -2512,6 +2558,46 @@ test("cleanup authority requires a self-contained non-symlink object directory",
       verifyTrial(fixture.options),
       /self-contained directory/i,
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("relocation support still rejects internally inconsistent recorded launcher paths", async () => {
+  const fixture = createFixture();
+  try {
+    await sealTrial(fixture.options, fixture.dependencies);
+    tamperRecordedWorktreeRootAndRepublish(fixture);
+
+    await assert.rejects(
+      verifyTrial(fixture.options),
+      /exact production C5 launcher manifest/i,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("the production runtime bundle verifies sealed C5 evidence after state-root relocation", async () => {
+  const fixture = createFixture();
+  const relocatedStateRoot = join(fixture.root, "consumer-state");
+  const runtimeBundle = join(fixture.root, "runtime-verifier.bundle.mjs");
+  try {
+    await sealTrial(fixture.options, fixture.dependencies);
+    await evaluateTrial(fixture.options);
+    await buildGate2702Runtime({ outputFile: runtimeBundle });
+    renameSync(fixture.stateRoot, relocatedStateRoot);
+
+    const runtime = await import(
+      `${pathToFileURL(runtimeBundle).href}?test=${randomUUID()}`
+    );
+    const loaded = await runtime.loadCurrentEvaluation({
+      trial: fixture.trialId,
+      stateRoot: relocatedStateRoot,
+    });
+
+    assert.equal(loaded.marker.trialId, fixture.trialId);
+    assert.equal(loaded.evaluation.kind, "Gate2702InsufficientEvidence");
   } finally {
     fixture.cleanup();
   }

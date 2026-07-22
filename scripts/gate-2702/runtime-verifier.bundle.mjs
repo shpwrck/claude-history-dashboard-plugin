@@ -12936,10 +12936,13 @@ function parseArtifactJson(objectBytes, entry, expectedKind) {
 	}
 	return expectedKind ? verifyReceipt(value, expectedKind, entry.sourcePath) : value;
 }
-function verifySealedTrialSet(runtime, paths, marker, manifest, objectBytes, byPath) {
+function verifySealedTrialSet(runtime, marker, manifest, objectBytes, byPath) {
 	const trial = parseArtifactJson(objectBytes, byPath.get("trial.json"), "Gate2702Trial");
-	const expectedStateRoot = dirname(dirname(paths.trialRoot));
-	if (trial.contentDigest !== marker.trialDigest || trial.contentDigest !== manifest.trialDigest || trial.trialId !== marker.trialId || trial.baseSha !== marker.baseSha || !sameValue$1(trial.definitionRef, runtime.plan.definitionRef) || !sameValue$1(trial.definitionRef, DEFINITION_REF) || trial.repository !== REPOSITORY || trial.executionMode !== "production" || resolve(trial.stateRoot) !== resolve(expectedStateRoot) || resolve(trial.worktreeRoot) !== resolve(join(paths.trialRoot, "worktrees")) || !Array.isArray(trial.registrations) || trial.registrations.length !== SUBJECTS.length * TREATMENTS.length || !Array.isArray(trial.subjectSnapshots) || trial.subjectSnapshots.length !== SUBJECTS.length) fail$1("sealed trial is not the exact production C5 launcher manifest");
+	const recordedPaths = typeof trial.stateRoot === "string" && isAbsolute(trial.stateRoot) ? trialPaths({
+		stateRoot: trial.stateRoot,
+		trial: trial.trialId
+	}) : null;
+	if (trial.contentDigest !== marker.trialDigest || trial.contentDigest !== manifest.trialDigest || trial.trialId !== marker.trialId || trial.baseSha !== marker.baseSha || !sameValue$1(trial.definitionRef, runtime.plan.definitionRef) || !sameValue$1(trial.definitionRef, DEFINITION_REF) || trial.repository !== REPOSITORY || trial.executionMode !== "production" || recordedPaths === null || typeof trial.worktreeRoot !== "string" || !isAbsolute(trial.worktreeRoot) || resolve(trial.worktreeRoot) !== resolve(join(recordedPaths.trialRoot, "worktrees")) || !Array.isArray(trial.registrations) || trial.registrations.length !== SUBJECTS.length * TREATMENTS.length || !Array.isArray(trial.subjectSnapshots) || trial.subjectSnapshots.length !== SUBJECTS.length) fail$1("sealed trial is not the exact production C5 launcher manifest");
 	const baseRegistrations = [];
 	for (const subject of SUBJECTS) {
 		const snapshots = trial.subjectSnapshots.filter((entry) => entry.subject === subject);
@@ -12951,7 +12954,7 @@ function verifySealedTrialSet(runtime, paths, marker, manifest, objectBytes, byP
 			const embedded = trial.registrations.filter((entry) => entry.subject === subject && entry.treatmentId === treatmentId);
 			const prefix = `runs/issue-${subject}/${treatmentId}/attempt-1`;
 			const registration = parseArtifactJson(objectBytes, byPath.get(`${prefix}/registration.json`), "Gate2702ArmRegistration");
-			if (embedded.length !== 1 || !sameValue$1(registration, embedded[0]) || registration.attempt !== 1 || registration.executionMode !== "production" || registration.trialId !== trial.trialId || registration.baseSha !== trial.baseSha || resolve(registration.runDir) !== resolve(runDirectory(paths, subject, treatmentId, 1)) || !isWithin(trial.worktreeRoot, registration.worktreePath)) fail$1(`sealed attempt-1 registration drifted for #${subject}/${treatmentId}`);
+			if (embedded.length !== 1 || !sameValue$1(registration, embedded[0]) || registration.attempt !== 1 || registration.executionMode !== "production" || registration.trialId !== trial.trialId || registration.baseSha !== trial.baseSha || typeof registration.runDir !== "string" || !isAbsolute(registration.runDir) || resolve(registration.runDir) !== resolve(runDirectory(recordedPaths, subject, treatmentId, 1)) || !isWithin(trial.worktreeRoot, registration.worktreePath)) fail$1(`sealed attempt-1 registration drifted for #${subject}/${treatmentId}`);
 			const preflightArm = pairPreflight.arms?.[treatmentId];
 			if (preflightArm?.treatmentId !== treatmentId || preflightArm?.attempt !== 1 || preflightArm?.registrationDigest !== registration.contentDigest || resolve(preflightArm?.worktreePath ?? "") !== resolve(registration.worktreePath)) fail$1(`sealed pair preflight is not bound to #${subject}/${treatmentId}`);
 			baseRegistrations.push(registration);
@@ -12964,7 +12967,11 @@ function verifySealedTrialSet(runtime, paths, marker, manifest, objectBytes, byP
 		worktreePath: registration.worktreePath,
 		registrationDigest: registration.contentDigest
 	}))) !== trial.worktreeManifestDigest || trial.worktreeManifestDigest !== marker.worktreeManifestDigest || trial.worktreeManifestDigest !== manifest.worktreeManifestDigest) fail$1("sealed worktree manifest does not rederive from its registrations");
-	const retryRegistrations = manifest.runCandidates.filter((candidate) => candidate.attempt === 2).map((candidate) => parseArtifactJson(objectBytes, byPath.get(`runs/issue-${candidate.subject}/${candidate.treatmentId}/attempt-2/registration.json`), "Gate2702ArmRegistration"));
+	const retryRegistrations = manifest.runCandidates.filter((candidate) => candidate.attempt === 2).map((candidate) => {
+		const registration = parseArtifactJson(objectBytes, byPath.get(`runs/issue-${candidate.subject}/${candidate.treatmentId}/attempt-2/registration.json`), "Gate2702ArmRegistration");
+		if (typeof registration.runDir !== "string" || !isAbsolute(registration.runDir) || resolve(registration.runDir) !== resolve(runDirectory(recordedPaths, candidate.subject, candidate.treatmentId, 2)) || !isWithin(trial.worktreeRoot, registration.worktreePath)) fail$1(`sealed retry registration drifted for #${candidate.subject}/${candidate.treatmentId}`);
+		return registration;
+	});
 	const retryPaths = [...byPath.keys()].filter((path) => path.startsWith("retries/sets/"));
 	if (marker.retryRegistrationSetDigest === void 0) {
 		if (manifest.retryRegistrationSetDigest !== null || retryRegistrations.length !== 0 || retryPaths.length !== 0) fail$1("sealed trial has an unbound retry registration set");
@@ -13653,7 +13660,7 @@ function verifyBundleDirectory(runtime, paths, marker, bundleDirectory) {
 	if (new Set(sourcePaths).size !== sourcePaths.length || !sameValue$1(sourcePaths, [...sourcePaths].sort())) fail$1("seal artifact paths are not uniquely sorted");
 	const byPath = new Map(manifest.artifacts.map((entry) => [entry.sourcePath, entry]));
 	if (!byPath.get("trial.json")) fail$1("verified marker does not bind the exact trial receipt");
-	verifySealedTrialSet(runtime, paths, marker, manifest, objectBytes, byPath);
+	verifySealedTrialSet(runtime, marker, manifest, objectBytes, byPath);
 	verifyArtifactCoverage(manifest, objectBytes, byPath);
 	const judgeSubjects = manifest.judgeResults.map((entry) => entry.subject);
 	if (new Set(judgeSubjects).size !== judgeSubjects.length) fail$1("seal manifest repeats a judge result");
