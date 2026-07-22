@@ -2253,6 +2253,55 @@ function tamperRecordedWorktreeRootAndRepublish(fixture) {
   }
 }
 
+function tamperAccountingAllInAndRepublish(
+  fixture,
+  treatmentId,
+  allInCostUsd,
+) {
+  const current = markerAndManifest(fixture);
+  const sourcePath = `runs/issue-${SUBJECTS[0]}/${treatmentId}/attempt-1/accounting.json`;
+  const existing = current.manifest.artifacts.find(
+    (entry) => entry.sourcePath === sourcePath,
+  );
+  assert.ok(existing);
+  const accounting = readJson(
+    join(current.bundleRoot, "objects", existing.objectName),
+  );
+  const tampered = withDigest({
+    ...accounting,
+    contentDigest: undefined,
+    allInCostUsd,
+  });
+  const bytes = objectBytes(tampered);
+  const replacement = artifactFor(sourcePath, bytes);
+  const artifacts = current.manifest.artifacts
+    .map((entry) => (entry.sourcePath === sourcePath ? replacement : entry))
+    .sort((left, right) => left.sourcePath.localeCompare(right.sourcePath));
+  const runCandidates = current.manifest.runCandidates.map((candidate) =>
+    candidate.subject === SUBJECTS[0] &&
+    candidate.treatmentId === treatmentId &&
+    candidate.attempt === 1
+      ? { ...candidate, accountingDigest: tampered.contentDigest }
+      : candidate,
+  );
+  const published = publishReplacementBundle(
+    fixture,
+    {
+      ...current.manifest,
+      contentDigest: undefined,
+      artifacts,
+      runCandidates,
+    },
+    new Map([[replacement.objectName, bytes]]),
+  );
+  if (
+    existing.objectName !== replacement.objectName &&
+    !artifacts.some((entry) => entry.objectName === existing.objectName)
+  ) {
+    rmSync(join(published.bundleRoot, "objects", existing.objectName));
+  }
+}
+
 function score(value) {
   return {
     correctness: value,
@@ -2726,6 +2775,45 @@ test("C5 control currency preserves exact worker decimals while treatment curren
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
     fixture.cleanup();
+  }
+});
+
+test("C5 sealing rejects coherently re-digested all-in cost derivation drift", async () => {
+  const cases = [
+    {
+      treatmentId: "haiku-solo",
+      tamperedAllInCostUsd: 0.7123344,
+    },
+    {
+      treatmentId: "haiku-sonnet-sidekick",
+      tamperedAllInCostUsd: 0.9544985000000001 + 0.617274,
+    },
+  ];
+  for (const { treatmentId, tamperedAllInCostUsd } of cases) {
+    const fixture = createFixture();
+    const previousHome = process.env.HOME;
+    process.env.HOME = fixture.home;
+    try {
+      promoteSuccessfulSelectedPair(fixture, {
+        controlWorkerCostUsd: 0.7123344000000003,
+        treatmentWorkerCostUsd: 0.9544985000000001,
+        sidekickCostUsd: 0.617274,
+      });
+      await sealTrial(fixture.options, fixture.dependencies);
+      tamperAccountingAllInAndRepublish(
+        fixture,
+        treatmentId,
+        tamperedAllInCostUsd,
+      );
+      await assert.rejects(
+        verifyTrial(fixture.options),
+        /sealed accounting all-in cost does not rederive/i,
+      );
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      fixture.cleanup();
+    }
   }
 });
 
