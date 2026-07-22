@@ -13241,7 +13241,11 @@ function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
 		const stdoutEntry = byPath.get(`${prefix}/stdout.log`);
 		if (!stdoutEntry || workerSource?.contentDigest !== stdoutEntry.contentDigest || workerSource?.byteLength !== stdoutEntry.sizeBytes) fail$1("sealed accounting is not bound to its retained worker output");
 		const numericCost = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && !Object.is(value, -0);
-		if (accounting.allInCostUsd !== null && (!numericCost(accounting.workerCostUsd) || !numericCost(accounting.sidekickCostUsd) || !numericCost(accounting.allInCostUsd) || accounting.allInCostUsd !== normalizeGate2702Cost(accounting.workerCostUsd + accounting.sidekickCostUsd))) fail$1("sealed accounting all-in cost does not rederive");
+		if (accounting.allInCostUsd !== null) {
+			if (!numericCost(accounting.workerCostUsd) || !numericCost(accounting.sidekickCostUsd) || !numericCost(accounting.allInCostUsd)) fail$1("sealed accounting all-in cost does not rederive");
+			const expectedAllInCostUsd = candidate.treatmentId === "haiku-solo" ? accounting.workerCostUsd : normalizeGate2702Cost(accounting.workerCostUsd + accounting.sidekickCostUsd);
+			if (accounting.allInCostUsd !== expectedAllInCostUsd) fail$1("sealed accounting all-in cost does not rederive");
+		}
 		if (accounting.bridgeEvidenceStatus === "eligible" && !numericCost(accounting.allInCostUsd)) fail$1("eligible sealed accounting has no finite all-in cost");
 		const sidekickSource = accounting.sourceEvidence?.sidekick;
 		let ledgerEntry = null;

@@ -1419,7 +1419,11 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
 
 function promoteSuccessfulSelectedPair(
   fixture,
-  { treatmentWorkerCostUsd = 0.9, sidekickCostUsd = 0.2 } = {},
+  {
+    controlWorkerCostUsd = 1.4,
+    treatmentWorkerCostUsd = 0.9,
+    sidekickCostUsd = 0.2,
+  } = {},
 ) {
   const subject = SUBJECTS[0];
   const snapshot = readJson(
@@ -1475,7 +1479,7 @@ function promoteSuccessfulSelectedPair(
       total_cost_usd:
         arm.registration.treatmentId === "haiku-sonnet-sidekick"
           ? treatmentWorkerCostUsd
-          : 1.4,
+          : controlWorkerCostUsd,
       result: "bounded successful fixture result",
     };
     const workerBytes = Buffer.from(
@@ -2596,6 +2600,37 @@ test("normalized C5 currency seals when raw floating-point addition differs by m
     assert.notEqual(
       accounting.allInCostUsd,
       accounting.workerCostUsd + accounting.sidekickCostUsd,
+    );
+
+    const sealed = await sealTrial(fixture.options, fixture.dependencies);
+    assert.equal(sealed.state, "verified");
+    assert.deepEqual(await verifyTrial(fixture.options), sealed);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    fixture.cleanup();
+  }
+});
+
+test("C5 control currency preserves exact worker decimals while treatment currency normalizes", async () => {
+  const fixture = createFixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = fixture.home;
+  try {
+    const promoted = promoteSuccessfulSelectedPair(fixture, {
+      controlWorkerCostUsd: 0.7123344000000003,
+      treatmentWorkerCostUsd: 0.9544985000000001,
+      sidekickCostUsd: 0.617274,
+    });
+    const control = promoted.selectedByTreatment["haiku-solo"].accounting;
+    const treatment =
+      promoted.selectedByTreatment["haiku-sonnet-sidekick"].accounting;
+    assert.equal(control.allInCostUsd, control.workerCostUsd);
+    assert.equal(control.allInCostUsd, 0.7123344000000003);
+    assert.equal(treatment.allInCostUsd, 1.5717725);
+    assert.notEqual(
+      treatment.allInCostUsd,
+      treatment.workerCostUsd + treatment.sidekickCostUsd,
     );
 
     const sealed = await sealTrial(fixture.options, fixture.dependencies);

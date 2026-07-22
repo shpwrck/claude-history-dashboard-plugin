@@ -2883,17 +2883,23 @@ function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
       Number.isFinite(value) &&
       value >= 0 &&
       !Object.is(value, -0);
-    if (
-      accounting.allInCostUsd !== null &&
-      (!numericCost(accounting.workerCostUsd) ||
+    if (accounting.allInCostUsd !== null) {
+      if (
+        !numericCost(accounting.workerCostUsd) ||
         !numericCost(accounting.sidekickCostUsd) ||
-        !numericCost(accounting.allInCostUsd) ||
-        accounting.allInCostUsd !==
-          normalizeGate2702Cost(
-            accounting.workerCostUsd + accounting.sidekickCostUsd,
-          ))
-    ) {
-      fail("sealed accounting all-in cost does not rederive");
+        !numericCost(accounting.allInCostUsd)
+      ) {
+        fail("sealed accounting all-in cost does not rederive");
+      }
+      const expectedAllInCostUsd =
+        candidate.treatmentId === "haiku-solo"
+          ? accounting.workerCostUsd
+          : normalizeGate2702Cost(
+              accounting.workerCostUsd + accounting.sidekickCostUsd,
+            );
+      if (accounting.allInCostUsd !== expectedAllInCostUsd) {
+        fail("sealed accounting all-in cost does not rederive");
+      }
     }
     if (
       accounting.bridgeEvidenceStatus === "eligible" &&

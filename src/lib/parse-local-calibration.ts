@@ -3,8 +3,8 @@
  *
  * This is the dashboard-side READER for the shadow-calls calibration report that
  * `~/.claude/shadow-calls/lib/calibration-report.mjs` (#2317, mirrored on
- * `shpwrck/claude`) produces. That module is a DERIVED, non-persisted rollup over
- * the shadow-calls ledger: it groups `mode:replay, axis:model, shadow.model=local/*`
+ * `shpwrck/claude`) atomically persists. That receipt is a DERIVED rollup over the
+ * shadow-calls ledger: the producer groups `mode:replay, axis:model, shadow.model=local/*`
  * records by task class and, per class, records `nSamples`, `blindJudgeAgreement`,
  * `costLocal`/`costClaude`, latency, a quality-`parity` gate, an `asOf`, and a
  * `verdict` in `pass | fail | insufficient`. The verdict discipline is the point:
@@ -67,7 +67,7 @@ export interface LocalCalibrationLatency {
 
 /** One task class's calibration row. */
 export interface LocalCalibrationClass {
-  /** `authoring | mechanical | review` (the canonical task taxonomy). */
+  /** Canonical replay task class (for example `mechanical`, `review`, or `debug`). */
   taskClass: string;
   /** The `local/*` candidate model, when the corpus recorded one. */
   localModel: string | null;
