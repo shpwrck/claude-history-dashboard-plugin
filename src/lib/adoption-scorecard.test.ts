@@ -171,8 +171,11 @@ describe('buildAdoptionScorecard', () => {
   });
 
   it('SURFACED finding whose detector markers are present live (no suppression yet) is ADOPTED (#1785)', () => {
+    // The receipt carries the EMITTED finding id — the api-errors detector's
+    // fix-carrying warning branch emits `reliability.rate-limits`, and that is
+    // what the /recs hook records (#2965; the catalog keys markers there).
     const receipts: AdoptionReceipt[] = [
-      surfaced('2026-05-28T00:00:00.000Z', ['reliability.api-errors']),
+      surfaced('2026-05-28T00:00:00.000Z', ['reliability.rate-limits']),
     ];
     // No suppression record, so no stored markerHeading — the heading is
     // resolved from the live detector catalog by finding id. The fix's full
@@ -188,6 +191,24 @@ describe('buildAdoptionScorecard', () => {
     expect(sc.rows[0].liveHunk).toContain('Avoid launching many parallel agent runs');
     // Still excluded from the coached M count — that requires a suppression.
     expect(sc.header.adoptedCount).toBe(0);
+  });
+
+  it('SURFACED info-branch id does not borrow the fix markers (dual-emit, #2965)', () => {
+    // `reliability.api-errors` is the detector id and the MARKERLESS info
+    // branch's emitted id. It must not resolve the rate-limit fix markers —
+    // an info finding carrying no fix can never be "adopted", even with the
+    // markers present live (the retired catalog serves only the suppressed
+    // path, for historical receipts stored under the detector id).
+    const receipts: AdoptionReceipt[] = [
+      surfaced('2026-05-28T00:00:00.000Z', ['reliability.api-errors']),
+    ];
+    const sc = buildAdoptionScorecard(
+      receipts,
+      config(CLAUDE_MD_RATE_LIMIT_ADOPTED),
+      findingMarkerCatalog()
+    );
+    expect(sc.rows[0].status).toBe('SURFACED');
+    expect(sc.rows[0].liveHunk).toBeNull();
   });
 
   it('recognizes the universal native-bypass policy without inventing examples', () => {
@@ -563,12 +584,14 @@ describe('treatment-scoped findings (#2842)', () => {
   });
 
   it('a NON-treatment-scoped finding still reaches ADOPTED from markers (guard is specific)', () => {
+    // Uses the EMITTED fix-carrying id (#2965) — the catalog no longer
+    // resolves the detector id for this dual-emit detector.
     const sc = buildAdoptionScorecard(
-      [surfaced('2026-07-01T00:00:00.000Z', ['reliability.api-errors'])],
+      [surfaced('2026-07-01T00:00:00.000Z', ['reliability.rate-limits'])],
       config(CLAUDE_MD_RATE_LIMIT_ADOPTED),
       findingMarkerCatalog()
     );
-    const row = sc.rows.find((r) => r.findingId === 'reliability.api-errors')!;
+    const row = sc.rows.find((r) => r.findingId === 'reliability.rate-limits')!;
     expect(row.status).toBe('ADOPTED');
   });
 });

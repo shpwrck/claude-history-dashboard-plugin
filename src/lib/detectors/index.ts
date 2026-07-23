@@ -35,6 +35,7 @@
  *   export const DETECTORS: Detector[] = [webSearchSpend];
  */
 import type { AppliedMarkers, Detector } from './types';
+import { markerFindingIdFor } from './dual-emit';
 
 // ── COST ────────────────────────────────────────────────────────────────
 import { detector as cache1hWaste } from './cost/cache-1h-waste';
@@ -555,6 +556,11 @@ export const NEW_DETECTORS = DETECTORS;
  * live recommendations — the exact adoption case the scorecard's surfaced→ADOPTED
  * transition needs. Detectors with no marker-gated CLAUDE.md fix are omitted.
  *
+ * Keys are EMITTED finding ids, not detector ids (#2965): adoption receipts
+ * store the id a recommendation was emitted under, so a dual-emit detector
+ * whose fix rides a non-detector-id branch catalogs its markers under that
+ * branch's id (`markerFindingIdFor`).
+ *
  * Server/test-side only: this iterates `DETECTORS`, so importing it drags the
  * whole recs engine into the importing chunk. Client/route code (e.g. the
  * Adoption Scorecard) must instead import the client-safe `FINDING_MARKER_CATALOG`
@@ -564,7 +570,7 @@ export const NEW_DETECTORS = DETECTORS;
 export function findingMarkerCatalog(): ReadonlyMap<string, AppliedMarkers> {
   const map = new Map<string, AppliedMarkers>();
   for (const d of DETECTORS) {
-    if (d.appliedMarkers) map.set(d.id, d.appliedMarkers);
+    if (d.appliedMarkers) map.set(markerFindingIdFor(d.id), d.appliedMarkers);
   }
   return map;
 }

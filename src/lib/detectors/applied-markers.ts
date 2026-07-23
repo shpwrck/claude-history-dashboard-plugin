@@ -129,6 +129,13 @@ export const RETIRED_SUPPRESSION_MARKER_CATALOG: ReadonlyMap<
   AppliedMarkers
 > = new Map([
   ['safety.dangerous-bypass', RETIRED_MARKERS_DANGEROUS_BYPASS],
+  // #2965: the rate-limit fix's markers were historically cataloged under the
+  // DETECTOR id, but the fix-carrying finding is emitted (and receipted) as
+  // `reliability.rate-limits` — the live catalog now keys them there. This
+  // retired entry keeps any historical suppressed receipt stored under the
+  // detector id resolvable, without letting a new SURFACED info-branch
+  // `reliability.api-errors` finding (which carries no fix) look adopted.
+  ['reliability.api-errors', MARKERS_RATE_LIMITS],
 ]);
 export const MARKERS_TOOL_ERRORS: AppliedMarkers = {
   headings: [/^##\s+Claude Coach Adopted Recommendations\b/i],
@@ -172,13 +179,17 @@ export const MARKERS_EDIT_FORMAT_CHURN: AppliedMarkers = {
 
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
- * Keys are detector ids; each value mirrors that detector's
- * `Detector.appliedMarkers`. Kept in sync with the detector catalog by
- * `applied-markers.contract.test.ts`.
+ * Keys are EMITTED finding ids (for a dual-emit detector whose fix rides a
+ * non-detector-id branch, that branch's id — #2965); each value mirrors the
+ * owning detector's `Detector.appliedMarkers`. Kept in sync with the detector
+ * catalog by `applied-markers.contract.test.ts`.
  */
 export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new Map([
   ['context.low-cache-hit', MARKERS_LOW_CACHE_HIT],
-  ['reliability.api-errors', MARKERS_RATE_LIMITS],
+  // #2965: keyed by the EMITTED fix-carrying finding id (the api-errors
+  // detector's warning branch), not the detector id — receipts store emitted
+  // ids, so this is the key the scorecard resolves by.
+  ['reliability.rate-limits', MARKERS_RATE_LIMITS],
   ['cost.expensive-sessions', MARKERS_EXPENSIVE_SESSIONS],
   ['workflow.redundant-reads', MARKERS_REDUNDANT_READS],
   ['cost.cache-1h-waste', MARKERS_CACHE_1H_WASTE],

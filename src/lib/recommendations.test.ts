@@ -4048,6 +4048,31 @@ describe('detector registry (#411/#468/#507 — static barrel)', () => {
     expect(never, `detectors that never fired on the bank: ${never.join(', ')}`).toEqual([]);
   });
 
+  it('every fix-carrying EMITTED id resolves its markers in the catalog (#2965)', async () => {
+    // Adoption receipts store the id a rec was EMITTED under, so the marker
+    // catalog must be keyed by emitted id. A dual-emit detector whose fix
+    // rides a non-detector-id branch (api-errors → reliability.rate-limits)
+    // would otherwise strand its markers under a key no receipt ever carries,
+    // silently undercutting the #1785 SURFACED→ADOPTED path. Fired on the
+    // bank so the pin covers what detectors actually EMIT, not what they
+    // declare.
+    const { DETECTORS, findingMarkerCatalog } = await import('./detectors');
+    const catalog = findingMarkerCatalog();
+    const bank = fixtureBank();
+
+    for (const fixture of bank) {
+      for (const d of DETECTORS) {
+        const rec = d.rule(fixture.input, fixture.now);
+        const markers = rec?.fix?.appliedMarkers;
+        if (!rec || !markers) continue;
+        expect(
+          catalog.get(rec.id),
+          `markers for emitted fix id ${rec.id} (detector ${d.id}) missing from findingMarkerCatalog()`
+        ).toEqual(markers);
+      }
+    }
+  });
+
   it('CLAUDE.md appliedMarkers are specific enough to avoid fake suppression wins (#580)', async () => {
     const { DETECTORS } = await import('./detectors');
     const bank = fixtureBank();

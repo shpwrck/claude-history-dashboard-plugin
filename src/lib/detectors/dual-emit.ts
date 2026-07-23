@@ -22,3 +22,24 @@ export const DUAL_EMIT: Record<string, string[]> = {
 export function emittableIdsFor(detectorId: string): string[] {
   return DUAL_EMIT[detectorId] ?? [detectorId];
 }
+
+/**
+ * For a dual-emit detector whose FIX-carrying branch emits an id other than
+ * the detector id, the id that fix (and its `appliedMarkers`) is actually
+ * emitted under (#2965). Adoption receipts store EMITTED finding ids, so the
+ * marker catalogs must key markers by this id — keying by detector id left a
+ * SURFACED-only `reliability.rate-limits` receipt unable to reach the #1785
+ * "fix landed, awaiting quiet" ADOPTED state (marker lookup missed).
+ *
+ * Only detectors whose fix rides a non-detector-id branch belong here:
+ * `safety.dangerous-bypass`'s branches carry no appliedMarkers, and
+ * `workflow.value-of-agent-handoff`'s fix rides its detector-id emission.
+ */
+export const MARKER_FINDING_ID: Record<string, string> = {
+  'reliability.api-errors': 'reliability.rate-limits',
+};
+
+/** The finding id a detector's `appliedMarkers` should be cataloged under. */
+export function markerFindingIdFor(detectorId: string): string {
+  return MARKER_FINDING_ID[detectorId] ?? detectorId;
+}
