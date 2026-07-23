@@ -27,6 +27,7 @@ test('parseReleaseConfig reads the real .github/release.yml shape', () => {
     config.categories.map((c) => c.title),
     [
       'Security',
+      'Data integrity',
       'Features & enhancements',
       'Performance',
       'UI',
@@ -41,6 +42,7 @@ test('parseReleaseConfig reads the real .github/release.yml shape', () => {
   assert.equal(config.categories.at(-1).labels.includes('*'), true);
   assert.deepEqual(domainLabels(config), [
     'security',
+    'data-integrity',
     'enhancement',
     'performance',
     'ui',
