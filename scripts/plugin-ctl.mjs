@@ -24,10 +24,10 @@
 
 import { createServer as createNetServer } from 'node:net';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { openSync, closeSync, constants as fsConstants } from 'node:fs';
+import { openSync, closeSync, realpathSync, constants as fsConstants } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   pluginCacheDir,
@@ -38,14 +38,18 @@ import {
 // ---------------------------------------------------------------------------
 // Node >= 24 preflight
 // ---------------------------------------------------------------------------
-const [nodeMajor] = process.versions.node.split('.').map(Number);
-if (nodeMajor < 24) {
-  process.stderr.write(
-    `plugin-ctl: Node.js >= 24 is required (found ${process.versions.node}).\n` +
-      `  The dashboard server uses native TypeScript stripping and node:sqlite,\n` +
-      `  both of which require Node 24+. Please upgrade Node.js.\n`
-  );
-  process.exit(1);
+// Runs only when this module is invoked directly (see the entry point below),
+// so importing the helpers into a test does not exit the test process.
+function preflightNode() {
+  const [nodeMajor] = process.versions.node.split('.').map(Number);
+  if (nodeMajor < 24) {
+    process.stderr.write(
+      `plugin-ctl: Node.js >= 24 is required (found ${process.versions.node}).\n` +
+        `  The dashboard server uses native TypeScript stripping and node:sqlite,\n` +
+        `  both of which require Node 24+. Please upgrade Node.js.\n`
+    );
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +58,7 @@ if (nodeMajor < 24) {
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
 
-function cacheDir() {
+export function cacheDir() {
   return pluginCacheDir(process.env);
 }
 
@@ -75,7 +79,7 @@ function logFile() {
 // ---------------------------------------------------------------------------
 
 /** Read PID from the PID file. Returns null if absent or non-numeric. */
-async function readPid() {
+export async function readPid() {
   try {
     const raw = await readFile(pidFile(), 'utf8');
     const n = parseInt(raw.trim(), 10);
@@ -88,7 +92,7 @@ async function readPid() {
 }
 
 /** Read port from the port file. Returns null if absent or non-numeric. */
-async function readPort() {
+export async function readPort() {
   try {
     const raw = await readFile(portFile(), 'utf8');
     const n = parseInt(raw.trim(), 10);
@@ -103,7 +107,7 @@ async function readPort() {
  * Uses process.kill(pid, 0) -- signal 0 tests reachability without sending a
  * real signal. Works on Unix and Windows (Node translates it to OpenProcess).
  */
-function isRunning(pid) {
+export function isRunning(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -132,7 +136,7 @@ function signalManagedTarget(pid, signal) {
 }
 
 /** Find a free TCP port by letting the OS pick one on 127.0.0.1. */
-async function freePort(preferredPort) {
+export async function freePort(preferredPort) {
   // Try the preferred port first (allows a stable default).
   if (preferredPort) {
     const available = await new Promise((resolve) => {
@@ -156,7 +160,7 @@ async function freePort(preferredPort) {
 }
 
 /** Ensure the cache directory exists. */
-async function ensureCacheDir() {
+export async function ensureCacheDir() {
   await mkdir(cacheDir(), { recursive: true });
 }
 
@@ -332,22 +336,33 @@ async function cmdStatus() {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+// Only run the preflight + command dispatcher when this file is executed
+// directly (`node plugin-ctl.mjs …`). When it is imported — e.g. by
+// plugin-ctl.test.mjs to exercise the real helpers — none of this runs, so the
+// import has no side effects and does not consume process.argv.
+const invokedDirectly =
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
 
-const [, , command] = process.argv;
-switch (command) {
-  case 'start':
-    await cmdStart();
-    break;
-  case 'stop':
-    await cmdStop();
-    break;
-  case 'status':
-    await cmdStatus();
-    break;
-  default:
-    process.stderr.write(
-      `plugin-ctl: unknown command "${command ?? ''}".\n` +
-        `  Usage: node plugin-ctl.mjs start|stop|status\n`
-    );
-    process.exit(1);
+if (invokedDirectly) {
+  preflightNode();
+
+  const [, , command] = process.argv;
+  switch (command) {
+    case 'start':
+      await cmdStart();
+      break;
+    case 'stop':
+      await cmdStop();
+      break;
+    case 'status':
+      await cmdStatus();
+      break;
+    default:
+      process.stderr.write(
+        `plugin-ctl: unknown command "${command ?? ''}".\n` +
+          `  Usage: node plugin-ctl.mjs start|stop|status\n`
+      );
+      process.exit(1);
+  }
 }

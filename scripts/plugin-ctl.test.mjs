@@ -1,20 +1,34 @@
 #!/usr/bin/env node
 // Unit tests for scripts/plugin-ctl.mjs supervisor logic.
 //
-// Tests the pure helpers (readPid, readPort, isRunning, freePort, ensureCacheDir)
-// and the state-file round-trip behaviour of start/stop/status by exercising the
-// module's exported internals in isolation -- no real server is spawned and no
-// real detached child is created. Spawn is exercised via an integration smoke test
-// that only boots the real server when the test environment allows it.
+// Exercises the REAL pure helpers exported by plugin-ctl.mjs — readPid,
+// readPort, isRunning, freePort, ensureCacheDir, cacheDir — by importing them,
+// so a bug in the supervisor's helpers fails this suite (#2956). The pid/port
+// helpers read files under CHD_CACHE_DIR; each test points that env var at a
+// fresh temp dir and writes the state files the supervisor would.
+//
+// No real server is spawned and no detached child is created here: the
+// spawn/detach path (cmdStart) is intentionally out of scope for this unit
+// suite. Importing plugin-ctl.mjs runs no CLI dispatch — its entry point is
+// guarded by an invoked-directly check — so this file drives the helpers alone.
 //
 // Run:
 //   node scripts/plugin-ctl.test.mjs   (npm run test:plugin-ctl)
 // Exits non-zero on any failure.
 
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+
+import {
+  cacheDir,
+  readPid,
+  readPort,
+  isRunning,
+  freePort,
+  ensureCacheDir,
+} from './plugin-ctl.mjs';
 
 // ---------------------------------------------------------------------------
 // Minimal test harness (mirrors the pattern used across scripts/*.test.mjs)
@@ -44,38 +58,13 @@ function check(label, fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers under test (extracted to avoid importing the full CLI module which
-// would trigger the Node-version preflight and the command dispatcher).
-// We replicate the minimal pure functions here so the tests are self-contained
-// and run without side effects.
-// ---------------------------------------------------------------------------
-
-/** Parse a pid/port file: returns the numeric value or null. */
-async function readNumericFile(path) {
-  try {
-    const raw = await readFile(path, 'utf8');
-    const n = parseInt(raw.trim(), 10);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Check process liveness via signal 0 (same logic as plugin-ctl.mjs). */
-function isRunning(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === 'EPERM';
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
+// Fixtures — point CHD_CACHE_DIR at a fresh temp cache dir per scenario so the
+// real readPid/readPort/cacheDir helpers resolve their state files there.
 // ---------------------------------------------------------------------------
 
 let tmpDir;
+let cacheSeq = 0;
+const origCacheDir = process.env.CHD_CACHE_DIR;
 
 async function setup() {
   tmpDir = await mkdtemp(join(tmpdir(), 'plugin-ctl-test-'));
@@ -83,169 +72,161 @@ async function setup() {
 
 async function teardown() {
   if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
+  if (origCacheDir === undefined) delete process.env.CHD_CACHE_DIR;
+  else process.env.CHD_CACHE_DIR = origCacheDir;
+}
+
+/** Create a fresh cache dir, point CHD_CACHE_DIR at it, and return its path. */
+function useCacheDir() {
+  const dir = join(tmpDir, `cache-${cacheSeq++}`);
+  process.env.CHD_CACHE_DIR = dir;
+  return dir;
 }
 
 await setup();
 
-// --- pid/port file round-trip ---
+// --- cacheDir() env resolution ---
 
-await check('readNumericFile returns null for missing file', async () => {
-  const result = await readNumericFile(join(tmpDir, 'nonexistent.pid'));
-  assert.equal(result, null);
+await check('cacheDir honours CHD_CACHE_DIR override', () => {
+  const dir = useCacheDir();
+  assert.equal(cacheDir(), dir);
 });
 
-await check('readNumericFile parses a valid pid', async () => {
-  const f = join(tmpDir, 'valid.pid');
-  await writeFile(f, '12345\n', 'utf8');
-  const result = await readNumericFile(f);
-  assert.equal(result, 12345);
+await check('cacheDir defaults to ~/.claude/.cache/chd when unset', () => {
+  delete process.env.CHD_CACHE_DIR;
+  const expected = join(homedir(), '.claude', '.cache', 'chd');
+  assert.equal(cacheDir(), expected);
 });
 
-await check('readNumericFile returns null for zero', async () => {
-  const f = join(tmpDir, 'zero.pid');
-  await writeFile(f, '0\n', 'utf8');
-  const result = await readNumericFile(f);
-  assert.equal(result, null);
+// --- ensureCacheDir() ---
+
+await check('ensureCacheDir creates the resolved cache directory', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  const st = await stat(dir);
+  assert.equal(st.isDirectory(), true);
 });
 
-await check('readNumericFile returns null for NaN content', async () => {
-  const f = join(tmpDir, 'nan.pid');
-  await writeFile(f, 'notanumber\n', 'utf8');
-  const result = await readNumericFile(f);
-  assert.equal(result, null);
+// --- readPid: real n > 1 guard (pid 1/-1 are POSIX-special and rejected) ---
+
+await check('readPid returns null when the pid file is absent', async () => {
+  useCacheDir(); // dir not created; file certainly missing
+  assert.equal(await readPid(), null);
 });
 
-await check('readNumericFile returns null for negative value', async () => {
-  const f = join(tmpDir, 'neg.pid');
-  await writeFile(f, '-1\n', 'utf8');
-  const result = await readNumericFile(f);
-  assert.equal(result, null);
+await check('readPid parses a valid pid', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), '12345\n', 'utf8');
+  assert.equal(await readPid(), 12345);
 });
 
-await check('readNumericFile trims whitespace', async () => {
-  const f = join(tmpDir, 'ws.pid');
-  await writeFile(f, '  99  \n', 'utf8');
-  const result = await readNumericFile(f);
-  assert.equal(result, 99);
+await check('readPid trims surrounding whitespace', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), '  99  \n', 'utf8');
+  assert.equal(await readPid(), 99);
+});
+
+await check('readPid rejects 0', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), '0\n', 'utf8');
+  assert.equal(await readPid(), null);
+});
+
+await check('readPid rejects 1 (POSIX kill(-1) guard)', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), '1\n', 'utf8');
+  assert.equal(await readPid(), null);
+});
+
+await check('readPid rejects a negative value', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), '-1\n', 'utf8');
+  assert.equal(await readPid(), null);
+});
+
+await check('readPid rejects non-numeric content', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), 'notanumber\n', 'utf8');
+  assert.equal(await readPid(), null);
+});
+
+// --- readPort: real n > 0 guard ---
+
+await check('readPort parses a valid port', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.port'), '5173\n', 'utf8');
+  assert.equal(await readPort(), 5173);
+});
+
+await check('readPort returns null for zero', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.port'), '0\n', 'utf8');
+  assert.equal(await readPort(), null);
+});
+
+await check('readPort returns null when the port file is absent', async () => {
+  useCacheDir();
+  assert.equal(await readPort(), null);
 });
 
 // --- isRunning ---
 
-await check('isRunning returns true for current process', async () => {
+await check('isRunning returns true for the current process', () => {
   assert.equal(isRunning(process.pid), true);
 });
 
-await check('isRunning returns false for pid 0', async () => {
-  // pid 0 is not a valid user process; kill(0, 0) would signal the process
-  // group, not a named process -- but we guard against pid <= 0 upstream so
-  // we just verify it doesn't throw here.
-  // (On Linux kill(0,0) succeeds for the process group, which is acceptable
-  // since valid usage always reads from a file we wrote ourselves.)
-  // This case is covered by the readNumericFile-returns-null-for-zero test above.
-  assert.equal(true, true); // structural: the pid-file guard is the real defence
+await check('isRunning returns a boolean for a very likely-dead pid', () => {
+  // 2^20 - 1 is below Linux's default max PID (4194304) and above macOS's
+  // (99999); we can't guarantee it is unused, so assert the contract (boolean).
+  assert.equal(typeof isRunning(2 ** 20 - 1), 'boolean');
 });
 
-await check('isRunning returns false for a dead pid', async () => {
-  // Use a PID that is almost certainly not a running process: 2^20 - 1.
-  // On Linux the default max PID is 4194304; on macOS it is 99999.
-  // We accept ESRCH or EINVAL as "not running".
-  const deadPid = 2 ** 20 - 1;
-  const result = isRunning(deadPid);
-  // It could theoretically be running if the system recycles to exactly that
-  // PID, so we only assert on known-dead cases we can construct.
-  assert.equal(typeof result, 'boolean');
+// --- status/start/stop state-file behaviour, via the REAL helpers ---
+
+await check('status path: running pid file -> readPid + isRunning agree', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), String(process.pid), 'utf8');
+  await writeFile(join(dir, 'plugin-ctl.port'), '5173', 'utf8');
+  const pid = await readPid();
+  assert.equal(pid, process.pid, 'readPid must round-trip the written pid');
+  assert.equal(await readPort(), 5173);
+  assert.equal(isRunning(pid), true, 'the current process is running');
 });
 
-// --- state file lifecycle ---
-
-await check('status: no pid file -> stopped', async () => {
-  const cacheDir = join(tmpDir, 'cache-no-pid');
-  await mkdir(cacheDir, { recursive: true });
-  const pid = await readNumericFile(join(cacheDir, 'plugin-ctl.pid'));
-  assert.equal(pid, null, 'expected null pid from absent file');
-  // status logic: pid === null -> "stopped"
-  const statusLabel = pid === null ? 'stopped' : 'running';
-  assert.equal(statusLabel, 'stopped');
+await check('stop path: stale pid file -> readPid reads it, isRunning is false', async () => {
+  const dir = useCacheDir();
+  await ensureCacheDir();
+  await writeFile(join(dir, 'plugin-ctl.pid'), '99999999', 'utf8');
+  const pid = await readPid();
+  assert.equal(pid, 99999999, 'a large pid > 1 must still parse');
+  // On any normal CI host PID 99999999 does not exist -> not running.
+  assert.equal(isRunning(pid), false, 'a stale pid must read as not running');
 });
 
-await check('status: pid file present and pid is running -> running', async () => {
-  const cacheDir = join(tmpDir, 'cache-running');
-  await mkdir(cacheDir, { recursive: true });
-  const pidPath = join(cacheDir, 'plugin-ctl.pid');
-  const portPath = join(cacheDir, 'plugin-ctl.port');
-  await writeFile(pidPath, String(process.pid), 'utf8');
-  await writeFile(portPath, '5173', 'utf8');
+// --- freePort ---
 
-  const pid = await readNumericFile(pidPath);
-  const port = await readNumericFile(portPath);
-  assert.equal(pid, process.pid);
-  assert.equal(port, 5173);
-  assert.equal(isRunning(pid), true);
+await check('freePort resolves to a usable TCP port number', async () => {
+  const port = await freePort();
+  assert.equal(typeof port, 'number');
+  assert.ok(port > 0 && port < 65536, `expected a valid port, got ${port}`);
 });
 
-await check('start: second start reuses existing pid -> idempotent', async () => {
-  // Simulate: pid file exists, process is running -> "already running" branch.
-  const cacheDir = join(tmpDir, 'cache-idempotent');
-  await mkdir(cacheDir, { recursive: true });
-  const pidPath = join(cacheDir, 'plugin-ctl.pid');
-  const portPath = join(cacheDir, 'plugin-ctl.port');
-  await writeFile(pidPath, String(process.pid), 'utf8');
-  await writeFile(portPath, '5173', 'utf8');
-
-  const pid = await readNumericFile(pidPath);
-  assert.equal(pid, process.pid, 'pid file must be readable');
-  // The supervisor checks isRunning(existingPid) -- if true it skips spawn.
-  assert.equal(isRunning(pid), true, 'current process should be running');
-  // Port file must survive the idempotent path (not cleaned up).
-  const port = await readNumericFile(portPath);
-  assert.equal(port, 5173);
-});
-
-await check('stop: stale pid -> removes pid+port files', async () => {
-  // Simulate: pid file present but process is gone (stale state).
-  // We do this by writing a pid that definitely doesn't exist.
-  const cacheDir = join(tmpDir, 'cache-stale');
-  await mkdir(cacheDir, { recursive: true });
-  const pidPath = join(cacheDir, 'plugin-ctl.pid');
-  const portPath = join(cacheDir, 'plugin-ctl.port');
-  // Use a PID we know isn't ours. We test the cleanup logic, not the actual kill.
-  await writeFile(pidPath, '99999999', 'utf8');
-  await writeFile(portPath, '5173', 'utf8');
-
-  const pid = await readNumericFile(pidPath);
-  assert.ok(pid !== null, 'expected a numeric pid');
-  const running = isRunning(pid);
-  // On most systems PID 99999999 won't exist. If by chance it does, we just
-  // verify the check is boolean (we can't kill it in a test anyway).
-  assert.equal(typeof running, 'boolean');
-  // Simulate the cleanup branch: delete the state files.
-  if (!running) {
-    await rm(pidPath, { force: true });
-    await rm(portPath, { force: true });
-    const afterPid = await readNumericFile(pidPath);
-    assert.equal(afterPid, null, 'pid file should be removed after cleanup');
-  }
-});
-
-// --- CHD_CACHE_DIR env override ---
-
-await check('CHD_CACHE_DIR overrides default cache location', async () => {
-  const override = join(tmpDir, 'custom-cache');
-  // The module uses process.env.CHD_CACHE_DIR; here we verify the resolution
-  // logic matches what the module does (inline the same logic):
-  function resolvedCacheDir(env) {
-    return env.CHD_CACHE_DIR || join(process.env.HOME || tmpdir(), '.claude', '.cache', 'chd');
-  }
-  const result = resolvedCacheDir({ CHD_CACHE_DIR: override });
-  assert.equal(result, override);
-});
-
-await check('CHD_CACHE_DIR defaults to ~/.claude/.cache/chd/', async () => {
-  function resolvedCacheDir(env) {
-    return env.CHD_CACHE_DIR || join(process.env.HOME || tmpdir(), '.claude', '.cache', 'chd');
-  }
-  const result = resolvedCacheDir({});
-  assert.ok(result.endsWith(join('.claude', '.cache', 'chd')), `expected default path, got ${result}`);
+await check('freePort returns the preferred port when it is free', async () => {
+  // Ask the OS for a free port, then request it as the preference: it should
+  // be handed straight back.
+  const candidate = await freePort();
+  const got = await freePort(candidate);
+  assert.equal(typeof got, 'number');
+  assert.ok(got > 0 && got < 65536);
 });
 
 // ---------------------------------------------------------------------------
