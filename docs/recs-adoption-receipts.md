@@ -48,23 +48,25 @@ undercount prose adoptions). A `SUPPRESSED` record with no prior `SURFACED`
 renders **"attribution pending"** and is excluded from `M` until the hook-side
 surfaced write (#581) lands. See ADR 0005 "Demo artifact".
 
-## Agent-executed mid-session CLAUDE.md append (opt-in, #584)
+## Agent-executed mid-session CLAUDE.md append (opt-in, #584) — deferred
 
-When the user opts in mid-session to "apply this fix to my project CLAUDE.md", the
-agent-facing `recs` skill performs an **append-only** write of the
-recommendation's CLAUDE.md fix snippet to the **current project's** `CLAUDE.md`.
-The deterministic text transformation is the dashboard-owned helper
-`appendClaudeMdFix` in [`src/lib/claude-md-append.ts`](../src/lib/claude-md-append.ts);
-the executable wiring of the opt-in prompt and the file write lives meta-side
-(tracked at `shpwrck/claude#12`).
+This flow is **not implemented**. The intent: when the user opts in mid-session to
+"apply this fix to my project CLAUDE.md", the agent-facing `recs` skill would
+perform an **append-only** write of the recommendation's CLAUDE.md fix snippet to
+the **current project's** `CLAUDE.md`. The dashboard once carried a deterministic
+text-transformation helper (`appendClaudeMdFix`, `src/lib/claude-md-append.ts`) as
+the dashboard-owned contract, but its executable wiring (meta, `shpwrck/claude#12`)
+never landed, so the helper was dead code with no consumer and was removed (#2962).
+Git history preserves it; the contract below is re-extractable when the wiring is
+actually built.
 
-Guarantees (per ADR 0005 item #10, "Auto-apply is OUT of v0 — propose-only"):
+Intended guarantees (per ADR 0005 item #10, "Auto-apply is OUT of v0 — propose-only"):
 
 - **Opt-in only; never global.** The append targets the per-project `CLAUDE.md`
   the user is working in. Global `~/.claude/CLAUDE.md` is never written — that is
   a cross-repo blast-radius violation, and the global `SessionStart` hook fires
-  before the repo/cwd is known, so it cannot execute this. `appendClaudeMdFix`
-  only transforms the project body text handed to it and rejects any fix whose
+  before the repo/cwd is known, so it cannot execute this. The transformation
+  only rewrites the project body text handed to it and rejects any fix whose
   `target` is not `CLAUDE.md`.
 - **Append-only.** Existing content is preserved byte-for-byte; the snippet is
   concatenated at the end. Existing sections are never rewritten, and a fix whose
