@@ -14204,6 +14204,41 @@ var StdioServerTransport = class {
 		});
 	}
 };
+//#endregion
+//#region scripts/mcp-shim-frictions.mjs
+/** RecCategory values considered friction-shaped (rework/stall/context-tax). */
+var FRICTION_CATEGORIES = Object.freeze([
+	"workflow",
+	"reliability",
+	"context"
+]);
+/**
+* Extract the recommendations array from the /api/recommendations.json
+* payload (bare array or `{ recommendations: [...] }`).
+*/
+function extractRecommendations(data) {
+	if (Array.isArray(data)) return data;
+	if (Array.isArray(data?.recommendations)) return data.recommendations;
+	return [];
+}
+/**
+* Select the top friction-shaped recommendations from a payload.
+*
+* Filters to the FRICTION_CATEGORIES (preserving the payload's own ranking
+* order) and caps at `limit`. When no recommendation matches, falls back to
+* the top `limit` recommendations of any category and says so in `note`.
+* Result shape is the `top_frictions` tool contract:
+* `{ total_recommendations, top_frictions, note }`.
+*/
+function selectTopFrictions(data, { limit = 5 } = {}) {
+	const recs = extractRecommendations(data);
+	const frictions = recs.filter((r) => FRICTION_CATEGORIES.includes(r?.category)).slice(0, limit);
+	return {
+		total_recommendations: recs.length,
+		top_frictions: frictions.length > 0 ? frictions : recs.slice(0, limit),
+		note: frictions.length === 0 ? `No workflow/reliability/context recommendations found; showing top ${limit} recommendations instead.` : void 0
+	};
+}
 function validPort(value) {
 	if (value == null || String(value).trim() === "") return null;
 	const port = Number(value);
@@ -14279,14 +14314,7 @@ async function toolGetRecommendations() {
 	return (await fetchJSON("/api/recommendations.json")).data;
 }
 async function toolTopFrictions() {
-	const data = (await fetchJSON("/api/recommendations.json")).data;
-	const recs = Array.isArray(data) ? data : Array.isArray(data?.recommendations) ? data.recommendations : [];
-	const frictions = recs.filter((r) => r?.category === "friction" || r?.kind === "friction" || r?.type === "friction" || String(r?.category).toLowerCase().includes("friction") || String(r?.kind).toLowerCase().includes("friction")).slice(0, 5);
-	return {
-		total_recommendations: recs.length,
-		top_frictions: frictions.length > 0 ? frictions : recs.slice(0, 5),
-		note: frictions.length === 0 ? "No friction-category recommendations found; showing top 5 recommendations instead." : void 0
-	};
+	return selectTopFrictions((await fetchJSON("/api/recommendations.json")).data);
 }
 function docNeighborhoodArgs(args) {
 	const out = [];
@@ -14342,7 +14370,7 @@ var TOOLS = [
 	},
 	{
 		name: "top_frictions",
-		description: "Fetch recommendations from the dashboard and return the top friction items (up to 5). Frictions are recommendations whose category/kind contains \"friction\". Falls back to the top 5 recommendations of any category if none are tagged as friction.",
+		description: "Fetch recommendations from the dashboard and return the top friction findings (up to 5): recommendations in the workflow, reliability, or context categories — the engine's rework, stall, and context-tax families. Falls back to the top 5 recommendations of any category when none of those match.",
 		inputSchema: {
 			type: "object",
 			properties: {},
