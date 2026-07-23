@@ -1,15 +1,16 @@
 /// <reference lib="webworker" />
 //
-// Dataset decode worker (#162). Moves the ~8 MB `/api/dataset.json` fetch +
-// `JSON.parse` (~128 ms) off the main thread so the load spinner keeps animating
-// and the React commit doesn't compete with parse work.
+// Dataset decode worker (#162). Moves the multi-MB `/api/dataset.json` fetch +
+// `JSON.parse` (~128 MB parsed on real data — see dataset-body.ts) off the main
+// thread so the load spinner keeps animating and the React commit doesn't
+// compete with parse work.
 //
 // The browser transparently brotli/gzip-decodes the response (the server sets
 // Content-Encoding), so `resp.json()` here only does the text-decode + parse —
 // both off the UI thread. The parsed object is structured-cloned back to the
 // caller (no transferable needed). The worker keeps a parsed IndexedDB cache by
 // dataset ETag: unchanged reloads do a tiny `If-None-Match` revalidation and
-// skip both the 8 MB compressed transfer and the 65 MB JSON parse. A changed
+// skip both the multi-MB compressed transfer and the full JSON parse. A changed
 // ETag downloads, parses, and replaces the cached object. Replies `{ data }` on
 // success or `{ error }` on any failure, so the caller can fall back to its
 // manual-upload path.

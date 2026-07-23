@@ -538,7 +538,7 @@ export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
       'See how often subagents, skills, and MCP tools are invoked and how well they perform so you can decide which to lean on and which to retire.',
   },
   { view: 'prompts', contract: 'evidence', label: 'Prompts', icon: CommentIcon, domain: 'workflow-hygiene' },
-  // Not serverOnly: like Workflows, Memories accepts the user's own uploaded
+  // No `requires` gate: like Workflows, Memories accepts the user's own uploaded
   // `memory/*.md` in the SPA/upload build (#538) and shows a data-aware
   // "needs a server" placeholder only when empty (see Memories.tsx).
   {

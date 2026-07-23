@@ -21,9 +21,10 @@
  * Persistence is deliberately OUT of this module. It defines the record shape,
  * the pure builder, and a pluggable {@link CheckpointAnswerSink} so the UI can
  * emit a record without knowing where it lands. An in-memory sink ships for
- * tests and preview; the durable server-side sink (a `/api/...` capture route +
- * append-only JSONL, mirroring the reject-signal path) is tracked as a
- * follow-up so this slice stays reviewable.
+ * tests and preview; the durable server-side sink shipped as
+ * `checkpoint-answer-store.ts` (#2519) — an append-only JSONL behind the
+ * `/api/checkpoint/answers` capture route wired in `scripts/server.mjs`,
+ * pinned by `scripts/checkpoint-answer-route.test.mjs`.
  */
 import type { DocNeighborhood, NeighborhoodAnchor } from './doc-neighborhood';
 

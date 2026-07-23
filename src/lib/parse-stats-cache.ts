@@ -8,7 +8,9 @@
  * the WoW computation from the P1-Sam prototype (branch `proto/539-stats-cache`).
  *
  * Artifact path: `~/.claude/stats-cache.json`
- * Server-only: YES (file read in `scripts/server.mjs`; not available in SPA mode).
+ * Server-only: NO — only the live file READ is server-side (`scripts/server.mjs`).
+ * The parser also runs in the SPA upload path (`upload-artifacts.ts` →
+ * `upload-dataset.ts`) and the result renders in `UsagePulsePf`.
  *
  * See issue #563 for the full design and persona (P1 Sam).
  */

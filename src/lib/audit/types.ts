@@ -9,9 +9,11 @@
  * deterministic field; its authority is the judge's rationale plus the evidence
  * refs it was shown.
  *
- * This module is SERVER-ONLY. It is imported solely by `scripts/server.mjs`
- * behind the `/api/audit.json` route and is never pulled into the SPA bundle
- * (the SPA has no API key and no `/api/*`).
+ * This module is RUNTIME server-only: `scripts/server.mjs` imports it behind
+ * the `/api/audit.json` route. `api-client.ts`, `api-client.spa.ts`, and
+ * `Recommendations.tsx` take TYPE-only imports (erased at build), so no
+ * runtime code is ever pulled into the SPA bundle (the SPA has no API key and
+ * no `/api/*`).
  */
 
 /**

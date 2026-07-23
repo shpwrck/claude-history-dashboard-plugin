@@ -10,7 +10,8 @@
  * Fields the client dataset does not carry at all — `gitOutcomes`,
  * `modelPinSavings`, `organizationIdentity`, `semanticIntent`, `memoryStores`
  * (server-side ingest artifacts; `ViewData.memories` is a different artifact
- * than the engine's `memoryStores`) — are equally absent for every surface here;
+ * than the engine's `memoryStores`), `docHygieneArtifact`, and
+ * `localCalibration` — are equally absent for every surface here;
  * `assembleRecommendationInput` normalizes them to explicit nulls. The parity
  * test (`recommendation-view-data.test.ts`) pins this list so a new detector
  * dependency on a client-carried field cannot be silently dropped.

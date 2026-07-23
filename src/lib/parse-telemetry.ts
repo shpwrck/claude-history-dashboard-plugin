@@ -19,10 +19,13 @@
  *   analyzeReliability(events) — per-session / per-model reliability metrics
  *   ModelLatencySample      — one successful-path per-model latency sample (#1166)
  *   parseTelemetryLatencyDir(dir) — reads the glob, returns ModelLatencySample[]
- *   aggregateModelLatency(samples) — per-model latency rollup (no detector yet, #915)
+ *   aggregateModelLatency(samples) — per-model latency rollup, consumed by the
+ *                                    #915 speed.model-latency detector
  *
- * NO detector, NO view — this feeds the #572 consolidated Agent Report Card and
- * (for the latency capture) the deferred #915 speed.model-latency detector.
+ * This feeds the #572 consolidated Agent Report Card and (for the latency
+ * capture) the shipped #915 speed.model-latency detector
+ * (`detectors/speed/model-latency.ts`); AgentReportCardPf and ReviewQueuePf
+ * render the results.
  */
 
 import { readFileSync, statSync } from 'node:fs'

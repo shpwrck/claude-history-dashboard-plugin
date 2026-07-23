@@ -2,8 +2,8 @@
 // epic #622). This is the PURE computation over a GIVEN session list — file
 // reads + parser passes, no SQLite, no session discovery. ingest.mjs keeps a
 // thin `computeLiveSession(now)` wrapper that injects the discovery dependency
-// (`listSessionsCached()`), preserving the server import surface while making
-// this logic importable by both server and client without an import cycle.
+// (`listSessionsCached()`), preserving the server import surface without an
+// import cycle. Server-only in practice: this module imports `node:fs` below.
 //
 // The dataset cache lags an active session by design; liveness must not — so
 // this path is deliberately file-based (readFileSync/statSync), not SQLite.

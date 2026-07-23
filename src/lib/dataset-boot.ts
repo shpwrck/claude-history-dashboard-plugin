@@ -1,9 +1,12 @@
 // Boot/slice split for the Tier-3 instant-load path (#2443, epic #1852).
 //
-// Today the server ships the whole assembled dataset (~98 MB parsed on real
-// data) as one `/api/dataset.json` monolith, because the isomorphic client is
-// written to consume a complete `Dataset`. ADR 0014 Tier 3 (self-hosted server)
-// may serve smarter: split the dataset into
+// The whole assembled dataset (~98 MB parsed on real data) used to ship only
+// as the one `/api/dataset.json` monolith, because the isomorphic client is
+// written to consume a complete `Dataset`. Since #2443 the ADR 0014 Tier 3
+// (self-hosted server) path serves smarter: `scripts/server.mjs` exposes
+// `/api/dataset/boot` + `/api/dataset/slice/<key>` (consumed by
+// `instant-load.ts`, with the monolith kept as the fallback), splitting the
+// dataset into
 //   - a tiny BOOT payload — the small metadata keys verbatim, plus server-
 //     computed headline AGGREGATES and per-slice COUNTS — enough to paint the
 //     landing shell without the heavy detail; and
