@@ -12,6 +12,14 @@
  * SERVER-ONLY: uses node:fs/node:path/node:os — never import this in browser code.
  * Called from scripts/ingest.mjs via `assembleDataset`.
  *
+ * The PURE half (record/summary types, the COLD_DAYS/PILEUP_MIN thresholds,
+ * and `summarizeTasks`) lives in the node-free leaf `./parse-tasks-summary`,
+ * which browser-reachable code imports directly. This module re-exports that
+ * surface so server-side importers keep their combined API, and adds only the
+ * fs-reading `parseTasksDir` on top. Keeping the pure half in a node-free leaf
+ * makes the SPA/server boundary structural rather than dependent on Vite's
+ * `node:fs` stub (#2960).
+ *
  * Issue #559 / persona P2 (Priya, tech lead).
  */
 import { readFileSync, statSync } from 'node:fs';
@@ -21,62 +29,20 @@ import {
   readDirentsBoundedSync,
   remainingEntryCapacity,
 } from './bounded-fs';
+import type { TaskRecord, TaskStatus } from './parse-tasks-summary';
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export type TaskStatus = 'pending' | 'in_progress' | 'completed';
-
-/**
- * One task record, normalised from the raw JSON stored on disk. Fields map
- * 1-to-1 to the artifact shape; `mtimeMs` is derived from the file's mtime and
- * is the primary clock used by detectors (no separate sidecar needed).
- */
-export interface TaskRecord {
-  /** Stable task id within its session (e.g. "1", "2", custom string). */
-  id: string;
-  /** Short imperative subject line. */
-  subject: string;
-  /** Longer prose description. May be empty. */
-  description: string;
-  /** Progressive-participle form of the subject ("Burning #182"). May be empty. */
-  activeForm: string;
-  /** Owner string (agent wave, user name, etc.). May be empty. */
-  owner: string;
-  /** Task lifecycle status. */
-  status: TaskStatus;
-  /** IDs of tasks this task unblocks (inverse of blockedBy). */
-  blocks: string[];
-  /** IDs of tasks that must complete before this one can start. */
-  blockedBy: string[];
-  /** PR URL from metadata.pr, if the task was linked to a pull request. */
-  pr?: string;
-  /** The session this task belongs to (= the sub-directory name). */
-  sessionId: string;
-  /** Last-modified time of the task file in milliseconds since epoch. */
-  mtimeMs: number;
-}
-
-// ── Per-session completion summary ───────────────────────────────────────────
-
-export interface TaskSessionSummary {
-  sessionId: string;
-  total: number;
-  completed: number;
-  /** Completion rate in [0, 1]. 1.0 when total === 0. */
-  rate: number;
-  open: number;
-  /** Milliseconds since epoch of the newest task file in this session. */
-  latestMtimeMs: number;
-  /** Milliseconds since epoch of the oldest task file in this session. */
-  earliestMtimeMs: number;
-}
-
-// ── Constants ────────────────────────────────────────────────────────────────
-
-/** A session untouched this many days = its open tasks are considered abandoned. */
-export const COLD_DAYS = 7;
-/** Minimum number of tasks stalled behind one unfinished root to be a pileup. */
-export const PILEUP_MIN = 2;
+// Re-export the node-free public surface so existing server-side importers of
+// `./parse-tasks` (ingest, detectors, tests) keep their combined API.
+export {
+  COLD_DAYS,
+  PILEUP_MIN,
+  summarizeTasks,
+} from './parse-tasks-summary';
+export type {
+  TaskStatus,
+  TaskRecord,
+  TaskSessionSummary,
+} from './parse-tasks-summary';
 
 export interface ParseTasksOptions {
   maxFileBytes?: number;
@@ -171,43 +137,6 @@ export function parseTasksDir(dir: string, opts: ParseTasksOptions = {}): TaskRe
   }
 
   return records;
-}
-
-// ── Aggregation ───────────────────────────────────────────────────────────────
-
-/**
- * Aggregate a flat list of TaskRecords into per-session completion summaries,
- * sorted worst-completion-rate first (matching the prototype's digest order).
- */
-export function summarizeTasks(tasks: TaskRecord[]): TaskSessionSummary[] {
-  const bySession = new Map<string, TaskRecord[]>();
-  for (const t of tasks) {
-    const group = bySession.get(t.sessionId) ?? [];
-    group.push(t);
-    bySession.set(t.sessionId, group);
-  }
-
-  const summaries: TaskSessionSummary[] = [];
-  for (const [sessionId, group] of bySession) {
-    const completed = group.filter((t) => t.status === 'completed').length;
-    const open = group.filter(
-      (t) => t.status === 'pending' || t.status === 'in_progress'
-    ).length;
-    const mtimes = group.map((t) => t.mtimeMs);
-    summaries.push({
-      sessionId,
-      total: group.length,
-      completed,
-      rate: group.length > 0 ? completed / group.length : 1,
-      open,
-      latestMtimeMs: Math.max(...mtimes),
-      earliestMtimeMs: Math.min(...mtimes),
-    });
-  }
-
-  // Worst first (mirrors the prototype's per-session digest order)
-  summaries.sort((a, b) => a.rate - b.rate);
-  return summaries;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

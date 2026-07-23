@@ -8,7 +8,7 @@
  * Issue #559.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -474,5 +474,39 @@ describe('blocked-task pileup gate logic (>=2)', () => {
       ([, blocked]) => blocked.length >= PILEUP_MIN
     );
     expect(pileups).toHaveLength(0); // only 1 blocked, need >= 2
+  });
+});
+
+// ── SPA/server boundary (#2960) — structural, not Vite-stub-dependent ─────────
+// The pure summarize half lives in the node-free leaf `parse-tasks-summary.ts`
+// so browser-reachable code can value-import it without pulling `node:fs` into
+// the SPA bundle. These source-contract checks fail at unit-test time — before
+// any build — if the leaf gains a node import or the browser component reaches
+// back to the server-only `parse-tasks` for a value.
+describe('SPA/server boundary (#2960)', () => {
+  const readSrc = (rel: string) =>
+    readFileSync(new URL(rel, import.meta.url), 'utf8');
+
+  it('the summarize leaf imports no node built-in', () => {
+    const leaf = readSrc('./parse-tasks-summary.ts');
+    expect(leaf).not.toMatch(/from ['"]node:/);
+    expect(leaf).not.toMatch(/\bfrom ['"]\.\/bounded-fs['"]/);
+  });
+
+  it('TaskHealthPf value-imports the summarize half from the node-free leaf, not parse-tasks', () => {
+    const src = readSrc('../components/TaskHealthPf.tsx');
+    const valueImportsFrom = (mod: string) =>
+      src
+        .split('\n')
+        .some(
+          (l) =>
+            /^\s*import\b/.test(l) &&
+            !/^\s*import\s+type\b/.test(l) &&
+            l.includes(`from '${mod}'`)
+        );
+    // The value import must resolve to the leaf …
+    expect(src).toContain("from '../lib/parse-tasks-summary'");
+    // … and must NOT be a value import of the server-only parse-tasks module.
+    expect(valueImportsFrom('../lib/parse-tasks')).toBe(false);
   });
 });
