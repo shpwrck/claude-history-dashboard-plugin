@@ -2,7 +2,7 @@
  * reliability.dropped-assignments — flags teams where task assignments were
  * silently never picked up by a worker agent.
  *
- * Data dependency: `teams` — a new optional field on RecommendationInput
+ * Data dependency: `teams` — an optional field on RecommendationInput
  * populated by the server ingest from ~/.claude/teams/<id>/inboxes/*.json
  * (see src/lib/parse-teams.ts).
  *
@@ -14,8 +14,7 @@
  * Issue: #560 / prototype: proto/539-teams
  */
 
-import type { Detector, RecommendationInput } from '../types';
-import type { TeamSummary } from '../../parse-teams';
+import type { Detector } from '../types';
 
 /** HIGH when an agent stalled or >= 50% of assignments dropped. */
 const HIGH_DROPPED_PCT = 50;
@@ -23,14 +22,10 @@ const HIGH_DROPPED_PCT = 50;
 export const detector: Detector = {
   id: 'reliability.dropped-assignments',
   category: 'reliability',
-  // `teams` is a new optional field; existing call sites compile unchanged.
-  dataDeps: ['teams' as keyof RecommendationInput],
+  dataDeps: ['teams'],
 
   rule(input) {
-    // Access `teams` via the extension pattern used in types.ts comments —
-    // cast to avoid touching the shared RecommendationInput type in this PR.
-    const data =
-      (input as RecommendationInput & { teams?: TeamSummary[] }).teams ?? [];
+    const data = input.teams ?? [];
     if (!data.length) return null;
 
     const withDropped = data.filter((t) => t.droppedCount > 0);

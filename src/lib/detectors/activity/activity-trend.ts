@@ -12,7 +12,6 @@
  */
 
 import type { Detector, RecommendationInput } from '../types';
-import type { StatsCache } from '../../parse-stats-cache';
 import { analyzeActivityTrend } from '../../parse-stats-cache';
 
 /** WoW toolCallCount threshold above which the user is warned (+50%). */
@@ -21,11 +20,9 @@ export const HOT_THRESHOLD_PCT = 50;
 export const detector: Detector = {
   id: 'activity.activity-trend',
   category: 'activity',
-  dataDeps: ['statsCache' as keyof RecommendationInput],
+  dataDeps: ['statsCache'],
   rule(input: RecommendationInput, now: number): ReturnType<Detector['rule']> {
-    // Opt-in: `statsCache` is not (yet) part of the base RecommendationInput —
-    // read it via a typed cast so other callers without it compile unchanged.
-    const sc = (input as RecommendationInput & { statsCache?: StatsCache | null }).statsCache;
+    const sc = input.statsCache;
     if (!sc) return null;
 
     const analysis = analyzeActivityTrend(sc, now);

@@ -19,8 +19,7 @@
  * exceeds MIN_REWORK_SCORE so the detector stays quiet on sparse or calm datasets.
  */
 
-import type { Detector, RecommendationInput } from '../types';
-import type { FileHistorySession } from '../../parse-file-history';
+import type { Detector } from '../types';
 import { short } from '../shared';
 
 const MIN_SESSIONS = 3;
@@ -31,9 +30,7 @@ export const detector: Detector = {
   category: 'workflow',
   dataDeps: ['fileHistory', 'sessions'], // fileHistory drives the signal; sessions for context
   rule(input) {
-    // `fileHistory` is a first-class optional field on RecommendationInput.
-    const data = (input as RecommendationInput & { fileHistory?: FileHistorySession[] })
-      .fileHistory ?? [];
+    const data = input.fileHistory ?? [];
 
     if (data.length < MIN_SESSIONS) return null;
 

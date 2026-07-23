@@ -39,15 +39,14 @@ export const detector: Detector = {
   id: 'reliability.config-drift',
   category: 'reliability',
   /**
-   * `configBackups` is a new optional field on RecommendationInput. Ingest
+   * `configBackups` is an optional field on RecommendationInput. Ingest
    * pre-computes the full account-wide DriftEvent[] (all projects, all windows)
    * using `diffConfigDrift` and ships it here. The detector filters to recent
    * project-scoped events — it never touches the filesystem.
    */
-  dataDeps: ['configBackups' as keyof RecommendationInput],
+  dataDeps: ['configBackups'],
   rule(input: RecommendationInput, now: number): import('../types').Recommendation | null {
-    // Access the new optional field without touching the shared types file.
-    const data = (input as RecommendationInput & { configBackups?: DriftEvent[] }).configBackups ?? [];
+    const data = input.configBackups ?? [];
     if (!data.length) return null;
 
     const cutoff = now - RECENCY_MS;

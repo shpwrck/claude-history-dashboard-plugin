@@ -5,7 +5,7 @@
  *
  * Persona P2 (Priya) / issue #559.
  *
- * dataDeps: reads a new optional `tasks` field on RecommendationInput (injected
+ * dataDeps: reads the optional `tasks` field on RecommendationInput (injected
  * by the main session's wiring). If absent or empty the detector is silent.
  */
 import type { Detector } from '../types';
@@ -17,10 +17,10 @@ import { PILEUP_MIN } from '../../parse-tasks';
 export const detector: Detector = {
   id: 'workflow.blocked-task-pileup',
   category: 'workflow',
-  dataDeps: ['tasks' as keyof RecommendationInput],
+  dataDeps: ['tasks'],
 
   rule(input: RecommendationInput) {
-    const data = (input as RecommendationInput & { tasks?: TaskRecord[] }).tasks ?? [];
+    const data = input.tasks ?? [];
     if (!data.length) return null;
 
     interface Pileup {

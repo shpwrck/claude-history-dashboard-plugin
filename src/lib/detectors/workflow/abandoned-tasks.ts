@@ -5,7 +5,7 @@
  *
  * Persona P2 (Priya) / issue #559.
  *
- * dataDeps: reads a new optional `tasks` field on RecommendationInput (injected
+ * dataDeps: reads the optional `tasks` field on RecommendationInput (injected
  * by the main session's wiring in scripts/ingest.mjs + scripts/server.mjs).
  * If the field is absent or empty the detector is silent.
  */
@@ -20,12 +20,10 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 export const detector: Detector = {
   id: 'workflow.abandoned-tasks',
   category: 'workflow',
-  dataDeps: ['tasks' as keyof RecommendationInput],
+  dataDeps: ['tasks'],
 
   rule(input: RecommendationInput, now: number) {
-    // Read the optional tasks field — cast needed because the field is not yet
-    // in the shared RecommendationInput type (the main session adds it).
-    const data = (input as RecommendationInput & { tasks?: TaskRecord[] }).tasks ?? [];
+    const data = input.tasks ?? [];
     if (!data.length) return null;
 
     const MS_COLD = COLD_DAYS * MS_PER_DAY;

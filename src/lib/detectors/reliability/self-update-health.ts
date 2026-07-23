@@ -1,6 +1,4 @@
 import type { Detector } from '../types';
-import type { RecommendationInput } from '../types';
-import type { UpdateResult } from '../../parse-last-update';
 import { analyzeUpdateHealth } from '../../parse-last-update';
 
 function updateHealthSnippet(): string {
@@ -27,11 +25,9 @@ function updateHealthSnippet(): string {
 export const detector: Detector = {
   id: 'reliability.self-update-health',
   category: 'reliability',
-  dataDeps: ['updateResults' as keyof RecommendationInput],
+  dataDeps: ['updateResults'],
   rule(input) {
-    // Pull the optional field without touching the shared RecommendationInput type.
-    const data =
-      (input as RecommendationInput & { updateResults?: UpdateResult[] }).updateResults ?? [];
+    const data = input.updateResults ?? [];
 
     if (!data.length) return null;
 

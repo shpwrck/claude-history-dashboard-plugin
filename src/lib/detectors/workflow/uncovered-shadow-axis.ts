@@ -1,6 +1,7 @@
 import type { Detector, RecCategory } from '../types';
 import { avgCostDelta, avgTokenDelta } from '../../parse-shadow-calls';
 import type { AxisAggregate } from '../../parse-shadow-calls';
+import { MIN_SAMPLES, MIN_DECIDED, MIN_SHADOW_WIN_RATE } from './shadow-axis-wins';
 
 /**
  * Discovery: cross-reference shadow-calls wins against the existing rule catalog and
@@ -15,10 +16,6 @@ import type { AxisAggregate } from '../../parse-shadow-calls';
  * proposal. The richer LLM-driven discovery (free-form patterns, draft PRs, scheduled
  * passes) stays out-of-band per ADR 0002; this is the deterministic MVP.
  */
-const MIN_SAMPLES = 5;
-const MIN_DECIDED = 3; // ≥3 non-tie comparisons, not just samples (#545)
-const MIN_SHADOW_WIN_RATE = 0.6;
-
 /**
  * Which existing detectors already recommend adopting the approach an axis represents.
  * A non-empty list = the concern is COVERED (enhance that rule instead of inventing one).
