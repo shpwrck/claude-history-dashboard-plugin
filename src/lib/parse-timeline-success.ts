@@ -1,8 +1,8 @@
-import type { SessionTokenData, TokenEntry } from '../types';
+import type { SessionTokenData } from '../types';
 import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { ApiErrorEvent } from './parse-errors';
-import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
+import { estimateCost } from './parse-sessions';
 
 /**
  * Timeline-shape → outcome correlation.
@@ -108,26 +108,12 @@ function bucketDuration(durationMin: number): DurationBucket {
   return '>180m';
 }
 
-function entryCost(entry: TokenEntry): number {
-  const { pricing } = resolveModelPricing(entry.model);
-  const cache1h = Math.min(entry.cacheCreation1hTokens, entry.cacheCreationTokens);
-  const cache5m = entry.cacheCreationTokens - cache1h;
-  return (
-    (entry.inputTokens / 1_000_000) * pricing.input +
-    (entry.outputTokens / 1_000_000) * pricing.output +
-    (cache5m / 1_000_000) * pricing.cacheWrite5m +
-    (cache1h / 1_000_000) * pricing.cacheWrite1h +
-    (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-    entry.webSearchRequests * SERVER_TOOL_PRICING.webSearchRequest +
-    entry.webFetchRequests * SERVER_TOOL_PRICING.webFetchRequest
-  );
-}
-
 function sessionCost(data: SessionTokenData | undefined): number {
+  // #2959: was a private byte-copy of the per-entry pricing formula; the one
+  // definition lives in parse-sessions (estimateCost = Σ estimateEntryCost,
+  // WeakMap-memoized per session).
   if (!data) return 0;
-  let total = 0;
-  for (const entry of data.entries) total += entryCost(entry);
-  return total;
+  return estimateCost(data);
 }
 
 function parseMs(iso: string): number | null {

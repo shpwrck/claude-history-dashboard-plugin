@@ -1,5 +1,5 @@
-import type { SessionTokenData, TokenEntry } from '../types';
-import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
+import type { SessionTokenData } from '../types';
+import { estimateEntryCost } from './parse-sessions';
 
 /**
  * Cost-over-time / burn-rate analytics.
@@ -58,25 +58,15 @@ export interface CostTrend {
 }
 
 /**
- * Cost of a single token entry, matching estimateCost's per-entry math.
- * Exported so other aggregations (e.g. the weekly-delta drill-down's
- * per-project / per-model cost breakdown) price an entry identically — there is
- * exactly one place the per-entry pricing formula lives.
+ * Cost of a single token entry. This is `estimateEntryCost` from
+ * parse-sessions re-exported under this module's historical name (#2959):
+ * there is exactly ONE place the per-entry pricing formula lives, and it is
+ * parse-sessions — the byte-identical local copy this alias replaced desynced
+ * from the headline Est. Cost math the moment either side changed. Other
+ * aggregations (e.g. the weekly-delta drill-down's per-project / per-model
+ * cost breakdown and summary.ts's by-day rollup) import it from here.
  */
-export function entryCost(entry: TokenEntry): number {
-  const { pricing } = resolveModelPricing(entry.model);
-  const cache1h = Math.min(entry.cacheCreation1hTokens, entry.cacheCreationTokens);
-  const cache5m = entry.cacheCreationTokens - cache1h;
-  return (
-    (entry.inputTokens / 1_000_000) * pricing.input +
-    (entry.outputTokens / 1_000_000) * pricing.output +
-    (cache5m / 1_000_000) * pricing.cacheWrite5m +
-    (cache1h / 1_000_000) * pricing.cacheWrite1h +
-    (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-    entry.webSearchRequests * SERVER_TOOL_PRICING.webSearchRequest +
-    entry.webFetchRequests * SERVER_TOOL_PRICING.webFetchRequest
-  );
-}
+export const entryCost = estimateEntryCost;
 
 /**
  * Extract the `YYYY-MM-DD` (UTC) day key from a timestamp, or null if bad.
