@@ -44,6 +44,17 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
       29,
       'enabled docIssueSnapshot datasets (#2710) use the next schema version'
     );
+    // Pin the FLAG-OFF (local-first default) schema version as a LITERAL so a
+    // regression that lowers it — e.g. back to v27 — fails here (#2955). The
+    // key-equality assertion below rebuilds its expected string FROM this same
+    // constant, so it is self-referential and cannot catch such a regression on
+    // its own. Bump this literal (and the note) deliberately when FLAG_OFF advances.
+    assert.equal(typeof ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
+    assert.equal(
+      ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION,
+      28,
+      'flag-off retains the pre-feature v28 schema; a regression to v27 must fail here (#2955)'
+    );
 
     const key = ingest.datasetAssemblySchemaKey();
     // The key folds in BOTH the dataset-assembly schema version AND the per-session
@@ -56,9 +67,10 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
       `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
       'flag-off retains the exact pre-feature v28 cache key'
     );
-    // The immediately-preceding v27 key needs no dedicated notEqual: the exact
-    // equal(28) assertion above already excludes every other version (#2709
-    // review item; avoids accumulating one dead assertion per bump).
+    // The immediately-preceding v27 key needs no dedicated notEqual: the literal
+    // equal(FLAG_OFF, 28) pin above fixes the flag-off version exactly, so any
+    // regression (v27 included) fails there (#2709 review item; avoids
+    // accumulating one dead assertion per bump).
     assert.notEqual(
       key,
       `dataset-schema:v26:parser-${ingest.PARSER_SIG_VERSION}`,
