@@ -1,7 +1,7 @@
 // Isolated per-view render churn measurements (issue #666).
 // Each view gets a fresh browser context to avoid cumulative PerformanceObserver bleed.
 // Usage: node scripts/measure-isolated-views.mjs [--port 4477]
-import { chromium } from 'playwright';
+import { chromium } from '@playwright/test';
 import { spawn } from 'child_process';
 import { createServer } from 'net';
 

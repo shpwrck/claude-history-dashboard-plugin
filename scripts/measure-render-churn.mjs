@@ -20,7 +20,7 @@
 // With --json in --sweep mode, all human/progress output goes to stderr so
 // stdout is pure JSON (`… --sweep --json | jq`).
 
-import { chromium } from 'playwright';
+import { chromium } from '@playwright/test';
 import { spawn } from 'child_process';
 import { createServer } from 'net';
 import { readFileSync } from 'fs';
