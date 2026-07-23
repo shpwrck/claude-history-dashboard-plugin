@@ -1,6 +1,6 @@
 # 0005 — Measurable, showable impact for the recs auto-injection
 
-Status: Proposed (design-first; output of the issue #573 multi-agent design debate)
+Status: Accepted (2026-07-22 — #573 closed; the AdoptionScorecard ships this design; originally design-first from the #573 debate)
 Date: 2026-06-04
 Supersedes: none
 Related: #573, ADR [0002](0002-dynamic-recommendation-rule-engine.md) (rule engine),

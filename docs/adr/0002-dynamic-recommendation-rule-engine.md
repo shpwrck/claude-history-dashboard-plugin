@@ -1,6 +1,6 @@
 # ADR 0002 — Dynamic rule engine for recommendations: discovery pipeline, not runtime evaluation
 
-- **Status:** Proposed (RFC — needs human ratification before any tracer-slice work)
+- **Status:** Accepted (2026-07-22 — shipped and enforced: #189 closed, the detector Catalog implements this design; originally Proposed as an RFC)
 - **Date:** 2026-05-30
 - **Issue:** #189
 - **Scope:** This ADR records a *design decision only*. Implementation is deferred

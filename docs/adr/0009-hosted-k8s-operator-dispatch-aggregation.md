@@ -1,6 +1,6 @@
 # 0009 — Hosted Kubernetes operator: aggregate-everywhere ingestion + pod-per-dispatch remote sessions
 
-Status: Proposed (output of a grilling session, 2026-06-11)
+Status: Accepted (2026-07-22 — implemented in probaitio-operator/; originally Proposed from a grilling session, 2026-06-11)
 Date: 2026-06-11
 Supersedes: none — extends the SPA/server deployment split (ADR [0003](0003-public-spa-hosting.md)) with a third, hosted flavor
 Related: epic #1247 (decomposition + sequencing), ADR [0003](0003-public-spa-hosting.md) (public SPA hosting),

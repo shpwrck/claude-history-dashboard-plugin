@@ -1,6 +1,6 @@
 # 0010 — Kubernetes substrate: reuse over build, harness-native seam stays ours
 
-Status: Proposed (records the settled architecture of epic #1247 + a first principle)
+Status: Accepted (2026-07-22 — standing AGENTS.md convention ("Kubernetes substrate: reuse over build"); records the settled architecture of epic #1247)
 Date: 2026-06-11
 Renumbered: from ADR 0009 (2026-06-11) — resolves a number collision with the hosted-operator
 ADR [0009](0009-hosted-k8s-operator-dispatch-aggregation.md) (#1254), which shipped under the same

@@ -1,6 +1,6 @@
 # 0008 — Server LLM-usage governance: scoped API invariant, enforced call-site registry, phased abuse controls
 
-Status: Proposed (output of a grilling session, 2026-06-09)
+Status: Accepted (2026-07-22 — fully CI-enforced via the check-llm-egress gate and the generated llm-usage registry; originally Proposed from a grilling session, 2026-06-09)
 Date: 2026-06-09
 Supersedes: none — **scopes** (does not amend) the blanket "no api.anthropic.com" phrasing
 Related: epic #930 (decomposition), ADR [0003](0003-public-spa-hosting.md) (public SPA hosting),

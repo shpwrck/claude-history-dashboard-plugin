@@ -1,6 +1,6 @@
 # 0003 — Public SPA hosting: ship the upload-only build publicly while source stays private
 
-- **Status:** Proposed (research / decision record for #326)
+- **Status:** Accepted (2026-07-22 — the public SPA channel is live; originally research for #326)
 - **Date:** 2026-06-01
 - **Deciders:** repo owner
 - **Related:** #324 (the `spa` build target), #325 (the published SPA image),

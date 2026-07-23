@@ -3,7 +3,7 @@
 # Push image refs (read from stdin, one per line) with bounded retries, to ride
 # out transient GHCR push failures.
 #
-# Why this exists: docker-publish builds five images with the classic builder and
+# Why this exists: docker-publish builds four images with the classic builder and
 # pushes each tag with a plain `docker push`. GHCR intermittently fails a push
 # mid-stream with errors like "unknown blob" or "blob upload unknown" — the
 # registry briefly reports a layer (often a base layer shared with a
