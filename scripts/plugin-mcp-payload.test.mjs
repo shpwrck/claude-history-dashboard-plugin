@@ -25,7 +25,21 @@ import {
   StdioClientTransport,
 } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-import { assemblePluginPayload } from './assemble-plugin-payload.mjs';
+import {
+  assemblePluginPayload,
+  stampedPluginManifest,
+} from './assemble-plugin-payload.mjs';
+
+// Unit: the version stamp overrides whatever version the source manifest
+// carried and preserves every other key, so a stale committed plugin.json
+// version can never reach the published payload (#2950).
+{
+  const stamped = JSON.parse(
+    stampedPluginManifest('{\n  "name": "x",\n  "version": "0.0.0-stale"\n}\n', '9.9.9')
+  );
+  assert.equal(stamped.version, '9.9.9', 'stamp must override the source version');
+  assert.equal(stamped.name, 'x', 'stamp must preserve other manifest keys');
+}
 
 const EXPECTED_TOOLS = [
   'dashboard_status',
@@ -157,6 +171,12 @@ try {
 
   const manifest = JSON.parse(
     await readFile(join(payloadRoot, '.claude-plugin', 'plugin.json'), 'utf8')
+  );
+  const pkg = JSON.parse(await readFile(resolve('package.json'), 'utf8'));
+  assert.equal(
+    manifest.version,
+    pkg.version,
+    'assembled plugin.json version must be stamped from package.json — no plugin-channel version skew (#2950)'
   );
   const declaration = manifest.mcpServers?.['claude-history-dashboard'];
   assert(

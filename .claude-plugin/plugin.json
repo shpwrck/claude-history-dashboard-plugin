@@ -1,6 +1,6 @@
 {
   "name": "claude-history-dashboard",
-  "version": "0.3.3",
+  "version": "0.5.0",
   "description": "Launch and browse a live view of your ~/.claude session history locally with no Docker and no cloud. Requires Node >= 24.",
   "author": {
     "name": "Jason Skrzypek",
@@ -19,7 +19,9 @@
   "mcpServers": {
     "claude-history-dashboard": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-shim.mjs"],
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-shim.mjs"
+      ],
       "env": {
         "CHD_PORT": "5173",
         "CHD_HOST": "127.0.0.1"

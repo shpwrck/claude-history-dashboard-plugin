@@ -2,7 +2,7 @@
 // Single source of truth for the marketplace mirror payload. The publish
 // workflow and the clean-runtime test both call this implementation.
 
-import { cp, mkdir, readdir, rm } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -15,6 +15,19 @@ const PROJECT_DIR = join(SCRIPTS_DIR, '..');
 async function copy(source, destination) {
   await mkdir(dirname(destination), { recursive: true });
   await cp(source, destination, { recursive: true });
+}
+
+/**
+ * Return `manifestText` (a plugin.json string) with its `version` set to
+ * `version`, preserving key order and 2-space formatting. package.json is the
+ * single source of truth for the plugin version, so the assembler stamps it
+ * into the payload manifest — the published plugin can never skew from the
+ * engine it ships (#2950). Exported for the version-sync test.
+ */
+export function stampedPluginManifest(manifestText, version) {
+  const manifest = JSON.parse(manifestText);
+  manifest.version = version;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
 function containsPath(parent, candidate) {
@@ -71,6 +84,18 @@ export async function assemblePluginPayload({
   await copy(
     join(projectRoot, '.claude-plugin'),
     join(payloadRoot, '.claude-plugin')
+  );
+  // Stamp the payload manifest version from package.json (the single source of
+  // truth), so the published plugin can never report a version that skews from
+  // the engine it ships (#2950).
+  const manifestPath = join(payloadRoot, '.claude-plugin', 'plugin.json');
+  const pkg = JSON.parse(
+    await readFile(join(projectRoot, 'package.json'), 'utf8')
+  );
+  await writeFile(
+    manifestPath,
+    stampedPluginManifest(await readFile(manifestPath, 'utf8'), pkg.version),
+    'utf8'
   );
   await copy(join(projectRoot, 'commands'), join(payloadRoot, 'commands'));
   // The plugin launches the same server from the payload root. Repo docs are
