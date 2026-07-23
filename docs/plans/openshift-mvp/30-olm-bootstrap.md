@@ -3,6 +3,10 @@
 > **Status:** reconciled to ADR 0011 (single-tenant #1247 substrate, Probaitio naming). The
 > multi-tenant/zero-knowledge pieces (Keycloak, client-side encryption, encrypted-blob store,
 > public write gate, compute proxy) are **deferred to #467** and collected in a section below.
+>
+> **Superseded by what shipped (as of 2026-07-22):** OLM was **bypassed** — the MVP substrate
+> shipped (#1559) without an OLM bundle/bootstrap. Treat the OLM-bundle packaging below as a
+> point-in-time proposal, not current architecture.
 
 > Area owner doc for the #1247 single-tenant Probaitio substrate.
 > Scope: how the `probaitio-operator` (operator-sdk **hybrid.helm** plugin: one Helm chart

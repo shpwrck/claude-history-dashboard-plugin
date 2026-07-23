@@ -4,7 +4,7 @@ Status: **proposed** (multi-agent ultraplan, 2026-06-11; 17 agents; adversary ve
 ship-with-adjustments). Open decisions locked 2026-06-11 (see "Decisions" below). Supersedes
 the implicit "one flat repo" structure. Promote to an ADR next.
 
-Context: the app is being renamed **Probaitio -> Probaitio** (embeds "AI") and moved to a new
+Context: the app is being renamed **Probatio -> Probaitio** (embeds "AI") and moved to a new
 GitHub org `probaitio` (created 2026-06-11). Domain `probaitio.com` is registered on
 Cloudflare. Today the codebase is ONE flat package `claude-history-dashboard` with no
 workspaces; this plan draws the component boundaries that don't yet exist in the build.
@@ -20,7 +20,7 @@ workspaces; this plan draws the component boundaries that don't yet exist in the
 - **Repo move = FRESH public org repo, NOT a transfer.** Do the entire rearchitecture refactor
   in the existing private repo first, then publish a clean curated snapshot to the org. Avoids
   scrubbing ~1,300 issues + full git history.
-- **CRD / API group:** `probaitio.com/v1alpha1` (own the domain; replaces `probaitio.com/v1alpha1`).
+- **CRD / API group:** `probaitio.com/v1alpha1` (own the domain; replaces `probatio.com/v1alpha1`).
 - **CLI placement:** `cmd/probaitio` sharing the operator's single `go.mod` (reversible later).
 - **Kernel npm-publish:** DEFER until a real external consumer exists; design boundaries so a
   later publish is a non-event.
@@ -238,6 +238,6 @@ monorepo, proof engine stays private in shpwrck/claude.
 
 ## Naming note
 
-`probaitio` (org) is intentional, not a typo for `probaitio`. The product was renamed
-Probaitio -> Probaitio (embeds "AI"). The `probaitio.com/v1alpha1` API group is the OLD name; the
+`probaitio` (org) is intentional, not a typo for `probatio`. The product was renamed
+Probatio -> Probaitio (embeds "AI"). The `probatio.com/v1alpha1` API group is the OLD name; the
 Phase-6 rename sweep replaces it (string TBD per the open decision above).

@@ -39,10 +39,11 @@ history — for the same user. Tiered by how directly they overlap the dashboard
 | simonw/claude-code-transcripts | Adjacent product: transcript publishing | [claude-code-transcripts.md](./claude-code-transcripts.md) | #807 |
 | Her / हेर | Adjacent product: session forensics | [her.md](./her.md) | #807 |
 | headroom | Inspiration: context compression and memory layer | [headroom.md](./headroom.md) | #727 |
-| Helmdeck | Adjacent product: typed-tool runtime for agents | [../competitive-analysis-helmdeck.md](../competitive-analysis-helmdeck.md) | Shared cost/efficiency narrative |
+| Helmdeck | Adjacent product: typed-tool runtime for agents | [helmdeck.md](./helmdeck.md) | Shared cost/efficiency narrative |
 | obra/Superpowers | Adjacent product / Inspiration: prescriptive agent methodology + skills framework | [superpowers.md](./superpowers.md) | #1874 — recs foil; mine Iron Laws for rules (#189/#656), proof loop measures what it prescribes |
 | Agent Substrate | Adjacent product: K8s agent-session multiplexing runtime | [agent-substrate.md](./agent-substrate.md) | Buy-vs-build for #1247 dispatch half (ADR 0009) |
 | AX (google/ax) | Adjacent product: distributed agent runtime / harness (runs on Agent Substrate) | [ax.md](./ax.md) | Harness half of the same dispatch reference; prior art for #1247 (ADR 0009) |
+| agent-sandbox (kubernetes-sigs) | Adjacent product: K8s `Sandbox` CRD for isolated agent runtimes | [agent-sandbox.md](./agent-sandbox.md) | Candidate execution substrate under the #1247 operator (replaces the hand-rolled `Job`), gated on a gVisor/Kata RuntimeClass |
 | Nirmata AIControls | Adjacent product: AI-agent governance / enforcement proxy | [nirmata-aicontrols.md](./nirmata-aicontrols.md) | Kyverno/K8s-native; collides only on per-identity cost attribution (relevant post K8s-dispatch switch) |
 | hexo-ai/SIA | Adjacent product / inspiration: benchmark self-improvement loop | [hexo-sia.md](./hexo-sia.md) | Ground-truth `evaluate.py` vs our no-ground-truth proxy (#1266/#1289/#1296); encroachment watch feeds #1312 |
 | rh-agent | Adjacent product: vertical skill-pack distribution of an agent runtime | [rh-agent.md](./rh-agent.md) | #1877 — instrumentation target, not a rival |

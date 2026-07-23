@@ -1,6 +1,11 @@
 > **Status:** reconciled to ADR 0011 (single-tenant #1247 substrate, Probaitio naming). The
 > multi-tenant/zero-knowledge pieces (Keycloak OIDC, client-side encryption, encrypted-blob store,
 > public write gate, compute proxy) are **deferred to #467** and collected in a section below.
+>
+> **Superseded by what shipped (as of 2026-07-22):** the SigV4 half of this plan did **not**
+> land — there is no `sigv4.ts`/SigV4 signer anywhere in the tree. The MVP substrate that
+> actually shipped (#1559) took a different, simpler path. Treat the SigV4 signing design below
+> as a point-in-time proposal, not current architecture.
 
 # OpenShift MVP — Dependency-free artifact-blob client + boot-the-image gate
 

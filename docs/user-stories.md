@@ -1,5 +1,12 @@
 # User stories, personas, and IA brainstorm
 
+> **As of 2026-07-22 — point-in-time brainstorm, some structural claims are stale.**
+> This doc reflects an early IA snapshot: the nav shell it names (`src/components/Layout.tsx`)
+> no longer exists — layout/nav now live in `PFLayout.tsx` + `src/lib/nav-prefs.ts` — and the
+> "eighteen top-level views" count has since grown to ~31 (see `nav-prefs.ts` `NAV_ITEMS`).
+> The persona/IA *reasoning* below is preserved as a 2026-05 brainstorm record; treat the
+> specific file names and view counts as historical, not current.
+
 **Status:** Brainstorm + first code change. The persona/IA spec stays
 narrative; the single code change so far is flipping the default
 landing route from `insights` to `recommendations` (see §6 for the

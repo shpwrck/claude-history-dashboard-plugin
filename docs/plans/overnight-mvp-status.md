@@ -1,5 +1,11 @@
 # Overnight autonomous run — warm sessions + centralized auth
 
+> **ARCHIVED — 2026-06-15 session scratch, not current state (as of 2026-07-22).**
+> This is the resumable log from a single overnight run. Its "NOT yet PR'd" / in-flight
+> notes are long superseded: the MVP operator + dashboard landed via #1559 (closed), and
+> subsequent substrate work moved on. Kept only as a point-in-time record of that night's
+> decisions; do not read it as the current status of warm sessions / centralized auth.
+
 User went to sleep 2026-06-15 ~02:24 UTC: "keep working towards the mvp goal (warm sessions and
 centralized auth), take a note of any complications but push through them." No questions possible
 (asleep) → every fork is an MVP-call-and-document. This file is the resumable record + complications

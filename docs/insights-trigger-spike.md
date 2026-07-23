@@ -2,6 +2,13 @@
 
 **Issue:** #265 · **Verdict: ✓ FEASIBLE** · Investigated 2026-05-31
 
+> **Superseded (2026-07-22):** the product decision to *keep* an Insights view was
+> reversed — [`insights-removal.md`](./insights-removal.md) (#1056) removed the
+> Insights surface. This spike's "feasible to trigger `/insights`" finding remains
+> technically accurate as a 2026-05-31 point-in-time record, but the dashboard no
+> longer ships the view it was scoping. See `insights-removal.md` for the current
+> stance.
+
 ## TL;DR
 
 `claude -p "/insights"` (the headless/print CLI, avenue 1) **dispatches the

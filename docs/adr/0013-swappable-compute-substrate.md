@@ -1,8 +1,16 @@
 # 0013 — Swappable compute substrate (substrate neutrality)
 
-- **Status:** Accepted (direction set in the 2026-06-16 infra-strategy discussion)
+- **Status:** Accepted (direction), **not implemented** — see the implementation-status note below
 - **Date:** 2026-06-16
 - **Deciders:** repo owner
+
+> **Implementation status (as of 2026-07-22):** the substrate-driver interface this ADR
+> accepts has **zero code presence** — there is no driver/substrate abstraction in
+> `probaitio-operator/` (`grep -rni 'driver|substrate' --include='*.go' probaitio-operator/`
+> is empty). The direction stands as an accepted *decision*, but the interface is unbuilt and
+> its realization is tied to the operator carry-forward triage (the k8s substrate is a
+> throwaway scaffold — build only the unblocking slice; see epic #1247 and ADR 0010).
+> Treat the driver interface described below as design intent, not shipped code.
 - **Related:** ADR [0009](./0009-hosted-k8s-operator-dispatch-aggregation.md) (operator + `RemoteSession`
   dispatch — the architecture this extends), ADR [0010](./0010-k8s-substrate-reuse-over-build.md)
   (reuse-over-build default), ADR [0012](./0012-probatio-operator-mvp-realization.md) (operator MVP),

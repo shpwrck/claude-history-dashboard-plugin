@@ -4,6 +4,11 @@
 
 Source: https://prahladyeri.github.io/guides/applying-brevity-and-language-efficiency-to-prompt-engineering.html
 
+> **DONE (as of 2026-07-22).** This ask is implemented: the brevity/language-efficiency
+> guidance is registered in `src/lib/external-guidance-registry.ts` (#1589). GitHub issue
+> #1589 is the authority for status; this in-repo copy is retained only as the source
+> reference and is no longer an open backlog item.
+
 > In-repo tracking copy of issue #1589.
 
 ## Why

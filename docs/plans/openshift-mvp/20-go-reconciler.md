@@ -3,6 +3,11 @@
 > **Status:** reconciled to ADR 0011 (single-tenant #1247 substrate, Probaitio naming). The
 > multi-tenant/zero-knowledge pieces (Keycloak, client-side encryption, encrypted-blob store,
 > public write gate, compute proxy) are **deferred to #467** and collected in a section below.
+>
+> **Superseded by what shipped (as of 2026-07-22):** the operator that actually shipped (#1559)
+> is a plain **controller-runtime** reconciler, **not** the operator-sdk `hybrid.helm` design
+> below (#1956). Treat the hybrid-Helm packaging in this doc as a point-in-time proposal; see
+> `probaitio-operator/` for the shipped controller-runtime implementation.
 
 Implementation-ready design for the **hybrid Helm operator** that packages the single-tenant
 Probaitio substrate (epic #1247, ADR 0011). The operator is built with the operator-sdk
