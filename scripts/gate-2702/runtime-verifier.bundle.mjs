@@ -3662,6 +3662,7 @@ var require_fast_uri = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		return uriTokens.join("");
 	}
 	var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
+	var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
 	/**
 	* @param {import('./types/index').URIComponent} parsed
 	* @param {RegExpMatchArray} matches
@@ -3692,6 +3693,11 @@ var require_fast_uri = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		let isIP = false;
 		if (options.reference === "suffix") if (options.scheme) uri = options.scheme + ":" + uri;
 		else uri = "//" + uri;
+		const authorityMatch = uri.match(AUTHORITY_PREFIX);
+		if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
+			parsed.error = "URI authority must not contain a literal backslash.";
+			malformedAuthorityOrPort = true;
+		}
 		const matches = uri.match(URI_PARSE);
 		if (matches) {
 			parsed.scheme = matches[1];
@@ -3720,7 +3726,7 @@ var require_fast_uri = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 			const schemeHandler = getSchemeHandler(options.scheme || parsed.scheme);
 			if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
 				if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) try {
-					parsed.host = URL.domainToASCII(parsed.host.toLowerCase());
+					parsed.host = new URL("http://" + parsed.host).hostname;
 				} catch (e) {
 					parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e;
 				}

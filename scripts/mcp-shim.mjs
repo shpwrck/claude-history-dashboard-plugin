@@ -10623,6 +10623,7 @@ var require_fast_uri = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		return uriTokens.join("");
 	}
 	var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
+	var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
 	/**
 	* @param {import('./types/index').URIComponent} parsed
 	* @param {RegExpMatchArray} matches
@@ -10653,6 +10654,11 @@ var require_fast_uri = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		let isIP = false;
 		if (options.reference === "suffix") if (options.scheme) uri = options.scheme + ":" + uri;
 		else uri = "//" + uri;
+		const authorityMatch = uri.match(AUTHORITY_PREFIX);
+		if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
+			parsed.error = "URI authority must not contain a literal backslash.";
+			malformedAuthorityOrPort = true;
+		}
 		const matches = uri.match(URI_PARSE);
 		if (matches) {
 			parsed.scheme = matches[1];
@@ -10681,7 +10687,7 @@ var require_fast_uri = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 			const schemeHandler = getSchemeHandler(options.scheme || parsed.scheme);
 			if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
 				if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) try {
-					parsed.host = URL.domainToASCII(parsed.host.toLowerCase());
+					parsed.host = new URL("http://" + parsed.host).hostname;
 				} catch (e) {
 					parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e;
 				}
@@ -13862,14 +13868,7 @@ var Server = class extends Protocol {
 	setRequestHandler(requestSchema, handler) {
 		const methodSchema = getObjectShape(requestSchema)?.method;
 		if (!methodSchema) throw new Error("Schema is missing a method literal");
-		let methodValue;
-		if (isZ4Schema(methodSchema)) {
-			const v4Schema = methodSchema;
-			methodValue = (v4Schema._zod?.def)?.value ?? v4Schema.value;
-		} else {
-			const v3Schema = methodSchema;
-			methodValue = v3Schema._def?.value ?? v3Schema.value;
-		}
+		const methodValue = getLiteralValue(methodSchema);
 		if (typeof methodValue !== "string") throw new Error("Schema method literal must be a string");
 		if (methodValue === "tools/call") {
 			const wrappedHandler = async (request, extra) => {
@@ -14123,13 +14122,18 @@ var Server = class extends Protocol {
 		return this.notification({ method: "notifications/prompts/list_changed" });
 	}
 };
-//#endregion
-//#region node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
 /**
 * Buffers a continuous stdio stream into discrete JSON-RPC messages.
 */
 var ReadBuffer = class {
+	constructor(options) {
+		this._maxBufferSize = options?.maxBufferSize ?? 10485760;
+	}
 	append(chunk) {
+		if ((this._buffer?.length ?? 0) + chunk.length > this._maxBufferSize) {
+			this.clear();
+			throw new Error(`ReadBuffer exceeded maximum size of ${this._maxBufferSize} bytes`);
+		}
 		this._buffer = this._buffer ? Buffer.concat([this._buffer, chunk]) : chunk;
 	}
 	readMessage() {
@@ -14158,18 +14162,23 @@ function serializeMessage(message) {
 * This transport is only available in Node.js environments.
 */
 var StdioServerTransport = class {
-	constructor(_stdin = process$1.stdin, _stdout = process$1.stdout) {
+	constructor(_stdin = process$1.stdin, _stdout = process$1.stdout, options) {
 		this._stdin = _stdin;
 		this._stdout = _stdout;
-		this._readBuffer = new ReadBuffer();
 		this._started = false;
 		this._ondata = (chunk) => {
-			this._readBuffer.append(chunk);
-			this.processReadBuffer();
+			try {
+				this._readBuffer.append(chunk);
+				this.processReadBuffer();
+			} catch (error) {
+				this.onerror?.(error);
+				this.close().catch(() => {});
+			}
 		};
 		this._onerror = (error) => {
 			this.onerror?.(error);
 		};
+		this._readBuffer = new ReadBuffer({ maxBufferSize: options?.maxBufferSize });
 	}
 	/**
 	* Starts listening for messages on stdin.
