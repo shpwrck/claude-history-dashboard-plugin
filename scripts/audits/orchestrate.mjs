@@ -43,10 +43,16 @@ import {
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { tmpdir } from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
 
 import { DEFAULT_GATES, resolveGates, GATES } from './gates.config.mjs';
+import {
+  assertExactAuditUniverse,
+  resolveAuditUniverse,
+} from './audit-scope.mjs';
+import { validateAuditEvidenceArchive } from './audit-evidence.mjs';
 import {
   partitionAuditFiles,
   assertExactPartition,
@@ -386,6 +392,7 @@ export function parseArgs(argv) {
   const a = {
     mode: 'plan',
     ledger: DEFAULT_LEDGER,
+    ledgerExplicit: false,
     floor: 12,
     fullBatch: 40,
     maxBatchBytes: 96 * 1024,
@@ -403,7 +410,10 @@ export function parseArgs(argv) {
     else if (v === '--run-all') a.mode = 'run-all';
     else if (v === '--baseline') a.baseline = argv[++i];
     else if (v === '--gates') a.gates = argv[++i];
-    else if (v === '--ledger') a.ledger = argv[++i];
+    else if (v === '--ledger') {
+      a.ledger = argv[++i];
+      a.ledgerExplicit = true;
+    }
     else if (v === '--state') a.state = argv[++i];
     else if (v === '--receipt-dir') a.receiptDir = argv[++i];
     else if (v === '--schema') a.schema = argv[++i];
@@ -466,7 +476,7 @@ export function readTrackedFiles(repoDir, baseline, runner = execFileSync) {
     .filter(Boolean);
 }
 
-export function readTrackedFileSizes(repoDir, baseline, runner = execFileSync) {
+export function readTrackedEntries(repoDir, baseline, runner = execFileSync) {
   const records = runner(
     'git',
     ['-C', repoDir, 'ls-tree', '-rlz', '--full-tree', baseline],
@@ -474,21 +484,135 @@ export function readTrackedFileSizes(repoDir, baseline, runner = execFileSync) {
   )
     .split('\0')
     .filter(Boolean);
-  const sizes = new Map();
+  const entries = [];
   for (const record of records) {
     const separator = record.indexOf('\t');
-    if (separator < 0) throw new Error('git ls-tree size output is malformed');
+    if (separator < 0) throw new Error('git ls-tree output is malformed');
     const fields = record.slice(0, separator).trim().split(/\s+/);
     const path = record.slice(separator + 1);
+    if (fields.length !== 4) throw new Error('git ls-tree output is malformed');
+    const [mode, type, oid] = fields;
     const size = Number(fields[3]);
-    if (!path || !Number.isInteger(size) || size < 0) {
+    if (
+      !path
+      || !/^[0-7]{6}$/.test(mode)
+      || !type
+      || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)
+      || !Number.isInteger(size)
+      || size < 0
+    ) {
       throw new Error(
-        `git ls-tree returned an invalid blob size for ${path || '<empty path>'}`,
+        `git ls-tree returned an invalid entry for ${path || '<empty path>'}`,
       );
     }
-    sizes.set(path, size);
+    entries.push({ path, mode, type, oid, size });
   }
-  return sizes;
+  return entries;
+}
+
+export function readTrackedFileSizes(repoDir, baseline, runner = execFileSync) {
+  return new Map(
+    readTrackedEntries(repoDir, baseline, runner).map(({ path, size }) => [
+      path,
+      size,
+    ]),
+  );
+}
+
+export function readBaselineBlobs(repoDir, entries, runner = execFileSync) {
+  if (!Array.isArray(entries)) throw new Error('entries must be an array');
+  if (entries.length === 0) return new Map();
+  const input = `${entries.map(({ oid }) => oid).join('\n')}\n`;
+  const raw = runner(
+    'git',
+    ['-C', repoDir, 'cat-file', '--batch'],
+    {
+      input,
+      maxBuffer: Math.max(
+        1024 * 1024,
+        entries.reduce((total, entry) => total + entry.size + 128, 0),
+      ),
+    },
+  );
+  const output = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  const blobs = new Map();
+  let offset = 0;
+  for (const entry of entries) {
+    const newline = output.indexOf(0x0a, offset);
+    if (newline < 0) {
+      throw new Error(`git cat-file output is truncated before ${entry.path}`);
+    }
+    const header = output.subarray(offset, newline).toString('utf8');
+    const match = /^([0-9a-f]{40}|[0-9a-f]{64}) ([^ ]+) ([0-9]+)$/.exec(
+      header,
+    );
+    if (!match) {
+      throw new Error(`git cat-file returned a malformed header for ${entry.path}`);
+    }
+    const [, oid, type, sizeText] = match;
+    const size = Number(sizeText);
+    if (oid !== entry.oid || type !== 'blob' || size !== entry.size) {
+      throw new Error(
+        `git cat-file identity does not match the tracked entry for ${entry.path}`,
+      );
+    }
+    const contentStart = newline + 1;
+    const contentEnd = contentStart + size;
+    if (contentEnd >= output.length || output[contentEnd] !== 0x0a) {
+      throw new Error(`git cat-file output is truncated for ${entry.path}`);
+    }
+    blobs.set(entry.path, Buffer.from(output.subarray(contentStart, contentEnd)));
+    offset = contentEnd + 1;
+  }
+  if (offset !== output.length) {
+    throw new Error('git cat-file returned unexpected trailing output');
+  }
+  return blobs;
+}
+
+export function resolveBaselineAuditUniverse({
+  repoDir,
+  baseline,
+  gitRunner = execFileSync,
+  receiptSchemaPath = DEFAULT_RECEIPT_SCHEMA,
+  receiptSchema,
+  evidenceValidator = validateAuditEvidenceArchive,
+}) {
+  const trackedEntries = readTrackedEntries(repoDir, baseline, gitRunner);
+  const universe = resolveAuditUniverse(trackedEntries);
+  assertExactAuditUniverse(trackedEntries, universe);
+
+  let evidence = {
+    fileCount: 0,
+    runCount: 0,
+    tripletCount: 0,
+    findingCount: 0,
+    runStates: [],
+  };
+  if (universe.excludedEvidenceEntries.length > 0) {
+    const blobs = readBaselineBlobs(
+      repoDir,
+      universe.excludedEvidenceEntries,
+      gitRunner,
+    );
+    const schema = receiptSchema ?? JSON.parse(
+      readFileSync(receiptSchemaPath, 'utf8'),
+    );
+    evidence = evidenceValidator({
+      excludedEvidenceEntries: universe.excludedEvidenceEntries,
+      blobs,
+      receiptSchema: schema,
+    });
+    if (
+      !evidence
+      || evidence.fileCount !== universe.scope.excludedEvidence.count
+    ) {
+      throw new Error(
+        'sealed evidence validator did not account for every excluded file',
+      );
+    }
+  }
+  return { ...universe, trackedEntries, evidence };
 }
 
 export function capBatchByBytes(batch, maxBytes, fileSizes) {
@@ -546,6 +670,42 @@ function statePaths(opts) {
   };
 }
 
+export function assertV2LedgerTarget(opts, state) {
+  if (!opts.file || state.version !== 2) return true;
+  if (!opts.ledgerExplicit) {
+    throw new Error(
+      'v2 mutating audit runs require an explicit run-specific --ledger path',
+    );
+  }
+  const ledgerPath = relative(
+    opts.repoDir,
+    absoluteFromRepo(opts.repoDir, opts.ledger),
+  ).replaceAll('\\', '/');
+  if (ledgerPath === DEFAULT_LEDGER) {
+    throw new Error(
+      'v2 audit runs must not overwrite the historical v0.6 ledger',
+    );
+  }
+  if (
+    ledgerPath.startsWith('../')
+    || !ledgerPath.startsWith('docs/audits/')
+    || !ledgerPath.endsWith('.md')
+  ) {
+    throw new Error(
+      'v2 --ledger must be a Markdown file inside docs/audits/',
+    );
+  }
+  if (
+    ledgerPath.startsWith('docs/audits/findings/')
+    || ledgerPath.startsWith('docs/audits/runs/')
+  ) {
+    throw new Error(
+      'v2 --ledger must remain outside sealed JSON evidence directories',
+    );
+  }
+  return true;
+}
+
 export function ensureBaselineWorktree({
   repoDir,
   baseline,
@@ -579,6 +739,15 @@ export function ensureBaselineWorktree({
 }
 
 export function loadOrInitializeState(opts, activeGates, paths) {
+  const universe = resolveBaselineAuditUniverse({
+    repoDir: opts.repoDir,
+    baseline: opts.baseline,
+    gitRunner: opts.gitRunner || execFileSync,
+    receiptSchemaPath: paths.schema || DEFAULT_RECEIPT_SCHEMA,
+    receiptSchema: opts.receiptSchema,
+    evidenceValidator: opts.evidenceValidator || validateAuditEvidenceArchive,
+  });
+  const { trackedEntries } = universe;
   if (existsSync(paths.state)) {
     const state = parseAuditState(readFileSync(paths.state, 'utf8'));
     if (state.baseline !== opts.baseline) {
@@ -600,18 +769,33 @@ export function loadOrInitializeState(opts, activeGates, paths) {
     // universe it was initialized from. Re-enumerate on every resume so a
     // truncated/tampered state cannot silently make the ledger claim full
     // coverage.
-    const trackedFiles = readTrackedFiles(opts.repoDir, opts.baseline);
-    assertExactPartition(trackedFiles, state.sections);
+    if (state.version === 1) {
+      assertExactPartition(
+        trackedEntries.map(({ path }) => path),
+        state.sections,
+      );
+    } else {
+      if (!isDeepStrictEqual(state.scope, universe.scope)) {
+        throw new Error(
+          'persisted audit scope drifted from the recomputed baseline universe',
+        );
+      }
+      assertExactPartition(
+        universe.auditableEntries.map(({ path }) => path),
+        state.sections,
+      );
+    }
     return state;
   }
 
   const auditDate = opts.auditDate || new Date().toISOString().slice(0, 10);
-  const trackedFiles = readTrackedFiles(opts.repoDir, opts.baseline);
+  const auditableFiles = universe.auditableEntries.map(({ path }) => path);
   return initializeAuditState({
     baseline: opts.baseline,
     gates: activeGates,
     auditDate,
-    sectionFiles: partitionAuditFiles(trackedFiles),
+    sectionFiles: partitionAuditFiles(auditableFiles),
+    scope: universe.scope,
   });
 }
 
@@ -821,9 +1005,36 @@ function logUsage(usage) {
   }
 }
 
+function logAuditScope(state) {
+  if (state.version === 2) {
+    console.log(
+      `  scope policy v${state.scope.policyVersion}: `
+      + `tracked=${state.scope.tracked.count}, `
+      + `auditable=${state.scope.auditable.count}, `
+      + `excluded sealed evidence=${state.scope.excludedEvidence.count}`,
+    );
+    return;
+  }
+  const tracked = state.sections.reduce(
+    (total, section) => total + section.files.length,
+    0,
+  );
+  console.log(
+    `  scope legacy v1: tracked=${tracked}, auditable=${tracked}, `
+    + 'excluded sealed evidence=0',
+  );
+}
+
 export function executeOneBatch(opts, state, paths) {
   if (!selectNextPendingBatch(state, 1)) {
-    return { state, stop: true, complete: true, reason: 'all files audited' };
+    return {
+      state,
+      stop: true,
+      complete: true,
+      reason: state.version === 2
+        ? 'all auditable files audited; excluded sealed evidence verified'
+        : 'all legacy baseline files audited',
+    };
   }
   const usage = {};
   for (const harness of HARNESSES) {
@@ -927,6 +1138,7 @@ export function main(argv = process.argv.slice(2)) {
   console.log(
     `orchestrate [${opts.mode}] gates=${activeGates.join('+')} baseline=${opts.baseline}`,
   );
+  logAuditScope(state);
 
   if (opts.mode === 'plan') {
     const usage = {};
@@ -947,7 +1159,11 @@ export function main(argv = process.argv.slice(2)) {
       sizeBatch(selected.u.leftPct, opts.fullBatch),
     );
     if (!batch) {
-      console.log('DONE: every tracked file has a validated receipt for every active gate.');
+      console.log(
+        state.version === 2
+          ? 'DONE: every auditable file has a validated receipt for every active gate; excluded sealed evidence verified.'
+          : 'DONE: every legacy baseline file has a validated receipt for every active gate.',
+      );
       return { state, stop: true, complete: true };
     }
     console.log(
@@ -958,6 +1174,7 @@ export function main(argv = process.argv.slice(2)) {
     return { state, stop: false, batch };
   }
 
+  assertV2LedgerTarget(opts, state);
   if (opts.file && (!opts.instance || opts.instance === 'orchestrator')) {
     throw new Error('--instance <unique id> is required with --file');
   }

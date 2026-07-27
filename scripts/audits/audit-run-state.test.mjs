@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -39,12 +40,32 @@ const ALL_SECTION_FILES = [
   ".claudeignore",
 ];
 
+const V2_SCOPE = {
+  policyVersion: 1,
+  tracked: {
+    count: ALL_SECTION_FILES.length + 4,
+    bytes: 240,
+    manifestSha256: "1".repeat(64),
+  },
+  auditable: {
+    count: ALL_SECTION_FILES.length,
+    bytes: 200,
+    manifestSha256: "2".repeat(64),
+  },
+  excludedEvidence: {
+    count: 4,
+    bytes: 40,
+    manifestSha256: "3".repeat(64),
+  },
+};
+
 function makeState(gates = ["security", "performance"]) {
   return initializeAuditState({
     baseline: "abc123",
     gates,
     auditDate: "2026-07-26",
     sectionFiles: partitionAuditFiles(ALL_SECTION_FILES),
+    scope: V2_SCOPE,
   });
 }
 
@@ -163,6 +184,13 @@ test("partition assertions reject unknown, missing, duplicate, and misclassified
     () => assertExactPartition(ALL_SECTION_FILES, wrongSection),
     /wrong ledger section/,
   );
+
+  const reordered = structuredClone(partitionAuditFiles(ALL_SECTION_FILES));
+  reordered[0].files.reverse();
+  assert.throws(
+    () => assertExactPartition(ALL_SECTION_FILES, reordered),
+    /baseline file order/,
+  );
 });
 
 test("initializeAuditState creates deterministic serializable progress for every section and active gate", () => {
@@ -172,12 +200,14 @@ test("initializeAuditState creates deterministic serializable progress for every
     gates: ["security", "performance"],
     auditDate: "2026-07-26",
     sectionFiles,
+    scope: V2_SCOPE,
   });
 
-  assert.equal(state.version, 1);
+  assert.equal(state.version, 2);
   assert.equal(state.baseline, "abc123");
   assert.equal(state.auditDate, "2026-07-26");
   assert.deepEqual(state.gates, ["security", "performance"]);
+  assert.deepEqual(state.scope, V2_SCOPE);
   assert.deepEqual(state.issueNumbersByGate, { security: [], performance: [] });
   assert.deepEqual(state.sections[0], {
     section: "root",
@@ -189,8 +219,79 @@ test("initializeAuditState creates deterministic serializable progress for every
   assert.doesNotThrow(() => JSON.stringify(state));
 });
 
+test("initializeAuditState records a validated v2 audit-universe seal when scope is provided", () => {
+  const state = initializeAuditState({
+    baseline: "abc123",
+    gates: ["security", "performance"],
+    auditDate: "2026-07-26",
+    sectionFiles: partitionAuditFiles(ALL_SECTION_FILES),
+    scope: V2_SCOPE,
+  });
+
+  assert.equal(state.version, 2);
+  assert.deepEqual(state.scope, V2_SCOPE);
+  assert.equal(assertAuditState(state), true);
+  assert.deepEqual(parseAuditState(serializeAuditState(state)), state);
+  assert.equal(selectNextPendingBatch(state, 1).auditedFiles[0], "package.json");
+});
+
+test("v2 state rejects corrupt scope equations, section counts, and unsupported policy versions", () => {
+  const makeV2 = () =>
+    initializeAuditState({
+      baseline: "abc123",
+      gates: ["security"],
+      auditDate: "2026-07-26",
+      sectionFiles: partitionAuditFiles(ALL_SECTION_FILES),
+      scope: V2_SCOPE,
+    });
+
+  const badEquation = makeV2();
+  badEquation.scope.tracked.count += 1;
+  assert.throws(() => assertAuditState(badEquation), /count equation/);
+
+  const badAuditableCount = makeV2();
+  badAuditableCount.scope.auditable.count -= 1;
+  badAuditableCount.scope.excludedEvidence.count += 1;
+  assert.throws(
+    () => assertAuditState(badAuditableCount),
+    /auditable count.*section/i,
+  );
+
+  const badByteEquation = makeV2();
+  badByteEquation.scope.tracked.bytes += 1;
+  assert.throws(() => assertAuditState(badByteEquation), /byte equation/);
+
+  const badPolicy = makeV2();
+  badPolicy.scope.policyVersion = 999;
+  assert.throws(
+    () => assertAuditState(badPolicy),
+    /unsupported audit scope policy/,
+  );
+
+  const badDigest = makeV2();
+  badDigest.scope.tracked.manifestSha256 = "not-a-digest";
+  assert.throws(() => assertAuditState(badDigest), /manifestSha256/);
+
+  const unexpectedMetric = makeV2();
+  unexpectedMetric.scope.auditable.extra = true;
+  assert.throws(
+    () => assertAuditState(unexpectedMetric),
+    /must contain exactly/,
+  );
+});
+
 test("initializeAuditState rejects invalid provenance and gate sets", () => {
   const sectionFiles = partitionAuditFiles(ALL_SECTION_FILES);
+  assert.throws(
+    () =>
+      initializeAuditState({
+        baseline: "abc",
+        gates: ["security"],
+        auditDate: "2026-07-26",
+        sectionFiles,
+      }),
+    /state\.scope/,
+  );
   assert.throws(
     () =>
       initializeAuditState({
@@ -198,6 +299,7 @@ test("initializeAuditState rejects invalid provenance and gate sets", () => {
         gates: ["security"],
         auditDate: "2026-07-26",
         sectionFiles,
+        scope: V2_SCOPE,
       }),
     /baseline/,
   );
@@ -208,6 +310,7 @@ test("initializeAuditState rejects invalid provenance and gate sets", () => {
         gates: [],
         auditDate: "2026-07-26",
         sectionFiles,
+        scope: V2_SCOPE,
       }),
     /gates/,
   );
@@ -218,6 +321,7 @@ test("initializeAuditState rejects invalid provenance and gate sets", () => {
         gates: ["security", "security"],
         auditDate: "2026-07-26",
         sectionFiles,
+        scope: V2_SCOPE,
       }),
     /duplicate gate/,
   );
@@ -228,6 +332,7 @@ test("initializeAuditState rejects invalid provenance and gate sets", () => {
         gates: ["not-a-gate"],
         auditDate: "2026-07-26",
         sectionFiles,
+        scope: V2_SCOPE,
       }),
     /unknown gate/,
   );
@@ -238,6 +343,7 @@ test("initializeAuditState rejects invalid provenance and gate sets", () => {
         gates: ["security"],
         auditDate: "2026-02-30",
         sectionFiles,
+        scope: V2_SCOPE,
       }),
     /valid YYYY-MM-DD/,
   );
@@ -249,6 +355,7 @@ test("selectNextPendingBatch resumes at the first incomplete file without resele
     gates: ["security", "performance"],
     auditDate: "2026-07-26",
     sectionFiles: partitionAuditFiles(ALL_SECTION_FILES),
+    scope: V2_SCOPE,
   });
 
   assert.deepEqual(selectNextPendingBatch(state, 1), {
@@ -556,6 +663,83 @@ test("ledger rendering uses baseline counts and withholds DONE until a whole sec
   );
 });
 
+test("v2 ledger updates insert and replace one idempotent audit-scope equation", () => {
+  const state = makeState(["security"]);
+  const markdown = [
+    "# Audit",
+    "",
+    "| Section | Files | security → #1932 |",
+    "|---|---|---|",
+    ...AUDIT_SECTIONS.map((section) => `| ${section} | 0 | — |`),
+    "",
+  ].join("\n");
+
+  const updated = updateLedgerMarkdown(markdown, state);
+  assert.match(
+    updated,
+    /<!-- audit-scope:start -->\n\*\*Audit scope \(policy v1\):\*\* 24 tracked files \(240 bytes\) = 20 auditable files \(200 bytes\) \+ 4 excluded sealed-evidence files \(40 bytes\)\.\n<!-- audit-scope:end -->\n\n\| Section \| Files \|/,
+  );
+  assert.equal(updateLedgerMarkdown(updated, state), updated);
+
+  const changed = structuredClone(state);
+  changed.scope.tracked.bytes += 5;
+  changed.scope.excludedEvidence.bytes += 5;
+  const replaced = updateLedgerMarkdown(updated, changed);
+  assert.match(replaced, /tracked files \(245 bytes\)/);
+  assert.equal(
+    (replaced.match(/<!-- audit-scope:start -->/g) || []).length,
+    1,
+  );
+});
+
+test("ledger scope markers fail closed when partial or duplicated", () => {
+  const table = renderLedgerTable(makeState(["security"]));
+  assert.throws(
+    () =>
+      updateLedgerMarkdown(
+        `<!-- audit-scope:start -->\n${table}\n`,
+        makeState(["security"]),
+      ),
+    /scope marker/i,
+  );
+  assert.throws(
+    () =>
+      updateLedgerMarkdown(
+        [
+          "<!-- audit-scope:start -->",
+          "<!-- audit-scope:end -->",
+          "<!-- audit-scope:start -->",
+          "<!-- audit-scope:end -->",
+          table,
+          "",
+        ].join("\n"),
+        makeState(["security"]),
+      ),
+    /scope marker/i,
+  );
+});
+
+test("updating the completed v0.6 ledger from its sealed v1 state is byte-stable", () => {
+  const state = parseAuditState(
+    readFileSync(
+      new URL(
+        "../../docs/audits/runs/v060-c8b98a29508b.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const markdown = readFileSync(
+    new URL(
+      "../../docs/audits/v060-review-phase-audit.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
+  assert.equal(updateLedgerMarkdown(markdown, state), markdown);
+});
+
 test("state serialization round-trips only self-consistent durable progress", () => {
   const state = makeState();
   const expectedBatch = selectNextPendingBatch(state, 2);
@@ -570,7 +754,7 @@ test("state serialization round-trips only self-consistent durable progress", ()
 
   assert.equal(assertAuditState(applied), true);
   const json = serializeAuditState(applied);
-  assert.match(json, /"version": 1/);
+  assert.match(json, /"version": 2/);
   assert.equal(json.endsWith("\n"), true);
   assert.deepEqual(parseAuditState(json), applied);
 
@@ -578,4 +762,27 @@ test("state serialization round-trips only self-consistent durable progress", ()
   corrupt.sections[0].completedFiles.push("scripts/audit.mjs");
   assert.throws(() => assertAuditState(corrupt), /unknown|batch progress/i);
   assert.throws(() => parseAuditState("{not json"), /valid JSON/i);
+});
+
+test("the sealed v0.6 legacy v1 state remains readable without migration", () => {
+  const text = readFileSync(
+    new URL(
+      "../../docs/audits/runs/v060-c8b98a29508b.json",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const state = parseAuditState(text);
+
+  assert.equal(state.version, 1);
+  assert.equal(state.scope, undefined);
+  assert.equal(
+    state.sections.reduce(
+      (total, section) => total + section.completedFiles.length,
+      0,
+    ),
+    1487,
+  );
+  assert.equal(selectNextPendingBatch(state, 1), null);
+  assert.deepEqual(parseAuditState(serializeAuditState(state)), state);
 });

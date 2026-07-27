@@ -111,6 +111,38 @@ regenerates the Markdown ledger atomically after a successfully reconciled route
 The router embeds a stable `<!-- audit-finding: <key> -->` marker and searches open
 and closed issues, so retries and overlapping harness windows do not double-file.
 
+## Subsequent-baseline audit scope
+
+Sealed machine evidence remains immutable history; resolving a finding does not
+delete its receipt, metadata seal, router result, or run state. Subsequent sweeps
+therefore use scope-policy v1 before section partitioning:
+
+```text
+tracked tree = auditable files + validated sealed-evidence files
+```
+
+The completed `c8b98a29508b…` baseline predates its generated evidence, so its
+legacy v1 state represents `1,487 tracked = 1,487 auditable + 0 excluded`. At the
+post-audit `f95ddffb55b2…` baseline, the exact equation is
+`2,273 tracked = 1,492 auditable + 781 excluded`: 780 receipt/metadata/router
+files plus one run-state file. Those excluded files total 4,083,405 bytes.
+
+Exclusion is deliberately narrower than a path glob. Only regular,
+non-executable JSON blobs with recognized generated names under
+`docs/audits/findings/` and `docs/audits/runs/` are candidates. Before dispatch,
+the orchestrator verifies the complete triplets, receipt contract, metadata SHA
+seals, router accounting, and their exact ownership by a completed run state.
+Missing, extra, malformed, tampered, executable, or symlinked candidates fail
+preflight. Human-readable audit Markdown, audit source/tests/schemas, and
+arbitrary JSON elsewhere remain auditable.
+
+New state files use schema v2 and persist the scope policy, counts, bytes, and
+manifest digests. Every resume recomputes those seals from the pinned Git tree
+and rejects drift. Legacy v1 state stays readable and byte-stable. A v2 run that
+uses `--file` must also name an explicit, run-specific Markdown ledger under
+`docs/audits/` and outside the two sealed JSON directories; this prevents a new
+baseline from overwriting the completed v0.6 ledger.
+
 ## How to run it (human kickoff)
 
 Use an immutable full SHA and a clean worktree for the mutable runner checkout:
@@ -127,7 +159,8 @@ node scripts/audits/orchestrate.mjs \
 - `--run`: dispatch and validate one receipt, then run only the router preview.
 - Add `--file --instance <unique-id>` to a one-batch `--run` only when the
   preview is accepted and issue creation/linking plus durable state/ledger
-  advancement are intended.
+  advancement are intended. For a v2 run, also pass a distinct ledger such as
+  `--ledger docs/audits/<run-id>-review.md`.
 - `--run-all` requires that same explicit `--file --instance <unique-id>`
   authority and repeats until complete, budget-stopped, or batch-limited.
 - Resume with the identical baseline, gates, and audit date; sealed receipts are

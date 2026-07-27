@@ -26,7 +26,12 @@ import {
   ensureBaselineWorktree,
   buildReceiptMetadata,
   validateReceiptMetadata,
+  loadOrInitializeState,
+  assertV2LedgerTarget,
   parseArgs,
+  readBaselineBlobs,
+  readTrackedEntries,
+  resolveBaselineAuditUniverse,
   readTrackedFileSizes,
   capBatchByBytes,
   resolveSectionSpec,
@@ -280,7 +285,8 @@ test('readTrackedFileSizes parses exact NUL-delimited blob sizes', () => {
   const calls = [];
   const sizes = readTrackedFileSizes('/repo', SHA, (file, args) => {
     calls.push([file, args]);
-    return '100644 blob deadbeef 12\ta b.mjs' + '\0' + '100755 blob feedface 0\tzero' + '\0';
+    return `100644 blob ${'d'.repeat(40)} 12\ta b.mjs\0`
+      + `100755 blob ${'f'.repeat(40)} 0\tzero\0`;
   });
   assert.deepEqual([...sizes], [['a b.mjs', 12], ['zero', 0]]);
   assert.ok(calls[0][1].includes('-rlz'));
@@ -288,6 +294,199 @@ test('readTrackedFileSizes parses exact NUL-delimited blob sizes', () => {
     () => readTrackedFileSizes('/repo', SHA, () => 'malformed\0'),
     /malformed/,
   );
+});
+
+test('readTrackedEntries parses the complete canonical git tree identity used by scope seals', () => {
+  const calls = [];
+  const entries = readTrackedEntries('/repo', SHA, (file, args) => {
+    calls.push([file, args]);
+    return [
+      `100644 blob ${'b'.repeat(40)} 12\ta b.mjs`,
+      `100755 blob ${'c'.repeat(40)} 0\tzero`,
+      '',
+    ].join('\0');
+  });
+
+  assert.deepEqual(entries, [
+    {
+      path: 'a b.mjs',
+      mode: '100644',
+      type: 'blob',
+      oid: 'b'.repeat(40),
+      size: 12,
+    },
+    {
+      path: 'zero',
+      mode: '100755',
+      type: 'blob',
+      oid: 'c'.repeat(40),
+      size: 0,
+    },
+  ]);
+  assert.ok(calls[0][1].includes('-rlz'));
+  assert.throws(
+    () => readTrackedEntries('/repo', SHA, () => 'malformed\0'),
+    /malformed/,
+  );
+});
+
+test('readBaselineBlobs reads every pinned git object in one length-delimited batch', () => {
+  const entries = [
+    {
+      path: 'a.json',
+      mode: '100644',
+      type: 'blob',
+      oid: 'a'.repeat(40),
+      size: 4,
+    },
+    {
+      path: 'b.json',
+      mode: '100644',
+      type: 'blob',
+      oid: 'b'.repeat(40),
+      size: 5,
+    },
+  ];
+  let call;
+  const blobs = readBaselineBlobs('/repo', entries, (file, args, options) => {
+    call = { file, args, options };
+    return Buffer.concat([
+      Buffer.from(`${'a'.repeat(40)} blob 4\n`),
+      Buffer.from('one\n'),
+      Buffer.from('\n'),
+      Buffer.from(`${'b'.repeat(40)} blob 5\n`),
+      Buffer.from('two\n\n'),
+      Buffer.from('\n'),
+    ]);
+  });
+
+  assert.equal(call.file, 'git');
+  assert.deepEqual(call.args, ['-C', '/repo', 'cat-file', '--batch']);
+  assert.equal(call.options.input, `${'a'.repeat(40)}\n${'b'.repeat(40)}\n`);
+  assert.equal(blobs.get('a.json').toString('utf8'), 'one\n');
+  assert.equal(blobs.get('b.json').toString('utf8'), 'two\n\n');
+  assert.throws(
+    () =>
+      readBaselineBlobs('/repo', entries, () =>
+        Buffer.from(`${'a'.repeat(40)} blob 4\nxx`),
+      ),
+    /truncated/,
+  );
+});
+
+test('baseline universe resolution cannot exclude a candidate without archive validation', () => {
+  const oid = 'f'.repeat(40);
+  const path = 'docs/audits/runs/v060-aaaaaaaaaaaa.json';
+  let validations = 0;
+  const gitRunner = (_file, args) => {
+    if (args.includes('ls-tree')) {
+      return `100644 blob ${oid} 2\t${path}\0`;
+    }
+    if (args.includes('cat-file')) {
+      return Buffer.concat([
+        Buffer.from(`${oid} blob 2\n`),
+        Buffer.from('{}'),
+        Buffer.from('\n'),
+      ]);
+    }
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+  const universe = resolveBaselineAuditUniverse({
+    repoDir: '/repo',
+    baseline: SHA,
+    gitRunner,
+    receiptSchema: { type: 'object' },
+    evidenceValidator(input) {
+      validations += 1;
+      assert.equal(input.excludedEvidenceEntries[0].kind, 'run-state');
+      assert.equal(input.blobs.get(path).toString('utf8'), '{}');
+      assert.deepEqual(input.receiptSchema, { type: 'object' });
+      return {
+        fileCount: 1,
+        runCount: 1,
+        tripletCount: 0,
+        findingCount: 0,
+        runStates: [],
+      };
+    },
+  });
+
+  assert.equal(validations, 1);
+  assert.equal(universe.scope.excludedEvidence.count, 1);
+  assert.equal(universe.evidence.fileCount, 1);
+
+  assert.throws(
+    () =>
+      resolveBaselineAuditUniverse({
+        repoDir: '/repo',
+        baseline: SHA,
+        gitRunner,
+        receiptSchema: { type: 'object' },
+        evidenceValidator() {
+          throw new Error('tampered archive');
+        },
+      }),
+    /tampered archive/,
+  );
+});
+
+test('loadOrInitializeState seals the exact auditable universe and rejects valid-looking resume drift', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chd-audit-state-v2-'));
+  const statePath = join(dir, 'state.json');
+  const treeOutput = [
+    `100644 blob ${'d'.repeat(40)} 12\tpackage.json`,
+    `100644 blob ${'e'.repeat(40)} 7\tREADME.md`,
+    '',
+  ].join('\0');
+  const gitRunner = (_file, args) => {
+    if (args.includes('ls-tree')) return treeOutput;
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+  const opts = {
+    repoDir: dir,
+    baseline: SHA,
+    auditDate: '2026-07-26',
+    gitRunner,
+  };
+  const paths = { state: statePath };
+
+  try {
+    const state = loadOrInitializeState(opts, ['security'], paths);
+    assert.equal(state.version, 2);
+    assert.deepEqual(
+      {
+        tracked: state.scope.tracked.count,
+        auditable: state.scope.auditable.count,
+        excluded: state.scope.excludedEvidence.count,
+      },
+      { tracked: 2, auditable: 2, excluded: 0 },
+    );
+    assert.deepEqual(state.sections[0].files, ['package.json', 'README.md']);
+
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    assert.deepEqual(
+      loadOrInitializeState(opts, ['security'], paths),
+      state,
+    );
+
+    const digestDrift = structuredClone(state);
+    digestDrift.scope.tracked.manifestSha256 = '0'.repeat(64);
+    writeFileSync(statePath, `${JSON.stringify(digestDrift, null, 2)}\n`);
+    assert.throws(
+      () => loadOrInitializeState(opts, ['security'], paths),
+      /scope.*drift/i,
+    );
+
+    const orderDrift = structuredClone(state);
+    orderDrift.sections[0].files.reverse();
+    writeFileSync(statePath, `${JSON.stringify(orderDrift, null, 2)}\n`);
+    assert.throws(
+      () => loadOrInitializeState(opts, ['security'], paths),
+      /baseline file order/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('capBatchByBytes keeps a contiguous prefix and always makes progress', () => {
@@ -343,6 +542,12 @@ test('parseArgs: requires --baseline, defaults to --plan', () => {
   assert.equal(a.floor, 15);
   assert.equal(a.maxBatchBytes, 96 * 1024);
   assert.equal(a.workerTimeoutMs, 10 * 60 * 1000);
+  assert.equal(a.ledgerExplicit, false);
+  assert.equal(
+    parseArgs(['--baseline', SHA, '--ledger', 'docs/audits/next-run.md'])
+      .ledgerExplicit,
+    true,
+  );
   assert.equal(parseArgs(['--baseline', SHA, '--max-batch-bytes', '123']).maxBatchBytes, 123);
   assert.equal(parseArgs(['--baseline', SHA, '--worker-timeout-ms', '456']).workerTimeoutMs, 456);
   assert.equal(parseArgs(['--baseline', SHA, '--run']).mode, 'run');
@@ -358,6 +563,53 @@ test('parseArgs: requires --baseline, defaults to --plan', () => {
   assert.throws(() => parseArgs(['--baseline', SHA, '--floor', '101']), /floor/);
   assert.throws(() => parseArgs(['--baseline', SHA, '--max-batch-bytes', '0']), /max-batch-bytes/);
   assert.throws(() => parseArgs(['--baseline', SHA, '--worker-timeout-ms', '0']), /worker-timeout-ms/);
+});
+
+test('v2 mutating runs require an explicit run-specific human ledger outside evidence directories', () => {
+  const state = { version: 2 };
+  const base = {
+    file: true,
+    repoDir: '/repo',
+    ledger: 'docs/audits/v060-review-phase-audit.md',
+    ledgerExplicit: false,
+  };
+  assert.throws(
+    () => assertV2LedgerTarget(base, state),
+    /explicit.*--ledger/i,
+  );
+  assert.throws(
+    () =>
+      assertV2LedgerTarget(
+        { ...base, ledgerExplicit: true },
+        state,
+      ),
+    /historical v0\.6 ledger/i,
+  );
+  assert.throws(
+    () =>
+      assertV2LedgerTarget(
+        {
+          ...base,
+          ledgerExplicit: true,
+          ledger: 'docs/audits/runs/next.md',
+        },
+        state,
+      ),
+    /sealed JSON evidence director/i,
+  );
+  assert.equal(
+    assertV2LedgerTarget(
+      {
+        ...base,
+        ledgerExplicit: true,
+        ledger: 'docs/audits/next-baseline-review.md',
+      },
+      state,
+    ),
+    true,
+  );
+  assert.equal(assertV2LedgerTarget(base, { version: 1 }), true);
+  assert.equal(assertV2LedgerTarget({ ...base, file: false }, state), true);
 });
 
 test('ensureBaselineWorktree creates and verifies an exact clean detached checkout', () => {

@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { AUDIT_SCOPE_POLICY_VERSION } from "./audit-scope.mjs";
 import { dedupKey, normalizePath, validateFinding } from "./file-findings.mjs";
 import { GATES } from "./gates.config.mjs";
 
@@ -248,6 +249,15 @@ export function assertExactPartition(files, sectionFiles) {
         .join("; "),
     );
   }
+  for (const section of AUDIT_SECTIONS) {
+    const actual = sectionFiles.find((entry) => entry.section === section).files;
+    const expected = files.filter((file) => sectionForFile(file) === section);
+    if (!isDeepStrictEqual(actual, expected)) {
+      throw new Error(
+        `files for ${section} must retain baseline file order`,
+      );
+    }
+  }
   return true;
 }
 
@@ -271,6 +281,7 @@ export function initializeAuditState({
   gates,
   auditDate,
   sectionFiles,
+  scope,
 } = {}) {
   requireNonemptyString(baseline, "baseline");
   validateGates(gates);
@@ -281,12 +292,14 @@ export function initializeAuditState({
     entry && Array.isArray(entry.files) ? entry.files : [],
   );
   assertExactPartition(allFiles, sectionFiles);
+  assertAuditScope(scope, allFiles.length);
 
   return {
-    version: 1,
+    version: 2,
     baseline,
     auditDate,
     gates: [...gates],
+    scope: cloneSerializable(scope),
     sections: sectionFiles.map(({ section, files }) => ({
       section,
       files: [...files],
@@ -301,7 +314,7 @@ export function initializeAuditState({
 export function selectNextPendingBatch(state, maxFiles) {
   if (!Number.isInteger(maxFiles) || maxFiles < 1)
     throw new Error("maxFiles must be a positive integer");
-  if (!state || state.version !== 1)
+  if (!state || ![1, 2].includes(state.version))
     throw new Error("unsupported or missing audit state");
   requireNonemptyString(state.baseline, "state.baseline");
   validateAuditDate(state.auditDate);
@@ -647,8 +660,79 @@ function assertStoredIssueMap(issueNumbersByGate, gates, label) {
   return normalized;
 }
 
+function assertExactObjectKeys(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (!isDeepStrictEqual(actual, expected)) {
+    throw new Error(
+      `${label} must contain exactly: ${expected.join(", ")}`,
+    );
+  }
+}
+
+function assertAuditScopeMetric(metric, label) {
+  assertExactObjectKeys(metric, ["count", "bytes", "manifestSha256"], label);
+  for (const field of ["count", "bytes"]) {
+    if (!Number.isSafeInteger(metric[field]) || metric[field] < 0) {
+      throw new Error(`${label}.${field} must be a nonnegative safe integer`);
+    }
+  }
+  if (
+    typeof metric.manifestSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(metric.manifestSha256)
+  ) {
+    throw new Error(
+      `${label}.manifestSha256 must be a lowercase SHA-256 digest`,
+    );
+  }
+}
+
+function assertAuditScope(scope, auditableFileCount) {
+  assertExactObjectKeys(
+    scope,
+    ["policyVersion", "tracked", "auditable", "excludedEvidence"],
+    "state.scope",
+  );
+  if (scope.policyVersion !== AUDIT_SCOPE_POLICY_VERSION) {
+    throw new Error(
+      `unsupported audit scope policy ${JSON.stringify(scope.policyVersion)}`,
+    );
+  }
+  assertAuditScopeMetric(scope.tracked, "state.scope.tracked");
+  assertAuditScopeMetric(scope.auditable, "state.scope.auditable");
+  assertAuditScopeMetric(
+    scope.excludedEvidence,
+    "state.scope.excludedEvidence",
+  );
+  if (
+    scope.tracked.count !==
+    scope.auditable.count + scope.excludedEvidence.count
+  ) {
+    throw new Error(
+      "state.scope count equation must satisfy tracked = auditable + excludedEvidence",
+    );
+  }
+  if (
+    scope.tracked.bytes !==
+    scope.auditable.bytes + scope.excludedEvidence.bytes
+  ) {
+    throw new Error(
+      "state.scope byte equation must satisfy tracked = auditable + excludedEvidence",
+    );
+  }
+  if (scope.auditable.count !== auditableFileCount) {
+    throw new Error(
+      "state.scope auditable count does not equal the section file count",
+    );
+  }
+  return true;
+}
+
 export function assertAuditState(state) {
-  if (!state || state.version !== 1)
+  if (!state || ![1, 2].includes(state.version))
     throw new Error("unsupported or missing audit state");
   requireNonemptyString(state.baseline, "state.baseline");
   validateAuditDate(state.auditDate);
@@ -669,6 +753,11 @@ export function assertAuditState(state) {
     Array.isArray(section.files) ? section.files : [],
   );
   assertExactPartition(allFiles, state.sections);
+  if (state.version === 2) {
+    assertAuditScope(state.scope, allFiles.length);
+  } else if (state.scope !== undefined) {
+    throw new Error("legacy v1 audit state must not contain state.scope");
+  }
   const globalIssues = assertStoredIssueMap(
     state.issueNumbersByGate,
     state.gates,
@@ -841,11 +930,48 @@ function parseMarkdownRow(line) {
     .map((cell) => cell.trim());
 }
 
+const AUDIT_SCOPE_START = "<!-- audit-scope:start -->";
+const AUDIT_SCOPE_END = "<!-- audit-scope:end -->";
+
+function scopeMarkerIndexes(lines) {
+  const starts = [];
+  const ends = [];
+  for (const [index, line] of lines.entries()) {
+    const trimmed = line.trim();
+    if (trimmed === AUDIT_SCOPE_START) starts.push(index);
+    if (trimmed === AUDIT_SCOPE_END) ends.push(index);
+  }
+  if (
+    starts.length !== ends.length ||
+    starts.length > 1 ||
+    (starts.length === 1 && starts[0] >= ends[0])
+  ) {
+    throw new Error(
+      "ledger audit scope markers must form at most one ordered pair",
+    );
+  }
+  return starts.length ? { start: starts[0], end: ends[0] } : null;
+}
+
+function renderAuditScopeBlock(scope) {
+  const format = new Intl.NumberFormat("en-US").format;
+  return [
+    AUDIT_SCOPE_START,
+    `**Audit scope (policy v${scope.policyVersion}):** ` +
+      `${format(scope.tracked.count)} tracked files (${format(scope.tracked.bytes)} bytes) = ` +
+      `${format(scope.auditable.count)} auditable files (${format(scope.auditable.bytes)} bytes) + ` +
+      `${format(scope.excludedEvidence.count)} excluded sealed-evidence files ` +
+      `(${format(scope.excludedEvidence.bytes)} bytes).`,
+    AUDIT_SCOPE_END,
+  ];
+}
+
 export function updateLedgerMarkdown(markdown, state) {
   requireLedgerState(state);
   if (typeof markdown !== "string")
     throw new Error("ledger markdown must be a string");
   const lines = markdown.split("\n");
+  const existingScope = scopeMarkerIndexes(lines);
   const headerIndex = lines.findIndex((line) => {
     if (!/^\s*\|/.test(line)) return false;
     const cells = parseMarkdownRow(line);
@@ -898,6 +1024,27 @@ export function updateLedgerMarkdown(markdown, state) {
     replacement.push(markdownRow(cells));
   }
   lines.splice(headerIndex, tableEnd - headerIndex, ...replacement);
+  if (state.version === 2) {
+    let marker = scopeMarkerIndexes(lines);
+    if (marker) {
+      let deleteCount = marker.end - marker.start + 1;
+      if (lines[marker.end + 1] === "") deleteCount += 1;
+      lines.splice(marker.start, deleteCount);
+    }
+    const updatedHeaderIndex = lines.findIndex((line) => {
+      if (!/^\s*\|/.test(line)) return false;
+      const cells = parseMarkdownRow(line);
+      return cells[0] === "Section" && cells[1] === "Files";
+    });
+    lines.splice(
+      updatedHeaderIndex,
+      0,
+      ...renderAuditScopeBlock(state.scope),
+      "",
+    );
+  } else if (existingScope) {
+    throw new Error("legacy v1 ledger must not contain audit scope markers");
+  }
   return lines.join("\n");
 }
 
