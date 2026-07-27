@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0121-b1314fa6bc26.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "d48e7ea2c3c4",
+      "title": "Blocked-continuation history is presented without freshness",
+      "number": 3219
+    },
+    {
+      "lens": "security",
+      "key": "38271f9d9009",
+      "title": "Unused-rule detector can encourage removal of safety-relevant bare-tool denies",
+      "number": 3220
+    },
+    {
+      "lens": "data-integrity",
+      "key": "147eac1eb8ce",
+      "title": "Validated prune snippet performs the opposite configuration change",
+      "number": 3221
+    },
+    {
+      "lens": "data-integrity",
+      "key": "d8eb8551ab39",
+      "title": "Backup policy state is called current without an observation date",
+      "number": 3222
+    },
+    {
+      "lens": "security",
+      "key": "84a2e1f53778",
+      "title": "Prompt-friction fix grants unrestricted access to arbitrary non-Bash tools",
+      "number": 3223
+    },
+    {
+      "lens": "data-integrity",
+      "key": "8068fd6f1d64",
+      "title": "Prompt-friction safety claim lacks provenance and validated evidence",
+      "number": 3224
+    },
+    {
+      "lens": "data-integrity",
+      "key": "75aafd9fa977",
+      "title": "Risky-action history is emitted without as-of or stale demotion",
+      "number": 3225
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 7,
+    "existing": 0,
+    "skipped": 0
+  }
+}

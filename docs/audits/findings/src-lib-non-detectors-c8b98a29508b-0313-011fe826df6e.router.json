@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0313-011fe826df6e.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "6350186deb12",
+      "title": "Filename-stem matching can fabricate file-path correction recommendations",
+      "number": 3162
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 0,
+    "skipped": 0
+  }
+}

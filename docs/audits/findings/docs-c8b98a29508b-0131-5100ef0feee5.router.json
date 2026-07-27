@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/docs-c8b98a29508b-0131-5100ef0feee5.json",
+  "section": "docs/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "8dcd697faadb",
+      "title": "Canonical deployment exposes live Claude history on the LAN without authentication",
+      "number": 3295
+    },
+    {
+      "lens": "security",
+      "key": "8e10d7b6e21c",
+      "title": "Shadow and replay flows lack a fail-closed guard against subscription-OAuth egress of Claude history",
+      "number": 3296
+    },
+    {
+      "lens": "data-integrity",
+      "key": "8fc327890fe2",
+      "title": "Efficiency roadmap's dollar and coverage claims are not reproducible from a cited artifact",
+      "number": 3297
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0225-109ba758acab.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "ff6a72d7673e",
+      "title": "Compaction drops do not reduce the reported rolling growth rate",
+      "number": 3139
+    },
+    {
+      "lens": "performance",
+      "key": "e61749e1cc50",
+      "title": "Debug-log ingestion has no default entry or byte budget",
+      "number": 3140
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

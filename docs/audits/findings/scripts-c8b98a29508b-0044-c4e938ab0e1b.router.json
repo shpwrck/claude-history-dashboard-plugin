@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/scripts-c8b98a29508b-0044-c4e938ab0e1b.json",
+  "section": "scripts/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "22305874d4c2",
+      "title": "Predictable artifact temporary path permits symlink overwrite",
+      "number": 3080
+    },
+    {
+      "lens": "data-integrity",
+      "key": "8abc5df28dc8",
+      "title": "Line-delimited Git parsing can omit valid Markdown filenames",
+      "number": 3081
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

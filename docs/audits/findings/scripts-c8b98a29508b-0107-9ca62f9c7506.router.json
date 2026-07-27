@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/scripts-c8b98a29508b-0107-9ca62f9c7506.json",
+  "section": "scripts/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "79e6293434e6",
+      "title": "Legacy navMs includes a fixed two-second delay",
+      "number": 3092
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "producerHarness": "codex",
+  "receiptSha256": "d54b0189f7dcb0d2456e41a5d0ef080ff07ee4f37dd547114f15810e6b83b02e",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "src/components",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFilesSha256": "595484711e0357d8be98f798dfe4b19dd7db70a7feb64f8decd8fca2bf729c33"
+}

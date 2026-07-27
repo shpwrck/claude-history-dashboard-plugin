@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-components-c8b98a29508b-0027-b81d7210aa6c.json",
+  "section": "src/components",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "a23d6fc24c87",
+      "title": "Latency bars route to unrelated session-duration evidence",
+      "number": 3256
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0303-5559a8e65113.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "9fccb6892893",
+      "title": "Unrelated git undo commands are attributed to preceding file edits",
+      "number": 3160
+    },
+    {
+      "lens": "performance",
+      "key": "9c95b81e713f",
+      "title": "API errors are rescanned and resorted for every session",
+      "number": 3161
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

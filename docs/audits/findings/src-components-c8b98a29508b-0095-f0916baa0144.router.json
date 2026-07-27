@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-components-c8b98a29508b-0095-f0916baa0144.json",
+  "section": "src/components",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "e754a841c81a",
+      "title": "Route-scoped radar rankings consume unfiltered runtime events",
+      "number": 3269
+    },
+    {
+      "lens": "performance",
+      "key": "faca67e71bc4",
+      "title": "Polling permits overlapping status requests",
+      "number": 3270
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

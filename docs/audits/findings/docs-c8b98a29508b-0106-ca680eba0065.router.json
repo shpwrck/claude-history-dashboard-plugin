@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/docs-c8b98a29508b-0106-ca680eba0065.json",
+  "section": "docs/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "47f64ef2b3df",
+      "title": "Historical Shadow Calls count lacks an as-of date",
+      "number": 3293
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 0,
+    "skipped": 0
+  }
+}

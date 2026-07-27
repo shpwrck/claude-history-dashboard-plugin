@@ -1,0 +1,330 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "fixtures/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/config/rules.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/build-form-fields.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/csv-to-records.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/filter-valid.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/form.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/import-csv.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/kind-label.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/sanitize.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/summarize.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/validate-batch.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/validate-record.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/test.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/high-centrality-audit-consumer/tree/src/audit.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/high-centrality-audit-consumer/tree/src/buffer.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/high-centrality-audit-consumer/tree/src/event-bus.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/config/rules.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static validation constants perform no privileged, external, filesystem, browser, or command operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Validator requirements, length limit, and allowed kinds are explicit deterministic constants."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Small module-level constant arrays are not a hot-path or new runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/build-form-fields.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "No security-sensitive operation or untrusted-data sink is implemented."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Form descriptor construction is not a detector, parser, calculation, recommendation, or validated fix."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No hot-path implementation or shipped surface exists."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/csv-to-records.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The function contains no filesystem, browser, command, credential, or other security-sensitive sink."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This is an intentional pre-task stub in the frozen matched-pair proof corpus; the manifest defines implementation as the controlled task, so the unimplemented behavior is valid fixture input rather than a product data-integrity defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No ingest algorithm exists to assess for memory or latency behavior."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/filter-valid.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The function contains no security-sensitive operation or sink."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This is an intentional pre-task stub in the frozen matched-pair proof corpus; the manifest defines implementation as the controlled task, so the unimplemented behavior is valid fixture input rather than a product data-integrity defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No filtering algorithm exists to assess as a hot path."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/form.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "String truncation is not an HTML sink and performs no privileged or external operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "The transformation deterministically preserves names at or below the configured limit and truncates longer names to that exact limit."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "The function performs one length check and at most one bounded slice per call, with no repeated recomputation."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/import-csv.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Header membership checking performs no file access, command execution, or unsafe rendering."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Header completeness is deterministically derived from every configured required field."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "The bounded required-field scan performs only three header membership checks with the current configuration."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/kind-label.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "No browser sink, privileged operation, or external interaction is implemented."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Human-readable labeling is not a detector, parser, calculation, recommendation, or validated fix."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No hot-path implementation or shipped surface exists."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/sanitize.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "No HTML rendering, filesystem write, command execution, or other governed security sink is present."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This is an intentional pre-task stub in the frozen matched-pair proof corpus; the manifest defines implementation as the controlled task, so the unimplemented behavior is valid fixture input rather than a product data-integrity defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No sanitization algorithm exists to assess for hot-path cost."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/summarize.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The function contains no security-sensitive operation or sink."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This is an intentional pre-task stub in the frozen matched-pair proof corpus; the manifest defines implementation as the controlled task, so the unimplemented behavior is valid fixture input rather than a product data-integrity defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No aggregation algorithm exists to assess for repeated scans or memory cost."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/validate-batch.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The function contains no security-sensitive operation or sink."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This is an intentional pre-task stub in the frozen matched-pair proof corpus; the manifest defines implementation as the controlled task, so the unimplemented behavior is valid fixture input rather than a product data-integrity defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No batch-validation algorithm exists to assess for N-times recomputation."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/src/validate-record.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The function contains no security-sensitive operation or sink."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This is an intentional pre-task stub in the frozen matched-pair proof corpus; the manifest defines implementation as the controlled task, so the unimplemented behavior is valid fixture input rather than a product data-integrity defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No validation algorithm exists to assess as a hot path."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The test definitions contain no security-sensitive runtime sink or production boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Tests provide concrete deterministic inputs and expected outputs for validation, filtering, counts, sanitization, CSV parsing, and batch classification."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The functional tests neither implement a hot path nor define a performance surface or budget."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/high-centrality-audit-consumer/tree/src/audit.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "No audit implementation, privileged operation, credential flow, or external sink exists."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub defines no detector, calculation, recommendation claim, provenance, or validated fix."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No audit processing surface exists to assess for recomputation, memory, or latency."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/high-centrality-audit-consumer/tree/src/buffer.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "No buffering implementation, security boundary, or governed sink exists."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub defines no detector, parser, calculation, recommendation claim, or validated fix."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No buffer implementation or shipped surface exists to assess against a memory budget."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/high-centrality-audit-consumer/tree/src/event-bus.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The in-memory synchronous event bus has no auth, filesystem, browser, command, credential, container, or network boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Event delivery is not a detector, parser, calculation, recommendation claim, or validated fix."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Publish performs one direct pass over the topic's subscribers; unsubscribe filters only that topic, and reset clears retained subscriptions."
+        }
+      ]
+    }
+  ],
+  "findings": []
+}

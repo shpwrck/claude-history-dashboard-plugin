@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0091-190614f0efbb.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "05677739ff3e",
+      "title": "Historical hook errors are promoted to an undated current warning",
+      "number": 3210
+    },
+    {
+      "lens": "data-integrity",
+      "key": "6a33c3b35fb3",
+      "title": "Suggested hook fix disables genuine failures",
+      "number": 3211
+    },
+    {
+      "lens": "security",
+      "key": "03d3c4bca465",
+      "title": "MCP server names enable command injection in generated fixes",
+      "number": 3212
+    },
+    {
+      "lens": "data-integrity",
+      "key": "92da84183115",
+      "title": "Generated MCP authentication fix is not copy-paste-safe",
+      "number": 3213
+    },
+    {
+      "lens": "data-integrity",
+      "key": "dcd668111a38",
+      "title": "Overload detector turns a fuzzy time join into a certain repayment claim",
+      "number": 3214
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 5,
+    "existing": 0,
+    "skipped": 0
+  }
+}

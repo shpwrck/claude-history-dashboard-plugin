@@ -1,0 +1,74 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/cold-ingest-bench.mjs",
+    "scripts/cold-ingest-worker.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/cold-ingest-bench.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Temporary fixture and database paths are generated under the OS temp directory, size and worker-count inputs are bounded, and workers receive fixed module URLs rather than executable input."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Serial and parallel row sets and assembled datasets are compared exactly before reporting, with normalized reproducibility hashes included in the summary."
+        },
+        {
+          "gate": "performance",
+          "status": "finding",
+          "reason": "The minimum-speedup environment value is converted with Number without finite positive validation, so NaN disables the benchmark failure condition."
+        }
+      ]
+    },
+    {
+      "file": "scripts/cold-ingest-worker.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "The worker consumes only parent-supplied session descriptors, imports fixed local parsing helpers, and returns failures as structured messages without executing supplied code."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Each session is paired with its current file signature and parsed through the same row builder used by the serial control path."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "The worker performs one linear pass over its parent-bounded chunk and returns rows only; the parent retains the single-writer merge policy."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "performance",
+      "severity": "medium",
+      "title": "Cold-ingest benchmark accepts a NaN speedup threshold",
+      "files": [
+        "scripts/cold-ingest-bench.mjs:224",
+        "scripts/cold-ingest-bench.mjs:296"
+      ],
+      "where": "scripts/cold-ingest-bench.mjs:224 and scripts/cold-ingest-bench.mjs:296",
+      "what": "CHD_COLD_INGEST_MIN_SPEEDUP is converted with Number but never checked for finiteness or positivity. An invalid non-empty value becomes NaN; JavaScript then evaluates every speedup < NaN comparison as false, so even a regression below 1x exits successfully and the performance gate is silently disabled.",
+      "fix": "Parse the threshold with the same fail-closed bounded-number helper used for the other benchmark controls, requiring a finite positive value before creating the fixture.",
+      "acceptance": "A focused parser test rejects empty-invalid, NaN, Infinity, zero, and negative threshold values; running the benchmark with CHD_COLD_INGEST_MIN_SPEEDUP=garbage exits non-zero before fixture construction, while a finite positive value preserves the measured comparison.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "At the immutable baseline, line 224 yields NaN for a nonnumeric non-empty value and line 296 compares the measured speedup against it. A direct JavaScript reproduction with speedup 0.25 produced min=NaN, printed=NaN, and speedup<min=false, confirming the gate fails open."
+    }
+  ]
+}

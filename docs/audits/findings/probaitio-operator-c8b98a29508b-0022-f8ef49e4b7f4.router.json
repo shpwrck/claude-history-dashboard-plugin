@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0022-f8ef49e4b7f4.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "69ccf0cb09f2",
+      "title": "Default ingest endpoint sends session artifacts and bearer token over plaintext HTTP",
+      "number": 3323
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 0,
+    "skipped": 0
+  }
+}

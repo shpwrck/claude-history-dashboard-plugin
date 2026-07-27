@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/scripts-c8b98a29508b-0119-814882fe8b6e.json",
+  "section": "scripts/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "145687662e77",
+      "title": "Fixture gate commands execute in an unjailed host shell",
+      "number": 3096
+    },
+    {
+      "lens": "data-integrity",
+      "key": "578c4c773ef0",
+      "title": "Proof receipts discard the run-level evidence required to reproduce their claims",
+      "number": 3097
+    },
+    {
+      "lens": "performance",
+      "key": "d4a3679c512b",
+      "title": "Concurrent worker output is buffered without a size limit",
+      "number": 3098
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

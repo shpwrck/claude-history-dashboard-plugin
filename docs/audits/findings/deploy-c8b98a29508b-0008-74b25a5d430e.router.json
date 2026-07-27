@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/deploy-c8b98a29508b-0008-74b25a5d430e.json",
+  "section": "deploy/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [],
+  "existing": [
+    {
+      "lens": "security",
+      "key": "314a2d3c469e",
+      "title": "CI runner image is not pinned to an immutable digest",
+      "number": 3340
+    }
+  ],
+  "skipped": [],
+  "counts": {
+    "created": 0,
+    "existing": 1,
+    "skipped": 0
+  }
+}

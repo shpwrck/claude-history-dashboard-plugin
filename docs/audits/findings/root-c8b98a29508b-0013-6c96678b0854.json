@@ -1,0 +1,320 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "root",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "bundle-budget.json",
+    "cold-load-budget.json",
+    "docker-compose.local.yml",
+    "docker-compose.spa.yml",
+    "docker-compose.tls.yml",
+    "docker-compose.yml",
+    "eslint.config.js",
+    "index.html",
+    "nginx.spa.conf.template",
+    "package-lock.json",
+    "package.json",
+    "perf-probe-budget.json"
+  ],
+  "verdicts": [
+    {
+      "file": "bundle-budget.json",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static bundle-budget configuration has no security boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "No detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Inspected per-flavor shell, vendor, route, and default byte caps."
+        }
+      ]
+    },
+    {
+      "file": "cold-load-budget.json",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static performance thresholds have no security boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "No detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Inspected FCP, TTI, content-paint, and CLS budgets for both flavors."
+        }
+      ]
+    },
+    {
+      "file": "docker-compose.local.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Inspected read-only ~/.claude mount, keep-id mapping, and loopback-default port binding."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Compose override contains no detector, parser, or calculation logic."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No application hot-path implementation or performance surface."
+        }
+      ]
+    },
+    {
+      "file": "docker-compose.spa.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The LAN-exposed SPA deploy uses a mutable image tag; see matching supply-chain finding."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Compose configuration contains no detector, parser, or calculation logic."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No application hot-path implementation or performance surface."
+        }
+      ]
+    },
+    {
+      "file": "docker-compose.tls.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The TLS proxy deploy uses a mutable image tag; see matching supply-chain finding."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Compose configuration contains no detector, parser, or calculation logic."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No application hot-path implementation or performance surface."
+        }
+      ]
+    },
+    {
+      "file": "docker-compose.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The base application deploy uses a mutable image tag; see matching supply-chain finding."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Compose configuration contains no detector, parser, or calculation logic."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No application hot-path implementation or performance surface."
+        }
+      ]
+    },
+    {
+      "file": "eslint.config.js",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Lint configuration does not implement an auth, egress, serving, or container boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "No detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "No runtime hot-path code or performance budget."
+        }
+      ]
+    },
+    {
+      "file": "index.html",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Inspected static entrypoint; SPA/sample CSP is injected at build time and no unsafe inline executable content is present."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Static document contains no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Inspected minimal document shell and single module entrypoint."
+        }
+      ]
+    },
+    {
+      "file": "nginx.spa.conf.template",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Inspected static-only boundary, /api/ hard-404, CSP, anti-framing, nosniff, and restrictive resource headers."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Proxy template contains no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Inspected gzip and immutable caching for fingerprinted assets with no-cache HTML shell."
+        }
+      ]
+    },
+    {
+      "file": "package-lock.json",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "Baseline npm audit reports seven vulnerable dependency entries: two already tracked in #2865 and five newly untracked across the Hono, fast-uri, and PostCSS chains."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Dependency lockfile contains no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Lockfile does not implement a runtime hot path or performance surface."
+        }
+      ]
+    },
+    {
+      "file": "package.json",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Inspected dependency and script declarations; no embedded secret, install lifecycle hook, or ungoverned credential egress was found."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Manifest contains no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Inspected declared bundle, cold-load, and probe measurement commands."
+        }
+      ]
+    },
+    {
+      "file": "perf-probe-budget.json",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static latency budget configuration has no security boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "No detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Inspected endpoint warm-latency and dataset size/cold-build budgets."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "security",
+      "severity": "high",
+      "title": "Deployment images are selected by mutable tags",
+      "files": [
+        "docker-compose.spa.yml:18",
+        "docker-compose.tls.yml:16",
+        "docker-compose.yml:9"
+      ],
+      "where": "docker-compose.spa.yml:18; docker-compose.tls.yml:16; docker-compose.yml:9",
+      "what": "All three deployable Compose definitions select a mutable image tag (latest or 2-alpine). A later registry retag can change the deployed executable without a repository change or review, defeating release provenance and creating a supply-chain exposure.",
+      "fix": "Replace each image reference with the approved immutable image digest, optionally retaining a human-readable version tag before @sha256.",
+      "acceptance": "`docker compose config` for each supported deployment shows every production image reference containing `@sha256:`; deployment of the same checkout resolves the same image digest on repeated runs.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Adversarial re-read of the cited baseline lines confirmed the exact mutable references: ghcr.io/shpwrck/claude-history-dashboard:latest, ghcr.io/shpwrck/claude-history-dashboard-spa:latest, and caddy:2-alpine."
+    },
+    {
+      "lens": "security",
+      "severity": "high",
+      "title": "Update transitive dependencies for body-parser and brace-expansion advisories",
+      "files": [
+        "package-lock.json:1843",
+        "package-lock.json:1885"
+      ],
+      "where": "package-lock.json:1843-1862; package-lock.json:1885-1896",
+      "what": "The pinned baseline still resolves body-parser 2.2.2 and brace-expansion 5.0.6. A fresh npm audit reports the previously tracked body-parser denial-of-service advisory and both high-severity brace-expansion denial-of-service advisories, so #2865 remains current.",
+      "fix": "Trace both transitive paths and update the narrowest safe direct dependencies or lockfile resolutions to fixed versions.",
+      "acceptance": "npm audit no longer reports GHSA-v422-hmwv-36x6, GHSA-3jxr-9vmj-r5cp, or GHSA-mh99-v99m-4gvg, and npm run validate remains green.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Re-ran npm audit --json against the immutable baseline on 2026-07-26 and re-read the exact body-parser 2.2.2 and brace-expansion 5.0.6 lock entries."
+    },
+    {
+      "lens": "security",
+      "severity": "high",
+      "title": "Resolve newly reported Hono, fast-uri, and PostCSS advisories",
+      "files": [
+        "package-lock.json:603",
+        "package-lock.json:732",
+        "package-lock.json:2666",
+        "package-lock.json:2976",
+        "package-lock.json:3990"
+      ],
+      "where": "package-lock.json:603-614,732-755,2666-2680,2976-2984,3990-4017",
+      "what": "A fresh npm audit at the pinned baseline reports five vulnerable dependency entries not covered by #2865: @hono/node-server and Hono through the bundled MCP SDK toolchain, fast-uri through production Ajv, and build-time PostCSS. The advisories cover path traversal, request-data confusion/disclosure and XSS, URI host confusion, and source-map path traversal; their exact shipped/build reachability has not yet been dispositioned.",
+      "fix": "Upgrade the narrowest direct dependencies and regenerate the lockfile; for any advisory that cannot be upgraded, prove and document why its vulnerable code path is unreachable in the shipped server, SPA, plugin payload, and build pipeline.",
+      "acceptance": "npm audit no longer reports GHSA-frvp-7c67-39w9, GHSA-xgm2-5f3f-mvvc, GHSA-hvrm-45r6-mjfj, GHSA-w62v-xxxg-mg59, GHSA-v2hh-gcrm-f6hx, GHSA-4c8g-83qw-93j6, or GHSA-r28c-9q8g-f849; npm run validate and the plugin payload tests pass.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Re-ran npm audit --json against the immutable baseline on 2026-07-26 and re-read all five cited lock entries and their direct/transitive classifications."
+    }
+  ]
+}

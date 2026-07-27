@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0050-0ec492838aa3.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "580134e60c8e",
+      "title": "Read-only RemoteSession role exposes session registration URLs",
+      "number": 3327
+    },
+    {
+      "lens": "security",
+      "key": "473d7cc37dc3",
+      "title": "Manager role has unused cluster-wide node-read privileges",
+      "number": 3328
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

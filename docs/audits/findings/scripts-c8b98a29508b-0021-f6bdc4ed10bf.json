@@ -1,0 +1,74 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/check-llm-egress.mjs",
+    "scripts/check-llm-egress.test.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/check-llm-egress.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The LLM-egress gate independently counts scrub and send calls by registry ID but does not prove that the scrubbed value is the payload sent to Anthropic."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "This governance checker does not produce recommendation claims, arithmetic results, historical signals, or validated fix snippets."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This is a bounded CI/release checker, not request-path or ingest hot-path code, and it introduces no runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "scripts/check-llm-egress.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The tests confirm only independent presence of scrub and wrapper calls and omit an adversarial case where the sent payload is unrelated to the scrub result."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "These unit tests do not generate recommendations, calculations, historical claims, or validated remediation snippets."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This test file neither executes in a production hot path nor defines a shipped surface requiring a probe or budget."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "security",
+      "severity": "high",
+      "title": "Egress gate does not prove that Anthropic receives the scrubbed payload",
+      "files": [
+        "scripts/check-llm-egress.mjs:125",
+        "scripts/check-llm-egress.test.mjs:77"
+      ],
+      "where": "scripts/check-llm-egress.mjs:125; scripts/check-llm-egress.mjs:128; scripts/check-llm-egress.mjs:154; scripts/check-llm-egress.mjs:165; scripts/check-llm-egress.test.mjs:77; scripts/check-llm-egress.test.mjs:123",
+      "what": "validateLlmWrapperCallSites reduces all calls to two registry-ID sets. Any egressScrub('id', ...) anywhere in the registered file satisfies the scrub requirement for callAnthropic('id', sensitivePayload), even if the scrub result is discarded, occurs in dead code, or scrubs a different value. Consequently this release gate can pass while ~/.claude-derived content is sent under subscription OAuth credentials, contrary to the stated egress boundary.",
+      "fix": "Make the approved send API accept only an opaque value returned by egressScrub, or extend the AST validation to require each protected wrapper payload argument to be data-flow-linked to a same-ID scrub result. Add a negative test where a scrub result is discarded and an unrelated payload is sent.",
+      "acceptance": "A fixture containing `egressScrub('server.fake', safeValue, options); callAnthropicMessages('server.fake', sensitiveValue);` must be rejected, while sending the captured same-ID scrub result must pass.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Adversarial re-read confirmed that collection records only file, line, callee, and registryId (lines 92-123), while validation stores only registry IDs in independent sets (lines 125-169). The tests at lines 77-155 exercise discovery and presence but contain no payload-flow assertion; therefore the bypass is reproducible from the audited logic and is not merely a missing-style check."
+    }
+  ]
+}

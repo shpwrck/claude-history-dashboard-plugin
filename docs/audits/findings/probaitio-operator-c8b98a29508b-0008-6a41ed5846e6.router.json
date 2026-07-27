@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0008-6a41ed5846e6.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "f6ac5f5f3040",
+      "title": "pull-secret prints the registry credential in command output",
+      "number": 3318
+    }
+  ],
+  "existing": [
+    {
+      "lens": "security",
+      "key": "44a5921519f3",
+      "title": "Downloaded operator tools are made executable without integrity verification",
+      "number": 3315
+    }
+  ],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 1,
+    "skipped": 0
+  }
+}

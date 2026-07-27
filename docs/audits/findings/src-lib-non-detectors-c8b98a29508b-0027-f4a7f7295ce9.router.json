@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0027-f4a7f7295ce9.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "e12ccaa1dc9a",
+      "title": "Raw transcript content can cross the LLM boundary without secret redaction",
+      "number": 3111
+    },
+    {
+      "lens": "data-integrity",
+      "key": "e1b1f6ba2067",
+      "title": "Substring server matching suppresses unrelated MCP adoption gaps",
+      "number": 3112
+    },
+    {
+      "lens": "data-integrity",
+      "key": "d1813c6f7b61",
+      "title": "Omitted thin factor remains in the sample and can confound advertised adjusted effects",
+      "number": 3113
+    },
+    {
+      "lens": "performance",
+      "key": "7041e64b74e3",
+      "title": "Unbounded categorical cardinality makes the regression cubic",
+      "number": 3114
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 4,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0183-844cfc8a0591.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "cbea6096997e",
+      "title": "Recommendations omit required structured provenance",
+      "number": 3242
+    },
+    {
+      "lens": "data-integrity",
+      "key": "5c3968826bec",
+      "title": "Default-validated CLAUDE.md fixes interpolate untrusted artifact text",
+      "number": 3243
+    },
+    {
+      "lens": "data-integrity",
+      "key": "0fe8114c72b7",
+      "title": "Historical review snapshots retain present-tense bottleneck claims",
+      "number": 3244
+    },
+    {
+      "lens": "performance",
+      "key": "3bba76445c5b",
+      "title": "Session opener clustering is unbounded quadratic work",
+      "number": 3245
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 4,
+    "existing": 0,
+    "skipped": 0
+  }
+}

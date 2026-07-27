@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0197-876745417437.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "63f4bcfa914c",
+      "title": "Generic shadow-axis adoption claims omit structured provenance",
+      "number": 3246
+    },
+    {
+      "lens": "data-integrity",
+      "key": "fa7071a61c45",
+      "title": "Undo-rate recommendation is not reproducible or dated",
+      "number": 3247
+    },
+    {
+      "lens": "data-integrity",
+      "key": "b332c6ec7956",
+      "title": "Uncovered-axis discovery claims lack provenance and freshness",
+      "number": 3248
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0017-99e607d7a1d6.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "12d9e942bc0d",
+      "title": "Cache and health recommendations omit required structured provenance",
+      "number": 3183
+    },
+    {
+      "lens": "data-integrity",
+      "key": "ca066ed359e3",
+      "title": "MCP schema savings can overcount heterogeneous per-session tool inventories",
+      "number": 3184
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

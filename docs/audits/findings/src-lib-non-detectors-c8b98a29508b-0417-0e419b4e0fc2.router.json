@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0417-0e419b4e0fc2.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "performance",
+      "key": "a7a4aaefd42e",
+      "title": "Forged ZIP size metadata bypasses inflated-byte memory limits",
+      "number": 3176
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0150-574f7ed91309.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "6013a92741ed",
+      "title": "Unquoted session directory name makes the recommended inspection command injectable",
+      "number": 3230
+    },
+    {
+      "lens": "security",
+      "key": "5edaa7b87e04",
+      "title": "Newlines in task subjects escape the comment-only command snippet",
+      "number": 3231
+    },
+    {
+      "lens": "data-integrity",
+      "key": "881300372ae1",
+      "title": "Seven recommendation detectors omit required structured provenance",
+      "number": 3232
+    },
+    {
+      "lens": "performance",
+      "key": "c31d9dba527f",
+      "title": "Concordance gate performs quadratic work over the full task corpus",
+      "number": 3233
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 4,
+    "existing": 0,
+    "skipped": 0
+  }
+}

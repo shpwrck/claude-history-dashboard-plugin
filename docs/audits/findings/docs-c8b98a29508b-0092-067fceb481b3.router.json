@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/docs-c8b98a29508b-0092-067fceb481b3.json",
+  "section": "docs/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "42dbeb2b57a6",
+      "title": "Personal OAuth sessions export ~/.claude-derived session content",
+      "number": 3289
+    },
+    {
+      "lens": "performance",
+      "key": "9e6437a91c56",
+      "title": "Push-ingest ships without a measurable resource budget",
+      "number": 3290
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

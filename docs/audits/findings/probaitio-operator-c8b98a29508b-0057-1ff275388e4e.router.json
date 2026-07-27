@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0057-1ff275388e4e.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "74ca4c00c4a0",
+      "title": "Scorecard test images are not pinned to immutable digests",
+      "number": 3329
+    },
+    {
+      "lens": "security",
+      "key": "a403acb33316",
+      "title": "Artifact shipping permits plaintext transmission of bearer credentials and ~/.claude session data",
+      "number": 3330
+    },
+    {
+      "lens": "performance",
+      "key": "3327bd3a7663",
+      "title": "Single-file batches bypass the body cap and synchronously amplify up to 64 MiB artifacts",
+      "number": 3331
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

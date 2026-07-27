@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/root-c8b98a29508b-0013-6c96678b0854.json",
+  "section": "root",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "4bfd11607afc",
+      "title": "Deployment images are selected by mutable tags",
+      "number": 3066
+    },
+    {
+      "lens": "security",
+      "key": "23e579a013c1",
+      "title": "Resolve newly reported Hono, fast-uri, and PostCSS advisories",
+      "number": 3067
+    }
+  ],
+  "existing": [
+    {
+      "lens": "security",
+      "key": "e7e706fc0cc3",
+      "title": "Update transitive dependencies for body-parser and brace-expansion advisories",
+      "number": 2865
+    }
+  ],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 1,
+    "skipped": 0
+  }
+}

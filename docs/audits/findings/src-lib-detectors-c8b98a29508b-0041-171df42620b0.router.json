@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0041-171df42620b0.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "636042258f4c",
+      "title": "Calculated recommendation claims omit required structured provenance",
+      "number": 3194
+    },
+    {
+      "lens": "data-integrity",
+      "key": "6aaa847fb7b5",
+      "title": "Agent-type detector makes an unsupported recovery claim and offers a blanket validated pin",
+      "number": 3195
+    },
+    {
+      "lens": "data-integrity",
+      "key": "7b21388f7389",
+      "title": "Expensive-session detector equates observed spend with recoverable savings",
+      "number": 3196
+    },
+    {
+      "lens": "data-integrity",
+      "key": "82878b22bab0",
+      "title": "Historical idle-tool evidence is presented without a date and includes an unobserved token range",
+      "number": 3197
+    },
+    {
+      "lens": "performance",
+      "key": "bbb05ff51e98",
+      "title": "Flagged-session aggregation is quadratic in session count",
+      "number": 3198
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 5,
+    "existing": 0,
+    "skipped": 0
+  }
+}

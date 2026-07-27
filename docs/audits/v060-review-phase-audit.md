@@ -14,9 +14,11 @@ three lenses at once**, routing findings to the three gate epics:
 A file that a lens doesn't touch gets a fast **`N/A (reason)`** verdict for that
 lens — file-by-file coverage without deep analysis where it can't apply.
 
-**Baseline:** pin at each batch's run commit (record it per row). Every finding
-is **verified against `origin/master` at that commit** before filing — the local
-tree may be stale, so a fixed-on-master issue is never reported as a gap.
+**Baseline:** the completed sweep is pinned end-to-end to the full
+`origin/master` SHA `c8b98a29508b5eb7725c75a7e2a41dfa94c1feba`. The
+runner enumerates the exact NUL-delimited `git ls-tree` manifest, proves that its
+13 sections form a lossless, non-overlapping partition, and gives workers a clean
+detached worktree at that SHA. Every finding is re-read there before filing.
 
 ## Design corrections (v2) — the three invariants
 
@@ -45,85 +47,99 @@ tree may be stale, so a fixed-on-master issue is never reported as a gap.
    the existing vendor-neutral `for-agent` queue + `coder`/`reviewer` skills
    (`--handoff` stamps `for-agent`+`groomed`).
 
-   Run it: `node scripts/audits/orchestrate.mjs --baseline <sha> [--gates a,b]
-   [--floor 12]` — `--plan` (default) prints the routing decision without executing;
-   `--run` dispatches the batch then files via the router. The live dispatch (nested
-   `claude -p` / `codex exec`) is the seam validated on the first real `--run`.
+   Run it with a full 40-character SHA. `--plan` (default) prints the next
+   routing decision without executing. `--run` dispatches one read-only worker,
+   validates and seals its receipt, and previews the router; it does not mutate
+   GitHub or advance state unless `--file --instance <unique-id>` is also present.
+   `--run-all --file --instance <unique-id>` repeats until complete,
+   budget-stopped, or `--max-batches` is hit; preview-only runs remain one batch.
 
 3. **Take usage into account at all times.** Before every batch the orchestrator
-   reads each harness's plan usage (`check-usage.mjs --source <h> --json`) and routes
-   to the one with budget, sizing the batch to ≤ half its 5h window; it **stops**
-   when no harness clears the `--floor`. **A stale, rejected, or unreadable usage
-   source is treated as ZERO budget, never as fresh** — verified: with the local
-   Codex source reporting its snapshot stale (the fix from dashboard #3024 /
-   shpwrck/claude #194), the orchestrator marks Codex `UNUSABLE -> 0%` and routes to
-   Claude instead of over-spending on a phantom budget.
+   reads each harness's plan usage (`check-harness-usage.mjs --source <h> --json`),
+   uses the smaller remaining percentage across the 5-hour and 7-day windows, and
+   sizes the file count to at most half that binding budget. The default 96 KiB
+   baseline-blob cap further bounds prompt content (one individually oversized file
+   may run alone). It **stops** when no harness clears `--floor`. A stale,
+   rejected, malformed, or unreadable usage source is ZERO budget, never fresh.
 
 ## Stage I/O contract (the portable seam)
 
-Stage 1 emits, and stage 2 consumes, one JSON file per batch:
+Each batch produces three durable artifacts with the same stem:
+
+- `.json`: a schema-validated receipt carrying the full baseline SHA, audit date,
+  section, active gates, exact `auditedFiles`, one reasoned verdict for every
+  file×gate pair, and zero or more verified findings;
+- `.meta.json`: the producer harness plus SHA-256 seals for the receipt bytes and
+  audited-file list, bound again to baseline/date/section/gates;
+- `.router.json`: every validated finding accounted for as created or existing
+  (a live run fails if anything is skipped).
+
+The essential receipt shape is:
 
 ```jsonc
 {
-  "baseline": "ff8d83b4",            // origin/master short sha the audit ran against
-  "auditDate": "2026-07-23",         // ISO date (stamped by the human/runner, not the workflow)
-  "section": "root",                 // ledger section key
-  "auditor": { "vendor": "claude", "instance": "00a0f586", "role": "main" },
-  "findings": [
-    {
-      "lens": "security|data-integrity|performance",
-      "severity": "critical|high|medium|low",
-      "title": "clean one-line title, no [tag] prefix",
-      "files": ["path/to/file.ts:120-133", "other.ts:44"],  // >=1 file:line
-      "where": "markdown bullets of file:line evidence",
-      "what": "what breaks / why it matters (optional)",
-      "fix": "concrete, minimal fix",
-      "acceptance": "a verifiable acceptance check",
-      "priority": "High|Medium|Low",   // optional; derived from severity if absent
-      "verified": true,                // MUST be true to file; verifier confirmed vs origin/master
-      "verifyNote": "how it was confirmed against origin/master"
-    }
-  ]
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "root",
+  "gates": ["security", "data-integrity", "performance"],
+  "auditedFiles": ["AGENTS.md"],
+  "verdicts": [{
+    "file": "AGENTS.md",
+    "gates": [
+      { "gate": "security", "status": "clean|n/a|finding", "reason": "..." }
+    ]
+  }],
+  "findings": [{
+    "lens": "security|data-integrity|performance",
+    "severity": "critical|high|medium|low",
+    "title": "clean one-line title",
+    "files": ["path/to/file.ts:120-133"],
+    "where": "file:line evidence",
+    "what": "impact",
+    "fix": "concrete minimal fix",
+    "acceptance": "verifiable check",
+    "priority": "High|Medium|Low",
+    "verified": true,
+    "verifyNote": "how the immutable baseline was checked"
+  }]
 }
 ```
 
-Only `verified: true` findings are filed. The router derives a **stable dedup
-key** `sha1(lens \n normalizedPrimaryFilePath \n slug(title))[:12]` and embeds
-`<!-- audit-finding: <key> -->` in the issue body; it refuses to create a second
-issue for the same key (searching open **and** closed issues), which is what
-makes concurrent multi-harness / multi-window auditing safe.
+The durable run state is the authority for resume. It rejects baseline, gate, date,
+manifest, batch, verdict, or issue-aggregation drift before any new dispatch, then
+regenerates the Markdown ledger atomically after a successfully reconciled router.
+The router embeds a stable `<!-- audit-finding: <key> -->` marker and searches open
+and closed issues, so retries and overlapping harness windows do not double-file.
 
 ## How to run it (human kickoff)
 
-Weekly budget is the ceiling; each batch is sized to **≤ half the live 5h window**
-(the `workflow-window-guard` governs Claude launches). One section per batch is a
-safe default; large sections (`src/lib` 455, `src/lib/detectors` 212) split further.
+Use an immutable full SHA and a clean worktree for the mutable runner checkout:
 
-   **Prefer the orchestrator** (`orchestrate.mjs`, above) — it resolves the section to a
-   pathspec, sizes the batch to real usage, dispatches, and files in one step.
+```sh
+node scripts/audits/orchestrate.mjs \
+  --baseline <40-character-sha> \
+  --gates security,data-integrity,performance \
+  --audit-date YYYY-MM-DD \
+  --repo-dir <runner-worktree>
+```
 
-1. **FIND** — the Workflow does NOT write to disk (its sandbox has no filesystem
-   access): it **returns** the findings object, so save that returned value to
-   `docs/audits/findings/<section>-<sha>.json` yourself. It requires `args.repoDir`
-   (absolute checkout path) and a real `args.path` **or** `args.files` — `section` is
-   only a label, so a bare `{ section, baseline }` would list the whole tree and audit
-   its first 40 files. Codex (or Claude, by hand) can instead audit the section per the
-   lens spec and write the same JSON shape directly.
-2. **FILE** — `node scripts/audits/file-findings.mjs --findings
-   docs/audits/findings/<section>-<sha>.json [--gates a,b] [--handoff] [--dry-run]
-   --vendor <v> --instance <id>`. `--gates` restricts filing to a subset (default
-   = the three remaining); `--instance` is required for a real (non-dry) run so
-   filed issues are attributable. Dry-run first to preview; it prints skip/create
-   per finding and never mutates under `--dry-run`.
-3. **Record** — mark the section's three lens cells in the ledger below (`DONE`,
-   with the finding issue numbers), commit the ledger, move to the next section.
-4. **BURN** — the `coder`/`reviewer` skills drain the `for-agent` findings across
-   both harnesses; gates close by hand (below) when their lens is fully swept and
-   their sub-issues are all closed.
+- Default/`--plan`: inspect usage and print the next bounded batch; no mutation.
+- `--run`: dispatch and validate one receipt, then run only the router preview.
+- Add `--file --instance <unique-id>` to a one-batch `--run` only when the
+  preview is accepted and issue creation/linking plus durable state/ledger
+  advancement are intended.
+- `--run-all` requires that same explicit `--file --instance <unique-id>`
+  authority and repeats until complete, budget-stopped, or batch-limited.
+- Resume with the identical baseline, gates, and audit date; sealed receipts are
+  reused, while an interrupted unsealed receipt is treated as retryable.
 
-**Kill switch / safety:** stage 2 is the only mutating step; run it `--dry-run`
-whenever unsure. Stage 1 is read-only. Re-running any section is safe (idempotent
-filing). No batch silently truncates — the workflow logs every file it skips.
+Workers receive an explicit file list and read-only tool surface. Receipt schema,
+path:line evidence, active-lens membership, complete file×gate verdict coverage, and
+immutable-baseline metadata are validated before routing. The live router sanitizes
+issue text, preserves signed authorship, and creates native sub-issues. Because
+GitHub caps a parent at 100 direct sub-issues, the router reserves direct slots at
+90 and creates signed `audit-rollup` children; overflow findings remain native
+descendants of the release gate.
 
 ## Gate-close criteria
 
@@ -133,39 +149,60 @@ explicitly moved to a later milestone. When all three of #1930/#1932/#2133 are
 closed (architecture #1931 already is), `scripts/check-release-gate.mjs` opens the
 v0.6.0 cut.
 
-## Ledger (resume state — update after each batch, then commit)
+## Ledger (durable completed state)
 
-File counts are from architecture baseline `bd45f1c5`; the workflow regenerates
-the actual file list per section from the run baseline via `git ls-tree`, so drift
-is handled — the counts below are only a size guide. Lens cells: `—` = not
-started, `WIP`, `DONE (#nnnn, #nnnn)` with filed issues, or `DONE (clean)`.
+File counts and cells below are generated from
+`docs/audits/runs/v060-c8b98a29508b.json`, whose manifest is the exact 1,487-file
+tracked tree at the pinned baseline. `DONE (#...)` lists the unique issues to
+which that section's accepted findings route; `DONE (clean)` means no issue for
+that lens in the section.
 
 | Section | Files | security → #1932 | data-integrity → #2133 | performance → #1930 |
 |---|---|---|---|---|
-| root | 33 | — | — | — |
-| scripts/ | 158 | — | — | — |
-| src/lib (non-detectors) | 455 | — | — | — |
-| src/lib/detectors | 212 | — | — | — |
-| src/components | 161 | — | — | — |
-| src (rest) | 13 | — | — | — |
-| docs/ | 140 | — | — | — |
-| fixtures/ | 172 | — | — | — |
-| e2e/ | 13 | — | — | — |
-| .github/ | 21 | — | — | — |
-| probaitio-operator/ | 81 | — | — | — |
-| deploy/ | 8 | — | — | — |
-| data/, tools/, bin/, commands/, .claude* | 27 | — | — | — |
+| root | 33 | DONE (#2865, #3062, #3063, #3064, #3066, #3067) | DONE (clean) | DONE (#3065) |
+| scripts/ | 166 | DONE (#3069, #3070, #3071, #3072, #3074, #3077, #3079, #3080, #3085, #3086, #3089, #3090, #3095, #3096, #3102) | DONE (#3068, #3073, #3075, #3078, #3081, #3082, #3083, #3084, #3091, #3092, #3093, #3097, #3099, #3101, #3104) | DONE (#3076, #3087, #3088, #3094, #3098, #3100, #3103) |
+| src/lib (non-detectors) | 452 | DONE (#3107, #3108, #3111, #3117, #3132, #3151, #3157, #3168, #3178) | DONE (#3105, #3106, #3109, #3110, #3112, #3113, #3115, #3116, #3118, #3119, #3120, #3121, #3123, #3124, #3125, #3126, #3128, #3131, #3133, #3134, #3135, #3136, #3138, #3139, #3141, #3142, #3143, #3144, #3145, #3146, #3149, #3153, #3154, #3155, #3158, #3159, #3160, #3162, #3163, #3165, #3166, #3170, #3171, #3173, #3175, #3179) | DONE (#3114, #3122, #3127, #3129, #3130, #3137, #3140, #3147, #3148, #3150, #3152, #3156, #3161, #3164, #3167, #3169, #3172, #3174, #3176, #3177) |
+| src/lib/detectors | 214 | DONE (#3212, #3220, #3223, #3230, #3231) | DONE (#3180, #3181, #3182, #3183, #3184, #3185, #3186, #3188, #3189, #3190, #3191, #3192, #3193, #3194, #3195, #3196, #3197, #3199, #3200, #3201, #3202, #3204, #3205, #3206, #3207, #3208, #3210, #3211, #3213, #3214, #3216, #3217, #3218, #3219, #3221, #3222, #3224, #3225, #3226, #3227, #3228, #3229, #3232, #3234, #3236, #3237, #3239, #3241, #3242, #3243, #3244, #3246, #3247, #3248, #3249, #3250) | DONE (#3187, #3198, #3203, #3209, #3233, #3235, #3238, #3240, #3245, #3251) |
+| src/components | 160 | DONE (#3254) | DONE (#3252, #3255, #3256, #3258, #3260, #3262, #3264, #3265, #3269, #3271, #3274, #3275, #3276, #3279) | DONE (#3253, #3257, #3259, #3261, #3263, #3266, #3267, #3268, #3270, #3272, #3273, #3277, #3278) |
+| src (rest) | 11 | DONE (clean) | DONE (clean) | DONE (clean) |
+| docs/ | 142 | DONE (#3281, #3284, #3289, #3291, #3292, #3295, #3296) | DONE (#3280, #3282, #3283, #3285, #3286, #3293, #3294, #3297) | DONE (#3287, #3288, #3290) |
+| fixtures/ | 172 | DONE (clean) | DONE (#3298, #3301, #3302) | DONE (clean) |
+| e2e/ | 13 | DONE (clean) | DONE (#3305) | DONE (clean) |
+| .github/ | 21 | DONE (#3306, #3307, #3313) | DONE (#3309) | DONE (clean) |
+| probaitio-operator/ | 77 | DONE (#3314, #3315, #3316, #3317, #3318, #3320, #3321, #3322, #3323, #3325, #3326, #3327, #3328, #3329, #3330, #3336) | DONE (#3333, #3335) | DONE (#3331) |
+| deploy/ | 8 | DONE (#3340, #3341) | DONE (clean) | DONE (clean) |
+| data/, tools/, bin/, commands/, .claude* | 18 | DONE (#3343, #3344, #3345, #3346) | DONE (clean) | DONE (clean) |
 
-## Seeded concerns (bank before the sweep)
+## Completed sweep
 
-Known findings surfaced during the release, to confirm/file in the relevant lens:
+The 2026-07-26 run completed all 13 sections in 260 sealed batches: **1,487 files**,
+**4,461 file×gate verdicts**, and **280 accepted finding records** routed to **269
+unique open issues** — 68 security, 146 data-integrity, and 55 performance. Data
+integrity exceeded GitHub's direct-child ceiling, so #3215 is the signed overflow
+rollup under #2133; every accepted issue remains reachable as a native descendant
+of its gate.
 
-- **performance** — `assembleDataset` builds a ~132 MB in-memory dataset and
-  detectors run twice per request; recs warm at 4.7–11.7 s (memory:
-  api-latency-profile-2026-06, instant-load-rearchitecture-proto). Confirm vs
-  current `origin/master` and file under #1930 if still live.
-- **security** — re-verify the ADR 0008 egress path (the v0.5.0 CRITICAL F1 was
-  an `egressScrub` identity stub); confirm the scrub is real on current master.
-- **data-integrity** — spot the detectors touched this cycle (adoption-loop,
-  rate-limits, down-modelling confidence) for present-tense staleness and
-  arithmetic.
+The run recovered cleanly from an interrupted component receipt and a timed-out
+14-file fixture batch by retrying only unsealed work in smaller batches. Four
+model-evaluation fixture candidates (#3299, #3300, #3303, #3304) and one redundant
+caller consequence (#3308) were rejected and removed from receipts/state. Eleven
+real but non-independent findings were consolidated into their surviving issues:
+#3310, #3311, #3312, #3319, #3324, #3332, #3334, #3337, #3338, #3339, and #3342.
+Those rejected issue shells are closed as not planned, unlabelled, unmilestoned,
+and absent from the gate hierarchy; their surviving issues carry the extra audit
+markers.
+
+All three lens columns are complete, but #1930, #1932, and #2133 intentionally
+remain open until their accepted descendants are closed or explicitly moved under
+the gate-close criteria above.
+
+## Seeded concerns (checked by the completed sweep)
+
+These pre-run concerns were included explicitly in the completed lens review:
+
+- **performance** — the `assembleDataset` memory profile, repeated detector
+  execution, and warm recommendation latency were included in the hot-path lens.
+- **security** — the ADR 0008 egress path and the former identity-stub failure
+  mode were re-read at the immutable baseline.
+- **data-integrity** — adoption-loop, rate-limit, and down-modelling detectors
+  were included in the stale-claim and arithmetic review.

@@ -1,0 +1,330 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "fixtures/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/sidebar.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/suggest.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/test.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/CLAUDE.md",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/config/limits.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/alerting.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/backpressure.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/quota.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/rate-limiter.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/retry.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/summary.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/throttle.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/window.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/test.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/CLAUDE.md"
+  ],
+  "verdicts": [
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/sidebar.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Stub has no input, authorization, filesystem, network, browser, command, SQL, container, or secret handling."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Stub does not implement a detector, parser, calculation, recommendation, or validated fix snippet."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Unimplemented stub does not create a hot path or new operational surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/suggest.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Stub has no input, authorization, filesystem, network, browser, command, SQL, container, or secret handling."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Stub does not implement a detector, parser, calculation, recommendation, or validated fix snippet."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Unimplemented stub does not create a hot path or new operational surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Local unit assertions contain no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Tests cover feature-flag behavior, not detector evidence, recommendation provenance, or calculations."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Unit tests do not ship in a runtime hot path or introduce a monitored surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/CLAUDE.md",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Narrative project convention defines no security-sensitive executable behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Narrative convention is not executable configuration and defines no detector, parser, or calculation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Narrative documentation does not execute or ship a runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/config/limits.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static numeric configuration has no security-sensitive input, boundary, secret, or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Inspected the three exported numeric source-of-truth values used by the batch's calculations; values are explicit and reproducible."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Three static numeric exports create no material runtime cost or new surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/alerting.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric threshold calculation has no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Operational threshold check is constant-time with no allocation, I/O, or repeated recomputation loop."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/backpressure.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric capacity function has no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Capacity lookup is constant-time with no allocation, I/O, or repeated recomputation loop."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/quota.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric quota calculation has no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Quota calculation is constant-time with no allocation, I/O, or repeated recomputation loop."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/rate-limiter.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "This function only compares a supplied count; it contains no auth, injection, filesystem, egress, browser, or infrastructure boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Hot-path rate-limit decision is a single constant-time comparison with no allocation or I/O."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/retry.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric retry-count function has no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Retry-count lookup is constant-time with no allocation, I/O, or recomputation loop."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/summary.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static numeric summary has no security-sensitive input, rendering, secret, or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Function performs only one bounded three-field object allocation and no I/O or repeated computation."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/throttle.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric delay calculation has no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Hot-path delay calculation is constant-time with no allocation, I/O, or repeated recomputation loop."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/src/window.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure timestamp arithmetic has no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This hardcoded mismatch is the manifest-declared controlled bugfix task input; the pair instruction and test require the evaluated task to repair it, so it is not a repository product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Timestamp calculation is one constant-time addition with no allocation, I/O, or recomputation loop."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-thresholds-bugfix/tree/test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Local unit assertions contain no security-sensitive boundary or operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Expected thresholds and arithmetic are derived directly from imported configuration, including boundary checks and floor division."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Unit tests do not ship in a runtime hot path or introduce a monitored surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-validator-feature/tree/CLAUDE.md",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Narrative project convention defines no security-sensitive executable behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Narrative convention is not executable configuration and defines no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Narrative documentation does not execute or ship a runtime surface."
+        }
+      ]
+    }
+  ],
+  "findings": []
+}

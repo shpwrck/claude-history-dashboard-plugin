@@ -1,0 +1,230 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "src/components",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "src/components/FileImpact.tsx",
+    "src/components/FileUpload.test.ts",
+    "src/components/FileUpload.tsx",
+    "src/components/FilteredEmptyState.tsx",
+    "src/components/Gate2702Results.test.tsx",
+    "src/components/Gate2702Results.tsx",
+    "src/components/LiveSession.test.ts",
+    "src/components/LiveSession.tsx"
+  ],
+  "verdicts": [
+    {
+      "file": "src/components/FileImpact.tsx",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Untrusted paths, session IDs, and labels are rendered through React text/attributes without raw HTML, filesystem writes, commands, credential access, or egress."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Displayed counts and claims cite structured aggregate fields; re-read estimates disclose fallback/mixed quality, missing byte data, thresholds, and per-session evidence."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Expensive aggregation, sorting, and drilldown work is memoized; rendered tables and charts are explicitly bounded."
+        }
+      ]
+    },
+    {
+      "file": "src/components/FileUpload.test.ts",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Test-only fixtures and mocked upload plumbing perform no production authorization, egress, filesystem write, or executable-input handling."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The tests do not implement a detector, parser, calculation, recommendation, or validated fix snippet."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Test code is not a shipped hot path and defines no runtime surface or budget."
+        }
+      ]
+    },
+    {
+      "file": "src/components/FileUpload.tsx",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "All selection paths use shared skip filtering before the guarded upload sink; this component performs no server egress, filesystem writes, raw-HTML rendering, or credential access."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The component only selects files and forwards them to the upload pipeline; it makes no detector recommendation or calculation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "finding",
+          "reason": "Directory drag-and-drop issues a React state update for every admitted file and retains the complete file list before starting the worker pipeline."
+        }
+      ]
+    },
+    {
+      "file": "src/components/FilteredEmptyState.tsx",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Filter descriptions and optional labels are rendered as escaped React content with no raw HTML or privileged operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "This is empty-state presentation and contains no detector, parser, arithmetic, recommendation, or fix snippet."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The component performs one small filter-description call and has no hot-path ingestion, large computation, or new probed surface."
+        }
+      ]
+    },
+    {
+      "file": "src/components/Gate2702Results.test.tsx",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Test-only projections and DOM assertions perform no authentication, egress, filesystem, command, or unsafe rendering operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Tests cover distinct evaluation outcomes, policy decisions, failed gates, exclusions, bounds, trial IDs, and evaluation/run timestamps, including historical attribution."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Test code is not production hot-path code and introduces no runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "src/components/Gate2702Results.tsx",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Server-projected identifiers and reasons are rendered through escaped React text; there is no raw HTML, command construction, secret access, or client-side privileged operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Verdicts remain distinct from policy decisions, gate states and sample/exclusion counts are displayed from structured fields, and every evaluation is attributed to a trial and exact evaluation time with older records labeled historical."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "The component consumes an already-bounded projection, reports dropped rows/evaluations, and performs only linear rendering over returned records."
+        }
+      ]
+    },
+    {
+      "file": "src/components/LiveSession.test.ts",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The test mocks the API client and uses inert DOM fixtures; it does not implement production boundary or credential behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Tests reproduce token formatting, context percentage, elapsed-time formatting, null handling, and detector-badge rendering from explicit payload fields."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The test is not a shipped hot path; polling cleanup coverage supports but does not itself participate in the performance gate."
+        }
+      ]
+    },
+    {
+      "file": "src/components/LiveSession.tsx",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "The server request uses the designated API-client SPA boundary, payload strings are React-escaped, and the component neither reads local Claude files nor sends subscription credentials/content."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "Concurrent polls may resolve out of order, allowing an older live-session response to overwrite a newer response."
+        },
+        {
+          "gate": "performance",
+          "status": "finding",
+          "reason": "A fixed interval starts a new request even when the previous poll remains in flight, so slow responses can accumulate concurrent requests."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "performance",
+      "severity": "medium",
+      "title": "Directory drag-and-drop performs one render-triggering update per file",
+      "files": [
+        "src/components/FileUpload.tsx:63",
+        "src/components/FileUpload.tsx:218"
+      ],
+      "where": "src/components/FileUpload.tsx:95-106 and src/components/FileUpload.tsx:220-246",
+      "what": "walkDirectory invokes the progress callback after every admitted file, and the callback immediately calls setScannedCount. Each asynchronous file lookup can therefore cause another render. The handler also accumulates every File handle in recursive arrays and allFiles before the worker pipeline begins, with no loose-directory entry budget. A large ~/.claude selection can spend substantial main-thread time scanning and rendering before parsing starts.",
+      "fix": "Throttle progress updates by time or batch, enforce an admitted-file limit during directory traversal, and feed bounded batches to the pipeline where feasible.",
+      "acceptance": "A deterministic directory-walk benchmark with at least 10,000 admitted files completes within a documented budget, performs a bounded number of progress state updates independent of file count, and rejects selections over the configured file limit with a clear status.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Adversarial re-read confirmed that src/components/FileUpload.tsx:95-106 calls progress once per accepted file and src/components/FileUpload.tsx:227-233 binds that callback directly to setScannedCount while retaining all returned files. The worker handoff at lines 246 and 150-160 occurs only after traversal, so worker parsing does not mitigate this scan/render path."
+    },
+    {
+      "lens": "data-integrity",
+      "severity": "medium",
+      "title": "Out-of-order live polls can restore stale session state",
+      "files": [
+        "src/components/LiveSession.tsx:119"
+      ],
+      "where": "src/components/LiveSession.tsx:119-129; src/components/LiveSession.test.ts:139-164",
+      "what": "setInterval invokes poll without an in-flight or generation guard. If poll A remains pending while poll B starts and B resolves first, A can later call setLive with older data, reverting the widget to a stale session or resurrecting a session after a newer inactive response.",
+      "fix": "Serialize polls with recursive setTimeout after settlement, or attach a monotonically increasing request generation and apply only the newest response.",
+      "acceptance": "Add a test using two deferred fetchLive promises: resolve the second with {active:false}, then resolve the first with active data, and verify the component remains inactive; the test must pass with the implemented ordering guard.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Second pass confirmed the only guard at src/components/LiveSession.tsx:124 is component cancellation, not request ordering. The existing polling test at src/components/LiveSession.test.ts:139-164 resolves requests in order and therefore does not cover the reproducible stale-response sequence."
+    },
+    {
+      "lens": "performance",
+      "severity": "medium",
+      "title": "Live polling permits unbounded concurrent requests",
+      "files": [
+        "src/components/LiveSession.tsx:128"
+      ],
+      "where": "src/components/LiveSession.tsx:128-133; src/components/LiveSession.test.ts:139-164",
+      "what": "The 10-second interval starts poll regardless of whether the preceding fetchLive call has settled. During sustained endpoint latency or a hung request, concurrent requests grow once per interval for the lifetime of the mounted widget.",
+      "fix": "Allow only one in-flight poll and schedule the next poll after it settles; retain the unmount cancellation guard.",
+      "acceptance": "With fetchLive held pending while fake time advances across at least five intervals, assert it is called exactly once; after resolving it, assert exactly one subsequent poll is scheduled.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Adversarial re-read verified that src/components/LiveSession.tsx:128-129 starts the initial poll and an unconditional interval, with no pending flag or abort controller. The test at src/components/LiveSession.test.ts:139-164 checks timer cleanup only and supplies immediately resolved requests."
+    }
+  ]
+}

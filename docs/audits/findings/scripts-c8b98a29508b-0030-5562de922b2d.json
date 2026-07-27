@@ -1,0 +1,36 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/ci-docs-only.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/ci-docs-only.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Git is invoked with argument arrays rather than a shell, pull-request diff discovery fails closed, and the only write is a fixed boolean to the runner-provided output file."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Inspected base/head SHA precedence, fallback behavior, empty-diff handling, and the explicit documentation path classifier; a non-documentation path makes docs_only false."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This bounded CI classifier is not shipped runtime, request-path, ingest, render, or bundle code."
+        }
+      ]
+    }
+  ],
+  "findings": []
+}

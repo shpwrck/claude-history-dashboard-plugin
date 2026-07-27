@@ -1,0 +1,74 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/compose-runtime-hardening.test.mjs",
+    "scripts/daily-digest-route.test.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/compose-runtime-hardening.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The writable-mount assertion checks only that the cache mount exists and does not enumerate or reject additional read-write mounts."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "This file enforces a container security posture rather than recommendation provenance, historical claims, calculations, or validated fix snippets."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This bounded Compose policy test is not runtime hot-path code and defines no performance surface."
+        }
+      ]
+    },
+    {
+      "file": "scripts/daily-digest-route.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "The integration test uses generated loopback and temporary paths, disables all LLM and GitHub egress, launches fixed local modules without a shell, and tears down the child and fixtures."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "The deterministic fixture asserts date validation, exact session/message/tool totals, categorization, project grouping, file impact, and the empty-day result."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This bounded one-session integration fixture is test code rather than the digest request-path implementation or its production performance budget."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "security",
+      "severity": "medium",
+      "title": "Runtime-hardening test does not constrain writable mounts",
+      "files": [
+        "scripts/compose-runtime-hardening.test.mjs:67",
+        "scripts/compose-runtime-hardening.test.mjs:68"
+      ],
+      "where": "scripts/compose-runtime-hardening.test.mjs:67-68",
+      "what": "The check named `cache as the only writable app mount` merely looks for the cache volume line. It never parses the service volume list or rejects additional read-write mounts. The immutable baseline already contains a second intentional writable adoption-store mount and the test still prints this assertion as passing, proving that an arbitrary future writable mount would evade the least-privilege guard.",
+      "fix": "Parse the app service volume entries and assert an explicit allowlist of writable destinations, including the currently intentional cache and adoption-store paths; require every other bind or volume mount to be read-only and reject unknown writable destinations.",
+      "acceptance": "A fixture matching the current two approved writable destinations passes; adding an arbitrary `/host:/app/extra:rw` mount fails; removing `:ro` from either Claude data source mount also fails; the assertion text names the actual allowlist.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "The baseline assertion at lines 67-68 is a single presence regex. Running the baseline test printed that the cache was the only writable app mount even though a direct inspection of the same app service showed the deliberate adoption-store read-write mount, reproducing the false security guarantee."
+    }
+  ]
+}

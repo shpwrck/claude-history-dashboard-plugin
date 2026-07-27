@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0185-b418a1289662.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "39b202053519",
+      "title": "Loopback model endpoint can redirect prompt data to an external host",
+      "number": 3132
+    },
+    {
+      "lens": "data-integrity",
+      "key": "ff1dfbe14227",
+      "title": "Corpus validation can approve tasks that do not round-trip unchanged",
+      "number": 3133
+    },
+    {
+      "lens": "data-integrity",
+      "key": "748a2da4daea",
+      "title": "Routing recommendations are accepted and promoted without reproducible provenance",
+      "number": 3134
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

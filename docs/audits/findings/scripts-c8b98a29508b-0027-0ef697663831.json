@@ -1,0 +1,74 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/check-test-suite-coverage.mjs",
+    "scripts/check-test-suite-coverage.test.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/check-test-suite-coverage.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Filesystem access is read-only, workflow filenames come from directory enumeration, and symlinked directories are not recursively followed; no path-traversal, command execution, secrets egress, or other active security concern was found."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "The coverage detector scans entire workflow YAML files as undifferentiated text, so non-executable YAML fields can falsely count suites as CI-wired."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This is a bounded CI utility, not hot-path or shipped runtime code; it performs one scripts-tree traversal and one pass over workflow files."
+        }
+      ]
+    },
+    {
+      "file": "scripts/check-test-suite-coverage.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "The test contains no authentication, filesystem mutation, untrusted command execution, client surface, secrets handling, or deployment configuration."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "The purported synthetic workflow test never supplies or parses a workflow and therefore does not exercise collectWiredSuites or protect the detector's executable-field boundary."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This small CI-only test suite is not hot-path code and introduces no runtime surface requiring a probe or budget."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "data-integrity",
+      "severity": "medium",
+      "title": "Non-executable workflow text can falsely prove a test suite is CI-wired",
+      "files": [
+        "scripts/check-test-suite-coverage.mjs:150",
+        "scripts/check-test-suite-coverage.test.mjs:63"
+      ],
+      "where": "scripts/check-test-suite-coverage.mjs:150-157; scripts/check-test-suite-coverage.test.mjs:63-73",
+      "what": "collectWiredSuites applies suite-reference and npm-invocation regexes to the complete comment-stripped YAML document rather than only executable jobs.*.steps[*].run values. A path or `npm run` string in an inert field such as `env`, `name`, or metadata is treated as execution, allowing the gate to report coverage for a suite that no workflow runs. The test labeled as a synthetic workflow test does not construct a workflow or call collectWiredSuites, so this false-positive boundary is untested.",
+      "fix": "Parse each workflow as YAML and inspect only executable `jobs.*.steps[*].run` strings (including their block-scalar contents), then replace the placeholder test with a minimal temporary workflow fixture that calls collectWiredSuites. Include both a real `run` step and inert fields containing suite/npm text.",
+      "acceptance": "A test with a workflow containing only `env: { NOTE: \"node --test scripts/foo.test.mjs\" }` reports `scripts/foo.test.mjs` as unwired, while adding `steps: [{ run: \"node --test scripts/foo.test.mjs\" }]` reports it wired; equivalent cases for inert and executable `npm run test:foo` text also pass.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Re-read scripts/check-test-suite-coverage.mjs:143-161 and scripts/check-test-suite-coverage.test.mjs:63-88 at baseline c8b98a29508b5eb7725c75a7e2a41dfa94c1feba. A workflow containing `env: NOTE: \"node --test scripts/foo.test.mjs\"` and no executable run command is still scanned wholesale and marks the suite wired. The purported synthetic workflow test does not invoke collectWiredSuites, so the defect remains unguarded."
+    }
+  ]
+}

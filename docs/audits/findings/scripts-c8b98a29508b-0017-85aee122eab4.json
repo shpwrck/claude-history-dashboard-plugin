@@ -1,0 +1,132 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/check-enterprise-route-inventory.mjs",
+    "scripts/check-enterprise-route-inventory.test.mjs",
+    "scripts/check-inbound-boundary.mjs",
+    "scripts/check-inbound-boundary.test.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/check-enterprise-route-inventory.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The security-route collector recognizes only single-quoted exact and prefix route literals, allowing valid double-quoted handlers to bypass inventory review."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "This is an authorization-route inventory gate, not recommendation, evidence-provenance, arithmetic, or validated-fix calculation code."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This CI-only source scanner is not runtime hot-path, ingest, assembly, or shipped surface code."
+        }
+      ]
+    },
+    {
+      "file": "scripts/check-enterprise-route-inventory.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "Collector coverage tests only single-quoted route syntax and therefore do not detect the inventory-gate bypass."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "These tests cover route classification rather than recommendation evidence, arithmetic, historical signals, or validated snippets."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This unit-test file does not participate in a production performance path or performance budget."
+        }
+      ]
+    },
+    {
+      "file": "scripts/check-inbound-boundary.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The SPA/server boundary gate scans EventSource, WebSocket, XMLHttpRequest, and sendBeacon line-by-line, so valid multiline primitive expressions evade it."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "This is a network-boundary detector, not a recommendation/provenance or calculation detector."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "The CI scan walks source files once, reads each eligible file once, and parses each non-owner file once; no repeated per-request or production hot-path work was introduced."
+        }
+      ]
+    },
+    {
+      "file": "scripts/check-inbound-boundary.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "Regression coverage exercises only same-line non-fetch primitive calls and omits valid multiline forms that bypass the gate."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The fixtures test network-boundary detection and make no recommendation, arithmetic, stale-signal, or validated-fix claims."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This unit-test file is outside production hot paths and does not define a performance surface or budget."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "security",
+      "severity": "medium",
+      "title": "Route inventory gate misses double-quoted handlers",
+      "files": [
+        "scripts/check-enterprise-route-inventory.mjs:287",
+        "scripts/check-enterprise-route-inventory.test.mjs:28"
+      ],
+      "where": "scripts/check-enterprise-route-inventory.mjs:287-305; scripts/check-enterprise-route-inventory.test.mjs:28-45",
+      "what": "Both exact-route and startsWith collectors require single-quoted literals. A valid handler such as `pathname === \"/api/new-sensitive-route\"` or `pathname.startsWith(\"/api/private/\")` produces no collected route, so the inventory validation can pass without an access classification. The tests cover only single-quoted examples.",
+      "fix": "Parse the server source with an AST and collect string literals independent of quote style, or minimally update both patterns to capture matching single or double quotes; add double-quoted exact and prefix regression cases.",
+      "acceptance": "A unit test passes double-quoted exact and prefix handlers to `collectEnterpriseRouteKeys`, asserts both are collected, and asserts an unlisted double-quoted handler makes inventory validation fail.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Adversarial re-read confirmed lines 287 and 297 hard-code `'([^']+)'`, while the collector test at lines 28-45 contains only single-quoted handler syntax. JavaScript accepts the omitted double-quoted forms, and neither remaining collector branch matches them."
+    },
+    {
+      "lens": "security",
+      "severity": "medium",
+      "title": "Multiline network constructors bypass the inbound boundary gate",
+      "files": [
+        "scripts/check-inbound-boundary.mjs:61",
+        "scripts/check-inbound-boundary.test.mjs:38"
+      ],
+      "where": "scripts/check-inbound-boundary.mjs:61-62, 173-189; scripts/check-inbound-boundary.test.mjs:38-48",
+      "what": "Non-fetch primitives are matched independently on each physical line. Valid code such as `new\\nEventSource('/api/live')` does not place `new` and `EventSource` on the same line and therefore produces no violation, allowing a direct dashboard-server connection outside the sanctioned owner list. The regression fixture uses only a same-line EventSource expression.",
+      "fix": "Detect these primitives from the TypeScript AST, as already done for fetch, including NewExpression targets and navigator.sendBeacon property calls; add multiline regression fixtures.",
+      "acceptance": "Tests assert that multiline `new EventSource`, `new WebSocket`, and `new XMLHttpRequest` expressions outside owners are reported, while comment and string occurrences remain ignored.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Adversarial re-read confirmed PRIMITIVE requires `new\\s+<constructor>` in one regex input, but lines 175-189 apply it one line at a time. The only non-fetch primitive fixture at line 40 is same-line, so the valid multiline syntax survives both implementation and test coverage."
+    }
+  ]
+}

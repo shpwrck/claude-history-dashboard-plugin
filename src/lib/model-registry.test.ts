@@ -32,6 +32,16 @@ describe('model registry', () => {
     });
   });
 
+  it('registers claude-opus-5 without promoting it to default or picker', () => {
+    // "Register only": priced correctly, but Opus 4.8 stays the default Opus
+    // and claude-opus-5 is intentionally kept out of the model picker.
+    expect(buildModelUpdateChecklist('claude-opus-5').registered).toBe(true);
+    expect(CURRENT_MODEL_IDS.opus).toBe('claude-opus-4-8');
+    expect(ANTHROPIC_PICKER_MODELS.map((model) => model.id)).not.toContain(
+      'claude-opus-5'
+    );
+  });
+
   it('derives exact pricing aliases from registry metadata', () => {
     expect(MODEL_PRICING['claude-fable-5'].input).toBe(10);
     expect(MODEL_PRICING['claude-fable-5'].output).toBe(50);
@@ -41,6 +51,15 @@ describe('model registry', () => {
     expect(MODEL_PRICING['claude-sonnet-4-6'].input).toBe(3);
     expect(MODEL_PRICING['claude-opus-4-8'].input).toBe(5);
     expect(MODEL_PRICING['claude-opus-4-7'].input).toBe(5);
+    // Claude Opus 5 — $5 in / $25 out per MTok, same tier as Opus 4.8.
+    // https://www.anthropic.com/news/claude-opus-5
+    expect(MODEL_PRICING['claude-opus-5']).toEqual({
+      input: 5,
+      output: 25,
+      cacheWrite5m: 6.25,
+      cacheWrite1h: 10,
+      cacheRead: 0.5,
+    });
     expect(MODEL_PRICING['claude-opus-4-1-20250414'].input).toBe(15);
     expect(MODEL_PRICING['claude-3-haiku-20240307'].input).toBe(0.25);
   });
@@ -49,6 +68,7 @@ describe('model registry', () => {
     expect(resolveModelFamily('claude-fable-5')).toBe('fable');
     expect(resolveModelFamily('claude-mythos-5')).toBe('mythos');
     expect(resolveModelFamily('claude-opus-4-8')).toBe('opus');
+    expect(resolveModelFamily('claude-opus-5')).toBe('opus');
     expect(resolveModelFamily('claude-sonnet-5')).toBe('sonnet');
     expect(resolveModelFamily('claude-sonnet-4-6')).toBe('sonnet');
     expect(resolveModelFamily('claude-haiku-4-5-20251001')).toBe('haiku');

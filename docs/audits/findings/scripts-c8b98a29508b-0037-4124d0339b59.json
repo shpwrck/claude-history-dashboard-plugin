@@ -1,0 +1,74 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/dataset-field-sizes.mjs",
+    "scripts/dataset-field-sizes.test.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/dataset-field-sizes.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "This operator-invoked diagnostic reads an explicitly selected local file or HTTP endpoint and does not run inside an authentication boundary or handle secrets."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "The reported dataset total and field shares count serialized values but omit top-level keys, separators, commas, and braces from the actual JSON body."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This on-demand observability CLI is not request-path, ingest, render, or bundle code and ships no user-facing surface."
+        }
+      ]
+    },
+    {
+      "file": "scripts/dataset-field-sizes.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure aggregation fixtures contain no filesystem mutation, network access, authentication, secrets, or executable input."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "The tests prove only that rows sum to the implementation-defined subtotal; they never compare the reported total with the serialized dataset wire size."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This small pure unit-test file is not production hot-path code or a shipped surface."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "data-integrity",
+      "severity": "low",
+      "title": "Dataset field-size report omits JSON key and framing bytes",
+      "files": [
+        "scripts/dataset-field-sizes.mjs:43",
+        "scripts/dataset-field-sizes.test.mjs:35"
+      ],
+      "where": "scripts/dataset-field-sizes.mjs:43-55 and scripts/dataset-field-sizes.test.mjs:35-39",
+      "what": "fieldSizes serializes each top-level value in isolation and sums those byte counts, but presents the result as total dataset.json bytes and derives every share from it. Top-level key strings, colons, commas, and object braces are absent. At the immutable baseline `{a:1}` is reported as 1 byte and 100 percent for `a`, while its UTF-8 JSON body is 7 bytes, so the report is not reproducible from the claimed wire artifact.",
+      "fix": "Make totalBytes equal the UTF-8 byte length of the serialized dataset and account for each serialized key plus separators and framing, either by assigning overhead deterministically to fields or reporting an explicit framing row; derive percentages from that true total.",
+      "acceptance": "Tests assert that totalBytes equals Buffer.byteLength(JSON.stringify(dataset), `utf8`) for one-field, multi-field, multibyte-key/value, and undefined-property fixtures, and that all reported attribution including framing sums exactly to the same total.",
+      "priority": "Low",
+      "verified": true,
+      "verifyNote": "A direct baseline call with `{a:1}` returned totalBytes=1, while Buffer.byteLength(JSON.stringify({a:1}), `utf8`) returned 7. Lines 43-55 sum valueBytes only, and the test at lines 35-39 merely re-sums those same rows, so it cannot detect the omitted wire bytes."
+    }
+  ]
+}

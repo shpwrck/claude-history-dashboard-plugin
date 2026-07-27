@@ -1,0 +1,53 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/check-release-gate.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/check-release-gate.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "Malformed version strings can be accepted as patch releases, bypassing all release-gate checks."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "This release-state script does not produce recommendation claims, provenance, validated fix snippets, or user-facing calculations governed by the data-integrity gate."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This is a manually/CI-invoked release utility, not hot-path or shipped runtime surface code."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "security",
+      "severity": "medium",
+      "title": "Non-anchored version parser permits release-gate bypass",
+      "files": [
+        "scripts/check-release-gate.mjs:55",
+        "scripts/check-release-gate.mjs:238"
+      ],
+      "where": "scripts/check-release-gate.mjs:55 and scripts/check-release-gate.mjs:238-245",
+      "what": "The version regular expression lacks an end anchor, so it accepts any string beginning with a valid-looking version. For example, `v0.2.1junk` is classified as patch 1; `main()` then exits successfully through the patch exemption before inspecting milestone gates. A malformed or unintended release target can therefore bypass the security and other standing release checks.",
+      "fix": "Require the entire normalized argument to match the supported version grammar by adding an end anchor: `/^(\\d+)\\.(\\d+)(?:\\.(\\d+))?$/`.",
+      "acceptance": "Assert that `classifyTarget` rejects `v0.2.1junk`, `v0.2.1.0`, and `v0.2-beta`, while accepting documented forms such as `v0.2`, `0.2.0`, and `v0.2.1`; confirm invalid inputs exit non-zero before the patch exemption.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Adversarial re-read confirmed line 55 performs a prefix-only match and lines 238-245 unconditionally exit 0 whenever the parsed patch is greater than zero. Thus `v0.2.1junk` deterministically reaches the exemption without any `gh` release-gate inspection."
+    }
+  ]
+}

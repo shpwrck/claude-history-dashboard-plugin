@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/scripts-c8b98a29508b-0001-7bdc613f57cb.json",
+  "section": "scripts/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "4d90c8dfdaa8",
+      "title": "Bundle attribution reports UTF-16 columns as built bytes",
+      "number": 3068
+    },
+    {
+      "lens": "security",
+      "key": "49490c9aca73",
+      "title": "Atomizer permits output-root path traversal through mapping and rules-dir",
+      "number": 3069
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

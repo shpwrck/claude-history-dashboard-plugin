@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0076-bfec5abf840a.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "1e9910215629",
+      "title": "Provenance validation accepts non-reproducible observations and impossible dates",
+      "number": 3204
+    },
+    {
+      "lens": "data-integrity",
+      "key": "d7d7e285ba48",
+      "title": "Opt-in allowlist leaves detector recommendations without structured provenance",
+      "number": 3205
+    },
+    {
+      "lens": "data-integrity",
+      "key": "d310d0841574",
+      "title": "Config-drift recency and evidence filters can produce unsupported findings",
+      "number": 3206
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

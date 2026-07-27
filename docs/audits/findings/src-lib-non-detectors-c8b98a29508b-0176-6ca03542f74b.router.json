@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0176-6ca03542f74b.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "performance",
+      "key": "c00008bed079",
+      "title": "Live polling synchronously materializes and reparses up to 64 MiB",
+      "number": 3130
+    },
+    {
+      "lens": "data-integrity",
+      "key": "2d4062a9a296",
+      "title": "Scripted evaluation results can be mislabeled as live-model receipts",
+      "number": 3131
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

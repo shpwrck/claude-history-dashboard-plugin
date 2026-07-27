@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0001-c2ad861cc7bb.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "0bef375967b7",
+      "title": "Four detectors emit recommendation claims without structured provenance",
+      "number": 3180
+    },
+    {
+      "lens": "data-integrity",
+      "key": "dc3c637edfaf",
+      "title": "Hot-session threshold can label a single session as “Multiple sessions”",
+      "number": 3181
+    },
+    {
+      "lens": "data-integrity",
+      "key": "1a280c1933a2",
+      "title": "Trailing newline makes the CLAUDE.md line threshold off by one",
+      "number": 3182
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

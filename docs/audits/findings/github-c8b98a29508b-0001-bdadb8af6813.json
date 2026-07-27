@@ -1,0 +1,196 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": ".github/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    ".github/ISSUE_TEMPLATE/epic.md",
+    ".github/actions/ensure-gh/action.yml",
+    ".github/release.yml",
+    ".github/workflows/agent-cross-review.yml",
+    ".github/workflows/backfill-release-notes.yml",
+    ".github/workflows/browser-compat.yml"
+  ],
+  "verdicts": [
+    {
+      "file": ".github/ISSUE_TEMPLATE/epic.md",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Issue-template prose does not execute code, handle credentials, or configure security boundaries."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The template defines no detector, parser, calculation, recommendation claim, or validated fix snippet."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The template is not hot-path code and ships no runtime surface."
+        }
+      ]
+    },
+    {
+      "file": ".github/actions/ensure-gh/action.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The composite action downloads and executes an unpinned, unverified release archive."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The installer contains no recommendation detector, parser, or calculation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This occasional CLI bootstrap is not a product hot path or newly shipped surface."
+        }
+      ]
+    },
+    {
+      "file": ".github/release.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static release-note categorization neither executes code nor handles security-sensitive data."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Label-to-heading configuration makes no detector-derived recommendation or arithmetic claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Static changelog categorization is not runtime or hot-path code."
+        }
+      ]
+    },
+    {
+      "file": ".github/workflows/agent-cross-review.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "Security-sensitive third-party actions receive repository tokens or an API key through mutable major-version refs."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "The author-vendor detector examines only the first 100 PR commits, so its routing result is not reproducible for larger PRs."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The event-driven review workflow is not a product hot path and does not ship a user-facing surface."
+        }
+      ]
+    },
+    {
+      "file": ".github/workflows/backfill-release-notes.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "A contents-write workflow uses mutable action refs and invokes the unverified gh installer."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "This file only quotes and forwards inputs to a separate release-note script; it implements no parser or calculation itself."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The manually dispatched maintenance workflow is not a hot path or new runtime surface."
+        }
+      ]
+    },
+    {
+      "file": ".github/workflows/browser-compat.yml",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "finding",
+          "reason": "The workflow executes externally maintained actions through mutable major-version refs."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The workflow runs browser checks but defines no recommendation detector, parser, calculation, or validated snippet."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Inspected CI cost and probe controls: superseded runs are cancelled, Playwright workers are bounded, startup has a timeout, and browser behavior is explicitly probed."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "security",
+      "severity": "high",
+      "title": "GitHub CLI installer executes an unverified moving release",
+      "files": [
+        ".github/actions/ensure-gh/action.yml:26",
+        ".github/actions/ensure-gh/action.yml:32"
+      ],
+      "where": ".github/actions/ensure-gh/action.yml:26-33 resolves `releases/latest` and streams the selected archive directly into `tar` without a pinned version, digest, or signature check.",
+      "what": "A compromised upstream release, API response, or release asset can place attacker-controlled executables on PATH for subsequent workflow steps. The same workflow source can also install different binaries on different runs, defeating reproducible supply-chain review.",
+      "fix": "Pin an explicitly reviewed gh version and expected SHA-256 digest, download the archive to a file, verify it with `sha256sum -c`, and only then extract it.",
+      "acceptance": "A clean-run test shows the action downloads one fixed version, rejects an archive whose bytes do not match the committed digest, and never extracts before verification.",
+      "priority": "High",
+      "verified": true,
+      "verifyNote": "Re-read lines 18-35 at detached HEAD c8b98a29508b5eb7725c75a7e2a41dfa94c1feba. The preinstalled-gh fast path does not protect runners where gh is absent; that path deterministically fetches `latest` and pipes the archive to tar with no integrity verification."
+    },
+    {
+      "lens": "security",
+      "severity": "medium",
+      "title": "Security-sensitive workflows execute actions through mutable tags",
+      "files": [
+        ".github/workflows/agent-cross-review.yml:69",
+        ".github/workflows/agent-cross-review.yml:146",
+        ".github/workflows/backfill-release-notes.yml:38",
+        ".github/workflows/backfill-release-notes.yml:41",
+        ".github/workflows/browser-compat.yml:53",
+        ".github/workflows/browser-compat.yml:58",
+        ".github/workflows/browser-compat.yml:79",
+        ".github/workflows/browser-compat.yml:82",
+        ".github/workflows/browser-compat.yml:121"
+      ],
+      "where": "The workflows use `actions/github-script@v7`, `anthropics/claude-code-action@v1`, `actions/checkout@v6`, `actions/setup-node@v6`, and `actions/upload-artifact@v7` rather than immutable commit SHAs.",
+      "what": "Owners of those action tags, or an attacker who compromises an upstream action, can retarget a tag and execute changed code with the workflows' tokens and secrets. The cross-review workflow is especially exposed because the Claude action receives `ANTHROPIC_API_KEY` and a write-capable GitHub token.",
+      "fix": "Replace every external `uses:` tag with a reviewed full commit SHA, retaining the release tag only in an adjacent update comment; update SHAs through a controlled dependency-update process.",
+      "acceptance": "A static check over these three workflow files rejects every external `uses:` value that is not pinned to a 40-character commit SHA; workflow tests still pass with the selected SHAs.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Re-read every cited `uses:` line at detached HEAD c8b98a29508b5eb7725c75a7e2a41dfa94c1feba and confirmed each external reference is a mutable major-version tag. The repository-local ensure-gh reference was not treated as an external tag."
+    },
+    {
+      "lens": "data-integrity",
+      "severity": "medium",
+      "title": "Author-vendor detector silently truncates PR commit evidence",
+      "files": [
+        ".github/workflows/agent-cross-review.yml:72"
+      ],
+      "where": ".github/workflows/agent-cross-review.yml:72-84 requests `pulls.listCommits` once with `per_page: 100` and classifies the joined result without pagination or a truncation guard.",
+      "what": "For a PR with more than 100 commits, qualifying co-author trailers after the first page are ignored. A mixed-vendor PR can therefore be classified as exclusively Claude or Codex instead of ambiguous, causing the wrong automated reviewer to run despite the workflow's stated evidence rule.",
+      "fix": "Use `github.paginate(github.rest.pulls.listCommits, ...)` to inspect all returned commits, or explicitly classify any PR whose complete evidence cannot be obtained as ambiguous.",
+      "acceptance": "A fixture or mocked API test with more than 100 commits and the only opposite-vendor trailer after commit 100 produces `ambiguous`; single-vendor trailers on later pages still produce the correct vendor.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Re-read lines 67-85 at detached HEAD c8b98a29508b5eb7725c75a7e2a41dfa94c1feba. The call has `per_page: 100`, no page parameter, no `github.paginate`, and no total-count/truncation check, while classification immediately consumes that single response."
+    }
+  ]
+}

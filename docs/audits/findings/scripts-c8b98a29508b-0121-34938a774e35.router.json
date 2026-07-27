@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/scripts-c8b98a29508b-0121-34938a774e35.json",
+  "section": "scripts/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "484220f3f8d6",
+      "title": "String timestamps silently defeat newest-first workflow ordering",
+      "number": 3099
+    },
+    {
+      "lens": "performance",
+      "key": "e41671275546",
+      "title": "Per-directory discovery caps permit multiplicative filesystem traversal",
+      "number": 3100
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0033-60164a8daf7c.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "7d2e78eaacf6",
+      "title": "Payload-size heuristics are emitted as evidence of task-specific over-fetch and compounded cache reads",
+      "number": 3190
+    },
+    {
+      "lens": "data-integrity",
+      "key": "29158f3c140d",
+      "title": "Unattended entrypoint is insufficient evidence for a booked Batch API saving",
+      "number": 3191
+    },
+    {
+      "lens": "data-integrity",
+      "key": "2da007fe6c1b",
+      "title": "All 1-hour cache writes are booked as recoverable despite missing reuse evidence",
+      "number": 3192
+    },
+    {
+      "lens": "data-integrity",
+      "key": "f2aeaf287dec",
+      "title": "Zero same-session cache reads does not prove the full 1-hour write was waste",
+      "number": 3193
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 4,
+    "existing": 0,
+    "skipped": 0
+  }
+}

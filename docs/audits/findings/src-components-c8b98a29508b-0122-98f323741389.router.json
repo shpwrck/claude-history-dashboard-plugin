@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-components-c8b98a29508b-0122-98f323741389.json",
+  "section": "src/components",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "99bfc040cb32",
+      "title": "Discovery-failure recommendations omit available session-level provenance",
+      "number": 3275
+    },
+    {
+      "lens": "data-integrity",
+      "key": "cf8c3d963bfe",
+      "title": "Stale activity data still produces a current-tense trend verdict",
+      "number": 3276
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

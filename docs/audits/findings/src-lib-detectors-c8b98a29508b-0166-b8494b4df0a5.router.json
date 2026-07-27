@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0166-b8494b4df0a5.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "b68fc556b157",
+      "title": "Harmful-habit claims omit required provenance and stale-signal demotion",
+      "number": 3234
+    },
+    {
+      "lens": "performance",
+      "key": "706e96013fb8",
+      "title": "Span sizing repeatedly scans all token entries for each span",
+      "number": 3235
+    },
+    {
+      "lens": "data-integrity",
+      "key": "ebd6f91d2c97",
+      "title": "Low-tool-effectiveness recommendation lacks structured provenance and freshness",
+      "number": 3236
+    },
+    {
+      "lens": "data-integrity",
+      "key": "dc0de8d17231",
+      "title": "Mid-turn interruption history is always presented as current",
+      "number": 3237
+    },
+    {
+      "lens": "performance",
+      "key": "4e5c1c8cb4ea",
+      "title": "Each interrupt rescans the session's full token history",
+      "number": 3238
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 5,
+    "existing": 0,
+    "skipped": 0
+  }
+}

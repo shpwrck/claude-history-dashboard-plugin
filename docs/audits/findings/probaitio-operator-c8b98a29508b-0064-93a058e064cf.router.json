@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0064-93a058e064cf.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "6424922f5b02",
+      "title": "Distress detector fails open when session-pod evidence cannot be read",
+      "number": 3333
+    }
+  ],
+  "existing": [
+    {
+      "lens": "security",
+      "key": "b35a292c4542",
+      "title": "Default dashboard image is mutable and not reproducibly pinned",
+      "number": 3322
+    }
+  ],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 1,
+    "skipped": 0
+  }
+}

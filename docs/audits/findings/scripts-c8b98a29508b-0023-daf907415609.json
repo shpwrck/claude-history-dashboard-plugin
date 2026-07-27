@@ -1,0 +1,74 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "scripts/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "scripts/check-openapi-freshness.mjs",
+    "scripts/check-openapi-freshness.test.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "scripts/check-openapi-freshness.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Reads only fixed repository-relative files; no writes, authorization boundary, secrets egress, command execution, or client/server input sink is present."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "The route-table parser treats any slash-leading string/identifier tuple as a served route without proving it belongs to a pathname-dispatched route map."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This bounded release-time checker is not hot-path or shipped runtime code and introduces no user-facing surface."
+        }
+      ]
+    },
+    {
+      "file": "scripts/check-openapi-freshness.test.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Test fixtures exercise pure parsing with local strings and fixed repository reads; they do not implement a security boundary."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "The negative coverage omits the parser's ambiguous slash-leading string/identifier tuple shape, allowing the false-positive route classification to remain asserted as valid behavior."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "This test file is not runtime hot-path code and defines no probe or performance budget concern."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "data-integrity",
+      "severity": "medium",
+      "title": "Route-table detector reports unrelated slash-keyed tuples as served endpoints",
+      "files": [
+        "scripts/check-openapi-freshness.mjs:95",
+        "scripts/check-openapi-freshness.test.mjs:55"
+      ],
+      "where": "scripts/check-openapi-freshness.mjs:95 and scripts/check-openapi-freshness.test.mjs:55",
+      "what": "The detector scans the entire server source for every array pair shaped like `['/path', identifier]`. It does not verify that the pair is inside a route Map or that the Map is subsequently queried with `pathname`. Consequently, an unrelated tuple such as `const metadata = [['/api/example', handler]]` is classified as a served endpoint, making the freshness result non-reproducible from actual dispatch behavior. The negative test covers only non-slash string pairs and identifier-keyed pairs, so it cannot expose this ambiguity.",
+      "fix": "Restrict extraction to entries inside a recognized route-map declaration whose identifier is demonstrably queried with `.get(pathname)`, preferably using a syntax-aware parser; add a regression fixture containing an unrelated `['/api/not-a-route', handler]` tuple.",
+      "acceptance": "A regression test proves that an unrelated slash-leading string/identifier tuple produces no served route, while an entry in a Map that is queried with `.get(pathname)` is still collected and drift detection continues to flag undocumented real table routes.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Adversarial re-read of scripts/check-openapi-freshness.mjs:65-98 confirmed that the only route-table qualification is the tuple regex at line 95, with no surrounding Map or `.get(pathname)` check. Re-read of scripts/check-openapi-freshness.test.mjs:39-75 confirmed the positive fixture includes both contextual signals but the negative fixture never exercises the ambiguous slash-string/identifier shape."
+    }
+  ]
+}

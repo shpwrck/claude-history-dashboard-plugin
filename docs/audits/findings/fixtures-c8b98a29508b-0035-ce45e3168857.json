@@ -1,0 +1,363 @@
+{
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "fixtures/",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFiles": [
+    "fixtures/model-eval-corpus/structured-edit/review-approval-gate/input.ts",
+    "fixtures/model-eval-corpus/structured-edit/review-approval-gate/source.ts",
+    "fixtures/model-eval-corpus/structured-edit/review-confidence-threshold/expected.ts",
+    "fixtures/model-eval-corpus/structured-edit/review-confidence-threshold/input.ts",
+    "fixtures/model-eval-corpus/structured-edit/review-confidence-threshold/source.ts",
+    "fixtures/proof/repo-map-context-waste/README.md",
+    "fixtures/proof/repo-map-context-waste/manifest.json",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/CLAUDE.md",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/config/feature-flags.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/breadcrumb.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/download.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/export.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/filter.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/nav.mjs",
+    "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/search.mjs"
+  ],
+  "verdicts": [
+    {
+      "file": "fixtures/model-eval-corpus/structured-edit/review-approval-gate/input.ts",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure review-policy predicate with no authentication, authorization, I/O, web boundary, injection, secrets, or infrastructure behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This deliberately mutated input.ts is the controlled evaluation subject; the neighboring source/expected corpus defines the correct conjunctive behavior, so the mutation is not a product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Constant-time two-boolean predicate; no hot-path allocation, recomputation, ingest, or new monitored surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/model-eval-corpus/structured-edit/review-approval-gate/source.ts",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure review-policy predicate with no authentication, authorization, I/O, web boundary, injection, secrets, or infrastructure behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Re-derived all four boolean cases; approval requires both green CI and absence of a high-confidence finding."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Constant-time two-boolean predicate; no hot-path allocation, recomputation, ingest, or new monitored surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/model-eval-corpus/structured-edit/review-confidence-threshold/expected.ts",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric comparison with no security-sensitive boundary or side effect."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Checked the threshold boundary; confidence equal to the threshold is correctly classified as blocking."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Constant-time numeric comparison with no meaningful performance surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/model-eval-corpus/structured-edit/review-confidence-threshold/input.ts",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric comparison with no security-sensitive boundary or side effect."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "This deliberately mutated input.ts is the controlled evaluation subject; the neighboring source/expected corpus defines the correct inclusive threshold, so the mutation is not a product defect."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Constant-time numeric comparison with no meaningful performance surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/model-eval-corpus/structured-edit/review-confidence-threshold/source.ts",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Pure numeric comparison with no security-sensitive boundary or side effect."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "clean",
+          "reason": "Checked the threshold boundary; confidence equal to the threshold is correctly classified as blocking."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Constant-time numeric comparison with no meaningful performance surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/README.md",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Narrative proof-fixture documentation; it contains no executable security boundary or secret material."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "Its reproducibility description says the former diff gates are now tests while its gate table still labels both as diff."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Documentation does not implement a hot path, ingest pipeline, UI surface, or performance probe."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/manifest.json",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "clean",
+          "reason": "Inspected executable gate commands and recommendation payloads; they use fixed local Node test/build commands and contain no shell interpolation, traversal, network egress, OAuth material, or secrets."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "finding",
+          "reason": "Two pair instructions promise check-diff verification, but their structured gate fields execute node tests instead."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Fixture metadata defines bounded test chains but no production hot path, ingest implementation, UI surface, or performance budget."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/CLAUDE.md",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Non-executable fixture convention text with no security-sensitive configuration or secret."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "Narrative convention text does not define a detector, parser, calculation, or recommendation evidence claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "Documentation has no runtime performance behavior."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/config/feature-flags.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Static local fixture flags and a read-only lookup; no auth, untrusted write, injection, web boundary, egress, or infrastructure behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The module is fixture configuration, not detector/parser/calculation or recommendation-claim code."
+        },
+        {
+          "gate": "performance",
+          "status": "clean",
+          "reason": "Flag checks are constant-time property reads with no repeated computation or allocation hotspot."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/breadcrumb.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "A one-line unimplemented fixture stub with no security-sensitive behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub implements no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The stub exposes no functioning hot path or new runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/download.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Despite its fixture name, this is only an unimplemented pure stub and performs no filesystem or network operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub implements no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The stub exposes no functioning hot path or new runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/export.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "Despite its fixture name, this is only an unimplemented pure stub and performs no filesystem or network operation."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub implements no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The stub exposes no functioning hot path or new runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/filter.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "A one-line unimplemented fixture stub with no security-sensitive behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub implements no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The stub exposes no functioning hot path or new runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/nav.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "A one-line unimplemented fixture stub with no authentication, authorization, web, or other security-sensitive behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub implements no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The stub exposes no functioning hot path or new runtime surface."
+        }
+      ]
+    },
+    {
+      "file": "fixtures/proof/repo-map-context-waste/pairs/config-backed-flag-rename-diff/tree/src/search.mjs",
+      "gates": [
+        {
+          "gate": "security",
+          "status": "n/a",
+          "reason": "A one-line unimplemented fixture stub with no query execution, injection sink, web boundary, or other security-sensitive behavior."
+        },
+        {
+          "gate": "data-integrity",
+          "status": "n/a",
+          "reason": "The stub implements no detector, parser, calculation, or recommendation claim."
+        },
+        {
+          "gate": "performance",
+          "status": "n/a",
+          "reason": "The stub exposes no functioning search hot path or new runtime surface."
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "lens": "data-integrity",
+      "severity": "medium",
+      "title": "Proof documentation reports obsolete gate kinds",
+      "files": [
+        "fixtures/proof/repo-map-context-waste/README.md:127",
+        "fixtures/proof/repo-map-context-waste/README.md:128"
+      ],
+      "where": "fixtures/proof/repo-map-context-waste/README.md:20-21 and :127-128",
+      "what": "The README says both former diff-gate pairs are now test-gated, yet the reproducibility table still labels `config-backed-flag-rename-diff` and `high-centrality-rename-diff` as diff gates. This makes the documented rerun design internally contradictory.",
+      "fix": "Change both table gate cells to `test` and remove or update the obsolete diff-gate disclosure at lines 87-88.",
+      "acceptance": "A text-level review finds no current claim that either renamed pair uses a diff gate, and the table identifies both as `test`.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Adversarially re-read README.md:10-21, :73-88, and :118-129. The contradiction is current and internal to the audited document; manifest.json:295-298 and :455-458 additionally support that both structured gates are tests."
+    },
+    {
+      "lens": "data-integrity",
+      "severity": "medium",
+      "title": "Pair instructions promise a different objective gate than the manifest executes",
+      "files": [
+        "fixtures/proof/repo-map-context-waste/manifest.json:282",
+        "fixtures/proof/repo-map-context-waste/manifest.json:443"
+      ],
+      "where": "fixtures/proof/repo-map-context-waste/manifest.json:282 versus :295-298, and :443 versus :455-458",
+      "what": "Both renamed-pair instructions state that `node check-diff.mjs` compares touched files with expected copies, while each pair's authoritative structured gate is `kind: test` with `node --test test.mjs`. A worker and reproducer therefore receive conflicting verification contracts from the same manifest.",
+      "fix": "Rewrite each stale title/instruction to describe its current multi-session test task and `node --test test.mjs` gate, or restore matching diff gates if that is the intended frozen design.",
+      "acceptance": "For every manifest pair, any gate named in `instruction` exactly matches `gate.kind`, `gate.command`, and the current chain task; specifically, neither renamed pair mentions `check-diff.mjs` while configured as a test gate.",
+      "priority": "Medium",
+      "verified": true,
+      "verifyNote": "Adversarially re-read manifest.json:278-298 and :439-458 at the immutable baseline. README.md:20-21 confirms these are former diff gates now intentionally converted to tests, so the instruction text is stale rather than an alternate active gate."
+    }
+  ]
+}

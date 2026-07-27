@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "producerHarness": "codex",
+  "receiptSha256": "4f7af96b0ccec2a5be50578e9feda07bc2db3675944a8f0eaf48e737bc48382b",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "section": "data/, tools/, bin/, commands/, .claude*",
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "auditedFilesSha256": "747fc5b333ac36a87c8702097db7c4473f22aa9ab8b3640231a60749c7b554af"
+}

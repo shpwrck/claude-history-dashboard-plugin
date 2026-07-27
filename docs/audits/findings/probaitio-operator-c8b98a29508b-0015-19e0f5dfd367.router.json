@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0015-19e0f5dfd367.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "15a654655b2b",
+      "title": "RemoteSession can turn an arbitrary namespace Secret into outbound Git credentials",
+      "number": 3320
+    },
+    {
+      "lens": "security",
+      "key": "0a5b062dfee1",
+      "title": "DashboardInstance permits arbitrary code to run under the managed dashboard identity",
+      "number": 3321
+    },
+    {
+      "lens": "security",
+      "key": "fbf92cd241ff",
+      "title": "Release workloads default to mutable container tags",
+      "number": 3322
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

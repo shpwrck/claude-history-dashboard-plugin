@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0358-f643822988bb.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "ef02a03a90a4",
+      "title": "Repo-map signatures can exfiltrate literal secrets as supposedly privacy-safe structure",
+      "number": 3168
+    },
+    {
+      "lens": "performance",
+      "key": "21937d22bf91",
+      "title": "Repo-map rendering performs quadratic cumulative string joins",
+      "number": 3169
+    },
+    {
+      "lens": "data-integrity",
+      "key": "52d6e619afe4",
+      "title": "Report-card recommendations lack structured artifact/field provenance",
+      "number": 3170
+    },
+    {
+      "lens": "data-integrity",
+      "key": "677b679ba64e",
+      "title": "Review-queue claims are not reproducible from emitted provenance",
+      "number": 3171
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 4,
+    "existing": 0,
+    "skipped": 0
+  }
+}

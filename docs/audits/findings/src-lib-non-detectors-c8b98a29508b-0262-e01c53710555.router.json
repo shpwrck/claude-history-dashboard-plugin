@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0262-e01c53710555.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "765c215b631f",
+      "title": "Mixed-model turns are repriced as though every entry used the first model",
+      "number": 3145
+    },
+    {
+      "lens": "data-integrity",
+      "key": "cb6b5c114b5e",
+      "title": "The downgradable metric counts upgrades and model aliases as downgrades",
+      "number": 3146
+    },
+    {
+      "lens": "performance",
+      "key": "405fcf5d3b56",
+      "title": "Non-monotonic input triggers turns-by-tokens rescanning",
+      "number": 3147
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0340-0f7670c0153e.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "01e473edadbb",
+      "title": "Malformed numeric counterfactuals can produce negative or non-finite accounting results",
+      "number": 3165
+    },
+    {
+      "lens": "data-integrity",
+      "key": "93db7d163faa",
+      "title": "Trust-boundary parser accepts malformed recommendation and provenance members",
+      "number": 3166
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

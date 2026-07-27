@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0289-f4f1c3e41e65.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "d245a447eacb",
+      "title": "Missing recurrence is incorrectly treated as high-confidence evidence of task success",
+      "number": 3155
+    },
+    {
+      "lens": "performance",
+      "key": "cf7e346e067a",
+      "title": "Task-success recurrence analysis is quadratic over history-sized collections",
+      "number": 3156
+    },
+    {
+      "lens": "security",
+      "key": "a51595ab95eb",
+      "title": "Task artifact traversal follows symlinks outside the configured root",
+      "number": 3157
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

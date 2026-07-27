@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/github-c8b98a29508b-0001-bdadb8af6813.json",
+  "section": ".github/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "f5f9657a3b07",
+      "title": "GitHub CLI installer executes an unverified moving release",
+      "number": 3306
+    },
+    {
+      "lens": "security",
+      "key": "9600ec0a92eb",
+      "title": "Security-sensitive workflows execute actions through mutable tags",
+      "number": 3307
+    },
+    {
+      "lens": "data-integrity",
+      "key": "12cf401326de",
+      "title": "Author-vendor detector silently truncates PR commit evidence",
+      "number": 3309
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

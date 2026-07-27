@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0029-678078dc860e.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "5e620be1ca28",
+      "title": "Metrics scrape sends a bearer token without authenticating the TLS peer",
+      "number": 3325
+    }
+  ],
+  "existing": [
+    {
+      "lens": "security",
+      "key": "5a248c2f722b",
+      "title": "Manager image is selected through a mutable latest tag",
+      "number": 3322
+    }
+  ],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 1,
+    "skipped": 0
+  }
+}

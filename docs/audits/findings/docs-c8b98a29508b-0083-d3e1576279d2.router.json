@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/docs-c8b98a29508b-0083-d3e1576279d2.json",
+  "section": "docs/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "02a5c7e67bfa",
+      "title": "Parser target is not three times all displayed baselines",
+      "number": 3285
+    },
+    {
+      "lens": "data-integrity",
+      "key": "f335eb58b45b",
+      "title": "Tokens render verdict cites the wrong measured duration",
+      "number": 3286
+    },
+    {
+      "lens": "performance",
+      "key": "3e6a4f8bbe02",
+      "title": "Sessions resize layout exceeds its render budget by more than 10×",
+      "number": 3287
+    },
+    {
+      "lens": "performance",
+      "key": "3e640216418c",
+      "title": "Tokens initial render remains above its declared budget",
+      "number": 3288
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 4,
+    "existing": 0,
+    "skipped": 0
+  }
+}

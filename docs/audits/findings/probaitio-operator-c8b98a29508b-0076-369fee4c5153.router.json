@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0076-369fee4c5153.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "f6fcf230366f",
+      "title": "Metrics bearer token is written to test and pod logs",
+      "number": 3336
+    }
+  ],
+  "existing": [
+    {
+      "lens": "security",
+      "key": "0bf351db864b",
+      "title": "Metrics probe explicitly disables TLS certificate verification",
+      "number": 3325
+    },
+    {
+      "lens": "security",
+      "key": "ac1ad8c63a2d",
+      "title": "E2E workload executes a mutable latest-tag image",
+      "number": 3329
+    },
+    {
+      "lens": "security",
+      "key": "a6d69bc41bb1",
+      "title": "Installer helpers apply network-fetched manifests without integrity verification",
+      "number": 3315
+    }
+  ],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 3,
+    "skipped": 0
+  }
+}

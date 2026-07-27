@@ -90,6 +90,15 @@ const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
     aliases: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-5-20250620'],
   },
   {
+    // Claude Opus 5: registered but NOT the default Opus — CURRENT_MODEL_IDS.opus
+    // stays claude-opus-4-8 and this is left out of the picker. Priced at the
+    // current Opus tier ($5 in / $25 out per MTok), same as Opus 4.8, per
+    // https://www.anthropic.com/news/claude-opus-5 (verified 2026-07-24).
+    id: 'claude-opus-5',
+    family: 'opus',
+    pricing: OPUS_CURRENT,
+  },
+  {
     id: CURRENT_MODEL_IDS.sonnet,
     family: 'sonnet',
     pricing: SONNET_CURRENT,

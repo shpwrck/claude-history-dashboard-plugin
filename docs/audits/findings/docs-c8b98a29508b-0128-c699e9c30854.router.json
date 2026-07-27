@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/docs-c8b98a29508b-0128-c699e9c30854.json",
+  "section": "docs/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 0,
+    "existing": 0,
+    "skipped": 0
+  }
+}

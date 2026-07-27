@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/scripts-c8b98a29508b-0112-074027f26a5e.json",
+  "section": "scripts/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "performance",
+      "key": "04ddce3a6a83",
+      "title": "Performance gate can pass while every measured endpoint is returning an error page",
+      "number": 3094
+    },
+    {
+      "lens": "security",
+      "key": "096c23fe63ca",
+      "title": "Stale or replaced PID state can terminate an unrelated process group",
+      "number": 3095
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}

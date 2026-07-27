@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-non-detectors-c8b98a29508b-0279-08b7765ea42c.json",
+  "section": "src/lib (non-detectors)",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "d36ca96f0709",
+      "title": "Session-registry parser follows JSON symlinks outside the requested directory",
+      "number": 3151
+    },
+    {
+      "lens": "performance",
+      "key": "5a8861ec4feb",
+      "title": "Registry ingestion defaults to unbounded synchronous file count and size",
+      "number": 3152
+    },
+    {
+      "lens": "data-integrity",
+      "key": "1d46495c4970",
+      "title": "Unvalidated usage values can corrupt token totals and cost estimates",
+      "number": 3153
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

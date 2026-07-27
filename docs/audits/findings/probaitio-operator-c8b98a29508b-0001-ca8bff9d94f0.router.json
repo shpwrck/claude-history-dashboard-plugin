@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0001-ca8bff9d94f0.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "security",
+      "key": "cb828143641f",
+      "title": "Devcontainer dependencies are not immutably pinned",
+      "number": 3314
+    },
+    {
+      "lens": "security",
+      "key": "a0e8ff87455d",
+      "title": "Bootstrap script executes unverified mutable downloads as root",
+      "number": 3315
+    },
+    {
+      "lens": "security",
+      "key": "ca1ea06f18a1",
+      "title": "Operator image base layers are selected by mutable tags",
+      "number": 3316
+    },
+    {
+      "lens": "security",
+      "key": "59debd2673ac",
+      "title": "Dispatch golden image installs an unversioned agent runtime",
+      "number": 3317
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 4,
+    "existing": 0,
+    "skipped": 0
+  }
+}

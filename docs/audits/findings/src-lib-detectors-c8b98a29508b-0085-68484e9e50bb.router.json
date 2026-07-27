@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/src-lib-detectors-c8b98a29508b-0085-68484e9e50bb.json",
+  "section": "src/lib/detectors",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "51e1f375ca32",
+      "title": "Historical cwd-drift recommendation has no observation-derived as-of date",
+      "number": 3207
+    },
+    {
+      "lens": "data-integrity",
+      "key": "bcd5d7550cea",
+      "title": "Dropped-assignment claims omit structured provenance",
+      "number": 3208
+    },
+    {
+      "lens": "performance",
+      "key": "da940b6f714c",
+      "title": "Five-row evidence caps are applied after unbounded flatMap allocation",
+      "number": 3209
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 3,
+    "existing": 0,
+    "skipped": 0
+  }
+}

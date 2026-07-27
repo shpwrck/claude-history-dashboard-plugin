@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/probaitio-operator-c8b98a29508b-0070-40617a4e3378.json",
+  "section": "probaitio-operator/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "bb907ae404df",
+      "title": "PoolHealthy reports claimed pods as warm",
+      "number": 3335
+    }
+  ],
+  "existing": [
+    {
+      "lens": "security",
+      "key": "f4bc3dfe74c5",
+      "title": "RemoteSession can exfiltrate an arbitrary referenced Secret to a repository host",
+      "number": 3320
+    }
+  ],
+  "skipped": [],
+  "counts": {
+    "created": 1,
+    "existing": 1,
+    "skipped": 0
+  }
+}

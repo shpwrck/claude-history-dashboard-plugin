@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "findings": "docs/audits/findings/fixtures-c8b98a29508b-0035-ce45e3168857.json",
+  "section": "fixtures/",
+  "baseline": "c8b98a29508b5eb7725c75a7e2a41dfa94c1feba",
+  "auditDate": "2026-07-26",
+  "dryRun": false,
+  "gates": [
+    "security",
+    "data-integrity",
+    "performance"
+  ],
+  "created": [
+    {
+      "lens": "data-integrity",
+      "key": "df8740c76cd0",
+      "title": "Proof documentation reports obsolete gate kinds",
+      "number": 3301
+    },
+    {
+      "lens": "data-integrity",
+      "key": "806bfe5d03ea",
+      "title": "Pair instructions promise a different objective gate than the manifest executes",
+      "number": 3302
+    }
+  ],
+  "existing": [],
+  "skipped": [],
+  "counts": {
+    "created": 2,
+    "existing": 0,
+    "skipped": 0
+  }
+}
