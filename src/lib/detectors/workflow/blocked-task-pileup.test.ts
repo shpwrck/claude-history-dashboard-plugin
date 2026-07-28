@@ -7,7 +7,7 @@
  * Issue #559.
  */
 import { describe, it, expect } from 'vitest';
-import { detector } from './blocked-task-pileup';
+import { detector, toSingleLine, commentOnly } from './blocked-task-pileup';
 import type { RecommendationInput } from '../types';
 import type { TaskRecord } from '../../parse-tasks';
 import { PILEUP_MIN } from '../../parse-tasks';
@@ -189,5 +189,135 @@ describe('workflow.blocked-task-pileup (#559)', () => {
     // c2 is completed so it's excluded from blocked count; c1 + c3 = 2 >= PILEUP_MIN
     expect(rec?.id).toBe('workflow.blocked-task-pileup');
     expect(rec?.affected).toBe(2);
+  });
+});
+
+// ── #3231: the comment-only snippet must stay comment-only ──────────────────
+//
+// Task subjects are arbitrary parsed strings. A subject containing a newline
+// followed by shell text used to terminate the `#` comment and leave an
+// executable line in the copy-paste snippet.
+
+describe('workflow.blocked-task-pileup comment-only fix snippet (#3231)', () => {
+  const INJECT = '\nprintf owned';
+
+  function pileupWith(rootSubject: string, childSubject: string) {
+    return detector.rule(
+      makeInput([
+        makeTask({ id: 'root', sessionId: 's1', status: 'pending', subject: rootSubject }),
+        makeTask({
+          id: 'c1',
+          sessionId: 's1',
+          status: 'pending',
+          subject: childSubject,
+          blockedBy: ['root'],
+        }),
+        makeTask({
+          id: 'c2',
+          sessionId: 's1',
+          status: 'pending',
+          subject: 'Benign child',
+          blockedBy: ['root'],
+        }),
+      ]),
+      0
+    );
+  }
+
+  it('comments out every physical line when root and child subjects inject newlines', () => {
+    const rec = pileupWith(`Root${INJECT}`, `Child${INJECT}`);
+    const snippet = rec!.fix!.snippet;
+    const lines = snippet.split('\n');
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) {
+      expect(line.startsWith('#')).toBe(true);
+    }
+  });
+
+  it('cannot run the injected text — no line is executable', () => {
+    const rec = pileupWith(`Root${INJECT}`, `Child${INJECT}`);
+    const snippet = rec!.fix!.snippet;
+    // The payload survives as inert prose on a commented line, never at the
+    // start of a line.
+    expect(snippet).toContain('printf owned');
+    for (const line of snippet.split('\n')) {
+      expect(line).not.toMatch(/^\s*printf/);
+    }
+    // Stripping comment lines leaves nothing to execute.
+    const executable = snippet
+      .split('\n')
+      .map((l) => l.replace(/^#.*$/, '').trim())
+      .filter(Boolean);
+    expect(executable).toEqual([]);
+  });
+
+  it('flattens carriage returns, NUL, and unicode line separators too', () => {
+    const rec = pileupWith(
+      'Root\r\nprintf cr',
+      'Child\u2028printf ls\u2029printf ps\u0000printf nul'
+    );
+    for (const line of rec!.fix!.snippet.split('\n')) {
+      expect(line.startsWith('#')).toBe(true);
+    }
+    expect(rec!.fix!.snippet).toContain('printf cr');
+    expect(rec!.fix!.snippet).toContain('printf ls');
+    expect(rec!.fix!.snippet).toContain('printf nul');
+  });
+
+  it('keeps the blank separator between pileups commented', () => {
+    const rec = detector.rule(
+      makeInput([
+        makeTask({ id: 'r1', sessionId: 's1', status: 'pending', subject: `A${INJECT}` }),
+        makeTask({ id: 'a1', sessionId: 's1', status: 'pending', blockedBy: ['r1'] }),
+        makeTask({ id: 'a2', sessionId: 's1', status: 'pending', blockedBy: ['r1'] }),
+        makeTask({ id: 'r2', sessionId: 's2', status: 'pending', subject: `B${INJECT}` }),
+        makeTask({ id: 'b1', sessionId: 's2', status: 'pending', blockedBy: ['r2'] }),
+        makeTask({ id: 'b2', sessionId: 's2', status: 'pending', blockedBy: ['r2'] }),
+      ]),
+      0
+    );
+    const lines = rec!.fix!.snippet.split('\n');
+    expect(lines.some((l) => l === '#')).toBe(true); // separator, still a comment
+    for (const line of lines) expect(line.startsWith('#')).toBe(true);
+  });
+
+  it('keeps a benign snippet readable', () => {
+    const rec = pileupWith('Ship the migration', 'Backfill rows');
+    const snippet = rec!.fix!.snippet;
+    expect(snippet).toContain('# Unblock: "Ship the migration"');
+    expect(snippet).toContain('#   - Backfill rows');
+    for (const line of snippet.split('\n')) expect(line.startsWith('#')).toBe(true);
+  });
+
+  it('DECLARES fixKind explicitly rather than inheriting the default', () => {
+    const rec = pileupWith('Ship the migration', 'Backfill rows');
+    // The literal field must be PRESENT. An absent fixKind silently defaults to
+    // 'validated', leaving the one-click classification undeclared — the
+    // implicit-classification defect this PR exists to close. An
+    // effectiveFixKind() assertion would pass with the field deleted, so check
+    // the raw property.
+    expect(Object.prototype.hasOwnProperty.call(rec!.fix!, 'fixKind')).toBe(true);
+    expect(rec!.fix!.fixKind).toBe('validated');
+    // 'validated' is judged against the DECLARED TARGET. This is a command-target
+    // fix whose snippet is entirely `#` lines, so pasting it into a shell is an
+    // inert no-op — safe verbatim. (The same text against a settings.json target
+    // would be 'manual', because `#` lines are not valid JSON.)
+    expect(rec!.fix!.target).toBe('command');
+    for (const line of rec!.fix!.snippet.split('\n')) {
+      expect(line.startsWith('#')).toBe(true);
+    }
+  });
+});
+
+describe('toSingleLine / commentOnly helpers (#3231)', () => {
+  it('collapses every line separator to a single space', () => {
+    expect(toSingleLine('a\nb\r\nc d e')).toBe('a b c d e');
+    expect(toSingleLine('  padded \n\n text  ')).toBe('padded text');
+    expect(toSingleLine('null\u0000byte')).toBe('null byte');
+    expect(toSingleLine('u\u2028sep\u2029s')).toBe('u sep s');
+  });
+
+  it('prefixes any line that is not already a comment', () => {
+    expect(commentOnly('# ok\nrm -rf /\n')).toBe('# ok\n# rm -rf /\n#');
   });
 });

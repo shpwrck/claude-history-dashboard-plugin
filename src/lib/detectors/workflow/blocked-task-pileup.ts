@@ -14,6 +14,39 @@ import { short } from '../shared';
 import type { TaskRecord } from '../../parse-tasks';
 import { PILEUP_MIN } from '../../parse-tasks';
 
+/**
+ * Flatten arbitrary parsed text to a single display line.
+ *
+ * Task subjects are free-form strings read from `~/.claude/tasks/*.json`, so a
+ * subject may contain newlines (or a carriage return, a U+2028/U+2029 line or
+ * paragraph separator, or any other control character). The fix snippet below
+ * is a comment-only shell block; a subject carrying a newline followed by
+ * `printf owned` used to end the `#` comment and leave `printf owned` as an
+ * executable line the moment the user pasted it (#3231). Every line/paragraph
+ * separator and control character collapses to a space here, and runs of
+ * whitespace collapse after it so the result stays readable.
+ */
+export function toSingleLine(value: string): string {
+  return value
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Belt-and-braces: guarantee EVERY physical line of a comment-only snippet
+ * starts with `#`, whatever slipped through the per-field flattening above.
+ * The snippet is `target: 'command'`, so this is the property that makes it
+ * inert when pasted into a shell.
+ */
+export function commentOnly(snippet: string): string {
+  return snippet
+    .split('\n')
+    .map((line) => (line.startsWith('#') ? line : `# ${line}`.trimEnd()))
+    .join('\n');
+}
+
 export const detector: Detector = {
   id: 'workflow.blocked-task-pileup',
   category: 'workflow',
@@ -83,15 +116,22 @@ export const detector: Detector = {
         `${short(p.sessionId)}: ${p.blockedCount} task(s) blocked behind "${p.rootSubject}"`
     );
 
-    const fixSnippet = pileups
-      .slice(0, 3)
-      .map(
-        (p) =>
-          `# Unblock: "${p.rootSubject}" (session ${short(p.sessionId)})\n` +
-          `# Assign an owner or split the root; ${p.blockedCount} downstream task(s) then unblock:\n` +
-          p.blockedSubjects.map((s) => `#   - ${s}`).join('\n')
-      )
-      .join('\n\n');
+    // Comment-only snippet: every interpolated subject is flattened to one line
+    // first, the blank separator between pileups is itself a `#` line, and
+    // commentOnly() re-asserts the invariant over the finished text (#3231).
+    const fixSnippet = commentOnly(
+      pileups
+        .slice(0, 3)
+        .map(
+          (p) =>
+            `# Unblock: "${toSingleLine(p.rootSubject)}" (session ${toSingleLine(short(p.sessionId))})\n` +
+            `# Assign an owner or split the root; ${p.blockedCount} downstream task(s) then unblock:\n` +
+            p.blockedSubjects
+              .map((s) => `#   - ${toSingleLine(s)}`)
+              .join('\n')
+        )
+        .join('\n#\n')
+    );
 
     return {
       id: 'workflow.blocked-task-pileup',
@@ -110,6 +150,16 @@ export const detector: Detector = {
       fix: {
         target: 'command',
         label: 'Identify and unblock root tasks',
+        // Declared, never inherited — an absent fixKind silently defaults to
+        // 'validated', leaving the one-click classification unclaimed. Safe-to-
+        // paste is judged against the DECLARED TARGET: this snippet is
+        // comment-only, and in a shell every `#` line is an inert no-op, so
+        // pasting it verbatim cannot do anything — matching the established
+        // comment-only `target: 'command'` fix in cost.idle-mcp-tools. (Against a
+        // settings.json target the same block would be 'manual', since `#` lines
+        // are not valid JSON and would break the file.) The real remedy is the
+        // human action in `note`; the snippet only names the roots to act on.
+        fixKind: 'validated',
         note:
           'Review each root task. Assign an owner or split it; downstream tasks unblock automatically.',
         snippet: fixSnippet,
