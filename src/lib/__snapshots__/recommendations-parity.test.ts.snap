@@ -479,30 +479,42 @@ Load these files once into context, then reuse that copy instead of re-reading t
     "view": "files",
   },
   {
-    "action": "Review whether these are still needed; pruning dead entries keeps settings.json honest. Known dangerous-command guards are deliberately excluded from this check, so anything listed is a non-destructive rule that simply never fired.",
+    "action": "Informational only: review whether each rule below is still needed. This check reports what never matched; it does not judge whether a rule is safe to remove and recommends no configuration change. Never matching is the expected outcome for a deny rule that is doing its job.",
     "affected": 2,
     "category": "safety",
-    "detail": "2 permission deny rule(s) never matched a command attempt in your retained history — they may be leftover clutter rather than active guards.",
+    "claimClass": "accounting",
+    "detail": "2 of 2 evaluable permission deny rule(s) never matched a tool call in your retained history. A guard that never fires may simply be working — the action was never attempted, or the rule deterred it — so this is not evidence that any of them is unnecessary. Judged over 54 retained tool call(s) (18 Bash) across 2 session(s); none of them carry a readable timestamp, so this window cannot be dated.",
     "evidence": [
       "Bash(npm test:*)",
       "Bash(yarn install:*)",
     ],
-    "fix": {
-      "label": "Prune unused deny rules",
-      "note": "Remove these never-matched entries from the "permissions.deny" array in settings.json if they are no longer relevant. (Destructive-command guards are never listed here.)",
-      "snippet": "{
-  "permissions": {
-    "deny": [
-      "Bash(npm test:*)",
-      "Bash(yarn install:*)"
-    ]
-  }
-}",
-      "target": "settings.json",
-    },
     "id": "safety.deny-rule-never-triggered",
+    "proofTier": "accounting",
+    "provenance": {
+      "inference": "No retained tool call matched these rules within the observed window. That establishes only that they did not fire there — not that they are unused, unnecessary, or safe to remove. No removal is proposed and no configuration change is emitted.",
+      "observations": [
+        {
+          "claim": "2 permission deny rule(s) are configured",
+          "field": "settings.permissions.deny",
+          "source": "liveConfig",
+          "value": 2,
+        },
+        {
+          "claim": "2 of the 2 evaluable rule(s) matched no retained tool call; 0 rule(s) were not evaluable and are excluded",
+          "field": "toolData[].calls[]",
+          "source": "parse-tools",
+          "value": 2,
+        },
+        {
+          "claim": "the comparison ran over 54 retained tool call(s) (18 Bash) across 2 session(s); none of them carry a readable timestamp, so this window cannot be dated",
+          "field": "toolData[].calls[].timestamp",
+          "source": "parse-tools",
+          "value": 54,
+        },
+      ],
+    },
     "severity": "info",
-    "title": "Unused permission deny rules",
+    "title": "Deny rules with no match in retained history",
     "view": "permissions",
   },
   {

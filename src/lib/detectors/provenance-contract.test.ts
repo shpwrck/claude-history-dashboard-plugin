@@ -1293,6 +1293,34 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now: Date.parse('2026-06-20T00:00:00.000Z'),
     };
   },
+  'safety.deny-rule-never-triggered': () => {
+    // Deny rules that no retained call matched. One guards a DESTRUCTIVE
+    // command on purpose: since #3221 the detector gives no removal advice, so
+    // it reports every evaluable rule rather than trying to classify command
+    // safety. History is dated (so asOf/stale are exercised rather than
+    // skipped) and clears the 20-call coverage floor — a thin window suppresses
+    // the finding outright. The calls deliberately run a DIFFERENT command from
+    // the deny rules, which is what leaves those rules never-triggered.
+    const calls = Array.from({ length: 24 }, (_, i) => ({
+      timestamp: i === 0 ? '2026-06-18T09:00:00.000Z' : '2026-06-19T09:00:00.000Z',
+      toolName: 'Bash',
+      input: { command: 'echo build-step' },
+      toolUseId: `dnt${i}`,
+      isError: false,
+      resultBytes: 0,
+    })) as unknown as RecommendationInput['toolData'][number]['calls'];
+    return {
+      input: baseInput({
+        toolData: [{ sessionId: 's-deny', calls }],
+        liveConfig: liveConfig({
+          settings: {
+            permissions: { deny: ['Bash(terraform destroy:*)', 'WebFetch'] },
+          },
+        }),
+      }),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
 };
 
 function runAllowlistedDetector(id: string): Recommendation {

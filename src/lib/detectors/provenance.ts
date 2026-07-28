@@ -59,6 +59,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'security.secrets-at-rest',
   'cost.edit-format-churn',
   'cost.local-downroute',
+  'safety.deny-rule-never-triggered',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */

@@ -24,10 +24,6 @@ import {
 } from '../task-class';
 import { resolveModelPricing, entryCostAtModel, CHEAPEST_MODEL } from '../pricing';
 import { scopeKeyOf } from '../reclaim';
-import {
-  bashSpec,
-  parsePermRule,
-} from '../permission-rules';
 export {
   allowShadowedByDeny,
   parsePermRule,
@@ -91,29 +87,15 @@ export function permissionsContain(
   return rules.every((r) => set.has(r));
 }
 
-// Dangerous-command stems whose `deny` guards are *expected* to sit unused —
-// a never-fired `rm -rf` guard is the rule working, not dead config. The
-// deny-never-triggered rule excludes these so it never nudges toward weakening
-// a real safety guard (the only kind of deny on many setups). Matched as a
-// command-prefix against the Bash rule's literal.
-const DANGEROUS_DENY_STEMS = [
-  'rm', 'rmdir', 'dd', 'mkfs', 'shred', 'curl', 'wget', 'sudo',
-  'chmod', 'chown', 'chgrp', 'kill', 'pkill', 'killall', 'shutdown',
-  'reboot', 'halt', 'fdisk', 'parted', 'mkswap', 'git reset --hard',
-  'git clean', 'git push --force', 'git push -f', 'git push --force-with-lease',
-  'npm publish',
-];
-
-/** A Bash deny rule guarding a known-destructive command — never flagged as clutter. */
-export function isDangerousDenyRule(rule: string): boolean {
-  const { tool, specifier } = parsePermRule(rule);
-  if (tool !== 'Bash' || specifier === null) return false;
-  const { literal } = bashSpec(specifier);
-  const lit = literal.toLowerCase();
-  return DANGEROUS_DENY_STEMS.some(
-    (stem) => lit === stem || lit.startsWith(stem + ' ')
-  );
-}
+// NOTE: `DANGEROUS_DENY_STEMS` / `isDangerousDenyRule` lived here until #3221.
+// They existed so `safety.deny-rule-never-triggered` could withhold a
+// destructive guard from its prune advice. That detector no longer gives prune
+// advice — it is purely informational — so nothing needs to classify whether a
+// deny rule's command is dangerous, and a denylist of dangerous stems that
+// fails open (`terraform destroy`, `kubectl delete`, `ls && rm -rf /`,
+// `env rm -rf /`) is exactly the bypass surface #3383 decided to delete rather
+// than keep narrowing. Do not reintroduce without a consumer that survives that
+// argument.
 
 export function hasPostEditHook(settings: LiveSettings | null | undefined): boolean {
   const post = settings?.hooks?.PostToolUse;

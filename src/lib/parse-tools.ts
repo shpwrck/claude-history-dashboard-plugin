@@ -3569,8 +3569,18 @@ export interface NativeToolBypass {
 const RFC3339_TIMESTAMP =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/;
 
-/** Date.parse is permissive; require a real RFC3339 calendar instant. */
-function rfc3339TimestampMs(timestamp: string): number | null {
+/**
+ * Date.parse is permissive; require a real RFC3339 calendar instant.
+ *
+ * Exported as the single strict reading of a {@link ToolCall.timestamp}. A
+ * `ToolCall` carries `entry.timestamp ?? ''` (see the parse loop above), so an
+ * absent transcript timestamp reaches consumers as `''` — and `Date.parse`
+ * would happily turn other partial strings (`'2026'`, `'Jun 19 2026'`) into an
+ * instant. Any consumer deciding whether a call is DATED must use this, so
+ * "dated" means the same thing everywhere instead of being re-derived, more
+ * loosely, per caller.
+ */
+export function rfc3339TimestampMs(timestamp: string): number | null {
   const match = RFC3339_TIMESTAMP.exec(timestamp);
   if (!match) return null;
   const year = Number(match[1]);

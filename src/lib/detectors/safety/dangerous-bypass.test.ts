@@ -1008,23 +1008,38 @@ describe('safety.dangerous-bypass settings authority and provenance', () => {
     );
   });
 
-  it('keeps an emitted npm-publish deny guard out of stale-rule pruning', () => {
+  it('never nudges toward undoing an emitted npm-publish deny guard (#3221)', () => {
     const emitted = detector.rule(
       bypassInput([bashSession('session-1', ['npm publish'])]),
       NOW
     )!;
     const deny = fixRules(emitted, 'deny');
-
     expect(deny).toEqual(['Bash(npm publish:*)']);
+
+    // Thin history: the never-triggered detector's coverage floor suppresses
+    // rather than claiming a freshly-added guard is dead.
     expect(
       denyRuleNeverTriggered.rule(
-        input({
-          toolData: [],
-          liveConfig: liveConfig({ deny }),
-        }),
+        input({ toolData: [], liveConfig: liveConfig({ deny }) }),
         NOW
       )
     ).toBeNull();
+
+    // With real history the guard IS reported — since #3221 the detector makes
+    // no safety judgement and withholds nothing — but purely as an observation:
+    // no fix, and no copy telling the user to prune or delete it.
+    const reported = denyRuleNeverTriggered.rule(
+      input({
+        toolData: [bashSession('session-2', Array.from({ length: 24 }, () => 'echo hi'))],
+        liveConfig: liveConfig({ deny }),
+      }),
+      NOW
+    );
+    expect(reported!.evidence).toEqual(deny);
+    expect(reported!.fix).toBeUndefined();
+    expect(`${reported!.detail} ${reported!.action}`.toLowerCase()).not.toMatch(
+      /prune|delete|clutter/
+    );
   });
 
   it('validates provenance on the dual-emitted warning id too', () => {
