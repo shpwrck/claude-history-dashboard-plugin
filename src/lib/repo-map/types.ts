@@ -54,7 +54,26 @@ export interface FileStructure {
 /** A parse function: source text + relative path -> structure. Injected into
  *  {@link generateRepoMap} so the file walk/render/ranking is testable without
  *  the WASM parser, and so other languages can plug in later. Async results
- *  support lazy parser initialization on the first cache miss. */
+ *  support lazy parser initialization on the first cache miss.
+ *
+ *  PRIVACY CONTRACT — an implementation MUST return signatures that are already
+ *  structurally sanitized: every literal VALUE (string, template, number, regex)
+ *  and every comment masked out, from its own AST, the way `redactLiteralNodes`
+ *  does for TypeScript (#3168). A `RepoSymbol.signature` is the only field
+ *  carrying author-written source text into a prompt-facing artifact, and this
+ *  is the ONLY layer that can honour the contract: masking a literal requires a
+ *  parse, and by the time structure reaches `generateRepoMap` the source is gone
+ *  and the language is unknown. The generator applies a shape-based scrub over
+ *  signatures as a second net, which catches secret-SHAPED text (an API key, a
+ *  JWT, a home path) but categorically CANNOT remove an arbitrary literal such
+ *  as `'pw-secret'` — that has no secret shape. A parser skipping this leaks
+ *  source content into the map.
+ *
+ *  The same contract binds anything that REPLAYS a signature without re-parsing
+ *  — notably the per-file cache (`file-cache.ts`), whose entries are reused only
+ *  when their salt matches `repoMapParserCacheSalt()`. That salt embeds
+ *  `REPO_MAP_OUTPUT.version`, so a change to masking semantics must bump that
+ *  version to retire entries produced under the older, weaker rules. */
 export type ParseFile = (
   source: string,
   path: string

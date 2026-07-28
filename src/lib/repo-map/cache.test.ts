@@ -80,8 +80,12 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from before the remote-identity field (#2709)', () => {
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(5);
+  it('invalidates artifacts from before literal-secret redaction (#3168)', () => {
+    // v6 changed signature GENERATION semantics: a v5 artifact can hold a
+    // signature carrying a literal secret, so it must never be reused.
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(6);
+    expect(isCacheValid({ ...persisted, version: 5 }, base)).toBe(false);
+    // ...and the pre-remote-identity artifacts of #2709 stay invalid too.
     expect(isCacheValid({ ...persisted, version: 4 }, base)).toBe(false);
   });
 

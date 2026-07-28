@@ -5,19 +5,22 @@ import type {
   ParseFile,
   RepoFile,
   RepoMap,
+  RepoSymbol,
 } from './types';
 import { RepoMapParserInitializationError } from './types';
 import { createTsParseFile } from './parser';
 import { readDirentsBoundedSync } from '../bounded-fs';
+import { redactSecrets } from '../secret-redaction';
 
 /**
  * Repo Map generator (#887 / ADR 0007). Walks a project root, extracts each
  * source file's structure via the injected {@link ParseFile}, ranks files by how
  * often they are imported, and renders a compact, token-budgeted text map.
  *
- * HOST-ONLY (reads the live filesystem). It carries NO source bodies — only
- * paths, symbol names + one-line signatures, and module specifiers — so the
- * artifact a caller persists is privacy-safe by construction.
+ * HOST-ONLY (reads the live filesystem). It carries NO source bodies and no
+ * source literals — only paths, symbol names + one-line signatures with literal
+ * values masked, and module specifiers — so the artifact a caller persists is
+ * privacy-safe by construction.
  */
 
 const SOURCE_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
@@ -151,8 +154,75 @@ function normalizeRel(dir: string, spec: string): string {
   return out.join('/');
 }
 
+/** SHAPE-based scrub of the ONE field that carries author-written source text
+ *  into the artifact (#3168). A second net, NOT the literal mask.
+ *
+ *  Be precise about what this does and does not cover, because the difference is
+ *  a privacy boundary. {@link redactSecrets} matches secret SHAPES — an API key,
+ *  a JWT, a bearer token, a home path, a long hex run. It catches those wherever
+ *  a signature came from, including a per-file cache entry or an injected
+ *  `parseFile`, neither of which is re-parsed here, and it covers the persisted
+ *  JSON and the rendered text in one pass. What it CANNOT do is remove an
+ *  arbitrary literal: `function f(key = 'pw-secret')` has no secret shape, and
+ *  recovering it would need an AST and a known language — both gone by here.
+ *
+ *  Literal masking is therefore the PARSER's job, stated as a contract on
+ *  {@link ParseFile}. TypeScript's parser satisfies it structurally, and no
+ *  shipped configuration depends on this function for literal safety: both
+ *  callers (`scripts/repo-map-generate.mjs`, `scripts/repo-map-gate.mjs`) use
+ *  `createTsParseFile`, the former behind a cache whose reuse is salted with
+ *  `REPO_MAP_OUTPUT.version`. {@link assertSanitizedSignature} surfaces a
+ *  violation in dev so a future non-TS parser fails loudly rather than quietly.
+ *
+ *  Only `signature` is scrubbed: `name` and `imports` are structural identifiers
+ *  the map's ranking and joins depend on, and a repo-relative path such as
+ *  `src/home/index.ts` would trip the redactor's home-path pattern. */
+function redactSymbols(symbols: RepoSymbol[], path: string): RepoSymbol[] {
+  return symbols.map((s) => {
+    if (!s.signature) return s;
+    assertSanitizedSignature(s.signature, s.name, path);
+    return { ...s, signature: redactSecrets(s.signature) };
+  });
+}
+
+const warnedContractViolations = new Set<string>();
+
+/** Dev-only check that a signature honoured the {@link ParseFile} privacy
+ *  contract, warning once per distinct offending signature.
+ *
+ *  The testable proxy for "literals were masked" is that no literal DELIMITER
+ *  survives: masking a literal removes its quotes along with its node, and the
+ *  TS path additionally cuts the head at any delimiter left by an unterminated
+ *  literal, so `signatureOf` provably never emits `'`, `"` or a backtick — nor
+ *  does {@link redactSecrets}, whose replacements are all bracketed words. A
+ *  surviving delimiter therefore means an upstream parser skipped literal
+ *  masking.
+ *
+ *  It WARNS rather than masks, deliberately. Quote-stripping an unknown
+ *  language's signature would corrupt structure where quotes are structural and
+ *  would still miss unquoted literals, leaving the seam asserting a completeness
+ *  it cannot deliver — the failure mode this whole change exists to remove. The
+ *  repairable defect is in the parser, so that is where the message points.
+ *
+ *  The message names the symbol and file but NEVER echoes the signature: the
+ *  unmasked literal is the thing being reported, and reprinting it would leak it
+ *  into logs — the same mistake in a different sink. */
+function assertSanitizedSignature(signature: string, name: string, path: string): void {
+  if (process.env.NODE_ENV === 'production') return;
+  if (!/['"`]/.test(signature)) return;
+  const key = `${path}:${name}`;
+  if (warnedContractViolations.has(key)) return;
+  warnedContractViolations.add(key);
+  console.warn(
+    `repo-map: signature for ${name} in ${path} retains a literal delimiter, so its ` +
+      'parser did not mask literals (ParseFile privacy contract, #3168). An arbitrary ' +
+      'literal cannot be removed at the generator seam; fix the parser.'
+  );
+}
+
 /** Render one file's block: path, then its exported symbols (signatures) first,
- *  then a compact import list. Bodies never appear. */
+ *  then a compact import list. Bodies never appear, and signatures reaching here
+ *  have already been through {@link redactSymbols}. */
 function renderFile(f: RepoFile): string {
   const lines: string[] = [f.path];
   const exported = f.symbols.filter((s) => s.exported);
@@ -231,7 +301,7 @@ export async function generateRepoMap(
     files.push({
       path: relPosix(root, abs),
       mtimeMs,
-      symbols: structure.symbols,
+      symbols: redactSymbols(structure.symbols, relPosix(root, abs)),
       // A source file contributes one graph edge per target, not one edge per
       // import/re-export declaration. Parser output intentionally preserves the
       // declarations it sees; normalize at this generator seam so ranking,

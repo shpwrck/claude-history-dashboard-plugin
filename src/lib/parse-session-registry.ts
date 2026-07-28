@@ -13,9 +13,17 @@
  * This file reads <pid>.json registry files, NOT transcript files.
  */
 
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { normalizeMaxEntries, readDirentsBoundedSync } from './bounded-fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+} from 'node:fs';
+import type { Stats } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
+import { readDirentsBoundedSync } from './bounded-fs';
 
 // ---------------------------------------------------------------------------
 // Per-session shape (one file = one live/recent process)
@@ -55,8 +63,139 @@ export interface SessionRegistryEntry {
 }
 
 export interface ParseSessionRegistryOptions {
+  /**
+   * Per-file byte ceiling. Files larger than this are skipped — on the stat
+   * when they are already too big, and mid-read when they grow past it while
+   * being read, so the ceiling holds against a concurrent writer. Omitted /
+   * non-finite / negative falls back to
+   * {@link DEFAULT_REGISTRY_MAX_FILE_BYTES}.
+   */
   maxFileBytes?: number;
+  /**
+   * Ceiling on directory entries inspected (all entries, not just `.json`).
+   * Omitted / non-finite / negative falls back to
+   * {@link DEFAULT_REGISTRY_MAX_ENTRIES}.
+   */
   maxEntries?: number;
+}
+
+/**
+ * Default ceiling on directory entries scanned per call (#3152).
+ *
+ * A real ~/.claude/sessions/ holds one small file per live/recent CLI process —
+ * tens to low hundreds in practice — so 50,000 leaves ~3 orders of magnitude of
+ * headroom for a legitimately large registry while still bounding a runaway or
+ * hostile directory. Matches the `DASHBOARD_ARTIFACT_DIR_MAX_ENTRIES` default
+ * that ingest already passes explicitly.
+ */
+export const DEFAULT_REGISTRY_MAX_ENTRIES = 50_000;
+
+/**
+ * Default per-file byte ceiling (#3152).
+ *
+ * A registry file is a single flat JSON object of roughly 200-400 bytes, so
+ * 1 MiB is ~3,000x headroom for any legitimate file while preventing a
+ * corrupted or deliberately inflated `<pid>.json` from being slurped into
+ * memory and handed to a synchronous `JSON.parse`.
+ */
+export const DEFAULT_REGISTRY_MAX_FILE_BYTES = 1_048_576;
+
+/** Resolve an optional numeric cap, falling back to a finite default. */
+function resolveCap(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+/**
+ * Open flags used to read a registry file without traversing a final-component
+ * symlink (#3151).
+ *
+ * `O_NOFOLLOW` makes the open itself atomic-with-respect-to-symlinks, but it is
+ * POSIX-only — Windows does not define it, and this parser does run there (the
+ * plugin bundle boots `scripts/server.mjs` -> `ingest.mjs` directly on the
+ * user's machine, no container). Where the flag is absent these flags collapse
+ * to a plain `O_RDONLY` that *would* follow a link swapped in after the `lstat`,
+ * so the descriptor identity check in {@link isSameFile} is what closes that
+ * window instead.
+ */
+const NOFOLLOW_OPEN_FLAGS =
+  fsConstants.O_RDONLY | (typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0);
+
+/**
+ * True when two stat results name the same file on the same device.
+ *
+ * Used to confirm that the descriptor actually opened is the same inode the
+ * `lstat` approved — the portable half of the no-symlink guarantee, and the
+ * only half on platforms without `O_NOFOLLOW`.
+ *
+ * Honest limit: this can only be as good as the identity the platform reports.
+ * POSIX always reports real `dev`/`ino`. Windows reports a file index for NTFS
+ * but can report `0` on filesystems that have no stable id, and two zeroes
+ * compare equal — so there the check degrades to a no-op rather than to a
+ * refusal. Refusing instead would deny service on those filesystems to close a
+ * window whose worst case is reading a file the invoking user can already read.
+ */
+function isSameFile(a: Stats, b: Stats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+/**
+ * True when `filePath` lies strictly beneath `rootDir` after lexical
+ * normalization. Dirent names never contain a path separator, so this is a
+ * defence-in-depth assertion rather than the primary boundary check — the
+ * primary check is that the entry is not a symlink.
+ */
+function isWithinDir(rootDir: string, filePath: string): boolean {
+  const root = resolve(rootDir);
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  return resolve(filePath).startsWith(prefix);
+}
+
+/** Chunk size used once a file turns out to be bigger than its stat claimed. */
+const READ_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Read at most `maxBytes` bytes from an already-open descriptor, or refuse.
+ *
+ * A size taken from `fstat` is only a snapshot: `readFileSync(fd)` reads to EOF,
+ * so a live or hostile writer that grows the file between the stat and the read
+ * (or midway through it) is read in full and the byte budget added for #3152 is
+ * bypassed entirely. This reads through a ceiling of `maxBytes + 1` instead —
+ * the extra byte exists only to prove the file is over budget, and its presence
+ * makes this return `null` so the caller skips the file without decoding or
+ * parsing it.
+ *
+ * `sizeHint` (the `fstat` size) only sizes the first allocation; it is never
+ * trusted as a bound.
+ *
+ * @returns the decoded text, or `null` when the descriptor holds more than
+ *          `maxBytes` bytes.
+ */
+function readFdBoundedSync(fd: number, maxBytes: number, sizeHint: number): string | null {
+  const ceiling = maxBytes + 1;
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  while (total < ceiling) {
+    const want = Math.min(
+      ceiling - total,
+      total === 0 ? Math.max(sizeHint + 1, 1) : READ_CHUNK_BYTES
+    );
+    const buf = Buffer.allocUnsafe(want);
+    // Explicit position: independent of the descriptor's offset, and a short
+    // read is never mistaken for EOF at the wrong place.
+    const got = readSync(fd, buf, 0, want, total);
+    if (got <= 0) break;
+    chunks.push(got === want ? buf : buf.subarray(0, got));
+    total += got;
+  }
+
+  // The ceiling byte came back, so the file is larger than the budget allows.
+  if (total > maxBytes) return null;
+  if (chunks.length === 0) return '';
+  // Decode exactly what was read — never the slack in the final buffer.
+  return (chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, total)).toString('utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +207,30 @@ export interface ParseSessionRegistryOptions {
  * Malformed / unreadable files are silently skipped (tolerate partial writes
  * that occur when a session file is being written concurrently).
  *
+ * Boundary guarantees:
+ * - Symlinked entries are refused (#3151). The requested directory is the
+ *   boundary: a `<pid>.json` that is a symlink to a registry-shaped file
+ *   elsewhere on the box is never ingested, even when its target is a regular
+ *   file with valid fields. Enforced in layers — `Dirent.isSymbolicLink()`, an
+ *   `lstat` (no-follow) re-check for filesystems that report `UNKNOWN` d_type,
+ *   `O_NOFOLLOW` on the open where the platform defines it, and a `dev`/`ino`
+ *   check that the descriptor really is the inode the `lstat` approved.
+ *   The last layer is what covers a link swapped in *after* the `lstat` on
+ *   Windows, which has no `O_NOFOLLOW`; see {@link isSameFile} for the one
+ *   case that leaves (a filesystem reporting no stable file id) and why it
+ *   degrades rather than refuses.
+ * - Both caps are finite by default (#3152): at most
+ *   {@link DEFAULT_REGISTRY_MAX_ENTRIES} directory entries are inspected and
+ *   files above {@link DEFAULT_REGISTRY_MAX_FILE_BYTES} are skipped, so the
+ *   default path can no longer be stalled by a huge or corrupted registry
+ *   directory. Explicit caller options (ingest passes the
+ *   `DASHBOARD_ARTIFACT_*` values) still win, smaller or larger.
+ * - The byte budget bounds the *read*, not just the stat. A file that grows
+ *   past the budget after it was stat'd — a live writer, or one racing the
+ *   check deliberately — is refused mid-read by {@link readFdBoundedSync}
+ *   rather than being slurped to EOF, so the cap holds against a concurrent
+ *   writer.
+ *
  * @param dir  Path to ~/.claude/sessions/ (or a test fixture directory)
  * @returns    Array of parsed entries, may be empty if the directory is absent
  *             or all files are malformed.
@@ -76,28 +239,40 @@ export function parseSessionRegistryDir(
   dir: string,
   opts: ParseSessionRegistryOptions = {}
 ): SessionRegistryEntry[] {
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
-  const filenames = readDirentsBoundedSync(dir, maxEntries).map((entry) => entry.name);
-  const maxFileBytes =
-    typeof opts.maxFileBytes === 'number' &&
-    Number.isFinite(opts.maxFileBytes) &&
-    opts.maxFileBytes >= 0
-      ? Math.floor(opts.maxFileBytes)
-      : -1;
+  const maxEntries = resolveCap(opts.maxEntries, DEFAULT_REGISTRY_MAX_ENTRIES);
+  const maxFileBytes = resolveCap(opts.maxFileBytes, DEFAULT_REGISTRY_MAX_FILE_BYTES);
+  const dirents = readDirentsBoundedSync(dir, maxEntries);
 
   const entries: SessionRegistryEntry[] = [];
-  for (const filename of filenames) {
+  for (const dirent of dirents) {
+    const filename = dirent.name;
     if (!filename.endsWith('.json')) continue;
+    // Cheap reject when readdir already told us the entry is a link.
+    if (dirent.isSymbolicLink()) continue;
+    let fd = -1;
     try {
       const filePath = join(dir, filename);
-      const fileStat = statSync(filePath);
-      if (
-        !fileStat.isFile() ||
-        (maxFileBytes >= 0 && fileStat.size > maxFileBytes)
-      ) {
+      if (!isWithinDir(dir, filePath)) continue;
+      // lstat, not stat: must NOT follow the link before deciding.
+      const linkStat = lstatSync(filePath);
+      if (linkStat.isSymbolicLink() || !linkStat.isFile() || linkStat.size > maxFileBytes) {
         continue;
       }
-      const raw = readFileSync(filePath, 'utf8');
+      // Where O_NOFOLLOW exists this closes the stat-then-open race outright:
+      // if the entry became a symlink after the lstat, the open fails (ELOOP)
+      // and we skip it. Where it does not, the identity check below does.
+      fd = openSync(filePath, NOFOLLOW_OPEN_FLAGS);
+      const openedStat = fstatSync(fd);
+      if (!openedStat.isFile()) continue;
+      // The descriptor must be the exact inode the lstat approved. Without
+      // O_NOFOLLOW the open would have followed a link swapped in just now;
+      // this catches that after the fact, before a single byte is read.
+      if (!isSameFile(linkStat, openedStat)) continue;
+      if (openedStat.size > maxFileBytes) continue;
+      // The stat above is only an early reject — the read itself is bounded, so
+      // a writer that grows the file after the stat cannot exceed the budget.
+      const raw = readFdBoundedSync(fd, maxFileBytes, openedStat.size);
+      if (raw === null) continue;
       const j = JSON.parse(raw) as Partial<SessionRegistryEntry>;
 
       // Require the minimum fields needed for attribution
@@ -124,7 +299,16 @@ export function parseSessionRegistryDir(
         entrypoint: j.entrypoint,
       });
     } catch {
-      // skip unparseable / partial files
+      // skip unparseable / partial / unopenable files (ELOOP on a symlinked
+      // entry lands here too)
+    } finally {
+      if (fd >= 0) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* ignore close failures */
+        }
+      }
     }
   }
   return entries;

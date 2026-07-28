@@ -10,14 +10,53 @@
  *   3. "low-signal" attribution when sessionCount <= 2
  *   4. kind!=entrypoint anomaly count (sdk-cli + kind:interactive is the real-world case)
  *   5. parseSessionRegistryDir tolerates missing dirs and malformed JSON
+ *   6. parseSessionRegistryDir refuses symlinked entries (#3151) and applies
+ *      finite default entry/byte caps (#3152)
  */
 
-import { describe, it, expect } from 'vitest';
-import { analyzeAttribution, parseSessionRegistryDir } from './parse-session-registry';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import {
+  analyzeAttribution,
+  parseSessionRegistryDir,
+  DEFAULT_REGISTRY_MAX_ENTRIES,
+  DEFAULT_REGISTRY_MAX_FILE_BYTES,
+} from './parse-session-registry';
 import type { SessionRegistryEntry } from './parse-session-registry';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { readDirentsBoundedSync } from './bounded-fs';
+
+// Spy wrapper over the REAL bounded reader (behaviour unchanged) so a test can
+// assert which entry cap the parser passes down on the default path (#3152).
+vi.mock('./bounded-fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./bounded-fs')>();
+  return { ...actual, readDirentsBoundedSync: vi.fn(actual.readDirentsBoundedSync) };
+});
+
+/**
+ * A controllable concurrent writer, used to open the stat-then-read race
+ * window on demand. While `path` is set, the next `fstatSync` the parser makes
+ * appends `append` to that file *after* the size has been observed but before
+ * any bytes are read — precisely what a live (or hostile) writer does. It fires
+ * once and disarms, so every other test in this file sees stock `node:fs`.
+ */
+const raceWriter = vi.hoisted(() => ({ path: '', append: '' }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const realFstat = actual.fstatSync as unknown as (...args: unknown[]) => unknown;
+  const fstatSync = (...args: unknown[]) => {
+    const stat = realFstat(...args);
+    if (raceWriter.path) {
+      const target = raceWriter.path;
+      raceWriter.path = '';
+      actual.appendFileSync(target, raceWriter.append);
+    }
+    return stat;
+  };
+  return { ...actual, default: { ...actual, fstatSync }, fstatSync };
+});
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -409,5 +448,305 @@ describe('parseSessionRegistryDir', () => {
 
     const result = parseSessionRegistryDir(dir);
     expect(result).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3151 — the requested directory is a hard boundary: no symlink traversal
+// ---------------------------------------------------------------------------
+
+/** A registry-shaped record with the minimum fields the parser requires. */
+const registryFile = (sessionId: string, extra: Partial<SessionRegistryEntry> = {}) =>
+  JSON.stringify({
+    pid: 5001,
+    sessionId,
+    cwd: '/repo/boundary',
+    startedAt: 1_700_000_000_000,
+    procStart: '5001',
+    version: '2.1.0',
+    peerProtocol: 1,
+    kind: 'interactive',
+    entrypoint: 'cli',
+    ...extra,
+  });
+
+describe('parseSessionRegistryDir — directory boundary (#3151)', () => {
+  it('refuses a .json entry that is a symlink to a valid registry file outside the directory', () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), 'session-registry-outside-'));
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-boundary-'));
+
+    // A perfectly valid, registry-shaped file that simply is NOT in `dir`.
+    const outsideTarget = join(outsideDir, 'elsewhere.json');
+    writeFileSync(outsideTarget, registryFile('leaked-session'));
+
+    writeFileSync(join(dir, 'valid.json'), registryFile('inside-session'));
+    symlinkSync(outsideTarget, join(dir, 'escape.json'));
+
+    const result = parseSessionRegistryDir(dir);
+
+    expect(result.map((r) => r.sessionId)).toEqual(['inside-session']);
+  });
+
+  it('refuses a symlinked entry even when its target sits inside the same directory', () => {
+    // Stricter-than-minimum, and deliberate: a registry entry is only ingested
+    // when the directory entry itself is a regular file. This also prevents
+    // double-counting one process under two filenames.
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-selflink-'));
+    writeFileSync(join(dir, '6001.json'), registryFile('real-session'));
+    symlinkSync(join(dir, '6001.json'), join(dir, '6002.json'));
+
+    const result = parseSessionRegistryDir(dir);
+
+    expect(result.map((r) => r.sessionId)).toEqual(['real-session']);
+  });
+
+  it('ignores a dangling symlink without throwing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-dangling-'));
+    writeFileSync(join(dir, '7001.json'), registryFile('still-here'));
+    symlinkSync(join(dir, 'does-not-exist.json'), join(dir, '7002.json'));
+
+    const result = parseSessionRegistryDir(dir);
+
+    expect(result.map((r) => r.sessionId)).toEqual(['still-here']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3152 — finite default entry / byte budgets
+// ---------------------------------------------------------------------------
+
+describe('parseSessionRegistryDir — default ingestion budgets (#3152)', () => {
+  it('documents finite defaults for both budgets', () => {
+    expect(Number.isFinite(DEFAULT_REGISTRY_MAX_ENTRIES)).toBe(true);
+    expect(Number.isFinite(DEFAULT_REGISTRY_MAX_FILE_BYTES)).toBe(true);
+    // Must stay well below the "effectively unlimited" sentinel the parser
+    // used to fall back to.
+    expect(DEFAULT_REGISTRY_MAX_ENTRIES).toBeLessThan(Number.MAX_SAFE_INTEGER);
+    expect(DEFAULT_REGISTRY_MAX_FILE_BYTES).toBeLessThan(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('passes the finite default entry cap to the bounded directory reader', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-entrycap-'));
+    writeFileSync(join(dir, '8001.json'), registryFile('budgeted'));
+    vi.mocked(readDirentsBoundedSync).mockClear();
+
+    parseSessionRegistryDir(dir);
+
+    expect(vi.mocked(readDirentsBoundedSync).mock.calls[0][1]).toBe(DEFAULT_REGISTRY_MAX_ENTRIES);
+  });
+
+  it('falls back to the finite default when maxEntries is invalid', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-entrycap-bad-'));
+    writeFileSync(join(dir, '8101.json'), registryFile('budgeted-2'));
+
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      vi.mocked(readDirentsBoundedSync).mockClear();
+      parseSessionRegistryDir(dir, { maxEntries: bad });
+      expect(vi.mocked(readDirentsBoundedSync).mock.calls[0][1]).toBe(DEFAULT_REGISTRY_MAX_ENTRIES);
+    }
+  });
+
+  it('honours an explicit entry cap smaller than the default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-entrycap-small-'));
+    for (let i = 0; i < 5; i++) {
+      writeFileSync(join(dir, `90${i}.json`), registryFile(`s-${i}`));
+    }
+
+    const result = parseSessionRegistryDir(dir, { maxEntries: 2 });
+
+    expect(result.length).toBeLessThanOrEqual(2);
+  });
+
+  it('skips an oversized registry file with default options and still returns the valid one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-bytecap-'));
+    writeFileSync(join(dir, '9101.json'), registryFile('small-and-valid'));
+    // Registry-shaped but far past the documented per-file budget. The whole
+    // point is that it is skipped on the stat, never slurped into memory and
+    // handed to a synchronous JSON.parse.
+    const oversized = registryFile('oversized-session', {
+      cwd: `/repo/${'x'.repeat(DEFAULT_REGISTRY_MAX_FILE_BYTES + 1024)}`,
+    });
+    writeFileSync(join(dir, '9102.json'), oversized);
+    expect(oversized.length).toBeGreaterThan(DEFAULT_REGISTRY_MAX_FILE_BYTES);
+
+    const result = parseSessionRegistryDir(dir);
+
+    expect(result.map((r) => r.sessionId)).toEqual(['small-and-valid']);
+  });
+
+  it('still loads a large-but-valid registry directory under the defaults', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-large-valid-'));
+    const count = 200;
+    for (let i = 0; i < count; i++) {
+      writeFileSync(join(dir, `${10_000 + i}.json`), registryFile(`bulk-${i}`, { pid: 10_000 + i }));
+    }
+
+    const result = parseSessionRegistryDir(dir);
+
+    expect(result).toHaveLength(count);
+  });
+
+  it('refuses a registry file that grows past the byte budget after it is stat-checked', () => {
+    // The file is a valid registry record split in two: a small head on disk,
+    // and a tail written by a concurrent writer that lands *after* the parser
+    // has stat'd the file and decided it fits. Reading the descriptor to EOF
+    // (readFileSync(fd)) therefore yields a well-formed, ingestable record that
+    // is megabytes past the budget — the budget must be enforced on the read.
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-race-'));
+    const file = join(dir, '9301.json');
+    const head = '{"pid":9301,"sessionId":"raced-session","cwd":"/repo/';
+    const tail =
+      `${'x'.repeat(DEFAULT_REGISTRY_MAX_FILE_BYTES)}","startedAt":1700000000000,` +
+      '"procStart":"9301","version":"2.1.0","peerProtocol":1,"kind":"interactive","entrypoint":"cli"}';
+
+    // The raced file is valid JSON and only over budget — it is refused for its
+    // size, not because the concurrent append corrupted it.
+    expect(() => JSON.parse(head + tail)).not.toThrow();
+    expect(head.length + tail.length).toBeGreaterThan(DEFAULT_REGISTRY_MAX_FILE_BYTES);
+
+    writeFileSync(file, head);
+    expect(statSync(file).size).toBeLessThan(DEFAULT_REGISTRY_MAX_FILE_BYTES);
+
+    raceWriter.path = file;
+    raceWriter.append = tail;
+    try {
+      const result = parseSessionRegistryDir(dir);
+      expect(result).toEqual([]);
+    } finally {
+      raceWriter.path = '';
+      raceWriter.append = '';
+    }
+
+    // The writer really did fire mid-parse; the skip was the byte budget.
+    expect(statSync(file).size).toBeGreaterThan(DEFAULT_REGISTRY_MAX_FILE_BYTES);
+  });
+
+  it('reads post-stat growth that stays within budget, decoding multi-byte text across chunks', () => {
+    // Same race, but the grown file still fits the budget, so it must parse —
+    // and the first read stops one byte into a 3-byte character, so the bytes
+    // have to be joined before decoding rather than decoded per chunk.
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-grown-'));
+    const file = join(dir, '9302.json');
+    const label = '日本語-café-Ω';
+    const head = '{"pid":9302,"sessionId":"grown-session","cwd":"/repo/';
+    const tail =
+      `${label}","startedAt":1700000000000,` +
+      '"procStart":"9302","version":"2.1.0","peerProtocol":1,"kind":"interactive","entrypoint":"cli"}';
+
+    writeFileSync(file, head);
+    raceWriter.path = file;
+    raceWriter.append = tail;
+    try {
+      const result = parseSessionRegistryDir(dir);
+      expect(result.map((r) => r.sessionId)).toEqual(['grown-session']);
+      expect(result[0].cwd).toBe(`/repo/${label}`);
+    } finally {
+      raceWriter.path = '';
+      raceWriter.append = '';
+    }
+  });
+
+  it('round-trips a normal registry file byte-identically', () => {
+    // Guards the bounded read against decoding buffer slack (trailing NULs) or
+    // dropping the final byte: every field must survive verbatim.
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-roundtrip-'));
+    const payload: SessionRegistryEntry = {
+      pid: 9401,
+      sessionId: 'round-trip-session',
+      cwd: '/repo/ünïcode-日本語',
+      startedAt: 1_700_000_000_000,
+      procStart: '9401',
+      version: '2.1.161',
+      peerProtocol: 1,
+      kind: 'interactive',
+      entrypoint: 'sdk-cli',
+    };
+    writeFileSync(join(dir, '9401.json'), JSON.stringify(payload));
+
+    expect(parseSessionRegistryDir(dir)).toEqual([payload]);
+  });
+
+  it('honours an explicit byte cap larger than the default (ingest passes one)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-bytecap-large-'));
+    const big = registryFile('big-but-allowed', {
+      cwd: `/repo/${'y'.repeat(DEFAULT_REGISTRY_MAX_FILE_BYTES + 1024)}`,
+    });
+    writeFileSync(join(dir, '9201.json'), big);
+
+    const result = parseSessionRegistryDir(dir, {
+      maxFileBytes: DEFAULT_REGISTRY_MAX_FILE_BYTES * 8,
+    });
+
+    expect(result.map((r) => r.sessionId)).toEqual(['big-but-allowed']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3151 — the boundary must hold where O_NOFOLLOW does not exist (Windows).
+// The plugin bundle runs scripts/server.mjs -> ingest.mjs directly on the
+// user's machine ("Cross-platform: Windows/Mac/Linux", plugin-ctl.mjs), so this
+// parser really does execute on a platform whose fs constants have no
+// O_NOFOLLOW and whose open() therefore follows symlinks.
+// ---------------------------------------------------------------------------
+
+describe('parseSessionRegistryDir — boundary without O_NOFOLLOW (#3151)', () => {
+  afterEach(() => {
+    vi.doUnmock('node:fs');
+    vi.resetModules();
+  });
+
+  it('refuses an entry swapped for a symlink between the lstat and the open', async () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), 'session-registry-swap-outside-'));
+    const dir = mkdtempSync(join(tmpdir(), 'session-registry-swap-'));
+
+    // A registry-shaped file outside the boundary — the thing an attacker wants
+    // the parser to read.
+    const outsideTarget = join(outsideDir, 'elsewhere.json');
+    writeFileSync(outsideTarget, registryFile('swapped-in-session'));
+
+    // Inside the boundary: an ordinary regular file at readdir and lstat time.
+    const entryPath = join(dir, '9501.json');
+    writeFileSync(entryPath, registryFile('honest-session'));
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const realLstat = actual.lstatSync as unknown as (...args: unknown[]) => unknown;
+      let armed = true;
+      // The hostile writer: replaces the just-approved regular file with a
+      // symlink out of the directory, in the window before the open.
+      const lstatSync = (...args: unknown[]) => {
+        const stat = realLstat(...args);
+        if (armed) {
+          armed = false;
+          actual.unlinkSync(entryPath);
+          actual.symlinkSync(outsideTarget, entryPath);
+        }
+        return stat;
+      };
+      // A Windows-shaped fs: O_NOFOLLOW is simply not defined there, so the
+      // parser's open flags collapse to a following O_RDONLY.
+      const constants = { ...actual.constants } as Record<string, number>;
+      delete constants.O_NOFOLLOW;
+      return {
+        ...actual,
+        default: { ...actual, constants, lstatSync },
+        constants,
+        lstatSync,
+      };
+    });
+
+    const { parseSessionRegistryDir: parseWithoutNofollow } = await import(
+      './parse-session-registry'
+    );
+
+    // Nothing is ingested: the honest file is gone, and the symlink that
+    // replaced it must not be followed out of the directory.
+    expect(parseWithoutNofollow(dir)).toEqual([]);
+
+    // The swap really did fire mid-parse, and it really does resolve outside
+    // the boundary — so the empty result is the identity check, not a no-op.
+    expect(lstatSync(entryPath).isSymbolicLink()).toBe(true);
+    expect(realpathSync(entryPath)).toBe(realpathSync(outsideTarget));
   });
 });
