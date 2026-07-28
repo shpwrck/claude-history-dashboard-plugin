@@ -52,7 +52,40 @@ export interface ModelPinWindowSummary {
   actualModelSpendUsd: number;
   targetModelSpendUsd: number;
   premiumUsd: number;
+  /**
+   * Model premium per dollar of target-model spend: `premiumUsd /
+   * targetModelSpendUsd` (#3136).
+   *
+   * `premiumUsd` is a TOTAL and scales with how much work the window contains,
+   * so it cannot be compared across windows of different size. This ratio is
+   * dimensionless — "for every dollar this workload would have cost on the
+   * target model, how many extra dollars did the actual model mix charge" — so
+   * it isolates MODEL CHOICE from workload volume. `targetModelSpendUsd` is the
+   * right denominator because it reprices the window's own tokens, so it
+   * already accounts for input/output mix as well as raw volume.
+   *
+   * 0 when the window has no target-model-priced spend, in which case the ratio
+   * carries no information and no realized claim is made from it.
+   */
+  premiumRatio: number;
   modelMix: ModelPinModelMixRow[];
+}
+
+/**
+ * The documented normalization behind a realized-savings figure (#3136).
+ *
+ * `realizedSavingsUsd = premiumRatioDelta * appliedToTargetSpendUsd`, where the
+ * delta is the improvement in model premium per dollar of target-model spend.
+ * Every term is exported so the arithmetic is reproducible from the result
+ * alone.
+ */
+export interface ModelPinNormalization {
+  kind: 'premium-per-target-dollar';
+  baselinePremiumRatio: number;
+  comparisonPremiumRatio: number;
+  premiumRatioDelta: number;
+  /** The clearly-identified workload the rate change is applied to. */
+  appliedToTargetSpendUsd: number;
 }
 
 export interface ModelPinModelMixRow {
@@ -69,10 +102,14 @@ export interface ModelPinSavingsResult {
   baseline: ModelPinWindowSummary;
   comparison: ModelPinWindowSummary;
   /**
-   * Observed reduction in model premium between the two windows. This is a
-   * Tier 1 before/after signal, so it is directional rather than causal.
+   * Observed reduction in model premium, normalized for workload volume and
+   * applied to the comparison window's own workload (#3136). A Tier 1
+   * before/after signal, so directional rather than causal — but no longer
+   * confounded by how much work each window happened to contain.
    */
   realizedSavingsUsd: number;
+  /** How {@link realizedSavingsUsd} was derived, so it can be checked (#3136). */
+  normalization: ModelPinNormalization;
   /** Remaining comparison-window model-swap ceiling. */
   predictedSavingsUsd: number;
   attribution: RecommendationSavingsAttribution;
@@ -121,9 +158,22 @@ export function deriveModelPinSavingsConfig(
       comparison.filter((entry) => entry.targetPriced).length / comparison.length;
     if (comparisonTargetShare < minComparisonTargetShare) continue;
 
-    const baselinePremium = sumPremium(baseline);
-    const comparisonPremium = sumPremium(comparison);
-    const realizedSavingsUsd = baselinePremium - comparisonPremium;
+    // Rank candidate boundaries by the SAME volume-normalized measure the
+    // realized figure uses (#3136). Ranking on raw premium totals favoured
+    // whichever split put more traffic in the baseline, which is a fact about
+    // where the split fell rather than about the model change it is meant to
+    // locate.
+    const baselineRatio = premiumRatioOf(
+      sumActual(baseline),
+      sumTarget(baseline)
+    );
+    const comparisonRatio = premiumRatioOf(
+      sumActual(comparison),
+      sumTarget(comparison)
+    );
+    const premiumRatioDelta = baselineRatio - comparisonRatio;
+    if (premiumRatioDelta <= 0) continue;
+    const realizedSavingsUsd = premiumRatioDelta * sumTarget(comparison);
     if (realizedSavingsUsd <= 0) continue;
     if (!best || realizedSavingsUsd > best.realizedSavingsUsd) {
       best = { index, realizedSavingsUsd };
@@ -178,10 +228,25 @@ export function computeModelPinSavings(
 
   const baseline = summarizeWindow(baselineEntries);
   const comparison = summarizeWindow(comparisonEntries);
-  const realizedSavingsUsd = Math.max(
+  // Realized savings from the RATE change, applied to the comparison workload
+  // (#3136).
+  //
+  // This used to be `baseline.premiumUsd - comparison.premiumUsd`: two totals
+  // over windows that may hold different entry counts, durations and token
+  // volumes. That confounds model choice with workload volume in both
+  // directions — a drop in traffic alone books "savings" the model pin did not
+  // cause, and a rise in traffic erases a genuine per-unit improvement.
+  //
+  // Instead: take the improvement in premium PER DOLLAR of target-model spend
+  // (the volume-normalized measure), and apply it to a clearly identified
+  // workload — the comparison window's own target-model spend. The result reads
+  // "on the work actually done after the pin, the old model mix would have
+  // charged this much more".
+  const premiumRatioDelta = Math.max(
     0,
-    baseline.premiumUsd - comparison.premiumUsd
+    baseline.premiumRatio - comparison.premiumRatio
   );
+  const realizedSavingsUsd = premiumRatioDelta * comparison.targetModelSpendUsd;
   const predictedSavingsUsd = comparison.premiumUsd;
 
   return {
@@ -189,6 +254,16 @@ export function computeModelPinSavings(
     baseline,
     comparison,
     realizedSavingsUsd,
+    // How the figure above was derived, so a reader can check it rather than
+    // trust it (#3136). Without this the number is a bare dollar amount whose
+    // normalization is invisible.
+    normalization: {
+      kind: 'premium-per-target-dollar',
+      baselinePremiumRatio: baseline.premiumRatio,
+      comparisonPremiumRatio: comparison.premiumRatio,
+      premiumRatioDelta,
+      appliedToTargetSpendUsd: comparison.targetModelSpendUsd,
+    },
     predictedSavingsUsd,
     attribution: {
       interventionKey: input.interventionKey ?? 'cost.automation-share',
@@ -241,11 +316,12 @@ function collectTimestampedEntries(
   return entries.sort((a, b) => a.timestampMs - b.timestampMs);
 }
 
-function sumPremium(entries: PricedEntry[]): number {
-  return entries.reduce(
-    (sum, entry) => sum + Math.max(0, entry.actualCost - entry.targetCost),
-    0
-  );
+function sumActual(entries: PricedEntry[]): number {
+  return entries.reduce((sum, entry) => sum + entry.actualCost, 0);
+}
+
+function sumTarget(entries: PricedEntry[]): number {
+  return entries.reduce((sum, entry) => sum + entry.targetCost, 0);
 }
 
 function collectWindowEntries(
@@ -310,6 +386,17 @@ function latestAsOf(entries: PricedEntry[]): string {
     .slice(0, 10);
 }
 
+/**
+ * Model premium per dollar of target-model spend — the volume-normalized
+ * measure realized savings are derived from (#3136). Returns 0 when there is no
+ * target-model-priced spend to normalize against, so a window with nothing in it
+ * cannot manufacture a ratio.
+ */
+function premiumRatioOf(actualUsd: number, targetUsd: number): number {
+  if (!(targetUsd > 0)) return 0;
+  return Math.max(0, actualUsd - targetUsd) / targetUsd;
+}
+
 function summarizeWindow(entries: PricedEntry[]): ModelPinWindowSummary {
   const sessions = new Set<string>();
   const byModel = new Map<string, PricedEntry[]>();
@@ -331,6 +418,7 @@ function summarizeWindow(entries: PricedEntry[]): ModelPinWindowSummary {
     actualModelSpendUsd,
     targetModelSpendUsd,
     premiumUsd: Math.max(0, actualModelSpendUsd - targetModelSpendUsd),
+    premiumRatio: premiumRatioOf(actualModelSpendUsd, targetModelSpendUsd),
     modelMix: Array.from(byModel.entries())
       .map(([model, modelEntries]) => summarizeModel(model, modelEntries))
       .sort((a, b) => {

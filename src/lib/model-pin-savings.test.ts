@@ -86,9 +86,30 @@ describe('computeModelPinSavings', () => {
       'claude-sonnet-4-6',
       CHEAPEST_MODEL,
     ]);
+    // CHANGED in #3136. This asserted `baselinePremium - comparisonPremium` --
+    // the subtraction of two TOTALS across a 1-entry baseline and a 2-entry
+    // comparison, i.e. the unmatched-window comparison the finding is about.
+    // The figure is now the improvement in premium PER DOLLAR of target-model
+    // spend, applied to the comparison window's own workload.
+    const baselineTarget =
+      entryCostAtModel(baselineOpus, CHEAPEST_MODEL);
+    const comparisonTarget =
+      entryCostAtModel(comparisonSonnet, CHEAPEST_MODEL) +
+      entryCostAtModel(comparisonHaiku, CHEAPEST_MODEL);
+    const baselineRatio = baselinePremium / baselineTarget;
+    const comparisonRatio = comparisonPremium / comparisonTarget;
     expect(result?.realizedSavingsUsd).toBeCloseTo(
-      baselinePremium - comparisonPremium,
+      (baselineRatio - comparisonRatio) * comparisonTarget,
       6
+    );
+    // ...and the derivation is reproducible from the result alone.
+    expect(result?.normalization).toMatchObject({
+      kind: 'premium-per-target-dollar',
+      appliedToTargetSpendUsd: expect.closeTo(comparisonTarget, 6),
+    });
+    expect(result!.normalization.premiumRatioDelta).toBeCloseTo(
+      baselineRatio - comparisonRatio,
+      9
     );
     expect(result?.predictedSavingsUsd).toBeCloseTo(comparisonPremium, 6);
     expect(result?.attribution).toMatchObject({
@@ -381,5 +402,91 @@ describe('sessionFilter parameterization (#2140)', () => {
         sessionFilter: (s) => s.sessionId === 'keep',
       })?.realizedSavingsUsd
     ).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model choice must not be confounded with workload volume (#3136)
+// ---------------------------------------------------------------------------
+
+describe('realized savings isolate model choice from volume (#3136)', () => {
+  const opus = 'claude-opus-4-8';
+
+  it('books nothing when only the TRAFFIC changed', () => {
+    // Identical model mix in both windows — every entry on Opus. The only
+    // difference is that the comparison window did less work. Any positive
+    // figure here is attributing a traffic drop to a model pin that never
+    // happened.
+    const result = computeModelPinSavings({
+      tokenData: [
+        session('auto-a', 'sdk-cli', [
+          entry('2026-05-02T12:00:00Z', opus),
+          entry('2026-05-03T12:00:00Z', opus),
+          entry('2026-05-04T12:00:00Z', opus),
+        ]),
+        session('auto-b', 'sdk-py', [entry('2026-05-09T12:00:00Z', opus)]),
+      ],
+      baseline,
+      comparison,
+    });
+
+    expect(result).not.toBeNull();
+    // Same premium per dollar of target spend on both sides → no rate change.
+    expect(result!.baseline.premiumRatio).toBeCloseTo(
+      result!.comparison.premiumRatio,
+      9
+    );
+    expect(result!.realizedSavingsUsd).toBeCloseTo(0, 9);
+    expect(result!.normalization.premiumRatioDelta).toBeCloseTo(0, 9);
+  });
+
+  it('still books a genuine rate improvement when traffic GREW', () => {
+    // One Opus entry before; three cheap entries after. Raw totals could show
+    // the comparison premium at or above the baseline's simply because there is
+    // more work — which previously erased the improvement.
+    const result = computeModelPinSavings({
+      tokenData: [
+        session('auto-a', 'sdk-cli', [entry('2026-05-02T12:00:00Z', opus)]),
+        session('auto-b', 'sdk-py', [
+          entry('2026-05-09T12:00:00Z', CHEAPEST_MODEL),
+          entry('2026-05-10T12:00:00Z', CHEAPEST_MODEL),
+          entry('2026-05-11T12:00:00Z', CHEAPEST_MODEL),
+        ]),
+      ],
+      baseline,
+      comparison,
+    });
+
+    expect(result).not.toBeNull();
+    // The comparison window is entirely on the target model: zero premium.
+    expect(result!.comparison.premiumRatio).toBeCloseTo(0, 9);
+    expect(result!.baseline.premiumRatio).toBeGreaterThan(0);
+    // A real per-unit improvement, applied to the (larger) comparison workload.
+    expect(result!.realizedSavingsUsd).toBeGreaterThan(0);
+    expect(result!.normalization.appliedToTargetSpendUsd).toBeCloseTo(
+      result!.comparison.targetModelSpendUsd,
+      9
+    );
+  });
+
+  it('reproduces its own figure from the exported terms', () => {
+    const result = computeModelPinSavings({
+      tokenData: [
+        session('auto-a', 'sdk-cli', [entry('2026-05-02T12:00:00Z', opus)]),
+        session('auto-b', 'sdk-py', [entry('2026-05-09T12:00:00Z', CHEAPEST_MODEL)]),
+      ],
+      baseline,
+      comparison,
+    });
+    const n = result!.normalization;
+    // The claim is checkable rather than merely asserted.
+    expect(n.premiumRatioDelta).toBeCloseTo(
+      n.baselinePremiumRatio - n.comparisonPremiumRatio,
+      9
+    );
+    expect(result!.realizedSavingsUsd).toBeCloseTo(
+      n.premiumRatioDelta * n.appliedToTargetSpendUsd,
+      9
+    );
   });
 });
