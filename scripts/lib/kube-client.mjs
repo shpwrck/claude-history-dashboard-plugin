@@ -40,7 +40,19 @@ function resolve() {
   const envApi = process.env.PROBAITIO_KUBE_API;
   const envTok = process.env.PROBAITIO_KUBE_TOKEN;
   if (envApi && envTok) {
-    return { base: envApi.replace(/\/+$/, ''), token: envTok };
+    let api;
+    try {
+      api = new URL(envApi);
+    } catch {
+      throw new Error('PROBAITIO_KUBE_API must be a valid HTTPS URL');
+    }
+    if (api.protocol !== 'https:') {
+      throw new Error('PROBAITIO_KUBE_API must use HTTPS');
+    }
+    if (api.username || api.password) {
+      throw new Error('PROBAITIO_KUBE_API must not include credentials');
+    }
+    return { base: api.origin, token: envTok };
   }
   const base = inClusterHost();
   const token = inClusterToken();
