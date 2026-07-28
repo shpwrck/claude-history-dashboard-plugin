@@ -403,4 +403,47 @@ describe('sample corpus — model evals workbench (#1388)', () => {
       JSON.stringify(buildSampleModelEvalResults())
     );
   });
+
+  // #3101: the seeded recommendations render as auditable claims, so a rationale
+  // may not assert evidence the emitted artifacts do not contain. The
+  // haiku->sonnet recommendation used to say its gap "holds across both
+  // batches" while `gap:haiku-sonnet:failure:small` appears in exactly one.
+  it('no seeded rationale claims multi-batch confirmation it does not have', () => {
+    type Run = { clusterId: string; role: string };
+    type Rec = { scope: string; rationale: string };
+    type Artifact = { runs: Run[]; recommendations: Rec[] };
+    const artifacts = buildSampleModelEvalResults() as unknown as Artifact[];
+
+    /** Batches holding BOTH a candidate and a baseline run for one scope. */
+    const supportingBatches = (scope: string) =>
+      artifacts.filter(
+        (a) =>
+          a.runs.some((r) => r.clusterId === scope && r.role === 'candidate') &&
+          a.runs.some((r) => r.clusterId === scope && r.role === 'baseline')
+      ).length;
+
+    for (const artifact of artifacts) {
+      for (const rec of artifact.recommendations) {
+        if (/both batches|across batches|across all batches|every batch/i.test(rec.rationale)) {
+          expect(
+            supportingBatches(rec.scope),
+            `"${rec.rationale}" claims multi-batch support for ${rec.scope}`
+          ).toBeGreaterThanOrEqual(2);
+        }
+      }
+    }
+  });
+
+  it('the haiku->sonnet rationale cites the single batch it actually has (11/12 vs 7/12)', () => {
+    type Rec = { scope: string; rationale: string };
+    type Artifact = { recommendations: Rec[] };
+    const recs = (buildSampleModelEvalResults() as unknown as Artifact[]).flatMap(
+      (a) => a.recommendations
+    );
+    const rec = recs.find((r) => r.scope === 'gap:haiku-sonnet:failure:small');
+    expect(rec).toBeDefined();
+    expect(rec!.rationale).not.toMatch(/both batches/i);
+    expect(rec!.rationale).toContain('11/12');
+    expect(rec!.rationale).toContain('7/12');
+  });
 });

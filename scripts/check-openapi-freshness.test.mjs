@@ -62,6 +62,49 @@ test('collectServedRoutes: table extractor ignores non-route array literals', ()
   assert.deepEqual([...collectServedRoutes(src)], []);
 });
 
+// #3073: the tuple SHAPE alone is not evidence of dispatch. A slash-leading
+// string/identifier pair that is not inside a Map the dispatcher queries with
+// `.get(pathname)` is unrelated data, and reporting it as a served endpoint
+// makes the freshness verdict unreproducible from the real route table.
+test('collectServedRoutes: a slash-keyed tuple outside a dispatched route Map is NOT a route', () => {
+  const src = `
+    const metadata = [['/api/example', handler], ['/api/other', describe]];
+    const docs = { rows: [['/api/doc-only', renderer]] };
+  `;
+  assert.deepEqual(
+    [...collectServedRoutes(src)],
+    [],
+    'unrelated slash-keyed tuples must not be classified as served endpoints'
+  );
+});
+
+test('collectServedRoutes: a Map of slash keys that is never queried with pathname is NOT a route source', () => {
+  // Same literal shape as a real table, but nothing dispatches on it — e.g. a
+  // documentation/label lookup keyed by path string.
+  const src = `
+    const PATH_LABELS = new Map([
+      ['/api/labelled', renderLabel],
+    ]);
+    const label = PATH_LABELS.get(someOtherKey);
+  `;
+  assert.deepEqual([...collectServedRoutes(src)], []);
+});
+
+test('collectServedRoutes: a real table survives alongside an unrelated tuple, and drift still flags it', () => {
+  const server = `
+    const metadata = [['/api/not-a-route', handler]];
+    const DATASET_ROUTES = new Map([
+      ['/api/real-table-route', handleReal],
+    ]);
+    const r = DATASET_ROUTES.get(pathname);
+  `;
+  const served = collectServedRoutes(server);
+  assert.ok(served.has('/api/real-table-route'), `real table route missing: ${[...served]}`);
+  assert.ok(!served.has('/api/not-a-route'), `unrelated tuple leaked: ${[...served]}`);
+  const d = findOpenApiDrift(server, SPEC_OK, { knownUnspeccedApiRoutes: {} });
+  assert.deepEqual(d.servedNotSpecced, ['/api/real-table-route']);
+});
+
 test('a route served ONLY via the table, undocumented, is flagged', () => {
   const server = `
     const DATASET_ROUTES = new Map([['/api/only-in-table', handleThing]]);

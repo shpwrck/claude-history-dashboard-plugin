@@ -88,32 +88,47 @@ function executeGit(spawn, args, cwd) {
   });
 }
 
-function requiredGitOutput(spawn, root, args, label) {
+function rawGitOutput(spawn, root, args, label) {
   const result = executeGit(spawn, args, root);
   if (result.error || result.status !== 0) {
     const detail =
       text(result.stderr).trim() || result.error?.message || "unknown error";
     throw new Error(`doc-hygiene: cannot ${label}: ${detail}`);
   }
-  return text(result.stdout).trim();
+  return text(result.stdout);
 }
 
-/** Git-tracked Markdown files at one immutable tree, including hidden dirs. */
+function requiredGitOutput(spawn, root, args, label) {
+  return rawGitOutput(spawn, root, args, label).trim();
+}
+
+/**
+ * Git-tracked Markdown files at one immutable tree, including hidden dirs.
+ *
+ * Read NUL-delimited (#3081). Git permits pathnames containing newlines and
+ * leading/trailing whitespace; line splitting plus `trim()` either split one
+ * such path into two non-`.md` fragments or renamed it, so committed Markdown
+ * silently vanished from the surface — and an empty list is scored as a clean
+ * check (score 10), i.e. "we found nothing" was reported as "there is nothing".
+ * With `-z` each record is exactly one pathname, preserved byte-for-byte.
+ */
 export function trackedMarkdownFiles(
   root,
   spawn = spawnSync,
   treeish = "HEAD",
 ) {
-  const output = requiredGitOutput(
+  const output = rawGitOutput(
     spawn,
     root,
-    ["ls-tree", "-r", "--name-only", treeish],
+    ["ls-tree", "-rz", "--name-only", treeish],
     "enumerate git-tracked Markdown",
   );
   return output
-    .split(/\r?\n/)
-    .map((path) => path.trim())
-    .filter((path) => /\.md$/i.test(path))
+    .split("\0")
+    .filter((path) => path !== "")
+    // endsWith, not /\.md$/i: `$` also matches BEFORE a trailing newline, so a
+    // pathname literally ending in "\n" would have passed as Markdown.
+    .filter((path) => path.toLowerCase().endsWith(".md"))
     .sort();
 }
 

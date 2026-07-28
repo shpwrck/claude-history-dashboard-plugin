@@ -876,8 +876,13 @@ export function buildSampleModelEvalResults() {
           scope: 'gap:haiku-sonnet:failure:small',
           weightedScore: 0.76,
           strongestEvidence: 'objective-task-history',
+          // #3101: this said "the quality gap holds across both batches", but
+          // `gap:haiku-sonnet:failure:small` appears in THIS batch only — the
+          // second artifact evaluates `gap:sonnet-opus:*` exclusively. The
+          // rationale now cites the evidence the emitted artifacts actually
+          // carry: the single 12-task replay batch, 11/12 vs 7/12.
           rationale:
-            'Replayed small tool-heavy tasks complete reliably on the candidate where the baseline retries; the quality gap holds across both batches.',
+            'Replayed small tool-heavy tasks complete reliably on the candidate where the baseline retries: 11/12 vs 7/12 across one 12-task replay batch.',
         },
       ],
     },

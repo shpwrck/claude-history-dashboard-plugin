@@ -61,7 +61,9 @@ async function waitUp(base, proc) {
 }
 
 // One transcript with three blocking, backgroundable foreground Bash calls
-// (each > the 10s block floor) so the BFC metric is non-zero.
+// (each > the 10s block floor) so the BFC metric is non-zero. All three resume
+// at the same continuation entry, so the metric's parallel-batch dedup reports
+// ONE BFC window over three tool calls — see the exact assertion below (#3082).
 function transcript(sessionId) {
   const lines = [
     JSON.stringify({ type: 'custom-title', sessionId, customTitle: 'Experiment session' }),
@@ -207,8 +209,18 @@ async function bootServer({ ledgerPath }) {
         assert.equal(v.arms.on.n, 1);
         assert.equal(v.arms.off.n, 0);
         assert.equal(v.n_total, 1);
-        // 3 BFC over 3 tool calls -> 100 BFC per 100 tool calls.
-        assert.ok(v.arms.on.meanMetric > 0);
+        // Assert the re-derived VALUE, not merely its sign (#3082): a
+        // positivity check still passes under a wrong denominator,
+        // normalization or scale factor, while this fixture claims to prove the
+        // whole ingest -> measure path.
+        //
+        // The three blocking Bash calls all resume at the SAME continuation
+        // entry (the closing assistant turn), so collectSessionBfcs collapses
+        // them into ONE deduped BFC window; the session still contributes three
+        // `tool_use` entries. The normalized metric is therefore
+        // (1 BFC / 3 tool calls) * 100 — computed here exactly as the evaluator
+        // does, so the comparison is exact rather than epsilon-fudged.
+        assert.equal(v.arms.on.meanMetric, (1 / 3) * 100);
         assert.equal(v.arms.off.meanMetric, null);
       });
       await check('n=1 ON / 0 OFF qualifies inconclusive', () => {

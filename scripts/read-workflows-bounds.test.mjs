@@ -179,3 +179,79 @@ test('readWorkflows and readWorkflowsSync preserve bounded workflow-agent errors
     rmSync(fx.root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// #3099: newest-first ordering must survive string timestamps.
+//
+// `boundedScalar` preserved arbitrary strings, and the comparator subtracted
+// them — an ISO timestamp minus another is NaN, which Array.prototype.sort
+// reads as "no ordering", so the documented newest-first result silently
+// degraded to directory iteration order. The manifests below are written in
+// REVERSE chronological order, so an inert comparator leaves them that way.
+// ---------------------------------------------------------------------------
+function mixedTimestampFixture() {
+  const root = join(tmpdir(), `chd-workflow-order-${randomUUID()}`);
+  const workflows = join(root, 'projects', 'proj-a', 'sess-a', 'workflows');
+  mkdirSync(workflows, { recursive: true });
+  // Written oldest -> newest so filesystem/discovery order is the REVERSE of
+  // the required result; `wf_d` has an unusable timestamp.
+  const manifests = [
+    ['wf_a.json', { runId: 'oldest-number', startTime: 1767225600000 }],
+    ['wf_b.json', { runId: 'middle-iso-string', startTime: '2026-01-01T00:00:10.000Z' }],
+    ['wf_c.json', { runId: 'newest-numeric-string', startTime: '1767225620000' }],
+    ['wf_d.json', { runId: 'unusable', startTime: 'sometime last tuesday' }],
+  ];
+  for (const [name, extra] of manifests) {
+    writeFileSync(
+      join(workflows, name),
+      JSON.stringify({ workflowName: 'W', status: 'completed', ...extra })
+    );
+  }
+  return { root, projectsRoot: join(root, 'projects') };
+}
+
+test('normalizeStartTime: numbers, numeric strings and ISO strings become epoch ms; anything else is null', async () => {
+  const { normalizeStartTime } = await import('./read-workflows.mjs');
+  assert.equal(normalizeStartTime(1767225600000), 1767225600000);
+  assert.equal(normalizeStartTime('1767225600000'), 1767225600000);
+  assert.equal(normalizeStartTime('2026-01-01T00:00:00.000Z'), 1767225600000);
+  assert.equal(normalizeStartTime('sometime last tuesday'), null);
+  assert.equal(normalizeStartTime(''), null);
+  assert.equal(normalizeStartTime(null), null);
+  assert.equal(normalizeStartTime(Number.NaN), null);
+  assert.equal(normalizeStartTime(true), null);
+  assert.equal(normalizeStartTime({}), null);
+});
+
+test('readWorkflows and readWorkflowsSync order runs newest-first across timestamp shapes', async () => {
+  const fx = mixedTimestampFixture();
+  try {
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    const expected = [
+      'newest-numeric-string',
+      'middle-iso-string',
+      'oldest-number',
+      'unusable', // no usable timestamp -> last, never interleaved
+    ];
+    for (const [label, result] of [
+      ['async', await workflows.readWorkflows(fx.projectsRoot)],
+      ['sync', workflows.readWorkflowsSync(fx.projectsRoot)],
+    ]) {
+      assert.deepEqual(
+        result.runs.map((r) => r.runId),
+        expected,
+        `${label} reader must return runs newest-first`
+      );
+      // Every projected startTime is a number or null — never a raw string.
+      for (const run of result.runs) {
+        assert.ok(
+          run.startTime === null || typeof run.startTime === 'number',
+          `${label}: startTime must be normalized, got ${JSON.stringify(run.startTime)}`
+        );
+      }
+      assert.equal(result.runs.at(-1).startTime, null);
+    }
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});

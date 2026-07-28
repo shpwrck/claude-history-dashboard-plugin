@@ -17,6 +17,7 @@ import {
   LOCAL_CHECK,
   normalizeLycheeJson,
   runDocHygiene,
+  trackedMarkdownFiles,
 } from "./doc-hygiene-run.mjs";
 import {
   AGENTS_LINT_CHECK,
@@ -36,7 +37,8 @@ function fakeSpawn({
   missingLychee = false,
   lycheeResult = null,
   agentsLintResult = null,
-  trackedMarkdown = "README.md\n.github/hidden.md\nsrc/not-markdown.ts\n",
+  // NUL-delimited, matching `git ls-tree -rz --name-only` (#3081).
+  trackedMarkdown = "README.md\0.github/hidden.md\0src/not-markdown.ts\0",
 } = {}) {
   const calls = [];
   const spawn = (command, args, options = {}) => {
@@ -57,7 +59,7 @@ function fakeSpawn({
     if (command === "tar") {
       const snapshot = args[args.indexOf("-C") + 1];
       for (const path of ["AGENTS.md", "CLAUDE.md", "REFERENCES.md"]) {
-        if (trackedMarkdown.split(/\r?\n/).includes(path)) {
+        if (trackedMarkdown.split("\0").includes(path)) {
           writeFileSync(join(snapshot, path), "# Setup\n\nFixture context.\n");
         }
       }
@@ -301,7 +303,7 @@ describe("doc-hygiene runner gating", () => {
     });
     const { spawn, calls } = fakeSpawn({
       missingLychee: true,
-      trackedMarkdown: "AGENTS.md\nCLAUDE.md\nREFERENCES.md\n",
+      trackedMarkdown: "AGENTS.md\0CLAUDE.md\0REFERENCES.md\0",
       agentsLintResult: (_options, args) => {
         const file = args[0].split("/").at(-1);
         const report = cleanReport(file);
@@ -380,7 +382,7 @@ describe("doc-hygiene runner gating", () => {
   it("keeps malformed agents-lint output as a skipped check, never a clean completion", () => {
     const { spawn } = fakeSpawn({
       missingLychee: true,
-      trackedMarkdown: "AGENTS.md\n",
+      trackedMarkdown: "AGENTS.md\0",
       agentsLintResult: { status: 0, stdout: "{}", stderr: "" },
     });
     const artifact = runDocHygiene({
@@ -406,7 +408,7 @@ describe("doc-hygiene runner gating", () => {
   it("rejects an agents-lint report for a different context file", () => {
     const { spawn } = fakeSpawn({
       missingLychee: true,
-      trackedMarkdown: "AGENTS.md\n",
+      trackedMarkdown: "AGENTS.md\0",
       agentsLintResult: {
         status: 0,
         stdout: JSON.stringify({
@@ -890,6 +892,67 @@ describe("doc-hygiene commit snapshot binding", () => {
         "Cannot find <repo>/future.md",
       );
       assert.doesNotMatch(JSON.stringify(artifact), /chd-doc-hygiene-/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// #3081: `git ls-tree` without `-z` is line-delimited AND quotes exotic names,
+// so a tracked Markdown file whose pathname contains a newline was dropped
+// entirely and one with leading/trailing whitespace was silently renamed by
+// trim(). Because an empty Markdown list is scored as a completed, clean
+// check (score 10), "we could not see it" was reported as "there is nothing
+// to see" — absence of evidence presented as evidence of absence.
+describe("tracked Markdown enumeration with exotic pathnames (#3081)", () => {
+  const EXOTIC = {
+    "plain.md": "# Plain\n",
+    " leading.md": "# Leading space\n",
+    "line\nbreak.md": "# Newline in the name\n",
+    "not-markdown.ts": "export const x = 1;\n",
+  };
+
+  it("returns newline- and whitespace-bearing pathnames byte-for-byte", () => {
+    const root = committedRepo(EXOTIC);
+    try {
+      const files = trackedMarkdownFiles(root);
+      assert.deepEqual(files, [" leading.md", "line\nbreak.md", "plain.md"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("hands those exact names to the hygiene check instead of an empty surface", () => {
+    const root = committedRepo(EXOTIC);
+    try {
+      let lycheeTargets = null;
+      const spawn = (command, args, options) => {
+        if (command === "lychee" && args[0] === "--version") {
+          return { status: 0, stdout: "lychee 0.24.2\n", stderr: "" };
+        }
+        if (command === "lychee") {
+          lycheeTargets = args.slice(args.indexOf("--") + 1);
+          return { status: 0, stdout: EMPTY_LYCHEE, stderr: "" };
+        }
+        return spawnSync(command, args, {
+          ...options,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      };
+      const artifact = runDocHygiene({ root, spawn, agentsLintBinary: null });
+      assert.deepEqual(
+        lycheeTargets,
+        [" leading.md", "line\nbreak.md", "plain.md"],
+        "every tracked Markdown file must reach the checker under its real name",
+      );
+      const local = artifact.checks.find((c) => c.name === LOCAL_CHECK);
+      assert.ok(local, "local link check ran");
+      assert.notEqual(
+        local.reason,
+        "No git-tracked Markdown files found at HEAD",
+        "an unreadable surface must never be reported as an empty one",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

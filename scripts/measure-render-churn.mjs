@@ -348,7 +348,43 @@ const INJECT_SCRIPT = `
 })();
 `;
 
-async function measureView(page, view, baseUrl) {
+export const LEGACY_SETTLE_MS = 2000;
+
+/**
+ * Route-render latency from the page's OWN timestamps (#3092).
+ *
+ * The legacy probe used to start a wall clock, force a hash navigation, sleep a
+ * fixed {@link LEGACY_SETTLE_MS}, and report the elapsed wall time as `navMs` —
+ * so every view reported roughly the settling delay plus harness overhead, not
+ * navigation or render latency, and changing the delay changed the "metric".
+ *
+ * The injected instrumentation already records, in page time: `navStart` (when
+ * the route metrics were reset, immediately before navigation), `lastMutationAt`
+ * (the last DOM mutation the route produced) and `firstFrameAt` (the second RAF
+ * after the reset). Render completion is the last mutation when the route
+ * mutated the DOM, else the first painted frame.
+ *
+ * If neither timestamp is usable, this returns null — "we did not measure it" —
+ * rather than substituting the settling delay, which is not the metric.
+ */
+export function deriveNavMs(timing) {
+  // `Number(null)` is 0, which would silently pass a finiteness check and turn a
+  // missing timestamp into a measurement — exactly the substitution this fix
+  // exists to prevent.
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const navStart = num(timing?.navStart);
+  if (navStart === null) return null;
+  const candidates = [];
+  // `lastMutationAt` is seeded to navStart, so it is evidence of a render only
+  // once the MutationObserver actually fired.
+  if ((num(timing?.mutationBatches) ?? 0) > 0) candidates.push(num(timing.lastMutationAt));
+  candidates.push(num(timing?.firstFrameAt));
+  const usable = candidates.filter((t) => t !== null && t >= navStart);
+  if (usable.length === 0) return null;
+  return Math.max(...usable) - navStart;
+}
+
+export async function measureView(page, view, baseUrl, { settleMs = LEGACY_SETTLE_MS } = {}) {
   // Navigate to root first so sample data is loaded (the SPA auto-loads it on mount)
   await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
@@ -363,22 +399,26 @@ async function measureView(page, view, baseUrl) {
     window.__churnResetRouteMetrics?.();
   });
 
-  const t0 = Date.now();
-
   // Navigate to the specific view (hash routing)
   await page.evaluate((hash) => { window.location.hash = hash; }, view.hash);
 
-  // Wait for the view to settle: wait for at least one chart/table element or 2s
-  await page.waitForTimeout(2000);
-
-  const navMs = Date.now() - t0;
+  // Settling delay: gives observers time to report. It is deliberately OUTSIDE
+  // the reported interval — navMs comes from the page's own timestamps below.
+  await page.waitForTimeout(settleMs);
 
   // Read metrics collected so far
   const metricsBefore = await page.evaluate(() => ({
     longtasks: window.__churnMetrics.longtasks.slice(),
     shifts: window.__churnMetrics.shifts.slice(),
     paintTime: window.__churnMetrics.paintTime,
+    navStart: window.__churnMetrics.navStart,
+    firstFrameAt: window.__churnMetrics.firstFrameAt,
+    firstMutationAt: window.__churnMetrics.firstMutationAt,
+    lastMutationAt: window.__churnMetrics.lastMutationAt,
+    mutationBatches: window.__churnMetrics.mutationBatches,
   }));
+
+  const navMs = deriveNavMs(metricsBefore);
 
   // --- Synthetic resize storm ---
   // Cycle viewport narrow <-> wide 5 times to stress ResizeObserver callbacks
@@ -880,6 +920,12 @@ async function runSweep(page, baseUrl, opts) {
   return out;
 }
 
+// navMs is null when the page reported no render-completion timestamp: say so
+// rather than printing a number that was never measured.
+function fmtNavMs(navMs) {
+  return navMs === null || navMs === undefined ? 'unknown' : String(Math.round(navMs));
+}
+
 async function runLegacy(page, baseUrl) {
   console.log('# Render-churn measurement (issue #666)\n');
   console.log(`Target: ${baseUrl} (SPA with sample corpus, 18 sessions)`);
@@ -891,7 +937,7 @@ async function runLegacy(page, baseUrl) {
     try {
       const r = await measureView(page, view, baseUrl);
       results.push(r);
-      console.log(`  navMs=${r.navMs} initialLT=${r.initialLongtaskCount}(${r.initialLongtaskTotalMs.toFixed(0)}ms) resizeLT=${r.resizeLongtaskCount}(${r.resizeLongtaskTotalMs.toFixed(0)}ms) CLS=${r.initialCLS.toFixed(4)}+${r.resizeCLS.toFixed(4)} raw=${r.initialRawCLS.toFixed(4)}+${r.resizeRawCLS.toFixed(4)}`);
+      console.log(`  navMs=${fmtNavMs(r.navMs)} initialLT=${r.initialLongtaskCount}(${r.initialLongtaskTotalMs.toFixed(0)}ms) resizeLT=${r.resizeLongtaskCount}(${r.resizeLongtaskTotalMs.toFixed(0)}ms) CLS=${r.initialCLS.toFixed(4)}+${r.resizeCLS.toFixed(4)} raw=${r.initialRawCLS.toFixed(4)}+${r.resizeRawCLS.toFixed(4)}`);
     } catch (err) {
       console.log(`  ERROR: ${err.message}`);
       results.push({ name: view.name, error: err.message });
@@ -908,7 +954,7 @@ async function runLegacy(page, baseUrl) {
       continue;
     }
     console.log(
-      `${r.name.padEnd(20)} | ${String(r.navMs).padStart(7)} | ${String(r.initialLongtaskCount).padStart(13)} | ${String(r.initialLongtaskTotalMs.toFixed(0)).padStart(10)} | ${String(r.resizeLongtaskCount).padStart(15)} | ${String(r.resizeLongtaskTotalMs.toFixed(0)).padStart(12)} | ${r.initialCLS.toFixed(4).padStart(9)} | ${r.resizeCLS.toFixed(4)}`
+      `${r.name.padEnd(20)} | ${fmtNavMs(r.navMs).padStart(7)} | ${String(r.initialLongtaskCount).padStart(13)} | ${String(r.initialLongtaskTotalMs.toFixed(0)).padStart(10)} | ${String(r.resizeLongtaskCount).padStart(15)} | ${String(r.resizeLongtaskTotalMs.toFixed(0)).padStart(12)} | ${r.initialCLS.toFixed(4).padStart(9)} | ${r.resizeCLS.toFixed(4)}`
     );
   }
 

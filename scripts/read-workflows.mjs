@@ -78,6 +78,33 @@ function boundedScalar(value) {
   return null;
 }
 
+/**
+ * Normalize a manifest `startTime` to finite epoch milliseconds, or null (#3099).
+ *
+ * `boundedScalar` preserved arbitrary strings, and the newest-first comparator
+ * subtracts them: `'2026-01-01T00:00Z' - '2026-01-02T00:00Z'` is NaN, which
+ * Array.prototype.sort reads as "no ordering", so the documented newest-first
+ * result silently degraded to directory iteration order and workflow-health
+ * consumers received misranked runs. The declared shape is
+ * `startTime: number | null` (src/lib/parse-workflows.ts), so normalizing here
+ * also stops the projection from violating its own contract.
+ *
+ * Supported: a finite number; a numeric string; any timestamp `Date.parse`
+ * understands (ISO 8601). Anything else is null — unknown, not zero.
+ */
+export function normalizeStartTime(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.slice(0, WORKFLOW_FIELD_MAX_CHARS).trim();
+  if (trimmed === '') return null;
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    const asNumber = Number(trimmed);
+    return Number.isFinite(asNumber) ? asNumber : null;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function trimWorkflowProgressEntry(e) {
   if (!e || typeof e !== 'object') return null;
   if (e.type === 'workflow_phase') {
@@ -116,7 +143,7 @@ function trimWorkflowRun(m, sessionId) {
     runId: boundedString(m.runId),
     workflowName: boundedString(m.workflowName),
     status: boundedString(m.status),
-    startTime: boundedScalar(m.startTime),
+    startTime: normalizeStartTime(m.startTime),
     durationMs: boundedScalar(m.durationMs),
     agentCount: boundedScalar(m.agentCount),
     totalTokens: boundedScalar(m.totalTokens),
@@ -141,7 +168,17 @@ function trimWorkflowRun(m, sessionId) {
 }
 
 const isWfManifest = (f) => f.startsWith('wf_') && f.endsWith('.json');
-const byStartDesc = (a, b) => (b.startTime ?? 0) - (a.startTime ?? 0);
+// Newest first. Only normalized numbers are compared; a run with no usable
+// timestamp cannot be ranked, so it sorts LAST (deterministically, and stably
+// among its peers) instead of poisoning the comparator with NaN.
+const byStartDesc = (a, b) => {
+  const at = typeof a.startTime === 'number' && Number.isFinite(a.startTime) ? a.startTime : null;
+  const bt = typeof b.startTime === 'number' && Number.isFinite(b.startTime) ? b.startTime : null;
+  if (at === null && bt === null) return 0;
+  if (at === null) return 1;
+  if (bt === null) return -1;
+  return bt - at;
+};
 
 function workflowLimits() {
   return {

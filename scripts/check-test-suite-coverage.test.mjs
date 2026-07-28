@@ -4,10 +4,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   extractSuiteRefs,
+  extractRunCommands,
   resolveScriptFiles,
   collectWiredSuites,
   findUnwiredSuites,
@@ -60,11 +64,131 @@ test('resolveScriptFiles expands globs and follows nested npm run / npm test', (
   );
 });
 
+// #3075: only an executable `jobs.*.steps[*].run` command proves a suite runs
+// in CI. Suite text sitting in an inert field (`env:`, `name:`, `with:`) is not
+// an invocation, and treating it as one lets a suite report "covered" while no
+// workflow ever runs it. These build REAL workflow files and call
+// collectWiredSuites — the placeholder below never did.
+const UNIVERSE = ['scripts/foo.test.mjs', 'scripts/bar.test.mjs'];
+const PKG_SCRIPTS = { 'test:foo': 'node --test scripts/foo.test.mjs' };
+
+/** Write one workflow into a throwaway repo root and collect its wired suites. */
+function wiredFor(workflowYaml) {
+  const root = mkdtempSync(join(tmpdir(), 'suite-coverage-'));
+  try {
+    const dir = join(root, '.github', 'workflows');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'ci.yml'), workflowYaml, 'utf8');
+    return [...collectWiredSuites(root, UNIVERSE, PKG_SCRIPTS)].sort();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('collectWiredSuites: a suite named only in an inert env value is NOT wired', () => {
+  const wf = `
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NOTE: "node --test scripts/foo.test.mjs"
+    steps:
+      - uses: actions/checkout@v4
+`;
+  assert.deepEqual(wiredFor(wf), []);
+});
+
+test('collectWiredSuites: the same command in a step run IS wired', () => {
+  const wf = `
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "node --test scripts/foo.test.mjs"
+`;
+  assert.deepEqual(wiredFor(wf), ['scripts/foo.test.mjs']);
+});
+
+test('collectWiredSuites: an inert `npm run test:foo` string is NOT wired; a run step is', () => {
+  const inert = `
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: npm run test:foo
+        uses: actions/checkout@v4
+        with:
+          note: npm run test:foo
+`;
+  assert.deepEqual(wiredFor(inert), [], 'step name/with inputs do not execute');
+
+  const executable = `
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: run the suite
+        run: npm run test:foo
+`;
+  assert.deepEqual(wiredFor(executable), ['scripts/foo.test.mjs']);
+});
+
+test('collectWiredSuites: block-scalar run bodies are executable text', () => {
+  const wf = `
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: several commands
+        run: |
+          echo "starting scripts/bar.test.mjs"
+          node --test scripts/foo.test.mjs
+`;
+  // `defaults.run` is a mapping, not a command, and must not be scanned; both
+  // suite names appear inside the real run block, so both count.
+  assert.deepEqual(wiredFor(wf), ['scripts/bar.test.mjs', 'scripts/foo.test.mjs']);
+});
+
+test('extractRunCommands: returns only step commands, in order', () => {
+  const wf = `
+name: ci
+on: [push]
+env:
+  TOP: node --test scripts/foo.test.mjs
+jobs:
+  a:
+    steps:
+      - run: first
+      - name: second step
+        run: |
+          second
+          lines
+  b:
+    steps:
+      - run: third
+`;
+  assert.deepEqual(extractRunCommands(wf), [
+    'first',
+    '          second\n          lines',
+    'third',
+  ]);
+});
+
 test('collectWiredSuites resolves npm-run steps in a synthetic workflow', () => {
   const universe = ['scripts/foo.test.mjs', 'scripts/bar.test.mjs'];
-  // A minimal package.json + workflow map is not exposed by the API; instead
-  // prove the wiring transitively via findUnwiredSuites against the real repo
-  // below. Here we assert the pure resolver used by collectWiredSuites.
   assert.equal(typeof collectWiredSuites, 'function');
   const map = resolveScriptFiles(
     { 'test:foo': 'node scripts/foo.test.mjs' },

@@ -18,8 +18,9 @@
 // source. It is an approximation (unmapped gaps are charged to "(unmapped)"),
 // but more than accurate enough to find what dominates a chunk.
 
-import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const C2I = {};
@@ -66,38 +67,67 @@ function groupOf(source) {
   return s.replace(/^\.\.\//, '');
 }
 
-function attributeChunk(jsPath, mapPath) {
-  const code = readFileSync(jsPath, 'utf8');
-  const lineLens = code.split('\n').map((l) => l.length + 1);
-  const map = JSON.parse(readFileSync(mapPath, 'utf8'));
+// Attribute a chunk's BYTES to its sources.
+//
+// Sourcemap columns are UTF-16 code-unit offsets, NOT byte offsets. Subtracting
+// two columns therefore yields a character count, and any non-ASCII character in
+// the emitted chunk made the per-group totals disagree with the on-disk UTF-8
+// size this report compares them against (#3068). Each span is measured with
+// Buffer.byteLength over the actual slice instead, the real newline byte is
+// charged only where a newline exists, and the region before the first mapping
+// on a line (plus any generated line the map does not cover) is charged to
+// "(unmapped)" — so the attributed totals sum EXACTLY to the chunk byte length.
+export function attributeChunkSource(code, map) {
+  const codeLines = code.split('\n');
   const sources = map.sources || [];
   const bySource = new Map();
+  const charge = (src, bytes) => {
+    if (bytes <= 0) return;
+    bySource.set(src, (bySource.get(src) || 0) + bytes);
+  };
   let srcIdx = 0;
-  const lines = (map.mappings || '').split(';');
-  for (let L = 0; L < lines.length; L++) {
-    const lineLen = lineLens[L] || 0;
-    const segs = lines[L].split(',').filter(Boolean).map(decodeVLQ);
+  const mappingLines = (map.mappings || '').split(';');
+  for (let L = 0; L < codeLines.length; L++) {
+    const line = codeLines[L];
+    // split('\n') yields one more element than there are newlines: only the
+    // elements before the last are actually followed by a newline byte.
+    const newlineBytes = L < codeLines.length - 1 ? 1 : 0;
+    const segs = (mappingLines[L] ?? '')
+      .split(',')
+      .filter(Boolean)
+      .map(decodeVLQ);
     let genCol = 0;
     let prevGenCol = 0;
     let prevSrc = null;
     for (let i = 0; i < segs.length; i++) {
       const d = segs[i];
       genCol += d[0];
-      // charge the span of the PREVIOUS segment up to this segment's column
-      if (prevSrc !== null) {
-        const span = Math.max(0, genCol - prevGenCol);
-        bySource.set(prevSrc, (bySource.get(prevSrc) || 0) + span);
-      }
+      // Charge the span of the PREVIOUS segment up to this segment's column.
+      // Before the first segment there is no mapping — that leading run is
+      // generated output no source claims.
+      charge(
+        prevSrc === null ? '(unmapped)' : prevSrc,
+        Buffer.byteLength(line.slice(prevGenCol, genCol), 'utf8')
+      );
       if (d.length >= 2) srcIdx += d[1];
       prevSrc = d.length >= 2 ? sources[srcIdx] : '(unmapped)';
       prevGenCol = genCol;
     }
-    if (prevSrc !== null) {
-      const span = Math.max(0, lineLen - prevGenCol);
-      bySource.set(prevSrc, (bySource.get(prevSrc) || 0) + span);
-    }
+    // Tail of the line (plus its newline) goes to the last segment's source, or
+    // to "(unmapped)" when the line carries no mapping at all.
+    charge(
+      prevSrc === null ? '(unmapped)' : prevSrc,
+      Buffer.byteLength(line.slice(prevGenCol), 'utf8') + newlineBytes
+    );
   }
   return bySource;
+}
+
+export function attributeChunk(jsPath, mapPath) {
+  return attributeChunkSource(
+    readFileSync(jsPath, 'utf8'),
+    JSON.parse(readFileSync(mapPath, 'utf8'))
+  );
 }
 
 function fmt(n) {
@@ -154,4 +184,8 @@ function main() {
   }
 }
 
-main();
+const invokedDirectly =
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+
+if (invokedDirectly) main();

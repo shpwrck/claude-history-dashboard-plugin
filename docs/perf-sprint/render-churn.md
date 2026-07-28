@@ -1,8 +1,16 @@
 # Render-churn profiling — ResizeObserver + large tables (issue #666)
 
-Measured against the SPA build (`npm run build:spa`) with the 18-session
+Measured against the sample build (`npm run build:sample`) with the 18-session
 deterministic sample corpus (`build-corpus.mjs`, seed `0x5eed1234`), served via
 `vite preview` on port 4476/4477. Chromium headless via Playwright.
+
+> **`build:sample`, not `build:spa`.** This doc previously said `build:spa`,
+> which cannot be right: `vite.config.ts` applies `sampleDataPlugin()` only
+> under `--mode sample`, so the spa/edge build emits no `sample-data.zip` and its
+> preview renders the empty upload-first UI (ADR 0014 / epic #1852).
+> `scripts/measure-isolated-views.mjs` now verifies the served corpus and
+> **aborts** rather than measuring an empty UI, so the old instruction would
+> fail immediately.
 
 Script: `scripts/measure-render-churn.mjs` / `scripts/measure-isolated-views.mjs`
 Methodology: each view is loaded in a **fresh browser context** (no
@@ -140,8 +148,10 @@ win, not a performance fix.
 ## How to re-run
 
 ```sh
-# 1. Build the SPA (generates sample corpus)
-npm run build:spa
+# 1. Build with the sample corpus. ONLY `--mode sample` emits sample-data.zip
+#    (vite.config.ts); `npm run build:spa` is the upload-first build and ships
+#    no mock data, so its preview renders an EMPTY UI.
+npm run build:sample
 
 # 2. Run the measurement harness (starts vite preview on port 4476)
 node scripts/measure-render-churn.mjs
@@ -152,3 +162,9 @@ node scripts/measure-isolated-views.mjs
 
 Both scripts exit cleanly and kill the preview server they started. Pipe output
 to a file to preserve the JSON results.
+
+`measure-isolated-views.mjs` verifies what it is about to measure and **exits
+nonzero** rather than publishing numbers it cannot attribute: the responder must
+serve this dashboard's shell (matching `index.html`'s `<title>`, not merely some
+built Vite app) and a real `sample-data.zip`. If you see
+`refusing to measure port …`, the message names the build to run.

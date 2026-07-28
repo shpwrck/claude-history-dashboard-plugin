@@ -38,21 +38,57 @@ export function fieldCardinality(value) {
   return null;
 }
 
+// Serialized byte size of one top-level MEMBER: the quoted key, the `:`
+// separator, and the value. A member whose value does not survive
+// JSON.stringify (undefined, a function, a symbol) never reaches the wire and
+// costs 0 bytes.
+export function memberBytes(key, value) {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return 0;
+  return (
+    Buffer.byteLength(JSON.stringify(key), 'utf8') +
+    1 + // ':'
+    Buffer.byteLength(serialized, 'utf8')
+  );
+}
+
 // Break a dataset object into per-top-level-key sizes, sorted largest-first.
-// Returns { totalBytes, rows: [{ key, bytes, pct, count }] }.
+// Returns { totalBytes, framingBytes, rows: [{ key, bytes, valueBytes, pct, count }] }.
+//
+// `totalBytes` is the REAL UTF-8 byte length of `JSON.stringify(dataset)` — the
+// artifact this report claims to describe — not the sum of the values measured
+// in isolation (#3078: `{a:1}` used to report 1 byte for a 7-byte body). Every
+// wire byte is attributed: each member carries its own key + `:` + value bytes,
+// and the object's `{`/`}` plus inter-member `,` bytes are reported as
+// `framingBytes`, so `sum(rows.bytes) + framingBytes === totalBytes` exactly.
 export function fieldSizes(dataset) {
-  const record = dataset && typeof dataset === 'object' ? dataset : {};
-  const rows = Object.keys(record).map((key) => ({
+  // Only a plain JSON object serializes as `{"k":v,…}`. An array, or an object
+  // with its own toJSON(), does not — rather than report framing we cannot
+  // account for, measure nothing.
+  if (
+    !dataset ||
+    typeof dataset !== 'object' ||
+    Array.isArray(dataset) ||
+    typeof dataset.toJSON === 'function'
+  ) {
+    return { totalBytes: 0, framingBytes: 0, rows: [] };
+  }
+  const rows = Object.keys(dataset).map((key) => ({
     key,
-    bytes: valueBytes(record[key]),
-    count: fieldCardinality(record[key]),
+    bytes: memberBytes(key, dataset[key]),
+    valueBytes: valueBytes(dataset[key]),
+    count: fieldCardinality(dataset[key]),
   }));
-  const totalBytes = rows.reduce((sum, r) => sum + r.bytes, 0);
+  // Framing: the two braces, plus one comma between each pair of members that
+  // actually reaches the wire (a dropped member takes its comma with it).
+  const wireMembers = rows.filter((r) => r.bytes > 0).length;
+  const framingBytes = 2 + Math.max(0, wireMembers - 1);
+  const totalBytes = rows.reduce((sum, r) => sum + r.bytes, 0) + framingBytes;
   rows.sort((a, b) => b.bytes - a.bytes);
   for (const r of rows) {
     r.pct = totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0;
   }
-  return { totalBytes, rows };
+  return { totalBytes, framingBytes, rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +155,13 @@ function printTable(result, top) {
       `  ${mb(r.bytes).padStart(9)}  ${r.pct.toFixed(1).padStart(5)}%  ${String(r.count ?? '').padStart(7)}  ${r.key}`
     );
   }
+  // The JSON braces + inter-member commas: small, but part of the same total,
+  // so the column sums to the artifact's real byte length.
+  const framingPct =
+    result.totalBytes > 0 ? (result.framingBytes / result.totalBytes) * 100 : 0;
+  console.log(
+    `  ${mb(result.framingBytes).padStart(9)}  ${framingPct.toFixed(1).padStart(5)}%  ${''.padStart(7)}  (JSON framing: braces + commas)`
+  );
 }
 
 async function main() {

@@ -88,14 +88,65 @@ export function collectServedRoutes(serverSrc) {
       .replace(/\\\./g, '.');
     routes.add(canonicalizePath(body));
   }
-  // Route-table entries: `['/path', handlerIdent]` array-literal pairs whose
-  // key is a slash-leading path string. Anchoring on the leading `/` keeps this
-  // from matching unrelated `[a, b]` literals; the `handler` identifier arm
-  // keeps it from matching non-route string tuples.
-  for (const m of serverSrc.matchAll(/\[\s*'(\/[^']*)'\s*,\s*[A-Za-z_$][\w$]*\s*\]/g)) {
-    routes.add(canonicalizePath(m[1]));
+  // Route-table entries. A slash-leading `['/path', ident]` tuple counts as a
+  // SERVED route only when it lives inside a `new Map([...])` bound to an
+  // identifier the dispatcher actually queries with `.get(pathname)` (#3073).
+  // Scanning the whole file for the tuple shape alone classified any unrelated
+  // literal — `const metadata = [['/api/example', handler]]` — as an endpoint,
+  // so the freshness verdict did not follow from real dispatch behaviour.
+  for (const path of collectRouteTablePaths(serverSrc)) {
+    routes.add(canonicalizePath(path));
   }
   return routes;
+}
+
+/** Identifiers the server dispatches on: `IDENT.get(pathname)`. */
+export function collectPathnameQueriedMaps(serverSrc) {
+  const names = new Set();
+  for (const m of serverSrc.matchAll(
+    /\b([A-Za-z_$][\w$]*)\s*\.get\(\s*pathname\s*[,)]/g
+  )) {
+    names.add(m[1]);
+  }
+  return names;
+}
+
+/**
+ * Path keys of every `const IDENT = new Map([ ['/path', handler], … ])` whose
+ * IDENT is queried with `.get(pathname)` somewhere in the same source. The
+ * `new Map(` argument list is delimited by paren matching rather than a regex,
+ * so parentheses inside handler expressions cannot truncate the table.
+ */
+export function collectRouteTablePaths(serverSrc) {
+  const queried = collectPathnameQueriedMaps(serverSrc);
+  const paths = [];
+  const declRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new Map\(/g;
+  for (const m of serverSrc.matchAll(declRe)) {
+    if (!queried.has(m[1])) continue;
+    const open = m.index + m[0].length - 1; // index of the '(' after `new Map`
+    const body = balancedSlice(serverSrc, open);
+    if (body === null) continue;
+    for (const entry of body.matchAll(
+      /\[\s*'(\/[^']*)'\s*,\s*[A-Za-z_$][\w$]*\s*[,\]]/g
+    )) {
+      paths.push(entry[1]);
+    }
+  }
+  return paths;
+}
+
+/** Text between `src[openIdx]` (a `(`) and its matching `)`, or null. */
+function balancedSlice(src, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === '(') depth += 1;
+    else if (c === ')') {
+      depth -= 1;
+      if (depth === 0) return src.slice(openIdx + 1, i);
+    }
+  }
+  return null;
 }
 
 /** Served `startsWith('…')` prefix guards, minus the ignored scaffolding. */

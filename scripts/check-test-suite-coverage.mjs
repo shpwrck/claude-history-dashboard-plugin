@@ -72,6 +72,80 @@ export function stripComments(text) {
     .join('\n');
 }
 
+// Block-scalar headers: `|`, `>`, with optional chomping/indentation indicators.
+const BLOCK_SCALAR_RE = /^[|>][+-]?\d*$/;
+
+/**
+ * Executable shell from a workflow: the `jobs.*.steps[*].run` scalars, and
+ * nothing else (#3075).
+ *
+ * The gate previously matched suite paths and `npm run` names anywhere in the
+ * whole document, so a suite named in an inert field — `env:`, `name:`, a
+ * `with:` input, arbitrary metadata — was accepted as PROOF that CI runs it.
+ * Absence of an executable step is not evidence that a step exists: only a
+ * `run:` command actually executes, so only a `run:` command counts.
+ *
+ * This is a deliberately small structural scan (no YAML dependency in a
+ * zero-dependency gate): it tracks indentation to build the key path, and
+ * accepts a `run` key only at `jobs.<job>.steps[*].run`. `defaults.run:` is a
+ * MAPPING, not a command, and is skipped because its value is neither an inline
+ * scalar nor a block-scalar header.
+ */
+export function extractRunCommands(yamlText) {
+  const lines = yamlText.split('\n');
+  const commands = [];
+  const stack = []; // { indent, key }
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i];
+    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
+    const lineIndent = raw.length - raw.trimStart().length;
+    // A step is a sequence item: `- run: …` / `- name: …`. Each `- ` marker
+    // shifts the effective key indent right by 2.
+    let rest = raw.slice(lineIndent);
+    let keyIndent = lineIndent;
+    while (rest.startsWith('- ') || rest === '-') {
+      const consumed = rest.startsWith('- ') ? 2 : 1;
+      rest = rest.slice(consumed);
+      keyIndent += consumed;
+    }
+    const m = /^([A-Za-z_][\w.-]*)\s*:(\s|$)/.exec(rest);
+    if (!m) continue;
+    const key = m[1];
+    const value = rest.slice(m[0].length).trim();
+    while (stack.length && stack[stack.length - 1].indent >= keyIndent) stack.pop();
+    stack.push({ indent: keyIndent, key });
+    const path = stack.map((e) => e.key);
+    const isStepRun =
+      key === 'run' && path.length === 4 && path[0] === 'jobs' && path[2] === 'steps';
+    if (BLOCK_SCALAR_RE.test(value)) {
+      // Block scalar: every following line indented deeper than the key. Consume
+      // it here (whether or not it is a step `run`) so its contents are never
+      // re-read as structure — a heredoc that happens to contain `run:` is data.
+      const body = [];
+      let j = i + 1;
+      for (; j < lines.length; j += 1) {
+        const next = lines[j];
+        if (!next.trim()) {
+          body.push('');
+          continue;
+        }
+        const nextIndent = next.length - next.trimStart().length;
+        if (nextIndent <= keyIndent) break;
+        body.push(next);
+      }
+      i = j - 1;
+      if (isStepRun) commands.push(body.join('\n'));
+      continue;
+    }
+    if (!isStepRun) continue;
+    if (value) {
+      // Inline scalar; drop a surrounding quote pair if present.
+      commands.push(value.replace(/^(['"])([\s\S]*)\1$/, '$2'));
+    }
+  }
+  return commands;
+}
+
 /** Extract scripts/*.test.mjs references (literal + glob) from a command string. */
 export function extractSuiteRefs(command) {
   const refs = [];
@@ -147,14 +221,19 @@ export function collectWiredSuites(repoRoot, universe, pkgScripts) {
   const wfDir = join(repoRoot, '.github', 'workflows');
   for (const entry of readdirSync(wfDir, { withFileTypes: true })) {
     if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue;
-    const text = stripComments(readFileSync(join(wfDir, entry.name), 'utf8'));
-    for (const ref of extractSuiteRefs(text)) {
-      for (const f of expandRef(ref, universe)) wired.add(f);
-    }
-    for (const m of text.matchAll(NPM_INVOKE_RE)) {
-      const name = m[1] ?? m[2];
-      const files = scriptFiles.get(name);
-      if (files) for (const f of files) wired.add(f);
+    // Only executable `jobs.*.steps[*].run` shell counts as wiring (#3075) —
+    // suite paths sitting in `env:`/`name:`/metadata prove nothing runs.
+    const runs = extractRunCommands(readFileSync(join(wfDir, entry.name), 'utf8'));
+    for (const command of runs) {
+      const text = stripComments(command);
+      for (const ref of extractSuiteRefs(text)) {
+        for (const f of expandRef(ref, universe)) wired.add(f);
+      }
+      for (const m of text.matchAll(NPM_INVOKE_RE)) {
+        const name = m[1] ?? m[2];
+        const files = scriptFiles.get(name);
+        if (files) for (const f of files) wired.add(f);
+      }
     }
   }
   return wired;
