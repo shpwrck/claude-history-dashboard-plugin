@@ -14,6 +14,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -125,10 +126,18 @@ const tempRoot = await mkdtemp(join(tmpdir(), 'chd-plugin-mcp-payload-'));
 const payloadRoot = join(tempRoot, 'plugin');
 const stateDir = join(tempRoot, 'state');
 const isolatedHome = join(tempRoot, 'home');
+const sensitiveDocRoot = join(isolatedHome, '.claude');
+const sensitiveSentinel = 'MCP_DOC_ROOT_SENTINEL_3090';
+const sensitiveAlias = join(tempRoot, 'claude-data-alias');
+const approvedWorkspace = join(tempRoot, 'approved-workspace');
+const unapprovedRoot = join(tempRoot, 'unapproved');
+const nodeSpawnMarker = join(tempRoot, 'node-spawns.log');
+const nodeSpawnPreload = join(tempRoot, 'node-spawn-preload.cjs');
 let client;
 let stateServer;
 let fallbackServer;
 let childStderr = '';
+let childStdout = '';
 
 try {
   const suppliedPayload = process.env.PLUGIN_PAYLOAD_ROOT;
@@ -188,6 +197,46 @@ try {
   fallbackServer = await listen('configured-fallback', false);
   await mkdir(stateDir, { recursive: true });
   await mkdir(isolatedHome, { recursive: true });
+  await mkdir(join(sensitiveDocRoot, 'docs'), { recursive: true });
+  await mkdir(approvedWorkspace, { recursive: true });
+  await mkdir(unapprovedRoot, { recursive: true });
+  await symlink(sensitiveDocRoot, sensitiveAlias, 'dir');
+  await writeFile(
+    join(sensitiveDocRoot, 'docs', 'secret.md'),
+    `# ${sensitiveSentinel}\n\nThis content must never enter an MCP response.\n`,
+    'utf8'
+  );
+  await writeFile(
+    join(approvedWorkspace, 'guide.md'),
+    '# Approved Workspace\n\nThis document is safe to return.\n',
+    'utf8'
+  );
+  await writeFile(
+    join(unapprovedRoot, 'private.md'),
+    '# Unapproved\n\nThis directory is not a configured workspace.\n',
+    'utf8'
+  );
+  await writeFile(
+    join(isolatedHome, '.claude.json'),
+    JSON.stringify({
+      projects: {
+        [approvedWorkspace]: {},
+        // The absolute ~/.claude deny must override even an accidentally
+        // configured project-root entry.
+        [sensitiveDocRoot]: {},
+      },
+    }),
+    'utf8'
+  );
+  await writeFile(
+    nodeSpawnPreload,
+    [
+      "const { appendFileSync } = require('node:fs');",
+      "appendFileSync(process.env.MCP_SPAWN_MARKER, `${process.pid}\\n`);",
+      '',
+    ].join('\n'),
+    'utf8'
+  );
   await writeFile(
     join(stateDir, 'plugin-ctl.port'),
     String(stateServer.port),
@@ -218,6 +267,8 @@ try {
       PATH: dirname(process.execPath),
       CHD_CACHE_DIR: stateDir,
       CHD_PORT: String(fallbackServer.port),
+      MCP_SPAWN_MARKER: nodeSpawnMarker,
+      NODE_OPTIONS: `--require=${nodeSpawnPreload}`,
     },
   });
   transport.stderr?.on('data', (chunk) => {
@@ -226,6 +277,14 @@ try {
 
   client = new Client({ name: 'plugin-payload-test', version: '1.0.0' });
   await client.connect(transport, { timeout: 10_000 });
+  transport._process?.stdout?.on('data', (chunk) => {
+    childStdout += chunk.toString();
+  });
+
+  const spawnCount = async () =>
+    (await readFile(nodeSpawnMarker, 'utf8')).trim().split('\n').filter(Boolean)
+      .length;
+  const shimOnlySpawnCount = await spawnCount();
 
   const listed = await client.listTools(undefined, { timeout: 10_000 });
   assert.deepEqual(
@@ -244,6 +303,117 @@ try {
   assert.equal(firstStatus.running, true);
   assert.equal(firstStatus.auth_required, true);
   assert.equal(firstStatus.url, `http://127.0.0.1:${stateServer.port}`);
+
+  const protectedRootResult = await client.callTool(
+    {
+      name: 'doc_neighborhood',
+      arguments: {
+        anchor_doc: 'docs/secret',
+        root: sensitiveDocRoot,
+      },
+    },
+    undefined,
+    { timeout: 10_000 }
+  );
+  assert.equal(
+    protectedRootResult.isError,
+    true,
+    'doc_neighborhood must reject ~/.claude before producing a response'
+  );
+  assert.match(
+    protectedRootResult.content?.find((item) => item.type === 'text')?.text ?? '',
+    /protected Claude data directory/
+  );
+  assert.doesNotMatch(
+    JSON.stringify(protectedRootResult),
+    new RegExp(sensitiveSentinel),
+    'the protected document sentinel must not enter the MCP response'
+  );
+  assert.doesNotMatch(
+    childStdout,
+    new RegExp(sensitiveSentinel),
+    'the protected document sentinel must not enter MCP stdout'
+  );
+  assert.equal(
+    await spawnCount(),
+    shimOnlySpawnCount,
+    'rejecting ~/.claude must happen before the producer process is spawned'
+  );
+
+  const protectedAliasResult = await client.callTool(
+    {
+      name: 'doc_neighborhood',
+      arguments: {
+        anchor_doc: 'secret',
+        root: join(sensitiveAlias, 'docs'),
+      },
+    },
+    undefined,
+    { timeout: 10_000 }
+  );
+  assert.equal(
+    protectedAliasResult.isError,
+    true,
+    'doc_neighborhood must reject symlink aliases into ~/.claude'
+  );
+  assert.doesNotMatch(JSON.stringify(protectedAliasResult), new RegExp(sensitiveSentinel));
+  assert.doesNotMatch(childStdout, new RegExp(sensitiveSentinel));
+  assert.equal(
+    await spawnCount(),
+    shimOnlySpawnCount,
+    'rejecting a ~/.claude symlink alias must happen before producer spawn'
+  );
+
+  const unapprovedRootResult = await client.callTool(
+    {
+      name: 'doc_neighborhood',
+      arguments: {
+        anchor_doc: 'private',
+        root: unapprovedRoot,
+      },
+    },
+    undefined,
+    { timeout: 10_000 }
+  );
+  assert.equal(
+    unapprovedRootResult.isError,
+    true,
+    'doc_neighborhood must reject roots outside configured workspaces'
+  );
+  assert.equal(
+    await spawnCount(),
+    shimOnlySpawnCount,
+    'rejecting an unapproved root must happen before producer spawn'
+  );
+
+  const approvedRootResult = await client.callTool(
+    {
+      name: 'doc_neighborhood',
+      arguments: {
+        anchor_doc: 'guide',
+        root: approvedWorkspace,
+      },
+    },
+    undefined,
+    { timeout: 10_000 }
+  );
+  assert.notEqual(
+    approvedRootResult.isError,
+    true,
+    'a root approved by the ~/.claude.json projects map must remain usable'
+  );
+  const approvedNeighborhood = parseTextResult(approvedRootResult);
+  assert.deepEqual(approvedNeighborhood.anchor, { kind: 'doc', slug: 'guide' });
+  assert(
+    approvedNeighborhood.nodes.some(
+      (node) => node.slug === 'guide' && node.path === 'guide.md'
+    ),
+    'approved workspace response should contain its requested document'
+  );
+  assert(
+    (await spawnCount()) > shimOnlySpawnCount,
+    'an approved workspace call should reach the producer'
+  );
 
   // A long-lived MCP process must follow a dashboard restart onto a new port.
   await writeFile(

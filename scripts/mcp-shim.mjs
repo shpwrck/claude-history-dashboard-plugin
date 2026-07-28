@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { dirname, join } from "node:path";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import process$1 from "node:process";
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { closeSync, openSync, readSync } from "node:fs";
 //#region \0rolldown/runtime.js
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -14214,6 +14215,102 @@ var StdioServerTransport = class {
 	}
 };
 //#endregion
+//#region scripts/lib/host-producer.mjs
+/** Reader chunk size, matching ingest's streaming cap reader. */
+var READ_CHUNK_BYTES = 65536;
+/**
+* Parse a non-negative integer env override, falling back to `fallback` when the
+* var is unset or not a finite non-negative integer. Shared so every cap
+* constant clamps env input the same way (mirrors ingest's own helper).
+*/
+function parseNonNegativeIntEnv(name, fallback, env = process.env) {
+	const raw = env?.[name];
+	if (raw == null || raw === "") return fallback;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+	return parsed;
+}
+/**
+* Resolve the max bytes a single auxiliary `~/.claude` artifact may be before a
+* capped read refuses it, from `DASHBOARD_ARTIFACT_FILE_MAX_BYTES`, clamped to
+* [64 KiB, 512 MiB]. A FUNCTION (not just a frozen const) so a consumer that
+* re-evaluates per-import (ingest does, for env-override tests) picks up a fresh
+* env value rather than the value frozen when this module first loaded.
+*/
+function resolveArtifactFileMaxBytes(env = process.env) {
+	return Math.max(65536, Math.min(536870912, parseNonNegativeIntEnv("DASHBOARD_ARTIFACT_FILE_MAX_BYTES", 67108864, env)));
+}
+/**
+* Resolve the max repo-map artifact directory entries scanned before discovery
+* stops — a runaway guard for a pathological `usage-data/repo-map/` dir — from
+* `DASHBOARD_REPO_MAP_ARTIFACT_MAX_ENTRIES`, clamped to [1, 1,000,000]. A
+* function for the same env-freshness reason as {@link resolveArtifactFileMaxBytes}.
+*/
+function resolveRepoMapArtifactMaxEntries(env = process.env) {
+	return Math.max(1, Math.min(1e6, parseNonNegativeIntEnv("DASHBOARD_REPO_MAP_ARTIFACT_MAX_ENTRIES", 5e4, env)));
+}
+/**
+* The single source of truth for the per-artifact byte cap, evaluated at module
+* load. ingest re-exports it as `ARTIFACT_FILE_MAX_BYTES` (server.mjs imports
+* that) and the server surfaces it in its limits banner. Module-load-frozen
+* value; tests that need a fresh env override call the resolver above.
+*/
+var ARTIFACT_FILE_MAX_BYTES = resolveArtifactFileMaxBytes();
+resolveRepoMapArtifactMaxEntries();
+/** A too-large artifact rejection carrying a stable, recognizable error code. */
+function artifactFileTooLargeError(maxBytes) {
+	const err = /* @__PURE__ */ new Error(`Auxiliary artifact exceeds ${maxBytes} byte limit`);
+	err.code = "ERR_DASHBOARD_ARTIFACT_FILE_TOO_LARGE";
+	err.maxBytes = maxBytes;
+	return err;
+}
+/**
+* Read a file as UTF-8 text, throwing {@link artifactFileTooLargeError} once
+* more than `maxBytes` have been read so a runaway/poisoned artifact can never
+* balloon memory. Streams in `READ_CHUNK_BYTES` chunks — identical to the
+* capped reader ingest used inline before this seam.
+*/
+function readArtifactTextCappedSync(filePath, maxBytes = ARTIFACT_FILE_MAX_BYTES) {
+	const fd = openSync(filePath, "r");
+	const chunks = [];
+	let bytes = 0;
+	const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes + 1));
+	try {
+		for (;;) {
+			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+			if (bytesRead === 0) break;
+			bytes += bytesRead;
+			if (bytes > maxBytes) throw artifactFileTooLargeError(maxBytes);
+			chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+		}
+	} finally {
+		closeSync(fd);
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
+/** {@link readArtifactTextCappedSync} + `JSON.parse`. The bounded JSON read every
+*  producer uses for `~/.claude.json` and per-root repo-map artifacts. */
+function readArtifactJsonCappedSync(filePath, maxBytes = ARTIFACT_FILE_MAX_BYTES) {
+	return JSON.parse(readArtifactTextCappedSync(filePath, maxBytes));
+}
+/**
+* Absolute project roots from a `~/.claude.json` `projects` map — the cwds the
+* user has worked in. Read through the CAPPED JSON reader so a huge `.claude.json`
+* cannot balloon memory (this closes the divergence where `repo-map-refresh.mjs`
+* read it uncapped). Returns [] when the file is absent/unreadable/not JSON.
+* Sorted for deterministic discovery.
+*/
+function claudeJsonProjectRoots(claudeJsonPath, maxBytes = ARTIFACT_FILE_MAX_BYTES) {
+	let raw;
+	try {
+		raw = readArtifactJsonCappedSync(claudeJsonPath, maxBytes);
+	} catch {
+		return [];
+	}
+	const projects = raw?.projects && typeof raw.projects === "object" ? raw.projects : {};
+	return Object.keys(projects).filter((root) => typeof root === "string" && root.startsWith("/")).sort();
+}
+//#endregion
 //#region scripts/mcp-shim-frictions.mjs
 /** RecCategory values considered friction-shaped (rework/stall/context-tax). */
 var FRICTION_CATEGORIES = Object.freeze([
@@ -14274,6 +14371,40 @@ async function readActiveDashboardPort(env = process.env) {
 var HOST = process.env.CHD_HOST || "127.0.0.1";
 var execFileAsync = promisify(execFile);
 var SHIM_DIR = dirname(fileURLToPath(import.meta.url));
+function pathInside(parent, candidate) {
+	const rel = relative(parent, candidate);
+	return rel === "" || !isAbsolute(rel) && !rel.startsWith(`..${sep}`) && rel !== "..";
+}
+function splitPathList(raw) {
+	if (!raw) return [];
+	return String(raw).split(new RegExp(`[${delimiter === "\\" ? "\\\\" : delimiter},\\n]`)).map((part) => part.trim()).filter(Boolean);
+}
+async function canonicalDirectoryOrNull(rawRoot) {
+	try {
+		const root = await realpath(resolve(rawRoot));
+		return (await stat(root)).isDirectory() ? root : null;
+	} catch {
+		return null;
+	}
+}
+async function isApprovedWorkspaceRoot(candidate, homeDir = homedir(), env = process.env) {
+	const configured = new Set([
+		...claudeJsonProjectRoots(join(homeDir, ".claude.json")),
+		...splitPathList(env.DASHBOARD_PROJECT_CONFIG_ROOTS),
+		env.CLAUDE_PROJECT_DIR
+	].filter((root) => typeof root === "string" && isAbsolute(root)));
+	for (const root of configured) if (await canonicalDirectoryOrNull(root) === candidate) return true;
+	return false;
+}
+async function canonicalDocRoot(rawRoot) {
+	const root = await canonicalDirectoryOrNull(rawRoot);
+	if (!root) throw new Error("doc root must be an existing directory");
+	const homeDir = homedir();
+	const claudeDir = await canonicalDirectoryOrNull(join(homeDir, ".claude"));
+	if (claudeDir && pathInside(claudeDir, root)) throw new Error("doc root is inside the protected Claude data directory");
+	if (!await isApprovedWorkspaceRoot(root, homeDir)) throw new Error("doc root is not an approved workspace");
+	return root;
+}
 async function fetchJSON(path) {
 	const baseUrl = `http://${HOST}:${await readActiveDashboardPort(process.env)}`;
 	const url = `${baseUrl}${path}`;
@@ -14339,15 +14470,18 @@ function docNeighborhoodArgs(args) {
 async function toolDocNeighborhood(args = {}) {
 	const loader = join(SHIM_DIR, "register-ts.mjs");
 	const script = join(SHIM_DIR, "doc-neighborhood-inject.mjs");
-	const injectArgs = docNeighborhoodArgs(args);
-	const cwd = args.root ? String(args.root) : process.cwd();
+	const root = await canonicalDocRoot(args.root ? String(args.root) : process.cwd());
+	const injectArgs = docNeighborhoodArgs({
+		...args,
+		root
+	});
 	const { stdout } = await execFileAsync(process.execPath, [
 		"--import",
 		loader,
 		script,
 		...injectArgs
 	], {
-		cwd,
+		cwd: root,
 		timeout: 2e4,
 		maxBuffer: 8 * 1024 * 1024
 	});
@@ -14406,7 +14540,7 @@ var TOOLS = [
 				},
 				root: {
 					type: "string",
-					description: "Repo root to build the doc graph over. Defaults to the shim cwd."
+					description: "Repo root to build the doc graph over. Must exactly match a configured workspace root; ~/.claude is always rejected. Defaults to the shim cwd, which must itself be an approved workspace."
 				},
 				max_distance: {
 					type: "number",

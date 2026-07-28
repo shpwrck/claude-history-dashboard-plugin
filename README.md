@@ -58,4 +58,7 @@ The plugin manifest declares a self-contained MCP server exposing
 `dashboard_status`, `get_recommendations`, `top_frictions`, and
 `doc_neighborhood`. No separate `npm install` is needed. The first three tools
 query the running dashboard; `doc_neighborhood` computes locally from the target
-repository and does not require the dashboard server.
+repository and does not require the dashboard server. Its `root` must exactly
+match a workspace named by the `projects` map in `~/.claude.json`,
+`CLAUDE_PROJECT_DIR`, or the explicit `DASHBOARD_PROJECT_CONFIG_ROOTS` allowlist;
+`~/.claude` and symlink aliases into it are always rejected.

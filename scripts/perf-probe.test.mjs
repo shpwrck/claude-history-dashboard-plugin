@@ -1,21 +1,153 @@
-// Unit tests for the pure budget logic in perf-probe.mjs (#2069, epic #1474).
-// The measurement path needs a live server + real corpus and is run on demand
-// (see the script header); these tests cover only the network-free core:
-// percentile() and evaluateBudget() (the over/under-budget branch). Run:
+// Tests for perf-probe.mjs (#2069, epic #1474).
+// The measurement status contract is exercised against a bounded in-process
+// HTTP server; percentile() and evaluateBudget() remain network-free. Run:
 //   node --test scripts/perf-probe.test.mjs   (npm run test:perf-probe)
 //
 // Also asserts the shipped perf-probe-budget.json parses and has the shape the
 // evaluator reads, so a malformed edit fails here instead of silently at runtime.
 
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { createServer } from 'node:http';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { percentile, round1, evaluateBudget } from './perf-probe.mjs';
+import { percentile, round1, evaluateBudget, probe } from './perf-probe.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+const PERF_PROBE_PATH = join(PROJECT_DIR, 'scripts', 'perf-probe.mjs');
+
+async function withTestServer(handler, run) {
+  const server = createServer(handler);
+  await new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  const { port } = server.address();
+  try {
+    return await run(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise((resolveClose, rejectClose) => {
+      server.close((error) => (error ? rejectClose(error) : resolveClose()));
+    });
+  }
+}
+
+function runProbeCli(args) {
+  return new Promise((resolveRun) => {
+    execFile(
+      process.execPath,
+      [PERF_PROBE_PATH, ...args],
+      { cwd: PROJECT_DIR },
+      (error, stdout, stderr) => {
+        resolveRun({ code: error && typeof error.code === 'number' ? error.code : 0, stdout, stderr });
+      }
+    );
+  });
+}
+
+test('probe rejects a cold endpoint 404 before reporting a measurement', async () => {
+  await withTestServer((_request, response) => {
+    response.writeHead(404);
+    response.end('missing');
+  }, async (base) => {
+    await assert.rejects(
+      probe(base, { warmSamples: 1, timeoutMs: 1_000 }),
+      /\/api\/dataset\.json.*404/
+    );
+  });
+});
+
+test('CLI --enforce exits nonzero and identifies a fast 404 response', async () => {
+  await withTestServer((_request, response) => {
+    response.writeHead(404);
+    response.end('missing');
+  }, async (base) => {
+    const result = await runProbeCli(['--base', base, '--warm=1', '--enforce']);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /\/api\/dataset\.json.*404/);
+    assert.doesNotMatch(result.stdout, /all metrics within budget/);
+  });
+});
+
+test('probe rejects a warm endpoint 500 before recording its latency', async () => {
+  let datasetRequests = 0;
+  await withTestServer((request, response) => {
+    if (request.url === '/api/dataset.json') datasetRequests += 1;
+    const status = request.url === '/api/dataset.json' && datasetRequests === 2 ? 500 : 200;
+    response.writeHead(status);
+    response.end(status === 500 ? 'failed' : '{}');
+  }, async (base) => {
+    await assert.rejects(
+      probe(base, { warmSamples: 1, timeoutMs: 1_000 }),
+      /\/api\/dataset\.json.*500/
+    );
+  });
+});
+
+test('probe rejects a 401 identity dataset-size response before recording bytes', async () => {
+  await withTestServer((request, response) => {
+    const isIdentityDataset =
+      request.url === '/api/dataset.json' &&
+      request.headers['accept-encoding'] === 'identity';
+    response.writeHead(isIdentityDataset ? 401 : 200);
+    response.end(isIdentityDataset ? 'unauthorized' : '{}');
+  }, async (base) => {
+    await assert.rejects(
+      probe(base, { warmSamples: 1, timeoutMs: 1_000 }),
+      /\/api\/dataset\.json.*401/
+    );
+  });
+});
+
+test('probe rejects a 500 compressed dataset-size response before recording bytes', async () => {
+  let compressedDatasetRequests = 0;
+  await withTestServer((request, response) => {
+    const isCompressedDataset =
+      request.url === '/api/dataset.json' &&
+      request.headers['accept-encoding'] === 'br, gzip';
+    if (isCompressedDataset) compressedDatasetRequests += 1;
+    const status = isCompressedDataset && compressedDatasetRequests === 3 ? 500 : 200;
+    response.writeHead(status);
+    response.end(status === 500 ? 'failed' : '{}');
+  }, async (base) => {
+    await assert.rejects(
+      probe(base, { warmSamples: 1, timeoutMs: 1_000 }),
+      /\/api\/dataset\.json.*500/
+    );
+  });
+});
+
+test('probe records endpoint latency and dataset bytes for 200 responses', async () => {
+  const identityBody = 'uncompressed-dataset';
+  const compressedBody = 'zip';
+  await withTestServer((request, response) => {
+    const identity = request.headers['accept-encoding'] === 'identity';
+    response.writeHead(200, identity ? {} : { 'content-encoding': 'gzip' });
+    response.end(identity ? identityBody : compressedBody);
+  }, async (base) => {
+    const result = await probe(base, { warmSamples: 1, timeoutMs: 1_000 });
+
+    assert.deepEqual(Object.keys(result.endpoints), [
+      '/api/dataset.json',
+      '/api/recommendations.json',
+      '/api/digest',
+      '/api/sessions',
+    ]);
+    for (const measurement of Object.values(result.endpoints)) {
+      assert.equal(measurement.status, 200);
+      assert.equal(measurement.samples, 1);
+      assert.ok(Number.isFinite(measurement.firstHitMs));
+      assert.ok(Number.isFinite(measurement.p50));
+      assert.ok(Number.isFinite(measurement.p95));
+    }
+    assert.equal(result.dataset.uncompressedBytes, Buffer.byteLength(identityBody));
+    assert.equal(result.dataset.compressedBytes, Buffer.byteLength(compressedBody));
+    assert.equal(result.dataset.compressedEncoding, 'gzip');
+  });
+});
 
 test('percentile: empty and single-element', () => {
   assert.equal(percentile([], 50), 0);

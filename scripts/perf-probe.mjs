@@ -22,8 +22,8 @@
 //
 // Because the real corpus (and thus absolute latency/bytes) varies per machine,
 // the measurement path is an on-demand observability harness, NOT a CI gate (CI
-// has no real running server+corpus). Only the pure budget logic
-// (percentile/evaluateBudget) is unit-tested — scripts/perf-probe.test.mjs,
+// has no real running server+corpus). The pure budget logic and HTTP response
+// contract are tested with an in-process server — scripts/perf-probe.test.mjs,
 // `npm run test:perf-probe`, wired into CI. Budget enforcement here is opt-in:
 // pass --enforce (or rely on the shipped perf-probe-budget.json) to exit
 // non-zero on a breach; the seed ceilings are the pre-fix baseline, to be
@@ -144,13 +144,21 @@ function httpGet(base, path, { acceptEncoding = 'identity', timeoutMs } = {}) {
   });
 }
 
+function assertSuccessfulResponse(path, response) {
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`${path} returned HTTP ${response.status}`);
+  }
+}
+
 async function measureEndpoint(base, path, { warmSamples, timeoutMs }) {
   // First hit is reported separately (it is the cold build when the server's
   // dataset cache was empty); it is NOT folded into the warm percentiles.
   const first = await httpGet(base, path, { acceptEncoding: 'br, gzip', timeoutMs });
+  assertSuccessfulResponse(path, first);
   const samples = [];
   for (let i = 0; i < warmSamples; i += 1) {
     const r = await httpGet(base, path, { acceptEncoding: 'br, gzip', timeoutMs });
+    assertSuccessfulResponse(path, r);
     samples.push(r.ms);
   }
   const sorted = [...samples].sort((a, b) => a - b);
@@ -171,7 +179,9 @@ export async function probe(base, { warmSamples = 5, timeoutMs = 300000 } = {}) 
   // Dataset byte sizes: one identity request (uncompressed) + one br/gzip
   // request (compressed). Reuse the warm-cache state already primed above.
   const ident = await httpGet(base, DATASET_PATH, { acceptEncoding: 'identity', timeoutMs });
+  assertSuccessfulResponse(DATASET_PATH, ident);
   const comp = await httpGet(base, DATASET_PATH, { acceptEncoding: 'br, gzip', timeoutMs });
+  assertSuccessfulResponse(DATASET_PATH, comp);
   const dataset = {
     uncompressedBytes: ident.bytes,
     compressedBytes: comp.bytes,
