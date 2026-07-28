@@ -187,6 +187,10 @@ describe('parse-task-success', () => {
       ),
       stopLine('2026-01-01T00:00:02.000Z'),
       userLine('now check the logs', '2026-01-01T00:00:03.000Z'),
+      // #3155: history must extend past the 14-day recurrence window before
+      // "the topic never returned" is evidence rather than a statement about
+      // how briefly we looked. This fixture previously spanned three seconds.
+      userLine('unrelated deployment question', '2026-01-20T00:00:00.000Z'),
     ].join('\n');
 
     const rows = parseTaskSuccess(transcript, 'neutral-session.jsonl', {
@@ -255,10 +259,12 @@ describe('parse-task-success', () => {
           'now check the logs',
           '2026-01-01T00:03:00.000Z'
         ),
+        // #3155: observed history must cover the full 14-day recurrence
+        // window after the span before its absence counts as corroboration.
         historyEntry(
           'other-session',
           'review src/OtherPanel.tsx',
-          '2026-01-02T00:00:00.000Z'
+          '2026-01-20T00:00:00.000Z'
         ),
       ],
       runtimeEvents: [runtime('quiet-session', '2026-01-01T00:02:30.000Z')],
@@ -329,5 +335,61 @@ describe('parse-task-success', () => {
       'blocked'
     );
     expect(classifyAgentClosingClaim('This is not complete yet.')).toBe('none');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Absence is only evidence once we have watched long enough (#3155)
+// ---------------------------------------------------------------------------
+
+describe('recurrence corroboration requires an observed window (#3155)', () => {
+  const span = (): TaskSuccessProxy[] =>
+    computeTaskSuccess({
+      entries: [
+        historyEntry('quiet-session', 'fix src/ReportsPanel.tsx', '2026-01-01T00:00:00.000Z'),
+        historyEntry('quiet-session', 'now check the logs', '2026-01-01T00:03:00.000Z'),
+      ],
+      runtimeEvents: [runtime('quiet-session', '2026-01-01T00:02:30.000Z')],
+      transcriptEvents: completedFileEvents('quiet-session', 'src/ReportsPanel.tsx'),
+    });
+
+  it('does not promote on absence when the window has not elapsed', () => {
+    // History covers three minutes. "The user never came back" is a statement
+    // about how briefly we looked, not about the task.
+    const rows = span();
+    expect(rows[0].confidence).not.toBe('high');
+    expect(rows[0].recurrence?.kind).not.toBe('corroborated');
+  });
+
+  it('does not promote when there is no history at all', () => {
+    // The starkest case: with an empty corpus nothing can return, so every span
+    // used to be corroborated to high confidence — absent evidence read as
+    // evidence of success.
+    const rows = computeTaskSuccess({
+      entries: [
+        historyEntry('quiet-session', 'fix src/ReportsPanel.tsx', '2026-01-01T00:00:00.000Z'),
+        historyEntry('quiet-session', 'now check the logs', '2026-01-01T00:03:00.000Z'),
+      ],
+      runtimeEvents: [runtime('quiet-session', '2026-01-01T00:02:30.000Z')],
+      transcriptEvents: completedFileEvents('quiet-session', 'src/ReportsPanel.tsx'),
+    });
+    expect(rows.every((r) => r.recurrence?.kind !== 'corroborated')).toBe(true);
+  });
+
+  it('promotes once observed history covers the full window, and dates the claim', () => {
+    const rows = computeTaskSuccess({
+      entries: [
+        historyEntry('quiet-session', 'fix src/ReportsPanel.tsx', '2026-01-01T00:00:00.000Z'),
+        historyEntry('quiet-session', 'now check the logs', '2026-01-01T00:03:00.000Z'),
+        // We kept watching for 19 days and the topic never returned.
+        historyEntry('other-session', 'review src/OtherPanel.tsx', '2026-01-20T00:00:00.000Z'),
+      ],
+      runtimeEvents: [runtime('quiet-session', '2026-01-01T00:02:30.000Z')],
+      transcriptEvents: completedFileEvents('quiet-session', 'src/ReportsPanel.tsx'),
+    });
+    expect(rows[0].confidence).toBe('high');
+    expect(rows[0].recurrence?.kind).toBe('corroborated');
+    // The claim is bounded by when we stopped looking, not open-ended.
+    expect(rows[0].recurrence?.observedUntil).toBe('2026-01-20T00:00:00.000Z');
   });
 });

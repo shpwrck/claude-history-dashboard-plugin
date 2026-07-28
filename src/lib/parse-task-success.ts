@@ -22,6 +22,17 @@ export interface TaskSuccessRecurrence {
   kind: 'demoted' | 'corroborated';
   topic: string;
   proof?: TaskSuccessRecurrenceProof;
+  /**
+   * ISO timestamp of the LAST human turn in the supplied history — the boundary
+   * beyond which we observed nothing (#3155).
+   *
+   * A `corroborated` recurrence rests on the ABSENCE of a later matching topic,
+   * and an absence is only meaningful up to the point we stopped looking. This
+   * dates the claim: the user did not return about this topic *as of* here.
+   * Present on corroborated records so the claim can never be read as
+   * open-ended.
+   */
+  observedUntil?: string;
 }
 
 export interface TaskSuccessProxy {
@@ -455,7 +466,19 @@ function demoteSpan(
   };
 }
 
-function corroborateSpan(span: TaskSuccessProxy, topic: string): TaskSuccessProxy {
+/**
+ * Promote a span on the strength of "the user never came back about this".
+ *
+ * Only reachable once the full recurrence window has elapsed INSIDE observed
+ * history (#3155) — see the guard at the call site. `observedUntil` dates the
+ * claim so the absence is bounded by when we stopped looking rather than
+ * asserted open-endedly.
+ */
+function corroborateSpan(
+  span: TaskSuccessProxy,
+  topic: string,
+  observedUntilMs: number
+): TaskSuccessProxy {
   return {
     ...span,
     confidence: 'high',
@@ -463,6 +486,7 @@ function corroborateSpan(span: TaskSuccessProxy, topic: string): TaskSuccessProx
     recurrence: {
       kind: 'corroborated',
       topic,
+      observedUntil: new Date(observedUntilMs).toISOString(),
     },
   };
 }
@@ -495,6 +519,20 @@ export function applyRecurrence(
     })
     .filter((turn): turn is CorrectiveTurn => turn != null)
     .sort((a, b) => a.timestamp - b.timestamp);
+  // The observation boundary: the last human turn we can see. Everything after
+  // it is unobserved, so no absence-based claim may extend past it (#3155).
+  //
+  // Derived from ALL real human turns, not just the topic-bearing ones: a turn
+  // we could not extract a topic from is still proof we were watching at that
+  // moment. Taking it from `allTopicTurns` would shorten the observed window
+  // whenever the most recent activity happened not to name a file or symbol.
+  const observedUntilMs = realHumanTurns(humanTurns).reduce(
+    (latest, entry) =>
+      Number.isFinite(entry.timestamp) && entry.timestamp > latest
+        ? entry.timestamp
+        : latest,
+    Number.NEGATIVE_INFINITY
+  );
   const correctiveTurns = allTopicTurns.filter(
     (turn) => classifyHumanTaskVerdict(turn.display) === 'correct'
   );
@@ -552,9 +590,16 @@ export function applyRecurrence(
         hasSharedTopic(current, turn) != null
     );
     if (returningTurn) continue;
+    // Absence of a returning turn is only evidence once we have actually
+    // WATCHED for the full recurrence window (#3155). `observedUntilMs` is the
+    // last moment the supplied history covers; if the window has not closed
+    // inside it, "they never came back" is a statement about how long we looked,
+    // not about the task. With no history at all this is -Infinity, so an empty
+    // or partial corpus can no longer promote every span to high confidence.
+    if (observedUntilMs - endMs < RECURRENCE_WINDOW_MS) continue;
     const topic = current.recurrenceTopics?.[0];
     if (!topic) continue;
-    byKey.set(key, corroborateSpan(current, topic));
+    byKey.set(key, corroborateSpan(current, topic, observedUntilMs));
   }
 
   return sorted.map((span) => byKey.get(`${span.sessionId}\0${span.taskIndex}`) ?? span);

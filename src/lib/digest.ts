@@ -165,11 +165,15 @@ const MISSING_DOMAIN_DETAIL: Record<ActionDomain, string> = {
  * `rec: null`) so the spine shows the full action surface, including the
  * intentionally-sparse `speed` slot.
  *
- * When #1480's per-domain `coverage` signal is threaded in, each finding carries
- * the matching `coverage` level so the empty cards can distinguish a true
- * blind-spot ("no data to judge this") from a domain that genuinely looks
- * healthy. Absent that signal, every domain defaults to `healthy` — preserving
- * Slice A's rendering.
+ * Each finding carries the matching `coverage` level so the empty cards can
+ * distinguish a true blind-spot ("no data to judge this") from a domain that
+ * genuinely looks healthy.
+ *
+ * A domain with NO coverage entry is a blind spot, not a healthy one (#3123).
+ * It previously defaulted to `healthy`, which meant an uninstrumented domain —
+ * and, when the coverage array was empty, EVERY domain — rendered as a clean
+ * card. Absence of a coverage signal is a fact about our instrumentation, not
+ * about the user's setup.
  */
 export function topPerDomain(
   recs: Recommendation[],
@@ -185,7 +189,7 @@ export function topPerDomain(
   return ACTION_DOMAINS.map((domain) => ({
     domain,
     rec: ranked.find((r) => domainForRec(r) === domain) ?? null,
-    coverage: levelByDomain.get(domain) ?? 'healthy',
+    coverage: levelByDomain.get(domain) ?? 'blind-spot',
     staleNote: coverageByDomain.get(domain)?.staleNote,
   }));
 }
@@ -222,7 +226,12 @@ export function emptyStateForDomainFinding(
   };
 }
 
-export type VerdictTone = 'ok' | 'attention' | 'critical';
+/**
+ * `unknown` is not a severity — it is the absence of a basis for any severity
+ * (#3123). Without it, "no findings" and "nothing was analysed" collapse into
+ * the same reassuring sentence.
+ */
+export type VerdictTone = 'ok' | 'attention' | 'critical' | 'unknown';
 
 export interface DigestVerdict {
   tone: VerdictTone;
@@ -231,13 +240,45 @@ export interface DigestVerdict {
 
 /**
  * The one-sentence "am I okay" verdict. Critical when any safety finding is
- * critical; attention when there are findings; ok when there are none.
+ * critical; attention when there are findings; ok when there are none AND we
+ * actually looked.
+ *
+ * `coverage` is REQUIRED (#3123). It used to be absent entirely, so an empty
+ * `recs` array produced "your recent agent activity looks healthy" whether the
+ * engine had examined everything and found nothing, or had examined nothing at
+ * all. Those are opposite states and the reassuring one was the default — on a
+ * fresh or partially-ingested install, the moment a user has least basis for
+ * confidence is exactly when they were told everything looked fine.
+ *
+ * Making it a required parameter rather than an optional one is deliberate: a
+ * caller cannot now produce a verdict without stating what was observed.
  */
-export function digestVerdict(recs: Recommendation[]): DigestVerdict {
+export function digestVerdict(
+  recs: Recommendation[],
+  coverage: readonly DomainCoverage[]
+): DigestVerdict {
+  // Nothing observable in any domain — we have no basis for a verdict, clean or
+  // otherwise. This is distinct from "we looked everywhere and it was quiet".
+  const observed = coverage.filter(
+    (c) => coverageLevelForStatus(c.status) !== 'blind-spot'
+  );
+  if (observed.length === 0) {
+    return {
+      tone: 'unknown',
+      text:
+        recs.length === 0
+          ? 'No agent activity has been analysed yet — this is not a clean bill of health.'
+          : 'Findings are shown below, but no domain reported observable coverage — treat them as provisional.',
+    };
+  }
   if (recs.length === 0) {
+    const blind = coverage.length - observed.length;
     return {
       tone: 'ok',
-      text: 'No findings — your recent agent activity looks healthy.',
+      text:
+        blind > 0
+          ? `No findings across the ${observed.length} domain(s) with data — ${blind} domain(s) had none to judge.`
+          : 'No findings — your recent agent activity looks healthy.',
     };
   }
   const criticalSafety = recs.find(

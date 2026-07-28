@@ -9,6 +9,7 @@ import {
   coverageLevelForStatus,
   DOMAIN_FOR_CATEGORY,
   emptyStateForDomainFinding,
+  ACTION_DOMAINS,
 } from './digest';
 import type { DomainCoverage } from './coverage';
 
@@ -77,7 +78,7 @@ describe('rankForDigest', () => {
       'cost.high-impact-waste',
     ]);
 
-    const verdict = digestVerdict(input);
+    const verdict = digestVerdict(input, fullCoverage);
     expect(verdict.tone).toBe('critical');
     expect(verdict.text).toContain('Dangerous bypass ran');
     expect(verdict.text).not.toContain('High-impact cost waste');
@@ -137,9 +138,15 @@ describe('topPerDomain', () => {
     expect(out.find((d) => d.domain === 'speed')?.rec).toBeNull();
   });
 
-  it('defaults every domain to healthy coverage when no coverage signal is supplied', () => {
+  /**
+   * CHANGED in #3123 — the old name said the defect out loud: "defaults every
+   * domain to healthy coverage when no coverage signal is supplied". A domain
+   * we have no coverage signal for is a blind spot; treating it as healthy
+   * turns absent instrumentation into a clean bill of health.
+   */
+  it('treats a domain with no coverage signal as a blind spot, not healthy', () => {
     const out = topPerDomain([rec('cost', 'warning')]);
-    expect(out.every((d) => d.coverage === 'healthy')).toBe(true);
+    expect(out.every((d) => d.coverage === 'blind-spot')).toBe(true);
   });
 
   it('maps the per-domain coverage signal (#1480) onto all three levels', () => {
@@ -161,8 +168,10 @@ describe('topPerDomain', () => {
     expect(byDomain.get('success-rate')?.staleNote).toBe(
       'Debug logs are stale.'
     );
-    // Domains absent from the coverage array fall back to healthy.
-    expect(byDomain.get('speed')?.coverage).toBe('healthy');
+    // CHANGED in #3123: a domain absent from the coverage array has no
+    // coverage signal, so it is a blind spot. Falling back to healthy reported
+    // absent instrumentation as a clean domain.
+    expect(byDomain.get('speed')?.coverage).toBe('blind-spot');
   });
 
   it('classifies empty domain states as clean, uninstrumented, or stale', () => {
@@ -210,26 +219,37 @@ describe('domainForRec', () => {
   });
 });
 
+
+/**
+ * "We looked, across every domain." Supplied to `digestVerdict` so the tests
+ * below exercise VERDICT logic; the coverage-dependent behaviour is tested
+ * separately (#3123).
+ */
+const fullCoverage: DomainCoverage[] = ACTION_DOMAINS.map((domain) => ({
+  domain,
+  status: 'PROVE' as const,
+}));
+
 describe('digestVerdict', () => {
   it('reports healthy when there are no findings', () => {
-    expect(digestVerdict([]).tone).toBe('ok');
+    expect(digestVerdict([], fullCoverage).tone).toBe('ok');
   });
 
   it('leads with safety when a safety finding is critical', () => {
-    const v = digestVerdict([rec('cost', 'critical'), rec('safety', 'critical')]);
+    const v = digestVerdict([rec('cost', 'critical'), rec('safety', 'critical')], fullCoverage);
     expect(v.tone).toBe('critical');
     expect(v.text.toLowerCase()).toContain('safety');
   });
 
   it('flags attention for non-critical findings', () => {
-    expect(digestVerdict([rec('cost', 'warning')]).tone).toBe('attention');
+    expect(digestVerdict([rec('cost', 'warning')], fullCoverage).tone).toBe('attention');
   });
 
   it('attention verdict names the top finding (no critical)', () => {
     const v = digestVerdict([
       rec('cost', 'warning', 'c1'),
       rec('context', 'info', 'x1'),
-    ]);
+    ], fullCoverage);
     expect(v.tone).toBe('attention');
     expect(v.text).toContain('cost warning');
   });
@@ -238,7 +258,7 @@ describe('digestVerdict', () => {
     const v = digestVerdict([
       rec('cost', 'critical', 'c1'),
       rec('context', 'info', 'x1'),
-    ]);
+    ], fullCoverage);
     expect(v.tone).toBe('attention');
     expect(v.text).toContain('cost critical');
   });
@@ -247,9 +267,59 @@ describe('digestVerdict', () => {
     const v = digestVerdict([
       rec('cost', 'warning', 'c1'),
       rec('safety', 'warning', 's1'),
-    ]);
+    ], fullCoverage);
     expect(v.tone).toBe('attention');
     // safety ranks first in the digest, but the verdict names the top *non-safety* finding
     expect(v.text).toContain('cost warning');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A verdict requires a basis (#3123)
+// ---------------------------------------------------------------------------
+
+describe('digestVerdict coverage requirement (#3123)', () => {
+  const blindCoverage: DomainCoverage[] = ACTION_DOMAINS.map((domain) => ({
+    domain,
+    status: 'CANNOT_SEE' as const,
+  }));
+
+  it('does not call an unanalysed surface healthy', () => {
+    // The regression: digestVerdict([]) returned tone 'ok' with "your recent
+    // agent activity looks healthy" whether we had examined everything and
+    // found nothing, or examined nothing at all.
+    const v = digestVerdict([], []);
+    expect(v.tone).toBe('unknown');
+    expect(v.text).not.toMatch(/looks healthy/i);
+    expect(v.text).toMatch(/not a clean bill of health/i);
+  });
+
+  it('does not call an all-blind surface healthy either', () => {
+    const v = digestVerdict([], blindCoverage);
+    expect(v.tone).toBe('unknown');
+  });
+
+  it('still reports healthy when we looked and found nothing', () => {
+    const v = digestVerdict([], fullCoverage);
+    expect(v.tone).toBe('ok');
+    expect(v.text).toMatch(/looks healthy/i);
+  });
+
+  it('qualifies a clean verdict when some domains had no data', () => {
+    const partial: DomainCoverage[] = [
+      { domain: 'safety', status: 'PROVE' },
+      { domain: 'cost', status: 'CANNOT_SEE' },
+    ];
+    const v = digestVerdict([], partial);
+    expect(v.tone).toBe('ok');
+    // The clean claim is scoped to what was observed, not the whole surface.
+    expect(v.text).toMatch(/1 domain\(s\) with data/);
+    expect(v.text).toMatch(/1 domain\(s\) had none to judge/);
+  });
+
+  it('marks findings provisional when nothing reported coverage', () => {
+    const v = digestVerdict([rec('cost', 'warning')], []);
+    expect(v.tone).toBe('unknown');
+    expect(v.text).toMatch(/provisional/i);
   });
 });
