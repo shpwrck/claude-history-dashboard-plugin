@@ -58,20 +58,37 @@ function mcpAttribution(
 }
 
 describe('computeConfigHygiene project-scoped resources (#1063)', () => {
+  const projectSkill = {
+    id: 'build-helper',
+    scope: 'project' as const,
+    projectPath: '/repo/a',
+    path: '/repo/a/.claude/skills/build-helper',
+  };
+
+  /**
+   * #1063's original assertion — one project's usage must not suppress
+   * another's unused finding — on a fixture where it is EARNED.
+   *
+   * The fixture this replaces gave a retained session only to `/repo/b` and
+   * then asserted a `/repo/a` finding, so it pinned the #3118 defect: it
+   * demanded an "unused" claim about a project we had never observed. Adding an
+   * unrelated `/repo/a` session keeps the independence property under test
+   * (b's three invocations still do not suppress a's finding) while giving the
+   * claim about `/repo/a` something to rest on. Changed deliberately in #3388,
+   * not quietly — see that issue for the decision.
+   */
   it('does not let another project suppress an unused project skill', () => {
     const findings = computeConfigHygiene({
-      liveConfig: liveConfig({
-        skills: [
-          {
-            id: 'build-helper',
-            scope: 'project',
-            projectPath: '/repo/a',
-            path: '/repo/a/.claude/skills/build-helper',
-          },
-        ],
-      }),
-      attribution: [attribution('s-b', { 'build-helper': 3 })],
-      sessions: [{ sessionId: 's-b', project: '/repo/b', startTime: now }],
+      liveConfig: liveConfig({ skills: [projectSkill] }),
+      attribution: [
+        attribution('s-b', { 'build-helper': 3 }),
+        // /repo/a was observed, and did not use the skill.
+        attribution('s-a', {}),
+      ],
+      sessions: [
+        { sessionId: 's-b', project: '/repo/b', startTime: now },
+        { sessionId: 's-a', project: '/repo/a', startTime: now },
+      ],
       now,
     });
 
@@ -86,6 +103,94 @@ describe('computeConfigHygiene project-scoped resources (#1063)', () => {
         sourcePath: '/repo/a/.claude/skills/build-helper/SKILL.md',
         removalPath: '/repo/a/.claude/skills/build-helper',
       },
+    ]);
+  });
+
+  it('claims nothing about a project with no retained sessions (#3388)', () => {
+    // The guard the test above used to contradict. `/repo/a` is installed but
+    // never observed, so "unused" would be a statement about our data rather
+    // than about the skill — zero observation is not evidence of disuse
+    // (#3118), and this is the exact fixture that used to assert otherwise.
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({ skills: [projectSkill] }),
+      attribution: [attribution('s-b', { 'build-helper': 3 })],
+      sessions: [{ sessionId: 's-b', project: '/repo/b', startTime: now }],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it('claims nothing about a project observed only OUTSIDE the window (#3388)', () => {
+    // A project whose only session predates the active window is exactly as
+    // unobserved-in-window as one with no session at all.
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({ skills: [projectSkill] }),
+      attribution: [attribution('s-old', {}), attribution('s-b', {})],
+      sessions: [
+        { sessionId: 's-old', project: '/repo/a', startTime: now - 200 * DAY_MS },
+        { sessionId: 's-b', project: '/repo/b', startTime: now },
+      ],
+      now,
+    });
+
+    expect(findings.filter((f) => f.scope.kind === 'project')).toEqual([]);
+  });
+
+  it('resolves guard and usage from the SAME project identity (#3388)', () => {
+    // The guard matches by canonical identity, so usage matching must too.
+    // If the guard said "observed" via `/repo/a/` while usage still demanded a
+    // raw `/repo/a` string match, the skill would be called unused on a
+    // project where we can plainly see it being used.
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({ skills: [projectSkill] }),
+      attribution: [attribution('s-a', { 'build-helper': 2 })],
+      sessions: [{ sessionId: 's-a', project: '/repo/a/', startTime: now }],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it('applies the guard to project-scoped subagents and commands too (#3388)', () => {
+    // The families that were missing it. Same unobserved project, three
+    // resource types, nothing claimed about any of them.
+    const unobserved = computeConfigHygiene({
+      liveConfig: liveConfig({
+        skills: [projectSkill],
+        subagents: [
+          { id: 'helper', scope: 'project', projectPath: '/repo/a', path: '/repo/a/.claude/agents/helper.md' },
+        ],
+        commands: [
+          { id: 'deploy', scope: 'project', projectPath: '/repo/a', path: '/repo/a/.claude/commands/deploy.md' },
+        ],
+      }),
+      attribution: [attribution('s-b', {})],
+      sessions: [{ sessionId: 's-b', project: '/repo/b', startTime: now }],
+      now,
+    });
+    expect(unobserved).toEqual([]);
+
+    // And still flag all three once that project HAS been observed, so the
+    // guard suppresses unearned claims rather than all claims.
+    const observed = computeConfigHygiene({
+      liveConfig: liveConfig({
+        skills: [projectSkill],
+        subagents: [
+          { id: 'helper', scope: 'project', projectPath: '/repo/a', path: '/repo/a/.claude/agents/helper.md' },
+        ],
+        commands: [
+          { id: 'deploy', scope: 'project', projectPath: '/repo/a', path: '/repo/a/.claude/commands/deploy.md' },
+        ],
+      }),
+      attribution: [attribution('s-a', {})],
+      sessions: [{ sessionId: 's-a', project: '/repo/a', startTime: now }],
+      now,
+    });
+    expect(observed.map((f) => f.resourceType).sort()).toEqual([
+      'command',
+      'skill',
+      'subagent',
     ]);
   });
 

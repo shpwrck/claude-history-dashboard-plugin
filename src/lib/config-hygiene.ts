@@ -313,9 +313,9 @@ function skillManifestPath(resourcePath: string | undefined): string | undefined
  * whose only retained session is 40 days old still has zero observation
  * inside the active 30-day window, so an "unused in the last 30 days" claim
  * for it is exactly as unfounded as one for a project with no sessions at
- * all. `projectMcpObservations` — keyed by every project with at least one
+ * all. `projectObservations` — keyed by every project with at least one
  * session whose `startTime >= windowStart`, mapping to *that project's own*
- * hedge (see {@link computeProjectMcpObservations}) — gates each per-project
+ * hedge (see {@link computeProjectObservations}) — gates each per-project
  * finding on presence, and hedges it on the mapped value, so a stale-only
  * project is excluded the same way an unobserved one is, and a
  * thinly-observed project (in-window, but with only a few days of its own
@@ -326,8 +326,8 @@ function skillManifestPath(resourcePath: string | undefined): string | undefined
  * `enabledByProjects` and `session.project` are independently-sourced
  * spellings of the same project root, so they can disagree on separators,
  * trailing slashes, or Windows drive-letter/UNC case even when they name the
- * same project. `projectMcpObservations` is keyed by canonical identity
- * ({@link mcpProjectKey}), and `usagesForProject` matches by
+ * same project. `projectObservations` is keyed by canonical identity
+ * ({@link projectObservationKey}), and `usagesForProject` matches by
  * {@link sameProjectIdentity} rather than raw string equality, so a session
  * recorded under one spelling still counts as usage — and as
  * observation-in-window — for a config entry recorded under an equivalent
@@ -340,7 +340,7 @@ function findingsForMcpServers(
   usages: SessionUsage[],
   windowStart: number,
   hedge: HygieneHedge | undefined,
-  projectMcpObservations: ReadonlyMap<string, HygieneHedge | undefined>
+  projectObservations: ReadonlyMap<string, HygieneHedge | undefined>
 ): HygieneFinding[] {
   const out: HygieneFinding[] = [];
   for (const s of servers) {
@@ -370,7 +370,7 @@ function findingsForMcpServers(
         ? s.enabledByProjects
         : ['(unknown)'];
     for (const project of projects) {
-      const key = mcpProjectKey(project);
+      const key = projectObservationKey(project);
       // No session for this project *inside the active window* → no
       // in-window observation → cannot honestly claim "unused" within that
       // window (#3118's reasoning, generalized to staleness as well as
@@ -378,7 +378,7 @@ function findingsForMcpServers(
       // exactly as unobserved-in-window as one with no session at all).
       // Looked up by canonical identity so an equivalent spelling of the
       // same project still matches.
-      if (!projectMcpObservations.has(key)) continue;
+      if (!projectObservations.has(key)) continue;
       const summary = summariseUsage(
         s.id,
         // Matched by canonical project identity (#3119 follow-up), not raw
@@ -398,7 +398,7 @@ function findingsForMcpServers(
           // This project's own hedge — never the global one — so a thinly
           // observed project can't inherit an unrelated project's longer
           // history and lose a hedge it should carry.
-          hedge: projectMcpObservations.get(key),
+          hedge: projectObservations.get(key),
           sourcePath: s.sourcePath,
         })
       );
@@ -416,7 +416,7 @@ function findingsForMcpServers(
  * path — the same fallback {@link sameProjectIdentity} uses, so two
  * unparseable-but-textually-equal spellings still match.
  */
-function mcpProjectKey(project: string): string {
+function projectObservationKey(project: string): string {
   const canonical = projectIdentityKey(project);
   // Namespace the raw fallback so it can never collide with a canonical key.
   // `projectIdentityKey` returns a serialized form (e.g. `posix:/repo/a`); a
@@ -442,8 +442,10 @@ function usagesForProject(usages: SessionUsage[], project: string): SessionUsage
 }
 
 /**
- * Per-project MCP observation map: presence of a project's canonical key
- * ({@link mcpProjectKey}) is the #3118/#3119 in-window guard (at least one
+ * Per-project observation map, shared by every project-scoped resource family
+ * (skills, subagents, commands and MCP servers): presence of a project's
+ * canonical key
+ * ({@link projectObservationKey}) is the #3118/#3119 in-window guard (at least one
  * session with `windowStart <= startTime <= now`); the value is that
  * project's OWN hedge, derived from the span between *its own* oldest
  * retained session and `now` — the same shape as
@@ -465,7 +467,7 @@ function usagesForProject(usages: SessionUsage[], project: string): SessionUsage
  *    no valid current-or-historical session could still pass the guard on
  *    a bogus future timestamp.
  */
-function computeProjectMcpObservations(
+function computeProjectObservations(
   sessions: HygieneInput['sessions'],
   windowStart: number,
   now: number
@@ -475,7 +477,7 @@ function computeProjectMcpObservations(
   for (const s of sessions) {
     if (!s.project) continue;
     if (s.startTime > now) continue;
-    const key = mcpProjectKey(s.project);
+    const key = projectObservationKey(s.project);
     if (s.startTime >= windowStart) observedInWindow.add(key);
     if (s.startTime > 0) {
       const oldest = oldestByProject.get(key);
@@ -589,6 +591,97 @@ function isStructurallyExcluded(
 }
 
 /**
+ * One project-scoped resource family (skills, subagents, commands). These three
+ * differ only in which attribution map they read and where their files live, so
+ * they share one traversal rather than three near-identical loops (#3388).
+ *
+ * That is not tidiness. The defect this fixes was precisely that ONE family
+ * (MCP servers, #3119) got the per-project guard and the other three silently
+ * did not. With one traversal there is no per-family place for the guard to go
+ * missing from: a new resource family either goes through here and inherits it,
+ * or is visibly doing something different.
+ */
+interface ScopedResourceFamily<T> {
+  resourceType: HygieneResourceType;
+  items: readonly T[];
+  /** Which attribution map this family's usage is counted from. */
+  getCount: (u: SessionUsage, id: string) => number;
+  id: (resource: T) => string;
+  sourcePath: (resource: T) => string | undefined;
+  removalPath: (resource: T) => string | undefined;
+  /**
+   * Whether {@link isStructurallyExcluded} applies. Skills and subagents have
+   * structurally-not-removable members (`_shared` dirs, subskills, test
+   * fixtures); commands do not, and applying it there would silently drop a
+   * real `_`-prefixed command.
+   */
+  applyStructuralExclusions: boolean;
+}
+
+/**
+ * Findings for one project-scoped resource family.
+ *
+ * A project-scoped resource resolves its guard, its hedge AND its usage from
+ * the same canonical project identity. Deriving any of the three differently is
+ * how #3118/#3119 kept recurring: a project could pass a canonical-identity
+ * guard while its usage was matched by raw string equality, so `/repo/a/` and
+ * `/repo/a` counted as the same project for "did we observe it" and as
+ * different projects for "was it used" — an evidence-free "unused" claim about
+ * a project we had in fact observed.
+ */
+function findingsForScopedResources<T extends { scope?: string; projectPath?: string }>(
+  family: ScopedResourceFamily<T>,
+  usages: SessionUsage[],
+  windowStart: number,
+  globalHedge: HygieneHedge | undefined,
+  projectObservations: ReadonlyMap<string, HygieneHedge | undefined>,
+  installedSkillIds: ReadonlySet<string>
+): HygieneFinding[] {
+  const out: HygieneFinding[] = [];
+  for (const resource of family.items) {
+    const resourceId = family.id(resource);
+    if (
+      family.applyStructuralExclusions &&
+      isStructurallyExcluded(resourceId, installedSkillIds)
+    ) {
+      continue;
+    }
+    const scope = resourceScope(resource);
+
+    let scopedUsages = usages;
+    let hedge = globalHedge;
+    if (scope.kind === 'project') {
+      const key = projectObservationKey(scope.project);
+      // No session for this project inside the active window → no in-window
+      // observation → nothing scoped to it can honestly be called "unused"
+      // (#3118/#3119's reasoning, extended to these families by #3388).
+      if (!projectObservations.has(key)) continue;
+      // This project's OWN hedge, never the global one, so a thinly-observed
+      // project cannot borrow a longer-observed project's coverage.
+      hedge = projectObservations.get(key);
+      // Canonical identity, matching the guard above — not `u.project ===
+      // project` string equality. See this function's doc comment.
+      scopedUsages = usagesForProject(usages, scope.project);
+    }
+
+    const summary = summariseUsage(resourceId, scopedUsages, windowStart, family.getCount);
+    if (summary.windowCount > 0) continue;
+    out.push(
+      emitUnusedFinding({
+        resourceType: family.resourceType,
+        resourceId,
+        scope,
+        summary,
+        hedge,
+        sourcePath: family.sourcePath(resource),
+        removalPath: family.removalPath(resource),
+      })
+    );
+  }
+  return out;
+}
+
+/**
  * Top-level entry. Returns findings sorted by (resource-type group →
  * lastSeen ascending → resourceId ascending), matching the UI's stable
  * grouping requirement from Q7.
@@ -612,11 +705,11 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
   // Installed skill ids — the parent set for the subskill exclusion (#2015).
   const installedSkillIds = new Set(lc.skills.map((s) => s.id));
   // Per-project MCP guard + hedge, computed together (see
-  // computeProjectMcpObservations) so a project with no in-window
+  // computeProjectObservations) so a project with no in-window
   // observation can never be called "unused", and a project that IS
   // in-window-observed is hedged from its own coverage rather than the
   // global minimum across every project (#3118/#3119).
-  const projectMcpObservations = computeProjectMcpObservations(
+  const projectObservations = computeProjectObservations(
     input.sessions,
     windowStart,
     now
@@ -624,89 +717,76 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
 
   const out: HygieneFinding[] = [];
 
-  for (const skill of lc.skills) {
-    // Skip structurally-not-removable resources (#2015): `_shared` utility dirs,
-    // subskills of an installed parent, built-in test fixtures.
-    if (isStructurallyExcluded(skill.id, installedSkillIds)) continue;
-    const scope = resourceScope(skill);
-    const summary = summariseUsage(
-      skill.id,
-      usages,
-      windowStart,
-      (u, id) => u.skills[id] ?? 0,
-      scope.kind === 'project' ? scope.project : undefined
-    );
-    if (summary.windowCount > 0) continue;
-    out.push(
-      emitUnusedFinding({
+  // Skills, subagents and commands share one traversal so the per-project
+  // guard cannot be present on some families and missing on others — which is
+  // exactly the defect #3388 fixes (MCP servers had it, these three did not).
+  out.push(
+    ...findingsForScopedResources(
+      {
         resourceType: 'skill',
-        resourceId: skill.id,
-        scope,
-        summary,
-        hedge,
-        sourcePath: skillManifestPath(skill.path),
-        removalPath: skill.path,
-      })
-    );
-  }
-
-  // Subagents — same logic as skills, different attribution map.
-  for (const agent of lc.subagents) {
-    // Same structural exclusions as skills (#2015): a `_`-prefixed helper or a
-    // built-in test fixture (e.g. test-echo-validator) is never a removal
-    // candidate. The subskill-prefix check is keyed on installed SKILLS, so a
-    // directly-invocable subagent variant (e.g. `ponytail-lite`) stays flagged.
-    if (isStructurallyExcluded(agent.id, installedSkillIds)) continue;
-    const scope = resourceScope(agent);
-    const summary = summariseUsage(
-      agent.id,
+        items: lc.skills,
+        getCount: (u, id) => u.skills[id] ?? 0,
+        id: (r) => r.id,
+        sourcePath: (r) => skillManifestPath(r.path),
+        removalPath: (r) => r.path,
+        // Structurally-not-removable resources (#2015): `_shared` utility dirs,
+        // subskills of an installed parent, built-in test fixtures.
+        applyStructuralExclusions: true,
+      },
       usages,
       windowStart,
-      (u, id) => u.agents[id] ?? 0,
-      scope.kind === 'project' ? scope.project : undefined
-    );
-    if (summary.windowCount > 0) continue;
-    out.push(
-      emitUnusedFinding({
+      hedge,
+      projectObservations,
+      installedSkillIds
+    )
+  );
+
+  out.push(
+    ...findingsForScopedResources(
+      {
         resourceType: 'subagent',
-        resourceId: agent.id,
-        scope,
-        summary,
-        hedge,
-        sourcePath: agent.path,
-        removalPath: agent.path,
-      })
-    );
-  }
+        items: lc.subagents,
+        getCount: (u, id) => u.agents[id] ?? 0,
+        id: (r) => r.id,
+        sourcePath: (r) => r.path,
+        removalPath: (r) => r.path,
+        // Same structural exclusions as skills (#2015). The subskill-prefix
+        // check is keyed on installed SKILLS, so a directly-invocable subagent
+        // variant (e.g. `ponytail-lite`) stays flagged.
+        applyStructuralExclusions: true,
+      },
+      usages,
+      windowStart,
+      hedge,
+      projectObservations,
+      installedSkillIds
+    )
+  );
 
   // Commands — slash-command definitions under ~/.claude/commands/. Usage comes
   // from the parsed `<command-name>` markers (parse-agents commands map), not a
-  // native attribution field (#634). Lifts the v1 deferral noted above.
-  for (const cmd of lc.commands) {
-    const scope = resourceScope(cmd);
-    const summary = summariseUsage(
-      cmd.id,
+  // native attribution field (#634).
+  out.push(
+    ...findingsForScopedResources(
+      {
+        resourceType: 'command',
+        items: lc.commands,
+        getCount: (u, id) => u.commands[id] ?? 0,
+        id: (r) => r.id,
+        sourcePath: (r) => r.path,
+        removalPath: (r) => r.path,
+        applyStructuralExclusions: false,
+      },
       usages,
       windowStart,
-      (u, id) => u.commands[id] ?? 0,
-      scope.kind === 'project' ? scope.project : undefined
-    );
-    if (summary.windowCount > 0) continue;
-    out.push(
-      emitUnusedFinding({
-        resourceType: 'command',
-        resourceId: cmd.id,
-        scope,
-        summary,
-        hedge,
-        sourcePath: cmd.path,
-        removalPath: cmd.path,
-      })
-    );
-  }
+      hedge,
+      projectObservations,
+      installedSkillIds
+    )
+  );
 
   out.push(
-    ...findingsForMcpServers(lc.mcpServers, usages, windowStart, hedge, projectMcpObservations)
+    ...findingsForMcpServers(lc.mcpServers, usages, windowStart, hedge, projectObservations)
   );
   out.push(...findingsForPlugins(lc.plugins, usages, windowStart, hedge));
 
