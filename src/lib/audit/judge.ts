@@ -37,12 +37,6 @@ import {
   type DraftJudgeFn,
 } from './skill-candidates';
 import {
-  detectBoomerangCandidates,
-  runBoomerangAudit,
-  type ReworkSession,
-  type ChurnFile,
-} from './boomerang-rework';
-import {
   runNaturalExperimentAudit,
   type NaturalExperimentRow,
 } from './natural-experiment';
@@ -112,14 +106,6 @@ export interface RunAuditsOptions {
    */
   skillCandidateSessions?: SkillCandidateSession[];
   /**
-   * Deterministic rework signals for the boomerang/rework-rate audit (#742):
-   * per-session rework rows (from parse-file-history) plus the high-churn files
-   * (from parse-files.topChurnFiles) that corroborate cross-session re-touch.
-   * Omitted / empty `reworkSessions` -> that audit is skipped. Reuses the base
-   * {@link JudgeFn} (isFinding = "genuine rework").
-   */
-  boomerangInput?: { reworkSessions: ReworkSession[]; churnFiles: ChurnFile[] };
-  /**
    * Per-session rows for the natural-experiment regression audit (#744): an
    * outcome label, the model + tool factors, and a per-session difficulty proxy.
    * Omitted / empty -> that audit is skipped. Reuses the base {@link JudgeFn}
@@ -167,8 +153,8 @@ export interface RunAuditsOptions {
   model?: string;
   /**
    * Shared per-run ceiling for external judge calls. Applies across the reference,
-   * agentic, boomerang, natural-experiment, start/stop, MCP, skill-draft, and
-   * deceit audits. Omitted means uncapped for backwards-compatible tests; the
+   * agentic, natural-experiment, start/stop, MCP, skill-draft, and deceit
+   * audits. Omitted means uncapped for backwards-compatible tests; the
    * server route passes a finite enterprise default.
    */
   maxJudgeCalls?: number;
@@ -394,24 +380,6 @@ export async function runAudits(
       );
     } catch {
       /* agentic audit failed wholesale — return what the others found */
-    }
-  }
-  if (
-    opts.boomerangInput &&
-    opts.boomerangInput.reworkSessions.length > 0
-  ) {
-    try {
-      findings.push(
-        ...(await runBoomerangAudit(
-          detectBoomerangCandidates(
-            opts.boomerangInput.reworkSessions,
-            opts.boomerangInput.churnFiles
-          ),
-          budgetedJudge
-        ))
-      );
-    } catch {
-      /* boomerang audit failed wholesale — return what the others found */
     }
   }
   if (

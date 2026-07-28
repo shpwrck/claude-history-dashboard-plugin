@@ -51,6 +51,85 @@ describe('detectCapabilityGaps', () => {
     expect(gaps.map((g) => g.capability)).toEqual(['web-fetch']);
   });
 
+  it('does not let an unrelated installed id suppress a capability gap (#3112)', () => {
+    // Substring matching used to treat any overlap as coverage: `webhook`
+    // contains `web`, `github-backup` starts with `github`, `browserless-metrics`
+    // contains `browser`. None of those servers provides the mapped capability,
+    // so every gap must survive — suppressing one is itself a claim.
+    const usage: ToolUsageSignal[] = [
+      ...USAGE,
+      {
+        capability: 'browser',
+        evidence: 'Bash `playwright` invoked 9 time(s)',
+        weight: 9,
+      },
+    ];
+    const installed = ['webhook', 'github-backup', 'browserless-metrics'];
+    const gaps = detectCapabilityGaps(installed, usage);
+    expect(gaps.map((g) => g.capability).sort()).toEqual([
+      'browser',
+      'github',
+      'web-fetch',
+    ]);
+  });
+
+  it('still treats a namespaced or packaging-suffixed id as coverage (#3112)', () => {
+    // Coverage requires the id to EQUAL a registered alias once the enumerated
+    // namespace prefixes and `-mcp`/`-server` suffixes are removed.
+    const caps = (installed: string[], usage = USAGE) =>
+      detectCapabilityGaps(installed, usage)
+        .map((g) => g.capability)
+        .sort();
+    expect(caps(['claude_ai_GitHub'])).toEqual(['web-fetch']);
+    expect(caps(['github-mcp'])).toEqual(['web-fetch']);
+    expect(caps(['mcp__github__server'])).toEqual(['web-fetch']);
+    // A multi-token alias matches as a unit...
+    expect(caps(['mcp__brave-search'])).toEqual(['github']);
+    // ...but a server that merely SHARES one of its tokens does not.
+    expect(caps(['search-index'])).toEqual(['github', 'web-fetch']);
+  });
+
+  it('does not accept an arbitrary PREFIX as a namespace (#3392 P2)', () => {
+    // `liveConfig.mcpServers[].id` is an arbitrary key from ~/.claude.json, so
+    // `backup-github` and `internal-web` are ordinary ids for unrelated servers.
+    // Treating any leading token as a namespace made them suppress the very gaps
+    // `github-backup` / `webhook` were fixed for — the same false suppression
+    // from the other end. Only the enumerated namespace forms are removable.
+    const usage: ToolUsageSignal[] = [
+      ...USAGE,
+      {
+        capability: 'browser',
+        evidence: 'Bash `playwright` invoked 9 time(s)',
+        weight: 9,
+      },
+    ];
+    const caps = (installed: string[]) =>
+      detectCapabilityGaps(installed, usage)
+        .map((g) => g.capability)
+        .sort();
+    const ALL = ['browser', 'github', 'web-fetch'];
+
+    // Prefix direction (this finding).
+    expect(caps(['backup-github'])).toEqual(ALL);
+    expect(caps(['internal-web'])).toEqual(ALL);
+    expect(caps(['legacy-playwright', 'staging-fetch'])).toEqual(ALL);
+    // Suffix direction (#3112) still holds.
+    expect(caps(['github-backup'])).toEqual(ALL);
+    expect(caps(['webhook'])).toEqual(ALL);
+    expect(caps(['browserless-metrics'])).toEqual(ALL);
+    // Both ends at once, and a bare unrelated id.
+    expect(caps(['internal-github-backup'])).toEqual(ALL);
+    expect(caps(['backup', 'internal'])).toEqual(ALL);
+
+    // The pinned positives are untouched: an enumerated namespace prefix, a
+    // packaging suffix, and a bare alias all still count as coverage.
+    expect(caps(['claude_ai_GitHub'])).toEqual(['browser', 'web-fetch']);
+    expect(caps(['github-mcp'])).toEqual(['browser', 'web-fetch']);
+    expect(caps(['mcp__brave-search'])).toEqual(['browser', 'github']);
+    expect(caps(['github'])).toEqual(['browser', 'web-fetch']);
+    expect(caps(['mcp__playwright'])).toEqual(['github', 'web-fetch']);
+  });
+
   it('does not fire on weak / low-weight signals', () => {
     const weak: ToolUsageSignal[] = [
       { capability: 'web-fetch', evidence: 'WebFetch used 2 time(s)', weight: 2 },

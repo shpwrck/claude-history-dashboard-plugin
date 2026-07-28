@@ -26,6 +26,18 @@
  * call is isolated in try/catch. Insufficient data (too few sessions, or no
  * feature value clears support + margin) -> return [] — no spurious claim.
  *
+ * DATING (#3115): every claim here is a correlation measured over a window of
+ * past sessions, so it is emitted "As of <YYYY-MM-DD>" with an `as-of:` evidence
+ * ref, where the date is {@link evidenceCutoff} — the latest observation in the
+ * sample. A dataset whose rows carry no observation timestamp has no trustworthy
+ * cutoff, and the finding is SUPPRESSED rather than phrased as current state.
+ *
+ * The audit then analyzes ONLY the dated rows (PR #3392) — ranking, baseline, and
+ * the reported sample size all come from the same subset the cutoff was derived
+ * from. Mixing undated rows into a window that names an exact date would silently
+ * put evidence of unknown (possibly NEWER) age inside it, which is the same
+ * stale-window defect one level down.
+ *
  * SERVER-ONLY (runs behind /api/audit.json with the rest of the harness).
  */
 import type { AuditFinding, AuditConfidence } from './types';
@@ -42,6 +54,78 @@ export interface StartStopRow {
   opener: string;
   /** True = good outcome; false = bad. Drives the bad-outcome rate per feature. */
   good: boolean;
+  /**
+   * When this session's evidence ENDS (epoch ms) — see {@link deriveObservedAt},
+   * the single place this is derived. REQUIRED for a claim to be emitted: an
+   * opener-trait correlation is a statement about a period of history, and
+   * without a date the audit cannot say WHEN the evidence was current (#3115).
+   * Rows missing it are treated as undated, and an insufficiently-dated dataset
+   * suppresses the finding entirely rather than presenting stale correlations as
+   * present-tense advice.
+   */
+  observedAt?: number;
+}
+
+/** Session row shape {@link deriveObservedAt} needs (`parse-history.Session`). */
+export interface ObservedAtSession {
+  sessionId: string;
+  /** Epoch ms of the session's LAST PROMPT-HISTORY entry. */
+  endTime?: number;
+}
+
+/** Timeline row shape {@link deriveObservedAt} needs (`parse-timeline`). */
+export interface ObservedAtTimeline {
+  sessionId: string;
+  /** ISO timestamp of the first transcript event. */
+  startTime?: string;
+  /** ISO timestamp of the LAST transcript event. */
+  endTime?: string;
+}
+
+/**
+ * Derive, per session, the moment its evidence ends: the LATEST valid
+ * end-of-activity timestamp across every source we have. This is the ONE place
+ * `observedAt` is computed — callers pass rows in and read the map out, they
+ * never reconcile sources themselves.
+ *
+ * Why the latest, and why one function (PR #3392 P2). `Session.endTime` comes
+ * from `groupBySessions`, which folds PROMPT-HISTORY entries, so it marks the
+ * last human prompt — not the end of the session. A session that keeps working
+ * after its final prompt (an overnight tool run is the obvious case) has
+ * transcript events, tokens, and tool calls AFTER that mark, and the outcome the
+ * audit reasons over is computed from those. Taking `Session.endTime` as the end
+ * of evidence therefore lets a cutoff claim "observed through July 1" while a
+ * contributing session actually ran into July 2 — the evidence outrunning the
+ * window that names it, which is the very defect #3115 exists to prevent, one
+ * field lower down.
+ *
+ * The rule is a MAXIMUM rather than "timeline wins" for two reasons: it is an
+ * upper bound whichever source happens to run later (a cutoff must BOUND the
+ * evidence it names, so erring late is the safe direction), and it keeps a
+ * session datable when only one source has it — timeline-only would silently
+ * undate every session that has prompt history but no timeline row, shrinking
+ * the dated subset and risking suppression for an availability reason rather
+ * than an honesty one.
+ */
+export function deriveObservedAt(
+  sessions: readonly ObservedAtSession[],
+  timelines: readonly ObservedAtTimeline[]
+): Map<string, number> {
+  const observedAt = new Map<string, number>();
+  const consider = (sessionId: string | undefined, ms: number): void => {
+    if (!sessionId || !Number.isFinite(ms) || ms <= 0) return;
+    const prev = observedAt.get(sessionId);
+    if (prev === undefined || ms > prev) observedAt.set(sessionId, ms);
+  };
+  for (const t of timelines ?? []) {
+    // A malformed/absent ISO string parses to NaN, which `consider` rejects.
+    consider(t?.sessionId, Date.parse(t?.endTime ?? ''));
+    consider(t?.sessionId, Date.parse(t?.startTime ?? ''));
+  }
+  for (const s of sessions ?? []) {
+    consider(s?.sessionId, s?.endTime as number);
+  }
+  return observedAt;
 }
 
 /**
@@ -249,6 +333,38 @@ function pct(rate: number): string {
   return `${Math.round(rate * 100)}%`;
 }
 
+/**
+ * A cutoff is only trustworthy when most of the sample is actually dated — a
+ * single dated row among hundreds would put a confident date on evidence that is
+ * mostly undated. Half is a deliberately blunt, explainable bar.
+ */
+export const MIN_DATED_FRACTION = 0.5;
+
+/** True when the value is a usable epoch-ms observation timestamp. */
+function isDated(row: StartStopRow): boolean {
+  return (
+    typeof row.observedAt === 'number' &&
+    Number.isFinite(row.observedAt) &&
+    row.observedAt > 0
+  );
+}
+
+/**
+ * The dataset's evidence cutoff as `YYYY-MM-DD` (UTC): the LATEST observation in
+ * the sample, i.e. the date through which the correlation was measured. Returns
+ * `null` when too few rows are dated to trust a cutoff — the caller then
+ * suppresses the finding rather than dating it wrongly or omitting the date and
+ * reading as current state (#3115).
+ */
+export function evidenceCutoff(rows: StartStopRow[]): string | null {
+  const dated = rows.filter(isDated);
+  if (dated.length === 0) return null;
+  if (dated.length < rows.length * MIN_DATED_FRACTION) return null;
+  const latest = Math.max(...dated.map((r) => r.observedAt as number));
+  const iso = new Date(latest).toISOString();
+  return iso.slice(0, 10);
+}
+
 /** Render one risky feature as a compact, judge-readable line. */
 function riskyLine(r: RiskyFeature, baseline: number): string {
   return (
@@ -275,11 +391,26 @@ export async function runStartStopOracleAudit(
   judge: JudgeFn,
   options: RankOptions = DEFAULT_RANK_OPTIONS
 ): Promise<AuditFinding[]> {
-  const risky = rankRiskyFeatures(rows, options);
+  // Without a trustworthy cutoff the claim would read as current state when it
+  // is really a correlation over an unknown, possibly stale window (#3115).
+  // Suppress rather than date it wrongly — and do it BEFORE any judge call, so
+  // an unusable dataset costs nothing.
+  const asOf = evidenceCutoff(rows);
+  if (!asOf) return [];
+
+  // Analyze ONLY the dated rows (PR #3392). The cutoff is derived from the dated
+  // subset, so ranking or counting the undated rows would put evidence of unknown
+  // age inside a window that names an exact date — and an undated row may well be
+  // NEWER than the cutoff. Signal, baseline, and the reported sample size all
+  // come from the same rows the cutoff describes, which is what makes the window
+  // reproducible.
+  const datedRows = rows.filter(isDated);
+
+  const risky = rankRiskyFeatures(datedRows, options);
   // No candidate -> no honest "don't-start" signal to report.
   if (risky.length === 0) return [];
 
-  const baseline = baselineBadRate(rows);
+  const baseline = baselineBadRate(datedRows);
   const lines = risky.map((r) => riskyLine(r, baseline)).join('\n');
   const traits = risky.map((r) => r.label).join('; ');
 
@@ -303,7 +434,9 @@ export async function runStartStopOracleAudit(
         '{"isFinding": boolean, "rationale": string, "confidence": "low"|"medium"|"high"}. ' +
         'isFinding = true means a genuine don\'t-start / stop-early signal.',
       user:
-        `Baseline bad-outcome rate across ${rows.length} session(s) with an opener: ` +
+        `Evidence window: sessions observed up to ${asOf} (all figures below are ` +
+        `historical, measured through that date).\nBaseline bad-outcome rate ` +
+        `across ${datedRows.length} dated session(s) with an opener: ` +
         `${pct(baseline)}.\nElevated opener traits (worst first):\n${lines}\n\n` +
         'Are these opener traits a genuine don\'t-start / stop-early signal, or ' +
         'baseline noise?',
@@ -316,14 +449,16 @@ export async function runStartStopOracleAudit(
     // stays at its cautious 'low' default and `confirmed` stays true so the
     // deterministic ranking still surfaces.
     rationale =
-      'Judge interpretation was unavailable; reporting the deterministic ranking ' +
-      'of opener traits whose historical bad-outcome rate exceeds the baseline.';
+      `As of ${asOf}, judge interpretation was unavailable; reporting the ` +
+      'deterministic ranking of opener traits whose bad-outcome rate exceeded ' +
+      `the baseline in sessions observed up to ${asOf}.`;
   }
 
   // If the judge actively rejected the signal as noise, do not assert a finding.
   if (!confirmed) return [];
 
   const evidenceRefs = [
+    `as-of:${asOf}`,
     `baseline:bad-rate=${pct(baseline)}`,
     ...risky.map((r) => `opener-trait:${r.feature}=${r.value} bad-rate=${pct(r.badRate)} n=${r.support}`),
     ...risky.flatMap((r) => r.exampleSessions.map((id) => `session:${id}`)),
@@ -334,14 +469,18 @@ export async function runStartStopOracleAudit(
       id: 'start-stop-oracle:risky-openers',
       domain: 'workflow',
       summary:
-        `Start/stop oracle: openers with these traits historically end badly more ` +
-        `often than the ${pct(baseline)} baseline -> ${traits}. Treat a new opener ` +
-        `matching them as a don't-start / stop-early signal.`,
+        `As of ${asOf}: across ${datedRows.length} dated session(s) observed up ` +
+        `to that date, openers with these traits ended badly more often than the ` +
+        `${pct(baseline)} baseline -> ${traits}. This is a historical ` +
+        `correlation, not a reading of current behaviour — re-check it against ` +
+        `work since ${asOf} before treating a new opener matching these traits ` +
+        `as a don't-start / stop-early signal.`,
       evidenceRefs,
       judgeRationale:
         rationale ||
-        `Opener traits (${traits}) carry an elevated bad-outcome rate vs. the ` +
-          `${pct(baseline)} baseline across ${rows.length} sessions.`,
+        `As of ${asOf}, opener traits (${traits}) carried an elevated ` +
+          `bad-outcome rate vs. the ${pct(baseline)} baseline across ` +
+          `${datedRows.length} dated sessions observed up to that date.`,
       confidence,
     },
   ];

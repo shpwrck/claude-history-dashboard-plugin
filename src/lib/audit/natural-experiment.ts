@@ -113,6 +113,12 @@ export interface FitResult {
   coefficients: Coefficient[];
   /** The reference level dropped per categorical factor (the baseline). */
   references: ReferenceLevel[];
+  /**
+   * Factors that could not be contrasted and were held CONSTANT: the fit ran
+   * only over rows at that level, and its coefficients say nothing about the
+   * levels excluded (#3113). Empty when both factors were contrasted.
+   */
+  heldConstant: ReferenceLevel[];
   /** Mean outcome (overall good rate) — context for interpreting the intercept. */
   meanOutcome: number;
 }
@@ -220,24 +226,36 @@ function levelCounts(values: string[]): Map<string, number> {
 }
 
 /**
- * Choose which levels of a categorical factor enter the model. Only levels with
- * at least `minPerCell` rows are modeled; the MOST COMMON qualifying level is the
- * dropped reference (so coefficients read as "vs. the typical baseline"). Returns
- * the reference level plus the remaining (dummy) levels in descending-count order.
- * Returns `null` when fewer than two levels qualify (nothing to contrast).
+ * How one categorical factor enters the design.
+ *
+ * `modeled` lists every level with at least `minPerCell` rows — the ONLY levels
+ * whose rows may stay in the sample. `contrast` is non-null only when two or more
+ * levels qualify, in which case the most common qualifying level is the dropped
+ * reference (so coefficients read as "vs. the typical baseline").
+ *
+ * The split matters (#3113): a factor with a single qualifying level cannot be
+ * contrasted, but that is NOT the same as a constant factor. If its thin levels
+ * were left in the sample while no column encoded them, their variation would
+ * still move the outcome and could load onto whichever factor IS modeled —
+ * manufacturing a false "adjusted" edge. So an uncontrastable factor is held
+ * CONSTANT at its single qualifying level and every other row is dropped.
  */
-function chooseLevels(
-  values: string[],
-  minPerCell: number
-): { reference: string; dummies: string[] } | null {
+interface FactorLevels {
+  /** Levels with >= minPerCell rows, descending by count then name. */
+  modeled: string[];
+  /** Reference + dummy levels, or null when fewer than two levels qualify. */
+  contrast: { reference: string; dummies: string[] } | null;
+}
+
+function chooseLevels(values: string[], minPerCell: number): FactorLevels {
   const counts = levelCounts(values);
   const qualifying = [...counts.entries()]
     .filter(([, c]) => c >= minPerCell)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([level]) => level);
-  if (qualifying.length < 2) return null;
+  if (qualifying.length < 2) return { modeled: qualifying, contrast: null };
   const [reference, ...dummies] = qualifying;
-  return { reference, dummies };
+  return { modeled: qualifying, contrast: { reference, dummies } };
 }
 
 /** The built design matrix plus the legend needed to label coefficients. */
@@ -249,6 +267,12 @@ interface Design {
   factors: Coefficient['factor'][];
   levels: (string | undefined)[];
   references: ReferenceLevel[];
+  /**
+   * Factors that could NOT be contrasted and were therefore held constant: the
+   * fit covers only rows at that level (#3113). Reported so a reader never reads
+   * an adjusted effect as spanning levels the sample no longer contains.
+   */
+  heldConstant: ReferenceLevel[];
   /** Rows actually used (those whose categorical levels were all modeled). */
   usedRows: NaturalExperimentRow[];
   /** Mean/std of difficulty used for standardization (for transparency). */
@@ -260,41 +284,75 @@ interface Design {
  * Build the OLS design matrix from the rows: an intercept column, one-hot dummies
  * for the modeled model + tool levels (reference dropped), and the standardized
  * difficulty covariate (z-score; the control). Rows whose model OR tool level
- * fell below `minPerCell` (so it is neither a dummy nor the reference) are dropped
- * — keeping them would push their mass onto the reference and bias it.
+ * fell below `minPerCell` are dropped — keeping them would push their mass onto
+ * the reference and bias it.
+ *
+ * That drop is UNCONDITIONAL, including for a factor that could not be contrasted
+ * at all (#3113). A factor with one qualifying level is held constant at it; its
+ * thin levels leave the sample rather than sitting in the data unmodeled, where
+ * their variation could load onto the factor that IS reported as adjusted.
+ *
+ * Because dropping rows SHRINKS the cells of the other factor, the level choice
+ * is then re-run on what survived, repeatedly, until the sample stops changing.
+ * Otherwise a level that qualified only on rows the restriction later removed
+ * would keep its dummy, and a coefficient could rest on a single session despite
+ * the `minPerCell` floor. At the fixed point every modeled level provably clears
+ * `minPerCell` IN THE RETAINED SAMPLE, which is the sample the fit reports on.
  *
  * Returns `null` when neither categorical factor has two qualifying levels (there
- * is nothing to contrast, so no experiment to run) — the caller turns that into
- * an insufficient-data result.
+ * is nothing to contrast, so no experiment to run), or when a factor has no
+ * qualifying level at all (nothing survives to hold it constant at) — the caller
+ * turns that into an insufficient-data result.
  */
 export function buildDesignMatrix(
   rows: NaturalExperimentRow[],
   minPerCell: number
 ): Design | null {
-  const modelLevels = chooseLevels(
-    rows.map((r) => r.model),
-    minPerCell
-  );
-  const toolLevels = chooseLevels(
-    rows.map((r) => r.toolFactor),
-    minPerCell
-  );
-  // Need at least one categorical factor that varies; otherwise the only
-  // regressor is difficulty and there's no model/tool contrast to interpret.
-  if (!modelLevels && !toolLevels) return null;
+  // Refine sample and levels together to a fixed point. Each non-final pass
+  // strictly shrinks the sample, so this terminates in at most `rows.length`
+  // passes; the bound is a defensive guard, not the expected exit.
+  let usedRows = rows;
+  let modelLevels = chooseLevels([], minPerCell);
+  let toolLevels = modelLevels;
+  let converged = false;
+  for (let pass = 0; pass <= rows.length; pass++) {
+    modelLevels = chooseLevels(
+      usedRows.map((r) => r.model),
+      minPerCell
+    );
+    toolLevels = chooseLevels(
+      usedRows.map((r) => r.toolFactor),
+      minPerCell
+    );
+    // Every level of a factor is thin -> no level to hold it constant at, and any
+    // sample we could keep would be entirely unmodeled variation.
+    if (modelLevels.modeled.length === 0 || toolLevels.modeled.length === 0) {
+      return null;
+    }
+    // Keep only rows whose levels are all MODELED — for a contrasted factor that
+    // means dummy-or-reference, for an uncontrasted one its single qualifying
+    // level. Never keep heterogeneous levels of an omitted factor.
+    const retained = usedRows.filter(
+      (r) =>
+        modelLevels.modeled.includes(r.model) &&
+        toolLevels.modeled.includes(r.toolFactor)
+    );
+    if (retained.length === usedRows.length) {
+      // Nothing dropped this pass: the levels above were computed on exactly
+      // this sample, so they are the final, self-consistent choice.
+      converged = true;
+      break;
+    }
+    if (retained.length === 0) return null;
+    usedRows = retained;
+  }
+  if (!converged) return null;
 
-  const modelOk = (m: string) =>
-    !modelLevels ||
-    m === modelLevels.reference ||
-    modelLevels.dummies.includes(m);
-  const toolOk = (t: string) =>
-    !toolLevels ||
-    t === toolLevels.reference ||
-    toolLevels.dummies.includes(t);
-
-  // Keep only rows whose levels are all modeled (dummy or reference).
-  const usedRows = rows.filter((r) => modelOk(r.model) && toolOk(r.toolFactor));
-  if (usedRows.length === 0) return null;
+  // Need at least one categorical factor that varies IN THE RETAINED SAMPLE;
+  // otherwise the only regressor is difficulty and there's no model/tool
+  // contrast to interpret. A factor can lose its contrast during refinement —
+  // that is the point: its second level no longer clears the floor.
+  if (!modelLevels.contrast && !toolLevels.contrast) return null;
 
   // Standardize difficulty (z-score). A degenerate (zero-variance) difficulty
   // column collapses to all-zeros, which the singularity guard handles — but we
@@ -309,22 +367,27 @@ export function buildDesignMatrix(
   const factors: Coefficient['factor'][] = ['intercept'];
   const levels: (string | undefined)[] = [undefined];
   const references: ReferenceLevel[] = [];
+  const heldConstant: ReferenceLevel[] = [];
 
-  if (modelLevels) {
-    references.push({ factor: 'model', level: modelLevels.reference });
-    for (const lvl of modelLevels.dummies) {
+  if (modelLevels.contrast) {
+    references.push({ factor: 'model', level: modelLevels.contrast.reference });
+    for (const lvl of modelLevels.contrast.dummies) {
       terms.push(`model:${lvl}`);
       factors.push('model');
       levels.push(lvl);
     }
+  } else {
+    heldConstant.push({ factor: 'model', level: modelLevels.modeled[0] });
   }
-  if (toolLevels) {
-    references.push({ factor: 'tool', level: toolLevels.reference });
-    for (const lvl of toolLevels.dummies) {
+  if (toolLevels.contrast) {
+    references.push({ factor: 'tool', level: toolLevels.contrast.reference });
+    for (const lvl of toolLevels.contrast.dummies) {
       terms.push(`tool:${lvl}`);
       factors.push('tool');
       levels.push(lvl);
     }
+  } else {
+    heldConstant.push({ factor: 'tool', level: toolLevels.modeled[0] });
   }
   terms.push('difficulty');
   factors.push('difficulty');
@@ -334,11 +397,13 @@ export function buildDesignMatrix(
   const y: number[] = [];
   for (const r of usedRows) {
     const row: number[] = [1]; // intercept
-    if (modelLevels) {
-      for (const lvl of modelLevels.dummies) row.push(r.model === lvl ? 1 : 0);
+    if (modelLevels.contrast) {
+      for (const lvl of modelLevels.contrast.dummies) {
+        row.push(r.model === lvl ? 1 : 0);
+      }
     }
-    if (toolLevels) {
-      for (const lvl of toolLevels.dummies) {
+    if (toolLevels.contrast) {
+      for (const lvl of toolLevels.contrast.dummies) {
         row.push(r.toolFactor === lvl ? 1 : 0);
       }
     }
@@ -354,6 +419,7 @@ export function buildDesignMatrix(
     factors,
     levels,
     references,
+    heldConstant,
     usedRows,
     difficultyMean,
     difficultyStd,
@@ -371,7 +437,7 @@ export function fitOls(
   design: Design,
   significanceThreshold: number
 ): FitResult | null {
-  const { X, y, terms, factors, levels, references } = design;
+  const { X, y, terms, factors, levels, references, heldConstant } = design;
   const A = xtx(X);
   const b = xty(X, y);
   const solved = solveWithInverse(A, b);
@@ -419,6 +485,7 @@ export function fitOls(
     n,
     coefficients,
     references,
+    heldConstant,
     meanOutcome,
   };
 }
@@ -454,6 +521,20 @@ export function fitNaturalExperiment(
         'No model or tool factor has at least two levels with ' +
         `${minPerCell}+ sessions each, so there is no like-for-like contrast ` +
         'to regress (every comparison would rest on a single thin cell).',
+    };
+  }
+
+  // Holding an uncontrastable factor constant can drop rows (#3113); re-apply the
+  // sample-size gate to what actually survived rather than to the raw input.
+  if (design.usedRows.length < minSessions) {
+    return {
+      status: 'insufficient',
+      n: design.usedRows.length,
+      reason:
+        `Only ${design.usedRows.length} of ${rows.length} session(s) sit at a ` +
+        `model/tool level with ${minPerCell}+ sessions behind it; the rest were ` +
+        'excluded rather than left in the sample as unmodeled variation, which ' +
+        `leaves fewer than the ${minSessions} sessions a fit needs.`,
     };
   }
 
@@ -500,12 +581,31 @@ function renderTable(fit: FitResult): string {
     .map((r) => `${r.factor}=${r.level}`)
     .join(', ');
   const lines = fit.coefficients.map(coefLine).join('\n');
+  const held = heldConstantNote(fit);
   return (
     `OLS of session outcome (1=good, 0=bad) on model + tool factors with ` +
     `standardized task-difficulty as a control covariate.\n` +
     `n=${fit.n} sessions; overall good-rate=${(fit.meanOutcome * 100).toFixed(0)}%.\n` +
     `Reference (baseline) levels: ${refs || 'none'}.\n` +
+    (held ? `${held}\n` : '') +
     `Coefficients (adjusted for difficulty):\n${lines}`
+  );
+}
+
+/**
+ * Describe any factor held constant because it could not be contrasted (#3113),
+ * so neither the judge nor the reader treats the fit as spanning levels that were
+ * excluded from the sample. Empty string when both factors were contrasted.
+ */
+function heldConstantNote(fit: FitResult): string {
+  if (fit.heldConstant.length === 0) return '';
+  const parts = fit.heldConstant
+    .map((h) => `${h.factor}=${h.level}`)
+    .join(', ');
+  return (
+    `Held constant (too few sessions at any other level to contrast, so rows at ` +
+    `other levels were excluded): ${parts}. The coefficients below apply only to ` +
+    `sessions at those levels.`
   );
 }
 
@@ -518,6 +618,12 @@ function evidenceFor(fit: FitResult): string[] {
     .filter((c) => c.factor !== 'intercept')
     .map((c) => `coef:${c.term}=${c.estimate.toFixed(3)}`);
   for (const r of fit.references) refs.push(`baseline:${r.factor}=${r.level}`);
+  // Trace the sample restriction too: an adjusted effect that only covers one
+  // level of an omitted factor must say so in its evidence (#3113).
+  for (const h of fit.heldConstant) {
+    refs.push(`held-constant:${h.factor}=${h.level}`);
+  }
+  refs.push(`sessions-fitted:${fit.n}`);
   return refs;
 }
 
@@ -555,11 +661,18 @@ export async function runNaturalExperimentAudit(
   }
 
   const table = renderTable(result);
+  const scope =
+    result.heldConstant.length > 0
+      ? ` The fit covers only sessions with ${result.heldConstant
+          .map((h) => `${h.factor}=${h.level}`)
+          .join(' and ')} (no other level had enough sessions to contrast).`
+      : '';
   const summary =
     `Natural-experiment regression over ${result.n} sessions: after ` +
     `controlling for task difficulty, ` +
     summarizeAdjustedEffects(result) +
-    ' (see coefficient table).';
+    ' (see coefficient table).' +
+    scope;
 
   // The judge call is the only network-touching step; isolate it so a transient
   // failure still yields the deterministic coefficient table (low confidence).

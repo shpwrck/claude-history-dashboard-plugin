@@ -6,8 +6,12 @@
  * workflow / loop instead of being hand-driven every time — then asks the judge
  * whether converting each candidate to autonomy is actually worth it.
  *
- * Deterministic seed: recurring tool-name n-grams across sessions, weighted by
- * the estimated $ those sessions cost (the "manual cost it would displace").
+ * Deterministic seed: recurring tool-name n-grams across sessions, ranked with
+ * the estimated $ those sessions cost as SCALE CONTEXT. That figure is
+ * whole-session spend, not a cost attributed to the sequence (#3109): the inputs
+ * carry no per-call or per-sequence token attribution, and one session normally
+ * contains several candidate sequences plus unrelated work, so the same dollars
+ * would otherwise be claimed as "displaced" by each of them.
  * Judge step: interpret whether the candidate is a genuine automation win.
  *
  * SERVER-ONLY (runs behind /api/audit.json with the rest of the harness).
@@ -22,13 +26,17 @@
 import type { AuditFinding } from './types';
 import type { JudgeFn } from './judge-types';
 
-/** One session's ordered tool usage plus the $ it cost (the displaced-cost weight). */
+/** One session's ordered tool usage plus the $ the WHOLE session cost. */
 export interface ToolSequenceSession {
   sessionId: string;
   project: string;
   /** Tool names in call order. */
   tools: string[];
-  /** Estimated USD for the session — the manual cost an automation would displace. */
+  /**
+   * Estimated USD for the ENTIRE session (`SessionCost.estimatedCost` from
+   * `cost-attribution.topExpensiveSessions`) — all work in the session, not the
+   * cost of any one sequence inside it.
+   */
   cost: number;
 }
 
@@ -41,8 +49,20 @@ export interface SequenceCandidate {
   sessions: string[];
   /** Total occurrences across all sessions (a sequence can repeat within one). */
   occurrences: number;
-  /** Summed estimated cost of the distinct sessions it appears in. */
-  displacedCost: number;
+  /**
+   * Summed WHOLE-SESSION estimated cost of the distinct sessions the sequence
+   * appears in — a scale/context metric, NOT a cost attributed to the sequence.
+   *
+   * A session usually contains substantial unrelated work and several candidate
+   * sequences, so the same dollars land in several candidates' context totals.
+   * Calling this "displaced cost" (as it was before #3109) asserted that
+   * automating one sequence would save the whole session's spend, which the
+   * per-session cost field cannot support: there is no per-call or per-sequence
+   * token attribution in the inputs. Report it as context, never as savings.
+   */
+  sessionCostContext: number;
+  /** Per-session whole-session cost, so the total is reproducible field-by-field. */
+  sessionCosts: { sessionId: string; cost: number }[];
 }
 
 export interface DetectOptions {
@@ -69,7 +89,7 @@ const ARROW = ' -> ';
  * Find tool-name sequences (length minLen..maxLen) that recur across >= minSessions
  * distinct sessions. PURE and deterministic — unit-tested without the judge.
  *
- * Ranking: more distinct sessions first, then larger displaced cost, then longer
+ * Ranking: more distinct sessions first, then larger session-cost context, then longer
  * sequence (a longer recurring chain is a stronger automation candidate), then
  * signature for stable ordering. Returns at most topN.
  */
@@ -113,21 +133,28 @@ export function detectRecurringSequences(
   const candidates: SequenceCandidate[] = [];
   for (const [signature, { sessionIds, occurrences, length }] of agg) {
     if (sessionIds.size < minSessions) continue;
-    let displacedCost = 0;
-    for (const id of sessionIds) displacedCost += costBySession.get(id) ?? 0;
+    const sessions = [...sessionIds].sort();
+    const sessionCosts = sessions.map((sessionId) => ({
+      sessionId,
+      cost: costBySession.get(sessionId) ?? 0,
+    }));
+    const sessionCostContext = sessionCosts.reduce((sum, s) => sum + s.cost, 0);
     candidates.push({
       signature,
       length,
-      sessions: [...sessionIds].sort(),
+      sessions,
       occurrences,
-      displacedCost,
+      sessionCostContext,
+      sessionCosts,
     });
   }
 
+  // Cost only breaks ties in RANKING (bigger sessions are worth looking at
+  // first); it is never presented as the sequence's own spend.
   candidates.sort(
     (a, b) =>
       b.sessions.length - a.sessions.length ||
-      b.displacedCost - a.displacedCost ||
+      b.sessionCostContext - a.sessionCostContext ||
       b.length - a.length ||
       a.signature.localeCompare(b.signature)
   );
@@ -160,9 +187,11 @@ export async function runAgenticOpportunityAudit(
           '{"isFinding": boolean, "rationale": string, "confidence": "low"|"medium"|"high"}.',
         user:
           `Recurring sequence: ${c.signature}. Seen in ${c.sessions.length} ` +
-          `session(s), ${c.occurrences} total occurrence(s), displacing an ` +
-          `estimated ${USD(c.displacedCost)} of manual work. Is this a genuine ` +
-          'agentic-workflow opportunity?',
+          `session(s), ${c.occurrences} total occurrence(s). Those sessions cost ` +
+          `${USD(c.sessionCostContext)} in TOTAL (whole-session spend for all ` +
+          'work in them; no per-sequence cost attribution exists, so this is ' +
+          'scale context only — do NOT treat it as the savings from automating ' +
+          'this sequence). Is this a genuine agentic-workflow opportunity?',
       });
     } catch {
       continue;
@@ -173,11 +202,20 @@ export async function runAgenticOpportunityAudit(
         domain: 'workflow',
         summary:
           `Recurring manual sequence "${c.signature}" across ` +
-          `${c.sessions.length} sessions (${c.occurrences} occurrences, ~` +
-          `${USD(c.displacedCost)} displaced) is a candidate for an agentic workflow.`,
+          `${c.sessions.length} sessions (${c.occurrences} occurrences) is a ` +
+          `candidate for an agentic workflow. Those sessions cost ` +
+          `${USD(c.sessionCostContext)} in total across ALL the work in them — ` +
+          'whole-session spend for scale, not a saving attributable to this ' +
+          'sequence (per-sequence cost is not measurable from session totals).',
         evidenceRefs: [
           `sequence:${c.signature}`,
           ...c.sessions.map((id) => `session:${id}`),
+          // Name the field behind every dollar figure so the total is
+          // reproducible and cannot be read as sequence-level attribution.
+          'cost-field:SessionCost.estimatedCost (whole session)',
+          ...c.sessionCosts.map(
+            (s) => `session-cost:${s.sessionId}=${USD(s.cost)}`
+          ),
         ],
         judgeRationale: verdict.rationale,
         confidence: verdict.confidence,

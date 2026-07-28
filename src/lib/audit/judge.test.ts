@@ -166,6 +166,44 @@ describe('runAudits graceful degrade', () => {
       'token-to-tool-ratio:out-1',
     ]);
   });
+
+  it('has no checkpoint-churn / boomerang audit — it was retired (#3398)', async () => {
+    // The churn audit was removed rather than reworded: its inputs (a checkpoint
+    // COUNT and a burst rate, with no file identity) could not support the
+    // repetition claim it made, and the deterministic `workflow.rework-signature`
+    // detector already publishes the one fact that survived — the densest
+    // sessions with score/churn/burst/span. Re-wiring it here would reintroduce
+    // both a judge verdict with no discriminating information and a duplicate of
+    // that detector, so this guards the removal.
+    //
+    // The old input key is passed deliberately. It is no longer part of
+    // RunAuditsOptions, so it is spread in as an untyped extra: if someone
+    // restores the wiring, this input starts producing findings again and this
+    // test fails.
+    const retiredInput: Record<string, unknown> = {
+      boomerangInput: {
+        reworkSessions: [
+          { sessionId: 'r1', project: 'demo', reworkScore: 42, churn: 20, burstRate: 1.1 },
+          { sessionId: 'r2', project: 'demo', reworkScore: 30, churn: 15, burstRate: 1.0 },
+          { sessionId: 'r3', project: 'demo', reworkScore: 18, churn: 9, burstRate: 1.0 },
+        ],
+        churnFiles: [{ filePath: '/repo/src/a.ts', churn: 22, sessions: 4 }],
+      },
+    };
+    const findings = await runAudits({
+      ...retiredInput,
+      judge: yesJudge,
+    });
+    expect(
+      findings.filter((f) =>
+        /boomerang|retry-storm|checkpoint-churn|rework/.test(f.id)
+      )
+    ).toEqual([]);
+    // No summary smuggles the retired claim back in either.
+    for (const f of findings) {
+      expect(f.summary).not.toMatch(/retry storm|bounce|redone|same work/i);
+    }
+  });
 });
 
 describe('parseVerdict', () => {

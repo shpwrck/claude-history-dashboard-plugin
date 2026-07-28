@@ -68,6 +68,50 @@ function makeRows(): NaturalExperimentRow[] {
   return rows;
 }
 
+/**
+ * #3113 fixture: `model` has ONE qualifying level (`sonnet`, 12 rows) plus a
+ * THIN second level (`haiku`, 2 rows — below the default minPerCell of 3) that
+ * is perfectly correlated with the `tool=Edit` level and always ends badly.
+ *
+ * The tool factor IS contrastable (Bash 6 / Edit 8), so a fit happens. If the
+ * thin haiku rows are left in the sample while the model factor is omitted from
+ * the design, their all-bad outcomes load onto `tool:Bash` (Edit, the
+ * reference, looks worse than it is) — an "adjusted" edge manufactured by the
+ * omitted factor. Both tool levels have an identical 50% good-rate among the
+ * sonnet rows, so the honest adjusted tool effect is exactly ZERO.
+ */
+function confoundedByThinModelLevel(): NaturalExperimentRow[] {
+  const rows: NaturalExperimentRow[] = [];
+  for (let i = 0; i < 6; i++) {
+    rows.push({
+      sessionId: `bash-${i}`,
+      outcome: (i % 2) as 0 | 1,
+      model: 'sonnet',
+      toolFactor: 'Bash',
+      difficulty: 1000 + i * 100,
+    });
+  }
+  for (let i = 0; i < 6; i++) {
+    rows.push({
+      sessionId: `edit-${i}`,
+      outcome: (i % 2) as 0 | 1,
+      model: 'sonnet',
+      toolFactor: 'Edit',
+      difficulty: 1000 + i * 100,
+    });
+  }
+  for (let i = 0; i < 2; i++) {
+    rows.push({
+      sessionId: `haiku-${i}`,
+      outcome: 0,
+      model: 'haiku',
+      toolFactor: 'Edit',
+      difficulty: 1000 + i * 100,
+    });
+  }
+  return rows;
+}
+
 const accept: JudgeFn = async () => ({
   isFinding: true,
   rationale: 'After controlling for difficulty, opus shows a real edge.',
@@ -224,6 +268,156 @@ describe('fitNaturalExperiment', () => {
     expect(result.status).toBe('insufficient');
   });
 
+  it('excludes the thin levels of an OMITTED factor instead of leaving them in the sample (#3113)', () => {
+    const rows = confoundedByThinModelLevel();
+    const result = fitNaturalExperiment(rows);
+    expect(result.status).toBe('fit');
+    if (result.status !== 'fit') return;
+
+    // The thin-model rows left the sample entirely: 12 sonnet rows, not 14.
+    expect(result.n).toBe(12);
+    // The model factor could not be contrasted, so it is reported as HELD
+    // CONSTANT rather than silently omitted while its variation stays in.
+    expect(result.heldConstant).toEqual([{ factor: 'model', level: 'sonnet' }]);
+    expect(result.coefficients.some((c) => c.factor === 'model')).toBe(false);
+
+    // The confound is gone: among the retained (sonnet) rows Bash and Edit have
+    // the same good-rate, so the adjusted tool effect is exactly 0 and is not
+    // flagged as an edge. With the thin haiku rows still in the sample this
+    // coefficient is non-zero — an edge created by the omitted factor.
+    //
+    // The reference level is recomputed on the RETAINED sample (#3392 P1): Edit
+    // leads 8-6 on the raw input, but after the 2 haiku rows leave it is a 6-6
+    // tie, which breaks alphabetically to Bash. So the modeled dummy is
+    // `tool:Edit`, and there is exactly one tool dummy either way.
+    const toolDummies = result.coefficients.filter((c) => c.factor === 'tool');
+    expect(toolDummies.map((c) => c.term)).toEqual(['tool:Edit']);
+    expect(toolDummies[0].estimate).toBeCloseTo(0, 9);
+    expect(toolDummies[0].significant).toBe(false);
+  });
+
+  it('returns insufficient when excluding an omitted factor’s thin levels leaves too few sessions (#3113)', () => {
+    // 6 sonnet rows (the only qualifying model level) + 4 rows split across two
+    // thin model levels. Dropping the thin rows leaves 6 < minSessions (8), so
+    // the honest answer is insufficient — not a fit over a contaminated sample.
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < 6; i++) {
+      rows.push({
+        sessionId: `s-${i}`,
+        outcome: (i % 2) as 0 | 1,
+        model: 'sonnet',
+        toolFactor: i < 3 ? 'Bash' : 'Edit',
+        difficulty: 1000 + i * 100,
+      });
+    }
+    for (let i = 0; i < 2; i++) {
+      rows.push({
+        sessionId: `h-${i}`,
+        outcome: 0,
+        model: 'haiku',
+        toolFactor: 'Edit',
+        difficulty: 1500,
+      });
+      rows.push({
+        sessionId: `o-${i}`,
+        outcome: 0,
+        model: 'opus',
+        toolFactor: 'Bash',
+        difficulty: 1500,
+      });
+    }
+    const result = fitNaturalExperiment(rows);
+    expect(result.status).toBe('insufficient');
+    if (result.status !== 'insufficient') return;
+    expect(result.n).toBe(6);
+    expect(result.reason).toMatch(/excluded rather than left in the sample/);
+  });
+
+  it('rechecks minPerCell on the RETAINED sample, not the raw input (#3392 P1)', () => {
+    // `tool=Bash` qualifies on the raw input by exactly 3 rows — but 2 of those
+    // are thin-model (`haiku`) rows that the #3113 restriction removes. After the
+    // restriction Bash is backed by ONE session, so a `tool:Bash` coefficient
+    // would rest on a single row despite the 3-session floor. Re-running the
+    // level choice on the retained sample drops Bash too, which leaves nothing to
+    // contrast -> insufficient.
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < 9; i++) {
+      rows.push({
+        sessionId: `edit-${i}`,
+        outcome: (i % 2) as 0 | 1,
+        model: 'sonnet',
+        toolFactor: 'Edit',
+        difficulty: 1000 + i * 100,
+      });
+    }
+    rows.push({
+      sessionId: 'bash-sonnet',
+      outcome: 1,
+      model: 'sonnet',
+      toolFactor: 'Bash',
+      difficulty: 1500,
+    });
+    for (let i = 0; i < 2; i++) {
+      rows.push({
+        sessionId: `bash-haiku-${i}`,
+        outcome: 0,
+        model: 'haiku',
+        toolFactor: 'Bash',
+        difficulty: 1500,
+      });
+    }
+    // Sanity: on the RAW input both tool levels clear the floor (Edit 9, Bash 3).
+    expect(rows.filter((r) => r.toolFactor === 'Bash')).toHaveLength(3);
+
+    const design = buildDesignMatrix(rows, 3);
+    expect(design).toBeNull();
+
+    const result = fitNaturalExperiment(rows);
+    expect(result.status).toBe('insufficient');
+    if (result.status !== 'insufficient') return;
+    expect(result.reason).toMatch(/two levels/);
+  });
+
+  it('keeps a contrast that still clears the floor after the restriction (#3392 P1)', () => {
+    // Same shape, but Bash has 5 raw rows and keeps 3 after the 2 thin-model rows
+    // leave — the floor is still met, so the fit proceeds. The recount must not
+    // be so eager that it kills every restricted design.
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < 7; i++) {
+      rows.push({
+        sessionId: `edit-${i}`,
+        outcome: (i % 2) as 0 | 1,
+        model: 'sonnet',
+        toolFactor: 'Edit',
+        difficulty: 1000 + i * 100,
+      });
+    }
+    for (let i = 0; i < 3; i++) {
+      rows.push({
+        sessionId: `bash-${i}`,
+        outcome: 1,
+        model: 'sonnet',
+        toolFactor: 'Bash',
+        difficulty: 1200 + i * 100,
+      });
+    }
+    for (let i = 0; i < 2; i++) {
+      rows.push({
+        sessionId: `bash-haiku-${i}`,
+        outcome: 0,
+        model: 'haiku',
+        toolFactor: 'Bash',
+        difficulty: 1500,
+      });
+    }
+    const result = fitNaturalExperiment(rows);
+    expect(result.status).toBe('fit');
+    if (result.status !== 'fit') return;
+    expect(result.n).toBe(10);
+    expect(result.heldConstant).toEqual([{ factor: 'model', level: 'sonnet' }]);
+    expect(coef(result, 'tool:Bash')).toBeDefined();
+  });
+
   it('degrades (does not throw) on a singular/degenerate design', () => {
     // Build a design whose tool factor is PERFECTLY collinear with the model
     // factor (every opus is Bash, every sonnet is Edit) -> the model and tool
@@ -304,6 +498,32 @@ describe('runNaturalExperimentAudit', () => {
     expect(f.evidenceRefs.some((r) => r.startsWith('baseline:'))).toBe(true);
     expect(f.judgeRationale).toContain('Opus');
     expect(f.confidence).toBe('medium');
+  });
+
+  it('scopes the emitted claim to the levels actually in the sample (#3113)', async () => {
+    let sawTable = '';
+    const capturing: JudgeFn = async ({ user }) => {
+      sawTable = user;
+      return { isFinding: true, rationale: 'ok', confidence: 'medium' };
+    };
+    const findings = await runNaturalExperimentAudit(
+      confoundedByThinModelLevel(),
+      capturing
+    );
+    expect(findings).toHaveLength(1);
+    const f = findings[0];
+    // The fit ran over the 12 retained sessions, and both the summary and the
+    // evidence say the result only covers model=sonnet — no unqualified
+    // "adjusted effect" over a sample that still held unmodeled variation.
+    expect(f.summary).toContain('over 12 sessions');
+    expect(f.summary).toContain('covers only sessions with model=sonnet');
+    expect(f.evidenceRefs).toContain('held-constant:model=sonnet');
+    expect(f.evidenceRefs).toContain('sessions-fitted:12');
+    // The judge is told about the restriction too, so its prose cannot
+    // generalize past the sample.
+    expect(sawTable).toMatch(/Held constant/);
+    // No tool level is advertised as an edge (the confound was the only source).
+    expect(f.summary).toMatch(/no model or tool factor shows/);
   });
 
   it('still emits the coefficients when the judge call fails', async () => {

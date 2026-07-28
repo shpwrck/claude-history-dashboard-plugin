@@ -44,12 +44,18 @@ const yesJudge: JudgeFn = async () => ({
 });
 
 describe('detectRecurringSequences', () => {
-  it('finds the cross-session sequence and weights it by displaced cost', () => {
+  it('finds the cross-session sequence and carries whole-session cost as context', () => {
     const found = detectRecurringSequences(FIXTURE);
     const hit = found.find((c) => c.signature === 'Read -> Edit -> Bash');
     expect(hit).toBeDefined();
     expect(hit!.sessions).toEqual(['s1', 's2']);
-    expect(hit!.displacedCost).toBeCloseTo(4.0); // 1.5 + 2.5
+    // The total is the sum of the two sessions' WHOLE-session cost — context for
+    // ranking, not a cost attributed to the sequence (#3109).
+    expect(hit!.sessionCostContext).toBeCloseTo(4.0); // 1.5 + 2.5
+    expect(hit!.sessionCosts).toEqual([
+      { sessionId: 's1', cost: 1.5 },
+      { sessionId: 's2', cost: 2.5 },
+    ]);
     expect(hit!.length).toBe(3);
   });
 
@@ -88,6 +94,74 @@ describe('runAgenticOpportunityAudit', () => {
     expect(f!.confidence).toBe('high');
     expect(f!.evidenceRefs).toContain('session:s1');
     expect(f!.summary).toContain('$4.00');
+  });
+
+  it('does not claim whole-session spend as cost the sequence displaces (#3109)', async () => {
+    // s1/s2 both run the recurring Read -> Edit -> Bash sequence, but most of
+    // their spend is UNRELATED work (a long research/refactor tail) — and each
+    // session also contains a second candidate sequence. Attributing the whole
+    // session cost to this one sequence would claim the same dollars twice.
+    const mixed: ToolSequenceSession[] = [
+      {
+        sessionId: 'm1',
+        project: 'demo',
+        tools: [
+          'Read', 'Edit', 'Bash', // the recurring candidate
+          'WebSearch', 'WebFetch', 'WebFetch', 'WebSearch', // unrelated, expensive
+          'Grep', 'Glob', 'Read', // a SECOND recurring candidate
+        ],
+        cost: 20,
+      },
+      {
+        sessionId: 'm2',
+        project: 'demo',
+        tools: [
+          'WebSearch', 'WebFetch', 'WebFetch', 'WebSearch',
+          'Read', 'Edit', 'Bash',
+          'Grep', 'Glob', 'Read',
+        ],
+        cost: 30,
+      },
+    ];
+    const candidates = detectRecurringSequences(mixed);
+    const findings = await runAgenticOpportunityAudit(candidates, yesJudge);
+    const f = findings.find(
+      (x) => x.id === 'agentic-opportunity:Read -> Edit -> Bash'
+    );
+    expect(f).toBeDefined();
+
+    // The claim is scoped: the $50 is the sessions' TOTAL spend, explicitly not
+    // a saving attributable to the sequence.
+    expect(f!.summary).not.toMatch(/displac/i);
+    expect(f!.summary).toContain('$50.00 in total across ALL the work in them');
+    expect(f!.summary).toMatch(/not a saving attributable to this sequence/);
+
+    // The same dollars appear under the other candidate too — which is exactly
+    // why they cannot be claimed as either one's displaced cost.
+    const other = findings.find(
+      (x) => x.id === 'agentic-opportunity:Grep -> Glob -> Read'
+    );
+    expect(other!.summary).toContain('$50.00');
+
+    // Any dollar figure names the field it came from and is reproducible
+    // per session.
+    expect(f!.evidenceRefs).toContain(
+      'cost-field:SessionCost.estimatedCost (whole session)'
+    );
+    expect(f!.evidenceRefs).toContain('session-cost:m1=$20.00');
+    expect(f!.evidenceRefs).toContain('session-cost:m2=$30.00');
+  });
+
+  it('tells the judge the cost is whole-session context, not sequence savings (#3109)', async () => {
+    let prompt = '';
+    const capturing: JudgeFn = async ({ user }) => {
+      prompt = user;
+      return { isFinding: false, rationale: 'n/a', confidence: 'low' };
+    };
+    await runAgenticOpportunityAudit(detectRecurringSequences(FIXTURE), capturing);
+    expect(prompt).not.toMatch(/displac/i);
+    expect(prompt).toMatch(/whole-session spend/);
+    expect(prompt).toMatch(/no per-sequence cost attribution exists/);
   });
 
   it('drops candidates the judge rejects', async () => {

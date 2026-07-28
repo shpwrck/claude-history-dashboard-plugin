@@ -3,8 +3,8 @@
  *
  * The injectable judge contract ({@link JudgeFn} / {@link JudgeVerdict}) used to
  * live in `./judge`, which also imports VALUES from every per-audit module
- * (agentic-opportunities, boomerang-rework, judge-deceit, mcp-adoption-gap,
- * natural-experiment, start-stop-oracle). Each of those audits in turn needs only
+ * (agentic-opportunities, judge-deceit, mcp-adoption-gap, natural-experiment,
+ * start-stop-oracle). Each of those audits in turn needs only
  * the judge CONTRACT — they imported `import type { JudgeFn } from './judge'`,
  * closing a (type-only, runtime-erased) madge cycle per audit.
  *

@@ -270,6 +270,12 @@ const { runLocalAnalyze, degradedResult, extractRecommendations } =
 const { runAudits, makeClaudeJudge, makeClaudeDraftJudge } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'audit', 'judge.ts')
 );
+// Single derivation of "when this session's evidence ends", used to date the
+// start/stop-oracle rows (#3115, #3392 P2). Lives with the audit that defines
+// the contract so the rule has exactly one home and is unit-tested there.
+const { deriveObservedAt } = await import(
+  join(PROJECT_DIR, 'src', 'lib', 'audit', 'start-stop-oracle.ts')
+);
 const { CURRENT_MODEL_IDS } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'model-registry.ts')
 );
@@ -303,15 +309,6 @@ const {
 // the browser), so every outcome resolves via the cost+cleanliness proxy.
 const { computeSessionOutcomes } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-timeline-success.ts')
-);
-// High-churn files corroborate the boomerang/rework-rate audit's per-session
-// rework signal (#742) — the same topChurnFiles >= HIGH_CHURN signal behind the
-// workflow.file-churn detector.
-const { topChurnFiles } = await import(
-  join(PROJECT_DIR, 'src', 'lib', 'parse-files.ts')
-);
-const { HIGH_CHURN } = await import(
-  join(PROJECT_DIR, 'src', 'lib', 'detectors', 'shared.ts')
 );
 // DIST_DIR/CLAUDE_DIR overrides exist only so the route tests can point the
 // server at throwaway temp dirs (see scripts/policy-write.test.mjs). In the
@@ -1679,42 +1676,6 @@ function toSkillCandidateSessions(ds) {
     .filter((s) => s.tools.length > 0);
 }
 
-// Map the assembled dataset into the boomerang/rework-rate audit's input (#742):
-// per-session rework rows from fileHistory (FileHistorySession already carries
-// reworkScore/churn/burstRate; project resolved via the sessions map like
-// toAgenticSessions) plus the high-churn files (topChurnFiles filtered to
-// churn >= HIGH_CHURN) that corroborate cross-session re-touch. Defensive: any
-// failure degrades to empty input (no candidates) rather than throwing, mirroring
-// how toAgenticSessions/toSkillCandidateSessions wrap their helpers.
-function toBoomerangInput(ds) {
-  try {
-    const sessions = auditRows(ds?.sessions);
-    const fileHistory = auditRows(ds?.fileHistory);
-    const toolData = auditRows(ds?.toolData);
-    const projectBySession = new Map(
-      sessions.map((s) => [s.sessionId, s.projectShort || s.project || ''])
-    );
-    const reworkSessions = fileHistory.map((s) => ({
-      sessionId: s.sessionId,
-      project: projectBySession.get(s.sessionId) || '',
-      reworkScore: s.reworkScore || 0,
-      churn: s.churn || 0,
-      burstRate: s.burstRate || 0,
-    }));
-    let churnFiles = [];
-    try {
-      churnFiles = topChurnFiles(toolData)
-        .filter((c) => c.churn >= HIGH_CHURN)
-        .map((c) => ({ filePath: c.filePath, churn: c.churn, sessions: c.sessions }));
-    } catch {
-      churnFiles = [];
-    }
-    return { reworkSessions, churnFiles };
-  } catch {
-    return { reworkSessions: [], churnFiles: [] };
-  }
-}
-
 // Coarse model family from a raw model id (e.g. "claude-opus-4-...-20250514"
 // -> "opus"). Buckets to the three Claude families plus an "other" catch-all so
 // the regression's categorical model factor has a few well-populated levels
@@ -1756,7 +1717,7 @@ function dominantTool(calls) {
 // and the per-session DIFFICULTY proxy computed DIRECTLY as the session's total
 // tokens (input + output) — NOT the global aggregatePerTaskCost aggregate.
 // Defensive: any failure degrades to [] (no rows -> audit skipped) rather than
-// throwing, mirroring toBoomerangInput.
+// throwing, mirroring toAgenticSessions.
 function toNaturalExperimentRows(ds) {
   try {
     const timelines = auditRows(ds?.timelines);
@@ -1801,9 +1762,13 @@ function toNaturalExperimentRows(ds) {
 // per-session OPENER (the new tokenData[].opener field from parse-sessions) +
 // good/bad OUTCOME (parse-timeline-success.computeSessionOutcomes, same call +
 // empty tags Map as toNaturalExperimentRows/toSkillCandidateSessions) + project
-// from the sessions map. Sessions with no opener are skipped (no feature to
-// derive). Defensive: any failure degrades to [] (no rows -> audit skipped)
-// rather than throwing, mirroring toNaturalExperimentRows.
+// from the sessions map + the session's OBSERVATION TIMESTAMP (Session.endTime,
+// epoch ms, from parse-history.groupBySessions), which the audit needs to date
+// its historical correlation "as of <date>" — an undated dataset suppresses the
+// finding instead of reading as current state (#3115).
+// Sessions with no opener are skipped (no feature to derive). Defensive: any
+// failure degrades to [] (no rows -> audit skipped) rather than throwing,
+// mirroring toNaturalExperimentRows.
 function toStartStopRows(ds) {
   try {
     const sessions = auditRows(ds?.sessions);
@@ -1814,6 +1779,13 @@ function toStartStopRows(ds) {
     const projectBySession = new Map(
       sessions.map((s) => [s.sessionId, s.projectShort || s.project || ''])
     );
+    // When each session's evidence ENDS. Derived in ONE place
+    // (deriveObservedAt, which takes the latest of the transcript and
+    // prompt-history end marks) so no caller reconciles the two: Session.endTime
+    // alone marks the last PROMPT, and a session that keeps working after it (an
+    // overnight tool run) would outrun it, dating the cutoff earlier than the
+    // evidence it names (#3392 P2).
+    const observedAtBySession = deriveObservedAt(sessions, timelines);
     let outcomes = new Map();
     try {
       outcomes = computeSessionOutcomes(
@@ -1833,6 +1805,7 @@ function toStartStopRows(ds) {
         project: projectBySession.get(t.sessionId) || '',
         opener: t.opener,
         good: outcomes.get(t.sessionId)?.good === true,
+        observedAt: observedAtBySession.get(t.sessionId),
       }));
   } catch {
     return [];
@@ -2154,7 +2127,7 @@ function buildEnterpriseOrganizationRollup(dataset, principal) {
 //     fallback for chained shell snippets (`git status && gh pr list`).
 //     Each signal's weight is its match count; signals below the audit's support
 //     floor never fire. Defensive: any failure degrades to empty input (no usage
-//     -> audit skipped), mirroring toBoomerangInput.
+//     -> audit skipped), mirroring toStartStopRows.
 function toMcpAdoptionInput(ds) {
   try {
     const toolData = auditRows(ds?.toolData);
@@ -10607,7 +10580,6 @@ const server = createServer(async (req, res) => {
           sessions: toAuditSessions(ds),
           agenticSessions: toAgenticSessions(ds),
           skillCandidateSessions: toSkillCandidateSessions(ds),
-          boomerangInput: toBoomerangInput(ds),
           naturalExperimentRows: toNaturalExperimentRows(ds),
           startStopRows: toStartStopRows(ds),
           mcpAdoptionInput: toMcpAdoptionInput(ds),
