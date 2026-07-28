@@ -117,6 +117,20 @@ describe('sanitizeAdoptionReceipt PROOF (#1074)', () => {
         effectSize: -0.31,
         uncertainty: 'bootstrap CI [-0.45, -0.18], Wilcoxon p=0.01',
         perDimensionDeltas: { cost: -0.31, latency: -0.08 },
+        statistics: {
+          nDecided: 12,
+          controlSuccessRate: 1,
+          injectedSuccessRate: 1,
+          qualityHoldPass: true,
+          bootstrap: {
+            lo: -0.45,
+            hi: -0.18,
+            iters: 10_000,
+            alpha: 0.05,
+            seed: 1,
+          },
+          wilcoxon: { statistic: 78, pOneSided: 0.01, n: 12 },
+        },
         verdict: 'proven',
       },
       projection: {
@@ -127,6 +141,9 @@ describe('sanitizeAdoptionReceipt PROOF (#1074)', () => {
       externalReviewRef: 'review:1078-pending',
       modelVersion: 'claude-opus-4-8',
       revalidationStatus: 'current',
+      evidenceRef: 'data/proof-evidence/sha256-abc.json',
+      evidenceDigest:
+        'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       ...overrides,
     };
   }
@@ -155,6 +172,20 @@ describe('sanitizeAdoptionReceipt PROOF (#1074)', () => {
         effectSize: -0.31,
         uncertainty: 'bootstrap CI [-0.45, -0.18], Wilcoxon p=0.01',
         perDimensionDeltas: { cost: -0.31, latency: -0.08 },
+        statistics: {
+          nDecided: 12,
+          controlSuccessRate: 1,
+          injectedSuccessRate: 1,
+          qualityHoldPass: true,
+          bootstrap: {
+            lo: -0.45,
+            hi: -0.18,
+            iters: 10_000,
+            alpha: 0.05,
+            seed: 1,
+          },
+          wilcoxon: { statistic: 78, pOneSided: 0.01, n: 12 },
+        },
         verdict: 'proven',
       },
       projection: {
@@ -165,6 +196,58 @@ describe('sanitizeAdoptionReceipt PROOF (#1074)', () => {
       externalReviewRef: 'review:1078-pending',
       modelVersion: 'claude-opus-4-8',
       revalidationStatus: 'current',
+      evidenceRef: 'data/proof-evidence/sha256-abc.json',
+      evidenceDigest:
+        'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+  });
+
+  it('fails closed when only one evidence binding field is present or the digest is malformed', () => {
+    expect(
+      sanitizeAdoptionReceipt(
+        proofInput({ evidenceDigest: undefined }),
+        now
+      )
+    ).toBeNull();
+    expect(
+      sanitizeAdoptionReceipt(
+        proofInput({ evidenceRef: undefined }),
+        now
+      )
+    ).toBeNull();
+    expect(
+      sanitizeAdoptionReceipt(
+        proofInput({ evidenceDigest: 'sha256:not-a-digest' }),
+        now
+      )
+    ).toBeNull();
+  });
+
+  it('continues to read historical PROOF receipts created before evidence bindings', () => {
+    const legacy = proofInput();
+    delete legacy.evidenceRef;
+    delete legacy.evidenceDigest;
+    const record = sanitizeAdoptionReceipt(legacy, now);
+    expect(record?.kind).toBe('PROOF');
+    expect(record).not.toHaveProperty('evidenceRef');
+    expect(record).not.toHaveProperty('evidenceDigest');
+  });
+
+  it('refuses to append a new PROOF claim without its evidence binding', async () => {
+    const legacy = proofInput();
+    delete legacy.evidenceRef;
+    delete legacy.evidenceDigest;
+    const dir = await makeDir();
+    const result = await appendAdoptionReceipt(
+      join(dir, 'proof.jsonl'),
+      legacy,
+      { env: {}, shadowCallsDir: join(dir, 'shadow-calls') }
+    );
+    expect(result).toEqual({
+      ok: false,
+      status: 400,
+      error:
+        'New PROOF receipts require evidenceRef, evidenceDigest, and structured statistics',
     });
   });
 

@@ -24,7 +24,8 @@
  * src/lib and ~/.claude/shadow-calls/lib — nothing is reinvented here.
  */
 
-import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
 import {
   cpSync,
   mkdtempSync,
@@ -35,9 +36,8 @@ import {
   existsSync,
 } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, dirname, resolve } from 'node:path';
+import { isAbsolute, join, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execFile } from 'node:child_process';
 
 // --- TS-source imports (this repo's src/lib is loaded via the register-ts hook).
 import {
@@ -54,9 +54,16 @@ import {
   wilcoxonSignedRank,
   bootstrapCI,
   decideVerdict,
+  PRE_REGISTERED_ALPHA,
+  PRE_REGISTERED_MDE_PCT,
   PRE_REGISTERED_MIN_DECIDED,
 } from '../src/lib/proof-stats.ts';
 import { appendAdoptionReceipt } from '../src/lib/adoption-receipts.ts';
+import {
+  createProofEvidenceArtifact,
+  persistProofEvidenceArtifact,
+  verifyProofReceiptAgainstEvidence,
+} from '../src/lib/proof-evidence.ts';
 
 // --- Shadow-calls jail + killswitch (absolute paths; user-global lib).
 const SHADOW_LIB = join(homedir(), '.claude', 'shadow-calls', 'lib');
@@ -85,6 +92,7 @@ function parseArgs(argv) {
     totalBudgetUsd: 30,
     concurrency: 4,
     out: null,
+    evidenceDir: null,
     pairs: null, // optional allowlist of pairIds to run (repeatable --pair)
     dryRun: false,
     observedUsdPerMo: null,
@@ -103,6 +111,7 @@ function parseArgs(argv) {
       case '--total-budget-usd': a.totalBudgetUsd = Number(next()); break;
       case '--concurrency': a.concurrency = Number(next()); break;
       case '--out': a.out = next(); break;
+      case '--evidence-dir': a.evidenceDir = next(); break;
       case '--pair': (a.pairs ??= []).push(next()); break;
       case '--dry-run': a.dryRun = true; break;
       case '--observed-usd-per-mo': a.observedUsdPerMo = Number(next()); break;
@@ -128,6 +137,7 @@ function printUsage() {
   --total-budget-usd USD  batch spend cap; stops early if next pair would exceed (default 30)
   --concurrency N         max concurrent jailed workers (default 4)
   --out PATH              receipt JSONL path (default a /tmp path)
+  --evidence-dir PATH     immutable run-level evidence directory (default beside --out)
   --observed-usd-per-mo N #890 observed $/mo for the receipt (default a labeled placeholder)
   --dry-run               write the receipt to a temp file + print it, never the real log`);
 }
@@ -218,6 +228,7 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
       coldStart: true, // fixtures are self-contained; deny the real $HOME
     });
     const started = Date.now();
+    const startedAt = new Date(started).toISOString();
     const child = spawn(argv[0], argv.slice(1), {
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -227,11 +238,23 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
     child.on('error', (err) => {
-      resolveRun({ ok: false, unresolved: true, reason: `spawn error: ${err.message}`, wallMs: Date.now() - started, tempHome });
+      resolveRun({
+        ok: false,
+        unresolved: true,
+        reason: `spawn error: ${err.message}`,
+        wallMs: Date.now() - started,
+        tempHome,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        exitCode: null,
+        resultDigest: null,
+        resultType: null,
+      });
     });
     child.on('close', (code) => {
       const wallMs = Date.now() - started;
       let cj = null;
+      let selectedResultText = null;
       // The jailed worker runs with `--output-format stream-json --verbose`
       // (set by the shadow-calls buildWorkerLaunch), so stdout is NDJSON: many
       // JSON lines, the LAST of which is the `{"type":"result", total_cost_usd,
@@ -243,6 +266,7 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
           const obj = JSON.parse(lines[i]);
           if (obj && typeof obj === 'object') {
             cj = obj;
+            selectedResultText = lines[i];
             if (obj.type === 'result') break;
           }
         } catch {
@@ -251,14 +275,42 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
       }
       // Fallback for a single-object `--output-format json` build.
       if (!cj) {
-        try { cj = JSON.parse(stdout.trim()); } catch { /* give up */ }
+        try {
+          selectedResultText = stdout.trim();
+          cj = JSON.parse(selectedResultText);
+        } catch { /* give up */ }
       }
       if (!cj) {
-        resolveRun({ ok: false, unresolved: true, reason: `worker produced no parseable JSON (exit ${code})`, stderr: stderr.slice(-400), wallMs, tempHome });
+        resolveRun({
+          ok: false,
+          unresolved: true,
+          reason: `worker produced no parseable JSON (exit ${code})`,
+          stderr: stderr.slice(-400),
+          wallMs,
+          tempHome,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          exitCode: typeof code === 'number' ? code : null,
+          resultDigest: null,
+          resultType: null,
+        });
         return;
       }
       const stableReads = countStableReads(stdout, stablePaths);
-      resolveRun({ ok: true, cj, wallMs, exitCode: code, tempHome, stableReads });
+      resolveRun({
+        ok: true,
+        cj,
+        wallMs,
+        exitCode: typeof code === 'number' ? code : null,
+        tempHome,
+        stableReads,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        resultDigest: `sha256:${createHash('sha256')
+          .update(selectedResultText ?? '')
+          .digest('hex')}`,
+        resultType: typeof cj.type === 'string' ? cj.type : null,
+      });
     });
   });
 }
@@ -304,7 +356,8 @@ function runGate(tree, gate) {
  * A legacy single-session pair (no `chain`) runs as a 1-step chain — identical to
  * the prior behavior, minus the prompt prepend (now via CLAUDE.md).
  */
-async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
+async function runArmOnce({ pair, arm, runIndex, model, maxBudgetUsd }) {
+  const startedAt = new Date().toISOString();
   // Materialize a throwaway copy of the fixture tree (a standalone mini-repo,
   // NOT a git worktree). The jailed workers edit it across sessions; Gate 0
   // verifies the final state.
@@ -329,11 +382,29 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
   const tempHomes = [];
   const perStepCostUsd = [];
   const perStepTokens = [];
+  const perStepCostSources = [];
+  const workerResults = [];
   let costUsd = 0;
   let tokens = 0;
   let wallMs = 0;
   let stableReads = 0; // #2083 adherence: total stable-file tool touches across the chain
   let costSource;
+  const finishRun = (result) => ({
+    ...result,
+    pairId: pair.pairId,
+    arm,
+    runIndex,
+    modelVersion: model,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    sessions: steps.length,
+    perStepCostUsd,
+    perStepTokens,
+    perStepCostSources,
+    workerResults,
+    scratch,
+    tempHomes,
+  });
 
   for (let i = 0; i < steps.length; i++) {
     const where = `session ${i + 1}/${steps.length}`;
@@ -341,14 +412,32 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
     try {
       worker = await runWorker({ worktree: tree, prompt: buildPrompt(steps[i]), model, maxBudgetUsd, stablePaths });
     } catch (err) {
-      return { unresolved: true, reason: `worker exception (${where}): ${err.message}`, costUsd, tokens, costSource, wallMs, perStepCostUsd, scratch, tempHomes };
+      const failedAt = new Date().toISOString();
+      workerResults.push({
+        session: i + 1,
+        startedAt: failedAt,
+        finishedAt: failedAt,
+        exitCode: null,
+        resultDigest: null,
+        resultType: 'exception',
+      });
+      return finishRun({ unresolved: true, reason: `worker exception (${where}): ${err.message}`, costUsd, tokens, costSource, wallMs });
     }
     if (worker.tempHome) tempHomes.push(worker.tempHome);
+    workerResults.push({
+      session: i + 1,
+      startedAt: worker.startedAt,
+      finishedAt: worker.finishedAt,
+      exitCode: worker.exitCode,
+      resultDigest: worker.resultDigest,
+      resultType: worker.resultType,
+    });
     if (!worker.ok) {
-      return { unresolved: true, reason: `${worker.reason} (${where})`, costUsd, tokens, costSource, wallMs: wallMs + (worker.wallMs || 0), perStepCostUsd, scratch, tempHomes };
+      return finishRun({ unresolved: true, reason: `${worker.reason} (${where})`, costUsd, tokens, costSource, wallMs: wallMs + (worker.wallMs || 0) });
     }
     const { usd, source } = costFromWorkerJson(worker.cj, model);
     costSource = source;
+    perStepCostSources.push(source);
     const stepTokens = tokensFromWorkerJson(worker.cj);
     costUsd += usd;
     tokens += stepTokens;
@@ -359,13 +448,19 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
     const isError = worker.cj.is_error === true || worker.cj.subtype === 'error_max_turns' || worker.cj.subtype === 'error_during_execution';
     // A session that errored out (max-budget / crash) makes the chain UNRESOLVED.
     if (isError) {
-      return { unresolved: true, reason: `worker is_error/${worker.cj.subtype} (${where})`, costUsd, tokens, costSource, wallMs, perStepCostUsd, scratch, tempHomes };
+      return finishRun({ unresolved: true, reason: `worker is_error/${worker.cj.subtype} (${where})`, costUsd, tokens, costSource, wallMs });
     }
   }
 
   // Gate 0 on the FINAL accumulated tree.
-  const gate = await runGate(tree, pair.gate);
-  return {
+  const gateResult = await runGate(tree, pair.gate);
+  const gate = {
+    kind: pair.gate.kind,
+    command: pair.gate.command,
+    expectMatch: pair.gate.expectMatch ?? null,
+    ...gateResult,
+  };
+  return finishRun({
     unresolved: false,
     decidedSuccess: gate.pass,
     gate,
@@ -373,13 +468,8 @@ async function runArmOnce({ pair, arm, model, maxBudgetUsd }) {
     tokens,
     costSource,
     wallMs,
-    sessions: steps.length,
     stableReads,
-    perStepCostUsd,
-    perStepTokens,
-    scratch,
-    tempHomes,
-  };
+  });
 }
 
 function cleanupScratch(run) {
@@ -387,6 +477,66 @@ function cleanupScratch(run) {
   for (const p of paths) {
     if (p && existsSync(p)) { try { rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ } }
   }
+}
+
+function runEvidence(run) {
+  return {
+    runId: `${run.pairId}/${run.arm}/${run.runIndex}`,
+    pairId: run.pairId,
+    arm: run.arm,
+    runIndex: run.runIndex,
+    modelVersion: run.modelVersion,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    unresolved: run.unresolved,
+    unresolvedReason: run.unresolved ? run.reason ?? 'unresolved' : null,
+    decidedSuccess: run.unresolved ? null : run.decidedSuccess === true,
+    gate: run.gate
+      ? {
+          kind: run.gate.kind,
+          command: run.gate.command,
+          expectMatch: run.gate.expectMatch,
+          pass: run.gate.pass,
+          exitCode: run.gate.exitCode,
+          expectedExitCode: run.gate.expected,
+        }
+      : null,
+    costUsd: run.costUsd,
+    costSources:
+      run.perStepCostSources?.length > 0
+        ? [...run.perStepCostSources]
+        : run.costSource
+          ? [run.costSource]
+          : [],
+    tokenCounts: {
+      total: run.tokens,
+      perStep: [...(run.perStepTokens ?? [])],
+    },
+    wallMs: run.wallMs,
+    sessions: run.sessions,
+    stableReads: run.stableReads ?? 0,
+    perStepCostUsd: [...(run.perStepCostUsd ?? [])],
+    workerResults: [...(run.workerResults ?? [])],
+  };
+}
+
+function portableEvidenceRef(path) {
+  const repoRelative = relative(REPO_ROOT, path);
+  if (
+    repoRelative &&
+    repoRelative !== '..' &&
+    !repoRelative.startsWith(`..${sep}`)
+  ) {
+    return repoRelative.split(sep).join('/');
+  }
+  return path;
+}
+
+function evidencePathFromRef(ref) {
+  if (typeof ref !== 'string' || !ref.trim()) {
+    throw new Error('proof receipt has no evidenceRef');
+  }
+  return isAbsolute(ref) ? ref : resolve(REPO_ROOT, ref);
 }
 
 // ---------------------------------------------------------------- concurrency
@@ -420,6 +570,22 @@ async function main() {
     draft.externalReviewRef = args.externalReviewRef;
     if (args.qualification && !String(draft.rollout).includes(args.qualification)) {
       draft.rollout = `${draft.rollout}\n\nExternal-review qualification: ${args.qualification}`;
+    }
+    try {
+      const evidencePath = evidencePathFromRef(draft.evidenceRef);
+      const artifact = JSON.parse(readFileSync(evidencePath, 'utf8'));
+      const verification = verifyProofReceiptAgainstEvidence(draft, artifact);
+      if (!verification.ok) {
+        console.error(
+          `refusing to finalize receipt: ${verification.error}`
+        );
+        process.exit(5);
+      }
+    } catch (error) {
+      console.error(
+        `refusing to finalize receipt without verifiable evidence: ${error.message}`
+      );
+      process.exit(5);
     }
     const outPath = args.out || join(REPO_ROOT, 'data', 'proof-receipts.jsonl');
     const res = await appendAdoptionReceipt(outPath, draft);
@@ -467,6 +633,22 @@ async function main() {
     for (const id of args.pairs) if (!found.has(id)) console.warn(`--pair ${id}: no such pairId in bundle`);
   }
   const pairs = selectable.slice(0, args.limit);
+  const outPath =
+    args.out ||
+    (args.dryRun
+      ? join(tmpdir(), `proof-receipt-dryrun-${Date.now()}.jsonl`)
+      : join(REPO_ROOT, 'data', 'proof-receipts.jsonl'));
+  const evidenceDirectory = resolve(
+    args.evidenceDir || join(dirname(outPath), 'proof-evidence')
+  );
+  const observedUsdPerMo =
+    typeof args.observedUsdPerMo === 'number' && Number.isFinite(args.observedUsdPerMo)
+      ? args.observedUsdPerMo
+      : 0; // labeled placeholder; pass --observed-usd-per-mo for the real #890 figure
+  const observedAssumption =
+    typeof args.observedUsdPerMo === 'number' && Number.isFinite(args.observedUsdPerMo)
+      ? `observed $/mo supplied via --observed-usd-per-mo`
+      : `observed $/mo placeholder (0) — pass --observed-usd-per-mo with the #890 figure from real history`;
   const sessionsPer = (p) => chainSteps(p).length;
   const totalSessions = pairs.reduce((s, p) => s + sessionsPer(p) * 2 * args.k, 0);
   const mDesc = bundle.sessionsPerChain ? ` x M=${bundle.sessionsPerChain} sessions` : '';
@@ -496,11 +678,16 @@ async function main() {
     const arms = ['control', 'injected'];
     const armRuns = {};
     for (const arm of arms) {
-      const jobs = Array.from({ length: args.k }, () => ({ pair, arm, model: args.model, maxBudgetUsd: args.maxBudgetUsd }));
+      const jobs = Array.from({ length: args.k }, (_, index) => ({
+        pair,
+        arm,
+        runIndex: index + 1,
+        model: args.model,
+        maxBudgetUsd: args.maxBudgetUsd,
+      }));
       const runs = await mapLimit(jobs, args.concurrency, (job) => runArmOnce(job));
       for (const r of runs) totalSpend += r.costUsd || 0;
       armRuns[arm] = runs;
-      runs.forEach(cleanupScratch);
     }
 
     // Per-arm summary: median cost over the k runs, success counts, UNRESOLVED.
@@ -550,6 +737,39 @@ async function main() {
         `pair=${pairDecided ? 'DECIDED' : 'EXCLUDED'}`
     );
   }
+
+  const evidenceArtifact = createProofEvidenceArtifact({
+    schemaVersion: '1',
+    experimentRef: `proof-batch/${WASTE_PATTERN}`,
+    preRegistrationRef: PREREG_REF,
+    fixtureSetRef: bundle.bundle,
+    modelVersion: args.model,
+    createdAt: new Date().toISOString(),
+    pairOrder: perPair.map(({ pair }) => pair.pairId),
+    analysisPlan: {
+      bootstrapIters: 10_000,
+      bootstrapAlpha: 0.05,
+      bootstrapSeed: 1,
+      qualityTolerance: 0.05,
+      minDecidedPairs: PRE_REGISTERED_MIN_DECIDED,
+      minimumDetectableEffectPct: PRE_REGISTERED_MDE_PCT,
+      significanceAlpha: PRE_REGISTERED_ALPHA,
+      sessionsPerChain: bundle.sessionsPerChain ?? 0,
+      observedUsdPerMo,
+    },
+    runs: perPair.flatMap(({ control, injected }) => [
+      ...control.runs.map(runEvidence),
+      ...injected.runs.map(runEvidence),
+    ]),
+  });
+  const persistedEvidence = persistProofEvidenceArtifact(
+    evidenceArtifact,
+    evidenceDirectory
+  );
+  const evidenceRef = portableEvidenceRef(persistedEvidence.path);
+  console.log(
+    `immutable run evidence saved to ${persistedEvidence.path} (${persistedEvidence.artifactDigest})`
+  );
 
   // -------------------------------------------------------------- aggregation
   const decidedPairs = perPair.filter((p) => p.pairDecided);
@@ -648,15 +868,6 @@ async function main() {
   // proven/null/refuted receipt for it; we report it and (in a real run) skip
   // the append. For dry-runs we still build + print a representable object using
   // 'null' as the carrier and stating the honest framing in uncertainty/rollout.
-  const observedUsdPerMo =
-    typeof args.observedUsdPerMo === 'number' && Number.isFinite(args.observedUsdPerMo)
-      ? args.observedUsdPerMo
-      : 0; // labeled placeholder; pass --observed-usd-per-mo for the real #890 figure
-  const observedAssumption =
-    typeof args.observedUsdPerMo === 'number' && Number.isFinite(args.observedUsdPerMo)
-      ? `observed $/mo supplied via --observed-usd-per-mo`
-      : `observed $/mo placeholder (0) — pass --observed-usd-per-mo with the #890 figure from real history`;
-
   const notProvable = decision.verdict === 'not-yet-provable';
   const receiptVerdict = notProvable ? 'null' : decision.verdict;
   const uncertainty = notProvable
@@ -696,6 +907,20 @@ async function main() {
         costPct: Number.isFinite(medPctDelta) ? medPctDelta : 0,
         latencyMs: Number.isFinite(latMedDelta) ? latMedDelta : 0,
       },
+      statistics: {
+        nDecided,
+        controlSuccessRate,
+        injectedSuccessRate,
+        qualityHoldPass,
+        bootstrap: {
+          lo: Number.isFinite(ci.lo) ? ci.lo : null,
+          hi: Number.isFinite(ci.hi) ? ci.hi : null,
+          iters: ci.iters ?? 10_000,
+          alpha: 0.05,
+          seed: 1,
+        },
+        wilcoxon,
+      },
       // SUPPORTING readout (#2082): cumulative onset curve, never the verdict.
       ...(doseResponse.length ? { doseResponse } : {}),
       verdict: receiptVerdict,
@@ -714,15 +939,27 @@ async function main() {
     externalReviewRef: args.externalReviewRef || '',
     modelVersion: args.model,
     revalidationStatus: 'current',
+    evidenceRef,
+    evidenceDigest: persistedEvidence.artifactDigest,
   };
 
-  // -------------------------------------------------------------- emit receipt
-  const outPath =
-    args.out ||
-    (args.dryRun
-      ? join(tmpdir(), `proof-receipt-dryrun-${Date.now()}.jsonl`)
-      : join(REPO_ROOT, 'data', 'proof-receipts.jsonl'));
+  const evidenceVerification = verifyProofReceiptAgainstEvidence(
+    receipt,
+    evidenceArtifact
+  );
+  if (!evidenceVerification.ok) {
+    throw new Error(
+      `proof receipt does not rederive from its evidence: ${evidenceVerification.error}`
+    );
+  }
+  // The receipt now binds the immutable evidence, so disposable trees and
+  // credential-only temp homes can be removed without destroying provenance.
+  for (const pair of perPair) {
+    pair.control.runs.forEach(cleanupScratch);
+    pair.injected.runs.forEach(cleanupScratch);
+  }
 
+  // -------------------------------------------------------------- emit receipt
   console.log('\n=== PROOF RECEIPT ===');
   console.log(JSON.stringify(receipt, null, 2));
 

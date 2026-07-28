@@ -90,6 +90,24 @@ export interface ProofReceipt {
     effectSize: number;
     uncertainty: string;
     perDimensionDeltas: Record<string, number>;
+    statistics?: {
+      nDecided: number;
+      controlSuccessRate: number;
+      injectedSuccessRate: number;
+      qualityHoldPass: boolean;
+      bootstrap: {
+        lo: number | null;
+        hi: number | null;
+        iters: number;
+        alpha: number;
+        seed: number;
+      };
+      wilcoxon: {
+        statistic: number;
+        pOneSided: number;
+        n: number;
+      };
+    };
     verdict: ProofVerdict;
   };
   /** Projected reclaim with stated assumptions (the fixtures->history bridge is an extrapolation). */
@@ -105,6 +123,9 @@ export interface ProofReceipt {
   modelVersion: string;
   /** Freshness of the proof against the current model (maintained by re-running the corpus). */
   revalidationStatus: ProofRevalidationStatus;
+  /** Content-addressed run-level evidence used to independently rederive this receipt. */
+  evidenceRef?: string;
+  evidenceDigest?: string;
 }
 
 export type AdoptionReceipt =
@@ -158,6 +179,12 @@ function cleanString(value: unknown, maxLen: number): string | null {
 function cleanNumber(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return value;
+}
+
+function cleanNullableNumber(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  const number = cleanNumber(value);
+  return number === null ? undefined : number;
 }
 
 /** A value present in a small fixed enum, else null. */
@@ -255,6 +282,15 @@ export function sanitizeAdoptionReceipt(
     const externalReviewRef = cleanString(raw.externalReviewRef, MAX_ID_LEN);
     const modelVersion = cleanString(raw.modelVersion, MAX_ID_LEN);
     const revalidationStatus = normalizeProofRevalidationStatus(raw.revalidationStatus);
+    const hasEvidenceBinding =
+      Object.prototype.hasOwnProperty.call(raw, 'evidenceRef') ||
+      Object.prototype.hasOwnProperty.call(raw, 'evidenceDigest');
+    const evidenceRef = hasEvidenceBinding
+      ? cleanString(raw.evidenceRef, MAX_TEXT_LEN)
+      : null;
+    const evidenceDigest = hasEvidenceBinding
+      ? cleanString(raw.evidenceDigest, MAX_FINGERPRINT_LEN)
+      : null;
     if (
       !experimentRef ||
       !preRegistrationRef ||
@@ -262,6 +298,14 @@ export function sanitizeAdoptionReceipt(
       !externalReviewRef ||
       !modelVersion ||
       !revalidationStatus
+    ) {
+      return null;
+    }
+    if (
+      hasEvidenceBinding &&
+      (!evidenceRef ||
+        !evidenceDigest ||
+        !/^sha256:[0-9a-f]{64}$/.test(evidenceDigest))
     ) {
       return null;
     }
@@ -322,6 +366,77 @@ export function sanitizeAdoptionReceipt(
     }
     if (effectSize === null || !resultUncertainty || !verdict) return null;
 
+    let statistics: ProofReceipt['result']['statistics'];
+    if (Object.prototype.hasOwnProperty.call(resultRaw ?? {}, 'statistics')) {
+      const statisticsRaw =
+        resultRaw?.statistics &&
+        typeof resultRaw.statistics === 'object' &&
+        !Array.isArray(resultRaw.statistics)
+          ? (resultRaw.statistics as Record<string, unknown>)
+          : null;
+      const bootstrapRaw =
+        statisticsRaw?.bootstrap &&
+        typeof statisticsRaw.bootstrap === 'object' &&
+        !Array.isArray(statisticsRaw.bootstrap)
+          ? (statisticsRaw.bootstrap as Record<string, unknown>)
+          : null;
+      const wilcoxonRaw =
+        statisticsRaw?.wilcoxon &&
+        typeof statisticsRaw.wilcoxon === 'object' &&
+        !Array.isArray(statisticsRaw.wilcoxon)
+          ? (statisticsRaw.wilcoxon as Record<string, unknown>)
+          : null;
+      const nDecided = cleanNumber(statisticsRaw?.nDecided);
+      const controlSuccessRate = cleanNumber(
+        statisticsRaw?.controlSuccessRate
+      );
+      const injectedSuccessRate = cleanNumber(
+        statisticsRaw?.injectedSuccessRate
+      );
+      const bootstrapLo = cleanNullableNumber(bootstrapRaw?.lo);
+      const bootstrapHi = cleanNullableNumber(bootstrapRaw?.hi);
+      const bootstrapIters = cleanNumber(bootstrapRaw?.iters);
+      const bootstrapAlpha = cleanNumber(bootstrapRaw?.alpha);
+      const bootstrapSeed = cleanNumber(bootstrapRaw?.seed);
+      const wilcoxonStatistic = cleanNumber(wilcoxonRaw?.statistic);
+      const wilcoxonP = cleanNumber(wilcoxonRaw?.pOneSided);
+      const wilcoxonN = cleanNumber(wilcoxonRaw?.n);
+      if (
+        nDecided === null ||
+        controlSuccessRate === null ||
+        injectedSuccessRate === null ||
+        typeof statisticsRaw?.qualityHoldPass !== 'boolean' ||
+        bootstrapLo === undefined ||
+        bootstrapHi === undefined ||
+        bootstrapIters === null ||
+        bootstrapAlpha === null ||
+        bootstrapSeed === null ||
+        wilcoxonStatistic === null ||
+        wilcoxonP === null ||
+        wilcoxonN === null
+      ) {
+        return null;
+      }
+      statistics = {
+        nDecided,
+        controlSuccessRate,
+        injectedSuccessRate,
+        qualityHoldPass: statisticsRaw.qualityHoldPass,
+        bootstrap: {
+          lo: bootstrapLo,
+          hi: bootstrapHi,
+          iters: bootstrapIters,
+          alpha: bootstrapAlpha,
+          seed: bootstrapSeed,
+        },
+        wilcoxon: {
+          statistic: wilcoxonStatistic,
+          pOneSided: wilcoxonP,
+          n: wilcoxonN,
+        },
+      };
+    }
+
     const projectionRaw =
       raw.projection &&
       typeof raw.projection === 'object' &&
@@ -346,12 +461,21 @@ export function sanitizeAdoptionReceipt(
         n,
         objectiveGates,
       },
-      result: { effectSize, uncertainty: resultUncertainty, perDimensionDeltas, verdict },
+      result: {
+        effectSize,
+        uncertainty: resultUncertainty,
+        perDimensionDeltas,
+        ...(statistics ? { statistics } : {}),
+        verdict,
+      },
       projection: { reclaimUsdPerMo, assumptions },
       rollout,
       externalReviewRef,
       modelVersion,
       revalidationStatus,
+      ...(hasEvidenceBinding && evidenceRef && evidenceDigest
+        ? { evidenceRef, evidenceDigest }
+        : {}),
     };
   }
 
@@ -612,6 +736,22 @@ export async function appendAdoptionReceipt(
       status: 400,
       error:
         'Body must be a SURFACED, SUPPRESSED, REJECTED, or PROOF adoption receipt with required allowlisted fields',
+    };
+  }
+  // Historical PROOF rows without run-level evidence remain readable, but no
+  // new causal claim may be appended without the independently rederivable
+  // evidence contract introduced by #3097.
+  if (
+    record.kind === 'PROOF' &&
+    (!record.evidenceRef ||
+      !record.evidenceDigest ||
+      !record.result.statistics)
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        'New PROOF receipts require evidenceRef, evidenceDigest, and structured statistics',
     };
   }
 
