@@ -12,11 +12,11 @@ describe('findAccessToken', () => {
 
   it('matches case- and separator-insensitively (access_token, AccessToken)', () => {
     expect(findAccessToken({ access_token: 'snake' })).toBe('snake');
-    expect(findAccessToken({ deep: { AccessToken: 'pascal' } })).toBe('pascal');
+    expect(findAccessToken({ claudeAiOauth: { AccessToken: 'pascal' } })).toBe('pascal');
   });
 
   it('ignores a non-string token value and keeps searching', () => {
-    expect(findAccessToken({ accessToken: 123, nested: { accessToken: 'real' } })).toBe('real');
+    expect(findAccessToken({ accessToken: 123, claudeAiOauth: { accessToken: 'real' } })).toBe('real');
   });
 
   it('returns null when there is no token / bad input', () => {
@@ -43,8 +43,37 @@ describe('findAccessToken', () => {
     expect(findAccessToken(creds)).toBe('legacy-claude-tok');
   });
 
-  it('#1712: legacy single-block files still resolve (first-found fallback)', () => {
-    expect(findAccessToken({ mcpOAuth: { srv: { accessToken: 'only-tok' } } })).toBe('only-tok');
+  it('#3178: an MCP-only credential file resolves to null, never the MCP token', () => {
+    // This used to return 'only-tok' via a first-found fallback. That token is
+    // an MCP server's secret; the caller would have sent it to Anthropic as if
+    // it were the user's subscription credential.
+    expect(findAccessToken({ mcpOAuth: { srv: { accessToken: 'only-tok' } } })).toBeNull();
+  });
+
+  it('#3178: keeps resolving the legacy top-level credential shape', () => {
+    // Top level of .credentials.json is not a vendor-scoped block, so it stays
+    // positively identified — cross-version resilience is not sacrificed.
+    expect(findAccessToken({ accessToken: 'legacy-top-level' })).toBe('legacy-top-level');
+  });
+
+  it('#3178: fails closed on any unidentifiable token, whatever its position', () => {
+    expect(findAccessToken({ someVendor: { accessToken: 'vendor-tok' } })).toBeNull();
+    expect(
+      findAccessToken({
+        mcpOAuth: { a: { accessToken: 'mcp-a' }, b: { accessToken: 'mcp-b' } },
+        githubOauth: { accessToken: 'gho_notours' },
+      })
+    ).toBeNull();
+  });
+
+  it('#3178: still resolves the real credential when MCP tokens come first', () => {
+    expect(
+      findAccessToken({
+        mcpOAuth: { srv: { accessToken: 'mcp-tok' } },
+        githubOauth: { accessToken: 'gho_notours' },
+        claudeAiOauth: { accessToken: 'sk-ant-oat01-real' },
+      })
+    ).toBe('sk-ant-oat01-real');
   });
 });
 

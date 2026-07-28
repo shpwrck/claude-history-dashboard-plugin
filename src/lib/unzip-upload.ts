@@ -417,7 +417,12 @@ export async function unzipBundleFromChunks(
     const index = loaded.length;
     loaded.push(undefined);
     admittedCount += 1;
-    if (originalSize !== undefined) admittedBytes += originalSize;
+    // NOTE: `originalSize` is untrusted ZIP metadata, so it is only ever an
+    // EARLY REJECTION HINT (the checks above, which avoid decompressing an
+    // entry that already declares itself too big). It is deliberately not
+    // added to `admittedBytes`: an entry can declare 1 KiB and emit 2 GiB, and
+    // accounting from the declaration would let that sail past both budgets.
+    // All accounting below is from bytes we actually observed (#3176).
 
     const decoder = new TextDecoder();
     const path = file.name;
@@ -450,28 +455,26 @@ export async function unzipBundleFromChunks(
           }
           if (chunk) {
             observedBytes += chunk.byteLength;
-            if (originalSize === undefined) {
-              if (observedBytes > maxEntryBytes) {
-                const tooLarge = new UploadTooLargeError(
-                  `"${path}" is over the ${formatBytes(maxEntryBytes)} per-file limit. ` +
-                    `That file looks corrupt or not a supported agent transcript - remove it and try again.`
-                );
-                rejectWithOverflow(tooLarge);
-                file.terminate();
-                reject(tooLarge);
-                return;
-              }
-              admittedBytes += chunk.byteLength;
-              if (admittedBytes > maxTotalBytes) {
-                const tooLarge = new UploadTooLargeError(
-                  `This archive inflates to over ${formatBytes(maxTotalBytes)}, past the upload limit. ` +
-                    `For a dataset this large, run the dashboard against your live ~/.claude directory instead.`
-                );
-                rejectWithOverflow(tooLarge);
-                file.terminate();
-                reject(tooLarge);
-                return;
-              }
+            if (observedBytes > maxEntryBytes) {
+              const tooLarge = new UploadTooLargeError(
+                `"${path}" is over the ${formatBytes(maxEntryBytes)} per-file limit. ` +
+                  `That file looks corrupt or not a supported agent transcript - remove it and try again.`
+              );
+              rejectWithOverflow(tooLarge);
+              file.terminate();
+              reject(tooLarge);
+              return;
+            }
+            admittedBytes += chunk.byteLength;
+            if (admittedBytes > maxTotalBytes) {
+              const tooLarge = new UploadTooLargeError(
+                `This archive inflates to over ${formatBytes(maxTotalBytes)}, past the upload limit. ` +
+                  `For a dataset this large, run the dashboard against your live ~/.claude directory instead.`
+              );
+              rejectWithOverflow(tooLarge);
+              file.terminate();
+              reject(tooLarge);
+              return;
             }
             text += decoder.decode(chunk, { stream: !final });
           }

@@ -41,7 +41,24 @@ function collectAccessTokens(
 // the naive walk returned an MCP token and every usage ping 401'd. Rank the
 // candidates: a `sk-ant-oat`-prefixed token (the Claude subscription credential)
 // wins regardless of position; then a token whose enclosing block name mentions
-// "claude"; then the legacy first-found fallback for cross-version resilience.
+// "claude".
+//
+// #3178: there is deliberately NO first-found fallback. The caller hands this
+// return value to the Anthropic egress chokepoint as the subscription OAuth
+// credential, so guessing turns an unrelated secret in ~/.claude — an MCP
+// server's access token, most concretely — into something we transmit to a
+// third party. A token is returned only when it is POSITIVELY identified as the
+// Claude credential:
+//
+//   1. it carries the `sk-ant-oat` prefix (definitive), or
+//   2. its enclosing block name mentions "claude" (`claudeAiOauth`, ...), or
+//   3. it sits at the TOP LEVEL of .credentials.json — the documented legacy
+//      shape, and the one position that cannot belong to a vendor-scoped block.
+//
+// Anything else — a token nested under `mcpOAuth`, `githubOauth`, or any other
+// third-party block — is someone else's secret, so an unidentifiable credential
+// file is treated as a missing one: fail closed and let the caller degrade (the
+// gauge just reports no usage data) rather than send that token off the box.
 export function findAccessToken(node: unknown): string | null {
   const candidates = collectAccessTokens(node);
   if (!candidates.length) return null;
@@ -49,7 +66,9 @@ export function findAccessToken(node: unknown): string | null {
   if (claudePrefixed) return claudePrefixed.value;
   const claudeBlock = candidates.find((c) => /claude/i.test(c.parentKey));
   if (claudeBlock) return claudeBlock.value;
-  return candidates[0].value;
+  const topLevel = candidates.find((c) => c.parentKey === '');
+  if (topLevel) return topLevel.value;
+  return null;
 }
 
 export type UsageWindow = {

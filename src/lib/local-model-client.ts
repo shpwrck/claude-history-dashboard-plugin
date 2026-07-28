@@ -10,7 +10,10 @@
  *    it is pinned to loopback (127.0.0.0/8, ::1, localhost) by
  *    `assertLoopbackEndpoint`. The surface therefore CANNOT reach a third-party
  *    API by construction — any non-loopback host is refused before any request
- *    is made.
+ *    is made. The guard covers EVERY hop, not just the first: the request sets
+ *    `redirect: 'manual'` and refuses any 3xx, because default fetch would
+ *    replay a 307/308 (POST body and all) at whatever host the local service
+ *    named, quietly carrying the prompt off loopback (#3132).
  *  - There is deliberately NO external fallback wired in v0.6.0: the default
  *    deployment path (endpoint unset) makes ZERO network calls, and an
  *    unset / unreachable / refused endpoint degrades to the deterministic engine
@@ -126,6 +129,12 @@ export interface LocalModelChatResult {
   model: string;
 }
 
+/** True for any response that asks the caller to go somewhere else. */
+function isRedirect(resp: Response): boolean {
+  if (resp.type === 'opaqueredirect') return true;
+  return resp.status >= 300 && resp.status < 400;
+}
+
 function extractChatText(body: unknown): string {
   if (!body || typeof body !== 'object') return '';
   const choices = (body as { choices?: unknown }).choices;
@@ -182,6 +191,12 @@ export async function callLocalModel(
         stream: false,
       }),
       signal: controller.signal,
+      // The loopback guard above only vets the FIRST hop. Default fetch follows
+      // 3xx redirects transparently and replays a 307/308 with the POST body
+      // intact, so a local service could bounce the prompt to any external host
+      // and the "loopback only" guarantee would silently not hold (#3132).
+      // 'manual' hands us the redirect response instead of chasing it.
+      redirect: 'manual',
     });
   } catch (err) {
     throw new LocalModelError(
@@ -190,6 +205,18 @@ export async function callLocalModel(
     );
   } finally {
     clearTimeout(timer);
+  }
+
+  // Refuse redirects outright rather than revalidating a Location: the local
+  // transport has no reason to need one, and refusing is the only response that
+  // cannot leak the request body. `type === 'opaqueredirect'` is what a fetch
+  // implementation reports under `redirect: 'manual'` when it will not expose
+  // the 3xx itself (status reads 0 there, so check it before `resp.ok`).
+  if (isRedirect(resp)) {
+    throw new LocalModelError(
+      'ERR_LOCAL_MODEL_REDIRECT',
+      'Local model endpoint attempted a redirect; refusing to follow it off loopback'
+    );
   }
 
   if (!resp.ok) {

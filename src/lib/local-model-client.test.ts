@@ -177,3 +177,99 @@ describe('local-model-client source (governance: no external Anthropic literal)'
     expect(source.includes(banned)).toBe(false);
   });
 });
+
+/**
+ * #3132 — the loopback guard only vets the first hop. Default fetch follows
+ * 3xx transparently and replays a 307/308 with the POST body intact, so a
+ * local service could bounce the prompt to any external host while the module
+ * still claimed "loopback only".
+ */
+describe('redirect refusal (governance: loopback holds for every hop)', () => {
+  const redirectResponse = (status: number, location: string): Response =>
+    ({
+      ok: false,
+      status,
+      type: 'default',
+      headers: new Headers({ location }),
+      json: async () => ({}),
+    }) as unknown as Response;
+
+  it.each([307, 308, 301, 302, 303])(
+    'refuses a %i redirect pointing off loopback and never calls the redirected host',
+    async (status) => {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValue(redirectResponse(status, 'https://example.invalid/v1/chat/completions'));
+
+      await expect(
+        callLocalModel({
+          endpoint: 'http://127.0.0.1:11434/v1',
+          model: 'qwen2.5-coder',
+          messages: [{ role: 'user', content: 'secret prompt' }],
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        })
+      ).rejects.toMatchObject({ code: 'ERR_LOCAL_MODEL_REDIRECT' });
+
+      // Exactly one request, and it went to loopback.
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(String(fetchImpl.mock.calls[0][0])).toContain('127.0.0.1');
+      for (const call of fetchImpl.mock.calls) {
+        expect(String(call[0])).not.toContain('example.invalid');
+      }
+    }
+  );
+
+  it('asks fetch not to follow redirects in the first place', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      okResponse({ model: 'm', choices: [{ message: { content: 'ok' } }] })
+    );
+
+    await callLocalModel({
+      endpoint: 'http://127.0.0.1:11434/v1',
+      model: 'm',
+      messages: [{ role: 'user', content: 'analyze' }],
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
+  });
+
+  it('refuses an opaqueredirect response, whose status reads 0', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      ({
+        ok: false,
+        status: 0,
+        type: 'opaqueredirect',
+        headers: new Headers(),
+        json: async () => ({}),
+      }) as unknown as Response
+    );
+
+    await expect(
+      callLocalModel({
+        endpoint: 'http://127.0.0.1:11434/v1',
+        model: 'm',
+        messages: [{ role: 'user', content: 'analyze' }],
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+    ).rejects.toMatchObject({ code: 'ERR_LOCAL_MODEL_REDIRECT' });
+  });
+
+  it('still accepts a normal loopback 200', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      okResponse({
+        model: 'qwen2.5-coder',
+        choices: [{ message: { role: 'assistant', content: 'Focus on cache waste.' } }],
+      })
+    );
+
+    await expect(
+      callLocalModel({
+        endpoint: 'http://127.0.0.1:11434/v1',
+        model: 'qwen2.5-coder',
+        messages: [{ role: 'user', content: 'analyze' }],
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+    ).resolves.toMatchObject({ text: 'Focus on cache waste.' });
+  });
+});

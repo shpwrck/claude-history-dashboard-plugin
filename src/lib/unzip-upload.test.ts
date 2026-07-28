@@ -481,3 +481,85 @@ describe('unzipBundle', () => {
     });
   });
 });
+
+/**
+ * #3176 — ZIP size fields are attacker-controlled metadata. The budget used to
+ * be accounted from `originalSize` whenever it was present, and the observed-
+ * byte checks were skipped in exactly that case, so an entry that declared
+ * itself small could inflate without bound and exhaust the tab's memory.
+ */
+describe('unzipBundle forged size metadata (#3176)', () => {
+  function buildZip(files: Record<string, string>): Uint8Array {
+    const tree: Record<string, Uint8Array> = {};
+    for (const [path, content] of Object.entries(files)) tree[path] = strToU8(content);
+    return zipSync(tree);
+  }
+
+  /**
+   * Overwrite the DECLARED uncompressed size in every local-file and
+   * central-directory header. The compressed size is left alone, so the entry
+   * still inflates fully — DEFLATE is self-terminating and does not stop at the
+   * declared length. This is what a hand-crafted malicious archive looks like:
+   * the metadata says "tiny", the stream emits anything it likes.
+   */
+  function forgeDeclaredSize(zip: Uint8Array, declared: number): Uint8Array {
+    const out = zip.slice();
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    for (let i = 0; i + 4 <= out.length; i += 1) {
+      const sig = dv.getUint32(i, true);
+      if (sig === 0x04034b50) dv.setUint32(i + 22, declared, true);
+      else if (sig === 0x02014b50) dv.setUint32(i + 24, declared, true);
+    }
+    return out;
+  }
+
+  it('rejects an entry that emits past maxEntryBytes despite a small declared size', async () => {
+    const zip = forgeDeclaredSize(
+      buildZip({ 'projects/p/sess.jsonl': 'x'.repeat(200_000) }),
+      10
+    );
+
+    await expect(unzipBundle(zip, { maxEntryBytes: 50_000 })).rejects.toBeInstanceOf(
+      UploadTooLargeError
+    );
+  });
+
+  it('rejects an archive that emits past maxTotalBytes despite small declared sizes', async () => {
+    const zip = forgeDeclaredSize(
+      buildZip({
+        'projects/p/a.jsonl': 'a'.repeat(120_000),
+        'projects/p/b.jsonl': 'b'.repeat(120_000),
+      }),
+      10
+    );
+
+    await expect(
+      unzipBundle(zip, { maxEntryBytes: 200_000, maxTotalBytes: 150_000 })
+    ).rejects.toBeInstanceOf(UploadTooLargeError);
+  });
+
+  it('does not double-count an accurate archive (declared + observed)', async () => {
+    // 40 KB of real content. A budget just over that must still admit it: if
+    // the declared size were added on top of the observed bytes, the effective
+    // usage would be ~80 KB and this would wrongly reject.
+    const content = 'y'.repeat(40_000);
+    const zip = buildZip({ 'projects/p/sess.jsonl': content });
+
+    const loaded = await unzipBundle(zip, {
+      maxEntryBytes: 50_000,
+      maxTotalBytes: 45_000,
+    });
+
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].text).toHaveLength(40_000);
+  });
+
+  it('still rejects early on an honestly-declared oversize entry', async () => {
+    // The declared size keeps its job as a cheap pre-decompression hint.
+    const zip = buildZip({ 'projects/p/sess.jsonl': 'z'.repeat(200_000) });
+
+    await expect(unzipBundle(zip, { maxEntryBytes: 50_000 })).rejects.toBeInstanceOf(
+      UploadTooLargeError
+    );
+  });
+});
