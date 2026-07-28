@@ -4,6 +4,7 @@ import type { LiveConfig } from '../types';
 import type { SessionAttribution } from './parse-agents';
 
 const now = Date.UTC(2026, 0, 15);
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function liveConfig(overrides: Partial<LiveConfig> = {}): LiveConfig {
   return {
@@ -33,6 +34,25 @@ function attribution(
     ),
     commands: {},
     mcpServers: {},
+    mcpTools: {},
+  };
+}
+
+function mcpAttribution(
+  sessionId: string,
+  mcpServers: Record<string, number>
+): SessionAttribution {
+  return {
+    sessionId,
+    agents: {},
+    skills: {},
+    commands: {},
+    mcpServers: Object.fromEntries(
+      Object.entries(mcpServers).map(([id, invocations]) => [
+        id,
+        { invocations, outputTokens: 0 },
+      ])
+    ),
     mcpTools: {},
   };
 }
@@ -136,5 +156,325 @@ describe('computeConfigHygiene structural exclusions (#2015)', () => {
     expect(got).toContain('groom-release');
     expect(got).toContain('handoff-to-agent');
     expect(got).toContain('ponytail-lite');
+  });
+});
+
+describe('computeConfigHygiene no-session input (#3118)', () => {
+  it('emits no findings when there are no retained sessions at all, even with installed resources', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        skills: [
+          { id: 'build-helper', scope: 'user', path: '/u/.claude/skills/build-helper' },
+        ],
+        mcpServers: [
+          { id: 'server-a', scope: 'global', sourcePath: '/u/.claude.json' },
+        ],
+      }),
+      // Empty sessions AND empty attribution — zero observation window, so
+      // nothing can be honestly called "unused".
+      attribution: [],
+      sessions: [],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it('still applies the window-shorter-than-threshold hedge for a non-empty sub-30-day dataset', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        skills: [
+          { id: 'build-helper', scope: 'user', path: '/u/.claude/skills/build-helper' },
+        ],
+      }),
+      attribution: [],
+      // One session, 2 days of retained history — well short of the 30-day
+      // active window, so the finding must still fire but carry the hedge.
+      sessions: [{ sessionId: 's1', startTime: now - 2 * DAY_MS }],
+      now,
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      resourceId: 'build-helper',
+      hedge: 'window-shorter-than-threshold',
+    });
+  });
+});
+
+describe('computeConfigHygiene project-scoped MCP servers (#3119)', () => {
+  it('does not let usage in an unrelated project suppress a project-scoped server finding', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      // Same server id "db" invoked in an entirely different project.
+      attribution: [mcpAttribution('s-b', { db: 5 })],
+      // Both projects have a retained session — /repo/a's is genuinely
+      // unused, /repo/b's is the unrelated invocation that must not bleed
+      // into /repo/a's finding.
+      sessions: [
+        { sessionId: 's-a', project: '/repo/a', startTime: now },
+        { sessionId: 's-b', project: '/repo/b', startTime: now },
+      ],
+      now,
+    });
+
+    expect(findings).toMatchObject([
+      {
+        id: 'mcpServer.unused:db@/repo/a',
+        resourceType: 'mcpServer',
+        resourceId: 'db',
+        scope: { kind: 'project', project: '/repo/a' },
+        lifetimeCount: 0,
+        windowCount: 0,
+      },
+    ]);
+  });
+
+  it('suppresses the project-scoped finding when usage is inside that project', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [mcpAttribution('s-a', { db: 5 })],
+      sessions: [{ sessionId: 's-a', project: '/repo/a', startTime: now }],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it('evaluates every entry in enabledByProjects independently, one finding per still-unused observed project', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            // Same server id owned by two different projects — usage in one
+            // must not suppress the finding for the other, and both must be
+            // considered rather than only enabledByProjects[0].
+            enabledByProjects: ['/repo/a', '/repo/b'],
+          },
+        ],
+      }),
+      attribution: [mcpAttribution('s-a', { db: 5 })],
+      // Both projects have retained sessions, so both are legitimately
+      // observed; only /repo/a actually used the server.
+      sessions: [
+        { sessionId: 's-a', project: '/repo/a', startTime: now },
+        { sessionId: 's-b', project: '/repo/b', startTime: now },
+      ],
+      now,
+    });
+
+    // /repo/a used it => no finding for /repo/a; /repo/b never used it (but
+    // was observed) => finding fires.
+    expect(findings).toMatchObject([
+      {
+        resourceType: 'mcpServer',
+        resourceId: 'db',
+        scope: { kind: 'project', project: '/repo/b' },
+        lifetimeCount: 0,
+        windowCount: 0,
+      },
+    ]);
+    expect(findings).toHaveLength(1);
+  });
+
+  it('does not claim a project-scoped server is unused when its project has no retained sessions at all (#3118 pattern one level down)', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [],
+      // Only a session in a *different* project — /repo/a itself has zero
+      // retained sessions, so there is no observation window for it at all.
+      // An empty window is not evidence of disuse, so no finding may fire.
+      sessions: [{ sessionId: 's-b', project: '/repo/b', startTime: now }],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it('does not claim a project-scoped server is unused when its only session for that project is stale (outside the 30-day window)', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [],
+      sessions: [
+        // /repo/a's ONLY session is 40 days old — outside the active 30-day
+        // window — so there is no in-window observation for /repo/a even
+        // though /repo/b's recent session means the (global) hedge would
+        // not fire either. Zero in-window data is exactly as unfounded a
+        // basis for "unused" as zero data at all (generalizing #3118).
+        { sessionId: 's-a-stale', project: '/repo/a', startTime: now - 40 * DAY_MS },
+        { sessionId: 's-b-recent', project: '/repo/b', startTime: now - 1 * DAY_MS },
+      ],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it("hedges a project-scoped finding from its OWN project's coverage, not a different project's longer history", () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [],
+      sessions: [
+        // /repo/a's only session is 2 days old — well short of the 30-day
+        // window — so its finding must carry the hedge. /repo/b's session
+        // is 40 days old (older than the window, so /repo/b itself is not
+        // even in-window-observed) — but critically, if the hedge were
+        // still computed globally across every session, the GLOBAL oldest
+        // session would be /repo/b's 40-day-old one, making the overall
+        // "data window" look >= 30 days and wrongly suppressing the hedge
+        // /repo/a's own two days of history should carry (the reviewer's
+        // exact residual on top of #3118/#3119).
+        { sessionId: 's-a-recent', project: '/repo/a', startTime: now - 2 * DAY_MS },
+        { sessionId: 's-b-old', project: '/repo/b', startTime: now - 40 * DAY_MS },
+      ],
+      now,
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      id: 'mcpServer.unused:db@/repo/a',
+      resourceType: 'mcpServer',
+      resourceId: 'db',
+      scope: { kind: 'project', project: '/repo/a' },
+      lifetimeCount: 0,
+      windowCount: 0,
+      hedge: 'window-shorter-than-threshold',
+    });
+  });
+
+  it('matches usage by canonical project identity, not raw string spelling — a session under a differently-spelled but equivalent project root still counts as usage', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [
+        // s-plain never invoked db; s-slash — an equivalent, differently-
+        // spelled project root (trailing slash) — DID invoke it. Raw string
+        // equality would admit /repo/a through the observation gate via
+        // s-plain while excluding s-slash's invocation from the usage
+        // summary (its spelling doesn't strictly equal the enabledByProjects
+        // entry), falsely reporting db as unused despite being demonstrably
+        // used inside /repo/a.
+        mcpAttribution('s-slash', { db: 5 }),
+      ],
+      sessions: [
+        { sessionId: 's-plain', project: '/repo/a', startTime: now },
+        { sessionId: 's-slash', project: '/repo/a/', startTime: now },
+      ],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+
+  it('does not treat a future-timestamped session as in-window observation (clock skew / malformed data)', () => {
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [],
+      // /repo/a's ONLY session is timestamped an hour AFTER `now` — clock
+      // skew, or malformed imported data — so there is no valid current-or-
+      // historical observation of /repo/a at all. A lower-bound-only window
+      // check would still admit it (a future timestamp is >= windowStart).
+      sessions: [
+        { sessionId: 's-future', project: '/repo/a', startTime: now + 60 * 60 * 1000 },
+      ],
+      now,
+    });
+
+    expect(findings).toEqual([]);
+  });
+});
+
+describe('computeConfigHygiene project key namespacing (#3119)', () => {
+  it('does not let an uncanonicalizable project spelling collide with a canonical key', () => {
+    const now = Date.now();
+    // 'posix:/repo/a' is the serialized form of the canonical key for
+    // '/repo/a'. If the raw fallback returned it unchanged, this config entry
+    // and the /repo/a session would land in the same map bucket: the session
+    // would admit the entry through the observation gate, while
+    // usagesForProject -- which compares by identity, not by this key --
+    // correctly excludes its usage. The result is an "unused" finding with no
+    // evidence behind it, which is the exact failure this PR exists to close.
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['posix:/repo/a'],
+          },
+        ],
+      }),
+      attribution: [],
+      sessions: [{ sessionId: 's1', project: '/repo/a', startTime: now }],
+      now,
+    });
+
+    expect(findings.filter((f) => f.id.startsWith('mcpServer.unused'))).toEqual([]);
   });
 });

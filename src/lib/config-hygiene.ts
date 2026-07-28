@@ -45,6 +45,7 @@ import type {
   SettingsEnvironmentObservation,
 } from '../types';
 import type { SessionAttribution } from './parse-agents';
+import { projectIdentityKey, sameProjectIdentity } from './project-identity';
 
 /**
  * The resource families v1 of the hygiene engine knows about. `hook` and
@@ -225,11 +226,11 @@ function resourceScope(resource: { scope?: string; projectPath?: string }): Hygi
  * we tag findings with the `window-shorter-than-threshold` hedge so the UI
  * can phrase honestly instead of overstating staleness.
  *
- * Returns `Infinity` when there are no sessions at all, so the "data window
- * shorter than threshold" check naturally evaluates false (we can't claim a
- * resource is unused when there's nothing to compare against, but in that
- * case `lifetimeCount` would also be 0 and we'd surface it as unused with
- * the hedge anyway — that's the honest reading).
+ * Returns `Infinity` when there are no sessions at all — kept defined for
+ * this helper in isolation, but `computeConfigHygiene` (#3118) now returns no
+ * findings at all *before* reaching this call when `sessions` is empty:
+ * zero retained sessions is zero observation, not evidence for "unused", so
+ * no hedge can make an unused claim honest in that case.
  */
 function effectiveDataWindowDays(
   sessions: HygieneInput['sessions'],
@@ -296,36 +297,196 @@ function skillManifestPath(resourcePath: string | undefined): string | undefined
  *  - global server, used nowhere → one global finding
  *  - project-scoped server, unused inside its project → one per-project
  *    finding (we never emit a "global unused" for a project-scoped server)
+ *
+ * A project-scoped server's usage MUST be summarised scoped to its own
+ * project (#3119): passing no `project` to `summariseUsage` means a
+ * same-named MCP server invoked in a completely unrelated project would
+ * incorrectly suppress this project's unused finding. `enabledByProjects`
+ * is also evaluated entry-by-entry rather than collapsed to `[0]`, so a
+ * server that in principle lists more than one owning project gets one
+ * independently-summarised finding per project instead of silently
+ * dropping the rest.
+ *
+ * Scoping to a project reproduces #3118's "no evidence" problem one level
+ * down, and the general form of that problem is "no evidence *inside the
+ * window the claim is about*" — not merely "no evidence ever". A project
+ * whose only retained session is 40 days old still has zero observation
+ * inside the active 30-day window, so an "unused in the last 30 days" claim
+ * for it is exactly as unfounded as one for a project with no sessions at
+ * all. `projectMcpObservations` — keyed by every project with at least one
+ * session whose `startTime >= windowStart`, mapping to *that project's own*
+ * hedge (see {@link computeProjectMcpObservations}) — gates each per-project
+ * finding on presence, and hedges it on the mapped value, so a stale-only
+ * project is excluded the same way an unobserved one is, and a
+ * thinly-observed project (in-window, but with only a few days of its own
+ * history) is hedged from its own coverage rather than borrowing a
+ * different project's longer one. Guard and hedge are one computation, so
+ * they cannot disagree (#3118/#3119).
+ *
+ * `enabledByProjects` and `session.project` are independently-sourced
+ * spellings of the same project root, so they can disagree on separators,
+ * trailing slashes, or Windows drive-letter/UNC case even when they name the
+ * same project. `projectMcpObservations` is keyed by canonical identity
+ * ({@link mcpProjectKey}), and `usagesForProject` matches by
+ * {@link sameProjectIdentity} rather than raw string equality, so a session
+ * recorded under one spelling still counts as usage — and as
+ * observation-in-window — for a config entry recorded under an equivalent
+ * one. Otherwise a real invocation could be excluded from the usage summary
+ * while still admitting the project through the observation gate, producing
+ * an "unused" finding for a server that is demonstrably in use.
  */
 function findingsForMcpServers(
   servers: LiveMcpServer[],
   usages: SessionUsage[],
   windowStart: number,
-  hedge: HygieneHedge | undefined
+  hedge: HygieneHedge | undefined,
+  projectMcpObservations: ReadonlyMap<string, HygieneHedge | undefined>
 ): HygieneFinding[] {
   const out: HygieneFinding[] = [];
   for (const s of servers) {
-    const summary = summariseUsage(
-      s.id,
-      usages,
-      windowStart,
-      (u, id) => u.mcpServers[id] ?? 0
-    );
-    if (summary.windowCount > 0) continue;
-    const scope: HygieneScope =
-      s.scope === 'global'
-        ? { kind: 'global' }
-        : { kind: 'project', project: s.enabledByProjects?.[0] ?? '(unknown)' };
-    out.push(
-      emitUnusedFinding({
-        resourceType: 'mcpServer',
-        resourceId: s.id,
-        scope,
-        summary,
-        hedge,
-        sourcePath: s.sourcePath,
-      })
-    );
+    if (s.scope === 'global') {
+      const summary = summariseUsage(
+        s.id,
+        usages,
+        windowStart,
+        (u, id) => u.mcpServers[id] ?? 0
+      );
+      if (summary.windowCount > 0) continue;
+      out.push(
+        emitUnusedFinding({
+          resourceType: 'mcpServer',
+          resourceId: s.id,
+          scope: { kind: 'global' },
+          summary,
+          hedge,
+          sourcePath: s.sourcePath,
+        })
+      );
+      continue;
+    }
+
+    const projects =
+      s.enabledByProjects && s.enabledByProjects.length > 0
+        ? s.enabledByProjects
+        : ['(unknown)'];
+    for (const project of projects) {
+      const key = mcpProjectKey(project);
+      // No session for this project *inside the active window* → no
+      // in-window observation → cannot honestly claim "unused" within that
+      // window (#3118's reasoning, generalized to staleness as well as
+      // absence — a project whose only session predates the window is
+      // exactly as unobserved-in-window as one with no session at all).
+      // Looked up by canonical identity so an equivalent spelling of the
+      // same project still matches.
+      if (!projectMcpObservations.has(key)) continue;
+      const summary = summariseUsage(
+        s.id,
+        // Matched by canonical project identity (#3119 follow-up), not raw
+        // `u.project === project` string equality — see the doc comment
+        // above for why that matters.
+        usagesForProject(usages, project),
+        windowStart,
+        (u, id) => u.mcpServers[id] ?? 0
+      );
+      if (summary.windowCount > 0) continue;
+      out.push(
+        emitUnusedFinding({
+          resourceType: 'mcpServer',
+          resourceId: s.id,
+          scope: { kind: 'project', project },
+          summary,
+          // This project's own hedge — never the global one — so a thinly
+          // observed project can't inherit an unrelated project's longer
+          // history and lose a hedge it should carry.
+          hedge: projectMcpObservations.get(key),
+          sourcePath: s.sourcePath,
+        })
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Canonical key for a project spelling, scoped to the MCP per-project guard/
+ * hedge/usage-matching above (#3119 follow-up). Collapses spellings
+ * `project-identity.ts` proves equivalent (trailing slash, path-separator or
+ * drive-letter/UNC case on Windows) via {@link projectIdentityKey}, falling
+ * back to the raw string when it isn't a provably canonicalizable absolute
+ * path — the same fallback {@link sameProjectIdentity} uses, so two
+ * unparseable-but-textually-equal spellings still match.
+ */
+function mcpProjectKey(project: string): string {
+  const canonical = projectIdentityKey(project);
+  // Namespace the raw fallback so it can never collide with a canonical key.
+  // `projectIdentityKey` returns a serialized form (e.g. `posix:/repo/a`); a
+  // project string that happens to equal one of those would otherwise map to
+  // the same bucket as the genuinely-different identity it resembles, letting
+  // an unrelated session pass the observation gate while `usagesForProject`
+  // (which compares by `sameProjectIdentity`, not by this key) correctly
+  // excludes its usage — an evidence-free "unused" claim.
+  return canonical ?? `raw:${project}`;
+}
+
+/**
+ * `usages` restricted to one project, matched by canonical identity
+ * ({@link sameProjectIdentity}) rather than raw string equality — see the
+ * {@link findingsForMcpServers} doc comment for why a project-scoped MCP
+ * server needs this instead of `summariseUsage`'s built-in strict-equality
+ * project filter.
+ */
+function usagesForProject(usages: SessionUsage[], project: string): SessionUsage[] {
+  return usages.filter(
+    (u) => u.project != null && sameProjectIdentity(u.project, project)
+  );
+}
+
+/**
+ * Per-project MCP observation map: presence of a project's canonical key
+ * ({@link mcpProjectKey}) is the #3118/#3119 in-window guard (at least one
+ * session with `windowStart <= startTime <= now`); the value is that
+ * project's OWN hedge, derived from the span between *its own* oldest
+ * retained session and `now` — the same shape as
+ * {@link effectiveDataWindowDays}, just scoped to one project instead of
+ * every session. Computing guard and hedge from the same per-project data
+ * means they can never disagree: a project can't pass the guard via its own
+ * in-window session yet get hedged (or not) using a completely different
+ * project's coverage.
+ *
+ * Two upper-bound rules keep this honest:
+ *  - Sessions are grouped by canonical project identity, not raw string
+ *    equality, so `/repo/a/` and `/repo/a` (or a Windows drive-letter/UNC
+ *    case/separator variant) contribute to the same project's guard and
+ *    coverage instead of silently splitting into two.
+ *  - A session timestamped after `now` (clock skew, or malformed imported
+ *    data) is excluded entirely — from both the in-window guard and the
+ *    coverage span — mirroring the upper bound `computeActivityRollups`
+ *    (`session-summaries.ts`) already applies. Without this, a project with
+ *    no valid current-or-historical session could still pass the guard on
+ *    a bogus future timestamp.
+ */
+function computeProjectMcpObservations(
+  sessions: HygieneInput['sessions'],
+  windowStart: number,
+  now: number
+): Map<string, HygieneHedge | undefined> {
+  const oldestByProject = new Map<string, number>();
+  const observedInWindow = new Set<string>();
+  for (const s of sessions) {
+    if (!s.project) continue;
+    if (s.startTime > now) continue;
+    const key = mcpProjectKey(s.project);
+    if (s.startTime >= windowStart) observedInWindow.add(key);
+    if (s.startTime > 0) {
+      const oldest = oldestByProject.get(key);
+      if (oldest == null || s.startTime < oldest) oldestByProject.set(key, s.startTime);
+    }
+  }
+  const out = new Map<string, HygieneHedge | undefined>();
+  for (const project of observedInWindow) {
+    const oldest = oldestByProject.get(project) ?? now;
+    const days = Math.max(0, (now - oldest) / DAY_MS);
+    out.set(project, days < ACTIVE_WINDOW_DAYS ? 'window-shorter-than-threshold' : undefined);
   }
   return out;
 }
@@ -435,6 +596,11 @@ function isStructurallyExcluded(
 export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
   const lc = input.liveConfig;
   if (!lc) return [];
+  // Zero retained sessions means zero observation window — there is no
+  // evidence to compare any resource's usage against, so no resource can be
+  // honestly called "unused" (#3118). Emit no findings rather than an
+  // unhedged blanket "unused" claim for every installed resource.
+  if (input.sessions.length === 0) return [];
   const now = input.now ?? Date.now();
   const windowStart = now - ACTIVE_WINDOW_DAYS * DAY_MS;
   const dataWindowDays = effectiveDataWindowDays(input.sessions, now);
@@ -445,6 +611,16 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
   const usages = buildSessionUsage(input.attribution, input.sessions);
   // Installed skill ids — the parent set for the subskill exclusion (#2015).
   const installedSkillIds = new Set(lc.skills.map((s) => s.id));
+  // Per-project MCP guard + hedge, computed together (see
+  // computeProjectMcpObservations) so a project with no in-window
+  // observation can never be called "unused", and a project that IS
+  // in-window-observed is hedged from its own coverage rather than the
+  // global minimum across every project (#3118/#3119).
+  const projectMcpObservations = computeProjectMcpObservations(
+    input.sessions,
+    windowStart,
+    now
+  );
 
   const out: HygieneFinding[] = [];
 
@@ -529,7 +705,9 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
     );
   }
 
-  out.push(...findingsForMcpServers(lc.mcpServers, usages, windowStart, hedge));
+  out.push(
+    ...findingsForMcpServers(lc.mcpServers, usages, windowStart, hedge, projectMcpObservations)
+  );
   out.push(...findingsForPlugins(lc.plugins, usages, windowStart, hedge));
 
   return sortFindings(out);
