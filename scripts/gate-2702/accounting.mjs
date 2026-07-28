@@ -902,9 +902,12 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
     };
   }
 
-  const sidekickTriggerCount = asyncJobs.size + directTriggerCount;
+  const asyncTriggerCount = [...asyncJobs.values()].filter(
+    ({ queued }) => queued,
+  ).length;
+  const sidekickTriggerCount = asyncTriggerCount + directTriggerCount;
   const lifecycleIncomplete = [...asyncJobs.values()].some(
-    ({ queued, completed }) => queued && !completed,
+    ({ queued, completed }) => !queued || !completed,
   );
   if (lifecycleIncomplete) {
     const reasons = ["sidekick-lifecycle-incomplete"];

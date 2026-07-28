@@ -1189,6 +1189,44 @@ test("an async queue without a completion keeps the call outcome unknown", () =>
   }
 });
 
+test("an async completion without a queue cannot become accounting evidence", () => {
+  const fixture = createEvidenceFixture({
+    treatmentId: "haiku-sonnet-sidekick",
+    workerResult: {
+      session_id: randomUUID(),
+      total_cost_usd: 0.25,
+      result: "private",
+    },
+  });
+  try {
+    writeSidekickLedger(fixture, [
+      {
+        model: "claude-sonnet-5",
+        trigger: "push-or-pr",
+        jobId: "orphan-completion",
+        turn: 3,
+        costUsd: 0.2,
+      },
+    ]);
+
+    const result = collect(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.sidekickTriggerCount, 0);
+    assert.equal(receipt.sidekickCostUsd, null);
+    assert.equal(receipt.allInCostUsd, null);
+    assert.equal(receipt.sidekickPaidCallCount, null);
+    assert.equal(receipt.sidekickShippedInterventionCount, null);
+    assert.equal(receipt.bridgeEvidenceStatus, "excluded");
+    assert.deepEqual(receipt.exclusionReasons, [
+      "sidekick-lifecycle-incomplete",
+    ]);
+    assert.equal("usage" in receipt, false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("sanitized historical C5 lifecycles reproduce 2/2/0, 3/3/1, and 2/2/0", () => {
   const historical = [
     {

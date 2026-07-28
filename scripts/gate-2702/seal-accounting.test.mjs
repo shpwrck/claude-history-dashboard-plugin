@@ -337,6 +337,27 @@ test("conflicting, incomplete, malformed, and unknown lifecycles fail closed", (
   assert.equal(incomplete.sidekickTriggerCount, 1);
   assert.equal(incomplete.sidekickPaidCallCount, null);
 
+  const orphanCompletion = derive(
+    ledgerBytes([
+      {
+        model: SIDEKICK_MODEL,
+        trigger: "push-or-pr",
+        jobId: "orphan-completion",
+        turn: 3,
+        costUsd: 0.2,
+      },
+    ]),
+  );
+  assert.deepEqual(orphanCompletion.exclusionReasons, [
+    "sidekick-lifecycle-incomplete",
+  ]);
+  assert.equal(orphanCompletion.sidekickTriggerCount, 0);
+  assert.equal(orphanCompletion.sidekickCostUsd, null);
+  assert.equal(orphanCompletion.sidekickPaidCallCount, null);
+  assert.equal(orphanCompletion.sidekickShippedInterventionCount, null);
+  assert.equal(orphanCompletion.bridgeEvidenceStatus, "excluded");
+  assert.equal("usage" in orphanCompletion, false);
+
   const malformed = derive(Buffer.from('{"model":\n'));
   assert.deepEqual(malformed.exclusionReasons, ["sidekick-ledger-malformed"]);
   assert.equal(

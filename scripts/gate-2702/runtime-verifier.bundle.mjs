@@ -10069,8 +10069,8 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 	}
 	if (lifecycleUnrecognized) return unknownSidekickValues("sidekick-lifecycle-unrecognized", rowEvidence);
 	if (lifecycleConflict) return unknownSidekickValues("sidekick-lifecycle-conflict", rowEvidence);
-	const sidekickTriggerCount = asyncJobs.size + directTriggerCount;
-	if ([...asyncJobs.values()].some(({ queued, completed }) => queued && !completed)) {
+	const sidekickTriggerCount = [...asyncJobs.values()].filter(({ queued }) => queued).length + directTriggerCount;
+	if ([...asyncJobs.values()].some(({ queued, completed }) => !queued || !completed)) {
 		const reasons = ["sidekick-lifecycle-incomplete"];
 		return {
 			sidekickCostUsd: null,
