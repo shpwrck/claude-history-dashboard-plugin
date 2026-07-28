@@ -655,7 +655,7 @@ test("classifier is inert until the C5 bridge is explicitly enabled", () => {
   }
 });
 
-test("a genuine declared-check failure stays eligible treatment evidence", () => {
+test("a genuine declared-check failure fails and remains ineligible", () => {
   const fixture = createEvidenceFixture({ vitestExit: 1, typecheckExit: 0 });
   try {
     const result = spawnSync(
@@ -680,22 +680,18 @@ test("a genuine declared-check failure stays eligible treatment evidence", () =>
     assert.equal(result.status, 0, result.stderr);
     const classification = JSON.parse(result.stdout);
     assert.equal(classification.kind, "Gate2702ArmClassification");
-    assert.equal(classification.status, "succeeded");
-    assert.equal(classification.eligible, true);
+    assert.equal(classification.status, "failed");
+    assert.equal(classification.eligible, false);
+    assert.equal(classification.error.code, "genuine-check-failure");
+    assert.equal(
+      classification.error.checkId,
+      "checks/gate-2702-vitest",
+    );
+    assert.equal(classification.worktreeEvidence, undefined);
     assert.match(
       classification.behaviorVerification.behaviorContextDigest,
       /^sha256:[0-9a-f]{64}$/,
     );
-    assert.equal(classification.worktreeEvidence.baseSha, fixture.baseSha);
-    assert.match(
-      classification.worktreeEvidence.contentDigest,
-      /^sha256:[0-9a-f]{64}$/,
-    );
-    assert.match(
-      classification.worktreeEvidence.trackedPatch.contentDigest,
-      /^sha256:[0-9a-f]{64}$/,
-    );
-    assert.ok(classification.worktreeEvidence.aggregateBytes >= 0);
     assert.deepEqual(
       classification.checkResults.map(({ checkId, status }) => ({
         checkId,
@@ -706,7 +702,11 @@ test("a genuine declared-check failure stays eligible treatment evidence", () =>
         { checkId: "checks/gate-2702-typecheck", status: "passed" },
       ],
     );
-    assert.equal(classification.retry.authorized, false);
+    assert.deepEqual(classification.retry, {
+      authorized: false,
+      reason: "genuine-result",
+      maximumAttempt: 2,
+    });
     assert.equal(
       existsSync(
         join(

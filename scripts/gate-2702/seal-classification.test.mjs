@@ -146,7 +146,7 @@ function workerPrompt(snapshot, registration) {
   ].join("\n");
 }
 
-function createSuccessfulFixture({ attempt = 1 } = {}) {
+function createSuccessfulFixture({ attempt = 1, vitestExit = 0 } = {}) {
   const artifacts = new Map();
   const putReceipt = (path, receipt) => {
     const value = withDigest(receipt);
@@ -562,8 +562,10 @@ function createSuccessfulFixture({ attempt = 1 } = {}) {
       dispatchToken,
       pid: 800 + index,
     });
-    const exitCode = index === 0 ? 1 : 0;
-    const stdoutBytes = Buffer.from(index === 0 ? "one test failed\n" : "ok\n");
+    const exitCode = index === 0 ? vitestExit : 0;
+    const stdoutBytes = Buffer.from(
+      exitCode === 0 ? "ok\n" : "one test failed\n",
+    );
     const stderrBytes = Buffer.alloc(0);
     putBytes(`${checkPrefix}.dispatch-gate`, Buffer.from(`${dispatchToken}\n`));
     putJson(`${checkPrefix}.outcome.json`, {
@@ -650,6 +652,7 @@ function createSuccessfulFixture({ attempt = 1 } = {}) {
     untracked: [],
     aggregateBytes: 0,
   };
+  const failedCheck = checkResults.find((result) => result.status === "failed");
   const classification = putReceipt(`${prefix}/classification.json`, {
     schemaVersion: 1,
     kind: "Gate2702ArmClassification",
@@ -662,8 +665,8 @@ function createSuccessfulFixture({ attempt = 1 } = {}) {
     treatmentId: TREATMENT_ID,
     attempt,
     baseSha: BASE_SHA,
-    status: "succeeded",
-    eligible: true,
+    status: failedCheck ? "failed" : "succeeded",
+    eligible: !failedCheck,
     retry: {
       authorized: false,
       reason: "genuine-result",
@@ -677,10 +680,20 @@ function createSuccessfulFixture({ attempt = 1 } = {}) {
       stdout: artifact(`${runDir}/stdout.log`, workerStdout),
       stderr: artifact(`${runDir}/stderr.log`, workerStderr),
     },
-    worktreeEvidence: {
-      ...worktreeBody,
-      contentDigest: valueDigest(worktreeBody),
-    },
+    ...(failedCheck
+      ? {
+          error: {
+            code: "genuine-check-failure",
+            checkId: failedCheck.checkId,
+            message: "a declared check completed with a failing result",
+          },
+        }
+      : {
+          worktreeEvidence: {
+            ...worktreeBody,
+            contentDigest: valueDigest(worktreeBody),
+          },
+        }),
     checkResults,
   });
   return {
@@ -737,10 +750,34 @@ test("classification and every declared check rederive from retained bytes", () 
       status: summary.status,
     })),
     [
-      { checkId: "checks/gate-2702-vitest", status: "failed" },
+      { checkId: "checks/gate-2702-vitest", status: "passed" },
       { checkId: "checks/gate-2702-typecheck", status: "passed" },
     ],
   );
+});
+
+test("a genuine declared-check failure rederives as ineligible", () => {
+  const fixture = createSuccessfulFixture({ vitestExit: 1 });
+  const verified = validateGate2702ClassificationEvidence({
+    artifactBytesByPath: fixture.artifacts,
+    trialId: TRIAL_ID,
+    baseSha: BASE_SHA,
+    subject: SUBJECT,
+    treatmentId: TREATMENT_ID,
+    attempt: 1,
+  });
+
+  assert.equal(verified.classification.status, "failed");
+  assert.equal(verified.classification.eligible, false);
+  assert.equal(
+    verified.classification.error.code,
+    "genuine-check-failure",
+  );
+  assert.equal(
+    verified.classification.error.checkId,
+    "checks/gate-2702-vitest",
+  );
+  assert.equal(verified.worktree, null);
 });
 
 test("an authorized attempt-2 classification retains exact attempt-1 lineage", () => {
@@ -763,7 +800,7 @@ test("an authorized attempt-2 classification retains exact attempt-1 lineage", (
 });
 
 test("re-digesting a failed check and classification cannot turn it into a pass", () => {
-  const fixture = createSuccessfulFixture();
+  const fixture = createSuccessfulFixture({ vitestExit: 1 });
   const checkId = "checks/gate-2702-vitest";
   const slug = checkId.replaceAll("/", "_");
   const originalExecution = fixture.checkReceipts[checkId].execution;
@@ -1052,6 +1089,7 @@ test("a missing production check tool rederives a failed tooling classification"
         summary.checkId === checkId
           ? {
               ...summary,
+              status: "failed",
               evidenceDigest: execution.contentDigest,
               exitCode: 127,
             }

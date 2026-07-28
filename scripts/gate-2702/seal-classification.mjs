@@ -1556,6 +1556,9 @@ function validateClassification(
           result.signal !== null ||
           result.processGroupQuiescent !== true,
       );
+      const genuineCheckFailure = summaries.find(
+        (result) => result.status === "failed" || result.exitCode !== 0,
+      );
       let disposition;
       if (timedOutCheck) {
         disposition = {
@@ -1590,6 +1593,17 @@ function validateClassification(
               "a declared check could not execute with the preflighted toolchain",
           },
           retry: retryDisposition(anchor.attempt, "tooling-artifact"),
+        };
+      } else if (genuineCheckFailure) {
+        disposition = {
+          status: "failed",
+          eligible: false,
+          error: {
+            code: "genuine-check-failure",
+            checkId: genuineCheckFailure.checkId,
+            message: "a declared check completed with a failing result",
+          },
+          retry: retryDisposition(anchor.attempt, "genuine-result", false),
         };
       } else {
         disposition = {

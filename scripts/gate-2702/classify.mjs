@@ -3643,6 +3643,9 @@ async function classify(plan, options) {
       result.signal !== null ||
       result.processGroupQuiescent !== true,
   );
+  const genuineCheckFailure = checkResults.find(
+    (result) => result.status === "failed" || result.exitCode !== 0,
+  );
   const classification = timedOutCheck
     ? {
         status: "cancelled",
@@ -3689,15 +3692,30 @@ async function classify(plan, options) {
               maximumAttempt: 2,
             },
           }
-        : {
-            status: "succeeded",
-            eligible: true,
-            retry: {
-              authorized: false,
-              reason: "genuine-result",
-              maximumAttempt: 2,
-            },
-          };
+        : genuineCheckFailure
+          ? {
+              status: "failed",
+              eligible: false,
+              error: {
+                code: "genuine-check-failure",
+                checkId: genuineCheckFailure.checkId,
+                message: "a declared check completed with a failing result",
+              },
+              retry: {
+                authorized: false,
+                reason: "genuine-result",
+                maximumAttempt: 2,
+              },
+            }
+          : {
+              status: "succeeded",
+              eligible: true,
+              retry: {
+                authorized: false,
+                reason: "genuine-result",
+                maximumAttempt: 2,
+              },
+            };
   const worktreeEvidence = classification.eligible
     ? captureGate2702WorktreeEvidence({
         worktreePath: registration.worktreePath,

@@ -10959,6 +10959,7 @@ function validateClassification(artifacts, registration, preflight, lifecycle, a
 			const timedOutCheck = summaries.find((result) => result.timedOut);
 			const truncatedCheck = summaries.find((result) => result.truncated);
 			const toolingFailure = summaries.find((result) => result.spawnError !== void 0 || (result.environmentErrors?.length ?? 0) > 0 || result.exitCode === null || result.exitCode === 127 || result.signal !== null || result.processGroupQuiescent !== true);
+			const genuineCheckFailure = summaries.find((result) => result.status === "failed" || result.exitCode !== 0);
 			let disposition;
 			if (timedOutCheck) disposition = {
 				status: "cancelled",
@@ -10989,6 +10990,16 @@ function validateClassification(artifacts, registration, preflight, lifecycle, a
 					message: "a declared check could not execute with the preflighted toolchain"
 				},
 				retry: retryDisposition(anchor.attempt, "tooling-artifact")
+			};
+			else if (genuineCheckFailure) disposition = {
+				status: "failed",
+				eligible: false,
+				error: {
+					code: "genuine-check-failure",
+					checkId: genuineCheckFailure.checkId,
+					message: "a declared check completed with a failing result"
+				},
+				retry: retryDisposition(anchor.attempt, "genuine-result", false)
 			};
 			else {
 				disposition = {
