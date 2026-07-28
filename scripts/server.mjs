@@ -10557,7 +10557,7 @@ const server = createServer(async (req, res) => {
       let auditStatus = 'ran';
       let auditReason;
       try {
-        const auditChat = ({ model, system, maxTokens, messages }) => {
+        const auditChat = ({ model, system, maxTokens, messages, containsClaudeData }) => {
           const boundedMaxTokens = auditMaxOutputTokens(maxTokens);
           const scrubbed = egressScrub(
             'server.audit-judge',
@@ -10586,6 +10586,9 @@ const server = createServer(async (req, res) => {
           return callAnthropicMessages('server.audit-judge', {
             apiKey,
             ...scrubbed.content,
+            // Carry the judge's data classification to the chokepoint (#3111)
+            // so ~/.claude-derived prompts can never ride an OAuth credential.
+            containsClaudeData: containsClaudeData === true,
             scrubReceipt: scrubbed.receipt,
             capChecked: true,
             capReceipt: serverAuditLlmCapReceipt(),

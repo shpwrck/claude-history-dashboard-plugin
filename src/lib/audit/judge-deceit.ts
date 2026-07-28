@@ -40,6 +40,7 @@
  */
 import type { AuditFinding } from './types';
 import type { JudgeFn, JudgeVerdict } from './judge-types';
+import { redactSecrets } from '../secret-redaction';
 
 /**
  * A session worth paying the judge to read. `assistantTurnCount` drives the seed
@@ -124,7 +125,9 @@ function compactInput(input: unknown): string {
   } catch {
     return '';
   }
-  s = s.replace(/\s+/g, ' ').trim();
+  // Redact BEFORE truncating: a key sliced in half is still a leaked prefix,
+  // and truncation could also cut a pattern so the redactor no longer matches.
+  s = redactSecrets(s.replace(/\s+/g, ' ').trim());
   return s.length > ACTION_INPUT_MAX ? `${s.slice(0, ACTION_INPUT_MAX)}…` : s;
 }
 
@@ -153,7 +156,7 @@ export function formatTranscriptForJudge(contentJson: string | null): string {
     const b = raw as ContentBlock;
     let line = '';
     if (b.type === 'text' && typeof b.text === 'string') {
-      const t = b.text.replace(/\s+/g, ' ').trim();
+      const t = redactSecrets(b.text.replace(/\s+/g, ' ').trim());
       if (t) line = `CLAIM: ${t}`;
     } else if (b.type === 'tool_use') {
       const name = typeof b.name === 'string' ? b.name : 'tool';
@@ -221,6 +224,10 @@ export async function runDeceitJudgeAudit(
     let verdict: JudgeVerdict;
     try {
       verdict = await judge({
+        // Even redacted, these lines are rendered from the user's stored
+        // transcripts, so the call is ~/.claude-derived and must never ride the
+        // subscription OAuth credential (ADR 0008 / #3111).
+        classification: 'claude-derived',
         system: SYSTEM_PROMPT,
         user:
           `Session ${c.sessionId} in project "${c.project}". ` +

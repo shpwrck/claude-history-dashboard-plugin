@@ -11,9 +11,12 @@ import {
   runReferenceAudit,
   runAudits,
   parseVerdict,
+  makeClaudeJudge,
   type AuditSession,
   type JudgeFn,
+  type ClaudeJudgeChatRequest,
 } from './judge';
+import { callAnthropic } from '../anthropic-egress';
 
 // One genuine outlier (huge tokens, ~no tools) amid normal, balanced sessions.
 const FIXTURE: AuditSession[] = [
@@ -184,5 +187,72 @@ describe('parseVerdict', () => {
       rationale: '',
       confidence: 'low',
     });
+  });
+});
+
+/**
+ * #3111 — the judge's data classification must be an ENFORCED property of the
+ * call, not a caller convention. `makeClaudeJudge` turns a `claude-derived`
+ * prompt into `containsClaudeData: true`, which the LLM chokepoint refuses to
+ * send under the subscription OAuth credential.
+ */
+describe('judge data classification (#3111)', () => {
+  it('marks a claude-derived prompt as Claude data on the chat request', async () => {
+    const seen: ClaudeJudgeChatRequest[] = [];
+    const judge = makeClaudeJudge(async (req) => {
+      seen.push(req);
+      return { text: '{"isFinding":false,"rationale":"","confidence":"low"}' };
+    });
+
+    await judge({
+      system: 'sys',
+      user: 'transcript',
+      classification: 'claude-derived',
+    });
+
+    expect(seen[0].containsClaudeData).toBe(true);
+  });
+
+  it('leaves an unclassified (metrics-only) prompt unmarked', async () => {
+    const seen: ClaudeJudgeChatRequest[] = [];
+    const judge = makeClaudeJudge(async (req) => {
+      seen.push(req);
+      return { text: '{"isFinding":false,"rationale":"","confidence":"low"}' };
+    });
+
+    await judge({ system: 'sys', user: '12 tokens per tool call' });
+
+    expect(seen[0].containsClaudeData).toBe(false);
+  });
+
+  it('refuses a subscription-OAuth judge before any network dispatch', async () => {
+    let fetchCalls = 0;
+    const fetchImpl = (async () => {
+      fetchCalls += 1;
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    // A judge whose chat implementation is backed by the subscription OAuth
+    // credential instead of a Console key.
+    const oauthJudge = makeClaudeJudge(async (req) => {
+      await callAnthropic('server.usage-gauge', {
+        credential: { kind: 'oauth', token: 'subscription-oauth-token' },
+        path: '/messages',
+        body: { messages: req.messages },
+        containsClaudeData: req.containsClaudeData,
+        fetchImpl,
+      });
+      return { text: '{"isFinding":false,"rationale":"","confidence":"low"}' };
+    });
+
+    await expect(
+      oauthJudge({
+        system: 'sys',
+        user: 'CLAIM: ... ACTION: ...',
+        classification: 'claude-derived',
+      })
+    ).rejects.toMatchObject({ code: 'ERR_DASHBOARD_LLM_OAUTH_CLAUDE_DATA' });
+
+    expect(fetchCalls).toBe(0);
   });
 });

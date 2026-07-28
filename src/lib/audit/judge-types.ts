@@ -26,8 +26,29 @@ export interface JudgeVerdict {
   confidence: AuditConfidence;
 }
 
-/** The judge call, abstracted so tests inject a deterministic fake. */
-export type JudgeFn = (prompt: {
+/**
+ * What kind of data a judge prompt carries (#3111).
+ *
+ * `claude-derived` marks prompt text built out of the user's `~/.claude` tree —
+ * transcript prose, tool-use inputs, anything read back from stored sessions.
+ * ADR 0008 forbids sending that content under the subscription OAuth
+ * credential, so a judge backed by that credential must refuse the call BEFORE
+ * any network dispatch. Carrying the classification on the prompt makes that a
+ * checkable property of the call itself, rather than an out-of-band caller
+ * convention the prompt-building module cannot enforce.
+ */
+export type JudgeDataClassification = 'synthetic' | 'claude-derived';
+
+/** One judge call's prompt. */
+export interface JudgePrompt {
   system: string;
   user: string;
-}) => Promise<JudgeVerdict>;
+  /**
+   * Omitted means `synthetic`: the prompt is built from aggregate metrics only
+   * (counts, ratios, ids) and carries no `~/.claude`-derived content.
+   */
+  classification?: JudgeDataClassification;
+}
+
+/** The judge call, abstracted so tests inject a deterministic fake. */
+export type JudgeFn = (prompt: JudgePrompt) => Promise<JudgeVerdict>;

@@ -248,3 +248,105 @@ describe('judge catches what Slice-B provably misses (acceptance #1)', () => {
     expect(findings[0].id).toBe('deceit-judge:shortcut-1');
   });
 });
+
+/**
+ * #3111 — the formatter renders the user's own stored transcripts into prompt
+ * text, so secrets living in assistant prose or tool-use inputs would otherwise
+ * cross the LLM boundary verbatim. These cover the two halves of the fix: the
+ * centralized redaction, and the data classification that stops the redacted
+ * prompt from riding the subscription OAuth credential.
+ */
+describe('transcript egress sanitizing (#3111)', () => {
+  const SECRETS = {
+    apiKey: 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789',
+    jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk',
+    bearer: 'Bearer abcdefghijklmnop0123456789',
+    env: 'GITHUB_TOKEN=ghp_ZzYyXxWwVvUuTtSsRrQqPpOoNnMmLlKk',
+    home: '/home/jskrzypek/.claude/settings.json',
+    email: 'jankoszy@gmail.com',
+    hex: 'a3f5c9d2e7b148a6f0c3d9e2b7a4f6c108d5e3b9a7c2f4d6e8b0a1c3d5e7f9b2',
+  };
+
+  function transcriptWith(): string {
+    return JSON.stringify([
+      { type: 'text', text: `Configured the client with ${SECRETS.apiKey} and ${SECRETS.email}.` },
+      {
+        type: 'tool_use',
+        name: 'Bash',
+        input: { command: `curl -H "Authorization: ${SECRETS.bearer}" api` },
+      },
+      { type: 'text', text: `Session token ${SECRETS.jwt} is still valid.` },
+      { type: 'tool_use', name: 'Write', input: { file_path: SECRETS.home, content: SECRETS.env } },
+      { type: 'text', text: `Object digest ${SECRETS.hex} verified.` },
+    ]);
+  }
+
+  it('redacts every representative secret out of the formatted transcript', () => {
+    const formatted = formatTranscriptForJudge(transcriptWith());
+
+    // Nothing recognisable as a credential survives into the prompt.
+    for (const [label, secret] of Object.entries(SECRETS)) {
+      expect(formatted, `${label} leaked into the judge prompt`).not.toContain(secret);
+    }
+    // ...and the redaction is visible rather than silently dropping content.
+    expect(formatted).toContain('[REDACTED_KEY]');
+    expect(formatted).toContain('[REDACTED_JWT]');
+    expect(formatted).toContain('Bearer [REDACTED_TOKEN]');
+    expect(formatted).toContain('[REDACTED_EMAIL]');
+    expect(formatted).toContain('[REDACTED_PATH]');
+    expect(formatted).toContain('GITHUB_TOKEN=[REDACTED]');
+    expect(formatted).toContain('[REDACTED_HEX]');
+    // The judge still gets usable CLAIM/ACTION structure to reason over.
+    expect(formatted).toContain('CLAIM: ');
+    expect(formatted).toContain('ACTION: Bash');
+  });
+
+  it('reaches a capturing judge only in redacted form', async () => {
+    const seen: string[] = [];
+    const capture: JudgeFn = async ({ user }) => {
+      seen.push(user);
+      return { isFinding: false, rationale: '', confidence: 'low' };
+    };
+    const getTranscript: GetTranscriptText = () => transcriptWith();
+
+    await runDeceitJudgeAudit(
+      [{ sessionId: 's1', project: 'p', assistantTurnCount: 9 }],
+      getTranscript,
+      capture
+    );
+
+    expect(seen).toHaveLength(1);
+    for (const [label, secret] of Object.entries(SECRETS)) {
+      expect(seen[0], `${label} reached the judge`).not.toContain(secret);
+    }
+  });
+
+  it('classifies the transcript prompt as ~/.claude-derived', async () => {
+    const classifications: (string | undefined)[] = [];
+    const capture: JudgeFn = async ({ classification }) => {
+      classifications.push(classification);
+      return { isFinding: false, rationale: '', confidence: 'low' };
+    };
+
+    await runDeceitJudgeAudit(
+      [{ sessionId: 's1', project: 'p', assistantTurnCount: 9 }],
+      () => JSON.stringify([{ type: 'text', text: 'did the thing' }]),
+      capture
+    );
+
+    expect(classifications).toEqual(['claude-derived']);
+  });
+
+  it('redacts a secret that would otherwise be split by input truncation', () => {
+    // A long tool input pushes the secret past ACTION_INPUT_MAX. Redacting
+    // before truncating means the prompt cannot carry a usable key prefix.
+    const padding = 'x'.repeat(300);
+    const formatted = formatTranscriptForJudge(
+      JSON.stringify([
+        { type: 'tool_use', name: 'Bash', input: { note: padding, key: SECRETS.apiKey } },
+      ])
+    );
+    expect(formatted).not.toContain(SECRETS.apiKey);
+    expect(formatted).not.toContain(SECRETS.apiKey.slice(0, 24));
+  });
+});

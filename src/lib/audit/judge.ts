@@ -17,8 +17,13 @@ import type { AuditFinding, AuditConfidence } from './types';
 // per-audit modules below can import it WITHOUT a (type-only) cycle back through
 // this module, which imports their values. Re-exported here so existing
 // `import { JudgeFn, JudgeVerdict } from './judge'` consumers are unaffected.
-import type { JudgeFn, JudgeVerdict } from './judge-types';
-export type { JudgeFn, JudgeVerdict } from './judge-types';
+import type { JudgeFn, JudgeVerdict, JudgePrompt } from './judge-types';
+export type {
+  JudgeFn,
+  JudgeVerdict,
+  JudgePrompt,
+  JudgeDataClassification,
+} from './judge-types';
 import {
   detectRecurringSequences,
   runAgenticOpportunityAudit,
@@ -75,6 +80,13 @@ export interface ClaudeJudgeChatRequest {
   system?: string;
   maxTokens: number;
   messages: { role: 'user' | 'assistant'; content: string }[];
+  /**
+   * True when the prompt was rendered from the user's `~/.claude` tree (#3111).
+   * The server's chat implementation forwards this to the LLM chokepoint, which
+   * fails closed rather than sending such content under the subscription OAuth
+   * credential (ADR 0008).
+   */
+  containsClaudeData?: boolean;
 }
 
 export interface ClaudeJudgeChatResult {
@@ -293,12 +305,13 @@ export function makeClaudeJudge(
   chat: ClaudeJudgeChatFn,
   model?: string
 ): JudgeFn {
-  return async ({ system, user }) => {
+  return async ({ system, user, classification }) => {
     const res = await chat({
       model,
       system,
       maxTokens: 512,
       messages: [{ role: 'user', content: user }],
+      containsClaudeData: classification === 'claude-derived',
     });
     return parseVerdict(res.text);
   };
@@ -335,9 +348,9 @@ function auditJudgeBudgetExceeded(): Error & { code?: string } {
 }
 
 function withJudgeCallBudget<T>(
-  judge: (prompt: { system: string; user: string }) => Promise<T>,
+  judge: (prompt: JudgePrompt) => Promise<T>,
   budget: JudgeCallBudget
-): (prompt: { system: string; user: string }) => Promise<T> {
+): (prompt: JudgePrompt) => Promise<T> {
   return async (prompt) => {
     if (budget.remaining <= 0) throw auditJudgeBudgetExceeded();
     budget.remaining -= 1;
