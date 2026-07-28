@@ -76,87 +76,6 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
     "view": "permissions",
   },
   {
-    "action": "Use the highest cache-read sessions to target context-slimming work. Treat 1-hour cache writes with no same-session cache reads as concrete cache policy waste.",
-    "affected": 1,
-    "category": "cost",
-    "detail": "No cache-read context spend was recorded. $76.00 was novel context ($36.00 uncached input, $40.00 cache writes). $40.00 was 1-hour cache write spend in session(s) with no cache reads. The deeper dead-token tranche is not claimed here; this v0 uses only deterministic token counters.",
-    "estSavingsUsd": 40,
-    "evidence": [
-      "automate: $40.00 1h cache writes, no cache reads",
-    ],
-    "id": "cost.cache-economics",
-    "provenance": {
-      "inference": "Cache-read spend is observed re-sent context, while 1-hour cache writes with zero cache reads are deterministic cache-write waste. Content-level dead-token attribution is intentionally deferred.",
-      "observations": [
-        {
-          "claim": "$0.00 spent on cache-read input tokens",
-          "field": "TokenEntry.cacheReadTokens",
-          "source": "parse-sessions",
-          "value": 0,
-        },
-        {
-          "claim": "$76.00 spent on novel context tokens",
-          "field": "TokenEntry.inputTokens + TokenEntry.cacheCreationTokens",
-          "source": "parse-sessions",
-          "value": 76,
-        },
-        {
-          "claim": "1 session(s) wrote 1-hour cache tokens and recorded zero cache-read tokens",
-          "field": "TokenEntry.cacheCreation1hTokens + TokenEntry.cacheReadTokens",
-          "source": "parse-sessions",
-          "value": 1,
-        },
-      ],
-    },
-    "severity": "warning",
-    "title": "Audit context cache economics",
-    "view": "tokens",
-  },
-  {
-    "action": "If that context is not reused beyond 5 minutes, prefer the 5-minute cache — up to the amount shown is recoverable.",
-    "affected": 1,
-    "category": "cost",
-    "detail": "4.00M tokens were written to the 1-hour cache across 1 session(s), billed at 2× input vs 1.25× for the default 5-minute cache.",
-    "estSavingsUsd": 15,
-    "fix": {
-      "appliedMarkers": {
-        "bodyPhrases": [
-          "default 5-minute prompt cache for routine work",
-        ],
-        "headings": [
-          /\\^##\\\\s\\+Cach\\(e\\|ing\\)\\\\b/i,
-        ],
-      },
-      "label": "Note the 1h-cache tradeoff",
-      "note": "Paste into CLAUDE.md so sessions avoid the 2× cache write when context is short-lived. No settings key controls cache TTL.",
-      "snippet": "## Caching
-- Prefer the default 5-minute prompt cache for routine work; it is billed at 1.25× input vs 2× for the 1-hour cache.
-- Only rely on the 1-hour cache for context genuinely reused across gaps >5 min. For short, scoped tasks, finish or compact before idle gaps so context is not re-written to the pricier 1h cache.",
-      "target": "CLAUDE.md",
-    },
-    "id": "cost.cache-1h-waste",
-    "reclaim": {
-      "category": "cost",
-      "counterfactual": {
-        "kind": "convertRate",
-        "rateFrom": "cacheWrite1h",
-        "rateTo": "cacheWrite5m",
-      },
-      "evidenceTokens": 4000000,
-      "leverId": "cost.cache-1h-waste",
-      "orderKey": 50,
-      "ownedPools": [
-        "cacheWrite1h",
-      ],
-      "scopeKeys": [
-        "automate|claude-opus-4-8",
-      ],
-    },
-    "severity": "warning",
-    "title": "Reduce 1-hour cache writes",
-    "view": "tokens",
-  },
-  {
     "action": "Investigate the top offenders — common causes are stale file state, wrong paths, or missing permissions.",
     "affected": 12,
     "category": "reliability",
@@ -282,6 +201,79 @@ Keep the working context well under the model's context window.
     "view": "context",
   },
   {
+    "action": "Check whether that context is genuinely reused beyond 5 minutes. Where it is not, the 5-minute cache is cheaper — but how much of the premium above is avoidable depends on reuse timing, which is not recorded in the token counters, so none of it is counted as recovered.",
+    "affected": 1,
+    "category": "cost",
+    "detail": "4.00M tokens were written to the 1-hour cache across 1 session(s), billed at 2× input vs 1.25× for the default 5-minute cache — a rate premium of $15.00 over what the same tokens would have cost at the 5-minute write rate.",
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "default 5-minute prompt cache for routine work",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Cach\\(e\\|ing\\)\\\\b/i,
+        ],
+      },
+      "label": "Note the 1h-cache tradeoff",
+      "note": "Paste into CLAUDE.md so sessions avoid the 2× cache write when context is short-lived. No settings key controls cache TTL.",
+      "snippet": "## Caching
+- Prefer the default 5-minute prompt cache for routine work; it is billed at 1.25× input vs 2× for the 1-hour cache.
+- Only rely on the 1-hour cache for context genuinely reused across gaps >5 min. For short, scoped tasks, finish or compact before idle gaps so context is not re-written to the pricier 1h cache.",
+      "target": "CLAUDE.md",
+    },
+    "id": "cost.cache-1h-waste",
+    "reclaim": {
+      "category": "cost",
+      "counterfactual": {
+        "kind": "flag-only",
+      },
+      "evidenceTokens": 4000000,
+      "leverId": "cost.cache-1h-waste",
+      "orderKey": 50,
+      "ownedPools": [],
+      "scopeKeys": [],
+    },
+    "severity": "warning",
+    "title": "Reduce 1-hour cache writes",
+    "view": "tokens",
+  },
+  {
+    "action": "Use the highest cache-read sessions to target context-slimming work. Treat 1-hour cache writes with no same-session cache reads as a CANDIDATE for a shorter cache TTL, and check those sessions before changing anything — zero reads within the session does not establish the entry went unused.",
+    "affected": 1,
+    "category": "cost",
+    "detail": "No cache-read context spend was recorded. $76.00 was novel context ($36.00 uncached input, $40.00 cache writes). $40.00 was 1-hour cache write spend in session(s) with no cache reads of their own — a candidate for a shorter cache TTL, not a measured saving. The deeper dead-token tranche is not claimed here; this v0 uses only deterministic token counters.",
+    "evidence": [
+      "automate: $40.00 1h cache writes, no cache reads",
+    ],
+    "id": "cost.cache-economics",
+    "provenance": {
+      "inference": "Cache-read spend is observed re-sent context. Sessions that wrote 1-hour cache tokens and recorded zero cache reads are a candidate signal only, bounded by the same-session observation window: it cannot distinguish an entry that went unused from one reused by a later session or after the captured interval, so no recovered amount is claimed from it. Content-level dead-token attribution is intentionally deferred.",
+      "observations": [
+        {
+          "claim": "$0.00 spent on cache-read input tokens",
+          "field": "TokenEntry.cacheReadTokens",
+          "source": "parse-sessions",
+          "value": 0,
+        },
+        {
+          "claim": "$76.00 spent on novel context tokens",
+          "field": "TokenEntry.inputTokens + TokenEntry.cacheCreationTokens",
+          "source": "parse-sessions",
+          "value": 76,
+        },
+        {
+          "claim": "1 session(s) wrote 1-hour cache tokens and recorded zero cache-read tokens WITHIN THAT SESSION (reuse by a later session is not observed)",
+          "field": "TokenEntry.cacheCreation1hTokens + TokenEntry.cacheReadTokens",
+          "source": "parse-sessions",
+          "value": 1,
+        },
+      ],
+    },
+    "severity": "warning",
+    "title": "Audit context cache economics",
+    "view": "tokens",
+  },
+  {
     "action": "Remove the dead allow entries (or narrow the deny if the allow was the intent) so settings.json reflects what actually happens.",
     "affected": 1,
     "category": "safety",
@@ -334,39 +326,6 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "severity": "warning",
     "title": "Hitting rate-limit / overloaded errors",
     "view": "errors",
-  },
-  {
-    "action": "Review these sessions for runaway context or repeated work that could be scoped down or split.",
-    "affected": 3,
-    "category": "cost",
-    "detail": "The top 3 sessions account for 99% of total estimated spend ($111.00 of $112.00).",
-    "estSavingsUsd": 111,
-    "evidence": [
-      "automate, $100.00, Bash",
-      "reader, $10.00, Read",
-      "extra1, $1.00, no tools",
-    ],
-    "fix": {
-      "appliedMarkers": {
-        "bodyPhrases": [
-          "start a fresh session when the task changes",
-        ],
-        "headings": [
-          /\\^##\\\\s\\+Session scope\\\\b/i,
-        ],
-      },
-      "label": "Add session-scoping guidance",
-      "note": "Paste into CLAUDE.md to curb the runaway-context pattern behind the top sessions.",
-      "snippet": "## Session scope
-- Keep one session to one task; start a fresh session when the task changes so stale context is not re-sent and re-billed each turn.
-- Compact or clear once a sub-task is done rather than letting context grow unbounded.
-- Avoid re-reading large files or directories repeatedly in a single session; reference them once.",
-      "target": "CLAUDE.md",
-    },
-    "id": "cost.expensive-sessions",
-    "severity": "info",
-    "title": "Spend is concentrated in a few sessions",
-    "view": "cost",
   },
   {
     "action": "Tighten recurring instructions in CLAUDE.md (constraints, file locations, conventions) so the assistant needs fewer corrections.",
@@ -445,6 +404,38 @@ Keep file work structured and permission-aware. Apply these examples; category n
     "severity": "info",
     "title": "Review shell patterns for native or path-safe alternatives",
     "view": "tools",
+  },
+  {
+    "action": "Review these sessions for runaway context or repeated work that could be scoped down or split.",
+    "affected": 3,
+    "category": "cost",
+    "detail": "The top 3 sessions account for 99% of total estimated spend ($111.00 of $112.00).",
+    "evidence": [
+      "automate, $100.00, Bash",
+      "reader, $10.00, Read",
+      "extra1, $1.00, no tools",
+    ],
+    "fix": {
+      "appliedMarkers": {
+        "bodyPhrases": [
+          "start a fresh session when the task changes",
+        ],
+        "headings": [
+          /\\^##\\\\s\\+Session scope\\\\b/i,
+        ],
+      },
+      "label": "Add session-scoping guidance",
+      "note": "Paste into CLAUDE.md to curb the runaway-context pattern behind the top sessions.",
+      "snippet": "## Session scope
+- Keep one session to one task; start a fresh session when the task changes so stale context is not re-sent and re-billed each turn.
+- Compact or clear once a sub-task is done rather than letting context grow unbounded.
+- Avoid re-reading large files or directories repeatedly in a single session; reference them once.",
+      "target": "CLAUDE.md",
+    },
+    "id": "cost.expensive-sessions",
+    "severity": "info",
+    "title": "Spend is concentrated in a few sessions",
+    "view": "cost",
   },
   {
     "action": "Pin frequently-needed files in CLAUDE.md or pass their contents once instead of re-reading.",

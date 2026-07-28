@@ -109,12 +109,17 @@ export const detector: Detector = {
           : 'No cache-read context spend was recorded. ') +
         `${fmtUsd(novelCost)} was novel context (${fmtUsd(inputCost)} uncached input, ${fmtUsd(cacheWriteCost)} cache writes). ` +
         (unread1hCost > 0
-          ? `${fmtUsd(unread1hCost)} was 1-hour cache write spend in session(s) with no cache reads. `
+          ? `${fmtUsd(unread1hCost)} was 1-hour cache write spend in session(s) with no cache reads of their own — a candidate for a shorter cache TTL, not a measured saving. `
           : '') +
         'The deeper dead-token tranche is not claimed here; this v0 uses only deterministic token counters.',
       action:
-        'Use the highest cache-read sessions to target context-slimming work. Treat 1-hour cache writes with no same-session cache reads as concrete cache policy waste.',
-      estSavingsUsd: unread1hCost > 0 ? unread1hCost : undefined,
+        'Use the highest cache-read sessions to target context-slimming work. Treat 1-hour cache writes with no same-session cache reads as a CANDIDATE for a shorter cache TTL, and check those sessions before changing anything — zero reads within the session does not establish the entry went unused.',
+      // No estSavingsUsd (#3193). Zero SAME-SESSION cache reads was being
+      // exported as the full write cost recovered. It does not establish that:
+      // the entry may have been read by a later session, or after the captured
+      // interval, and a shorter TTL would not have avoided the write cost
+      // anyway — only the rate premium on it. Observed spend stays as
+      // accounting; the recoverable fraction is not measured here.
       affected: new Set(
         sessions
           .filter((s) => s.cacheReadCost > 0 || s.cacheWrite1hCost > 0)
@@ -137,14 +142,17 @@ export const detector: Detector = {
             value: Math.round(novelCost * 100) / 100,
           },
           {
-            claim: `${unread1h.length} session(s) wrote 1-hour cache tokens and recorded zero cache-read tokens`,
+            // Scope stated in the claim itself: the zero is same-session only,
+            // so the reader is not left to assume it covers the entry's whole
+            // lifetime (#3193).
+            claim: `${unread1h.length} session(s) wrote 1-hour cache tokens and recorded zero cache-read tokens WITHIN THAT SESSION (reuse by a later session is not observed)`,
             source: 'parse-sessions',
             field: 'TokenEntry.cacheCreation1hTokens + TokenEntry.cacheReadTokens',
             value: unread1h.length,
           },
         ],
         inference:
-          'Cache-read spend is observed re-sent context, while 1-hour cache writes with zero cache reads are deterministic cache-write waste. Content-level dead-token attribution is intentionally deferred.',
+          'Cache-read spend is observed re-sent context. Sessions that wrote 1-hour cache tokens and recorded zero cache reads are a candidate signal only, bounded by the same-session observation window: it cannot distinguish an entry that went unused from one reused by a later session or after the captured interval, so no recovered amount is claimed from it. Content-level dead-token attribution is intentionally deferred.',
       },
     };
   },

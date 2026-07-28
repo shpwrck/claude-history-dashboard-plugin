@@ -75,19 +75,23 @@ export const detector: Detector = {
 
     sessions.sort((a, b) => b.usd - a.usd);
 
-    // Book the Batch discount against input/output pools. OrderKey 82 preserves
-    // stable cost-lever ordering; automation-share's same-token ceiling is not a
-    // booked claim. The cascade's residual guard caps this at the real bill.
+    // Flag-only (#3191). This previously booked a 50% cut on the input/output
+    // pools of EVERY sufficiently large sdk-* session. The only eligibility
+    // evidence available is the unattended entrypoint plus optional schedule
+    // events, and neither shows the workload tolerates the Batch API's
+    // up-to-24-hour turnaround — the action itself tells the user to confirm
+    // that, so the booking was made before the condition it depends on was
+    // checked. Latency-sensitive automation (a cron job whose output another
+    // system waits on) is unattended and not batchable. The lever keeps its
+    // evidence for per-category coverage and books $0 until an explicit
+    // async-tolerance signal exists.
     const reclaim: ReclaimClaim = {
       leverId: 'cost.batchable-workload',
       category: 'cost',
       orderKey: 82,
-      ownedPools: ['input', 'output'],
-      scopeKeys: [...scopeKeys],
-      counterfactual: {
-        kind: 'scaleTokens',
-        poolDeltaFrac: { input: BATCH_DISCOUNT, output: BATCH_DISCOUNT },
-      },
+      ownedPools: [],
+      scopeKeys: [],
+      counterfactual: { kind: 'flag-only' },
       evidenceTokens: 0,
     };
 
@@ -104,14 +108,16 @@ export const detector: Detector = {
       detail:
         `${sessions.length} unattended (sdk-*) session(s) ran token-heavy, non-interactive work (` +
         `${fmtUsd(batchableIoCost)} in standard input/output spend). The Anthropic Batch API cuts standard ` +
-        `input/output ~${Math.round(BATCH_DISCOUNT * 100)}% for async-tolerant workloads, recovering ~${fmtUsd(
+        `input/output ~${Math.round(BATCH_DISCOUNT * 100)}% for async-tolerant workloads, which would be ~${fmtUsd(
           estSavingsUsd
-        )}.` +
+        )} here IF every one of these workloads tolerates async turnaround — that eligibility is not established by anything measured here, so none of it is counted as recovered.` +
         schedNote +
         ` Cache reads/writes are excluded (not batch-discounted). cost.automation-share may show a separate same-token ceiling, but that ceiling is not booked into reclaim.`,
       action:
         'Route latency-insensitive unattended/scheduled runs (bulk replay/eval/analysis, non-interactive cron jobs) through the Batch API for ~50% off standard input/output. Confirm each workload tolerates async (up-to-24h) turnaround before switching.',
-      estSavingsUsd,
+      // No estSavingsUsd (#3191) — see the reclaim comment. The ceiling above
+      // is stated in the detail as conditional, and declared below as a
+      // tier-0 estimate rather than a booked amount.
       savingsAttribution: {
         interventionKey: 'cost.batchable-workload',
         signatureId: 'batch-api-unattended-io',
@@ -145,7 +151,7 @@ export const detector: Detector = {
             : []),
         ],
         inference:
-          'Unattended (sdk-*) token-heavy work has no human waiting on the turn, so it tolerates the Batch API\'s async turnaround for a deterministic ~50% cut on standard input/output (cache pools excluded). The dollar is a tier-0 counterfactual estimate and the booked Batch claim remains distinct from automation-share\'s non-booked same-token ceiling.',
+          'Unattended (sdk-*) token-heavy work is a CANDIDATE for the Batch API, which cuts standard input/output ~50% (cache pools excluded). Entrypoint and schedule cadence do not establish async tolerance: unattended work can still be latency-sensitive when another system consumes its output. The dollar is therefore a tier-0 opportunity ceiling conditional on unverified eligibility, and nothing is booked into reclaim.',
       },
     };
   },

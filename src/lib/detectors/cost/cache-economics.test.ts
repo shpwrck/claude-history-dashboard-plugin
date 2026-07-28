@@ -75,7 +75,16 @@ describe('cost.cache-economics', () => {
     );
   });
 
-  it('flags 1-hour cache writes with no same-session cache reads as concrete waste', () => {
+  /**
+   * CHANGED in #3193. This asserted `estSavingsUsd` was the FULL 1h write cost
+   * whenever a session recorded zero cache reads of its own — i.e. it pinned
+   * the defect: zero same-session reads was being exported as proof the entry
+   * went unused and the whole write was recoverable. It establishes neither
+   * (a later session may read the entry, and a shorter TTL avoids the rate
+   * premium, not the write). The detector still surfaces the signal and the
+   * observed spend; what it no longer does is book a recovered amount.
+   */
+  it('surfaces unread 1-hour writes as a candidate, without booking a saving', () => {
     const rec = detector.rule(
       input([
         session('never-read-session', [
@@ -89,11 +98,33 @@ describe('cost.cache-economics', () => {
     );
 
     expect(rec).not.toBeNull();
-    expect(rec!.estSavingsUsd).toBeCloseTo(10, 9);
+    // The measurement survives...
     expect(rec!.detail).toContain('$10.00 was 1-hour cache write spend');
     expect(rec!.evidence).toContain(
       'never-re: $10.00 1h cache writes, no cache reads'
     );
+    // ...the counterfactual does not.
+    expect(rec!.estSavingsUsd).toBeUndefined();
+    // And the copy must not present the candidate as established waste.
+    expect(rec!.detail).toContain('not a measured saving');
+    expect(rec!.provenance?.inference).toContain('candidate signal only');
+  });
+
+  it('scopes the zero-read observation to the session that recorded it (#3193)', () => {
+    const rec = detector.rule(
+      input([
+        session('never-read-session', [
+          entry({ cacheCreationTokens: 1_000_000, cacheCreation1hTokens: 1_000_000 }),
+        ]),
+      ]),
+      0
+    );
+    // A reader must not be able to take the zero for the entry's whole
+    // lifetime — reuse by a LATER session is simply not observed here.
+    const obs = rec!.provenance?.observations.find((o) =>
+      o.field.includes('cacheCreation1hTokens')
+    );
+    expect(obs?.claim).toContain('WITHIN THAT SESSION');
   });
 
   it('stays dark when there is no cache-read spend and no unread 1h write', () => {

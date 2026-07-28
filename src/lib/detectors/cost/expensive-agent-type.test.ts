@@ -4,6 +4,7 @@ import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import type { ToolUsageData } from '../../parse-tools';
 import type { SessionAttribution } from '../../parse-agents';
+import { effectiveFixKind, isBlanketModelPinSnippet } from '../fix-validity';
 
 const taskCall = (i: number) => ({
   timestamp: `2026-01-01T00:00:0${i}Z`,
@@ -46,5 +47,38 @@ describe('cost.expensive-agent-type (#418)', () => {
   });
   it('self-suppresses when Haiku is pinned', () => {
     expect(detector.rule(input('claude-haiku-4-5'), 0)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The claim must not outrun the evidence (#3195)
+// ---------------------------------------------------------------------------
+
+describe('cost.expensive-agent-type claim discipline (#3195)', () => {
+  it('does not assert what right-sizing would recover', () => {
+    const rec = detector.rule(input(), 0);
+    // The detector's own comment says it has aggregate run-count evidence and
+    // NO scoped, quality-backed right-sizing claim. The detail used to promise
+    // "right-sizing its model recovers most of that" anyway.
+    expect(rec?.detail).not.toMatch(/recover/i);
+    // Mean cost per run is the measurement, and it stays.
+    expect(rec?.detail).toContain('/run over 5 runs');
+  });
+
+  it('books nothing, because a flag is all the evidence supports', () => {
+    const rec = detector.rule(input(), 0);
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim?.counterfactual.kind).toBe('flag-only');
+  });
+
+  it('does not offer the blanket model pin as a copy-paste fix', () => {
+    const rec = detector.rule(input(), 0);
+    // A top-level "model" key re-routes EVERY task class, not just the flagged
+    // agent type. fix-validity already has a predicate for this exact shape.
+    expect(isBlanketModelPinSnippet(rec!.fix!.snippet)).toBe(true);
+    // ...so it must not be published as copy-paste-safe. Absent fixKind would
+    // mean 'validated'.
+    expect(effectiveFixKind(rec!.fix!)).toBe('illustrative');
+    expect(rec?.fix?.note).toMatch(/do NOT paste as-is/i);
   });
 });

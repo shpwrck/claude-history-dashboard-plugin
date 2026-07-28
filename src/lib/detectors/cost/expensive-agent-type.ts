@@ -3,8 +3,8 @@ import { fmtUsd, isHaikuPinned } from '../shared';
 import { computeAgentEffectiveness } from '../../parse-agent-effectiveness';
 import type { ReclaimClaim } from '../../reclaim';
 
-// A subagent type whose mean cost per run is high — right-sizing its model
-// recovers most of that. (#418)
+// A subagent type whose mean cost per run is high. (#418) What right-sizing
+// would recover is NOT claimed here — see the detail/fix notes (#3195).
 const MIN_MEAN_COST_USD = 0.1;
 const MIN_RUNS = 5;
 
@@ -45,7 +45,12 @@ export const detector: Detector = {
       category: 'cost',
       severity: 'info',
       title: 'High mean cost per agent run',
-      detail: `Agent type "${top.agentType}" averages ${fmtUsd(top.meanCostUsd)}/run over ${top.runs} runs${rows.length > 1 ? ` (and ${rows.length - 1} other type(s) over $0.10/run)` : ''}; right-sizing its model recovers most of that.`,
+      // No recovery assertion (#3195). The comment above already states this
+      // detector has aggregate run-count evidence and no scoped, quality-backed
+      // right-sizing claim; the detail used to contradict that by promising it
+      // "recovers most of that". Mean cost per run is the measurement; what a
+      // cheaper model would recover, at what quality, is unmeasured here.
+      detail: `Agent type "${top.agentType}" averages ${fmtUsd(top.meanCostUsd)}/run over ${top.runs} runs${rows.length > 1 ? ` (and ${rows.length - 1} other type(s) over $0.10/run)` : ''}.`,
       action:
         'Pin a cheaper model (e.g. claude-haiku-4-5) for that agent type, narrow its task scope, or cap the context passed to it.',
       reclaim,
@@ -55,7 +60,15 @@ export const detector: Detector = {
       fix: {
         target: 'settings.json',
         label: 'Pin a cheaper model for the agent',
-        note: 'Set a cheaper model in the SDK config / settings.json that launches the flagged agent type.',
+        // ILLUSTRATIVE, not copy-paste (#3195). A top-level `model` key is a
+        // BLANKET pin: it re-routes every task class, including code
+        // authoring, not just the flagged agent type. `isBlanketModelPinSnippet`
+        // (detectors/fix-validity.ts) exists for exactly this shape, and epic
+        // #2138 keeps code authoring on the strong model until a class-scoped
+        // replay clears it. Without fixKind this was published as validated.
+        fixKind: 'illustrative',
+        note:
+          'Example only — do NOT paste as-is. A top-level "model" key pins EVERY task class, not just the flagged agent type; apply the cheaper model in the SDK config or agent definition that launches this agent instead.',
         snippet: `{\n  "model": "claude-haiku-4-5"\n}`,
       },
     };

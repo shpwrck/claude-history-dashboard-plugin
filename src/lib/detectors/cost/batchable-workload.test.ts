@@ -48,32 +48,40 @@ const input = (overrides?: Partial<RecommendationInput>): RecommendationInput =>
   }) as RecommendationInput;
 
 describe('cost.batchable-workload (#1755)', () => {
-  it('fires on token-heavy unattended sessions with a marginal input/output reclaim', () => {
+  /**
+   * CHANGED in #3191. These two asserted a booked `scaleTokens` counterfactual
+   * cutting 50% off the input/output pools of every large sdk-* session, and a
+   * positive cascade marginal from it. That pinned the defect: the only
+   * eligibility evidence is the unattended entrypoint (plus optional schedule
+   * events), and neither shows the workload tolerates the Batch API's
+   * up-to-24h turnaround. The detector's own action tells the user to confirm
+   * that — the booking was made before the condition it rests on was checked.
+   * The firing behaviour they also covered is preserved below.
+   */
+  it('fires on token-heavy unattended sessions, without booking a saving', () => {
     const rec = detector.rule(
       input({ tokenData: [session('s1', 'sdk-cli', 1_000_000, 200_000)] }),
       0
     );
     expect(rec?.id).toBe('cost.batchable-workload');
     expect(rec?.category).toBe('cost');
-    expect(rec?.estSavingsUsd).toBeGreaterThan(0);
     expect(rec?.affected).toBe(1);
-    expect(rec?.reclaim?.ownedPools).toEqual(['input', 'output']);
-    // Stable late cost-lever order; automation-share's ceiling is not booked.
+    // The opportunity is still surfaced, explicitly conditional...
+    expect(rec?.detail).toContain('IF every one of these workloads tolerates async');
+    // ...and nothing is booked.
+    expect(rec?.estSavingsUsd).toBeUndefined();
+    expect(rec?.reclaim?.counterfactual.kind).toBe('flag-only');
+    expect(rec?.reclaim?.ownedPools).toEqual([]);
     expect(rec?.reclaim?.orderKey).toBeGreaterThan(80);
-    expect(rec?.reclaim?.counterfactual.kind).toBe('scaleTokens');
-    if (rec?.reclaim?.counterfactual.kind === 'scaleTokens') {
-      expect(rec.reclaim.counterfactual.poolDeltaFrac.input).toBe(0.5);
-      expect(rec.reclaim.counterfactual.poolDeltaFrac.output).toBe(0.5);
-    }
   });
 
-  it('books a positive marginal through the cascade and preserves the identity', () => {
+  it('books nothing through the cascade while eligibility is unverified (#3191)', () => {
     const td = [session('s1', 'sdk-cli', 1_000_000, 200_000)];
     const rec = detector.rule(input({ tokenData: td }), 0);
     const result = runReclaimCascade([rec!.reclaim!], td);
-    expect(result.total).toBeGreaterThan(0);
-    expect(result.byCategory.cost).toBeCloseTo(result.total, 9);
-    expect(result.billOriginal - result.billFinal).toBeCloseTo(result.total, 9);
+    // A flag-only lever must move no money and leave the bill identity intact.
+    expect(result.total).toBe(0);
+    expect(result.billFinal).toBeCloseTo(result.billOriginal, 9);
   });
 
   it('ignores interactive (cli) sessions — only unattended workloads are batchable', () => {

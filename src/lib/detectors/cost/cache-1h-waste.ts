@@ -1,14 +1,22 @@
 import type { Detector } from '../types';
 import type { AppliedMarkers } from '../types';
-import { claudeMdMarksApplied, MIN_SAVINGS_USD } from '../shared';
+import { claudeMdMarksApplied, fmtUsd, MIN_SAVINGS_USD } from '../shared';
 import { getModelPricing } from '../../pricing';
 import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
 
 /**
  * 1-hour cache writes are billed at 2x the input rate vs 1.25x for the default
- * 5-minute cache. If those entries didn't actually get reused after 5 minutes,
- * the 1h cache was pure overpay. We surface the *maximum* recoverable amount:
- * the price delta on every 1h-cache token written.
+ * 5-minute cache. The price delta on every 1h-cache token written is a
+ * MAXIMUM EXPOSURE, not a booked saving (#3192).
+ *
+ * Recovering it requires that the context was not reused after five minutes —
+ * exactly the condition the action states. This detector cannot see that: the
+ * loop reads `cacheCreation1hTokens`, `cacheCreationTokens`, `model` and
+ * `sessionId`, and no reuse-timing field exists in the token counters at all.
+ * A legitimately reused 1-hour entry is indistinguishable here from a wasted
+ * one, so booking the delta counted correctly-used cache as recoverable waste.
+ * The arithmetic stays (it is a real measurement of the rate premium paid); the
+ * claim that it is recoverable does not.
  */
 const MARKERS_CACHE_1H_WASTE: AppliedMarkers = {
   headings: [/^##\s+Cach(e|ing)\b/i],
@@ -25,9 +33,6 @@ export const detector: Detector = {
     let extraCost = 0;
     let tokens = 0;
     const sessions = new Set<string>();
-    // The cascade scopes are per-(session, model); collect the canonical keys of
-    // every entry that actually wrote to the 1h cache so the convertRate
-    // counterfactual (1h-write rate → 5m-write rate) books on exactly those cells.
     const scopeKeys = new Set<string>();
     for (const d of input.tokenData) {
       for (const e of d.entries) {
@@ -41,15 +46,19 @@ export const detector: Detector = {
       }
     }
     if (extraCost < MIN_SAVINGS_USD) return null;
-    // Reclaim claim: re-bill the 1h cache-write pool at the 5-minute write rate
-    // on the same model. `convertRate` only touches the `cacheWrite1h` residual.
+    // Flag-only (#3192). This previously booked a `convertRate` counterfactual
+    // that re-billed the whole 1h cache-write pool at the 5-minute rate — i.e.
+    // it asserted every 1h write should have been a 5m write. Without
+    // reuse-timing evidence that is unsupportable, so the lever carries its
+    // evidence for per-category coverage and books $0. Restoring a booked
+    // counterfactual requires a reuse signal this parser does not yet produce.
     const reclaim: ReclaimClaim = {
       leverId: 'cost.cache-1h-waste',
       category: 'cost',
       orderKey: 50,
-      ownedPools: ['cacheWrite1h'],
-      scopeKeys: [...scopeKeys],
-      counterfactual: { kind: 'convertRate', rateFrom: 'cacheWrite1h', rateTo: 'cacheWrite5m' },
+      ownedPools: [],
+      scopeKeys: [],
+      counterfactual: { kind: 'flag-only' },
       evidenceTokens: tokens,
     };
     return {
@@ -57,10 +66,11 @@ export const detector: Detector = {
       category: 'cost',
       severity: extraCost >= 1 ? 'warning' : 'info',
       title: 'Reduce 1-hour cache writes',
-      detail: `${(tokens / 1_000_000).toFixed(2)}M tokens were written to the 1-hour cache across ${sessions.size} session(s), billed at 2× input vs 1.25× for the default 5-minute cache.`,
+      detail: `${(tokens / 1_000_000).toFixed(2)}M tokens were written to the 1-hour cache across ${sessions.size} session(s), billed at 2× input vs 1.25× for the default 5-minute cache — a rate premium of ${fmtUsd(extraCost)} over what the same tokens would have cost at the 5-minute write rate.`,
       action:
-        'If that context is not reused beyond 5 minutes, prefer the 5-minute cache — up to the amount shown is recoverable.',
-      estSavingsUsd: extraCost,
+        'Check whether that context is genuinely reused beyond 5 minutes. Where it is not, the 5-minute cache is cheaper — but how much of the premium above is avoidable depends on reuse timing, which is not recorded in the token counters, so none of it is counted as recovered.',
+      // No estSavingsUsd (#3192): the premium above is measured, its
+      // recoverable fraction is not. See the module comment.
       reclaim,
       affected: sessions.size,
       view: 'tokens',

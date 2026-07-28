@@ -21,6 +21,7 @@ export const detector: Detector = {
     const totalCost = input.tokenData.reduce((s, d) => s + estimateCost(d), 0);
     const top3 = top.slice(0, 3);
     const top3Cost = top3.reduce((s, r) => s + r.estimatedCost, 0);
+    // Materiality gate on OBSERVED spend — not a savings threshold (#3196).
     if (totalCost <= 0 || top3Cost < MIN_SAVINGS_USD) return null;
     const share = (top3Cost / totalCost) * 100;
     // Only worth flagging when spend is concentrated in a handful of sessions.
@@ -33,7 +34,12 @@ export const detector: Detector = {
       detail: `The top 3 sessions account for ${share.toFixed(0)}% of total estimated spend (${fmtUsd(top3Cost)} of ${fmtUsd(totalCost)}).`,
       action:
         'Review these sessions for runaway context or repeated work that could be scoped down or split.',
-      estSavingsUsd: top3Cost,
+      // No estSavingsUsd (#3196). `top3Cost` is the full OBSERVED cost of those
+      // three sessions. Booking it as savings asserts that session-scoping
+      // guidance eliminates 100% of their spend — but this detector measures
+      // concentration, not waste, and most of that cost is work the user
+      // wanted done. The concentration figure is an accounting claim and stays;
+      // the recoverable fraction is a counterfactual nobody has measured.
       affected: top3.length,
       evidence: top3.map(
         (r) => `${short(r.sessionId)}, ${fmtUsd(r.estimatedCost)}, ${r.topTool ?? 'no tools'}`
