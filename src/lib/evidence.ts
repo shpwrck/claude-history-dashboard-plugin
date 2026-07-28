@@ -48,6 +48,17 @@ export function resolveEvidenceRef(
   const timeline = timelines.find((candidate) => candidate.sessionId === ref.sessionId);
   if (!timeline) return null;
 
+  // Fast path: a ref minted moments ago by evidenceRefForEntry (every
+  // "Entry N" link in SessionTimeline/SessionList) carries the CURRENT
+  // entryIndex for the CURRENT timeline, so an in-bounds index whose entry
+  // still matches ref's identity is the entry the ref was built from — that
+  // is what "still in bounds and matching" *means* for a fresh ref, and
+  // rejecting it would silently dead-link every "Entry N" click into a
+  // same-timestamp multi-block turn (assistant thinking + text is routine;
+  // see parseSessionTimeline). A reparse CAN insert a same-timestamp sibling
+  // ahead of the target and leave a stale index pointing at the wrong entry
+  // here — that residual misattribution is real and is knowingly deferred to
+  // #3390 (stable per-entry identifier), not solved by this fast path.
   const indexedEntry = timeline.entries[ref.entryIndex];
   if (matchesRef(indexedEntry, ref)) {
     return {
@@ -58,11 +69,21 @@ export function resolveEvidenceRef(
     };
   }
 
-  const fallbackIndex = timeline.entries.findIndex((entry) =>
-    matchesRef(entry, ref)
-  );
-  if (fallbackIndex === -1) return null;
+  // Once the index itself is stale (out of bounds, or no longer matching),
+  // we must search the whole timeline, and a bare timestamp (no toolUseId)
+  // is not a unique key — same-timestamp siblings from one transcript record
+  // are the ordinary case, not an edge case. Resolving to "the first match"
+  // would silently attach evidence to an unrelated entry, so the fallback
+  // only resolves when ref's identity narrows the timeline down to exactly
+  // one candidate; any other count (zero or ambiguous) fails closed to null
+  // rather than guessing (#3125).
+  const fallbackIndices: number[] = [];
+  timeline.entries.forEach((entry, index) => {
+    if (matchesRef(entry, ref)) fallbackIndices.push(index);
+  });
+  if (fallbackIndices.length !== 1) return null;
 
+  const fallbackIndex = fallbackIndices[0];
   return {
     ref,
     timeline,
