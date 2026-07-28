@@ -25,6 +25,7 @@ import type { Detector, RecommendationInput } from '../types';
 import type { McpAuthState } from '../../parse-mcp-auth';
 import { classifyAuthServers } from '../../parse-mcp-auth';
 import { isUnattendedEntrypoint } from '../../parse-sessions';
+import { shellQuoteMinimal as shellQuote } from '../../shell-quote';
 
 /**
  * Build a per-server unattended-call-count map from attribution data, scoped to
@@ -97,26 +98,15 @@ export function isSupportedMcpServerName(name: unknown): name is string {
 }
 
 /**
- * Characters that are literal to every POSIX shell, so a value made only of
- * them needs no quoting. Deliberately excludes `~` (tilde expansion), `{}`
- * (brace expansion), `!` (history), `*?[]` (globbing) and all of `$`, backtick,
- * quotes, whitespace and the metacharacters `;&|<>()#`.
- */
-const SHELL_SAFE_LITERAL_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
-
-/**
  * POSIX shell-quote a value so it survives copy-paste as exactly one argv
  * element. Values made purely of literal characters pass through unquoted (so
- * `claude mcp auth github` stays readable); everything else is single-quoted
- * with embedded single quotes escaped as `'\''`, which is inert in every POSIX
- * shell because single quotes suppress all expansion.
+ * `claude mcp auth github` stays readable); everything else is single-quoted.
+ *
+ * This is the repo-wide primitive from `src/lib/shell-quote.ts` (#3379), not a
+ * local copy — re-exported under the name this module and its tests already
+ * use.
  */
-export function shellQuote(value: string): string {
-  if (value.length > 0 && !value.startsWith('-') && SHELL_SAFE_LITERAL_RE.test(value)) {
-    return value;
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+export { shellQuote };
 
 /**
  * Render a server name for human-readable prose/evidence. Supported names print

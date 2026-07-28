@@ -1,8 +1,8 @@
 import type { HygieneFinding } from './config-hygiene';
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+// Always-quote, not the minimal form: every snippet this module emits is a
+// delete or an editor-open aimed at a user path, so visible quoting is worth
+// more here than a shorter line (#3379).
+import { shellQuote } from './shell-quote';
 
 /**
  * Render a path for the copyable `code -g ...` command.

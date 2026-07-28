@@ -47,6 +47,7 @@ import { join, dirname, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 
+import { shellQuote } from '../lib/shell-quote.mjs';
 import { DEFAULT_GATES, resolveGates, GATES } from './gates.config.mjs';
 import {
   assertExactAuditUniverse,
@@ -208,9 +209,10 @@ export function filterFiles(files, exclude = []) {
   return files.filter((f) => !exclude.some((p) => String(f).startsWith(p)));
 }
 
-// POSIX single-quote escape (wrap in '...'; embedded ' -> '\'') so a filename or path
-// with shell metacharacters cannot break out of an interpolated command argument.
-export const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+// POSIX single-quote escape so a filename or path with shell metacharacters cannot
+// break out of an interpolated command argument. Thin coercing wrapper over the
+// shared primitive (#3379) — the escape itself lives in one place only.
+export const shq = (s) => shellQuote(String(s));
 
 // Build the per-batch instruction the chosen harness executes (harness-neutral text).
 // The orchestrator has already enumerated and sliced the section, so it passes the

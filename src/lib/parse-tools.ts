@@ -1,5 +1,6 @@
 import { parseJsonl, parseMessage } from './parse-utils';
 import { bashCommandFingerprint } from './bash-command-fingerprint';
+import { shellQuoteMinimal } from './shell-quote';
 import {
   detectRiskyActionPatternName,
   rmRfCertainty,
@@ -1412,13 +1413,14 @@ function sshPayloadTokens(tokens: string[]): string[] | null {
   return argv.slice(index);
 }
 
-function shellQuoteArgument(argument: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(argument)) return argument;
-  return `'${argument.replace(/'/g, `'\\''`)}'`;
-}
-
+// Re-serialize argv back into shell source so the analyzer can re-parse it one
+// level down (`kubectl exec … -- <payload>`). Uses the shared minimal quoter
+// (#3379) rather than a local copy. The contract that matters here is that each
+// element round-trips to exactly one token, which quoting preserves: the
+// re-parse unquotes before matching, so an option like `-rf` is still read as
+// an option whether or not the quoter passed it through unquoted.
 function shellSourceFromArgv(argv: string[]): string {
-  return argv.map(shellQuoteArgument).join(' ');
+  return argv.map(shellQuoteMinimal).join(' ');
 }
 
 function sshPayload(tokens: string[]): string | null {

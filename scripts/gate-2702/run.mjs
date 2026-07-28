@@ -28,6 +28,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { shellQuote } from "../lib/shell-quote.mjs";
 import {
   GATE_2702_SIDEKICK_ENV_KEYS,
   GATE_2702_SIDEKICK_VERSION,
@@ -210,10 +211,6 @@ function isWithin(root, candidate) {
     !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
     !isAbsolute(rel)
   );
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
 function parseArgs(argv) {
@@ -2173,7 +2170,7 @@ async function commandRetry(plan, options) {
 function recoveryCommand(trialId, repoPath, stateRoot) {
   return (
     `Recovery command: CHD_EXPERIMENT_2702=1 node scripts/gate-2702/run.mjs cleanup ` +
-    `--trial ${trialId} --repo ${shellQuote(repoPath)} --state-root ${shellQuote(stateRoot)}`
+    `--trial ${trialId} --repo ${shellQuote(String(repoPath))} --state-root ${shellQuote(String(stateRoot))}`
   );
 }
 

