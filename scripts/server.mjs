@@ -10585,10 +10585,7 @@ const server = createServer(async (req, res) => {
           );
           return callAnthropicMessages('server.audit-judge', {
             apiKey,
-            model: scrubbed.content.model,
-            system: scrubbed.content.system,
-            maxTokens: scrubbed.content.maxTokens,
-            messages: scrubbed.content.messages,
+            ...scrubbed.content,
             scrubReceipt: scrubbed.receipt,
             capChecked: true,
             capReceipt: serverAuditLlmCapReceipt(),

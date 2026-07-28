@@ -9,8 +9,11 @@ import { fileURLToPath } from 'node:url';
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
 const COMPOSE = readFileSync(join(PROJECT_DIR, 'docker-compose.yml'), 'utf8');
+const SPA_COMPOSE = readFileSync(join(PROJECT_DIR, 'docker-compose.spa.yml'), 'utf8');
+const TLS_COMPOSE = readFileSync(join(PROJECT_DIR, 'docker-compose.tls.yml'), 'utf8');
 const LINES = COMPOSE.split(/\r?\n/);
 const APP_SERVICE = serviceBlock('app');
+const IMMUTABLE_IMAGE = /@sha256:[0-9a-f]{64}\}?$/;
 
 let failures = 0;
 function check(name, cond, detail = '') {
@@ -49,6 +52,14 @@ function appHasOrderedLines(patterns) {
   return true;
 }
 
+function allImageReferencesAreImmutable(compose) {
+  const images = compose
+    .split(/\r?\n/)
+    .map((line) => line.match(/^\s+image:\s+(\S+)\s*$/)?.[1])
+    .filter(Boolean);
+  return images.length > 0 && images.every((image) => IMMUTABLE_IMAGE.test(image));
+}
+
 check('base compose defines an app service', APP_SERVICE.length > 0);
 check('base compose makes the app root filesystem read-only', appHasLine(/^    read_only: true$/));
 check(
@@ -70,6 +81,18 @@ check(
 check(
   'base compose does not accidentally mark the cache volume read-only',
   !appHasLine(/^      - cache:\/app\/\.cache:ro$/)
+);
+check(
+  'base compose pins the published app image by digest',
+  allImageReferencesAreImmutable(COMPOSE)
+);
+check(
+  'standalone SPA compose pins the published image by digest',
+  allImageReferencesAreImmutable(SPA_COMPOSE)
+);
+check(
+  'TLS compose pins the reverse-proxy image by digest',
+  allImageReferencesAreImmutable(TLS_COMPOSE)
 );
 
 if (failures > 0) process.exit(1);

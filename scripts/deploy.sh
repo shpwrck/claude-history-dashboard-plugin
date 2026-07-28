@@ -83,6 +83,14 @@ for arg in "$@"; do
   esac
 done
 
+# A digest-pinned image is a valid pull/run reference but cannot be the output
+# tag of a local Compose build. Keep published deploys on the immutable default
+# from docker-compose.yml; source deploys deliberately tag their locally built
+# image in the localhost namespace instead.
+if [ "$PUBLISHED" -eq 0 ]; then
+  export CHD_APP_IMAGE="${CHD_APP_IMAGE:-localhost/claude-history-dashboard:local}"
+fi
+
 # Refresh host-side artifacts before deploying. Both are best-effort so an
 # optional checker or one malformed project cannot block the dashboard deploy.
 if [ "$REFRESH" -eq 1 ]; then

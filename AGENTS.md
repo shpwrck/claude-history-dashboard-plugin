@@ -169,14 +169,16 @@ ineligible, so the two loops never grab the same issue.
 - Typecheck / validate: `npm run typecheck` (`tsc -b`); `npm run validate`
   (lint + test + full build) is the pre-PR gate.
 - Lint: `npm run lint`
-- Deploy: `podman compose -f docker-compose.yml -f docker-compose.local.yml up --build -d`
+- Deploy: `CHD_APP_IMAGE=localhost/claude-history-dashboard:local podman compose -f docker-compose.yml -f docker-compose.local.yml up --build -d`
   from the repo root. The container holds port 5173. Verify on
   `http://127.0.0.1:5173` (pasta networking is IPv4-only — `localhost` may
   resolve to `::1` and reset). There is no systemd service.
   - Keep `--build` when shipping local frontend changes — it rebuilds the image
     from the working tree (this is what `/ship` and the deploy hooks rely on).
   - To deploy the **published** image instead (no rebuild; faster; pinnable
-    rollback target), `pull` then `up -d` without `--build`:
+    rollback target), `pull` then `up -d` without `--build`. The committed
+    default is digest-pinned, so registry tag movement cannot change the
+    selected executable:
     `podman compose -f docker-compose.yml -f docker-compose.local.yml pull && podman compose -f docker-compose.yml -f docker-compose.local.yml up -d`.
     Every push to `master` publishes `ghcr.io/shpwrck/claude-history-dashboard:latest`
     + `:sha-<short>` via `.github/workflows/docker-publish.yml`.
@@ -192,7 +194,7 @@ ineligible, so the two loops never grab the same issue.
   upload-only static bundle. Deploy it standalone with the **self-contained**
   `docker-compose.spa.yml` (nginx image `Dockerfile.spa`, host port 8325, **no
   `~/.claude` bind mount, no `/api/*`**):
-  `podman compose -f docker-compose.spa.yml up --build -d`, verify on
+  `CHD_SPA_IMAGE=localhost/claude-history-dashboard-spa:local podman compose -f docker-compose.spa.yml up --build -d`, verify on
   `http://127.0.0.1:8325`. The same publish workflow pushes
   `ghcr.io/shpwrck/claude-history-dashboard-spa:latest` + `:sha-<short>`. Any new
   server call MUST route through `src/lib/api-client.ts` or the `spa-boundary` CI

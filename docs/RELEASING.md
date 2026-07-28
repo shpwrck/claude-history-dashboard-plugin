@@ -26,6 +26,34 @@ We do **not** use release branches or a stabilization freeze — that would figh
 the continuous burn-down loop. If a release needs to exclude in-flight work,
 hold the tag until `master` is at the commit you want.
 
+### Deployable Compose references are digest-pinned
+
+The publish workflow's tags are discovery and release labels; the deployable
+Compose defaults do not trust a tag alone. `docker-compose.yml`,
+`docker-compose.spa.yml`, and `docker-compose.tls.yml` select reviewed artifacts
+with `@sha256:` digests, so a registry retag cannot change the executable chosen
+by an unchanged checkout.
+
+Advancing a default pin is a reviewed follow-up change after the target image is
+published. For the two dashboard images, confirm the image's
+`org.opencontainers.image.revision` label matches the intended commit before
+recording its registry-reported manifest digest. For a multi-architecture
+upstream such as Caddy, record the top-level index digest rather than one
+machine's child manifest. Render all supported deployments before merging:
+
+```sh
+podman compose -f docker-compose.yml config
+podman compose -f docker-compose.yml -f docker-compose.local.yml config
+podman compose -f docker-compose.yml -f docker-compose.tls.yml config
+podman compose -f docker-compose.spa.yml config
+```
+
+Every rendered production `image:` must contain `@sha256:`. Direct source
+builds are the deliberate exception: Compose cannot use a digest reference as a
+build output tag, so `scripts/deploy.sh` selects
+`localhost/claude-history-dashboard:local`; direct commands set the matching
+`CHD_APP_IMAGE` or `CHD_SPA_IMAGE` override documented in `README.md`.
+
 ## Each release answers one question
 
 Every release is framed by a single **guiding question** — the one thing this
@@ -417,14 +445,16 @@ cuts.
 
 ## Rollback
 
-Every push and tag leaves an immutable `:sha-<short>` (and releases leave
-`:X.Y.Z`) image. To roll a deployment back, pin that tag instead of `:latest`:
+Every push and release leaves lookup tags (`:sha-<short>` and `:X.Y.Z`), but a
+deployment must record the resolved digest rather than trust that a registry tag
+will never move. To roll back temporarily, select a previously reviewed digest
+through the same immutable override:
 
 ```sh
-# example: pin the server image to a known-good release
-podman compose -f docker-compose.yml -f docker-compose.local.yml \
-  pull ghcr.io/shpwrck/claude-history-dashboard:0.1.0
-# then point the compose file's image tag at :0.1.0 and `up -d`
+# example: select a previously reviewed server manifest
+export CHD_APP_IMAGE=ghcr.io/shpwrck/claude-history-dashboard@sha256:<64-hex-digest>
+podman compose -f docker-compose.yml -f docker-compose.local.yml pull
+podman compose -f docker-compose.yml -f docker-compose.local.yml up -d
 ```
 
 See the deploy notes in `CLAUDE.md` / `README.md` for the full pull-then-`up -d`

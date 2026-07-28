@@ -4,7 +4,8 @@
 // The gate has three layers:
 // 1. raw origin literals may only appear in approved chokepoint/UI-copy files;
 // 2. server egress wrapper calls must pass literal ids registered in
-//    src/lib/llm-registry.ts; and
+//    src/lib/llm-registry.ts, and protected payloads must come directly from a
+//    captured same-id egressScrub result;
 // 3. publicly reachable entries must satisfy the pre-public exposure contract;
 //    and
 // 4. docs/llm-usage-registry.md must be freshly generated from the registry.
@@ -59,6 +60,12 @@ const LLM_WRAPPER_CALLEES = new Set([
   'callAnthropicMessages',
   'egressScrub',
 ]);
+const ANTHROPIC_MESSAGE_PAYLOAD_FIELDS = new Set([
+  'model',
+  'maxTokens',
+  'system',
+  'messages',
+]);
 
 const PUBLIC_EXPOSURE_MODE_ENV = 'DASHBOARD_LLM_PUBLIC_EXPOSURE_MODE';
 const PUBLIC_EXPOSURE_MODES = new Set(['single-tenant', 'multi-tenant']);
@@ -112,6 +119,12 @@ export function collectLlmWrapperCalls(file, sourceText) {
           line: position.line + 1,
           callee,
           registryId,
+          ...(callee === 'egressScrub'
+            ? {}
+            : {
+                payloadScrubRegistryId:
+                  linkedPayloadScrubRegistryId(node, callee),
+              }),
         });
       }
     }
@@ -152,7 +165,17 @@ export function validateLlmWrapperCallSites(calls, entries = LLM_USAGE_REGISTRY)
     }
 
     if (call.callee === 'egressScrub') scrubRefs.add(call.registryId);
-    else serverEgressRefs.add(call.registryId);
+    else {
+      serverEgressRefs.add(call.registryId);
+      if (
+        entry.egressScrub !== 'none' &&
+        call.payloadScrubRegistryId !== call.registryId
+      ) {
+        errors.push(
+          `${location}: ${call.callee} must send payload derived from a captured same-id egressScrub result`
+        );
+      }
+    }
   }
 
   for (const entry of entries) {
@@ -226,18 +249,161 @@ function calleeName(expression) {
   return '';
 }
 
-function literalText(node) {
-  if (!node) return null;
-  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-    return node.text;
+function linkedPayloadScrubRegistryId(call, callee) {
+  const request = unwrapExpression(call.arguments[1]);
+  if (!request) return null;
+
+  // Keep the accepted flow deliberately narrow and visible in the call:
+  // `const scrubbed = egressScrub(...)`, followed in the same statement list
+  // by either a direct `scrubbed.content` send or a request whose payload is
+  // the single `...scrubbed.content` spread. Unsupported aliasing fails closed.
+  const binding =
+    scrubContentBinding(request) ??
+    (callee === 'callAnthropicMessages'
+      ? messageRequestScrubBinding(request)
+      : callee === 'callAnthropic'
+        ? rawRequestScrubBinding(request)
+        : null);
+  if (!binding) return null;
+  return capturedScrubRegistryId(call, binding);
+}
+
+function messageRequestScrubBinding(request) {
+  if (!ts.isObjectLiteralExpression(request)) return null;
+
+  let binding = null;
+  let scrubbedContentSpreads = 0;
+  for (const property of request.properties) {
+    if (ts.isSpreadAssignment(property)) {
+      const spreadBinding = scrubContentBinding(property.expression);
+      if (!spreadBinding || (binding && spreadBinding !== binding)) return null;
+      binding = spreadBinding;
+      scrubbedContentSpreads += 1;
+      continue;
+    }
+
+    const name = staticPropertyName(property.name);
+    if (name == null || ANTHROPIC_MESSAGE_PAYLOAD_FIELDS.has(name)) return null;
   }
-  if (ts.isParenthesizedExpression(node)) return literalText(node.expression);
+
+  return scrubbedContentSpreads === 1 ? binding : null;
+}
+
+function rawRequestScrubBinding(request) {
+  if (!ts.isObjectLiteralExpression(request)) return null;
+
+  let binding = null;
+  let bodyProperties = 0;
+  for (const property of request.properties) {
+    if (ts.isSpreadAssignment(property)) return null;
+    const name = staticPropertyName(property.name);
+    if (name == null) return null;
+    if (name !== 'body') continue;
+    if (!ts.isPropertyAssignment(property)) return null;
+    binding = scrubContentBinding(property.initializer);
+    bodyProperties += 1;
+  }
+
+  return bodyProperties === 1 ? binding : null;
+}
+
+function scrubContentBinding(expression) {
+  const unwrapped = unwrapExpression(expression);
+  if (
+    !unwrapped ||
+    !ts.isPropertyAccessExpression(unwrapped) ||
+    unwrapped.name.text !== 'content'
+  ) {
+    return null;
+  }
+  const target = unwrapExpression(unwrapped.expression);
+  return target && ts.isIdentifier(target) ? target.text : null;
+}
+
+function capturedScrubRegistryId(call, binding) {
+  const context = containingStatementContext(call);
+  if (!context) return null;
+  const statementIndex = context.container.statements.indexOf(context.statement);
+  if (statementIndex < 0) return null;
+
+  for (let index = statementIndex - 1; index >= 0; index -= 1) {
+    const statement = context.container.statements[index];
+    if (!ts.isVariableStatement(statement)) continue;
+    const declaration = statement.declarationList.declarations.find(
+      (candidate) =>
+        ts.isIdentifier(candidate.name) && candidate.name.text === binding
+    );
+    if (!declaration) continue;
+    if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return null;
+
+    const initializer = unwrapExpression(declaration.initializer);
+    if (
+      !initializer ||
+      !ts.isCallExpression(initializer) ||
+      calleeName(initializer.expression) !== 'egressScrub'
+    ) {
+      return null;
+    }
+    return literalText(initializer.arguments[0]);
+  }
+
+  return null;
+}
+
+function containingStatementContext(node) {
+  let current = node;
+  while (
+    current.parent &&
+    !ts.isBlock(current.parent) &&
+    !ts.isSourceFile(current.parent)
+  ) {
+    current = current.parent;
+  }
+  const container = current.parent;
+  if (!container || (!ts.isBlock(container) && !ts.isSourceFile(container))) {
+    return null;
+  }
+  return { container, statement: current };
+}
+
+function staticPropertyName(name) {
+  if (!name) return null;
+  if (
+    ts.isIdentifier(name) ||
+    ts.isStringLiteral(name) ||
+    ts.isNumericLiteral(name)
+  ) {
+    return name.text;
+  }
+  if (
+    ts.isComputedPropertyName(name) &&
+    (ts.isStringLiteral(name.expression) ||
+      ts.isNumericLiteral(name.expression))
+  ) {
+    return name.expression.text;
+  }
+  return null;
+}
+
+function unwrapExpression(node) {
+  if (!node) return null;
+  if (ts.isParenthesizedExpression(node)) return unwrapExpression(node.expression);
   if (
     ts.isAsExpression(node) ||
     ts.isSatisfiesExpression(node) ||
-    ts.isTypeAssertionExpression(node)
+    ts.isTypeAssertionExpression(node) ||
+    ts.isNonNullExpression(node)
   ) {
-    return literalText(node.expression);
+    return unwrapExpression(node.expression);
+  }
+  return node;
+}
+
+function literalText(node) {
+  node = unwrapExpression(node);
+  if (!node) return null;
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text;
   }
   return null;
 }

@@ -90,6 +90,7 @@ check('collector finds literal wrapper ids and line numbers', () => {
       line: 1,
       callee: 'callAnthropic',
       registryId: 'server.probe',
+      payloadScrubRegistryId: null,
     },
     {
       file: 'scripts/server.mjs',
@@ -102,6 +103,7 @@ check('collector finds literal wrapper ids and line numbers', () => {
       line: 4,
       callee: 'callAnthropicMessages',
       registryId: 'server.fake',
+      payloadScrubRegistryId: null,
     },
   ]);
 });
@@ -151,6 +153,60 @@ check('validator rejects wrapper calls outside the registered file', () => {
   assert.match(
     errors.join('\n'),
     /server\.probe is registered for scripts\/server\.mjs/
+  );
+});
+
+check('validator rejects a protected send whose scrub result is discarded', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      "egressScrub('server.fake', safeValue, options);",
+      "callAnthropicMessages('server.fake', sensitiveValue);",
+    ].join('\n')
+  );
+  const errors = validateLlmWrapperCallSites(calls, [entries[0]]);
+  assert.match(
+    errors.join('\n'),
+    /callAnthropicMessages must send payload derived from a captured same-id egressScrub result/
+  );
+});
+
+check('validator accepts a protected send of the captured same-id scrub result', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
+      "callAnthropicMessages('server.fake', {",
+      '  apiKey,',
+      '  ...scrubbed.content,',
+      '  scrubReceipt: scrubbed.receipt,',
+      '  capChecked: true,',
+      '  capReceipt,',
+      '});',
+    ].join('\n')
+  );
+  assert.deepEqual(validateLlmWrapperCallSites(calls, [entries[0]]), []);
+});
+
+check('validator rejects an unsanitized override of scrubbed message content', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
+      "callAnthropicMessages('server.fake', {",
+      '  apiKey,',
+      '  ...scrubbed.content,',
+      '  messages: sensitiveValue,',
+      '  scrubReceipt: scrubbed.receipt,',
+      '  capChecked: true,',
+      '  capReceipt,',
+      '});',
+    ].join('\n')
+  );
+  const errors = validateLlmWrapperCallSites(calls, [entries[0]]);
+  assert.match(
+    errors.join('\n'),
+    /callAnthropicMessages must send payload derived from a captured same-id egressScrub result/
   );
 });
 

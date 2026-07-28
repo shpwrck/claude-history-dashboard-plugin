@@ -34,18 +34,20 @@ function runDeployWithoutNode(args: string[]) {
   ].join('\n'));
   writeFileSync(podmanPath, [
     '#!/bin/sh',
-    'printf "%s|%s\\n" "${CHD_HOST_ENV_NAMES+x}:${CHD_HOST_ENV_NAMES-}" "$*" >> "$FAKE_ENGINE_LOG"',
+    'printf "%s|%s|%s\\n" "${CHD_HOST_ENV_NAMES+x}:${CHD_HOST_ENV_NAMES-}" "${CHD_APP_IMAGE+x}:${CHD_APP_IMAGE-}" "$*" >> "$FAKE_ENGINE_LOG"',
   ].join('\n'));
   chmodSync(dirnamePath, 0o755);
   chmodSync(podmanPath, 0o755);
 
+  const env = { ...process.env };
+  delete env.CHD_APP_IMAGE;
   const result = spawnSync(
     '/usr/bin/bash',
     [resolve(process.cwd(), 'scripts/deploy.sh'), ...args],
     {
       encoding: 'utf8',
       env: {
-        ...process.env,
+        ...env,
         PATH: root,
         FAKE_ENGINE_LOG: logPath,
       },
@@ -63,20 +65,24 @@ describe('scripts/deploy.sh host environment snapshot', () => {
       name: 'source --no-refresh',
       args: ['--no-refresh'],
       expectedCommands: ['compose', 'up --build -d'],
+      expectedImageEnv: 'x:localhost/claude-history-dashboard:local',
     },
     {
       name: 'published --no-refresh',
       args: ['--pull', '--no-refresh'],
       expectedCommands: ['compose', 'pull', 'up -d'],
+      expectedImageEnv: ':',
     },
     {
       name: 'published with best-effort refresh',
       args: ['--pull'],
       expectedCommands: ['compose', 'pull', 'up -d'],
+      expectedImageEnv: ':',
     },
   ])('keeps $name deploys usable when Node is unavailable', ({
     args,
     expectedCommands,
+    expectedImageEnv,
   }) => {
     const result = runDeployWithoutNode(args);
 
@@ -85,6 +91,7 @@ describe('scripts/deploy.sh host environment snapshot', () => {
     expect(result.engineLog).not.toHaveLength(0);
     for (const line of result.engineLog) {
       expect(line).toMatch(/^x:\|/);
+      expect(line.split('|')[1]).toBe(expectedImageEnv);
     }
     for (const command of expectedCommands) {
       expect(result.engineLog.join('\n')).toContain(command);
