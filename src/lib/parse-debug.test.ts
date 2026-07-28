@@ -16,7 +16,8 @@
 import { describe, it, expect } from 'vitest';
 import { parseDebugLog, parseDebugDir } from './parse-debug';
 import type { DebugSessionMetrics } from './parse-debug';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, symlinkSync } from 'node:fs';
+import { DEFAULT_ARTIFACT_MAX_FILE_BYTES } from './bounded-fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -440,5 +441,34 @@ describe('DebugSessionMetrics interface', () => {
     expect(typeof m.fastModeLostCount).toBe('number');
     // isSdkCli is optional — may be boolean or undefined.
     expect(m.isSdkCli === undefined || typeof m.isSdkCli === 'boolean').toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Directory boundary + finite defaults (#3378)
+// ---------------------------------------------------------------------------
+
+describe('parseDebugDir — the debug directory is the boundary (#3378)', () => {
+  it('refuses a symlinked log pointing outside the directory', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'debug-outside-'));
+    const dir = mkdtempSync(join(tmpdir(), 'debug-boundary-'));
+    const target = join(outside, 'stolen.txt');
+    writeFileSync(target, '[DEBUG] stolen\n');
+    symlinkSync(target, join(dir, 'linked.txt'));
+    // A real sibling proves the parser works on this fixture otherwise.
+    writeFileSync(join(dir, 'real.txt'), '[DEBUG] real\n');
+
+    const out = parseDebugDir(dir);
+    expect(out.map((m) => m.sessionId)).toEqual(['real']);
+  });
+
+  it('applies a finite per-file byte cap by default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'debug-cap-'));
+    writeFileSync(join(dir, 'big.txt'), 'x'.repeat(DEFAULT_ARTIFACT_MAX_FILE_BYTES + 100));
+    // Before #3378 the default was -1 — no cap at all.
+    expect(parseDebugDir(dir)).toEqual([]);
+    expect(
+      parseDebugDir(dir, { maxFileBytes: DEFAULT_ARTIFACT_MAX_FILE_BYTES + 1000 })
+    ).toHaveLength(1);
   });
 });

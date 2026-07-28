@@ -14,11 +14,15 @@
  * Issue: #560 / prototype branch: proto/539-teams
  */
 
-import { readFileSync, statSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
+  DEFAULT_ARTIFACT_MAX_FILE_BYTES,
   normalizeMaxEntries,
   readDirentsBoundedSync,
+  readFileInDirBoundedSync,
+  readSubdirectoryNamesBoundedSync,
   remainingEntryCapacity,
 } from './bounded-fs';
 import { parseDateMs } from './parse-utils';
@@ -124,16 +128,14 @@ function safeParse(text: string): TaskAssignmentPayload | null {
   }
 }
 
+/**
+ * Real subdirectories of `dir`. Symlinked entries are refused: following one
+ * would walk an arbitrary foreign tree as a team directory (#3378).
+ */
 function listSubdirs(dir: string, maxEntries: number): string[] {
   if (!existsSync(dir)) return [];
   try {
-    return readDirentsBoundedSync(dir, maxEntries).map((entry) => entry.name).filter((entry) => {
-      try {
-        return statSync(join(dir, entry)).isDirectory();
-      } catch {
-        return false;
-      }
-    });
+    return readSubdirectoryNamesBoundedSync(dir, maxEntries);
   } catch {
     return [];
   }
@@ -144,18 +146,12 @@ function loadAgentAssignments(
   agent: string,
   maxFileBytes: number
 ): TeamAssignment[] {
-  const filePath = join(inboxDir, `${agent}.json`);
   let msgs: TeamMessage[];
   try {
-    const fileStat = statSync(filePath);
-    if (
-      !fileStat.isFile() ||
-      (maxFileBytes >= 0 && fileStat.size > maxFileBytes)
-    ) {
-      return [];
-    }
-    const raw = readFileSync(filePath, 'utf8');
-    const parsed = JSON.parse(raw);
+    // Refuses symlinks and anything over the byte budget (#3378).
+    const read = readFileInDirBoundedSync(inboxDir, `${agent}.json`, maxFileBytes);
+    if (!read) return [];
+    const parsed = JSON.parse(read.text);
     if (!Array.isArray(parsed)) return [];
     msgs = parsed as TeamMessage[];
   } catch {
@@ -238,8 +234,8 @@ export function parseTeamsDir(
     Number.isFinite(opts.maxFileBytes) &&
     opts.maxFileBytes >= 0
       ? Math.floor(opts.maxFileBytes)
-      : -1;
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
+      : DEFAULT_ARTIFACT_MAX_FILE_BYTES;
+  const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
   const teamIds = listSubdirs(dir, maxEntries);
   let inboxEntriesRead = 0;
 

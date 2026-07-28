@@ -22,12 +22,16 @@
  *
  * Issue #559 / persona P2 (Priya, tech lead).
  */
-import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
+  DEFAULT_ARTIFACT_MAX_FILE_BYTES,
   normalizeMaxEntries,
   readDirentsBoundedSync,
+  readFileInDirBoundedSync,
+  readSubdirectoryNamesBoundedSync,
   remainingEntryCapacity,
+  resolveCap,
 } from './bounded-fs';
 import type { TaskRecord, TaskStatus } from './parse-tasks-summary';
 
@@ -61,26 +65,16 @@ export interface ParseTasksOptions {
  */
 export function parseTasksDir(dir: string, opts: ParseTasksOptions = {}): TaskRecord[] {
   const records: TaskRecord[] = [];
-  const maxFileBytes =
-    typeof opts.maxFileBytes === 'number' &&
-    Number.isFinite(opts.maxFileBytes) &&
-    opts.maxFileBytes >= 0
-      ? Math.floor(opts.maxFileBytes)
-      : -1;
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
-  const entries = readDirentsBoundedSync(dir, maxEntries).map((entry) => entry.name);
+  const maxFileBytes = resolveCap(opts.maxFileBytes, DEFAULT_ARTIFACT_MAX_FILE_BYTES);
+  const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
+  // Symlinked session directories are refused: following one would walk an
+  // arbitrary foreign tree as though it belonged to ~/.claude/tasks/ (#3378).
+  const entries = readSubdirectoryNamesBoundedSync(dir, maxEntries);
   let taskEntriesRead = 0;
 
   for (const sessionId of entries) {
     if (taskEntriesRead >= maxEntries) break;
     const sessionDir = join(dir, sessionId);
-    let stat;
-    try {
-      stat = statSync(sessionDir);
-    } catch {
-      continue;
-    }
-    if (!stat.isDirectory()) continue;
 
     const taskFiles = readDirentsBoundedSync(
       sessionDir,
@@ -92,20 +86,15 @@ export function parseTasksDir(dir: string, opts: ParseTasksOptions = {}): TaskRe
     for (const filename of taskFiles) {
       if (taskEntriesRead >= maxEntries) break;
       taskEntriesRead += 1;
-      const filePath = join(sessionDir, filename);
       let raw: Record<string, unknown>;
       let mtimeMs: number;
       try {
-        const fileStat = statSync(filePath);
-        if (
-          !fileStat.isFile() ||
-          (maxFileBytes >= 0 && fileStat.size > maxFileBytes)
-        ) {
-          continue;
-        }
-        const text = readFileSync(filePath, 'utf8');
-        raw = JSON.parse(text) as Record<string, unknown>;
-        mtimeMs = fileStat.mtimeMs;
+        const read = readFileInDirBoundedSync(sessionDir, filename, maxFileBytes);
+        if (!read) continue;
+        raw = JSON.parse(read.text) as Record<string, unknown>;
+        // mtime from the descriptor actually read, not a second stat that could
+        // resolve somewhere else.
+        mtimeMs = read.stat.mtimeMs;
       } catch {
         // malformed or unreadable — skip silently
         continue;

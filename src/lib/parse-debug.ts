@@ -31,9 +31,16 @@
  * client-side bundles.
  */
 
-import { readFileSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
-import { normalizeMaxEntries, readDirentsBoundedSync } from './bounded-fs';
+
+import { basename } from 'node:path';
+import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
+  DEFAULT_ARTIFACT_MAX_FILE_BYTES,
+  normalizeMaxEntries,
+  readDirentsBoundedSync,
+  readFileInDirBoundedSync,
+  resolveCap,
+} from './bounded-fs';
 
 // ---- exported types --------------------------------------------------------
 
@@ -227,35 +234,18 @@ export function parseDebugDir(
   dir: string,
   opts: ParseDebugDirOptions = {}
 ): DebugSessionMetrics[] {
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
+  const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
   const entries = readDirentsBoundedSync(dir, maxEntries).map((entry) => entry.name);
-  const maxFileBytes =
-    typeof opts.maxFileBytes === 'number' &&
-    Number.isFinite(opts.maxFileBytes) &&
-    opts.maxFileBytes >= 0
-      ? Math.floor(opts.maxFileBytes)
-      : -1;
+  const maxFileBytes = resolveCap(opts.maxFileBytes, DEFAULT_ARTIFACT_MAX_FILE_BYTES);
 
   const results: DebugSessionMetrics[] = [];
   for (const filename of entries) {
     if (!filename.endsWith('.txt')) continue;
     const sessionId = basename(filename, '.txt');
-    const filePath = join(dir, filename);
-    let text: string;
-    try {
-      const fileStat = statSync(filePath);
-      if (
-        !fileStat.isFile() ||
-        (maxFileBytes >= 0 && fileStat.size > maxFileBytes)
-      ) {
-        continue;
-      }
-      text = readFileSync(filePath, 'utf8');
-    } catch (err) {
-      console.warn(`[parse-debug] skipping unreadable file: ${filePath}`, err);
-      continue;
-    }
-    results.push(parseDebugLog(text, sessionId));
+    // Refuses symlinks and anything over the byte budget (#3378).
+    const read = readFileInDirBoundedSync(dir, filename, maxFileBytes);
+    if (!read) continue;
+    results.push(parseDebugLog(read.text, sessionId));
   }
   return results;
 }

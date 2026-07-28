@@ -19,6 +19,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
   normalizeMaxEntries,
   readDirentsBoundedSync,
   remainingEntryCapacity,
@@ -96,7 +97,7 @@ export function parseFileHistoryDir(
   dir: string,
   opts: ParseFileHistoryOptions = {}
 ): FileHistorySession[] {
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
+  const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
   const entries = readDirentsBoundedSync(dir, maxEntries);
   const results: FileHistorySession[] = [];
   let snapshotEntriesRead = 0;

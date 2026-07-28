@@ -14,7 +14,7 @@
  *      finite default entry/byte caps (#3152)
  */
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   analyzeAttribution,
   parseSessionRegistryDir,
@@ -22,7 +22,7 @@ import {
   DEFAULT_REGISTRY_MAX_FILE_BYTES,
 } from './parse-session-registry';
 import type { SessionRegistryEntry } from './parse-session-registry';
-import { lstatSync, mkdtempSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readDirentsBoundedSync } from './bounded-fs';
@@ -689,64 +689,10 @@ describe('parseSessionRegistryDir — default ingestion budgets (#3152)', () => 
 // O_NOFOLLOW and whose open() therefore follows symlinks.
 // ---------------------------------------------------------------------------
 
-describe('parseSessionRegistryDir — boundary without O_NOFOLLOW (#3151)', () => {
-  afterEach(() => {
-    vi.doUnmock('node:fs');
-    vi.resetModules();
-  });
-
-  it('refuses an entry swapped for a symlink between the lstat and the open', async () => {
-    const outsideDir = mkdtempSync(join(tmpdir(), 'session-registry-swap-outside-'));
-    const dir = mkdtempSync(join(tmpdir(), 'session-registry-swap-'));
-
-    // A registry-shaped file outside the boundary — the thing an attacker wants
-    // the parser to read.
-    const outsideTarget = join(outsideDir, 'elsewhere.json');
-    writeFileSync(outsideTarget, registryFile('swapped-in-session'));
-
-    // Inside the boundary: an ordinary regular file at readdir and lstat time.
-    const entryPath = join(dir, '9501.json');
-    writeFileSync(entryPath, registryFile('honest-session'));
-
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      const realLstat = actual.lstatSync as unknown as (...args: unknown[]) => unknown;
-      let armed = true;
-      // The hostile writer: replaces the just-approved regular file with a
-      // symlink out of the directory, in the window before the open.
-      const lstatSync = (...args: unknown[]) => {
-        const stat = realLstat(...args);
-        if (armed) {
-          armed = false;
-          actual.unlinkSync(entryPath);
-          actual.symlinkSync(outsideTarget, entryPath);
-        }
-        return stat;
-      };
-      // A Windows-shaped fs: O_NOFOLLOW is simply not defined there, so the
-      // parser's open flags collapse to a following O_RDONLY.
-      const constants = { ...actual.constants } as Record<string, number>;
-      delete constants.O_NOFOLLOW;
-      return {
-        ...actual,
-        default: { ...actual, constants, lstatSync },
-        constants,
-        lstatSync,
-      };
-    });
-
-    const { parseSessionRegistryDir: parseWithoutNofollow } = await import(
-      './parse-session-registry'
-    );
-
-    // Nothing is ingested: the honest file is gone, and the symlink that
-    // replaced it must not be followed out of the directory.
-    expect(parseWithoutNofollow(dir)).toEqual([]);
-
-    // The swap really did fire mid-parse, and it really does resolve outside
-    // the boundary — so the empty result is the identity check, not a no-op.
-    expect(lstatSync(entryPath).isSymbolicLink()).toBe(true);
-    expect(realpathSync(entryPath)).toBe(realpathSync(outsideTarget));
-  });
-});
+// The "boundary without O_NOFOLLOW" case moved to bounded-fs.test.ts in #3378,
+// where the behaviour now lives. It cannot run here: this file carries a
+// hoisted `vi.mock('./bounded-fs')` spy (above) whose `importOriginal()` pins an
+// instance of bounded-fs evaluated OUTSIDE the `doMock('node:fs')` window, so
+// the Windows-shaped constants never reach the code under test and the check
+// silently reads the real O_NOFOLLOW. Left here as a pointer rather than
+// deleted, so the coverage is findable from the parser it protects.

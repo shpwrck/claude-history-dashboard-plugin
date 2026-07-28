@@ -20,9 +20,13 @@
  * from ingest and stays pure itself.
  */
 
-import { join } from 'node:path';
-import { normalizeMaxEntries, readDirentsBoundedSync } from './bounded-fs';
-import { CONFIG_FILE_MAX_BYTES, readTextFileCappedSync } from './config-loader';
+import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
+  normalizeMaxEntries,
+  readDirentsBoundedSync,
+  readFileInDirBoundedSync,
+} from './bounded-fs';
+import { CONFIG_FILE_MAX_BYTES } from './config-loader';
 
 // ── Shape of a single ~/.claude.json snapshot (structural fields only) ──────
 
@@ -111,7 +115,7 @@ export function parseBackupsDir(
   projectPath?: string,
   opts: ParseBackupsOptions = {}
 ): ConfigSnapshot[] {
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
+  const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
   const filenames = readDirentsBoundedSync(dir, maxEntries).map((entry) => entry.name);
   const maxFileBytes = opts.maxFileBytes ?? CONFIG_FILE_MAX_BYTES;
 
@@ -129,7 +133,10 @@ export function parseBackupsDir(
   for (const { f, ts } of candidates) {
     let raw: RawBackupJson;
     try {
-      raw = JSON.parse(readTextFileCappedSync(join(dir, f), maxFileBytes)) as RawBackupJson;
+      // readTextFileCappedSync follows symlinks; this refuses them (#3378).
+      const read = readFileInDirBoundedSync(dir, f, maxFileBytes);
+      if (!read) continue;
+      raw = JSON.parse(read.text) as RawBackupJson;
     } catch {
       continue;
     }

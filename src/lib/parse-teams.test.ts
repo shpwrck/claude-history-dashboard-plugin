@@ -8,7 +8,8 @@
  * Issue: #560
  */
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
+import { DEFAULT_ARTIFACT_MAX_FILE_BYTES } from './bounded-fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
@@ -330,5 +331,71 @@ describe('analyzeTeams — severity threshold boundary', () => {
     expect(s.droppedPct).toBe(49);
     // No stalled agents (agent-y is all read; agent-x has all dropped → stalled)
     expect(s.stalledAgents[0].agent).toBe('agent-x');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Directory boundary + finite defaults (#3378)
+// ---------------------------------------------------------------------------
+
+describe('parseTeamsDir — the teams directory is the boundary (#3378)', () => {
+  const message = (taskId: string) => JSON.stringify([
+    {
+      from: 'team-lead',
+      text: JSON.stringify({ type: 'task_assignment', taskId, subject: 'S' }),
+      timestamp: new Date(NOW).toISOString(),
+      type: 'message',
+      read: false,
+    },
+  ]);
+
+  it('refuses a symlinked inbox file pointing outside the directory', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'teams-outside-'));
+    const dir = mkdtempSync(join(tmpdir(), 'teams-boundary-'));
+    const inbox = join(dir, 'team-a', 'inboxes');
+    mkdirSync(inbox, { recursive: true });
+
+    const target = join(outside, 'stolen.json');
+    writeFileSync(target, message('stolen'));
+    symlinkSync(target, join(inbox, 'ghost.json'));
+    writeFileSync(join(inbox, 'real.json'), message('real'));
+
+    const parsed = parseTeamsDir(dir);
+    // `agent` comes from the filename, so the symlinked `ghost.json` would show
+    // up here as its own agent if it had been followed.
+    expect((parsed.get('team-a') ?? []).map((a) => a.agent)).toEqual(['real']);
+  });
+
+  it('refuses a symlinked TEAM directory', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'teams-outdir-'));
+    mkdirSync(join(outside, 'foreign', 'inboxes'), { recursive: true });
+    writeFileSync(join(outside, 'foreign', 'inboxes', 'a.json'), message('stolen'));
+
+    const dir = mkdtempSync(join(tmpdir(), 'teams-dirlink-'));
+    symlinkSync(join(outside, 'foreign'), join(dir, 'team-linked'));
+
+    expect(parseTeamsDir(dir).size).toBe(0);
+  });
+
+  it('applies a finite per-file byte cap by default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'teams-cap-'));
+    const inbox = join(dir, 'team-a', 'inboxes');
+    mkdirSync(inbox, { recursive: true });
+    const huge = JSON.stringify([
+      {
+        from: 'team-lead',
+        text: JSON.stringify({ type: 'task_assignment', taskId: 'big', subject: 'S' }),
+        timestamp: new Date(NOW).toISOString(),
+        type: 'message',
+        read: false,
+        pad: 'x'.repeat(DEFAULT_ARTIFACT_MAX_FILE_BYTES + 100),
+      },
+    ]);
+    writeFileSync(join(inbox, 'a.json'), huge);
+    // Before #3378 the default was -1 — no cap at all.
+    expect((parseTeamsDir(dir).get('team-a') ?? []).length).toBe(0);
+    expect(
+      (parseTeamsDir(dir, { maxFileBytes: huge.length + 10 }).get('team-a') ?? []).length
+    ).toBe(1);
   });
 });

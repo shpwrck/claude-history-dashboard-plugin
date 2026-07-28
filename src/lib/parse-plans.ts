@@ -14,7 +14,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeMaxEntries, readDirentsBoundedSync } from './bounded-fs';
+import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
+  normalizeMaxEntries,
+  readDirentsBoundedSync,
+} from './bounded-fs';
 
 // ── Core data shape ─────────────────────────────────────────────────────────
 
@@ -77,7 +81,7 @@ export function parsePlanMarkdown(text: string, name: string): PlanSignature {
  *             Tilde expansion is NOT done here; callers must resolve `~` first.
  */
 export function parsePlansDir(dir: string, opts: ParsePlansOptions = {}): PlanSignature[] {
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
+  const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
   const entries = readDirentsBoundedSync(dir, maxEntries).map((entry) => entry.name);
   const maxFileBytes =
     typeof opts.maxFileBytes === 'number' &&

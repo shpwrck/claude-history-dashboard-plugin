@@ -9,7 +9,10 @@
  */
 import { opendirSync } from 'node:fs';
 import { join } from 'node:path';
-import { normalizeMaxEntries } from './bounded-fs';
+import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
+  normalizeMaxEntries,
+} from './bounded-fs';
 import { CONFIG_FILE_MAX_BYTES, readTextFileCappedSync } from './config-loader';
 import {
   parseExternalGuidanceSnapshot,
@@ -53,9 +56,13 @@ export function externalGuidanceSnapshotPaths(
   dir: string,
   opts: ParseExternalGuidanceOptions = {}
 ): string[] {
-  const maxEntries = normalizeMaxEntries(opts.maxEntries);
+  const maxEntries = normalizeMaxEntries(
+    opts.maxEntries,
+    DEFAULT_ARTIFACT_MAX_ENTRIES
+  );
   const maxScannedEntries = normalizeMaxEntries(
-    opts.maxScannedEntries ?? maxEntries
+    opts.maxScannedEntries ?? maxEntries,
+    DEFAULT_ARTIFACT_MAX_ENTRIES
   );
   const paths: string[] = [];
   let scanned = 0;

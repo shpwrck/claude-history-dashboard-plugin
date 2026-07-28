@@ -8,9 +8,10 @@
  * Issue #559.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { DEFAULT_ARTIFACT_MAX_FILE_BYTES } from './bounded-fs';
 import {
   parseTasksDir,
   summarizeTasks,
@@ -508,5 +509,59 @@ describe('SPA/server boundary (#2960)', () => {
     expect(src).toContain("from '../lib/parse-tasks-summary'");
     // … and must NOT be a value import of the server-only parse-tasks module.
     expect(valueImportsFrom('../lib/parse-tasks')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Directory boundary + finite defaults (#3378)
+// ---------------------------------------------------------------------------
+
+describe('parseTasksDir — the tasks directory is the boundary (#3378)', () => {
+  const taskFile = (status: string) =>
+    JSON.stringify({ status, description: 'd', activeForm: 'a' });
+
+  it('refuses a symlinked task file pointing outside the session directory', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'tasks-outside-'));
+    const dir = mkdtempSync(join(tmpdir(), 'tasks-boundary-'));
+    const sessionDir = join(dir, 'sess-1');
+    mkdirSync(sessionDir);
+
+    const target = join(outside, 'stolen.json');
+    writeFileSync(target, taskFile('pending'));
+    symlinkSync(target, join(sessionDir, 'a.json'));
+
+    // A real sibling proves the parser is otherwise working on this fixture.
+    writeFileSync(join(sessionDir, 'b.json'), taskFile('completed'));
+
+    const records = parseTasksDir(dir);
+    expect(records.map((r) => r.status)).toEqual(['completed']);
+  });
+
+  it('refuses a symlinked SESSION directory', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'tasks-outdir-'));
+    mkdirSync(join(outside, 'foreign'));
+    writeFileSync(join(outside, 'foreign', 'a.json'), taskFile('pending'));
+
+    const dir = mkdtempSync(join(tmpdir(), 'tasks-dirlink-'));
+    symlinkSync(join(outside, 'foreign'), join(dir, 'sess-linked'));
+
+    expect(parseTasksDir(dir)).toEqual([]);
+  });
+
+  it('applies a finite per-file byte cap by default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tasks-cap-'));
+    const sessionDir = join(dir, 'sess-1');
+    mkdirSync(sessionDir);
+    // Padding a valid record past the default budget must skip it. Before
+    // #3378 the default was -1, i.e. no cap at all.
+    const huge = JSON.stringify({
+      status: 'pending',
+      description: 'x'.repeat(DEFAULT_ARTIFACT_MAX_FILE_BYTES + 100),
+      activeForm: 'a',
+    });
+    writeFileSync(join(sessionDir, 'big.json'), huge);
+    expect(parseTasksDir(dir)).toEqual([]);
+    // An explicit larger cap still wins, in both directions.
+    expect(parseTasksDir(dir, { maxFileBytes: huge.length + 10 })).toHaveLength(1);
   });
 });

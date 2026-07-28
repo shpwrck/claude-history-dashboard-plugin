@@ -7,6 +7,7 @@
  */
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
@@ -256,6 +257,33 @@ describe('parseBackupsDir', () => {
       ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Directory boundary (#3378)
+// ---------------------------------------------------------------------------
+
+describe('parseBackupsDir — the backups directory is the boundary (#3378)', () => {
+  it('refuses a symlinked backup pointing outside the directory', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'backups-outside-'));
+    const dir = await mkdtemp(join(tmpdir(), 'backups-boundary-'));
+    try {
+      const target = join(outside, 'stolen.json');
+      await writeFile(target, JSON.stringify({ mcpServers: { stolen: {} } }));
+      symlinkSync(target, join(dir, '.claude.json.backup.1717200000000'));
+      // A real sibling proves the parser works on this fixture otherwise.
+      await writeFile(
+        join(dir, '.claude.json.backup.1717200001000'),
+        JSON.stringify({ mcpServers: { real: {} } })
+      );
+
+      const snapshots = parseBackupsDir(dir);
+      expect(snapshots.map((s) => s.globalMcpServerKeys)).toEqual([['real']]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 });

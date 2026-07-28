@@ -30,7 +30,11 @@
 
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { normalizeMaxEntries, readDirentsBoundedSync } from './bounded-fs'
+import {
+  DEFAULT_ARTIFACT_MAX_ENTRIES,
+  normalizeMaxEntries,
+  readDirentsBoundedSync,
+} from './bounded-fs'
 
 // ---------- Types ----------
 
@@ -196,7 +200,7 @@ function eachTelemetryLine(
   opts: ParseTelemetryDirOptions,
   onLine: (line: string) => void,
 ): void {
-  const maxEntries = normalizeMaxEntries(opts.maxEntries)
+  const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES)
   const files = readDirentsBoundedSync(dir, maxEntries)
     .map((entry) => entry.name)
     .filter((f) => f.includes('1p_failed_events'))
