@@ -143,11 +143,21 @@ for your own `$HOME` and `$NVM_DIR`/global `node_modules` location.
   `custom-title` always wins over an `ai-title` for the same session.
 - **Evidence refs.** `src/lib/evidence.ts` defines the shared
   `EvidenceRef` coordinate for evidence-backed features: `sessionId`,
-  `entryIndex`, `timestamp`, and optional `toolUseId`. `parse-timeline.ts`
-  produces `TimelineEntry.toolUseId` from assistant `tool_use.id` and user
-  `tool_result.tool_use_id`, so value-flow edges, forensic graph nodes, Ask
-  citations, and risky-action findings can all resolve through
-  `resolveEvidenceRef()` to the same timeline entry.
+  `entryIndex`, `timestamp`, and optional `toolUseId` and `entryId`.
+  `parse-timeline.ts` produces `TimelineEntry.toolUseId` from assistant
+  `tool_use.id` and user `tool_result.tool_use_id`, so value-flow edges,
+  forensic graph nodes, Ask citations, and risky-action findings can all
+  resolve through `resolveEvidenceRef()` to the same timeline entry.
+  `TimelineEntry.entryId` (#3390) is that entry's stable identity —
+  `${record.uuid}:${blockIndex}` from `timelineEntryId()`, keyed on the record's
+  own `uuid` and ABSENT when the record has none (no positional fallback). It is
+  keyed that way because the subagent merge concatenates `subagents/*.jsonl` in
+  LEXICAL filename order over random hex names, so a late-created subagent's
+  records are routinely spliced in ahead of existing ones — an id built from
+  array position gets reassigned to the new occupant and a stale ref then
+  resolves to the wrong entry. When a ref carries an `entryId`,
+  `resolveEvidenceRef()` matches on it ALONE and fails closed when it names no
+  entry or two; the index+timestamp path serves only identity-less refs.
 
 ## Installed CLI bundle
 

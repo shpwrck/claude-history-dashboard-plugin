@@ -5,7 +5,7 @@ import {
   resolveEvidenceRefs,
   type EvidenceRef,
 } from './evidence';
-import type { SessionTimeline } from './parse-timeline';
+import { parseSessionTimeline, type SessionTimeline } from './parse-timeline';
 
 const timeline: SessionTimeline = {
   sessionId: 'session-1',
@@ -93,55 +93,262 @@ describe('EvidenceRef resolver (#1305)', () => {
     expect(resolved?.entry.summary).toBe('inspect the failing test');
   });
 
-  it('KNOWN LIMITATION (#3390): a reparse can still shift an in-bounds index onto the wrong same-timestamp sibling', () => {
-    // This pins a residual gap deliberately left open, not a passing
-    // guarantee. Simulates a reparse where a new content block from the same
-    // transcript record (parseSessionTimeline stamps every block in a record
-    // with the SAME timestamp) is inserted ahead of the entry the ref was
-    // originally created for. The stored entryIndex (0) is still in range
-    // and its current occupant matches ref's timestamp, so the indexed fast
-    // path accepts it — but it is NOT the entry the ref pointed at; that
-    // entry got pushed to index 1. Neither entry carries a toolUseId, so
-    // timestamp alone cannot tell them apart.
-    //
-    // We keep the fast path anyway (see resolveEvidenceRef) because
-    // rejecting every in-bounds match this way breaks the far more common
-    // case: a FRESH ref minted moments ago by evidenceRefForEntry from the
-    // current timeline (see the "fresh ref" test below), which is exactly
-    // what SessionTimeline/SessionList mint for every "Entry N" link. Closing
-    // this residual misattribution for good needs a stable per-entry
-    // identifier (#3390), not a stricter timestamp check.
-    const reorderedTimeline: SessionTimeline = {
+  it('#3390: an entryId ref follows its entry when records are spliced in ahead of it', () => {
+    // Was a KNOWN LIMITATION pin, then very nearly a worse bug. The ref carries
+    // the id the target had BEFORE the reparse — which is the only thing a
+    // stored ref can carry — and the reparse splices a record in ahead of it.
+    // An id built from array position gets REASSIGNED to the new occupant here,
+    // so the ref would resolve confidently to the wrong entry; keying the id to
+    // the record's own uuid is what makes the ref follow its entry. Assigning
+    // the ref the target's POST-insertion id would assert only that resolution
+    // works when nothing moved, which is not the property under test.
+    const refIdMintedBeforeTheEdit = 'rec-target:0';
+
+    const reparsedTimeline: SessionTimeline = {
       sessionId: 'session-reordered',
       startTime: '2026-06-12T10:00:00.000Z',
       endTime: '2026-06-12T10:00:00.000Z',
       entries: [
         {
+          entryId: 'rec-spliced:0',
           timestamp: '2026-06-12T10:00:00.000Z',
           kind: 'assistant',
-          summary: 'newly inserted block, not the one the ref pointed at',
+          summary: 'merged-in subagent record, not the one the ref pointed at',
         },
         {
+          entryId: refIdMintedBeforeTheEdit,
           timestamp: '2026-06-12T10:00:00.000Z',
           kind: 'assistant',
-          summary: 'the original block the ref was created for',
+          summary: 'the entry the ref was created for',
         },
       ],
     };
 
     const ref: EvidenceRef = {
       sessionId: 'session-reordered',
+      // Stale: the target sat at index 0 when the ref was minted.
       entryIndex: 0,
       timestamp: '2026-06-12T10:00:00.000Z',
+      entryId: refIdMintedBeforeTheEdit,
     };
 
-    const resolved = resolveEvidenceRef(ref, [reorderedTimeline]);
+    const resolved = resolveEvidenceRef(ref, [reparsedTimeline]);
 
-    // Documents the residual: it resolves, but to the wrong entry.
-    expect(resolved?.entryIndex).toBe(0);
-    expect(resolved?.entry.summary).toBe(
-      'newly inserted block, not the one the ref pointed at'
+    expect(resolved?.entryIndex).toBe(1);
+    expect(resolved?.entry.summary).toBe('the entry the ref was created for');
+  });
+
+  it('#3390: end-to-end — a ref survives the subagent merge splicing records in ahead of it', () => {
+    // The scenario that actually occurs: readMergedSession concatenates
+    // subagents/*.jsonl in LEXICAL filename order over random hex names, so a
+    // late-created subagent lands EARLY in the merged blob and displaces every
+    // record after it. Built through the real parser so the ref is minted the
+    // way production mints it, from the pre-merge parse.
+    const targetLine = JSON.stringify({
+      type: 'user',
+      uuid: 'rec-target',
+      timestamp: '2026-06-12T10:00:05.000Z',
+      message: { role: 'user', content: 'the entry a ref points at' },
+    });
+    const splicedLine = JSON.stringify({
+      type: 'user',
+      uuid: 'rec-spliced',
+      timestamp: '2026-06-12T10:00:01.000Z',
+      message: { role: 'user', content: 'a later subagent that sorts earlier' },
+    });
+
+    const beforeMerge = parseSessionTimeline(targetLine, 'session-merge.jsonl');
+    const ref = evidenceRefForEntry(beforeMerge, 0)!;
+    expect(ref.entryId).toBe('rec-target:0');
+
+    const afterMerge = parseSessionTimeline(
+      [splicedLine, targetLine].join('\n'),
+      'session-merge.jsonl'
     );
+    const resolved = resolveEvidenceRef(ref, [afterMerge]);
+
+    expect(resolved?.entry.summary).toBe('the entry a ref points at');
+    expect(resolved?.entryIndex).toBe(1);
+  });
+
+  it('#3390 RESIDUAL (not a regression): a block inserted INSIDE one record still shifts its siblings', () => {
+    // Honest pin of what uuid keying does NOT fix. `blockIndex` is still a
+    // position, so inserting a block ahead of the target WITHIN one record
+    // reassigns the target's id to its new neighbour and this resolves to the
+    // wrong sibling.
+    //
+    // Why it is nonetheless acceptable: (1) it is exactly what master does
+    // today — the pre-#3390 KNOWN LIMITATION documented this same
+    // misresolution — so nothing regresses; (2) it requires REWRITING an
+    // existing transcript line, unlike the record splice, which happens on
+    // every merge; (3) it is unobservable in the measured corpus, where all
+    // 7746 array-content records carry exactly ONE block.
+    // The fix, if multi-block records ever appear, is to make the block
+    // component content-derived (a hash) — NOT to corroborate the id against a
+    // timestamp, which would make identity a second opinion that can disagree.
+    const line = (blocks: unknown[]) =>
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'rec-rewritten',
+        timestamp: '2026-06-12T10:00:00.000Z',
+        message: { role: 'assistant', content: blocks },
+      });
+
+    const before = parseSessionTimeline(
+      line([{ type: 'text', text: 'the entry the ref points at' }]),
+      'session-rewrite.jsonl'
+    );
+    const ref = evidenceRefForEntry(before, 0)!;
+    expect(ref.entryId).toBe('rec-rewritten:0');
+
+    const after = parseSessionTimeline(
+      line([
+        { type: 'text', text: 'a block inserted ahead of it' },
+        { type: 'text', text: 'the entry the ref points at' },
+      ]),
+      'session-rewrite.jsonl'
+    );
+
+    // Documents the residual: it resolves, but to the inserted sibling.
+    expect(resolveEvidenceRef(ref, [after])?.entry.summary).toBe(
+      'a block inserted ahead of it'
+    );
+  });
+
+  it('#3390: a set-but-unmatched entryId fails closed instead of falling back to the timestamp', () => {
+    // The transcript was edited/rewritten since the ref was minted, so `9:0` is
+    // gone. Every remaining entry shares the ref's timestamp — the pre-#3390
+    // rules would have handed back entry 0 (in-bounds index, matching
+    // timestamp). Falling back there would resolve the ref to an entry it was
+    // never written against: the exact misattribution entryId exists to remove.
+    const editedTimeline: SessionTimeline = {
+      sessionId: 'session-edited',
+      startTime: '2026-06-12T10:00:00.000Z',
+      endTime: '2026-06-12T10:00:00.000Z',
+      entries: [
+        {
+          entryId: 'rec-a:0',
+          timestamp: '2026-06-12T10:00:00.000Z',
+          kind: 'assistant',
+          summary: 'an unrelated entry that merely shares the timestamp',
+        },
+      ],
+    };
+
+    const ref: EvidenceRef = {
+      sessionId: 'session-edited',
+      entryIndex: 0,
+      timestamp: '2026-06-12T10:00:00.000Z',
+      entryId: 'rec-vanished:0',
+    };
+
+    expect(resolveEvidenceRef(ref, [editedTimeline])).toBeNull();
+  });
+
+  it('#3390: identity is dispositive — a stale index and timestamp never override it', () => {
+    // Both corroborating signals disagree with the identity: the stored index
+    // points at a different entry and the stored timestamp belongs to that
+    // other entry. The ref still resolves to the entry it names, with no
+    // reconciliation between the three.
+    const timelineWithIds: SessionTimeline = {
+      sessionId: 'session-ids',
+      startTime: '2026-06-12T10:00:00.000Z',
+      endTime: '2026-06-12T10:05:00.000Z',
+      entries: [
+        {
+          entryId: 'rec-c:0',
+          timestamp: '2026-06-12T10:00:00.000Z',
+          kind: 'user',
+          summary: 'the entry the stale index and timestamp point at',
+        },
+        {
+          entryId: 'rec-d:2',
+          timestamp: '2026-06-12T10:05:00.000Z',
+          kind: 'assistant',
+          summary: 'the entry the ref was written against',
+        },
+      ],
+    };
+
+    const ref: EvidenceRef = {
+      sessionId: 'session-ids',
+      entryIndex: 0,
+      timestamp: '2026-06-12T10:00:00.000Z',
+      entryId: 'rec-d:2',
+    };
+
+    const resolved = resolveEvidenceRef(ref, [timelineWithIds]);
+
+    expect(resolved?.entryIndex).toBe(1);
+    expect(resolved?.entry.summary).toBe('the entry the ref was written against');
+  });
+
+  it('#3390: evidenceRefForEntry carries entryId through a round trip', () => {
+    const identityTimeline: SessionTimeline = {
+      sessionId: 'session-roundtrip',
+      startTime: '2026-06-12T10:00:00.000Z',
+      endTime: '2026-06-12T10:00:00.000Z',
+      entries: [
+        {
+          entryId: 'rec-e:0',
+          timestamp: '2026-06-12T10:00:00.000Z',
+          kind: 'thinking',
+          summary: 'reasoning',
+        },
+        {
+          entryId: 'rec-e:1',
+          timestamp: '2026-06-12T10:00:00.000Z',
+          kind: 'assistant',
+          summary: 'the answer',
+        },
+      ],
+    };
+
+    const ref = evidenceRefForEntry(identityTimeline, 1);
+
+    expect(ref).toEqual({
+      sessionId: 'session-roundtrip',
+      entryIndex: 1,
+      timestamp: '2026-06-12T10:00:00.000Z',
+      entryId: 'rec-e:1',
+    });
+
+    expect(resolveEvidenceRef(ref!, [identityTimeline])?.entry.summary).toBe('the answer');
+  });
+
+  it('#3390: duplicate entryIds fail closed rather than resolving to the first', () => {
+    // A single parse cannot emit two entries with the same
+    // `${uuid}:${blockIndex}`, so a duplicate means the entry array is
+    // not one parse and the id identifies nothing. Guessing "the first" would
+    // be a confident unverified claim (#3125).
+    const mergedTimeline: SessionTimeline = {
+      sessionId: 'session-merged',
+      startTime: '2026-06-12T10:00:00.000Z',
+      endTime: '2026-06-12T10:00:00.000Z',
+      entries: [
+        {
+          entryId: 'rec-dup:0',
+          timestamp: '2026-06-12T10:00:00.000Z',
+          kind: 'user',
+          summary: 'from transcript A',
+        },
+        {
+          entryId: 'rec-dup:0',
+          timestamp: '2026-06-12T10:01:00.000Z',
+          kind: 'user',
+          summary: 'from transcript B',
+        },
+      ],
+    };
+
+    const ref: EvidenceRef = {
+      sessionId: 'session-merged',
+      entryIndex: 0,
+      timestamp: '2026-06-12T10:00:00.000Z',
+      entryId: 'rec-dup:0',
+    };
+
+    expect(resolveEvidenceRef(ref, [mergedTimeline])).toBeNull();
   });
 
   it('#3390 (fresh-ref guard): a ref minted just now for a same-timestamp multi-block turn still resolves', () => {

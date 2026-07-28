@@ -13,6 +13,8 @@ interface RawDimensionEntry extends RawSessionEntry {
   gitBranch?: string;
   entrypoint?: string;
   message?: unknown;
+  /** Claude Code's own per-record id. See {@link TimelineEntry.entryId}. */
+  uuid?: string;
 }
 
 export type EntryKind =
@@ -41,6 +43,59 @@ export interface TimelineEntry {
   // sessionId intentionally omitted — it is redundant with the enclosing
   // SessionTimeline.sessionId and was repeated on every entry (38B × N).
   // No consumer reads a per-entry sessionId.
+  /**
+   * Stable per-entry identity (#3390): `${record.uuid}:${blockIndex}`, where
+   * `uuid` is the source record's OWN identifier as Claude Code wrote it and
+   * `blockIndex` is this entry's position within that record's content-block
+   * array (0 for scalar/non-array `message.content` and for non-content-bearing
+   * records, e.g. `kind === 'other'`).
+   *
+   * WHY NOT THE RECORD'S ARRAY POSITION. The first cut of this field keyed on
+   * `recordIndex` (the line's position in `parseJsonl(text)`) on the grounds
+   * that array positions are provably unique per parse. They are — but
+   * UNIQUENESS IS NOT STABILITY, and stability under insertion is the property
+   * an evidence ref actually needs. `readMergedSession`/`ingestOne` concatenate
+   * `subagents/*.jsonl` in LEXICAL filename order (REFERENCES.md, "Subagent
+   * merge order matters"), and those filenames are random hex — so a subagent
+   * created late routinely sorts EARLY and its records are spliced in AHEAD of
+   * records that already had refs written against them. Measured on this repo's
+   * own live session: 18 subagent files, 45 of 153 pairs inverted between
+   * creation order and lexical order, and the newest file displaced 820
+   * downstream records on the next parse. A positional key silently reassigns
+   * the displaced records' ids to their new occupants, so a stale ref resolves
+   * CONFIDENTLY TO THE WRONG ENTRY — strictly worse than the #3125 behaviour it
+   * replaced, which fell back to the (insertion-stable) timestamp.
+   *
+   * `uuid` has exactly the property position lacks: it travels with the record,
+   * so splicing lines in around it changes nothing. Its known weakness is the
+   * mirror image — it is not guaranteed unique (a merge could carry the same
+   * record twice) — and that weakness is the safe one, because
+   * `resolveEvidenceRef` fails closed on a duplicate id rather than guessing.
+   * Measured coverage on the live corpus: 8790 records across 19 files, `uuid`
+   * present on 100% of `user`/`assistant`/`system`/`attachment` records and
+   * ZERO duplicates.
+   *
+   * ABSENT WHEN THE RECORD HAS NO `uuid` — we do NOT fall back to a positional
+   * id, because a positional fallback is precisely the unstable key this field
+   * exists to stop using; a ref with no identity takes evidence.ts's legacy
+   * timestamp path, which is lossy but never confidently wrong. In the live
+   * corpus the only timestamped records lacking a `uuid` are `queue-operation`
+   * lines (533), which become low-value `kind: 'other'` entries.
+   *
+   * RESIDUAL, stated honestly: `blockIndex` is still a position, so inserting a
+   * block AHEAD of another WITHIN one record would shift it. That is no worse
+   * than the pre-#3390 behaviour (the old KNOWN LIMITATION documented exactly
+   * that misresolution) and is unobservable in the live corpus, where all 7746
+   * array-content records carry exactly ONE block. If multi-block records ever
+   * appear, replace the block component with a content hash rather than
+   * corroborating the id against a timestamp.
+   *
+   * Optional (like every other derived field on this interface, e.g.
+   * `toolUseId`/`waitLanguage`): many hand-built `TimelineEntry` fixtures across
+   * the codebase construct entries directly without it, and those must keep
+   * typechecking as identity-less entries.
+   */
+  entryId?: string;
   timestamp: string; // ISO
   kind: EntryKind;
   summary?: string; // one-line, already truncated to ~200 chars; stripped from bulk timelines
@@ -168,6 +223,24 @@ function timelineEntry(
 
 function firstPromptPreview(entries: TimelineEntry[]): string | undefined {
   return entries.find((entry) => entry.kind === 'user' && entry.summary)?.summary;
+}
+
+/**
+ * Build a {@link TimelineEntry.entryId} from its source record's `uuid` and the
+ * entry's block position within that record. Single source of truth for the id
+ * format so a future producer (or a test) never hand-rolls a divergent
+ * encoding.
+ *
+ * Returns `undefined` when the record carries no usable `uuid`: an entry with
+ * no stable identity must have NO identity, never a positional stand-in. See
+ * the field doc on {@link TimelineEntry.entryId} for the measured reason.
+ */
+export function timelineEntryId(
+  recordUuid: string | undefined,
+  blockIndex: number
+): string | undefined {
+  if (typeof recordUuid !== 'string' || recordUuid.length === 0) return undefined;
+  return `${recordUuid}:${blockIndex}`;
 }
 
 /**
@@ -499,6 +572,7 @@ export function parseSessionTimeline(
       const msg = parseMessage(raw.message);
       if (!msg) {
         entries.push(timelineEntry({
+          entryId: timelineEntryId(raw.uuid, 0),
           timestamp,
           kind: 'user',
           summary: '',
@@ -507,6 +581,7 @@ export function parseSessionTimeline(
       }
       if (typeof msg.content === 'string') {
         entries.push(timelineEntry({
+          entryId: timelineEntryId(raw.uuid, 0),
           timestamp,
           kind: 'user',
           summary: summarize(msg.content),
@@ -514,10 +589,11 @@ export function parseSessionTimeline(
           ...(isRediscoveryText(msg.content) ? { rediscovery: true } : {}),
         }));
       } else if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
+        for (const [blockIndex, block] of msg.content.entries()) {
           if (!block || typeof block !== 'object') continue;
           if (block.type === 'tool_result') {
             entries.push(timelineEntry({
+              entryId: timelineEntryId(raw.uuid, blockIndex),
               timestamp,
               kind: 'tool_result',
               summary: stringifyToolResultContent(block.content),
@@ -526,6 +602,7 @@ export function parseSessionTimeline(
             }));
           } else if (block.type === 'text') {
             entries.push(timelineEntry({
+              entryId: timelineEntryId(raw.uuid, blockIndex),
               timestamp,
               kind: 'user',
               summary: summarize(block.text ?? ''),
@@ -538,11 +615,12 @@ export function parseSessionTimeline(
     } else if (type === 'assistant') {
       const msg = parseMessage(raw.message);
       if (!msg || !Array.isArray(msg.content)) continue;
-      for (const block of msg.content) {
+      for (const [blockIndex, block] of msg.content.entries()) {
         if (!block || typeof block !== 'object') continue;
         if (block.type === 'text') {
           const text = block.text ?? '';
           entries.push(timelineEntry({
+            entryId: timelineEntryId(raw.uuid, blockIndex),
             timestamp,
             kind: 'assistant',
             summary: summarize(text),
@@ -553,12 +631,14 @@ export function parseSessionTimeline(
           }));
         } else if (block.type === 'thinking') {
           entries.push(timelineEntry({
+            entryId: timelineEntryId(raw.uuid, blockIndex),
             timestamp,
             kind: 'thinking',
             summary: summarize(block.thinking ?? block.text ?? ''),
           }));
         } else if (block.type === 'tool_use') {
           entries.push(timelineEntry({
+            entryId: timelineEntryId(raw.uuid, blockIndex),
             timestamp,
             kind: 'tool_use',
             summary: stringifyToolInput(block.input),
@@ -571,6 +651,7 @@ export function parseSessionTimeline(
       }
     } else if (type) {
       entries.push(timelineEntry({
+        entryId: timelineEntryId(raw.uuid, 0),
         timestamp,
         kind: 'other',
         summary: type,

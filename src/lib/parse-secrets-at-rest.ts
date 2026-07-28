@@ -1,6 +1,7 @@
 import { parseJsonl, parseMessage } from './parse-utils';
 import { SECRET_PATTERNS } from './transcript-hygiene';
 import type { EvidenceRef } from './evidence';
+import { timelineEntryId } from './parse-timeline';
 
 /**
  * Ingest-time `security.secrets-at-rest` signal parser (#2504, epic #2199).
@@ -26,8 +27,10 @@ import type { EvidenceRef } from './evidence';
  * stored, exported, or displayed. Values exist only transiently inside this
  * function (to dedup a value echoed in both `tool_result` and `toolUseResult`
  * of the same entry); the returned shape carries ONLY per-kind counts and
- * EvidenceRef coordinates (`sessionId`, `entryIndex`, `timestamp`,
- * optional `toolUseId`). No field ever holds a matched value or a snippet.
+ * EvidenceRef coordinates (`sessionId`, `entryIndex`, `timestamp`, `entryId`,
+ * optional `toolUseId`). No field ever holds a matched value or a snippet —
+ * `entryId` is a pair of array positions (`${recordIndex}:${blockIndex}`),
+ * derived from where the match sat, never from what it was.
  *
  * Pure and browser-safe (no Node built-ins), so it tree-shakes out of the
  * client bundle while remaining importable by `scripts/ingest.mjs` at ingest
@@ -128,6 +131,24 @@ function firstToolUseId(content: unknown): string | undefined {
 }
 
 /**
+ * Array index of the first `tool_result` block in a user turn's content, or 0
+ * when there is none. The entry-level `toolUseResult` payload is the structured
+ * twin of that block, so a secret found only there belongs to the same content
+ * block — and therefore the same {@link timelineEntryId} — as the `tool_result`
+ * the dashboard renders.
+ */
+function firstToolResultBlockIndex(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  const index = content.findIndex(
+    (block) =>
+      block &&
+      typeof block === 'object' &&
+      (block as { type?: unknown }).type === 'tool_result'
+  );
+  return index === -1 ? 0 : index;
+}
+
+/**
  * Walk a session transcript and emit its per-session secrets-at-rest signal.
  * Returns `null` when no secret-shaped value is found (so the persisted blob
  * stays empty and the detector is dark), mirroring the null-when-nothing
@@ -150,20 +171,48 @@ export function parseSecretsAtRest(
     if (entry.type !== 'user') return;
     const msg = parseMessage(entry.message);
 
-    const strings: string[] = [];
-    if (msg) collectStrings(msg.content, strings);
+    // Strings are tagged with the CONTENT-BLOCK index they came from, so the
+    // evidence ref can name the exact block that carried the secret rather than
+    // the whole record (#3390). Same string set as an untagged walk of
+    // `msg.content` — only the attribution is new.
+    const strings: { text: string; blockIndex: number }[] = [];
+    if (msg && Array.isArray(msg.content)) {
+      msg.content.forEach((block, blockIndex) => {
+        const blockStrings: string[] = [];
+        collectStrings(block, blockStrings);
+        for (const text of blockStrings) strings.push({ text, blockIndex });
+      });
+    } else if (msg) {
+      // Scalar/object content is one unit; parseSessionTimeline gives it block 0.
+      const scalarStrings: string[] = [];
+      collectStrings(msg.content, scalarStrings);
+      for (const text of scalarStrings) strings.push({ text, blockIndex: 0 });
+    }
     // The entry-level structured tool-result payload (Claude Code writes it
-    // alongside the message's tool_result block for many tools).
-    collectStrings((entry as { toolUseResult?: unknown }).toolUseResult, strings);
+    // alongside the message's tool_result block for many tools), attributed to
+    // that sibling block.
+    const toolResultStrings: string[] = [];
+    collectStrings((entry as { toolUseResult?: unknown }).toolUseResult, toolResultStrings);
+    if (toolResultStrings.length > 0) {
+      const blockIndex = firstToolResultBlockIndex(msg?.content);
+      for (const text of toolResultStrings) strings.push({ text, blockIndex });
+    }
     if (strings.length === 0) return;
 
     // Per-entry DISTINCT-value dedup: a value present in both the tool_result
     // block and its sibling toolUseResult is one at-rest secret, not two. The
     // value is the transient dedup key ONLY — it never leaves this function.
     const kindByValue = new Map<string, string>();
-    for (const s of strings) {
-      for (const { kind, value } of findSecrets(s)) {
+    // Lowest-indexed content block that carried any secret — the block the
+    // evidence ref points at. Deterministic regardless of the order strings
+    // were appended above.
+    let secretBlockIndex: number | undefined;
+    for (const { text, blockIndex } of strings) {
+      for (const { kind, value } of findSecrets(text)) {
         if (!kindByValue.has(value)) kindByValue.set(value, kind);
+        if (secretBlockIndex === undefined || blockIndex < secretBlockIndex) {
+          secretBlockIndex = blockIndex;
+        }
       }
     }
     if (kindByValue.size === 0) return;
@@ -179,6 +228,24 @@ export function parseSecretsAtRest(
         entryIndex,
         timestamp: typeof entry.timestamp === 'string' ? entry.timestamp : '',
       };
+      // This parser builds refs by hand (one per RECORD) rather than via
+      // evidenceRefForEntry, so it must stamp the identity itself — through the
+      // same helper, never a hand-rolled format. Keyed on the record's OWN
+      // `uuid`, exactly as parseSessionTimeline keys the entry this will resolve
+      // to; `secretBlockIndex` is the block within that record that carried the
+      // match. A record with no uuid gets NO entryId (the helper returns
+      // undefined) and the ref falls back to the legacy timestamp path — never
+      // to the record's array position, which the subagent merge reorders. If
+      // the timeline parser skipped the matched block (a block type it does not
+      // render, or a record with no timestamp) the id matches no entry and
+      // resolveEvidenceRef fails closed: a dead link, never a link to a
+      // neighbouring turn.
+      const recordUuid = (entry as { uuid?: unknown }).uuid;
+      const entryId = timelineEntryId(
+        typeof recordUuid === 'string' ? recordUuid : undefined,
+        secretBlockIndex ?? 0
+      );
+      if (entryId) ref.entryId = entryId;
       const toolUseId = msg ? firstToolUseId(msg.content) : undefined;
       if (toolUseId) ref.toolUseId = toolUseId;
       evidenceRefs.push(ref);

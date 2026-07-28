@@ -3,6 +3,7 @@ import {
   parseSessionTimeline,
   slimSessionTimeline,
   isBackgroundableBashCommand,
+  timelineEntryId,
   type SessionTimeline,
 } from './parse-timeline'
 import { collectSessionBfcs } from './experiments/conversational-availability-metric'
@@ -280,6 +281,138 @@ describe('parseSessionTimeline', () => {
     expect(tl.gitBranch).toBe('main')
     expect(tl.entrypoint).toBe('cli')
     expect(tl.serviceTier).toBe('standard')
+  })
+
+  it('timelineEntryId formats uuid:blockIndex, and yields NO id without a uuid', () => {
+    expect(timelineEntryId('abc-123', 0)).toBe('abc-123:0')
+    expect(timelineEntryId('abc-123', 2)).toBe('abc-123:2')
+    // No usable uuid => no identity at all. A positional stand-in here would
+    // reintroduce the unstable key the uuid exists to replace.
+    expect(timelineEntryId(undefined, 0)).toBeUndefined()
+    expect(timelineEntryId('', 0)).toBeUndefined()
+  })
+
+  describe('entryId (#3390 stable per-entry identity)', () => {
+    it('assigns a distinct entryId per content block within ONE multi-block record', () => {
+      const text = line({
+        type: 'assistant',
+        uuid: 'rec-A',
+        timestamp: '2026-01-01',
+        message: {
+          content: [
+            { type: 'thinking', thinking: 'hmm' },
+            { type: 'text', text: 'answer' },
+            { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } },
+          ],
+        },
+      })
+      const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+      // Same record (one uuid), one id per block position — never colliding.
+      expect(entries.map((e) => e.entryId)).toEqual(['rec-A:0', 'rec-A:1', 'rec-A:2'])
+      // All three share the timestamp (single raw record) and carry no
+      // toolUseId except the tool_use block — exactly the shape that had no
+      // stable key pre-#3390.
+      expect(new Set(entries.map((e) => e.timestamp)).size).toBe(1)
+    })
+
+    it('keys entryId to the record, not to any array position', () => {
+      // Two records written out of chronological order (as real merged
+      // transcripts routinely are); parseSessionTimeline sorts the flattened
+      // entries by timestamp afterwards, swapping their array positions. The
+      // id follows the RECORD either way.
+      const text = [
+        line({ type: 'user', uuid: 'rec-late', timestamp: '2026-01-02', message: { content: 'later, but written first' } }),
+        line({ type: 'user', uuid: 'rec-early', timestamp: '2026-01-01', message: { content: 'earlier, but written second' } }),
+      ].join('\n')
+      const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+      expect(entries.map((e) => e.summary)).toEqual(['earlier, but written second', 'later, but written first'])
+      expect(entries[0].entryId).toBe('rec-early:0')
+      expect(entries[1].entryId).toBe('rec-late:0')
+    })
+
+    it('THE LOAD-BEARING PROPERTY: an entry keeps its id when records are spliced in ahead of it', () => {
+      // This is the property an evidence ref actually needs, and the one a
+      // positional key could not provide. The subagent merge concatenates
+      // subagents/*.jsonl in LEXICAL filename order over random hex names, so a
+      // late-created subagent's records are routinely spliced in AHEAD of
+      // records that already have refs written against them (measured on this
+      // repo's live session: 45 of 153 file pairs inverted, 820 records
+      // displaced by one new file). Under the first cut of this field the
+      // target's id was silently handed to its new neighbour.
+      const target = line({ type: 'user', uuid: 'rec-target', timestamp: '2026-01-05', message: { content: 'the entry a ref points at' } })
+      const before = parseSessionTimeline(target, 's.jsonl')!.entries
+      const idBefore = before[0].entryId
+
+      const after = parseSessionTimeline(
+        [
+          line({ type: 'user', uuid: 'rec-spliced-1', timestamp: '2026-01-01', message: { content: 'merged-in subagent line' } }),
+          line({ type: 'user', uuid: 'rec-spliced-2', timestamp: '2026-01-02', message: { content: 'another merged-in line' } }),
+          target,
+        ].join('\n'),
+        's.jsonl'
+      )!.entries
+
+      expect(idBefore).toBe('rec-target:0')
+      // Same id, new array position — and no OTHER entry has taken it over.
+      const stillThere = after.filter((e) => e.entryId === idBefore)
+      expect(stillThere).toHaveLength(1)
+      expect(stillThere[0].summary).toBe('the entry a ref points at')
+      expect(after.indexOf(stillThere[0])).toBe(2)
+    })
+
+    it('produces byte-identical entryIds across reparses of unchanged input', () => {
+      const text = [
+        line({ type: 'user', uuid: 'r1', timestamp: '2026-01-01', message: { content: 'hello' } }),
+        line({
+          type: 'assistant',
+          uuid: 'r2',
+          timestamp: '2026-01-01',
+          message: { content: [{ type: 'text', text: 'a' }, { type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+        }),
+      ].join('\n')
+      const first = parseSessionTimeline(text, 's.jsonl')!.entries.map((e) => e.entryId)
+      const second = parseSessionTimeline(text, 's.jsonl')!.entries.map((e) => e.entryId)
+      expect(second).toEqual(first)
+    })
+
+    it('never assigns the same entryId to two different entries in one timeline', () => {
+      const text = [
+        line({ type: 'user', uuid: 'r1', timestamp: '2026-01-01', message: { content: [{ type: 'text', text: 'hi' }, { type: 'tool_result', tool_use_id: 'x', content: 'ok' }] } }),
+        line({
+          type: 'assistant',
+          uuid: 'r2',
+          timestamp: '2026-01-01',
+          message: { content: [{ type: 'thinking', thinking: 'a' }, { type: 'text', text: 'b' }, { type: 'tool_use', id: 'y', name: 'Bash', input: {} }] },
+        }),
+        line({ type: 'user', uuid: 'r3', timestamp: '2026-01-01', message: { content: [{ type: 'tool_result', tool_use_id: 'y', content: 'done' }] } }),
+      ].join('\n')
+      const ids = parseSessionTimeline(text, 's.jsonl')!.entries.map((e) => e.entryId)
+      expect(new Set(ids).size).toBe(ids.length)
+    })
+
+    it('gives a message-less/malformed record an id from its uuid', () => {
+      const text = [
+        line({ type: 'user', uuid: 'rec-bad', timestamp: '2026-01-01', message: 123 }),
+        line({ type: 'user', uuid: 'rec-good', timestamp: '2026-01-02', message: { content: 'a real message' } }),
+      ].join('\n')
+      const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+      expect(entries[0].entryId).toBe('rec-bad:0')
+      expect(entries[1].entryId).toBe('rec-good:0')
+    })
+
+    it('omits entryId entirely for a record with NO uuid (never a positional stand-in)', () => {
+      // queue-operation lines are the live example (533 of them in the measured
+      // corpus). An entry with no stable identity must carry none, so its refs
+      // take evidence.ts's legacy timestamp path — lossy, but never confidently
+      // wrong.
+      const text = [
+        line({ type: 'user', timestamp: '2026-01-01', message: { content: 'no uuid on this record' } }),
+        line({ type: 'user', uuid: 'rec-has-one', timestamp: '2026-01-02', message: { content: 'this one has a uuid' } }),
+      ].join('\n')
+      const entries = parseSessionTimeline(text, 's.jsonl')!.entries
+      expect(entries[0].entryId).toBeUndefined()
+      expect(entries[1].entryId).toBe('rec-has-one:0')
+    })
   })
 
   it('sorts entries by timestamp and sets start/end accordingly', () => {

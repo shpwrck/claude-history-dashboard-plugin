@@ -105,11 +105,15 @@ test('session-blob version is the value the session_blob cache key actually bake
   assert.equal(typeof SESSION_BLOB_OUTPUT.version, 'string');
 });
 
-test('session-blob version turns over for edit format-churn metrics (#2507)', () => {
+test('session-blob version turns over for uuid-keyed timeline entry identity (#3390)', () => {
+  // A CONTENT-shape bump the column fingerprint above cannot force: timeline_json
+  // entries now carry `entryId` and secrets_at_rest_json refs carry the matching
+  // id, with no column added, removed, or renamed. Pinning the literal keeps the
+  // deliberate bump from being silently reverted.
   assert.equal(
     SESSION_BLOB_OUTPUT.version,
-    'edit-format-churn-v18',
-    'tool_json now persists sparse editFormatChurn metrics; the v17 cache key must not remain current'
+    'timeline-entry-uuid-v20',
+    'timeline_json entries now carry a uuid-keyed entryId (and secrets_at_rest_json refs the matching id); the v18 cache key -- and the branch-only positional v19 -- must not remain current'
   );
 });
 

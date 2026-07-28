@@ -2339,6 +2339,16 @@ const DATASET_CACHE_KEEP = 3;
 //   v3 (#2006): recalibrated thinking residual (per-block-type token density).
 //   v4 (#2036): precompute target-aware rm -rf certainty + dangerous fragment on
 //       ToolCall, so body-stripped commands keep correct dangerous-command signal.
+//   v5 (#3390): SUPERSEDED BY v6 BEFORE MERGE — never on master. It stamped a
+//       POSITIONAL entryId (`${recordIndex}:${blockIndex}`), which review showed
+//       is unique but not stable: the subagent merge splices records in ahead of
+//       existing ones, reassigning a stale ref's id to a different entry.
+//   v6 (#3390): parseSessionTimeline stamps `entryId` as `${record.uuid}:${blockIndex}`
+//       (absent when the record has no uuid) and parseSecretsAtRest stamps the
+//       matching id on its EvidenceRefs. The transcripts are unchanged, so
+//       without this bump an unchanged session would keep serving a cached parse
+//       carrying the old positional ids — which resolve CONFIDENTLY WRONG once
+//       records shift — instead of uuid-keyed ones.
 // Exported so the dataset-cache-schema regression test can assert the dataset key
 // folds this in (the two cache gates must turn over together).
 //
@@ -2348,7 +2358,7 @@ const DATASET_CACHE_KEEP = 3;
 // parser-output seam (scripts/lib/parser-output-versions.mjs). The seam lists
 // this knob under RELATED_INVALIDATION_KNOBS so the two are discoverable
 // together but NOT collapsed — they invalidate distinct caches.
-export const PARSER_SIG_VERSION = 'v4';
+export const PARSER_SIG_VERSION = 'v6';
 
 // Bump when assembleDataset() or an upstream parser changes the serialized
 // dataset's shape or meaning without necessarily changing any ~/.claude source

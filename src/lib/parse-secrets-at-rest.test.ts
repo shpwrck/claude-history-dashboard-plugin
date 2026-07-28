@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseSecretsAtRest } from './parse-secrets-at-rest';
+import { parseSessionTimeline } from './parse-timeline';
+import { resolveEvidenceRef } from './evidence';
 
 // Synthetic, obviously-fake credentials that still match the shared
 // SECRET_PATTERNS. NONE of these is a live secret — they are shape-only decoys.
@@ -137,5 +139,75 @@ describe('parseSecretsAtRest', () => {
     // A partial value fragment must not leak either.
     expect(json).not.toContain('sk-ant-');
     expect(json).not.toContain('AKIA');
+  });
+
+  it('#3390: stamps an entryId that resolves to the block that carried the secret', () => {
+    // This parser builds refs BY HAND, and its `entryIndex` is a RECORD index,
+    // not a timeline-entry index — so it points at the wrong entry the moment
+    // one record yields more than one entry. Here the second record yields two
+    // text entries; the secret is in the SECOND. The ref's entryIndex (1) lands
+    // on the first, whose timestamp matches (one record, one timestamp) and
+    // which carries no toolUseId to contradict it — so the pre-#3390 rules
+    // resolved this ref to the wrong block, confidently. The entryId names the
+    // matched block of the matched RECORD outright, and keeps naming it when
+    // the subagent merge splices other records in ahead of it.
+    const text = transcript([
+      userText('starting the run', '2026-07-01T00:00:00.000Z'),
+      {
+        type: 'user',
+        uuid: 'rec-multi',
+        timestamp: '2026-07-01T00:00:01.000Z',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'a plain note with nothing in it' },
+            { type: 'text', text: `and my key is ${FAKE_ANTHROPIC}` },
+          ],
+        },
+      },
+    ]);
+
+    const sig = parseSecretsAtRest(text, 'sess-h.jsonl');
+    expect(sig!.evidenceRefs).toHaveLength(1);
+    expect(sig!.evidenceRefs[0].entryId).toBe('rec-multi:1');
+    expect(sig!.evidenceRefs[0].toolUseId).toBeUndefined();
+
+    const timeline = parseSessionTimeline(text, 'sess-h.jsonl');
+    const resolved = resolveEvidenceRef(sig!.evidenceRefs[0], [timeline]);
+    // Entry 2 is record 1's SECOND text block; entry 1 is its same-timestamp
+    // sibling that the record-index ref used to land on.
+    expect(resolved?.entryIndex).toBe(2);
+    expect(resolved?.entry.summary).toContain('and my key is');
+  });
+
+  it('#3390: attributes a toolUseResult-only secret to its sibling tool_result block', () => {
+    // The structured `toolUseResult` payload has no content block of its own;
+    // it is the twin of the tool_result block, so the ref must name that block
+    // rather than defaulting to block 0 (the text block here). The old rules
+    // happened to land right on this one — but only because a toolUseId was
+    // present to disambiguate; the id makes it exact without that crutch.
+    const text = transcript([
+      {
+        type: 'user',
+        uuid: 'rec-twin',
+        timestamp: '2026-07-01T00:00:00.000Z',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'echo output follows' },
+            { type: 'tool_result', tool_use_id: 'tool-4', content: 'redacted by the tool' },
+          ],
+        },
+        toolUseResult: { stdout: `AWS_ACCESS_KEY_ID=${FAKE_AWS}` },
+      },
+    ]);
+
+    const sig = parseSecretsAtRest(text, 'sess-i.jsonl');
+    expect(sig!.evidenceRefs[0].entryId).toBe('rec-twin:1');
+
+    const timeline = parseSessionTimeline(text, 'sess-i.jsonl');
+    expect(resolveEvidenceRef(sig!.evidenceRefs[0], [timeline])?.entry.kind).toBe(
+      'tool_result'
+    );
   });
 });

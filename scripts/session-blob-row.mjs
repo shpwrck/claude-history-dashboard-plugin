@@ -114,6 +114,18 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       from raw Edit/MultiEdit old/new bodies before distillation drops them.
 //       Reparse tool_json so cached rows carry the metric. Dataset schema v26
 //       rejects bodies assembled from pre-v18 rows.
+//   'timeline-entry-identity-v19' (#3390): SUPERSEDED BY v20 BEFORE MERGE —
+//       never on master. Stamped a POSITIONAL entryId; see the v5->v6 note in
+//       scripts/ingest.mjs for why position is not an identity.
+//   'timeline-entry-uuid-v20' (#3390): timeline_json entries carry
+//       `entryId` = `${record.uuid}:${blockIndex}` (absent when the record has no
+//       uuid), and secrets_at_rest_json refs carry the matching id. The COLUMN
+//       SET is unchanged — `timeline_json` and `secrets_at_rest_json` already
+//       existed — so the forward-fence contract (which fingerprints column
+//       NAMES) does not move; this is a change to those columns' CONTENT shape
+//       and the bump is therefore deliberate, not fence-forced. Without it a
+//       cached row would serve entries with the old positional ids, which
+//       resolve confidently to the WRONG entry once records shift.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));
