@@ -199,7 +199,7 @@ export function buildReclaimTrendline(
   const whole = rollupCascade(
     runReclaimCascade(claims, tokenData, collectWindowRejection)
   );
-  const gauge = coverageGauge(whole.coverageByCategory, whole.totalBill);
+  const gauge = coverageGauge(whole.coverageUnion);
   const byCategory = categoryCoverageBreakdown(
     whole.coverageByCategory,
     whole.totalBill
@@ -227,31 +227,28 @@ export function buildReclaimTrendline(
 }
 
 /**
- * Collapse the cascade's per-category coverage into a single window-wide gauge:
- * the priced set-union of EVERY category's addressed cells over the repriced
- * `totalBill`. Categories address disjoint OR overlapping cells; the cascade
- * already unions within a category, but two categories can pin the same cell, so
- * we re-union across categories on the cell-priced figures.
+ * The window-wide gauge: the priced set-union of EVERY category's addressed
+ * cells over the repriced `totalBill`.
  *
- * Because the per-category `claimedUsd` figures may double-count a cell two
- * categories both address, summing them could exceed `totalBill`. We therefore
- * clamp the numerator to `totalBill` (belt-and-suspenders, matching the cascade's
- * own per-category clamp) so `coverage` stays in [0,1]. The gauge stays a pure
- * reporting figure — it is never multiplied into the dollar identity.
+ * This used to SUM the per-category `claimedUsd` figures and clamp the result to
+ * `totalBill`, while its own comment described a union (#3163). A sum is not a
+ * union: two categories can address the same cell, and that cell was then
+ * counted twice. A $5 cell addressed by both cost and context read as $10 of a
+ * $30 bill — 33% coverage instead of 17% — and with enough overlap the gauge
+ * saturated at 100% while most of the bill was untouched. The clamp hid the
+ * overflow rather than fixing it, so the number looked plausible at every
+ * magnitude.
+ *
+ * The union is now computed in the cascade (`coverageUnion`), where the cell
+ * identities still exist. It cannot be reconstructed here: a per-category total
+ * has already discarded which cells it covers. The gauge stays a pure reporting
+ * figure — it is never multiplied into the dollar identity.
  */
-function coverageGauge(
-  coverageByCategory: Partial<Record<RecCategory, CategoryCoverage>>,
-  totalBill: number
-): CoverageGauge {
-  let claimedUsd = 0;
-  for (const cov of Object.values(coverageByCategory)) {
-    if (cov) claimedUsd += cov.claimedUsd;
-  }
-  claimedUsd = Math.min(claimedUsd, totalBill);
+function coverageGauge(union: CategoryCoverage): CoverageGauge {
   return {
-    claimedUsd,
-    totalBill,
-    coverage: totalBill > 0 ? claimedUsd / totalBill : 0,
+    claimedUsd: union.claimedUsd,
+    totalBill: union.totalBill,
+    coverage: union.coverage,
   };
 }
 

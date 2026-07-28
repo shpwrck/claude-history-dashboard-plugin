@@ -323,6 +323,16 @@ export interface ReclaimCascadeResult {
    * ghost / no-cell category is omitted.
    */
   coverageByCategory: Partial<Record<RecCategory, CategoryCoverage>>;
+  /**
+   * Priced set-union of the addressed cells across EVERY category (#3163).
+   *
+   * NOT the sum of {@link ReclaimCascadeResult.coverageByCategory}: two
+   * categories may address the same cell, and summing double-counts it.
+   * Computed where the cell identities exist, because a category total no
+   * longer carries them — so this is the only figure that can answer "how much
+   * of the bill does our advice actually address" without over-reporting.
+   */
+  coverageUnion: CategoryCoverage;
   /** One entry per input claim, in cascade order, incl. rejections. */
   booked: BookedClaim[];
 }
@@ -466,7 +476,11 @@ export function runReclaimCascade(
   // Coverage is priced against the ORIGINAL (pre-cascade) matrix, so it must be
   // captured before any counterfactual shrinks a cell. Pure reporting — it never
   // enters the dollar identity (doc §4: "plotted separately, never multiplied").
-  const coverageByCategory = computeCoverage(claims, matrix, billOriginal);
+  const { byCategory: coverageByCategory, union: coverageUnion } = computeCoverage(
+    claims,
+    matrix,
+    billOriginal
+  );
 
   // Cause-first ordering (doc §4 "ordering policy: cause-first, decided"): the
   // CauseKey rank is PRIMARY, so a behavioural cause ([10,40)) always books its
@@ -604,7 +618,16 @@ export function runReclaimCascade(
     );
   }
 
-  return { billOriginal, billFinal, total, byCategory, byLever, coverageByCategory, booked };
+  return {
+    billOriginal,
+    billFinal,
+    total,
+    byCategory,
+    byLever,
+    coverageByCategory,
+    coverageUnion,
+    booked,
+  };
 }
 
 /**
@@ -643,7 +666,11 @@ function computeCoverage(
   claims: ReclaimClaim[],
   matrix: Map<string, ScopeResidual>,
   totalBill: number
-): Partial<Record<RecCategory, CategoryCoverage>> {
+): {
+  byCategory: Partial<Record<RecCategory, CategoryCoverage>>;
+  /** Priced union of every category's addressed cells — see the note below (#3163). */
+  union: CategoryCoverage;
+} {
   // Per category, the distinct addressed cells: token cells keyed `${scopeKey}#${pool}`
   // and server cells keyed `${scopeKey}#server`, so a cell counts at most once.
   const cellsByCategory = new Map<RecCategory, Set<string>>();
@@ -678,21 +705,26 @@ function computeCoverage(
     }
   }
 
-  // Price each category's addressed-cell union at the original matrix rate, and
-  // emit ONLY non-empty categories (sparse: no ghost { claimedUsd: 0 } entries).
-  const out: Partial<Record<RecCategory, CategoryCoverage>> = {};
-  for (const [cat, cells] of cellsByCategory) {
-    let claimedUsd = 0;
+  // Price a set of addressed cells at the original matrix rate. Shared by the
+  // per-category rows and the window-wide union so both price identically.
+  const priceCells = (cells: Set<string>): number => {
+    let usd = 0;
     for (const cellId of cells) {
       const hash = cellId.lastIndexOf('#');
       const scopeKey = cellId.slice(0, hash);
       const part = cellId.slice(hash + 1);
       const row = matrix.get(scopeKey);
       if (!row) continue;
-      claimedUsd += part === 'server' ? row.server : cellCost(row, part as PoolId);
+      usd += part === 'server' ? row.server : cellCost(row, part as PoolId);
     }
     // The set-union already bounds this by the bill; clamp belt-and-suspenders.
-    claimedUsd = Math.min(claimedUsd, totalBill);
+    return Math.min(usd, totalBill);
+  };
+
+  // Emit ONLY non-empty categories (sparse: no ghost { claimedUsd: 0 } entries).
+  const out: Partial<Record<RecCategory, CategoryCoverage>> = {};
+  for (const [cat, cells] of cellsByCategory) {
+    const claimedUsd = priceCells(cells);
     if (claimedUsd <= EPS) continue; // sparse: omit categories with no dollar opinion
     out[cat] = {
       claimedUsd,
@@ -700,7 +732,26 @@ function computeCoverage(
       coverage: totalBill > EPS ? claimedUsd / totalBill : 0,
     };
   }
-  return out;
+
+  // The window-wide union (#3163). Two categories can address the SAME cell, so
+  // the sum of per-category `claimedUsd` double-counts it — a $5 cell addressed
+  // by both cost and context reads as $10 of a $30 bill (33%) instead of $5
+  // (17%), and with enough overlap the gauge reaches 100% while most of the bill
+  // is untouched. Only a union over cell IDENTITIES can answer "how much of the
+  // bill does our advice actually address", so it is computed here, where the
+  // identities exist, rather than reconstructed from category totals that no
+  // longer carry them.
+  const allCells = new Set<string>();
+  for (const cells of cellsByCategory.values()) {
+    for (const cellId of cells) allCells.add(cellId);
+  }
+  const unionUsd = priceCells(allCells);
+  const union: CategoryCoverage = {
+    claimedUsd: unionUsd,
+    totalBill,
+    coverage: totalBill > EPS ? unionUsd / totalBill : 0,
+  };
+  return { byCategory: out, union };
 }
 
 /**
@@ -778,6 +829,13 @@ export interface ReclaimRollupWithBill {
    * categories that price at least one cell appear.
    */
   coverageByCategory: Partial<Record<RecCategory, CategoryCoverage>>;
+  /**
+   * Priced set-union of the addressed cells across every category (#3163).
+   * Threaded through the rollup because the window gauge needs it and cannot
+   * derive it: summing `coverageByCategory` double-counts any cell two
+   * categories both address.
+   */
+  coverageUnion: CategoryCoverage;
   /** The repriced actual bill — coverage = total / totalBill. */
   totalBill: number;
 }
@@ -788,6 +846,7 @@ export function rollupCascade(result: ReclaimCascadeResult): ReclaimRollupWithBi
     byCategory: result.byCategory,
     byLever: result.byLever,
     coverageByCategory: result.coverageByCategory,
+    coverageUnion: result.coverageUnion,
     totalBill: result.billOriginal,
   };
 }

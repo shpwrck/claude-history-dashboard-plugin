@@ -339,6 +339,8 @@ describe('runReclaimCascade — guarded-marginal identity', () => {
       byCategory: {},
       byLever: {},
       coverageByCategory: {},
+      // #3163: the window-wide union is now threaded through the rollup.
+      coverageUnion: { claimedUsd: 0, totalBill: r.billOriginal, coverage: 0 },
       totalBill: r.billOriginal,
     });
   });

@@ -306,3 +306,92 @@ describe('buildReclaimTrendline', () => {
     expect(out.points).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The gauge is a UNION, not a sum (#3163)
+// ---------------------------------------------------------------------------
+
+describe('coverage gauge across overlapping categories (#3163)', () => {
+  // One $5 cell (1M Opus input @ $5/MTok) inside a $30 bill (the other $25 is
+  // output, which nothing addresses).
+  const td = [
+    session('s1', 'claude-opus-4-7', [
+      entry({ inputTokens: 1_000_000, outputTokens: 1_000_000 }),
+    ]),
+  ];
+  const scope = scopeKeyOf('s1', 'claude-opus-4-7');
+
+  it('counts a cell addressed by two categories once', () => {
+    // cost and context both pin the SAME (scope, input) cell.
+    const out = buildReclaimTrendline(
+      [
+        rec(
+          'cost.pins-input',
+          claim({ leverId: 'cost.pins-input', category: 'cost', ownedPools: ['input'], scopeKeys: [scope] })
+        ),
+        rec(
+          'context.pins-input',
+          claim({
+            leverId: 'context.pins-input',
+            category: 'context',
+            orderKey: 40,
+            ownedPools: ['input'],
+            scopeKeys: [scope],
+          })
+        ),
+      ],
+      td
+    );
+
+    // The regression: summing the two category totals reported $10 of the $5
+    // cell — double the cell's own price — and inflated coverage to match.
+    expect(out.gauge.claimedUsd).toBeCloseTo(5, 9);
+    expect(out.gauge.coverage).toBeCloseTo(5 / out.gauge.totalBill, 9);
+
+    // ...while each category legitimately shows the full cell it addresses.
+    const byCat = new Map(out.byCategory.map((c) => [c.category, c.claimedUsd]));
+    expect(byCat.get('cost')).toBeCloseTo(5, 9);
+    expect(byCat.get('context')).toBeCloseTo(5, 9);
+    // Which is exactly why the sum (10) is not the union (5).
+    expect((byCat.get('cost') ?? 0) + (byCat.get('context') ?? 0)).toBeCloseTo(10, 9);
+  });
+
+  it('still adds disjoint cells from different categories', () => {
+    const out = buildReclaimTrendline(
+      [
+        rec(
+          'cost.pins-input',
+          claim({ leverId: 'cost.pins-input', category: 'cost', ownedPools: ['input'], scopeKeys: [scope] })
+        ),
+        rec(
+          'context.pins-output',
+          claim({
+            leverId: 'context.pins-output',
+            category: 'context',
+            orderKey: 40,
+            ownedPools: ['output'],
+            scopeKeys: [scope],
+          })
+        ),
+      ],
+      td
+    );
+    // Disjoint cells: $5 input + $25 output = the whole bill.
+    expect(out.gauge.claimedUsd).toBeCloseTo(out.gauge.totalBill, 9);
+    expect(out.gauge.coverage).toBeCloseTo(1, 9);
+  });
+
+  it('never reports coverage above 1', () => {
+    const out = buildReclaimTrendline(
+      ['a', 'b', 'c', 'd'].map((n) =>
+        rec(
+          `cost.${n}`,
+          claim({ leverId: `cost.${n}`, category: 'cost', ownedPools: ['input'], scopeKeys: [scope] })
+        )
+      ),
+      td
+    );
+    expect(out.gauge.coverage).toBeLessThanOrEqual(1);
+    expect(out.gauge.claimedUsd).toBeCloseTo(5, 9);
+  });
+});
