@@ -25,6 +25,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -214,6 +215,253 @@ describe('apply -> revert round trip', () => {
     ]);
 
     revertFile(file, quiet);
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+  });
+});
+
+describe('apply output containment (#3069)', () => {
+  it('rejects a traversing --rules-dir before writing outside the output root', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'atomize-config-output-root-'));
+    tempDirs.push(outer);
+    const project = join(outer, 'nested', 'project');
+    mkdirSync(project, { recursive: true });
+    const file = join(project, 'CLAUDE.md');
+    writeFileSync(file, MONOLITH);
+
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync(
+        'node',
+        [
+          SCRIPT,
+          '--section',
+          'Build & deploy=src/lib',
+          '--rules-dir',
+          '../../escape',
+          file,
+        ],
+        { encoding: 'utf8' }
+      );
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain('--rules-dir');
+    expect(existsSync(join(outer, 'escape', 'build-deploy.md'))).toBe(false);
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    expect(readdirSync(project)).toEqual(['CLAUDE.md']);
+  });
+
+  it('rejects a traversing mapping subtree before writing nested AGENTS.md outside the root', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'atomize-config-output-root-'));
+    tempDirs.push(outer);
+    const project = join(outer, 'nested', 'project');
+    mkdirSync(project, { recursive: true });
+    const file = join(project, 'CLAUDE.md');
+    writeFileSync(file, MONOLITH);
+    const mapFile = join(outer, 'mapping.json');
+    writeFileSync(mapFile, JSON.stringify({ 'Build & deploy': '../../escape' }));
+
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync(
+        'node',
+        [
+          SCRIPT,
+          '--emit',
+          'agents-md',
+          '--map',
+          mapFile,
+          file,
+        ],
+        { encoding: 'utf8' }
+      );
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain('mapping subtree');
+    expect(existsSync(join(outer, 'escape', 'AGENTS.md'))).toBe(false);
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    expect(readdirSync(project)).toEqual(['CLAUDE.md']);
+  });
+
+  it('rejects a traversing subtree even when its mapping key does not resolve', () => {
+    const { dir, file } = makeTempMonolith();
+
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync(
+        'node',
+        [SCRIPT, '--emit', 'agents-md', '--section', 'x=../../escape', file],
+        { encoding: 'utf8' }
+      );
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain('mapping subtree');
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    expect(readdirSync(dir)).toEqual(['CLAUDE.md']);
+  });
+
+  it('rejects absolute rules directories and mapping subtrees', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'atomize-config-output-root-'));
+    tempDirs.push(outer);
+    const project = join(outer, 'project');
+    mkdirSync(project);
+    const file = join(project, 'CLAUDE.md');
+    writeFileSync(file, MONOLITH);
+
+    const cases = [
+      {
+        args: [
+          '--section',
+          'Build & deploy=src/lib',
+          '--rules-dir',
+          join(outer, 'rules-escape'),
+        ],
+        message: '--rules-dir',
+      },
+      {
+        args: [
+          '--emit',
+          'agents-md',
+          '--section',
+          `Build & deploy=${join(outer, 'mapping-escape')}`,
+        ],
+        message: 'mapping subtree',
+      },
+    ];
+
+    for (const testCase of cases) {
+      let failed: { status: number | null; stderr: string } | null = null;
+      try {
+        execFileSync('node', [SCRIPT, ...testCase.args, file], { encoding: 'utf8' });
+      } catch (err) {
+        const e = err as { status: number | null; stderr: string };
+        failed = { status: e.status, stderr: e.stderr };
+      }
+      expect(failed).not.toBeNull();
+      expect(failed!.status).toBe(1);
+      expect(failed!.stderr).toContain(testCase.message);
+    }
+
+    expect(existsSync(join(outer, 'rules-escape'))).toBe(false);
+    expect(existsSync(join(outer, 'mapping-escape'))).toBe(false);
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    expect(readdirSync(project)).toEqual(['CLAUDE.md']);
+  });
+
+  it('rejects Windows-shaped absolute paths even on a non-Windows host', () => {
+    const { dir, file } = makeTempMonolith();
+
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync(
+        'node',
+        [
+          SCRIPT,
+          '--section',
+          'Build & deploy=src/lib',
+          '--rules-dir',
+          'C:\\escape\\rules',
+          file,
+        ],
+        { encoding: 'utf8' }
+      );
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain('--rules-dir');
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+    expect(readdirSync(dir)).toEqual(['CLAUDE.md']);
+  });
+
+  it('rejects a --rules-dir that escapes through an existing symlink', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'atomize-config-output-root-'));
+    tempDirs.push(outer);
+    const project = join(outer, 'project');
+    const escape = join(outer, 'escape');
+    mkdirSync(project);
+    mkdirSync(escape);
+    symlinkSync(escape, join(project, 'linked'));
+    const file = join(project, 'CLAUDE.md');
+    writeFileSync(file, MONOLITH);
+
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync(
+        'node',
+        [
+          SCRIPT,
+          '--section',
+          'Build & deploy=src/lib',
+          '--rules-dir',
+          'linked/rules',
+          file,
+        ],
+        { encoding: 'utf8' }
+      );
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain('outside the output root');
+    expect(existsSync(join(escape, 'rules', 'build-deploy.md'))).toBe(false);
+    expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
+  });
+
+  it('rejects a mapping subtree that escapes through an existing symlink', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'atomize-config-output-root-'));
+    tempDirs.push(outer);
+    const project = join(outer, 'project');
+    const escape = join(outer, 'escape');
+    mkdirSync(project);
+    mkdirSync(escape);
+    symlinkSync(escape, join(project, 'linked'));
+    const file = join(project, 'CLAUDE.md');
+    writeFileSync(file, MONOLITH);
+
+    let failed: { status: number | null; stderr: string } | null = null;
+    try {
+      execFileSync(
+        'node',
+        [
+          SCRIPT,
+          '--emit',
+          'agents-md',
+          '--section',
+          'Build & deploy=linked/component',
+          file,
+        ],
+        { encoding: 'utf8' }
+      );
+    } catch (err) {
+      const e = err as { status: number | null; stderr: string };
+      failed = { status: e.status, stderr: e.stderr };
+    }
+
+    expect(failed).not.toBeNull();
+    expect(failed!.status).toBe(1);
+    expect(failed!.stderr).toContain('outside the output root');
+    expect(existsSync(join(escape, 'component', 'AGENTS.md'))).toBe(false);
     expect(readFileSync(file, 'utf8')).toBe(MONOLITH);
   });
 });

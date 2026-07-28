@@ -61,6 +61,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
@@ -294,6 +295,22 @@ function normalizeSubtree(subtree) {
   return subtree.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
 }
 
+function assertSafeRelativePath(value, label, { allowEmpty = false } = {}) {
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be a relative path`);
+  }
+  const portable = value.replace(/\\/g, '/');
+  if (!allowEmpty && portable.length === 0) {
+    throw new Error(`${label} must be a non-empty relative path`);
+  }
+  if (isAbsolute(value) || isAbsolute(portable) || /^(?:[A-Za-z]:|\/\/)/.test(portable)) {
+    throw new Error(`${label} must be a relative path`);
+  }
+  if (portable.split('/').includes('..')) {
+    throw new Error(`${label} must not contain '..' path components`);
+  }
+}
+
 function pathsGlobFor(subtree) {
   const clean = normalizeSubtree(subtree);
   return clean.includes('*') ? clean : `${clean}/**`;
@@ -359,6 +376,10 @@ export function buildPlan({
 }) {
   if (emit !== 'rules' && emit !== 'agents-md') {
     throw new Error(`unknown emit mode: ${emit} (expected 'rules' or 'agents-md')`);
+  }
+  assertSafeRelativePath(rulesDirRel, '--rules-dir');
+  for (const subtree of mapping.values()) {
+    assertSafeRelativePath(subtree, 'mapping subtree', { allowEmpty: true });
   }
   const secs = sections ?? splitSections(content);
 
@@ -485,6 +506,39 @@ function buildAgentsMdPlan({ scope, mapping, secs }) {
 // -- Apply / revert (filesystem) ----------------------------------------------
 
 /**
+ * Resolve symlinks in the existing prefix of a path while retaining any
+ * not-yet-created suffix. This gives containment checks the path the filesystem
+ * will actually traverse, even when the final rule directory does not exist.
+ */
+function canonicalPath(path) {
+  let existing = resolve(path);
+  const missing = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    missing.unshift(basename(existing));
+    existing = parent;
+  }
+  return resolve(realpathSync(existing), ...missing);
+}
+
+function outputPath(outRoot, rulePathRel) {
+  const root = canonicalPath(outRoot);
+  const candidate = resolve(outRoot, rulePathRel);
+  const canonicalCandidate = canonicalPath(candidate);
+  const containment = relative(root, canonicalCandidate);
+  if (
+    containment === '' ||
+    containment === '..' ||
+    containment.startsWith(`..${sep}`) ||
+    isAbsolute(containment)
+  ) {
+    throw new Error(`refusing output path outside the output root: ${rulePathRel}`);
+  }
+  return candidate;
+}
+
+/**
  * Atomize one monolith on disk. Options:
  *   mapping  Map<key, subtree> | null  (null -> infer)
  *   infer    allow WRITING inferred moves (without it, a null mapping is
@@ -504,6 +558,12 @@ export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = 
       'no section mapping given: pass --map/--section (detector mapping), or --infer to ' +
         'accept CLI-inferred moves; --dry-run previews inference without writing'
     );
+  }
+  assertSafeRelativePath(rulesDirRel, '--rules-dir');
+  if (mapping !== null) {
+    for (const subtree of mapping.values()) {
+      assertSafeRelativePath(subtree, 'mapping subtree', { allowEmpty: true });
+    }
   }
 
   const abs = resolve(filePath);
@@ -559,8 +619,15 @@ export function atomizeFile(filePath, { mapping = null, infer = false, dryRun = 
     return { plan, unresolved, written: false };
   }
 
-  for (const move of plan.moves) {
-    const rulePath = join(outRoot, move.rulePathRel);
+  // Resolve and validate every destination before the first write, so one bad
+  // move cannot leave a partially atomized config behind. Canonicalizing each
+  // existing prefix also catches an in-root symlink that redirects outside.
+  const destinations = plan.moves.map((move) => ({
+    move,
+    rulePath: outputPath(outRoot, move.rulePathRel),
+  }));
+
+  for (const { move, rulePath } of destinations) {
     if (existsSync(rulePath)) {
       const existing = readFileSync(rulePath, 'utf8');
       if (existing !== move.ruleContent) {
