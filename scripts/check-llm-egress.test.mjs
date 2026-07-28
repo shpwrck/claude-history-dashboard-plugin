@@ -51,6 +51,9 @@ const caps = {
   spendControls: ['operator spend limit'],
 };
 
+const APPROVED_EGRESS_IMPORT =
+  "const { egressScrub } = await import('../src/lib/anthropic-egress.ts');";
+
 function publicEntry(overrides = {}) {
   return {
     id: 'server.public',
@@ -160,6 +163,7 @@ check('validator rejects a protected send whose scrub result is discarded', () =
   const calls = collectLlmWrapperCalls(
     'scripts/server.mjs',
     [
+      APPROVED_EGRESS_IMPORT,
       "egressScrub('server.fake', safeValue, options);",
       "callAnthropicMessages('server.fake', sensitiveValue);",
     ].join('\n')
@@ -175,11 +179,11 @@ check('validator accepts a protected send of the captured same-id scrub result',
   const calls = collectLlmWrapperCalls(
     'scripts/server.mjs',
     [
+      APPROVED_EGRESS_IMPORT,
       "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
       "callAnthropicMessages('server.fake', {",
       '  apiKey,',
-      '  ...scrubbed.content,',
-      '  scrubReceipt: scrubbed.receipt,',
+      '  scrubbedBody: scrubbed,',
       '  capChecked: true,',
       '  capReceipt,',
       '});',
@@ -192,15 +196,123 @@ check('validator rejects an unsanitized override of scrubbed message content', (
   const calls = collectLlmWrapperCalls(
     'scripts/server.mjs',
     [
+      APPROVED_EGRESS_IMPORT,
       "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
       "callAnthropicMessages('server.fake', {",
       '  apiKey,',
-      '  ...scrubbed.content,',
+      '  scrubbedBody: scrubbed,',
       '  messages: sensitiveValue,',
-      '  scrubReceipt: scrubbed.receipt,',
       '  capChecked: true,',
       '  capReceipt,',
       '});',
+    ].join('\n')
+  );
+  const errors = validateLlmWrapperCallSites(calls, [entries[0]]);
+  assert.match(
+    errors.join('\n'),
+    /callAnthropicMessages must send payload derived from a captured same-id egressScrub result/
+  );
+});
+
+check('validator rejects intervening mutation of a captured scrub result', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      APPROVED_EGRESS_IMPORT,
+      "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
+      'Object.assign(scrubbed.content, { messages: sensitiveValue });',
+      "callAnthropicMessages('server.fake', {",
+      '  apiKey,',
+      '  scrubbedBody: scrubbed,',
+      '  capChecked: true,',
+      '  capReceipt,',
+      '});',
+    ].join('\n')
+  );
+  const errors = validateLlmWrapperCallSites(calls, [entries[0]]);
+  assert.match(
+    errors.join('\n'),
+    /callAnthropicMessages must send payload derived from a captured same-id egressScrub result/
+  );
+});
+
+check('validator rejects a helper method spoofing egressScrub', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      APPROVED_EGRESS_IMPORT,
+      "const scrubbed = helper.egressScrub('server.fake', sensitiveValue, options);",
+      "callAnthropicMessages('server.fake', {",
+      '  apiKey,',
+      '  scrubbedBody: scrubbed,',
+      '  capChecked: true,',
+      '  capReceipt,',
+      '});',
+    ].join('\n')
+  );
+  const errors = validateLlmWrapperCallSites(calls, [entries[0]]);
+  assert.match(
+    errors.join('\n'),
+    /callAnthropicMessages must send payload derived from a captured same-id egressScrub result/
+  );
+});
+
+check('validator rejects a conditional import that can select a spoofed scrubber', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      "const { egressScrub } = await import(useEvil ? './evil.mjs' : '../src/lib/anthropic-egress.ts');",
+      "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
+      "callAnthropicMessages('server.fake', {",
+      '  apiKey,',
+      '  scrubbedBody: scrubbed,',
+      '  capChecked: true,',
+      '  capReceipt,',
+      '});',
+    ].join('\n')
+  );
+  const errors = validateLlmWrapperCallSites(calls, [entries[0]]);
+  assert.match(
+    errors.join('\n'),
+    /callAnthropicMessages must send payload derived from a captured same-id egressScrub result/
+  );
+});
+
+check('validator rejects a reassignable approved scrubber binding', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      "let { egressScrub } = await import('../src/lib/anthropic-egress.ts');",
+      'egressScrub = helper.egressScrub;',
+      "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
+      "callAnthropicMessages('server.fake', {",
+      '  apiKey,',
+      '  scrubbedBody: scrubbed,',
+      '  capChecked: true,',
+      '  capReceipt,',
+      '});',
+    ].join('\n')
+  );
+  const errors = validateLlmWrapperCallSites(calls, [entries[0]]);
+  assert.match(
+    errors.join('\n'),
+    /callAnthropicMessages must send payload derived from a captured same-id egressScrub result/
+  );
+});
+
+check('validator does not capture a scrub binding across a concise function boundary', () => {
+  const calls = collectLlmWrapperCalls(
+    'scripts/server.mjs',
+    [
+      APPROVED_EGRESS_IMPORT,
+      "const scrubbed = egressScrub('server.fake', sensitiveValue, options);",
+      'const send = () =>',
+      "  callAnthropicMessages('server.fake', {",
+      '    apiKey,',
+      '    scrubbedBody: scrubbed,',
+      '    capChecked: true,',
+      '    capReceipt,',
+      '  });',
     ].join('\n')
   );
   const errors = validateLlmWrapperCallSites(calls, [entries[0]]);

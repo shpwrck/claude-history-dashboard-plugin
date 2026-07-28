@@ -8,6 +8,7 @@ import {
   callAnthropic,
   callAnthropicMessages,
   egressScrub,
+  type CallAnthropicRequest,
   type EgressScrubReceipt,
   type LlmCapReceipt,
 } from './anthropic-egress';
@@ -254,7 +255,7 @@ describe('callAnthropic governance', () => {
     });
   });
 
-  it('rejects Console-key audit calls until the scrub receipt is present', async () => {
+  it('rejects Console-key audit calls until an opaque scrubbed body is present', async () => {
     await expect(
       callAnthropic('server.audit-judge', {
         credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
@@ -281,8 +282,7 @@ describe('callAnthropic governance', () => {
       callAnthropic('server.audit-judge', {
         credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
         path: '/messages',
-        body: scrubbed.content,
-        scrubReceipt: scrubbed.receipt,
+        scrubbedBody: scrubbed,
       })
     ).rejects.toMatchObject({
       code: 'ERR_DASHBOARD_LLM_CAP_UNCHECKED',
@@ -303,8 +303,7 @@ describe('callAnthropic governance', () => {
       callAnthropic('server.audit-judge', {
         credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
         path: '/messages',
-        body: scrubbed.content,
-        scrubReceipt: scrubbed.receipt,
+        scrubbedBody: scrubbed,
         capChecked: true,
       })
     ).rejects.toMatchObject({
@@ -326,8 +325,7 @@ describe('callAnthropic governance', () => {
       callAnthropic('server.audit-judge', {
         credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
         path: '/messages',
-        body: scrubbed.content,
-        scrubReceipt: scrubbed.receipt,
+        scrubbedBody: scrubbed,
         capChecked: true,
         capReceipt: capReceipt({
           callBudget: { env: 'DASHBOARD_AUDIT_MAX_JUDGE_CALLS', limit: 0 },
@@ -354,8 +352,7 @@ describe('callAnthropic governance', () => {
       callAnthropic('server.audit-judge', {
         credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
         path: '/messages',
-        body: scrubbed.content,
-        scrubReceipt: scrubbed.receipt,
+        scrubbedBody: scrubbed,
         capChecked: true,
         capReceipt: capReceipt({
           outputTokenLimit: {
@@ -387,6 +384,209 @@ describe('callAnthropic governance', () => {
     ).rejects.toMatchObject({
       code: 'ERR_DASHBOARD_LLM_SCRUB_MISSING',
     });
+  });
+
+  it('rejects fabricated scrub authorizers without calling fetch', async () => {
+    let fetchCalls = 0;
+    const fetchImpl = async () => {
+      fetchCalls += 1;
+      return response({ ok: true });
+    };
+    const forgedRequest = {
+      credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
+      path: '/messages',
+      body: {
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 512,
+        messages: [
+          {
+            role: 'user',
+            content: 'secret sk-ant-abcdef0123456789ABCDEFG',
+          },
+        ],
+      },
+      scrubReceipt: {
+        registryId: 'server.audit-judge',
+        mode: 'redact',
+        inputBytes: 128,
+        outputBytes: 128,
+      },
+      capChecked: true,
+      capReceipt: capReceipt(),
+      fetchImpl,
+    } as unknown as CallAnthropicRequest;
+
+    await expect(
+      callAnthropic('server.audit-judge', forgedRequest)
+    ).rejects.toMatchObject({
+      code: 'ERR_DASHBOARD_LLM_SCRUB_MISSING',
+    });
+
+    const forgedOpaqueRequest = {
+      credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
+      path: '/messages',
+      scrubbedBody: {
+        content: {
+          model: 'claude-sonnet-4-5-20250929',
+          max_tokens: 512,
+          messages: [
+            {
+              role: 'user',
+              content: 'secret sk-ant-abcdef0123456789ABCDEFG',
+            },
+          ],
+        },
+        receipt: {
+          registryId: 'server.audit-judge',
+          mode: 'redact',
+          inputBytes: 128,
+          outputBytes: 128,
+        },
+      },
+      capChecked: true,
+      capReceipt: capReceipt(),
+      fetchImpl,
+    } as unknown as CallAnthropicRequest;
+
+    await expect(
+      callAnthropic('server.audit-judge', forgedOpaqueRequest)
+    ).rejects.toMatchObject({
+      code: 'ERR_DASHBOARD_LLM_SCRUB_MISSING',
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('sends only the exact serialized output from the trusted scrub path', async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return response({ ok: true });
+    };
+    const scrubbed = egressScrub(
+      'server.audit-judge',
+      {
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 512,
+        messages: [
+          {
+            role: 'user' as const,
+            content: 'secret sk-ant-abcdef0123456789ABCDEFG',
+          },
+        ],
+      },
+      { logger: () => undefined }
+    );
+    const trustedSerializedBody = JSON.stringify(scrubbed.content);
+
+    // A caller can retain the public redacted view, but mutating that view must
+    // not change the transmission snapshot authorized by the scrub operation.
+    scrubbed.content.messages[0].content =
+      'replacement sk-ant-zyxwvutsrqponmlk987654321';
+
+    await callAnthropic('server.audit-judge', {
+      credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
+      path: '/messages',
+      scrubbedBody: scrubbed,
+      capChecked: true,
+      capReceipt: capReceipt(),
+      fetchImpl,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.body).toBe(trustedSerializedBody);
+    expect(calls[0].init.body).not.toContain(
+      'sk-ant-abcdef0123456789ABCDEFG'
+    );
+    expect(calls[0].init.body).not.toContain(
+      'sk-ant-zyxwvutsrqponmlk987654321'
+    );
+    expect(calls[0].init.body).toContain('[REDACTED_KEY]');
+  });
+
+  it('rejects executable toJSON values before they can reintroduce secrets', async () => {
+    let fetchCalls = 0;
+    const fetchImpl = async () => {
+      fetchCalls += 1;
+      return response({ ok: true });
+    };
+
+    await expect(
+      Promise.resolve().then(async () => {
+        const scrubbed = egressScrub(
+          'server.audit-judge',
+          {
+            model: 'claude-sonnet-4-5-20250929',
+            max_tokens: 512,
+            messages: [{ role: 'user' as const, content: 'safe prompt' }],
+            toJSON() {
+              return {
+                model: 'claude-sonnet-4-5-20250929',
+                max_tokens: 512,
+                messages: [
+                  {
+                    role: 'user',
+                    content: 'sk-ant-abcdef0123456789ABCDEFG',
+                  },
+                ],
+              };
+            },
+          },
+          { logger: () => undefined }
+        );
+        return callAnthropic('server.audit-judge', {
+          credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
+          path: '/messages',
+          scrubbedBody: scrubbed,
+          capChecked: true,
+          capReceipt: capReceipt(),
+          fetchImpl,
+        });
+      })
+    ).rejects.toMatchObject({
+      code: 'ERR_DASHBOARD_LLM_SCRUB_UNSUPPORTED',
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('fails closed on cyclic data and accessors without invoking caller code', () => {
+    const cyclic: Record<string, unknown> = {
+      model: 'claude-sonnet-4-5-20250929',
+    };
+    cyclic.self = cyclic;
+
+    expect(() =>
+      egressScrub('server.audit-judge', cyclic, {
+        logger: () => undefined,
+      })
+    ).toThrow(
+      expect.objectContaining({
+        code: 'ERR_DASHBOARD_LLM_SCRUB_UNSUPPORTED',
+      })
+    );
+
+    let getterCalls = 0;
+    const accessorBody = {
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 512,
+    } as Record<string, unknown>;
+    Object.defineProperty(accessorBody, 'messages', {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return [{ role: 'user', content: 'safe prompt' }];
+      },
+    });
+
+    expect(() =>
+      egressScrub('server.audit-judge', accessorBody, {
+        logger: () => undefined,
+      })
+    ).toThrow(
+      expect.objectContaining({
+        code: 'ERR_DASHBOARD_LLM_SCRUB_UNSUPPORTED',
+      })
+    );
+    expect(getterCalls).toBe(0);
   });
 
   it('sends OAuth probes with OAuth headers and no browser direct-access header', async () => {
@@ -440,9 +640,14 @@ describe('callAnthropic governance', () => {
       'server.audit-judge',
       {
         model: 'claude-sonnet-4-5-20250929',
-        maxTokens: 512,
+        max_tokens: 512,
         system: 'Return JSON',
-        messages: [{ role: 'user', content: 'Judge this capped prompt.' }],
+        messages: [
+          {
+            role: 'user' as const,
+            content: 'Judge this capped prompt.',
+          },
+        ],
       },
       {
         logger: () => undefined,
@@ -451,11 +656,7 @@ describe('callAnthropic governance', () => {
 
     const result = await callAnthropicMessages('server.audit-judge', {
       apiKey: 'sk-ant-test',
-      model: scrubbed.content.model,
-      maxTokens: scrubbed.content.maxTokens,
-      system: scrubbed.content.system,
-      messages: scrubbed.content.messages,
-      scrubReceipt: scrubbed.receipt,
+      scrubbedBody: scrubbed,
       capChecked: true,
       capReceipt: capReceipt(),
       fetchImpl,
@@ -473,6 +674,43 @@ describe('callAnthropic governance', () => {
       'content-type': 'application/json',
     });
     expect(calls[0].init.body).toContain('"max_tokens":512');
+  });
+
+  it('derives fallback response metadata from the trusted transmission snapshot', async () => {
+    const calls: RequestInit[] = [];
+    const fetchImpl = async (
+      _url: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      calls.push(init ?? {});
+      return response({
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    };
+    const scrubbed = egressScrub(
+      'server.audit-judge',
+      {
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 32,
+        messages: [{ role: 'user' as const, content: 'safe prompt' }],
+      },
+      { logger: () => undefined }
+    );
+    scrubbed.content.model = 'caller-mutated-model';
+
+    const result = await callAnthropicMessages('server.audit-judge', {
+      apiKey: 'sk-ant-test',
+      scrubbedBody: scrubbed,
+      capChecked: true,
+      capReceipt: capReceipt(),
+      fetchImpl,
+    });
+
+    expect(result.model).toBe('claude-sonnet-4-5-20250929');
+    expect(calls[0].body).toContain('"model":"claude-sonnet-4-5-20250929"');
+    expect(calls[0].body).not.toContain('caller-mutated-model');
   });
 
   it('uses typed egress errors for policy failures', async () => {

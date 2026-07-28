@@ -60,9 +60,12 @@ const LLM_WRAPPER_CALLEES = new Set([
   'callAnthropicMessages',
   'egressScrub',
 ]);
-const ANTHROPIC_MESSAGE_PAYLOAD_FIELDS = new Set([
+const PROTECTED_REQUEST_PAYLOAD_FIELDS = new Set([
+  'body',
+  'scrubReceipt',
   'model',
   'maxTokens',
+  'max_tokens',
   'system',
   'messages',
 ]);
@@ -105,6 +108,8 @@ export function collectLlmWrapperCalls(file, sourceText) {
     scriptKindForFile(file)
   );
   const calls = [];
+  const approvedEgressScrubBinding =
+    hasUnambiguousApprovedEgressScrubBinding(source);
 
   function visit(node) {
     if (ts.isCallExpression(node)) {
@@ -123,7 +128,10 @@ export function collectLlmWrapperCalls(file, sourceText) {
             ? {}
             : {
                 payloadScrubRegistryId:
-                  linkedPayloadScrubRegistryId(node, callee),
+                  linkedPayloadScrubRegistryId(
+                    node,
+                    approvedEgressScrubBinding
+                  ),
               }),
         });
       }
@@ -249,82 +257,60 @@ function calleeName(expression) {
   return '';
 }
 
-function linkedPayloadScrubRegistryId(call, callee) {
+function linkedPayloadScrubRegistryId(
+  call,
+  approvedEgressScrubBinding
+) {
   const request = unwrapExpression(call.arguments[1]);
   if (!request) return null;
 
   // Keep the accepted flow deliberately narrow and visible in the call:
   // `const scrubbed = egressScrub(...)`, followed in the same statement list
-  // by either a direct `scrubbed.content` send or a request whose payload is
-  // the single `...scrubbed.content` spread. Unsupported aliasing fails closed.
-  const binding =
-    scrubContentBinding(request) ??
-    (callee === 'callAnthropicMessages'
-      ? messageRequestScrubBinding(request)
-      : callee === 'callAnthropic'
-        ? rawRequestScrubBinding(request)
-        : null);
+  // by `scrubbedBody: scrubbed`. The runtime authenticates that exact object
+  // identity through its private WeakMap; aliases and legacy body/receipt
+  // shapes fail closed here as well.
+  const binding = protectedRequestScrubBinding(request);
   if (!binding) return null;
-  return capturedScrubRegistryId(call, binding);
+  return capturedScrubRegistryId(
+    call,
+    binding,
+    approvedEgressScrubBinding
+  );
 }
 
-function messageRequestScrubBinding(request) {
+function protectedRequestScrubBinding(request) {
   if (!ts.isObjectLiteralExpression(request)) return null;
 
   let binding = null;
-  let scrubbedContentSpreads = 0;
-  for (const property of request.properties) {
-    if (ts.isSpreadAssignment(property)) {
-      const spreadBinding = scrubContentBinding(property.expression);
-      if (!spreadBinding || (binding && spreadBinding !== binding)) return null;
-      binding = spreadBinding;
-      scrubbedContentSpreads += 1;
-      continue;
-    }
-
-    const name = staticPropertyName(property.name);
-    if (name == null || ANTHROPIC_MESSAGE_PAYLOAD_FIELDS.has(name)) return null;
-  }
-
-  return scrubbedContentSpreads === 1 ? binding : null;
-}
-
-function rawRequestScrubBinding(request) {
-  if (!ts.isObjectLiteralExpression(request)) return null;
-
-  let binding = null;
-  let bodyProperties = 0;
+  let scrubbedBodyProperties = 0;
   for (const property of request.properties) {
     if (ts.isSpreadAssignment(property)) return null;
     const name = staticPropertyName(property.name);
     if (name == null) return null;
-    if (name !== 'body') continue;
+    if (PROTECTED_REQUEST_PAYLOAD_FIELDS.has(name)) return null;
+    if (name !== 'scrubbedBody') continue;
     if (!ts.isPropertyAssignment(property)) return null;
-    binding = scrubContentBinding(property.initializer);
-    bodyProperties += 1;
+    const initializer = unwrapExpression(property.initializer);
+    if (!initializer || !ts.isIdentifier(initializer)) return null;
+    if (binding && binding !== initializer.text) return null;
+    binding = initializer.text;
+    scrubbedBodyProperties += 1;
   }
 
-  return bodyProperties === 1 ? binding : null;
+  return scrubbedBodyProperties === 1 ? binding : null;
 }
 
-function scrubContentBinding(expression) {
-  const unwrapped = unwrapExpression(expression);
-  if (
-    !unwrapped ||
-    !ts.isPropertyAccessExpression(unwrapped) ||
-    unwrapped.name.text !== 'content'
-  ) {
-    return null;
-  }
-  const target = unwrapExpression(unwrapped.expression);
-  return target && ts.isIdentifier(target) ? target.text : null;
-}
-
-function capturedScrubRegistryId(call, binding) {
+function capturedScrubRegistryId(
+  call,
+  binding,
+  approvedEgressScrubBinding
+) {
+  if (!approvedEgressScrubBinding) return null;
   const context = containingStatementContext(call);
   if (!context) return null;
   const statementIndex = context.container.statements.indexOf(context.statement);
   if (statementIndex < 0) return null;
+  if (identifierCount(context.statement, binding) !== 1) return null;
 
   for (let index = statementIndex - 1; index >= 0; index -= 1) {
     const statement = context.container.statements[index];
@@ -335,12 +321,27 @@ function capturedScrubRegistryId(call, binding) {
     );
     if (!declaration) continue;
     if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return null;
+    for (
+      let intervening = index + 1;
+      intervening < statementIndex;
+      intervening += 1
+    ) {
+      if (
+        identifierCount(
+          context.container.statements[intervening],
+          binding
+        ) > 0
+      ) {
+        return null;
+      }
+    }
 
     const initializer = unwrapExpression(declaration.initializer);
     if (
       !initializer ||
       !ts.isCallExpression(initializer) ||
-      calleeName(initializer.expression) !== 'egressScrub'
+      !ts.isIdentifier(initializer.expression) ||
+      initializer.expression.text !== 'egressScrub'
     ) {
       return null;
     }
@@ -357,6 +358,7 @@ function containingStatementContext(node) {
     !ts.isBlock(current.parent) &&
     !ts.isSourceFile(current.parent)
   ) {
+    if (isFunctionBoundary(current.parent)) return null;
     current = current.parent;
   }
   const container = current.parent;
@@ -364,6 +366,102 @@ function containingStatementContext(node) {
     return null;
   }
   return { container, statement: current };
+}
+
+function isFunctionBoundary(node) {
+  return (
+    ts.isArrowFunction(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isConstructorDeclaration(node)
+  );
+}
+
+function identifierCount(node, name) {
+  let count = 0;
+  function visit(current) {
+    if (ts.isIdentifier(current) && current.text === name) count += 1;
+    ts.forEachChild(current, visit);
+  }
+  visit(node);
+  return count;
+}
+
+function hasUnambiguousApprovedEgressScrubBinding(source) {
+  const bindings = [];
+  collectRuntimeBindings(source, bindings);
+  const scrubBindings = bindings.filter(
+    (binding) => binding.identifier.text === 'egressScrub'
+  );
+  return (
+    scrubBindings.length === 1 &&
+    isApprovedEgressScrubBinding(scrubBindings[0])
+  );
+}
+
+function collectRuntimeBindings(node, bindings) {
+  if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+    collectBindingName(node.name, node, bindings);
+  } else if (
+    (ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)) &&
+    node.name
+  ) {
+    bindings.push({ identifier: node.name, declaration: node });
+  } else if (ts.isImportClause(node) && node.name) {
+    bindings.push({ identifier: node.name, declaration: node });
+  } else if (ts.isNamespaceImport(node) || ts.isImportSpecifier(node)) {
+    bindings.push({ identifier: node.name, declaration: node });
+  }
+  ts.forEachChild(node, (child) => collectRuntimeBindings(child, bindings));
+}
+
+function collectBindingName(name, declaration, bindings) {
+  if (!name || ts.isOmittedExpression(name)) return;
+  if (ts.isIdentifier(name)) {
+    bindings.push({ identifier: name, declaration });
+    return;
+  }
+  for (const element of name.elements) {
+    if (!ts.isOmittedExpression(element)) {
+      collectBindingName(element.name, declaration, bindings);
+    }
+  }
+}
+
+function isApprovedEgressScrubBinding(binding) {
+  const declaration = binding.declaration;
+  if (!ts.isVariableDeclaration(declaration)) return false;
+  if (!ts.isObjectBindingPattern(declaration.name)) return false;
+  if (!declaration.initializer) return false;
+  const declarationList = declaration.parent;
+  if (
+    !ts.isVariableDeclarationList(declarationList) ||
+    (declarationList.flags & ts.NodeFlags.Const) === 0
+  ) {
+    return false;
+  }
+  const statement = declarationList.parent;
+  if (!statement || !ts.isVariableStatement(statement)) return false;
+  if (!ts.isSourceFile(statement.parent)) return false;
+
+  let initializer = unwrapExpression(declaration.initializer);
+  if (initializer && ts.isAwaitExpression(initializer)) {
+    initializer = unwrapExpression(initializer.expression);
+  }
+  return (
+    !!initializer &&
+    ts.isCallExpression(initializer) &&
+    initializer.expression.kind === ts.SyntaxKind.ImportKeyword &&
+    initializer.arguments.length === 1 &&
+    ts.isStringLiteral(initializer.arguments[0]) &&
+    initializer.arguments[0].text === '../src/lib/anthropic-egress.ts'
+  );
 }
 
 function staticPropertyName(name) {

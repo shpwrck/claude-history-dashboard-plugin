@@ -248,7 +248,7 @@ const { rehydrateDataset, slimDataset } = await import(
 );
 // Server LLM calls are registered and enforced through this chokepoint (#931).
 const { callAnthropic, callAnthropicMessages, egressScrub } = await import(
-  join(PROJECT_DIR, 'src', 'lib', 'anthropic-egress.ts')
+  '../src/lib/anthropic-egress.ts'
 );
 const { getLlmUsageEntry } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'llm-registry.ts')
@@ -10563,7 +10563,7 @@ const server = createServer(async (req, res) => {
             'server.audit-judge',
             {
               model: model || DASHBOARD_AUDIT_MODEL,
-              maxTokens: boundedMaxTokens,
+              max_tokens: boundedMaxTokens,
               ...(system ? { system } : {}),
               messages,
             },
@@ -10585,11 +10585,10 @@ const server = createServer(async (req, res) => {
           );
           return callAnthropicMessages('server.audit-judge', {
             apiKey,
-            ...scrubbed.content,
+            scrubbedBody: scrubbed,
             // Carry the judge's data classification to the chokepoint (#3111)
             // so ~/.claude-derived prompts can never ride an OAuth credential.
             containsClaudeData: containsClaudeData === true,
-            scrubReceipt: scrubbed.receipt,
             capChecked: true,
             capReceipt: serverAuditLlmCapReceipt(),
           });

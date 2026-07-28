@@ -18,9 +18,9 @@ export interface CallAnthropicRequest {
   method?: 'GET' | 'POST';
   path: '/messages' | '/models';
   body?: unknown;
+  scrubbedBody?: EgressScrubResult<unknown>;
   headers?: Record<string, string>;
   containsClaudeData?: boolean;
-  scrubReceipt?: EgressScrubReceipt;
   capChecked?: boolean;
   capReceipt?: LlmCapReceipt;
   fetchImpl?: typeof fetch;
@@ -28,11 +28,7 @@ export interface CallAnthropicRequest {
 
 export interface AnthropicChatRequest {
   apiKey: string;
-  model: string;
-  maxTokens: number;
-  system?: string;
-  messages: { role: 'user' | 'assistant'; content: string }[];
-  scrubReceipt: EgressScrubReceipt;
+  scrubbedBody: EgressScrubResult<AnthropicMessagesBody>;
   capChecked: true;
   capReceipt: LlmCapReceipt;
   /**
@@ -45,6 +41,13 @@ export interface AnthropicChatRequest {
   fetchImpl?: typeof fetch;
 }
 
+export interface AnthropicMessagesBody {
+  model: string;
+  max_tokens: number;
+  system?: string;
+  messages: { role: 'user' | 'assistant'; content: string }[];
+}
+
 export interface AnthropicChatResult {
   text: string;
   inputTokens: number;
@@ -54,15 +57,20 @@ export interface AnthropicChatResult {
 }
 
 export interface EgressScrubReceipt {
-  registryId: LlmUsageId;
-  mode: LlmEgressScrubMode;
-  inputBytes: number;
-  outputBytes: number;
+  readonly registryId: LlmUsageId;
+  readonly mode: LlmEgressScrubMode;
+  readonly inputBytes: number;
+  readonly outputBytes: number;
 }
 
+const trustedScrubResultBrand: unique symbol = Symbol(
+  'dashboard.trusted-egress-scrub-result'
+);
+
 export interface EgressScrubResult<T> {
-  content: T;
-  receipt: EgressScrubReceipt;
+  readonly content: T;
+  readonly receipt: EgressScrubReceipt;
+  readonly [trustedScrubResultBrand]: true;
 }
 
 export interface LlmCapReceipt {
@@ -74,6 +82,18 @@ export interface LlmCapReceipt {
 }
 
 export type EgressScrubLogger = (receipt: EgressScrubReceipt) => void;
+
+interface TrustedScrubbedBody {
+  registryId: LlmUsageId;
+  serializedBody: string;
+  model?: string;
+}
+
+// Runtime opacity matters here: TypeScript's structural types disappear after
+// compilation, so a private brand alone cannot distinguish a trusted scrub
+// result from caller-created JSON. The WeakMap authorizes only object identities
+// created by egressScrub and retains the exact serialized transmission snapshot.
+const trustedScrubbedBodies = new WeakMap<object, TrustedScrubbedBody>();
 
 export class AnthropicEgressError extends Error {
   code: string;
@@ -119,6 +139,7 @@ export async function callAnthropic(
   registryId: LlmUsageId,
   req: CallAnthropicRequest
 ): Promise<Response> {
+  let serializedBody: string | undefined;
   const entry = getLlmUsageEntry(registryId);
   if (!entry) {
     throw new AnthropicEgressError(
@@ -165,21 +186,36 @@ export async function callAnthropic(
   }
 
   if (entry.rule === 'B') {
+    if ('scrubReceipt' in req) {
+      throw new AnthropicEgressError(
+        'ERR_DASHBOARD_LLM_SCRUB_MISSING',
+        `${registryId} cannot authorize egress with a caller-supplied scrub receipt`
+      );
+    }
     if (req.credential.kind !== 'console-key' || !req.credential.apiKey) {
       throw new AnthropicEgressError(
         'ERR_DASHBOARD_LLM_MISSING_API_KEY',
         `${registryId} requires an Anthropic Console API key`
       );
     }
-    if (!validScrubReceipt(registryId, entry.egressScrub, req.scrubReceipt)) {
+    const trustedBody =
+      req.scrubbedBody && typeof req.scrubbedBody === 'object'
+        ? trustedScrubbedBodies.get(req.scrubbedBody)
+        : undefined;
+    if (
+      req.body != null ||
+      !trustedBody ||
+      trustedBody.registryId !== registryId
+    ) {
       throw new AnthropicEgressError(
         'ERR_DASHBOARD_LLM_SCRUB_MISSING',
-        `${registryId} requires an egressScrub receipt before egress`
+        `${registryId} requires the opaque body returned by egressScrub before egress`
       );
     }
+    serializedBody = trustedBody.serializedBody;
     if (
       req.capChecked !== true ||
-      !validCapReceipt(registryId, req.body, req.capReceipt)
+      !validCapReceipt(registryId, serializedBody, req.capReceipt)
     ) {
       throw new AnthropicEgressError(
         'ERR_DASHBOARD_LLM_CAP_UNCHECKED',
@@ -188,15 +224,17 @@ export async function callAnthropic(
     }
   }
 
+  if (serializedBody === undefined && req.body != null) {
+    serializedBody = serializeRequestBody(req.body);
+  }
   const fetcher = req.fetchImpl ?? fetch;
-  const headers = buildHeaders(req);
+  const headers = buildHeaders(req, serializedBody !== undefined);
   const init: RequestInit = {
-    method: req.method ?? (req.body == null ? 'GET' : 'POST'),
+    method: req.method ?? (serializedBody === undefined ? 'GET' : 'POST'),
     headers,
   };
-  if (req.body != null) {
-    init.body =
-      typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+  if (serializedBody !== undefined) {
+    init.body = serializedBody;
   }
   return fetcher(`${ANTHROPIC_BASE}${req.path}`, init);
 }
@@ -205,18 +243,13 @@ export async function callAnthropicMessages(
   registryId: LlmUsageId,
   req: AnthropicChatRequest
 ): Promise<AnthropicChatResult> {
+  const requestModel = trustedScrubbedBodies.get(req.scrubbedBody)?.model;
   const resp = await callAnthropic(registryId, {
     credential: { kind: 'console-key', apiKey: req.apiKey },
     path: '/messages',
     method: 'POST',
-    body: {
-      model: req.model,
-      max_tokens: req.maxTokens,
-      ...(req.system ? { system: req.system } : {}),
-      messages: req.messages,
-    },
+    scrubbedBody: req.scrubbedBody,
     containsClaudeData: req.containsClaudeData,
-    scrubReceipt: req.scrubReceipt,
     capChecked: req.capChecked,
     capReceipt: req.capReceipt,
     fetchImpl: req.fetchImpl,
@@ -235,15 +268,131 @@ export async function callAnthropicMessages(
     .filter((block) => block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text as string)
     .join('');
+  const responseModel =
+    typeof parsed.model === 'string' ? parsed.model : undefined;
   return {
     text,
     inputTokens: parsed.usage?.input_tokens ?? 0,
     outputTokens: parsed.usage?.output_tokens ?? 0,
-    model: parsed.model ?? req.model,
+    model: responseModel ?? requestModel ?? '',
     stopReason: parsed.stop_reason ?? null,
   };
 }
 
+function normalizeJson<T>(value: T): T {
+  return cloneJsonValue(value, new WeakSet<object>()) as T;
+}
+
+function cloneJsonValue(
+  value: unknown,
+  ancestors: WeakSet<object>
+): unknown {
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return value;
+    return unsupportedScrubContent('non-finite number');
+  }
+
+  if (typeof value !== 'object') {
+    return unsupportedScrubContent(typeof value);
+  }
+  if (ancestors.has(value)) {
+    return unsupportedScrubContent('cyclic reference');
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype) {
+      return unsupportedScrubContent('non-plain array');
+    }
+  } else if (prototype !== Object.prototype && prototype !== null) {
+    return unsupportedScrubContent('non-plain object');
+  }
+
+  ancestors.add(value);
+  try {
+    return Array.isArray(value)
+      ? cloneJsonArray(value, ancestors)
+      : cloneJsonObject(value as Record<string, unknown>, ancestors);
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function cloneJsonArray(
+  value: unknown[],
+  ancestors: WeakSet<object>
+): unknown[] {
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const elementKeys = Reflect.ownKeys(descriptors).filter(
+    (key) => key !== 'length'
+  );
+  if (
+    elementKeys.length !== value.length ||
+    elementKeys.some(
+      (key) =>
+        typeof key !== 'string' ||
+        !isCanonicalArrayIndex(key, value.length)
+    )
+  ) {
+    return unsupportedScrubContent('sparse or extended array');
+  }
+
+  const out: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (
+      !descriptor ||
+      !descriptor.enumerable ||
+      !('value' in descriptor)
+    ) {
+      return unsupportedScrubContent('array accessor');
+    }
+    out.push(cloneJsonValue(descriptor.value, ancestors));
+  }
+  return out;
+}
+
+function cloneJsonObject(
+  value: Record<string, unknown>,
+  ancestors: WeakSet<object>
+): Record<string, unknown> {
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const out: Record<string, unknown> = Object.create(null) as Record<
+    string,
+    unknown
+  >;
+
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string') {
+      return unsupportedScrubContent('symbol property');
+    }
+    const descriptor = descriptors[key];
+    if (!descriptor.enumerable || !('value' in descriptor)) {
+      return unsupportedScrubContent('non-data property');
+    }
+    out[key] = cloneJsonValue(descriptor.value, ancestors);
+  }
+  return out;
+}
+
+function isCanonicalArrayIndex(key: string, length: number): boolean {
+  const index = Number(key);
+  return (
+    Number.isInteger(index) &&
+    index >= 0 &&
+    index < length &&
+    String(index) === key
+  );
+}
+
+function unsupportedScrubContent(kind: string): never {
+  throw new AnthropicEgressError(
+    'ERR_DASHBOARD_LLM_SCRUB_UNSUPPORTED',
+    `Egress scrub accepts only acyclic plain JSON data; rejected ${kind}`
+  );
+}
 export function egressScrub<T>(
   registryId: LlmUsageId,
   content: T,
@@ -277,24 +426,45 @@ export function egressScrub<T>(
       `${registryId} requires a scrub logger before egress`
     );
   }
-  const inputBytes = jsonByteLength(content);
-  const redacted = redactSecretsDeep(content);
-  const receipt = {
+  const normalized = normalizeJson(content);
+  const inputBytes = jsonByteLength(normalized);
+  const redacted = redactSecretsDeep(normalized);
+  const receipt: EgressScrubReceipt = Object.freeze({
     registryId,
     mode: entry.egressScrub,
     inputBytes,
     outputBytes: jsonByteLength(redacted),
-  };
+  });
+  const serializedBody = serializeRequestBody(redacted);
+  if (serializedBody === undefined) {
+    throw new AnthropicEgressError(
+      'ERR_DASHBOARD_LLM_SCRUB_UNSERIALIZABLE',
+      `${registryId} produced a body that cannot be serialized for egress`
+    );
+  }
   options.logger(receipt);
-  return { content: redacted, receipt };
+  const result: EgressScrubResult<T> = Object.freeze({
+    [trustedScrubResultBrand]: true,
+    content: redacted,
+    receipt,
+  });
+  trustedScrubbedBodies.set(result, {
+    registryId,
+    serializedBody,
+    model: modelFromSerializedBody(serializedBody),
+  });
+  return result;
 }
 
-function buildHeaders(req: CallAnthropicRequest): Record<string, string> {
+function buildHeaders(
+  req: CallAnthropicRequest,
+  hasBody: boolean
+): Record<string, string> {
   const base: Record<string, string> = {
     ...req.headers,
     'anthropic-version': ANTHROPIC_VERSION,
   };
-  if (req.body != null && !hasHeader(base, 'content-type')) {
+  if (hasBody && !hasHeader(base, 'content-type')) {
     base['content-type'] = 'application/json';
   }
   if (req.credential.kind === 'oauth') {
@@ -304,22 +474,6 @@ function buildHeaders(req: CallAnthropicRequest): Record<string, string> {
     base['x-api-key'] = req.credential.apiKey;
   }
   return base;
-}
-
-function validScrubReceipt(
-  registryId: LlmUsageId,
-  expectedMode: LlmEgressScrubMode,
-  receipt: EgressScrubReceipt | undefined
-): boolean {
-  return (
-    expectedMode === 'redact' &&
-    receipt?.registryId === registryId &&
-    receipt.mode === expectedMode &&
-    Number.isFinite(receipt.inputBytes) &&
-    Number.isFinite(receipt.outputBytes) &&
-    receipt.inputBytes >= 0 &&
-    receipt.outputBytes >= 0
-  );
 }
 
 function validCapReceipt(
@@ -361,6 +515,19 @@ function validNamedPositiveLimit(
     Number.isFinite(value.limit) &&
     value.limit > 0
   );
+}
+
+function serializeRequestBody(body: unknown): string | undefined {
+  return typeof body === 'string' ? body : JSON.stringify(body);
+}
+
+function modelFromSerializedBody(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { model?: unknown } | null;
+    return typeof parsed?.model === 'string' ? parsed.model : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function maxTokensFromBody(body: unknown): number | null {
