@@ -154,6 +154,76 @@ export interface AdoptionReceiptStreamResult {
   read: boolean;
   skipped: number;
   records: number;
+  /**
+   * Absolute byte offset in `file` immediately past the last line this scan
+   * consumed (== EOF after a complete read, == the requested `start` when the
+   * read failed). Always a line boundary, so it is a safe resume point.
+   */
+  endOffset: number;
+}
+
+export interface AdoptionReceiptStreamOptions {
+  /** Byte offset to resume the scan at. Must be a line boundary. */
+  start?: number;
+}
+
+export const ADOPTION_SPOOL_COMMIT_KIND = '_CHD_SPOOL_DRAIN_COMMIT';
+const ADOPTION_SPOOL_TRANSACTION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * The commit frame the spool drain appends as the LAST line of the same single
+ * `appendFile` write that carries its receipt batch (see `adoption-spool.ts`).
+ *
+ * `offset` is the byte offset in the drained snapshot immediately past the last
+ * source line this batch covers. It is what makes recovery idempotent: a retry
+ * resumes the snapshot at the highest committed offset instead of replaying the
+ * whole file, so a batch that partially committed can never be duplicated.
+ */
+interface AdoptionSpoolCommitMarker {
+  schemaVersion: '1';
+  kind: typeof ADOPTION_SPOOL_COMMIT_KIND;
+  transactionId: string;
+  offset: number;
+}
+
+function isSnapshotOffset(value: unknown): value is number {
+  return (
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+  );
+}
+
+export function adoptionSpoolCommitMarker(
+  transactionId: string,
+  offset: number
+): AdoptionSpoolCommitMarker {
+  if (!ADOPTION_SPOOL_TRANSACTION_ID.test(transactionId)) {
+    throw new Error('Invalid adoption spool transaction id');
+  }
+  if (!isSnapshotOffset(offset)) {
+    throw new Error('Invalid adoption spool commit offset');
+  }
+  return {
+    schemaVersion: '1',
+    kind: ADOPTION_SPOOL_COMMIT_KIND,
+    transactionId,
+    offset,
+  };
+}
+
+export function isAdoptionSpoolCommitMarker(
+  input: unknown
+): input is AdoptionSpoolCommitMarker {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const raw = input as Record<string, unknown>;
+  return (
+    Object.keys(raw).length === 4 &&
+    raw.schemaVersion === '1' &&
+    raw.kind === ADOPTION_SPOOL_COMMIT_KIND &&
+    typeof raw.transactionId === 'string' &&
+    ADOPTION_SPOOL_TRANSACTION_ID.test(raw.transactionId) &&
+    isSnapshotOffset(raw.offset)
+  );
 }
 
 const MAX_ID_LEN = 160;
@@ -541,6 +611,11 @@ function parseAdoptionReceiptLine(
   } catch {
     return null;
   }
+  // The spool drain appends this internal transaction marker in the same
+  // destination write as its sanitized receipt batch. It is not an adoption
+  // receipt and therefore disappears from every canonical read without being
+  // reported as corrupt input.
+  if (isAdoptionSpoolCommitMarker(parsed)) return undefined;
   // Writes may omit `ts` and are stamped by `sanitizeAdoptionReceipt`, but a
   // persisted line must already carry a usable time. Re-stamping malformed
   // history on every replay would make that record perpetually newest and could
@@ -639,26 +714,36 @@ async function readAdoptionReceiptTailText(
 export async function streamAdoptionReceipts(
   file: string,
   now: () => Date,
-  onRecord: (record: AdoptionReceipt) => void | Promise<void>
+  onRecord: (
+    record: AdoptionReceipt,
+    endOffset: number
+  ) => void | Promise<void>,
+  options: AdoptionReceiptStreamOptions = {}
 ): Promise<AdoptionReceiptStreamResult> {
+  const start = isSnapshotOffset(options.start) ? options.start : 0;
   let skipped = 0;
   let records = 0;
   let pending = '';
   let droppingLongLine = false;
+  // Byte offset of the next unconsumed byte. Advanced per parsed segment (plus
+  // its newline) so every value handed out is an exact line boundary in the
+  // source file and can be replayed as a resume point.
+  let offset = start;
   const input = createReadStream(file, {
     encoding: 'utf8',
     highWaterMark: ADOPTION_RECEIPT_LINE_MAX_BYTES,
+    ...(start > 0 ? { start } : {}),
   });
   const scanNow = oncePerReceiptScanClock(now);
 
-  async function processLine(line: string): Promise<void> {
+  async function processLine(line: string, endOffset: number): Promise<void> {
     const record = parseAdoptionReceiptLine(line, scanNow);
     if (record === undefined) return;
     if (record === null) {
       skipped += 1;
       return;
     }
-    await onRecord(record);
+    await onRecord(record, endOffset);
     records += 1;
   }
 
@@ -670,6 +755,7 @@ export async function streamAdoptionReceipts(
         const lineEnded = newlineIndex !== -1;
         const segment = lineEnded ? text.slice(0, newlineIndex) : text;
         text = lineEnded ? text.slice(newlineIndex + 1) : '';
+        offset += Buffer.byteLength(segment, 'utf8') + (lineEnded ? 1 : 0);
 
         if (droppingLongLine) {
           if (lineEnded) {
@@ -691,7 +777,7 @@ export async function streamAdoptionReceipts(
         }
 
         if (lineEnded) {
-          await processLine(pending);
+          await processLine(pending, offset);
           pending = '';
         }
       }
@@ -700,15 +786,15 @@ export async function streamAdoptionReceipts(
     if (droppingLongLine) {
       skipped += 1;
     } else if (pending) {
-      await processLine(pending);
+      await processLine(pending, offset);
     }
   } catch {
-    return { read: false, skipped: 0, records: 0 };
+    return { read: false, skipped: 0, records: 0, endOffset: start };
   } finally {
     input.destroy();
   }
 
-  return { read: true, skipped, records };
+  return { read: true, skipped, records, endOffset: offset };
 }
 
 export function adoptionWritesDisabled(

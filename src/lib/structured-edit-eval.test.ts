@@ -31,13 +31,16 @@ import {
 // @ts-expect-error - host-only .mjs runner has no declaration file.
 import {
   MAX_LIVE_TASK_BYTES,
+  RUNNER_VERSION,
   defaultReceiptPath,
   readLiveTaskFile,
+  replayAttemptTelemetry,
   runJailedAttempt,
   runLiveTask,
   runTaskBatch,
   sanitizeToolEvidence,
   spawnWorker,
+  toolClassificationDigest,
   toolTelemetry,
   versionProbeEnv,
   workerEnvironment,
@@ -55,6 +58,7 @@ const RECEIPT_PATH = resolve(
   CORPUS_ROOT,
   'receipts/claude-haiku-4-5-2026-07-13.json'
 );
+const CONTRACT_PATH = resolve(CORPUS_ROOT, 'runner-contract.json');
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -314,7 +318,7 @@ describe('structured-edit scorer', () => {
 });
 
 describe('structured-edit receipt contract', () => {
-  it('keeps the committed jailed model receipt reproducible against its pinned inputs', () => {
+  it('keeps the committed jailed model receipt reproducible against its pinned inputs', async () => {
     const receipt = JSON.parse(readFileSync(RECEIPT_PATH, 'utf8'));
     expect(receipt).toMatchObject({
       schemaVersion: 1,
@@ -332,6 +336,10 @@ describe('structured-edit receipt contract', () => {
         selected_tasks: 6,
         completed_tasks: 6,
       },
+      // The generation that PRODUCED this run, never re-stamped. This paid run
+      // predates #3093, so it stays at 3 even though the current contract is 4:
+      // re-stamping it would erase the only signal separating a generation-3
+      // `read_calls` (shell evidence counted) from a generation-4 one.
       runner: { version: 3 },
       totals: {
         n: 6,
@@ -350,12 +358,33 @@ describe('structured-edit receipt contract', () => {
       entry.telemetry.resolved_model_id === 'claude-haiku-4-5-20251001'
     )).toBe(true);
     expect(receipt.corpus.manifest_sha256).toBe(sha256(MANIFEST_TEXT));
-    expect(receipt.runner.script_sha256).toBe(
-      sha256(readFileSync(resolve(REPO_ROOT, 'scripts/model-eval-run.mjs'), 'utf8'))
-    );
-    expect(receipt.runner.scorer_sha256).toBe(
-      sha256(readFileSync(resolve(REPO_ROOT, 'scripts/lib/model-edit-benchmark.ts'), 'utf8'))
-    );
+    // A receipt may be older than the current contract but never newer: a
+    // version above RUNNER_VERSION is a generation this code cannot honour.
+    expect(receipt.runner.version).toBeLessThanOrEqual(RUNNER_VERSION);
+    // Why a superseded receipt needs no paid re-run, stated as a check rather
+    // than a judgement: generation 4 changed only how SHELL evidence is
+    // classified, and this receipt records none. Every event it holds is a
+    // literal read or edit, which both generations classify identically — so
+    // its recorded numbers are the numbers the current code produces, as the
+    // re-derivation below then proves. A receipt carrying shell evidence would
+    // not land here; its counters would stop matching and it would fail.
+    for (const entry of receipt.tasks) {
+      for (const attempt of entry.attempts) {
+        for (const event of attempt.tool_events) {
+          if (event.type !== 'tool_use') continue;
+          expect(event.name).toMatch(/^(read|edit)$/);
+          expect(event.input.read_evidence).toBeUndefined();
+        }
+      }
+    }
+    // Recorded runner/scorer hashes are as-of-run provenance and are checked
+    // for shape only. Comparing them to the working tree froze both files: any
+    // byte change, including a comment, demanded a fresh paid model run. The
+    // reproducibility claim is carried instead by the re-derivation below.
+    expect(receipt.runner.script_path).toBe('scripts/model-eval-run.mjs');
+    expect(receipt.runner.script_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(receipt.runner.scorer_path).toBe('scripts/lib/model-edit-benchmark.ts');
+    expect(receipt.runner.scorer_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(receipt.runner.jail).toMatchObject({
       gate: { ok: true, reason: null },
       modules: [
@@ -390,34 +419,135 @@ describe('structured-edit receipt contract', () => {
       expect(attempt.parser.event_count).toBeGreaterThan(0);
       expect(attempt.worker_output_sha256).toMatch(/^[0-9a-f]{64}$/);
       expect(attempt.worker_stderr_sha256).toMatch(/^[0-9a-f]{64}$/);
-      const tools = toolTelemetry([{ content: attempt.tool_events }]);
-      expect(attempt.telemetry).toMatchObject({
-        read_calls: tools.read,
-        edit_calls: tools.edit,
-        write_calls: tools.write,
-        edit_successes: tools.editSuccesses,
-        edit_failures: tools.editFailures,
-        write_successes: tools.writeSuccesses,
-        write_failures: tools.writeFailures,
-        read_without_edit_attempts:
-          tools.read > 0 && tools.edit === 0 && tools.write === 0 ? 1 : 0,
-        duration_ms: attempt.duration_ms,
-        cost_usd: attempt.cost_usd,
-        resolved_model_id: attempt.resolved_model_id,
-      });
-      const usage = attempt.usage;
-      expect(attempt.telemetry.input_tokens).toBe(
-        (usage.input_tokens ?? 0) +
-          (usage.cache_read_input_tokens ?? 0) +
-          (usage.cache_creation_input_tokens ?? 0)
-      );
-      expect(attempt.telemetry.output_tokens).toBe(usage.output_tokens);
-      expect(attempt.telemetry.retries_used).toBe(attempt.attempt - 1);
+      // Every counter the attempt claims is recomputed by the current runner
+      // from the evidence the attempt itself records.
+      expect(attempt.telemetry).toEqual(replayAttemptTelemetry(attempt));
       expect(attempt.launch.argv_sha256).toBe(sha256(JSON.stringify(attempt.launch.argv)));
       expect(attempt.launch.settings_sha256).toBe(
         sha256(JSON.stringify(attempt.launch.settings))
       );
     }
+
+    // Re-derive the whole receipt: feed the recorded inputs back through the
+    // CURRENT runner, scorer, and fold, and require the recorded outputs to
+    // come back out. Only the model call itself is unrepeatable; its produced
+    // bytes are pinned by the recorded hashes.
+    if (!CORPUS) throw new Error('corpus manifest did not parse; nothing to re-derive against');
+    const runs = [];
+    for (const recorded of receipt.tasks) {
+      const task = CORPUS.tasks.find((entry) => entry.id === recorded.task_id);
+      if (!task) throw new Error(`receipt task is not in the corpus: ${recorded.task_id}`);
+
+      // Input side: the mutated file the model was handed is regenerated from
+      // the committed source by the current Babel mutation.
+      const source = readFileSync(resolve(CORPUS_ROOT, task.sourcePath), 'utf8');
+      const expectedText = readFileSync(resolve(CORPUS_ROOT, task.expectedPath), 'utf8');
+      const input = applyStructuredEditMutation(source, task.mutation).content;
+      expect(input).toBe(readFileSync(resolve(CORPUS_ROOT, task.inputPath), 'utf8'));
+      expect(sha256(input)).toBe(recorded.input_sha256);
+      expect(sha256(expectedText)).toBe(recorded.expected_sha256);
+      // The corpus must still be a repair challenge under the current scorer.
+      // Without this, a scorer that passed everything would "reproduce" an
+      // all-passing receipt.
+      expect(await scoreStructuredEdit(expectedText, input, 'task.ts')).toMatchObject({
+        verification_passed: false,
+        comparison: 'mismatch',
+      });
+
+      // Output side: the receipt records the produced bytes only as a hash, so
+      // they are recoverable exactly when the run was byte-exact. A task that
+      // is not byte-exact must fail loudly here rather than be waved through —
+      // such a receipt has to carry its produced bytes to stay replayable.
+      expect(recorded.byte_exact_match).toBe(true);
+      expect(recorded.actual_sha256).toBe(recorded.expected_sha256);
+      const produced = expectedText;
+      const score = await scoreStructuredEdit(expectedText, produced, 'task.ts');
+
+      const attempts = recorded.attempts.map(
+        (attempt: { score: unknown; telemetry: unknown }) => ({
+          ...attempt,
+          score,
+          telemetry: replayAttemptTelemetry(attempt),
+        })
+      );
+      const telemetry = attempts
+        .map((attempt: { telemetry: StructuredEditRunTelemetry }) => attempt.telemetry)
+        .reduce((left: StructuredEditRunTelemetry, right: StructuredEditRunTelemetry) =>
+          mergeStructuredEditTelemetry(left, right)
+        );
+      runs.push(
+        buildStructuredEditTaskResult({
+          task,
+          modelId: receipt.model_id,
+          inputSha256: sha256(input),
+          score,
+          telemetry,
+          attempts,
+        })
+      );
+    }
+
+    expect(
+      buildStructuredEditEvalResult({
+        modelId: receipt.model_id,
+        corpus: CORPUS,
+        runs,
+        manifestSha256: sha256(MANIFEST_TEXT),
+        // Provenance the run measured and this replay cannot recompute: the
+        // wall-clock stamp, the jail/binary identities, and the as-of-run file
+        // hashes. Everything scored is re-derived above.
+        runner: receipt.runner,
+        execution: receipt.execution,
+        completion: receipt.completion,
+        createdAt: receipt.createdAt,
+      })
+    ).toEqual(receipt);
+  });
+
+  it('ties the contract generation to what the classifier does, not to what the code declares', () => {
+    const contract = JSON.parse(readFileSync(CONTRACT_PATH, 'utf8'));
+
+    // RUNNER_VERSION is a hand-maintained integer, so on its own it proves
+    // nothing: #3093 changed what `read_calls` means while every receipt went
+    // on claiming generation 3, and no test noticed. The digest is the part
+    // that cannot be faked by declaration — it is computed from the
+    // classifier's behaviour over the committed battery, so it moves when
+    // meaning moves and holds still for comments and refactors.
+    expect(contract.semantics_digest).toBe(toolClassificationDigest(contract.cases));
+    expect(contract.version).toBe(RUNNER_VERSION);
+    expect(contract.generations.at(-1).version).toBe(RUNNER_VERSION);
+
+    // The battery has to actually cover the surface that moved, or the digest
+    // is a fingerprint of nothing. Generation 3 counted this shell evidence as
+    // a successful task read; generation 4 must not.
+    const generationThreeShell = contract.cases.find(
+      (entry: { id: string }) => entry.id === 'replay-of-generation-3-shell-evidence'
+    );
+    expect(toolTelemetry(generationThreeShell.events)).toMatchObject({
+      read: 0,
+      unknownReads: 1,
+    });
+  });
+
+  it('rejects a receipt whose counters were scored under the previous contract', () => {
+    const receipt = JSON.parse(readFileSync(RECEIPT_PATH, 'utf8'));
+    // A hypothetical generation-3 receipt, constructed here rather than
+    // committed: the same run plus one shell command, counted the way
+    // generation 3 counted it (read_calls 2, because the token `task.ts` in a
+    // command was taken to prove inspection).
+    const attempt = structuredClone(receipt.tasks[0].attempts[0]);
+    attempt.tool_events = [
+      ...attempt.tool_events,
+      { type: 'tool_use', id: 'tool-3', name: 'bash', input: { task_path: true } },
+      { type: 'tool_result', tool_use_id: 'tool-3', is_error: false },
+    ];
+    attempt.telemetry = { ...attempt.telemetry, read_calls: 2 };
+
+    // Under the current contract that claim no longer follows from the
+    // evidence, so the receipt fails instead of being carried forward as if
+    // its numbers still meant what they did when they were written.
+    expect(replayAttemptTelemetry(attempt)).toMatchObject({ read_calls: 1 });
+    expect(attempt.telemetry).not.toEqual(replayAttemptTelemetry(attempt));
   });
 
   it('keeps task quality, edit-tool success, ghosts, and read-without-edit distinct', async () => {
@@ -722,6 +852,7 @@ describe('model-eval live-runner reliability', () => {
 
     expect(counts).toEqual({
       read: 0,
+      unknownReads: 0,
       edit: 2,
       write: 2,
       editSuccesses: 1,
@@ -794,6 +925,7 @@ describe('model-eval live-runner reliability', () => {
     const counts = toolTelemetry(events);
     expect(counts).toEqual({
       read: 1,
+      unknownReads: 0,
       edit: 0,
       write: 0,
       editSuccesses: 0,
@@ -853,7 +985,7 @@ describe('model-eval live-runner reliability', () => {
     });
   });
 
-  it('counts shell/search inspection of task.ts and keeps only recomputable evidence', async () => {
+  it('counts structured search inspection of task.ts and keeps only recomputable evidence', async () => {
     const events = [
       {
         message: {
@@ -878,14 +1010,16 @@ describe('model-eval live-runner reliability', () => {
       },
     ];
 
-    expect(toolTelemetry(events).read).toBe(2);
+    // The shell command may well have read task.ts, but the receipt cannot tell
+    // that from the token, so it is bucketed unknown rather than claimed (#3093).
+    expect(toolTelemetry(events)).toMatchObject({ read: 1, unknownReads: 1 });
     const sanitized = sanitizeToolEvidence(events);
     expect(sanitized).toEqual([
       {
         type: 'tool_use',
         id: 'tool-1',
         name: 'bash',
-        input: { task_path: true },
+        input: { task_path: false, read_evidence: 'unknown' },
       },
       {
         type: 'tool_use',
@@ -897,7 +1031,10 @@ describe('model-eval live-runner reliability', () => {
       { type: 'tool_result', tool_use_id: 'tool-2', is_error: false },
     ]);
     expect(JSON.stringify(sanitized)).not.toContain('private');
-    expect(toolTelemetry([{ content: sanitized }]).read).toBe(2);
+    expect(toolTelemetry([{ content: sanitized }])).toMatchObject({
+      read: 1,
+      unknownReads: 1,
+    });
 
     const noEditAttempt = await runJailedAttempt({
       jail: runnerFixtureJail({ events }),
@@ -920,7 +1057,7 @@ describe('model-eval live-runner reliability', () => {
       }),
     });
     expect(noEditAttempt.telemetry).toMatchObject({
-      read_calls: 2,
+      read_calls: 1,
       edit_calls: 0,
       write_calls: 0,
       read_without_edit_attempts: 1,
@@ -934,6 +1071,113 @@ describe('model-eval live-runner reliability', () => {
     expect(JSON.stringify(noEditAttempt.evidence)).not.toContain('chd-model-edit-');
   });
 
+  it('never infers a task.ts read from a shell command token (#3093)', async () => {
+    const attemptFor = async (events: unknown[]) =>
+      runJailedAttempt({
+        jail: runnerFixtureJail({ events }),
+        task: task(),
+        committed: {
+          input: 'export const ok = false;\n',
+          expected: 'export const ok = true;\n',
+          inputSha256: 'b'.repeat(64),
+        },
+        model: 'fixture-model',
+        maxBudgetUsd: 0.01,
+        retryNumber: 0,
+        spawnWorkerFn: async () => ({
+          code: 0,
+          signal: null,
+          stdout: '{}',
+          stderr: '',
+          timedOut: false,
+          timeoutReason: null,
+        }),
+      });
+
+    // A shell command that merely names the file inspected nothing.
+    const echoEvents = [
+      {
+        content: [
+          {
+            type: 'tool_use',
+            name: 'Bash',
+            id: 'echo-1',
+            input: { command: 'echo task.ts' },
+          },
+          { type: 'tool_result', tool_use_id: 'echo-1', is_error: false },
+        ],
+      },
+    ];
+    expect(toolTelemetry(echoEvents)).toMatchObject({ read: 0, unknownReads: 1 });
+    const echoAttempt = await attemptFor(echoEvents);
+    expect(echoAttempt.telemetry).toMatchObject({
+      read_calls: 0,
+      read_without_edit_attempts: 0,
+    });
+    // The unknown evidence is carried in the receipt, not attributed, and a
+    // replay of that receipt must not re-promote it to a read.
+    expect(echoAttempt.evidence.tool_events).toEqual([
+      {
+        type: 'tool_use',
+        id: 'tool-1',
+        name: 'bash',
+        input: { task_path: false, read_evidence: 'unknown' },
+      },
+      { type: 'tool_result', tool_use_id: 'tool-1', is_error: false },
+    ]);
+    expect(replayAttemptTelemetry(echoAttempt.evidence)).toMatchObject({
+      read_calls: 0,
+      read_without_edit_attempts: 0,
+    });
+
+    // A recognized read of the task file still counts.
+    const readAttempt = await attemptFor([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            name: 'Read',
+            id: 'read-1',
+            input: { file_path: 'task.ts' },
+          },
+          { type: 'tool_result', tool_use_id: 'read-1', is_error: false },
+        ],
+      },
+    ]);
+    expect(readAttempt.telemetry).toMatchObject({
+      read_calls: 1,
+      read_without_edit_attempts: 1,
+    });
+
+    // A failed read result stays uncounted in both buckets.
+    const failedEvents = [
+      {
+        content: [
+          {
+            type: 'tool_use',
+            name: 'Read',
+            id: 'read-2',
+            input: { file_path: 'task.ts' },
+          },
+          { type: 'tool_result', tool_use_id: 'read-2', is_error: true },
+          {
+            type: 'tool_use',
+            name: 'Bash',
+            id: 'echo-2',
+            input: { command: 'printf task.ts' },
+          },
+          { type: 'tool_result', tool_use_id: 'echo-2', is_error: true },
+        ],
+      },
+    ];
+    expect(toolTelemetry(failedEvents)).toMatchObject({ read: 0, unknownReads: 0 });
+    const failedAttempt = await attemptFor(failedEvents);
+    expect(failedAttempt.telemetry).toMatchObject({
+      read_calls: 0,
+      read_without_edit_attempts: 0,
+    });
+  });
+
   it('does not double-count mirrored top-level and message tool content', () => {
     const parts = [
       { type: 'tool_use', name: 'Read', id: 'read-1', input: { file_path: 'task.ts' } },
@@ -945,6 +1189,7 @@ describe('model-eval live-runner reliability', () => {
 
     expect(toolTelemetry(mirrored)).toEqual({
       read: 1,
+      unknownReads: 0,
       edit: 1,
       write: 0,
       editSuccesses: 1,

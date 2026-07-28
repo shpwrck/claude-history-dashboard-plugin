@@ -110,7 +110,16 @@ export type StructuredEditToolEvidence =
       id: string;
       name: string;
       /** Sanitized target marker; no source path or tool payload is retained. */
-      input: { task_path: boolean };
+      input: {
+        task_path: boolean;
+        /**
+         * Set when the evidence mentions the task file but cannot be
+         * classified as a read of it — a shell command, whose text the receipt
+         * deliberately drops. Bucketed and shown, never counted as a read
+         * (#3093).
+         */
+        read_evidence?: 'unknown';
+      };
     }
   | {
       type: 'tool_result';
@@ -261,10 +270,27 @@ export interface StructuredEditEvalResult {
     max_budget_usd: number | null;
   };
   runner: {
-    version: 3;
+    /**
+     * Contract generation that PRODUCED this receipt (`RUNNER_VERSION` in
+     * `scripts/model-eval-run.mjs`), never re-stamped — it is what tells a
+     * reader which semantics the recorded counters were scored under, e.g.
+     * whether a shell command naming the task file counted as a read.
+     *
+     * Being older than the current generation does not void a receipt:
+     * validity is decided by re-derivation, and a receipt stays valid while
+     * its recorded data still reproduces under the current code (#3395).
+     */
+    version: number;
     script_path: 'scripts/model-eval-run.mjs';
+    /**
+     * Hash of the runner file **as of the run** — provenance, not a
+     * reproducibility gate. Reproducibility is proven by re-deriving the
+     * recorded outputs from the recorded inputs with the current runner, so a
+     * behaviour-preserving edit here does not invalidate a paid receipt (#3395).
+     */
     script_sha256: string;
     scorer_path: 'scripts/lib/model-edit-benchmark.ts';
+    /** Hash of the scorer file as of the run — provenance, not a gate. */
     scorer_sha256: string;
     jail: {
       gate: { ok: boolean; reason: string | null };

@@ -47,6 +47,40 @@ const DEFAULT_MANIFEST = join(
   'structured-edit-corpus.json'
 );
 const MODEL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/;
+/**
+ * Contract generation of this runner + scorer pair (#3395).
+ *
+ * Two separate jobs, deliberately not conflated:
+ *
+ * - **Validity** is decided by re-derivation, not by this number. A receipt is
+ *   valid while the current runner reproduces its recorded outputs from its
+ *   recorded inputs. `runner.script_sha256`/`runner.scorer_sha256` stay in the
+ *   receipt as as-of-run provenance and are NOT asserted against the working
+ *   tree, so a comment or a refactor that leaves scored output unchanged cannot
+ *   invalidate a paid receipt.
+ * - **Meaning** is what this number carries. `runner.version` records the
+ *   generation that PRODUCED a receipt and is never re-stamped, because it is
+ *   the only thing that lets a reader tell a generation-3 `read_calls` (shell
+ *   evidence counted as a task read) from a generation-4 one (it does not).
+ *   Re-stamping an existing receipt would destroy exactly that distinction.
+ *
+ * Bump this for any change to what a recorded field MEANS or to receipt shape —
+ * including a change that leaves the committed fixture's numbers untouched.
+ * Generation 4 is #3093: shell evidence stopped counting as a task read and
+ * gained the `read_evidence` marker.
+ *
+ * A superseded receipt is not automatically void. It stays valid evidence for
+ * as long as its recorded data still re-derives under the current generation,
+ * and it keeps its original version so the semantics it was scored under stay
+ * legible. It becomes void the moment re-derivation stops matching.
+ *
+ * This constant is hand-maintained, so by itself it would only be a label.
+ * `toolClassificationDigest` is what gives it teeth: the digest recorded in
+ * `fixtures/model-eval-corpus/runner-contract.json` moves automatically when
+ * classification behaviour moves, and clearing that failure means editing the
+ * file where this version is declared.
+ */
+export const RUNNER_VERSION = 4;
 export const MAX_LIVE_TASK_BYTES = 1024 * 1024;
 export const MAX_WORKER_STREAM_BYTES = 4 * 1024 * 1024;
 
@@ -433,16 +467,41 @@ function commandMentionsTask(input) {
   return /(^|[^a-zA-Z0-9_.-])task\.ts([^a-zA-Z0-9_.-]|$)/.test(command);
 }
 
-function isReadToolUse(name, input, taskPath) {
+function isSearchTool(leaf) {
+  return leaf === 'grep' || leaf === 'rg' || leaf === 'ripgrep' || leaf.includes('search');
+}
+
+/**
+ * Classify one tool_use as evidence that the worker inspected task.ts (#3093).
+ *
+ * `'read'` is only claimed for a structured target that resolves to the task
+ * file: the literal Read tool, or a search tool whose path argument is task.ts.
+ *
+ * A shell command is never read evidence. The token `task.ts` inside a command
+ * string says nothing about what the command did — `echo task.ts` reads
+ * nothing, `rm task.ts` destroys it — so treating the token as a read
+ * fabricated successful `read_calls`, and could fabricate a
+ * `read_without_edit_attempts` charge, for inspection that never happened.
+ * Shell evidence that mentions the task file is bucketed `'unknown'` and
+ * attributed to no counter; the bucket is recorded in the receipt so the
+ * unclassifiable evidence stays visible instead of silently disappearing.
+ */
+function classifyReadEvidence(name, input, taskPath) {
   const leaf = toolLeaf(name);
-  if (leaf === 'read') return targetsTaskFile(input, taskPath);
-  if (leaf === 'bash') return input?.task_path === true || commandMentionsTask(input);
-  const search =
-    leaf === 'grep' ||
-    leaf === 'rg' ||
-    leaf === 'ripgrep' ||
-    leaf.includes('search');
-  return search && targetsTaskFile(input, taskPath);
+  if (leaf === 'read' || isSearchTool(leaf)) {
+    return targetsTaskFile(input, taskPath) ? 'read' : 'none';
+  }
+  if (leaf === 'bash') {
+    // `task_path: true` also matches receipts written before #3093, whose shell
+    // evidence was recorded as a task-file read; replaying one now downgrades
+    // that claim to unknown rather than re-asserting it.
+    return input?.read_evidence === 'unknown' ||
+      input?.task_path === true ||
+      commandMentionsTask(input)
+      ? 'unknown'
+      : 'none';
+  }
+  return 'none';
 }
 
 function isWriteTool(name) {
@@ -456,6 +515,12 @@ function isLiteralReadTool(name) {
 export function toolTelemetry(events, taskPath = 'task.ts') {
   const counts = {
     read: 0,
+    /**
+     * Completed evidence that mentions the task file but cannot be classified
+     * as a read — shell commands. Held separately so it is never folded into
+     * `read`, which is what adherence and read-without-edit are computed from.
+     */
+    unknownReads: 0,
     edit: 0,
     write: 0,
     editSuccesses: 0,
@@ -464,6 +529,7 @@ export function toolTelemetry(events, taskPath = 'task.ts') {
     writeFailures: 0,
   };
   const reads = new Set();
+  const unknownReads = new Set();
   const edits = new Set();
   const writes = new Set();
   const completedReads = new Set();
@@ -472,12 +538,12 @@ export function toolTelemetry(events, taskPath = 'task.ts') {
     for (const part of contentParts(event)) {
       if (part?.type === 'tool_use') {
         const name = String(part.name ?? '').toLowerCase();
-        // Match the proof-batch adherence proxy: a shell/search tool that
-        // explicitly mentions task.ts inspected the benchmark input even when
-        // the worker did not use Claude's literal Read tool.
-        if (isReadToolUse(name, part.input, taskPath) && part.id) {
-          reads.add(part.id);
-        }
+        // A search tool whose structured target is task.ts inspected the
+        // benchmark input even when the worker did not use the literal Read
+        // tool. A shell command lands in the unknown bucket instead (#3093).
+        const readEvidence = classifyReadEvidence(name, part.input, taskPath);
+        if (part.id && readEvidence === 'read') reads.add(part.id);
+        if (part.id && readEvidence === 'unknown') unknownReads.add(part.id);
         if (isEditTool(name) && targetsTaskFile(part.input, taskPath)) {
           counts.edit += 1;
           if (part.id) edits.add(part.id);
@@ -490,11 +556,14 @@ export function toolTelemetry(events, taskPath = 'task.ts') {
       if (
         part?.type === 'tool_result' &&
         part.tool_use_id &&
-        reads.has(part.tool_use_id) &&
+        (reads.has(part.tool_use_id) || unknownReads.has(part.tool_use_id)) &&
         !completedReads.has(part.tool_use_id)
       ) {
         completedReads.add(part.tool_use_id);
-        if (part.is_error !== true) counts.read += 1;
+        if (part.is_error !== true) {
+          if (reads.has(part.tool_use_id)) counts.read += 1;
+          else counts.unknownReads += 1;
+        }
       }
       if (
         part?.type === 'tool_result' &&
@@ -528,10 +597,11 @@ export function sanitizeToolEvidence(events, taskPath = 'task.ts') {
       if (part?.type === 'tool_use') {
         const name = String(part.name ?? '').toLowerCase();
         const literalRead = isLiteralReadTool(name);
-        const read = isReadToolUse(name, part.input, taskPath);
+        const readEvidence = classifyReadEvidence(name, part.input, taskPath);
         const mutating = isEditTool(name) || isWriteTool(name);
-        if (!read && !literalRead && !mutating) continue;
-        const taskTarget = read || (mutating && targetsTaskFile(part.input, taskPath));
+        if (readEvidence === 'none' && !literalRead && !mutating) continue;
+        const taskTarget =
+          readEvidence === 'read' || (mutating && targetsTaskFile(part.input, taskPath));
         const id = `tool-${nextId}`;
         nextId += 1;
         if (part.id) ids.set(part.id, id);
@@ -539,7 +609,13 @@ export function sanitizeToolEvidence(events, taskPath = 'task.ts') {
           type: 'tool_use',
           id,
           name,
-          input: { task_path: taskTarget },
+          // Unclassifiable evidence keeps its own marker so a replay reaches
+          // the same verdict instead of re-deciding from a dropped command
+          // string, and so the receipt shows what was seen but not counted.
+          input:
+            readEvidence === 'unknown'
+              ? { task_path: taskTarget, read_evidence: 'unknown' }
+              : { task_path: taskTarget },
         });
         continue;
       }
@@ -554,6 +630,57 @@ export function sanitizeToolEvidence(events, taskPath = 'task.ts') {
     }
   }
   return evidence;
+}
+
+/** Key-order-independent serialization, so a refactor cannot move a digest. */
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalJson(value[key])])
+    );
+  }
+  return value;
+}
+
+/**
+ * Behavioural fingerprint of tool-evidence classification over a committed
+ * battery of cases (#3395).
+ *
+ * `RUNNER_VERSION` is a hand-maintained integer, so nothing about it forces it
+ * to move when semantics move — that omission is exactly how #3093 changed what
+ * `read_calls` means while every receipt kept claiming generation 3. This
+ * digest closes that: it is derived from what the classifier DOES, not from
+ * what the code declares, so a semantic change flips it automatically while a
+ * comment or a rename leaves it alone.
+ *
+ * It covers the classification surface specifically. Scoring changes already
+ * show up in the receipt's own re-derivation (the recorded scores stop
+ * matching); a classification change need not, because a receipt only exercises
+ * the constructs its run happened to produce.
+ *
+ * The honest limit: no in-repo check can force a human to relabel a generation.
+ * What this buys is that the change is caught at the moment it happens and can
+ * only be silenced by editing the file that declares the version, in the same
+ * diff, where a reviewer sees it.
+ */
+export function toolClassificationDigest(cases, taskPath = 'task.ts') {
+  const observed = (Array.isArray(cases) ? cases : []).map((entry) => {
+    const events = Array.isArray(entry?.events) ? entry.events : [];
+    const evidence = sanitizeToolEvidence(events, taskPath);
+    return {
+      id: String(entry?.id ?? ''),
+      telemetry: toolTelemetry(events, taskPath),
+      evidence,
+      // Replaying the sanitized evidence must reach the same verdict as the raw
+      // stream, or a receipt would mean one thing when written and another when
+      // verified.
+      replayed: toolTelemetry([{ content: evidence }], taskPath),
+    };
+  });
+  return sha256(JSON.stringify(canonicalJson(observed)));
 }
 
 function nullableNonNegative(value) {
@@ -659,30 +786,37 @@ export function launchEvidence(launch, paths, effectiveEnv = workerEnvironment(l
   };
 }
 
-function workerTelemetry(parsed, retriesUsed, taskPath = 'task.ts') {
-  const usage = parsed?.usage ?? {};
-  const tools = toolTelemetry(
-    Array.isArray(parsed?.events) ? parsed.events : [],
-    taskPath
-  );
-  const parser = parserEvidence(parsed);
-  const parserComplete = parserEvidenceComplete(parsed, parser);
-  const durationMs = parserComplete ? nullableNonNegative(parsed?.durationMs) : null;
-  const costUsd = parserComplete ? nullableNonNegative(parsed?.totalCostUsd) : null;
+/**
+ * The one mapping from attempt facts to receipt telemetry. Both the live path
+ * (`workerTelemetry`, reading a freshly parsed worker stream) and the replay
+ * path (`replayAttemptTelemetry`, reading what a receipt already recorded) go
+ * through here, so verifying a receipt exercises the same arithmetic that
+ * produced it instead of a second copy that can drift.
+ */
+function attemptTelemetry({
+  usage,
+  tools,
+  parserComplete,
+  durationMs,
+  costUsd,
+  model,
+  retriesUsed,
+}) {
+  const resolvedDuration = parserComplete ? nullableNonNegative(durationMs) : null;
+  const resolvedCost = parserComplete ? nullableNonNegative(costUsd) : null;
   const usageComplete =
-    parsed !== null &&
-    parsed !== undefined &&
-    parsed.usage !== null &&
-    typeof parsed.usage === 'object' &&
+    usage !== null &&
+    usage !== undefined &&
+    typeof usage === 'object' &&
     nullableNonNegative(usage.input_tokens) !== null &&
     nullableNonNegative(usage.output_tokens) !== null &&
     parserComplete;
   return emptyTelemetry({
     input_tokens:
-      finiteNonNegative(usage.input_tokens) +
-      finiteNonNegative(usage.cache_read_input_tokens) +
-      finiteNonNegative(usage.cache_creation_input_tokens),
-    output_tokens: finiteNonNegative(usage.output_tokens),
+      finiteNonNegative(usage?.input_tokens) +
+      finiteNonNegative(usage?.cache_read_input_tokens) +
+      finiteNonNegative(usage?.cache_creation_input_tokens),
+    output_tokens: finiteNonNegative(usage?.output_tokens),
     read_calls: tools.read,
     edit_calls: tools.edit,
     write_calls: tools.write,
@@ -693,11 +827,65 @@ function workerTelemetry(parsed, retriesUsed, taskPath = 'task.ts') {
     read_without_edit_attempts:
       tools.read > 0 && tools.edit === 0 && tools.write === 0 ? 1 : 0,
     retries_used: retriesUsed,
-    duration_ms: durationMs,
-    cost_usd: costUsd,
-    resolved_model_id:
-      typeof parsed?.model === 'string' ? parsed.model.slice(0, 160) : null,
-    telemetry_complete: usageComplete && durationMs !== null && costUsd !== null,
+    duration_ms: resolvedDuration,
+    cost_usd: resolvedCost,
+    resolved_model_id: typeof model === 'string' ? model.slice(0, 160) : null,
+    telemetry_complete: usageComplete && resolvedDuration !== null && resolvedCost !== null,
+  });
+}
+
+function workerTelemetry(parsed, retriesUsed, taskPath = 'task.ts') {
+  const parser = parserEvidence(parsed);
+  return attemptTelemetry({
+    usage: parsed?.usage ?? null,
+    tools: toolTelemetry(
+      Array.isArray(parsed?.events) ? parsed.events : [],
+      taskPath
+    ),
+    parserComplete: parserEvidenceComplete(parsed, parser),
+    durationMs: parsed?.durationMs,
+    costUsd: parsed?.totalCostUsd,
+    model: parsed?.model,
+    retriesUsed,
+  });
+}
+
+/**
+ * Recompute one attempt's telemetry from the evidence a receipt already
+ * carries. The receipt keeps the raw worker stream only as a hash, but it does
+ * record every input this mapping consumes — sanitized tool evidence, token
+ * usage, parser evidence, and the run's irreducible measurements (duration,
+ * cost, resolved model) — so the counters it claims can be re-derived offline
+ * with no model call (#3395).
+ *
+ * Only a completed `worker` attempt is replayable: a `task-boundary` attempt's
+ * telemetry comes from a spawn/scoring failure whose cause the receipt does not
+ * record, and transport-failure flags are overlaid outside this mapping. Both
+ * stay at their `emptyTelemetry` defaults here, so a caller comparing the
+ * result against a failed attempt's recorded telemetry sees a mismatch rather
+ * than a false "reproduced" verdict.
+ */
+export function replayAttemptTelemetry(attempt, taskPath = 'task.ts') {
+  const parser = attempt?.parser ?? null;
+  const parserComplete =
+    attempt?.output_parsed === true &&
+    parser !== null &&
+    typeof parser === 'object' &&
+    (parser.format === 'json' || parser.format === 'stream-json') &&
+    Number.isInteger(parser.event_count) &&
+    parser.event_count > 0 &&
+    parser.malformed_lines === 0;
+  return attemptTelemetry({
+    usage: attempt?.usage ?? null,
+    tools: toolTelemetry(
+      Array.isArray(attempt?.tool_events) ? [{ content: attempt.tool_events }] : [],
+      taskPath
+    ),
+    parserComplete,
+    durationMs: attempt?.duration_ms,
+    costUsd: attempt?.cost_usd,
+    model: attempt?.resolved_model_id,
+    retriesUsed: Number.isInteger(attempt?.attempt) ? attempt.attempt - 1 : 0,
   });
 }
 
@@ -1438,7 +1626,7 @@ async function main() {
     readFile(SCORER_PATH, 'utf8'),
   ]);
   const runner = {
-    version: 3,
+    version: RUNNER_VERSION,
     script_path: 'scripts/model-eval-run.mjs',
     script_sha256: sha256(runnerSource),
     scorer_path: 'scripts/lib/model-edit-benchmark.ts',

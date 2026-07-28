@@ -21,6 +21,43 @@ text, and raw `CLAUDE.md` bodies are not valid receipt fields. Writes are skippe
 when `SHADOW_CALLS_OFF=1` is set or the shared `~/.claude/shadow-calls/OFF`
 sentinel exists.
 
+## Spool drain commit protocol (#3106)
+
+This log has several independent appenders — the POST route, the reject mirror,
+`ingest.mjs`, `proof-batch.mjs`, and the offline spool drain. Every one of them,
+including the drain, writes **one `appendFile` call per unit of whole JSONL
+lines**; nothing streams bytes into the log. That is what keeps a concurrent
+append from landing inside another writer's record.
+
+The drain (`src/lib/adoption-spool.ts`) rotates the live spool to a private
+snapshot and then appends it in **batches** capped at 64 KiB. Each batch is one
+`appendFile` call carrying its sanitized receipts plus a trailing private
+`_CHD_SPOOL_DRAIN_COMMIT` frame, so the frame can never be separated from the
+records it commits:
+
+```json
+{"schemaVersion":"1","kind":"_CHD_SPOOL_DRAIN_COMMIT","transactionId":"<uuid>","offset":65412}
+```
+
+`offset` is the snapshot byte offset the batch covers, which makes recovery
+**resumable** rather than all-or-nothing: a retry reads the highest committed
+offset for the transaction and restarts the snapshot there, so a drain
+interrupted after some batches appends only the remainder — no replay of what
+already landed, no loss of what did not. Canonical readers ignore the frame
+rather than treating it as a receipt or as corrupt input, and the receipt writer
+rejects it, so it cannot be forged through the API.
+
+**Known residual.** Rotation is a consumer-side move and cannot quiesce the
+producer: a hook that opened the live spool for append *before* the rename holds
+a descriptor on the rotated inode and may write to it later. The drain chases
+such a tail (it re-reads a snapshot that grew and refuses to unlink one whose
+bytes it has not all consumed), which narrows the loss window to a write landing
+between the final size check and the unlink — but cannot close it. Closing it
+requires the producer to cooperate (a lock the drain honours, or a spool
+*directory* into which each receipt is renamed atomically), and the producer
+lives in `~/.claude`, outside this repo. Cross-process drains are likewise not
+serialized; `serializeDrain` is an in-process mutex.
+
 ## Read path & the Adoption Scorecard (#577)
 
 `GET /api/adoption/receipts` replays the log read-only as

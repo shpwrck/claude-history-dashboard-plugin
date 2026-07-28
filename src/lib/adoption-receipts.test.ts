@@ -11,6 +11,10 @@ import {
   readAdoptionReceiptIndex,
   readRejectedFindingIds,
   sanitizeAdoptionReceipt,
+  adoptionSpoolCommitMarker,
+  isAdoptionSpoolCommitMarker,
+  streamAdoptionReceipts,
+  type AdoptionReceipt,
 } from './adoption-receipts';
 
 const tmpDirs: string[] = [];
@@ -1021,5 +1025,122 @@ describe('readAdoptionReceipts (#1003)', () => {
     ]);
     expect(JSON.stringify(receipts)).not.toContain('rawSecret');
     expect(skipped).toBe(0);
+  });
+});
+
+describe('adoption spool commit frame (#3106)', () => {
+  const txId = '11111111-2222-4333-8444-555555555555';
+
+  it('binds a transaction id to the snapshot offset it commits', () => {
+    const frame = adoptionSpoolCommitMarker(txId, 4096);
+    expect(frame).toEqual({
+      schemaVersion: '1',
+      kind: '_CHD_SPOOL_DRAIN_COMMIT',
+      transactionId: txId,
+      offset: 4096,
+    });
+    expect(isAdoptionSpoolCommitMarker(frame)).toBe(true);
+  });
+
+  it('refuses a frame that cannot name a replayable resume point', () => {
+    expect(() => adoptionSpoolCommitMarker('not-a-uuid', 0)).toThrow();
+    expect(() => adoptionSpoolCommitMarker(txId, -1)).toThrow();
+    expect(() => adoptionSpoolCommitMarker(txId, 1.5)).toThrow();
+    expect(() => adoptionSpoolCommitMarker(txId, Number.NaN)).toThrow();
+    // An offset-less frame is the pre-#3106 all-or-nothing shape: it cannot
+    // resume a partial batch, so it is not a valid commit frame.
+    expect(
+      isAdoptionSpoolCommitMarker({
+        schemaVersion: '1',
+        kind: '_CHD_SPOOL_DRAIN_COMMIT',
+        transactionId: txId,
+      })
+    ).toBe(false);
+  });
+
+  it('stays invisible to every canonical read', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'receipts.jsonl');
+    const receipt = JSON.stringify({
+      schemaVersion: '1',
+      kind: 'SURFACED',
+      ts: now().toISOString(),
+      sessionHash: 'abc',
+      findingIds: ['cost.cache'],
+    });
+    await writeFile(
+      file,
+      `${receipt}\n${JSON.stringify(adoptionSpoolCommitMarker(txId, 128))}\n`
+    );
+    const replay = await readAdoptionReceipts(file, now);
+    expect(replay.receipts).toHaveLength(1);
+    // Not a receipt, and not reported as corrupt input either.
+    expect(replay.skipped).toBe(0);
+  });
+
+  it('cannot be forged through the receipt writer', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'receipts.jsonl');
+    const result = await appendAdoptionReceipt(
+      file,
+      { ...adoptionSpoolCommitMarker(txId, 0), ts: now().toISOString() },
+      { now, env: {}, shadowCallsDir: join(dir, 'sc') }
+    );
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('streamAdoptionReceipts resume offsets (#3106)', () => {
+  it('reports a line-boundary offset per record and resumes from it', async () => {
+    const dir = await makeDir();
+    const file = join(dir, 'spool.jsonl');
+    const line = (hash: string) =>
+      `${JSON.stringify({
+        schemaVersion: '1',
+        kind: 'SURFACED',
+        ts: now().toISOString(),
+        sessionHash: hash,
+        findingIds: ['cost.cache'],
+      })}\n`;
+    // A multi-byte body proves the offsets are BYTE offsets, not char offsets.
+    const body = `${line('a-\u00e9\u00e9')}${line('b')}${line('c')}`;
+    await writeFile(file, body, 'utf8');
+
+    const seen: Array<[string, number]> = [];
+    const first = await streamAdoptionReceipts(file, now, (record, offset) => {
+      seen.push([
+        (record as Extract<AdoptionReceipt, { kind: 'SURFACED' }>).sessionHash,
+        offset,
+      ]);
+    });
+    expect(first.read).toBe(true);
+    expect(first.endOffset).toBe(Buffer.byteLength(body, 'utf8'));
+    expect(seen.map(([hash]) => hash)).toEqual(['a-\u00e9\u00e9', 'b', 'c']);
+    expect(seen[0][1]).toBe(Buffer.byteLength(line('a-\u00e9\u00e9'), 'utf8'));
+
+    const resumed: string[] = [];
+    const second = await streamAdoptionReceipts(
+      file,
+      now,
+      (record) => {
+        resumed.push(
+          (record as Extract<AdoptionReceipt, { kind: 'SURFACED' }>).sessionHash
+        );
+      },
+      { start: seen[0][1] }
+    );
+    // Resuming at a committed offset replays nothing before it.
+    expect(resumed).toEqual(['b', 'c']);
+    expect(second.endOffset).toBe(Buffer.byteLength(body, 'utf8'));
+  });
+
+  it('reports the requested start as the end offset when the read fails', async () => {
+    const dir = await makeDir();
+    const result = await streamAdoptionReceipts(
+      join(dir, 'missing.jsonl'),
+      now,
+      () => {}
+    );
+    expect(result).toEqual({ read: false, skipped: 0, records: 0, endOffset: 0 });
   });
 });
