@@ -367,4 +367,54 @@ describe('renderRepoMap', () => {
     expect(included).toHaveLength(1);
     expect(truncated).toBe(true);
   });
+
+  it('counts block separators at the exact token-budget boundary', () => {
+    const boundaryFiles: RepoFile[] = ['a', 'b', 'c'].map((path) => ({
+      path,
+      symbols: [],
+      imports: [],
+    }));
+
+    const result = renderRepoMap(boundaryFiles, 1);
+
+    expect(result.text).toBe('a\n\nb');
+    expect(result.included).toEqual(boundaryFiles.slice(0, 2));
+    expect(result.truncated).toBe(true);
+  });
+
+  it('joins the rendered output once for a 4,000-file complexity probe', () => {
+    const probeFiles: RepoFile[] = Array.from({ length: 4_000 }, (_, index) => ({
+      path: `file-${String(index).padStart(4, '0')}.ts`,
+      symbols: [],
+      imports: [],
+    }));
+    const originalJoin = Array.prototype.join;
+    let renderedOutputJoins = 0;
+    let renderedOutputJoinElements = 0;
+    const joinSpy = vi.spyOn(Array.prototype, 'join').mockImplementation(function (
+      this: unknown[],
+      separator?: string
+    ) {
+      if (separator === '\n\n' && this[0] === 'file-0000.ts') {
+        renderedOutputJoins += 1;
+        renderedOutputJoinElements += this.length;
+      }
+      return Reflect.apply(originalJoin, this, [separator]);
+    });
+
+    const result = (() => {
+      try {
+        return renderRepoMap(probeFiles, Number.MAX_SAFE_INTEGER);
+      } finally {
+        joinSpy.mockRestore();
+      }
+    })();
+
+    expect(result.included).toHaveLength(4_000);
+    expect(result.truncated).toBe(false);
+    expect({ renderedOutputJoins, renderedOutputJoinElements }).toEqual({
+      renderedOutputJoins: 1,
+      renderedOutputJoinElements: 4_000,
+    });
+  });
 });

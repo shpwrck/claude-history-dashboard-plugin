@@ -98,8 +98,8 @@ function relPosix(root: string, file: string): string {
 
 /** ~4 chars per token — the same coarse estimate the rest of the dashboard uses
  *  for budgeting; exact tokenisation is not worth the dependency here. */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+function estimateTokensFromCharacters(characterCount: number): number {
+  return Math.ceil(characterCount / 4);
 }
 
 /** Rank files most-referenced-first: a file imported by many others is more
@@ -242,20 +242,24 @@ export function renderRepoMap(
   rankedFiles: RepoFile[],
   tokenBudget: number
 ): { text: string; included: RepoFile[]; truncated: boolean } {
+  const blockSeparator = '\n\n';
   const blocks: string[] = [];
   const included: RepoFile[] = [];
+  let renderedLength = 0;
   let truncated = false;
   for (const f of rankedFiles) {
     const block = renderFile(f);
-    const next = blocks.length === 0 ? block : `${blocks.join('\n\n')}\n\n${block}`;
-    if (estimateTokens(next) > tokenBudget && included.length > 0) {
+    const nextLength =
+      renderedLength + (blocks.length === 0 ? 0 : blockSeparator.length) + block.length;
+    if (estimateTokensFromCharacters(nextLength) > tokenBudget && included.length > 0) {
       truncated = true;
       break;
     }
     blocks.push(block);
     included.push(f);
+    renderedLength = nextLength;
   }
-  return { text: blocks.join('\n\n'), included, truncated };
+  return { text: blocks.join(blockSeparator), included, truncated };
 }
 
 /**
