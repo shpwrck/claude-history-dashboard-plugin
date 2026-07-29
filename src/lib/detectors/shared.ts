@@ -727,3 +727,109 @@ export function splitSegments(command: string): string[] {
   segs.push(cur);
   return segs.map((s) => s.trim()).filter(Boolean);
 }
+
+// ---------------------------------------------------------------------------
+// Timestamped window sums (#3235, #3238).
+//
+// Several detectors ask the same question repeatedly: "sum these numeric fields
+// over the token entries whose timestamp falls in [lo, hi]". Done naively that
+// is a fresh scan of the session's whole token history PER QUERY — O(Q x T) on
+// the detector hot path, for a partition that does not depend on which query is
+// asking.
+//
+// This builds the answer once per session: timestamps sorted ascending, plus a
+// prefix sum per tracked field. A query is then two binary searches and one
+// subtraction, O(log T). Floating-point note: prefix subtraction is not
+// bit-identical to summing a slice, so dollar figures can differ in the last
+// ulp; every consumer here already rounds or compares with a tolerance.
+// ---------------------------------------------------------------------------
+
+/** A sorted, prefix-summed index over timestamped numeric rows. */
+export interface WindowSumIndex {
+  /** Ascending event timestamps (ms). */
+  readonly ms: number[];
+  /** `prefix[f][i]` = sum of field `f` over the first `i` rows. Length T+1. */
+  readonly prefix: number[][];
+  /** Number of tracked fields. */
+  readonly fieldCount: number;
+}
+
+/**
+ * Build a {@link WindowSumIndex} from rows carrying a timestamp and N numeric
+ * fields. Rows whose timestamp is not finite are dropped — the same rows the
+ * per-query scans skipped.
+ */
+export function buildWindowSumIndex<T>(
+  rows: readonly T[],
+  msOf: (row: T) => number,
+  fieldsOf: (row: T) => number[],
+  fieldCount: number
+): WindowSumIndex {
+  const kept: { ms: number; fields: number[] }[] = [];
+  for (const row of rows) {
+    const ms = msOf(row);
+    if (!Number.isFinite(ms)) continue;
+    kept.push({ ms, fields: fieldsOf(row) });
+  }
+  kept.sort((a, b) => a.ms - b.ms);
+
+  const ms = new Array<number>(kept.length);
+  const prefix: number[][] = [];
+  for (let f = 0; f < fieldCount; f++) prefix.push(new Array<number>(kept.length + 1).fill(0));
+  for (let i = 0; i < kept.length; i++) {
+    ms[i] = kept[i].ms;
+    for (let f = 0; f < fieldCount; f++) {
+      prefix[f][i + 1] = prefix[f][i] + (kept[i].fields[f] || 0);
+    }
+  }
+  return { ms, prefix, fieldCount };
+}
+
+/** First index whose timestamp is >= `target` (T when none). */
+function lowerBound(ms: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = ms.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ms[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** First index whose timestamp is > `target` (T when none). */
+function upperBound(ms: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = ms.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ms[mid] <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Sum every tracked field over the rows inside a timestamp window, in
+ * O(log T). `lowerInclusive` picks the half-open convention: `true` matches
+ * `lo <= t <= hi` (#3235's span windows), `false` matches `lo < t <= hi`
+ * (#3238's orphaned-turn windows, where the lower bound is the previous
+ * boundary and must not be re-counted).
+ */
+export function sumInWindow(
+  index: WindowSumIndex,
+  loMs: number,
+  hiMs: number,
+  lowerInclusive: boolean
+): number[] {
+  const out = new Array<number>(index.fieldCount).fill(0);
+  if (index.ms.length === 0) return out;
+  if (!Number.isFinite(loMs) || !Number.isFinite(hiMs)) return out;
+  const start = lowerInclusive ? lowerBound(index.ms, loMs) : upperBound(index.ms, loMs);
+  const end = upperBound(index.ms, hiMs);
+  if (end <= start) return out;
+  for (let f = 0; f < index.fieldCount; f++) {
+    out[f] = index.prefix[f][end] - index.prefix[f][start];
+  }
+  return out;
+}

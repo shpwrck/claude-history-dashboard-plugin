@@ -181,3 +181,131 @@ describe('workflow.mid-turn-interrupt-steering — cadence', () => {
     expect(detector.rule(input([noWork, real.tl, real2.tl], [real.td, real2.td]), 0)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #3238 — every interrupt rescanned the session's whole token history.
+//
+// `wastedInWindow` walked ALL token entries for EVERY qualifying interrupt,
+// re-parsing timestamps and re-resolving per-model pricing each time: O(I x T)
+// on the detector hot path, to compute a partition that does not depend on
+// which interrupt is asking.
+//
+// The probe counts reads of `entry.timestamp` via a getter rather than timing
+// anything, so it is deterministic. The index touches each entry exactly ONCE
+// per session; every interrupt window afterwards is two binary searches over
+// the prefix sums and touches no entry at all.
+// ---------------------------------------------------------------------------
+describe('workflow.mid-turn-interrupt-steering indexes tokens once (#3238)', () => {
+  /** Token entries whose timestamp reads are counted. */
+  function countingEntries(count: number, counter: { reads: number }): TokenEntry[] {
+    return Array.from({ length: count }, (_, i) => {
+      const ts = iso(i * SEC);
+      return {
+        get timestamp() {
+          counter.reads += 1;
+          return ts;
+        },
+        inputTokens: 100,
+        outputTokens: 10,
+        cacheCreationTokens: 0,
+        cacheCreation1hTokens: 0,
+        cacheReadTokens: 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+        model: 'claude-opus-4-8',
+      } as unknown as TokenEntry;
+    });
+  }
+
+  /** `interrupts` mid-turn interrupts spread across one session's timeline. */
+  function interruptTimeline(interrupts: number, spacing: number): SessionTimeline {
+    const entries: TimelineEntry[] = [userE(0)];
+    for (let i = 1; i <= interrupts; i++) {
+      entries.push(assistantE(i * spacing - spacing / 2));
+      entries.push(interruptE(i * spacing));
+    }
+    return timeline('s-scale', entries);
+  }
+
+  it('touches each token entry once regardless of how many interrupts ask', () => {
+    const ENTRIES = 20_000;
+    const INTERRUPTS = 500;
+    const counter = { reads: 0 };
+    const entries = countingEntries(ENTRIES, counter);
+
+    const rec = detector.rule(
+      input([interruptTimeline(INTERRUPTS, 20 * SEC)], [tokenData('s-scale', entries)]),
+      Date.now()
+    );
+
+    expect(rec?.id).toBe('workflow.mid-turn-interrupt-steering');
+    // Exactly one read per entry: the index build. The old rescan performed on
+    // the order of INTERRUPTS x ENTRIES (~10,000,000) reads for this fixture.
+    expect(counter.reads).toBe(ENTRIES);
+  });
+
+  it('touches no token entry at all in a session with no qualifying interrupt', () => {
+    // The pre-index code only reached `tokenEntries` inside the
+    // `inFlight && interrupted` branch, so a session with no qualifying
+    // interrupt did ZERO token work. An eagerly-built index would have added
+    // O(T log T) to that common path — relocating the cost, not removing it.
+    const counter = { reads: 0 };
+    const entries = countingEntries(5_000, counter);
+
+    // Three sessions that each look busy but carry no interrupt sentinel, plus
+    // one that does, so the detector still fires and the walk is exercised.
+    const quiet = (id: string) =>
+      timeline(id, [userE(0), assistantE(1 * SEC), toolUseE(2 * SEC), toolResultE(3 * SEC)]);
+
+    detector.rule(
+      input(
+        [quiet('q1'), quiet('q2'), quiet('q3')],
+        [
+          tokenData('q1', entries),
+          tokenData('q2', entries),
+          tokenData('q3', entries),
+        ]
+      ),
+      Date.now()
+    );
+
+    expect(counter.reads).toBe(0);
+  });
+
+  it('keeps the orphaned window lower-exclusive so two interrupts never double-bill', () => {
+    // Two interrupts in one turn. The entry at exactly the FIRST interrupt's
+    // timestamp belongs to the first window (upper bound inclusive) and must
+    // NOT be counted again by the second (lower bound exclusive).
+    const tl = timeline('s-dup', [
+      userE(0),
+      assistantE(1 * SEC),
+      interruptE(2 * SEC),
+      assistantE(3 * SEC),
+      interruptE(4 * SEC),
+      // A third interrupt so the detector clears MIN_INTERRUPTS.
+      assistantE(5 * SEC),
+      interruptE(6 * SEC),
+    ]);
+    const entries = [
+      tokenEntry(1 * SEC, 100), // first window only
+      tokenEntry(2 * SEC, 200), // exactly ON the first interrupt
+      tokenEntry(3 * SEC, 400), // second window only
+      tokenEntry(5 * SEC, 800), // third window only
+    ];
+
+    const rec = detector.rule(
+      input([tl], [tokenData('s-dup', entries)]),
+      Date.now()
+    );
+    expect(rec?.id).toBe('workflow.mid-turn-interrupt-steering');
+
+    // Windows are (0,2s] -> 100+200, (2s,4s] -> 400, (4s,6s] -> 800.
+    // Every output token is billed to exactly ONE window: 1,500 total.
+    // Double-counting the 2s boundary entry would report 1,700; dropping it
+    // would report 1,300.
+    const wasted = rec?.provenance?.observations?.find(
+      (o) => o.field === 'entries[].outputTokens'
+    );
+    expect(wasted?.value).toBe(1_500);
+  });
+});

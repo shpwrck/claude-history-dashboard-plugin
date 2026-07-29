@@ -5,6 +5,9 @@ import {
   newestIsoDate,
   newestEpochDate,
   newestTokenDataDate,
+  buildWindowSumIndex,
+  sumInWindow,
+  type WindowSumIndex,
 } from './shared';
 import { estimateCost } from '../parse-sessions';
 import { CHEAPEST_MODEL } from '../pricing';
@@ -218,5 +221,85 @@ describe('newestIsoDate / newestEpochDate (#3232)', () => {
     expect(newestEpochDate([Date.UTC(9999, 11, 31, 23, 59, 59, 999)])).toBe('9999-12-31');
     expect(newestEpochDate([null, undefined, NaN, 0])).toBeUndefined();
     expect(newestEpochDate([])).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Windowed prefix sums (#3235, #3238).
+//
+// Both consumers previously rescanned a session's whole token history for every
+// span / interrupt — O(Q x T) to recompute a partition that does not depend on
+// which query is asking. The complexity claim lives HERE, in the primitive, so
+// this is where it is pinned deterministically: a Proxy over the sorted
+// timestamp array counts element reads, so the assertions measure query work
+// directly rather than wall-clock (which is host-sensitive and, with several
+// burns sharing a host, unreliable as evidence).
+// ---------------------------------------------------------------------------
+describe('buildWindowSumIndex / sumInWindow (#3235, #3238)', () => {
+  const row = (ms: number, a: number, b: number) => ({ ms, a, b });
+  const build = (rows: { ms: number; a: number; b: number }[]) =>
+    buildWindowSumIndex(rows, (r) => r.ms, (r) => [r.a, r.b], 2);
+
+  /** Count indexed reads of the index's timestamp array. */
+  function counting(index: WindowSumIndex, counter: { reads: number }): WindowSumIndex {
+    return {
+      ...index,
+      ms: new Proxy(index.ms, {
+        get(target, prop, receiver) {
+          if (typeof prop === 'string' && /^(0|[1-9]\d*)$/.test(prop)) counter.reads += 1;
+          return Reflect.get(target, prop, receiver);
+        },
+      }),
+    };
+  }
+
+  it('answers a window query in logarithmic reads, not a linear scan', () => {
+    const N = 100_000;
+    const index = build(Array.from({ length: N }, (_, i) => row(i * 1000, 1, 2)));
+
+    const counter = { reads: 0 };
+    const out = sumInWindow(counting(index, counter), 25_000_000, 75_000_000, true);
+
+    // Correctness first: entries 25,000..75,000 inclusive.
+    expect(out).toEqual([50_001, 100_002]);
+    // Two binary searches over 100,000 entries is ~2 x 17 reads. A linear scan
+    // would read on the order of 100,000. Bound generously but far below linear.
+    expect(counter.reads).toBeLessThan(80);
+  });
+
+  it('does not grow query reads as the corpus grows', () => {
+    const readsFor = (n: number) => {
+      const index = build(Array.from({ length: n }, (_, i) => row(i * 1000, 1, 0)));
+      const counter = { reads: 0 };
+      sumInWindow(counting(index, counter), 0, n * 1000, true);
+      return counter.reads;
+    };
+    // 64x the corpus costs only a few more comparisons, not 64x the work.
+    expect(readsFor(128_000) - readsFor(2_000)).toBeLessThan(20);
+  });
+
+  it('sorts unsorted input and drops non-finite timestamps', () => {
+    const index = build([row(3000, 3, 0), row(1000, 1, 0), row(NaN, 99, 0), row(2000, 2, 0)]);
+    expect(index.ms).toEqual([1000, 2000, 3000]);
+    // The NaN row is gone, so it can never be summed into any window.
+    expect(sumInWindow(index, 0, 10_000, true)).toEqual([6, 0]);
+  });
+
+  it('honors the lower-bound convention on both sides', () => {
+    const index = build([row(100, 1, 0), row(200, 2, 0), row(300, 4, 0)]);
+    // Inclusive lower (#3235 span windows): 100 and 200 both counted.
+    expect(sumInWindow(index, 100, 200, true)).toEqual([3, 0]);
+    // Exclusive lower (#3238 orphaned windows): the boundary row is NOT
+    // re-counted, which is what stops two interrupts double-billing.
+    expect(sumInWindow(index, 100, 200, false)).toEqual([2, 0]);
+  });
+
+  it('returns zeros for empty indexes, inverted windows, and non-finite bounds', () => {
+    const empty = build([]);
+    expect(sumInWindow(empty, 0, 100, true)).toEqual([0, 0]);
+    const index = build([row(100, 1, 0)]);
+    expect(sumInWindow(index, 200, 100, true)).toEqual([0, 0]);
+    expect(sumInWindow(index, NaN, 100, true)).toEqual([0, 0]);
+    expect(sumInWindow(index, 0, NaN, true)).toEqual([0, 0]);
   });
 });

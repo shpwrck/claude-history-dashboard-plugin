@@ -694,3 +694,179 @@ describe('workflow.human-input-leverage', () => {
     expect(validateFixSnippet(rec!.fix!)).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #3235 — span sizing rescanned all token entries for every span.
+//
+// `spanTokenPoolsFor` walked a session's rows from index 0 for EVERY steering
+// span. The rows were already timestamp-sorted, and the partition does not
+// depend on which span is asking, so S spans over T entries cost O(S x T) to
+// recompute a lookup.
+//
+// The probe counts READS of `entry.timestamp` via a getter rather than timing
+// anything, so it is deterministic and immune to host contention. Prefix sums
+// touch each entry exactly ONCE at build time; every span query afterwards is
+// two binary searches over the index and touches no entry at all.
+// ---------------------------------------------------------------------------
+describe('workflow.human-input-leverage sizes spans without rescanning (#3235)', () => {
+  const SESSION = 'sess-scale';
+  const BASE = Date.parse('2026-06-12T10:00:00.000Z');
+
+  /** One session whose entries count every timestamp read. */
+  function countingTokenData(entryCount: number, counter: { reads: number }): SessionTokenData {
+    const entries = Array.from({ length: entryCount }, (_, i) => {
+      const ts = new Date(BASE + i * 1000).toISOString();
+      return {
+        get timestamp() {
+          counter.reads += 1;
+          return ts;
+        },
+        inputTokens: 10,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheCreation1hTokens: 0,
+        cacheReadTokens: 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+        model: 'claude-opus-4-8',
+      };
+    });
+    return {
+      sessionId: SESSION,
+      entrypoint: 'cli',
+      totalInputTokens: entryCount * 10,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      model: 'claude-opus-4-8',
+      messageCount: entryCount,
+      entries,
+      compactionEvents: [],
+      hasUnknownModel: false,
+    } as unknown as SessionTokenData;
+  }
+
+  /** `spanCount` spans spread across the session, each covering a slice. */
+  function spans(spanCount: number, entryCount: number): TaskSteering[] {
+    const width = Math.floor(entryCount / spanCount);
+    return Array.from({ length: spanCount }, (_, i) =>
+      steering({
+        sessionId: SESSION,
+        taskIndex: i,
+        startTime: new Date(BASE + i * width * 1000).toISOString(),
+        endTime: new Date(BASE + ((i + 1) * width - 1) * 1000).toISOString(),
+      })
+    );
+  }
+
+  it('sizes 1,000 spans over 100,000 entries without a per-span rescan', () => {
+    // The acceptance asks for >= 1,000 spans and >= 100,000 entries in one
+    // session. Correctness is what is asserted here, NOT a read count: the old
+    // per-span walk read only internal state, so it is indistinguishable from
+    // the indexed version at this boundary except by wall-clock (measured 231
+    // ms -> 47 ms, but timing is host-sensitive and not evidence on a shared
+    // host). The DETERMINISTIC complexity proof lives on the primitive both
+    // detectors delegate to — see `buildWindowSumIndex / sumInWindow` in
+    // detectors/shared.test.ts, which pins the query at ~34 element reads over
+    // 100,000 entries instead of a linear scan.
+    const ENTRIES = 100_000;
+    const SPANS = 1_000;
+    const counter = { reads: 0 };
+    const td = countingTokenData(ENTRIES, counter);
+
+    detector.rule(input({ steering: spans(SPANS, ENTRIES), tokenData: [td] }), NOW);
+
+    // Each entry is read exactly once, at index-build time — the span queries
+    // never touch the entries again. (The pre-fix code also built its rows in
+    // one pass, so this pins the build, not the fix.)
+    expect(counter.reads).toBe(ENTRIES);
+  });
+
+  it('routes repeated span queries through the index instead of copied-row scans', () => {
+    const ENTRIES = 2_000;
+    const SPANS = 64;
+    const counter = { coercions: 0 };
+    const endTime = new Date(BASE + (ENTRIES - 1) * 1000).toISOString();
+    const sourceReads = { reads: 0 };
+    const td = countingTokenData(ENTRIES, sourceReads);
+
+    // A source-timestamp getter cannot distinguish the implementations: both
+    // parse each timestamp once while building their private rows. A numeric
+    // object can. Prefix construction coerces each input-token value once,
+    // while the old consumer coerced it again inside every overlapping span's
+    // copied-row scan (S x T).
+    for (const entry of td.entries) {
+      entry.inputTokens = {
+        [Symbol.toPrimitive]() {
+          counter.coercions += 1;
+          return 10;
+        },
+      } as unknown as number;
+    }
+    const repeated = Array.from({ length: SPANS }, (_, taskIndex) =>
+      steering({
+        sessionId: SESSION,
+        taskIndex,
+        startTime: new Date(BASE).toISOString(),
+        endTime,
+      })
+    );
+
+    detector.rule(input({ steering: repeated, tokenData: [td] }), NOW);
+
+    // The index consumes every numeric field once at build time. Restoring the
+    // original consumer while leaving this test/helper intact yields
+    // ENTRIES x SPANS coercions instead.
+    expect(sourceReads.reads).toBe(ENTRIES);
+    expect(counter.coercions).toBe(ENTRIES);
+  });
+
+  /**
+   * Four typical 10k spans plus one 300k excursion whose ONLY token entry sits
+   * at `exTs`. If the span window stopped including a bound, that entry is
+   * dropped, the excursion sizes to 0 tokens, it is filtered out before the
+   * outlier test, and the detector goes silent — so firing is a real assertion
+   * about the bound, not a tautology.
+   */
+  function corpusWithExcursionTokenAt(exTs: string) {
+    const steeringRows: TaskSteering[] = [];
+    const successRows: TaskSuccessProxy[] = [];
+    const tokenData: SessionTokenData[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const sessionId = `sess-typ-${i}`;
+      steeringRows.push(steering({ sessionId, taskIndex: 0 }));
+      tokenData.push(tokens(sessionId, 10_000));
+    }
+    steeringRows.push(
+      steering({ sessionId: 'sess-excursion', taskIndex: 0, corrective: 2 })
+    );
+    successRows.push(
+      success({ sessionId: 'sess-excursion', taskIndex: 0, verdict: 'correct' })
+    );
+    tokenData.push(tokens('sess-excursion', 300_000, exTs));
+    return input({ steering: steeringRows, success: successRows, tokenData });
+  }
+
+  it('includes a token entry sitting exactly on the span START bound', () => {
+    // The old walk skipped only `row.ms < start`, so an entry AT start counted.
+    expect(detector.rule(corpusWithExcursionTokenAt(START), NOW)?.id).toBe(
+      'workflow.human-input-leverage'
+    );
+  });
+
+  it('includes a token entry sitting exactly on the span END bound', () => {
+    // The old walk stopped only on `row.ms > end`, so an entry AT end counted.
+    expect(detector.rule(corpusWithExcursionTokenAt(END), NOW)?.id).toBe(
+      'workflow.human-input-leverage'
+    );
+  });
+
+  it('excludes a token entry one millisecond outside each bound', () => {
+    // The complement, so the two tests above cannot pass by the window simply
+    // being unbounded.
+    const before = new Date(Date.parse(START) - 1).toISOString();
+    const after = new Date(Date.parse(END) + 1).toISOString();
+    expect(detector.rule(corpusWithExcursionTokenAt(before), NOW)).toBeNull();
+    expect(detector.rule(corpusWithExcursionTokenAt(after), NOW)).toBeNull();
+  });
+});

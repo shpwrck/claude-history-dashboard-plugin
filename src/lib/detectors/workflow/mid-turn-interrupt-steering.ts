@@ -2,6 +2,7 @@ import type { Detector, Recommendation, RecObservation } from '../types';
 import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
 import type { SessionTokenData, TokenEntry } from '../../../types';
 import { fmtUsd } from '../shared';
+import { buildWindowSumIndex, sumInWindow, type WindowSumIndex } from '../shared';
 import { getModelPricing } from '../../pricing';
 
 /**
@@ -54,20 +55,42 @@ function tsMs(ts: string): number {
  * interrupt discarded. Joined from `parse-sessions` token entries by timestamp.
  */
 function wastedInWindow(
-  tokenEntries: TokenEntry[],
+  index: WindowSumIndex,
   lowerMs: number,
   interruptMs: number
 ): { tokens: number; usd: number } {
-  let tokens = 0;
-  let usd = 0;
-  for (const e of tokenEntries) {
-    const t = tsMs(e.timestamp);
-    if (!Number.isFinite(t) || t <= lowerMs || t > interruptMs) continue;
-    if (e.outputTokens <= 0) continue;
-    tokens += e.outputTokens;
-    usd += (e.outputTokens / 1_000_000) * getModelPricing(e.model).output;
-  }
+  // Lower bound EXCLUSIVE: it is the previous turn/interrupt boundary, and
+  // re-counting it would double-bill in-flight work across two interrupts.
+  const [tokens, usd] = sumInWindow(index, lowerMs, interruptMs, false);
   return { tokens, usd };
+}
+
+// Prefix-sum field order: [0] output tokens, [1] their dollar cost.
+const WASTE_FIELDS = 2;
+
+/**
+ * Index a session's token entries once so each interrupt's window is a
+ * binary-search lookup instead of a full rescan (#3238).
+ *
+ * `wastedInWindow` used to walk EVERY token entry for EVERY qualifying
+ * interrupt — O(I x T) of timestamp parsing and per-model pricing on the
+ * detector hot path — to compute a partition that does not depend on which
+ * interrupt is asking. Pricing is resolved once per entry here, still at that
+ * entry's OWN model, so the dollar figure keeps its per-message attribution.
+ */
+function wasteIndexFor(tokenEntries: TokenEntry[]): WindowSumIndex {
+  return buildWindowSumIndex(
+    tokenEntries,
+    (e) => tsMs(e.timestamp),
+    (e) => {
+      // Entries with no output contribute nothing, exactly as the old
+      // `outputTokens <= 0` skip did. A negative value must not be summed in:
+      // prefix subtraction cannot re-derive which rows were skipped.
+      const out = e.outputTokens > 0 ? e.outputTokens : 0;
+      return [out, (out / 1_000_000) * getModelPricing(e.model).output];
+    },
+    WASTE_FIELDS
+  );
 }
 
 /**
@@ -80,6 +103,17 @@ function collectSessionInterrupts(
   tl: SessionTimeline,
   tokenEntries: TokenEntry[]
 ): Interrupt[] {
+  // Built ONCE per session, and only if a qualifying interrupt actually asks.
+  //
+  // Eager construction would have relocated the cost rather than removed it:
+  // interrupts are a MINORITY of turns (see the module note above) and the
+  // detector walks EVERY supplied timeline, so indexing up front would add
+  // O(T log T) to the common no-interrupt session, which previously touched
+  // `tokenEntries` not at all. Reported by Codex review on PR #3480 — the same
+  // trap as the eager index caught on PR #3467.
+  let wasteIndex: WindowSumIndex | null = null;
+  const wasteIndexOnce = (): WindowSumIndex =>
+    (wasteIndex ??= wasteIndexFor(tokenEntries));
   const interrupts: Interrupt[] = [];
   const entries = tl.entries;
   // `turnStartMs` resets on every real human prompt; `boundaryMs` additionally
@@ -107,7 +141,7 @@ function collectSessionInterrupts(
     if (e.kind === 'user' && e.interrupted) {
       const interruptMs = tsMs(e.timestamp);
       if (inFlight && Number.isFinite(interruptMs)) {
-        const { tokens, usd } = wastedInWindow(tokenEntries, boundaryMs, interruptMs);
+        const { tokens, usd } = wastedInWindow(wasteIndexOnce(), boundaryMs, interruptMs);
         interrupts.push({
           sessionId: tl.sessionId,
           interruptTs: e.timestamp,

@@ -48,6 +48,7 @@ import type { ToolUsageData } from '../../parse-tools';
 import { mineCorrections } from '../../parse-tools';
 import { short } from '../shared';
 import { claudeMdMarksApplied } from '../shared';
+import { buildWindowSumIndex, sumInWindow, type WindowSumIndex } from '../shared';
 
 // Need at least this many token-sized spans before a median is a meaningful
 // baseline (mirrors runaway-workflow-cost's MIN_RUNS).
@@ -170,49 +171,68 @@ function formatSignalPhrase(signals: HumanSignal[]): string {
   return signals.map((s) => humanSignalLabel(s)).join(', ');
 }
 
-/** Sort tokens per session so span-window joins are deterministic and bounded. */
+// Field order for the per-session prefix sums. Keep in step with
+// `poolsFromFields` below — the two are a pair.
+const POOL_FIELDS = 4;
+
+/**
+ * Index tokens per session so a span-window join is O(log T), not O(T) (#3235).
+ *
+ * `spanTokenPoolsFor` used to walk a session's rows from the beginning for
+ * EVERY steering span. The rows were already sorted, and the partition does not
+ * depend on which span is asking, so S spans over T entries cost O(S x T) to
+ * recompute an answer that could be looked up. Prefix sums plus two binary
+ * searches per span make it O(T + S log T).
+ */
 function tokenEntriesBySession(
   tokenData: SessionTokenData[]
-): Map<string, { ms: number; pools: TokenPools }[]> {
-  const bySession = new Map<string, { ms: number; pools: TokenPools }[]>();
+): Map<string, WindowSumIndex> {
+  const bySession = new Map<string, WindowSumIndex>();
   for (const data of tokenData) {
-    const rows: { ms: number; pools: TokenPools }[] = [];
-    for (const entry of data.entries) {
-      const ms = parseMs(entry.timestamp);
-      if (ms == null) continue;
-      rows.push({ ms, pools: entryTokenPools(entry) });
-    }
-    rows.sort((a, b) => a.ms - b.ms);
-    bySession.set(data.sessionId, rows);
+    bySession.set(
+      data.sessionId,
+      buildWindowSumIndex(
+        data.entries,
+        (entry) => parseMs(entry.timestamp) ?? NaN,
+        (entry) => {
+          const p = entryTokenPools(entry);
+          return [p.inputTokens, p.outputTokens, p.cacheCreationTokens, p.cacheReadTokens];
+        },
+        POOL_FIELDS
+      )
+    );
   }
   return bySession;
+}
+
+function poolsFromFields(fields: number[]): TokenPools {
+  return {
+    inputTokens: fields[0],
+    outputTokens: fields[1],
+    cacheCreationTokens: fields[2],
+    cacheReadTokens: fields[3],
+  };
 }
 
 /** Token pools observed inside a steering span's [startTime, endTime] window. */
 function spanTokenPoolsFor(
   span: TaskSteering,
-  bySession: Map<string, { ms: number; pools: TokenPools }[]>
+  bySession: Map<string, WindowSumIndex>
 ): TokenPools {
-  const totals: TokenPools = {
+  const empty: TokenPools = {
     inputTokens: 0,
     outputTokens: 0,
     cacheCreationTokens: 0,
     cacheReadTokens: 0,
   };
-  const rows = bySession.get(span.sessionId);
-  if (!rows || rows.length === 0) return totals;
+  const index = bySession.get(span.sessionId);
+  if (!index || index.ms.length === 0) return empty;
   const startMs = parseMs(span.startTime);
   const endMs = parseMs(span.endTime);
-  if (startMs == null || endMs == null) return totals;
-  for (const row of rows) {
-    if (row.ms < startMs) continue;
-    if (row.ms > endMs) break;
-    totals.inputTokens += row.pools.inputTokens;
-    totals.outputTokens += row.pools.outputTokens;
-    totals.cacheCreationTokens += row.pools.cacheCreationTokens;
-    totals.cacheReadTokens += row.pools.cacheReadTokens;
-  }
-  return totals;
+  if (startMs == null || endMs == null) return empty;
+  // Both bounds inclusive, matching the old `row.ms < start ? skip : row.ms >
+  // end ? stop : add` walk.
+  return poolsFromFields(sumInWindow(index, startMs, endMs, true));
 }
 
 function median(nums: number[]): number {
