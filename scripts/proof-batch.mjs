@@ -25,11 +25,10 @@
  */
 
 import { createHash } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   cpSync,
   mkdtempSync,
-  mkdirSync,
   writeFileSync,
   readFileSync,
   rmSync,
@@ -38,6 +37,7 @@ import {
 import { tmpdir, homedir } from 'node:os';
 import { isAbsolute, join, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runProofGate } from './proof-gate-sandbox.mjs';
 
 // --- TS-source imports (this repo's src/lib is loaded via the register-ts hook).
 import {
@@ -67,7 +67,11 @@ import {
 
 // --- Shadow-calls jail + killswitch (absolute paths; user-global lib).
 const SHADOW_LIB = join(homedir(), '.claude', 'shadow-calls', 'lib');
-const { sandboxGate, buildWorkerLaunch, seedTempHome } = await import(
+const {
+  sandboxGate,
+  buildWorkerLaunch,
+  seedTempHome,
+} = await import(
   pathToFileURL(join(SHADOW_LIB, 'sandbox.mjs')).href
 );
 const { isKilled, killReason } = await import(
@@ -317,31 +321,17 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
 
 // ---------------------------------------------------------------- Gate 0
 /**
- * Run the pair's objective gate command in the materialized tree. DECIDED-success
- * iff exit code === gate.expectExitCode (and the optional expectMatch substring
- * is present). Anything else is DECIDED-fail. Runs UNJAILED on the host (the
- * gate is a deterministic verifier, not the model worker) but inside the
- * throwaway tree, so it cannot touch the real repo.
+ * Run the pair's objective gate command under the pinned sandbox-runtime.
+ * DECIDED-success iff exit code === gate.expectExitCode (and the optional
+ * expectMatch substring is present). Anything else is DECIDED-fail.
+ *
+ * The free-form command remains compatible with the frozen fixture schema, but
+ * it executes through the pinned sandbox-runtime CLI: read access starts
+ * closed, host writes are confined to the disposable tree, network access is
+ * empty-by-default, PID state is namespaced, Unix sockets are seccomp-blocked,
+ * and the environment is rebuilt from a fixed allowlist.
  */
-function runGate(tree, gate) {
-  return new Promise((resolveGate) => {
-    // NB: `bash -c`, NOT `bash -lc` — a login shell sources profile files that
-    // `cd` to $HOME, which silently drops the `cwd` and makes the gate run in
-    // the wrong directory ("Could not find test.mjs" -> spurious exit 1).
-    execFile(
-      'bash',
-      ['-c', gate.command],
-      { cwd: tree, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        const exitCode = err && typeof err.code === 'number' ? err.code : err ? 1 : 0;
-        const out = `${stdout}\n${stderr}`;
-        const codeOk = exitCode === gate.expectExitCode;
-        const matchOk = gate.expectMatch ? out.includes(gate.expectMatch) : true;
-        resolveGate({ pass: codeOk && matchOk, exitCode, expected: gate.expectExitCode });
-      }
-    );
-  });
-}
+export const runGate = runProofGate;
 
 // ---------------------------------------------------------------- one arm-run
 /**
@@ -1008,7 +998,9 @@ function rate(boolArr) {
   return boolArr.filter(Boolean).length / boolArr.length;
 }
 
-main().catch((err) => {
-  console.error('proof-batch fatal:', err);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error('proof-batch fatal:', err);
+    process.exit(1);
+  });
+}
