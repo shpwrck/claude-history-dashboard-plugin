@@ -58,16 +58,7 @@ import type {
  * sample-corpus sweep) proves it.
  */
 export const PROVENANCE_EXEMPT: readonly string[] = [
-  'activity.stale-projects',
-  'context.bloated-claude-md',
-  'context.compaction-hot-sessions',
-  'context.compaction-large-tool-outputs',
-  'context.low-cache-hit',
-  'context.low-health',
   'context.over-scoped-config-section',
-  'context.over-window',
-  'context.repeated-compactions',
-  'context.repo-map-context-waste',
   'cost.cache-1h-waste',
   'cost.disproportionate-thinking',
   'cost.expensive-agent-type',
@@ -125,6 +116,15 @@ export const PROVENANCE_EXEMPT: readonly string[] = [
  */
 export const PROVENANCE_DETECTORS: readonly string[] = [
   'activity.activity-trend',
+  'activity.stale-projects',
+  'context.bloated-claude-md',
+  'context.compaction-hot-sessions',
+  'context.compaction-large-tool-outputs',
+  'context.low-cache-hit',
+  'context.low-health',
+  'context.over-window',
+  'context.repeated-compactions',
+  'context.repo-map-context-waste',
   'reliability.hook-errors',
   'safety.dangerous-bypass',
   'speed.hook-overhead',

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './compaction-large-tool-outputs';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import type { ToolUsageData, ToolCall } from '../../parse-tools';
@@ -38,5 +39,43 @@ describe('context.compaction-large-tool-outputs (#425)', () => {
         0
       )
     ).toBeNull();
+  });
+
+  // ── Provenance (#3180) ───────────────────────────────────────────────────
+  describe('provenance', () => {
+    it('passes the contract when it fires', () => {
+      const rec = detector.rule(input(), 0);
+      expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    });
+
+    it('states the population behind each figure — they are different cohorts', () => {
+      // The mean is over the HOT cohort; the dominance count is over every
+      // scored session. Reporting both without saying so is how a reader ends
+      // up dividing one by the other.
+      const rec = detector.rule(input(), 0);
+      const obs = rec!.provenance!.observations;
+      const mean = obs.find((o) => o.field === 'largeToolOutputRate');
+      expect(mean!.claim).toContain('hot session(s)');
+      const dominant = obs.find((o) => o.field === 'topFactor');
+      expect(dominant!.claim).toContain('whole scored fleet');
+      expect(dominant!.value).toBe(rec!.affected);
+    });
+
+    it('cites a mean that is genuinely a rate in [0,1] and clears the warn gate', () => {
+      const rec = detector.rule(input(), 0);
+      const mean = Number(
+        rec!.provenance!.observations.find((o) => o.field === 'largeToolOutputRate')!.value
+      );
+      expect(mean).toBeGreaterThanOrEqual(0);
+      expect(mean).toBeLessThanOrEqual(1);
+      // The rule only fires above the warn threshold, so the cited value must
+      // be consistent with the gate that let it through.
+      expect(mean).toBeGreaterThanOrEqual(0.1);
+    });
+
+    it('does not claim tool output caused a measured number of context tokens', () => {
+      const rec = detector.rule(input(), 0);
+      expect(rec!.provenance!.inference).toMatch(/not an attribution of measured/i);
+    });
   });
 });

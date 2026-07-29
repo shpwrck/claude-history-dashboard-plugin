@@ -1,6 +1,6 @@
 import type { Detector } from '../types';
 import type { AppliedMarkers } from '../types';
-import { claudeMdMarksApplied, basename } from '../shared';
+import { claudeMdMarksApplied, basename, newestTokenDataDate } from '../shared';
 import { parseFileReread } from '../../parse-file-reread';
 import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
 import type { RepoMapFileJoin, RepoMapProjectJoin } from '../../parse-repo-map-join';
@@ -249,6 +249,14 @@ export const detector: Detector = {
       return `${c.path}${sym} — ${why}, re-read across ${c.sessions} session(s), ~${c.rereadTokens.toLocaleString()} tokens`;
     };
 
+    // Reason mix across the WHOLE candidate list — the three selection paths
+    // (#3189) are three `reason` values inside one list, not three variants of
+    // the finding, so the mix belongs in one observation.
+    const byReason = { 'config-backed': 0, 'stable-api': 0, 'high-centrality': 0 };
+    for (const c of candidates) byReason[c.reason] += 1;
+    const topCandidate = top[0]; // ranked by reread tokens, then centrality
+    const asOf = newestTokenDataDate(input.tokenData);
+
     return {
       id: 'context.repo-map-context-waste',
       category: 'context',
@@ -269,6 +277,61 @@ export const detector: Detector = {
           .map((c) => `- @${c.path}${c.symbols.length > 0 ? ` — ${c.symbols.join(', ')}` : ''}`)
           .join('\n')}`,
         appliedMarkers: MARKERS_REPO_MAP_WASTE,
+      },
+      provenance: {
+        observations: [
+          {
+            claim: `${candidates.length} repo-map file(s) are re-read across sessions, carry no recorded churn, and match at least one structural signal`,
+            source: 'parse-repo-map-join (repoMap.projects[].files[])',
+            field: 'reread.totalEstimatedTokenWaste / churn.churn',
+            value: candidates.length,
+          },
+          {
+            claim: `their selection reasons are ${byReason['config-backed']} config-backed, ${byReason['stable-api']} stable exported API, ${byReason['high-centrality']} high-centrality (>= CENTRALITY_FLOOR = ${CENTRALITY_FLOOR} sibling importers)`,
+            source: 'parse-repo-map-join (repoMap.projects[].files[])',
+            field: 'configSections / symbols[].exported / imports',
+            value: `${byReason['config-backed']}/${byReason['stable-api']}/${byReason['high-centrality']}`,
+          },
+          {
+            claim: `their re-reads sum to an estimated ${totalRereadTokens} token(s) of repeated content`,
+            source: 'parse-repo-map-join (repoMap.projects[].files[].reread)',
+            field: 'totalEstimatedTokenWaste',
+            value: totalRereadTokens,
+          },
+          {
+            claim: `the largest single contributor is ${topCandidate.path}, re-read across ${topCandidate.sessions} session(s) for an estimated ${topCandidate.rereadTokens} token(s)`,
+            source: 'parse-repo-map-join (repoMap.projects[].files[].reread)',
+            field: 'totalEstimatedTokenWaste / sessions',
+            value: topCandidate.rereadTokens,
+          },
+          ...(reclaim
+            ? [
+                {
+                  // The priced claim covers only the surfaced top slice, while
+                  // the headline total covers every candidate. Those are
+                  // different numbers and the reader must be able to tell.
+                  claim: `the priced reclaim covers only the top ${top.length} surfaced file(s): ${directWasteTokens} re-read token(s) matched back to ${scopeKeys.size} (session, model) scope(s)`,
+                  source: 'parse-file-reread (parseFileReread over toolData + tokenData)',
+                  field: 'repeats[].estimatedTokenWaste',
+                  value: directWasteTokens,
+                },
+              ]
+            : []),
+        ],
+        // The structural signals and the reread estimate are read from the map
+        // and the tool calls. That pinning REMOVES the cost is the proposal,
+        // and the token figure is an estimate, not a billed amount.
+        inference:
+          'The structural signals (exports, config backing, import in-degree) and the ' +
+          're-read counts are read from the repo map and the recorded tool calls; the token ' +
+          'figures are ESTIMATES derived from result sizes, not billed amounts. That pinning ' +
+          'or referencing these files removes the repeated cost is the proposed consequence, ' +
+          'not an observed one — no before/after was measured. Two known limits: centrality ' +
+          'is matched by extension-stripped basename rather than a real module resolver, so ' +
+          'same-named files in different directories share an in-degree; and "read-only" ' +
+          'means no churn was RECORDED in the retained window, not that the file is immutable.',
+        // Newest OBSERVED entry, never `now`.
+        ...(asOf ? { asOf } : {}),
       },
     };
   },

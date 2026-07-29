@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { detector } from './stale-projects';
+import { validateRecommendationProvenance } from '../provenance';
 import { STALE_WEEKS, MIN_STALE_SESSIONS } from '../shared';
 import type { RecommendationInput } from '../types';
 import type { ProjectStats } from '../../../types';
@@ -106,5 +107,63 @@ describe('activity.stale-projects detector', () => {
 
   it('does not fire when there are no projects', () => {
     expect(detector.rule(input([]), NOW)).toBeNull();
+  });
+
+  // ── Provenance (#3180) ───────────────────────────────────────────────────
+  describe('provenance', () => {
+    const fire = (projects = [makeProject({ projectShort: 'old-proj' })]) =>
+      detector.rule(input(projects), NOW)!;
+
+    it('passes the contract when it fires', () => {
+      expect(validateRecommendationProvenance(fire())).toEqual([]);
+    });
+
+    it('cites the session floor against the module that declares it', () => {
+      // The cited value is the CONSTANT, so the citation must point at
+      // `MIN_STALE_SESSIONS` — `projects[].sessionCount` never holds it, and a
+      // reader following that pointer finds a different number.
+      const obs = fire().provenance!.observations.find((o) =>
+        o.claim.includes('MIN_STALE_SESSIONS')
+      );
+      expect(obs, 'expected an observation citing the session floor').toBeDefined();
+      expect(obs!.field).toBe('MIN_STALE_SESSIONS');
+      expect(obs!.value).toBe(MIN_STALE_SESSIONS);
+      expect(obs!.source).not.toContain('sessionCount');
+    });
+
+    it('describes the population it counted, not just "went quiet"', () => {
+      // Projects below the session floor are ALSO quiet but are excluded, so a
+      // bare "N of M went quiet" would misdescribe the M.
+      const rec = fire([
+        makeProject({ projectShort: 'counted' }),
+        makeProject({ projectShort: 'too-few-sessions', sessionCount: MIN_STALE_SESSIONS - 1 }),
+      ]);
+      const head = rec.provenance!.observations[0];
+      expect(head.value).toBe(1);
+      expect(head.claim).toContain('2 known project(s)');
+      expect(head.claim).toContain(`${MIN_STALE_SESSIONS}-session floor`);
+    });
+
+    it('dates the claim from the freshest observed activity, never from now', () => {
+      const rec = fire([makeProject({ lastSeen: CUTOFF - 5 * DAY })]);
+      expect(rec.provenance!.asOf).toBe(
+        new Date(CUTOFF - 5 * DAY).toISOString().slice(0, 10)
+      );
+      expect(rec.provenance!.asOf).not.toBe(new Date(NOW).toISOString().slice(0, 10));
+    });
+
+    it('reproduces the count from the cited field — mutating lastSeen moves it', () => {
+      const cited = (lastSeen: number) =>
+        detector.rule(
+          input([makeProject({ projectShort: 'a' }), makeProject({ projectShort: 'b', lastSeen })]),
+          NOW
+        )!.provenance!.observations[0].value;
+      expect(cited(CUTOFF - 3 * DAY)).toBe(2); // both stale
+      expect(cited(NOW - DAY)).toBe(1); // b is active again
+    });
+
+    it('separates the quiet measurement from the "is it finished" question', () => {
+      expect(fire().provenance!.inference).toMatch(/cannot separate a completed project/i);
+    });
   });
 });

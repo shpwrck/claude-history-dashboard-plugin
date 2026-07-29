@@ -159,13 +159,29 @@ export function isHaikuPinned(settings: LiveSettings | null | undefined): boolea
 export function mergedClaudeMdText(
   liveConfig: LiveConfig | null | undefined
 ): string {
-  if (!liveConfig?.claudeMd) return '';
+  return mergedClaudeMdParts(liveConfig).join('\n\n');
+}
+
+/**
+ * The individual CLAUDE.md documents {@link mergedClaudeMdText} concatenates,
+ * in merge order (global first, then each non-empty per-project file).
+ *
+ * Exported so a detector reporting a figure ABOUT the merged text can cite how
+ * many documents it was merged from without re-implementing the "which files
+ * count" predicate. Two copies of that predicate would drift, and a provenance
+ * observation whose composition claim disagrees with the number it explains is
+ * worse than no observation at all (#3180).
+ */
+export function mergedClaudeMdParts(
+  liveConfig: LiveConfig | null | undefined
+): string[] {
+  if (!liveConfig?.claudeMd) return [];
   const parts: string[] = [];
   if (liveConfig.claudeMd.global) parts.push(liveConfig.claudeMd.global);
   for (const text of Object.values(liveConfig.claudeMd.perProject ?? {})) {
     if (typeof text === 'string' && text.length > 0) parts.push(text);
   }
-  return parts.join('\n\n');
+  return parts;
 }
 
 /**
@@ -280,6 +296,53 @@ export function truncate(s: string, max: number): string {
 
 export function daysAgo(ts: number, now: number): number {
   return Math.max(0, Math.round((now - ts) / (24 * 60 * 60 * 1000)));
+}
+
+/** Largest epoch-ms `new Date(...).toISOString()` can render without throwing. */
+const MAX_TIME_MS = 8.64e15;
+
+/**
+ * An epoch-ms instant as an ISO `YYYY-MM-DD`, or `undefined` when it is not a
+ * real, renderable instant.
+ *
+ * `new Date(ms).toISOString()` THROWS a RangeError past ±8.64e15, and a
+ * detector that throws takes the whole recommendation build down — so the range
+ * guard is the point, not decoration. `0` is treated as "unknown" rather than
+ * 1970-01-01 because every caller here uses 0 as its no-timestamp sentinel.
+ */
+export function isoDateFromMs(ms: number): string | undefined {
+  if (!Number.isFinite(ms) || ms <= 0 || Math.abs(ms) > MAX_TIME_MS) return undefined;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * The newest READABLE entry timestamp across `tokenData`, as an ISO
+ * `YYYY-MM-DD` — the `asOf` anchor for any provenance claim derived from
+ * session token entries.
+ *
+ * Derived from the DATA, never from `now`: a claim is only true as of the last
+ * thing that was actually observed, and stamping it with today's date asserts a
+ * freshness the corpus does not have. Several v0.6 audit findings are exactly
+ * that mistake, so the anchor lives here once instead of being re-derived (and
+ * re-mis-derived) per detector.
+ *
+ * Unparseable timestamps are skipped rather than coerced — `TokenEntry.timestamp`
+ * is a raw transcript string and older writers/fixtures leave non-dates in it.
+ * A corpus with no readable timestamp yields `undefined`, and since
+ * `provenance.asOf` is optional that absence is honest where a guess would not
+ * be.
+ */
+export function newestTokenDataDate(
+  tokenData: readonly SessionTokenData[] | undefined
+): string | undefined {
+  let newest = 0;
+  for (const d of tokenData ?? []) {
+    for (const e of d.entries ?? []) {
+      const ms = Date.parse(e.timestamp);
+      if (Number.isFinite(ms) && ms > newest) newest = ms;
+    }
+  }
+  return isoDateFromMs(newest);
 }
 
 /**

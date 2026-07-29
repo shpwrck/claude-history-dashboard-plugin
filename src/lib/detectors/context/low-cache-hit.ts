@@ -1,6 +1,6 @@
 import type { Detector } from '../types';
 import type { AppliedMarkers } from '../types';
-import { claudeMdMarksApplied } from '../shared';
+import { claudeMdMarksApplied, newestTokenDataDate, short } from '../shared';
 import {
   LOW_HIT_RATE,
   computeCacheEfficiency,
@@ -28,6 +28,10 @@ export const detector: Detector = {
     const low = eff.filter((r) => r.hitRate < LOW_HIT_RATE);
     if (low.length === 0) return null;
     const avg = eff.reduce((s, r) => s + r.hitRate, 0) / eff.length;
+    // `computeCacheEfficiency` sorts ASCENDING by hitRate, so the head of the
+    // filtered list is the worst reuse observed.
+    const worst = low[0];
+    const asOf = newestTokenDataDate(input.tokenData);
 
     // ── Reclaim claim (epic #944, PR3 / #949) ────────────────────────────────
     // A cache *write* that the session never read back is pure waste — the prefix
@@ -95,6 +99,59 @@ export const detector: Detector = {
         note: 'Append to CLAUDE.md so context stays stable within a session and the prompt cache is reused.',
         snippet: `## Keep the prompt cache warm\n\nCache hits require a stable context prefix, so avoid churning it mid-session:\n- Don't interleave large, unrelated file reads into focused work — batch related reads together.\n- Avoid switching permission modes or models in the middle of a task.\n- Don't re-Read files that haven't changed; reuse what's already in context.\n- Group similar work so repeated context (same files, same instructions) is reused rather than re-sent at full input rate.`,
         appliedMarkers: MARKERS_LOW_CACHE_HIT,
+      },
+      provenance: {
+        observations: [
+          {
+            // Denominator excludes sessions with no cache traffic at all —
+            // those have no hit rate to be low, and counting them would dilute
+            // the proportion with sessions the rule never evaluated.
+            claim: `${low.length} of ${eff.length} session(s) with any cache traffic read back less than the reuse floor`,
+            source: 'context-health (computeCacheEfficiency over tokenData)',
+            field: 'hitRate',
+            value: low.length,
+          },
+          {
+            claim: `the reuse floor is LOW_HIT_RATE = ${(LOW_HIT_RATE * 100).toFixed(0)}%`,
+            source: 'context-health',
+            field: 'LOW_HIT_RATE',
+            value: LOW_HIT_RATE,
+          },
+          {
+            claim: `the mean hit rate across those ${eff.length} session(s) is ${(avg * 100).toFixed(1)}%`,
+            source: 'context-health (computeCacheEfficiency over tokenData)',
+            field: 'hitRate',
+            value: Number(avg.toFixed(4)),
+          },
+          {
+            claim: `the worst reuse observed is ${(worst.hitRate * 100).toFixed(1)}%, on session ${short(worst.sessionId)}`,
+            source: 'context-health (computeCacheEfficiency over tokenData)',
+            field: 'hitRate',
+            value: Number(worst.hitRate.toFixed(4)),
+          },
+          ...(reclaim
+            ? [
+                {
+                  claim: `${writeTokens} cache-write token(s) sit under the low-reuse sessions, of which ${(poolFrac * 100).toFixed(1)}% is claimed as reclaimable`,
+                  source: 'context-health (reclaimableCacheWriteFrac over measured hitRate)',
+                  field: 'tokenData[].entries[].cacheCreationTokens',
+                  value: writeTokens,
+                },
+              ]
+            : []),
+        ],
+        // The hit rates are measured. The reclaimable fraction is DERIVED from
+        // the measured shortfall below the floor — it is a counterfactual, not
+        // an observation that those tokens were wasted.
+        inference:
+          'Hit rates and cache-write volumes are measured. The reclaimable fraction is ' +
+          'derived from each session\'s shortfall below the reuse floor, so it is a ' +
+          'counterfactual estimate of what a warm cache would have avoided — not an ' +
+          'observation that those tokens were wasted, and not a measured dollar saving. ' +
+          'Low reuse also has innocent causes (a genuinely short session, deliberately ' +
+          'unrelated work) that the hit rate alone cannot separate.',
+        // Newest OBSERVED entry, never `now`.
+        ...(asOf ? { asOf } : {}),
       },
     };
   },

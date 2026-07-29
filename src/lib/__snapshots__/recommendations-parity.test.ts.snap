@@ -146,6 +146,29 @@ Keep the working context well under the model's context window.
       "target": "CLAUDE.md",
     },
     "id": "context.over-window",
+    "provenance": {
+      "inference": "A peak above 200,000 tokens is a measured high-water mark. Eviction-and-re-send is what the window does past that point — this counts the sessions that reached it, not the tokens they re-paid.",
+      "observations": [
+        {
+          "claim": "3 of 5 session(s) with readable token entries peaked above the window",
+          "field": "peakContext",
+          "source": "context-health (computeContextGrowth over tokenData)",
+          "value": 3,
+        },
+        {
+          "claim": "the highest observed peak was 10,000,000 tokens, on session automate",
+          "field": "peakContext",
+          "source": "context-health (computeContextGrowth over tokenData.entries)",
+          "value": 10000000,
+        },
+        {
+          "claim": "the threshold applied is OVER_WINDOW = 200,000 tokens",
+          "field": "OVER_WINDOW",
+          "source": "context-health",
+          "value": 200000,
+        },
+      ],
+    },
     "severity": "warning",
     "title": "Sessions spilled past the 200K context window",
     "view": "context",
@@ -175,6 +198,41 @@ Keep the working context well under the model's context window.
       "target": "CLAUDE.md",
     },
     "id": "context.compaction-hot-sessions",
+    "provenance": {
+      "inference": "What is measured is band membership (a heuristic composite of peak, growth, tool-output rate, re-read density and compaction count) and the cohort's cache-write pool. The 10-40K-tokens-per-event figure in the headline is a documented range for compaction in general — this detector does not measure the tokens any individual compaction re-sent. The risk band is a forward-looking score, so a hot session has not necessarily compacted yet.",
+      "observations": [
+        {
+          "claim": "3 of 5 scored session(s) sit in the medium-or-high compaction-risk band",
+          "field": "riskClass",
+          "source": "parse-compaction-risk (computeCompactionRisk + summarizeCompactionRisk)",
+          "value": 3,
+        },
+        {
+          "claim": "that is 60% of the scored fleet",
+          "field": "hotPercent",
+          "source": "parse-compaction-risk (summarizeCompactionRisk)",
+          "value": 60,
+        },
+        {
+          "claim": "the finding needs either MIN_HOT_SESSIONS = 2 hot sessions, or 40% of a fleet of at least MIN_FLEET_FOR_PERCENT = 5",
+          "field": "MIN_HOT_SESSIONS / MIN_HOT_PERCENT / MIN_FLEET_FOR_PERCENT",
+          "source": "detectors/context/compaction-hot-sessions",
+          "value": 2,
+        },
+        {
+          "claim": "the most common leading suggestion across the hot cohort is "Run /clear when switching tasks", on 3 of them",
+          "field": "topSuggestion / topSuggestionCount",
+          "source": "parse-compaction-risk (summarizeCompactionRisk)",
+          "value": 3,
+        },
+        {
+          "claim": "4000000 cache-write token(s) across the hot cohort back the reclaim claim, of which the measured cache-shortfall fraction is 100.0%",
+          "field": "tokenData[].entries[].cacheCreationTokens / hitRate",
+          "source": "context-health (computeCacheEfficiency + reclaimableCacheWriteFrac)",
+          "value": 4000000,
+        },
+      ],
+    },
     "reclaim": {
       "category": "context",
       "cause": "structural-prefix",
@@ -724,6 +782,35 @@ These were run repeatedly — wrap them in a script (e.g. \`scripts/dev.sh\`) or
       "target": "settings.json",
     },
     "id": "activity.stale-projects",
+    "provenance": {
+      "asOf": "2023-10-03",
+      "inference": "Quiet is not the same as finished. This measures the absence of recorded activity in RETAINED history — it cannot separate a completed project from a stalled one, which is why the action asks rather than tells.",
+      "observations": [
+        {
+          "claim": "1 of 1 known project(s) both cleared the 3-session floor and recorded no activity inside the 4-week window",
+          "field": "projects[].lastSeen",
+          "source": "parse-history (groupByProjects)",
+          "value": 1,
+        },
+        {
+          "claim": "the quietest is "stale", last active 42 day(s) ago",
+          "field": "projects[].lastSeen",
+          "source": "parse-history (groupByProjects)",
+          "value": 42,
+        },
+        {
+          "claim": "only projects with at least MIN_STALE_SESSIONS = 3 recorded session(s) are counted, so one-off directories are excluded",
+          "field": "MIN_STALE_SESSIONS",
+          "source": "detectors/shared",
+          "value": 3,
+        },
+        {
+          "claim": "no cleanupPeriodDays is set, so nothing is ageing this history out on its own",
+          "field": "settings.cleanupPeriodDays",
+          "source": "~/.claude/settings.json",
+        },
+      ],
+    },
     "severity": "info",
     "title": "Projects have gone quiet",
     "view": "activity",

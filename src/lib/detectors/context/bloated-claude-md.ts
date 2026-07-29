@@ -1,5 +1,5 @@
 import type { Detector } from '../types';
-import { mergedClaudeMdText } from '../shared';
+import { mergedClaudeMdParts } from '../shared';
 
 // Anthropic documents a ~200-line target for CLAUDE.md; adherence degrades and
 // every session pays the token cost past it. (#412)
@@ -16,7 +16,8 @@ export const detector: Detector = {
   category: 'context',
   dataDeps: ['liveConfig'],
   rule(input) {
-    const text = mergedClaudeMdText(input.liveConfig);
+    const parts = mergedClaudeMdParts(input.liveConfig);
+    const text = parts.join('\n\n');
     if (text.length === 0) return null;
     const lines = text.split('\n').length;
     if (lines <= WARN_LINES) return null;
@@ -51,6 +52,40 @@ session and instruction adherence degrades.
 
 - Or move rarely-needed reference material into a skill with
   \`disable-model-invocation\` so it is read on demand, not every turn.`,
+      },
+      provenance: {
+        observations: [
+          {
+            claim: `the merged CLAUDE.md text is ${lines} line(s) long`,
+            source: 'liveConfig.claudeMd (mergedClaudeMdText)',
+            field: 'claudeMd.global + claudeMd.perProject',
+            value: lines,
+          },
+          {
+            // The number above is a MERGE, not the size of one file. Without
+            // this the reader would reasonably check ~/.claude/CLAUDE.md, find
+            // it far shorter, and conclude the finding is wrong.
+            claim: `that count is the concatenation of ${parts.length} CLAUDE.md document(s), not the size of any single file`,
+            source: 'liveConfig.claudeMd (mergedClaudeMdParts)',
+            field: 'claudeMd.global + claudeMd.perProject',
+            value: parts.length,
+          },
+          {
+            claim: `the target compared against is WARN_LINES = ${WARN_LINES} lines, and severity escalates at CRITICAL_LINES = ${CRITICAL_LINES}`,
+            source: 'detectors/context/bloated-claude-md',
+            field: 'WARN_LINES / CRITICAL_LINES',
+            value: WARN_LINES,
+          },
+        ],
+        // Only the line count is measured here. The ~200-line target and the
+        // adherence claim in `detail` are Anthropic's documented guidance —
+        // this detector does not measure adherence or token cost at all, and
+        // saying so is what keeps the headline honest (#3180).
+        inference:
+          'Only the line count is measured. The ~200-line target and the degraded-adherence ' +
+          'consequence are Anthropic\'s documented guidance, not something observed here: no ' +
+          'adherence rate and no per-session token cost is computed. Because the figure is a ' +
+          'merge, trimming one of the merged files may not clear the target on its own.',
       },
     };
   },

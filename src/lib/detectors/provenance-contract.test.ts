@@ -40,6 +40,7 @@ import {
   demoteStaleAttribution,
 } from './provenance';
 import { emittableIdsFor } from './dual-emit';
+import { MIN_STALE_SESSIONS } from './shared';
 import type {
   Recommendation,
   RecommendationInput,
@@ -274,7 +275,7 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * unauditable recommendation, so growing it must be a deliberate edit rather
  * than the path of least resistance. Update this number DOWNWARD only.
  */
-const EXEMPT_AT_INVERSION = 52;
+const EXEMPT_AT_INVERSION = 43;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {
@@ -602,7 +603,257 @@ const rcDebug = (sessionId: string) =>
     fastModeLostCount: 5,
   }) as unknown as RecommendationInput['debugLogs'][number];
 
+// ── context/activity migration fixtures (#3180, #3183, #3185, #3188, #3189) ──
+//
+// Nine detectors migrated off the debt register together. Six of them do not
+// fire on the sample corpus, so a trigger fixture is the ONLY tier of proof
+// that runs them — hence one per detector rather than leaning on the sweep.
+// Timestamps are real ISO dates so the `asOf` path (newest OBSERVED entry,
+// never `now`) is exercised rather than skipped.
+
+const CTX_TS = '2026-06-09T12:00:00.000Z';
+const CTX_ASOF = '2026-06-09';
+
+/** A session token record with one entry, sized to hit a chosen context peak. */
+const ctxSession = (
+  sessionId: string,
+  over: {
+    inputTokens?: number;
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+    totalCacheCreationTokens?: number;
+    totalCacheReadTokens?: number;
+    compactions?: number;
+    timestamp?: string;
+  } = {}
+): RecommendationInput['tokenData'][number] =>
+  ({
+    sessionId,
+    totalOutputTokens: 5_000,
+    totalCacheCreationTokens: over.totalCacheCreationTokens ?? over.cacheCreationTokens ?? 0,
+    totalCacheReadTokens: over.totalCacheReadTokens ?? over.cacheReadTokens ?? 0,
+    entries: [
+      {
+        timestamp: over.timestamp ?? CTX_TS,
+        model: 'claude-sonnet-4-6',
+        inputTokens: over.inputTokens ?? 1_000,
+        outputTokens: 5_000,
+        cacheCreationTokens: over.cacheCreationTokens ?? 0,
+        cacheCreation1hTokens: 0,
+        cacheReadTokens: over.cacheReadTokens ?? 0,
+        webSearchRequests: 0,
+        webFetchRequests: 0,
+      },
+    ],
+    compactionEvents: Array.from({ length: over.compactions ?? 0 }, () => ({})),
+  }) as unknown as RecommendationInput['tokenData'][number];
+
+/** `n` Read calls returning `bytesEach` bytes — a large-tool-output profile. */
+const ctxReads = (
+  sessionId: string,
+  n: number,
+  bytesEach: number,
+  path = '/repo/src/lib/reclaim.ts'
+): RecommendationInput['toolData'][number] =>
+  ({
+    sessionId,
+    calls: Array.from({ length: n }, (_, i) => ({
+      timestamp: `2026-06-09T12:00:0${i}.000Z`,
+      toolName: 'Read',
+      input: { file_path: path },
+      toolUseId: `ctx-r${i}`,
+      isError: null,
+      resultBytes: bytesEach,
+    })),
+  }) as unknown as RecommendationInput['toolData'][number];
+
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
+  'activity.stale-projects': () => {
+    // Two projects over the session floor whose last activity predates the
+    // 4-week cutoff, and no `cleanupPeriodDays` ageing history out.
+    const now = Date.parse('2026-06-10T00:00:00.000Z');
+    const DAY = 24 * 60 * 60 * 1000;
+    const project = (projectShort: string, daysQuiet: number) => ({
+      project: `/home/u/${projectShort}`,
+      projectShort,
+      sessionCount: MIN_STALE_SESSIONS + 2,
+      messageCount: 120,
+      firstSeen: now - 300 * DAY,
+      lastSeen: now - daysQuiet * DAY,
+      sessions: [],
+    });
+    return {
+      input: baseInput({
+        projects: [
+          project('quiet-one', 40),
+          project('quiet-two', 95),
+        ] as unknown as RecommendationInput['projects'],
+        liveConfig: liveConfig(),
+      }),
+      now,
+    };
+  },
+
+  'context.bloated-claude-md': () => {
+    // A merged CLAUDE.md past the 200-line target. Split across a global file
+    // AND a per-project file so the "this is a merge" observation is exercised
+    // on a genuine merge rather than a single document.
+    return {
+      input: baseInput({
+        liveConfig: liveConfig({
+          claudeMd: {
+            global: 'global rule line\n'.repeat(180),
+            perProject: { '/repo': 'project rule line\n'.repeat(60) },
+          },
+        } as unknown as Partial<LiveConfig>),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'context.compaction-hot-sessions': () => {
+    // Two sessions near the window that have already compacted twice → both
+    // land in the hot band, clearing MIN_HOT_SESSIONS. Cache writes with no
+    // reads back give the reclaim arm a non-zero grounded fraction.
+    const hot = (id: string) =>
+      ctxSession(id, {
+        inputTokens: 180_000,
+        cacheCreationTokens: 1_000_000,
+        cacheReadTokens: 0,
+        compactions: 2,
+      });
+    return {
+      input: baseInput({
+        tokenData: [hot('ch-1'), hot('ch-2')],
+        timelines: [],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'context.compaction-large-tool-outputs': () => {
+    // Three hot sessions whose tool calls all return >5K-token results, so
+    // tool-output is the dominant compaction factor on each (MIN_DOMINANT = 3).
+    const ids = ['lt-1', 'lt-2', 'lt-3'];
+    return {
+      input: baseInput({
+        tokenData: ids.map((id) => ctxSession(id, { inputTokens: 140_000 })),
+        toolData: ids.map((id) => ctxReads(id, 4, 50_000)),
+        timelines: [],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'context.low-cache-hit': () => {
+    // Two sessions reading back far less than the 50% reuse floor, with real
+    // cache-write volume so the reclaim observation is exercised too.
+    return {
+      input: baseInput({
+        tokenData: [
+          ctxSession('lc-1', { cacheCreationTokens: 1_000_000, cacheReadTokens: 100_000 }),
+          ctxSession('lc-2', { cacheCreationTokens: 500_000, cacheReadTokens: 20_000 }),
+        ],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'context.low-health': () => {
+    // Score 20: -20 low cache hit, -20 two compactions, -20 peak over the warn
+    // line, -20 peak over the window — comfortably under LOW_HEALTH_SCORE (50).
+    return {
+      input: baseInput({
+        tokenData: [
+          ctxSession('lh-1', {
+            inputTokens: 210_000,
+            cacheCreationTokens: 1_000,
+            cacheReadTokens: 0,
+            compactions: 2,
+          }),
+        ],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'context.over-window': () => {
+    // Peak context 260K, past the 200K window.
+    return {
+      input: baseInput({
+        tokenData: [
+          ctxSession('ow-1', { inputTokens: 250_000, cacheReadTokens: 10_000 }),
+          ctxSession('ow-2', { inputTokens: 60_000 }),
+        ],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'context.repeated-compactions': () => {
+    // DELIBERATELY ordered against the claim: `computeCompactionRisk` sorts by
+    // riskScore, so the near-window session (2 compactions) outranks the
+    // low-context one (5 compactions). A "most-compacted = rows[0]" reading
+    // would report 2 here; the correct max is 5.
+    return {
+      input: baseInput({
+        tokenData: [
+          ctxSession('rc-low-risk', { inputTokens: 2_000, compactions: 5 }),
+          ctxSession('rc-high-risk', { inputTokens: 190_000, compactions: 2 }),
+        ],
+        timelines: [],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'context.repo-map-context-waste': () => {
+    // One stable, read-only, exported-API file that is re-read across sessions,
+    // plus the tool calls that re-read it so the priced reclaim arm fires.
+    const path = 'src/lib/reclaim.ts';
+    const repoMap = {
+      projects: [
+        {
+          root: '/repo',
+          generatedAtGitSha: 'abc123',
+          fileCount: 1,
+          truncated: false,
+          text: '(map)',
+          configSections: [],
+          configAttribution: [],
+          files: [
+            {
+              path,
+              imports: [],
+              configSections: [],
+              recommendations: [],
+              symbols: [
+                { name: 'runReclaimCascade', kind: 'function', exported: true, signature: 'f()', line: 1 },
+                { name: 'scopeKeyOf', kind: 'function', exported: true, signature: 'f()', line: 2 },
+              ],
+              reread: { sessions: 3, totalReads: 9, totalEstimatedTokenWaste: 5_000, maxPerSession: 3 },
+            },
+          ],
+        },
+      ],
+    } as unknown as RecommendationInput['repoMap'];
+    return {
+      input: baseInput({
+        repoMap,
+        toolData: [ctxReads('rm-1', 3, 4_000, `/repo/${path}`)],
+        tokenData: [ctxSession('rm-1', { cacheReadTokens: 50_000 })],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
   'reliability.api-errors': () => {
     // Recorded errors with NO rate-limit status, so the rule takes its
     // detector-id branch rather than dual-emitting `reliability.rate-limits`.
@@ -1593,6 +1844,39 @@ describe('PROVENANCE_DETECTORS trigger harness', () => {
     const rec = runAllowlistedDetector(id);
     expect(rec.provenance, `${id} emitted no provenance`).toBeDefined();
     expect(validateRecommendationProvenance(rec)).toEqual([]);
+  });
+});
+
+/**
+ * `asOf` must come from the newest OBSERVED datum, never from `now`.
+ *
+ * The validator cannot tell the difference — both are well-formed dates — so
+ * without this the easiest wrong implementation (`new Date(now)`) passes the
+ * whole contract while asserting a freshness the corpus does not have. Each
+ * fixture below observes 2026-06-09 and runs at `now` = 2026-06-10, so a
+ * now-derived date is off by exactly one day and fails here.
+ */
+describe('migrated context/activity detectors date claims from observed data', () => {
+  const tokenDerived = [
+    'context.compaction-hot-sessions',
+    'context.compaction-large-tool-outputs',
+    'context.low-cache-hit',
+    'context.low-health',
+    'context.over-window',
+    'context.repeated-compactions',
+    'context.repo-map-context-waste',
+  ];
+
+  it.each(tokenDerived)('%s anchors asOf to the newest observed entry, not today', (id) => {
+    const rec = runAllowlistedDetector(id);
+    expect(rec.provenance!.asOf).toBe(CTX_ASOF);
+  });
+
+  it('activity.stale-projects dates from the freshest project activity', () => {
+    // Its corpus is `projects[].lastSeen`, not token entries: the newest
+    // project was last active 40 days before the 2026-06-10 run.
+    const rec = runAllowlistedDetector('activity.stale-projects');
+    expect(rec.provenance!.asOf).toBe('2026-05-01');
   });
 });
 

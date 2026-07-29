@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './compaction-hot-sessions';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import { runReclaimCascade, scopeKeyOf } from '../../reclaim';
@@ -45,6 +46,45 @@ describe('context.compaction-hot-sessions (#415)', () => {
   });
   it('stays silent with no token data', () => {
     expect(detector.rule(input([]), 0)).toBeNull();
+  });
+
+  // ── Provenance (#3180) ───────────────────────────────────────────────────
+  describe('provenance', () => {
+    it('passes the contract when it fires', () => {
+      const rec = detector.rule(input([hot('s1'), hot('s2')]), 0);
+      expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    });
+
+    it('reproduces the hot count and its denominator from the cited fields', () => {
+      const rec = detector.rule(input([hot('s1'), hot('s2'), hot('s3')]), 0);
+      const head = rec!.provenance!.observations[0];
+      expect(head.value).toBe(rec!.affected);
+      expect(head.value).toBe(3);
+      expect(head.claim).toContain('of 3 scored session(s)');
+      expect(head.field).toBe('riskClass');
+    });
+
+    it('cites the percent arm as a percentage, not a fraction', () => {
+      const rec = detector.rule(input([hot('s1'), hot('s2')]), 0);
+      const pct = rec!.provenance!.observations.find((o) => o.field === 'hotPercent');
+      expect(pct).toBeDefined();
+      expect(Number(pct!.value)).toBeGreaterThan(1);
+      expect(Number(pct!.value)).toBeLessThanOrEqual(100);
+    });
+
+    it('attributes the 10-40K-per-event figure to documentation, not measurement', () => {
+      // `detail` asserts "re-sends 10-40K tokens per event"; nothing here
+      // measures the tokens any individual compaction re-sent.
+      const rec = detector.rule(input([hot('s1'), hot('s2')]), 0);
+      expect(rec!.detail).toContain('10–40K');
+      expect(rec!.provenance!.inference).toMatch(/documented range/i);
+      expect(rec!.provenance!.inference).toMatch(/does not measure/i);
+    });
+
+    it('says the risk band is forward-looking, not a record of compactions that happened', () => {
+      const rec = detector.rule(input([hot('s1'), hot('s2')]), 0);
+      expect(rec!.provenance!.inference).toMatch(/has not necessarily compacted yet/i);
+    });
   });
 
   // ── Reclaim claim (epic #944, PR3 / #949) ────────────────────────────────

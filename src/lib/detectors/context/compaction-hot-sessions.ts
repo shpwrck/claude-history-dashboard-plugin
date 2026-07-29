@@ -1,5 +1,5 @@
 import type { Detector } from '../types';
-import { claudeMdMarksApplied } from '../shared';
+import { claudeMdMarksApplied, newestTokenDataDate } from '../shared';
 import {
   computeCompactionRisk,
   summarizeCompactionRisk,
@@ -116,6 +116,8 @@ export const detector: Detector = {
           }
         : undefined;
 
+    const asOf = newestTokenDataDate(input.tokenData);
+
     return {
       id: 'context.compaction-hot-sessions',
       category: 'context',
@@ -137,6 +139,64 @@ export const detector: Detector = {
 - Read with \`offset\`/\`limit\` and prefer Grep over reading whole large files.
 - Don't pull large or unrelated files into context the current task doesn't need.`,
         appliedMarkers: MARKERS,
+      },
+      provenance: {
+        observations: [
+          {
+            claim: `${summary.hotSessions} of ${summary.totalSessions} scored session(s) sit in the medium-or-high compaction-risk band`,
+            source: 'parse-compaction-risk (computeCompactionRisk + summarizeCompactionRisk)',
+            field: 'riskClass',
+            value: summary.hotSessions,
+          },
+          {
+            claim: `that is ${summary.hotPercent.toFixed(0)}% of the scored fleet`,
+            source: 'parse-compaction-risk (summarizeCompactionRisk)',
+            field: 'hotPercent',
+            value: Number(summary.hotPercent.toFixed(2)),
+          },
+          {
+            claim: `the finding needs either MIN_HOT_SESSIONS = ${MIN_HOT_SESSIONS} hot sessions, or ${MIN_HOT_PERCENT}% of a fleet of at least MIN_FLEET_FOR_PERCENT = ${MIN_FLEET_FOR_PERCENT}`,
+            source: 'detectors/context/compaction-hot-sessions',
+            field: 'MIN_HOT_SESSIONS / MIN_HOT_PERCENT / MIN_FLEET_FOR_PERCENT',
+            value: MIN_HOT_SESSIONS,
+          },
+          summary.topSuggestion
+            ? {
+                claim: `the most common leading suggestion across the hot cohort is "${summary.topSuggestion}", on ${summary.topSuggestionCount} of them`,
+                source: 'parse-compaction-risk (summarizeCompactionRisk)',
+                field: 'topSuggestion / topSuggestionCount',
+                value: summary.topSuggestionCount,
+              }
+            : {
+                claim: 'no leading suggestion was harvested from the hot cohort',
+                source: 'parse-compaction-risk (summarizeCompactionRisk)',
+                field: 'topSuggestion',
+              },
+          ...(reclaim
+            ? [
+                {
+                  claim: `${writeTokens} cache-write token(s) across the hot cohort back the reclaim claim, of which the measured cache-shortfall fraction is ${(poolFrac * 100).toFixed(1)}%`,
+                  source: 'context-health (computeCacheEfficiency + reclaimableCacheWriteFrac)',
+                  field: 'tokenData[].entries[].cacheCreationTokens / hitRate',
+                  value: writeTokens,
+                },
+              ]
+            : []),
+        ],
+        // The band membership and the cache-write pool are measured. The
+        // "10-40K tokens per event" in `detail` is a DOCUMENTED range, not a
+        // per-event measurement taken here — several v0.6 findings exist
+        // precisely because a detail sentence asserted a cost the detector
+        // never measured (#3180).
+        inference:
+          'What is measured is band membership (a heuristic composite of peak, growth, ' +
+          'tool-output rate, re-read density and compaction count) and the cohort\'s ' +
+          'cache-write pool. The 10-40K-tokens-per-event figure in the headline is a ' +
+          'documented range for compaction in general — this detector does not measure ' +
+          'the tokens any individual compaction re-sent. The risk band is a forward-looking ' +
+          'score, so a hot session has not necessarily compacted yet.',
+        // Newest OBSERVED entry, never `now`.
+        ...(asOf ? { asOf } : {}),
       },
     };
   },

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './low-cache-hit';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import { runReclaimCascade, scopeKeyOf } from '../../reclaim';
@@ -53,6 +54,51 @@ describe('context.low-cache-hit (#949)', () => {
     expect(
       detector.rule(input([session('s1', 'claude-opus-4-8', 1_000_000, 2_000_000)]), 0)
     ).toBeNull();
+  });
+
+  // ── Provenance (#3183) ───────────────────────────────────────────────────
+  describe('provenance', () => {
+    const lowSession = (id: string) => session(id, 'claude-opus-4-8', 1_000_000, 100_000);
+    const warmSession = (id: string) => session(id, 'claude-opus-4-8', 1_000_000, 2_000_000);
+
+    it('passes the contract when it fires', () => {
+      const rec = detector.rule(input([lowSession('s1')]), 0);
+      expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    });
+
+    it('counts against sessions with cache traffic, not the whole fleet', () => {
+      // A warm session belongs in the denominator (it HAS a hit rate); it must
+      // not be counted as affected.
+      const rec = detector.rule(input([lowSession('s1'), warmSession('s2')]), 0);
+      const head = rec!.provenance!.observations[0];
+      expect(head.value).toBe(1);
+      expect(head.claim).toContain('of 2 session(s) with any cache traffic');
+      expect(head.field).toBe('hitRate');
+    });
+
+    it('cites the floor and the measured mean against their own fields', () => {
+      const rec = detector.rule(input([lowSession('s1')]), 0);
+      const obs = rec!.provenance!.observations;
+      const floor = obs.find((o) => o.field === 'LOW_HIT_RATE');
+      expect(floor?.value).toBe(LOW_HIT_RATE);
+      const mean = obs.find((o) => o.claim.includes('mean hit rate'));
+      expect(mean).toBeDefined();
+      expect(Number(mean!.value)).toBeCloseTo(100_000 / 1_100_000, 4);
+    });
+
+    it('reproduces the cited rate from the cited field — more reads, higher rate', () => {
+      const meanOf = (reads: number) => {
+        const rec = detector.rule(input([session('s1', 'claude-opus-4-8', 1_000_000, reads)]), 0);
+        return Number(rec!.provenance!.observations.find((o) => o.claim.includes('mean hit rate'))!.value);
+      };
+      expect(meanOf(400_000)).toBeGreaterThan(meanOf(100_000));
+    });
+
+    it('calls the reclaimable fraction a counterfactual, not a measured saving', () => {
+      const rec = detector.rule(input([lowSession('s1')]), 0);
+      expect(rec!.provenance!.inference).toMatch(/counterfactual/i);
+      expect(rec!.provenance!.inference).toMatch(/not a measured dollar saving/i);
+    });
   });
 
   it('self-suppresses on the cache-warm CLAUDE.md note', () => {

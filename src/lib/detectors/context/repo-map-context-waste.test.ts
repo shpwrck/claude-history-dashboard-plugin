@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './repo-map-context-waste';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import type { ToolUsageData } from '../../parse-tools';
@@ -402,5 +403,74 @@ describe('context.repo-map-context-waste (#890, epic #871 + #944)', () => {
     const rec = find(input({ repoMap: map }));
     expect(rec?.evidence?.[0]).toContain('src/pricey.ts');
     expect(rec?.affected).toBe(2);
+  });
+
+  // ── Provenance (#3189) ───────────────────────────────────────────────────
+  describe('provenance', () => {
+    // One candidate per selection reason, in ONE candidate list — the "three
+    // variants" in the finding are these three `reason` values, not three
+    // different recommendations.
+    const mixedMap = () =>
+      dataset(
+        project([
+          file({
+            path: 'config/limits.json',
+            symbols: [],
+            configSections: ['rate-limits'],
+            reread: reread(2, 3000),
+          }),
+          file({
+            path: 'src/lib/reclaim.ts',
+            symbols: [sym('runReclaimCascade')],
+            reread: reread(3, 5000),
+          }),
+          file({ path: 'src/lib/util.ts', symbols: [sym('helper', false)], reread: reread(2, 2000) }),
+          file({ path: 'src/a.ts', imports: ['./lib/util'] }),
+          file({ path: 'src/b.ts', imports: ['../lib/util'] }),
+        ])
+      );
+
+    it('passes the contract when it fires', () => {
+      const rec = find(input({ repoMap: mixedMap() }));
+      expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    });
+
+    it('reports the reason mix across all three selection paths', () => {
+      const rec = find(input({ repoMap: mixedMap() }));
+      const mix = rec!.provenance!.observations.find((o) => o.claim.includes('selection reasons'));
+      expect(mix, 'expected an observation breaking down the selection reasons').toBeDefined();
+      expect(mix!.value).toBe('1/1/1'); // config-backed / stable-api / high-centrality
+      expect(mix!.claim).toContain('config-backed');
+      expect(mix!.claim).toContain('stable exported API');
+      expect(mix!.claim).toContain('high-centrality');
+    });
+
+    it('reproduces the aggregate token figure from the cited reread field', () => {
+      const rec = find(input({ repoMap: mixedMap() }));
+      const total = rec!.provenance!.observations.find(
+        (o) => o.field === 'totalEstimatedTokenWaste'
+      );
+      expect(total!.value).toBe(3000 + 5000 + 2000);
+      // And it tracks the input rather than being restated from the detail.
+      const smaller = find(
+        input({
+          repoMap: dataset(
+            project([file({ path: 'src/x.ts', symbols: [sym('a')], reread: reread(1, 250) })])
+          ),
+        })
+      );
+      expect(
+        smaller!.provenance!.observations.find((o) => o.field === 'totalEstimatedTokenWaste')!.value
+      ).toBe(250);
+    });
+
+    it('separates the measured re-reads from the proposal that pinning removes them', () => {
+      const rec = find(input({ repoMap: mixedMap() }));
+      expect(rec!.provenance!.inference).toMatch(/ESTIMATES/);
+      expect(rec!.provenance!.inference).toMatch(/proposed consequence/i);
+      // Two honest limits the numbers alone hide.
+      expect(rec!.provenance!.inference).toMatch(/basename/i);
+      expect(rec!.provenance!.inference).toMatch(/not that the file is immutable/i);
+    });
   });
 });
