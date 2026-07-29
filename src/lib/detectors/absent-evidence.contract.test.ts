@@ -154,6 +154,103 @@ describe('the contract can actually fail (negative control)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Thin evidence: present, but too little to support a comparative claim (#3424).
+// ---------------------------------------------------------------------------
+
+/**
+ * A genuinely thin corpus: ONE session, ONE day old, one tool call.
+ *
+ * The sibling case to the empty input above. Empty is easy — there is nothing to
+ * reason from. Thin is where the mistake actually gets made: there IS data, so a
+ * detector runs, and any claim shaped as a rate, a proportion, or a cohort is
+ * being computed from a sample of one.
+ */
+function thinInput(): RecommendationInput {
+  const ts = new Date(NOW - 86_400_000).toISOString();
+  return assembleRecommendationInput({
+    tokenData: [
+      {
+        sessionId: 's1',
+        entrypoint: 'cli',
+        project: '/repo/a',
+        totalInputTokens: 500_000,
+        totalOutputTokens: 100_000,
+        entries: [
+          {
+            timestamp: ts,
+            model: 'claude-opus-4-8',
+            inputTokens: 500_000,
+            outputTokens: 100_000,
+            cacheCreationTokens: 200_000,
+            cacheCreation1hTokens: 200_000,
+            cacheReadTokens: 50_000,
+            webSearchRequests: 1,
+            webFetchRequests: 0,
+          },
+        ],
+        compactionEvents: [],
+      },
+    ] as unknown as RecommendationInput['tokenData'],
+    toolData: [
+      {
+        sessionId: 's1',
+        calls: [
+          {
+            timestamp: ts,
+            toolName: 'Bash',
+            input: { command: 'npm test' },
+            toolUseId: 'u1',
+            isError: false,
+            resultBytes: 100,
+          },
+        ],
+      },
+    ] as unknown as RecommendationInput['toolData'],
+    sessions: [
+      { sessionId: 's1', project: '/repo/a', startTime: NOW - 86_400_000 },
+    ] as unknown as RecommendationInput['sessions'],
+    projects: [],
+    permissionRows: [],
+    apiErrors: [],
+  });
+}
+
+describe('no detector makes a FLEET claim from a one-session corpus (#3424)', () => {
+  /**
+   * Measured, not assumed: exactly three detectors fire on this input, and the
+   * list is asserted so a new one cannot join silently.
+   *
+   * The two that remain are ACCOUNTING claims — counts and costs of what was
+   * actually observed, true at any corpus size:
+   *  - `cost.cache-1h-waste` measures the rate premium paid on tokens that were
+   *    really written (and books nothing, per #3192);
+   *  - `context.over-window` counts the observed sessions that passed 200K.
+   *
+   * `context.compaction-hot-sessions` was the third and is now suppressed: its
+   * percent arm read one hot session out of one as "100% of the fleet" and
+   * announced "Multiple sessions at high compaction risk" about a single
+   * session (#3424).
+   */
+  it('only accounting claims survive a one-session corpus', () => {
+    const fired = DETECTORS.filter((d) => d.rule(thinInput(), NOW) !== null).map((d) => d.id);
+    expect(fired.sort()).toEqual(['context.over-window', 'cost.cache-1h-waste']);
+  });
+
+  it('no surviving finding claims a fleet proportion', () => {
+    for (const detector of DETECTORS) {
+      const rec = detector.rule(thinInput(), NOW);
+      if (!rec) continue;
+      // A "% of the fleet" or "N of M sessions" phrasing computed from one
+      // session is the shape this guards against.
+      expect(
+        `${rec.title} ${rec.detail}`,
+        `${detector.id} described a fleet proportion from a single-session corpus`
+      ).not.toMatch(/% of the fleet/i);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Claim-producing surfaces OUTSIDE the detector catalog.
 //
 // Both of these are real, recently-fixed instances of the class (#3123). A

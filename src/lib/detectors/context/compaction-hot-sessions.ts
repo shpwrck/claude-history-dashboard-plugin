@@ -12,6 +12,24 @@ import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
 const MIN_HOT_SESSIONS = 2;
 const MIN_HOT_PERCENT = 40;
 
+/**
+ * Smallest fleet for which the PERCENT arm is allowed to fire (#3424).
+ *
+ * `hotPercent` is `hot / total`, so a single hot session in a one-session corpus
+ * reads as "100% of the fleet" and tripped the percent arm on its own — the
+ * detector then announced "Multiple sessions at high compaction risk" about one
+ * session, and reported a fleet proportion computed from n=1. A proportion is
+ * not a fleet statistic until there is a fleet.
+ *
+ * DERIVED from the two thresholds above rather than picked: below
+ * `MIN_HOT_SESSIONS / (MIN_HOT_PERCENT / 100)` = 2 / 0.4 = 5 sessions, the
+ * percent arm can only ever fire for FEWER hot sessions than the absolute arm
+ * already requires, so it can only weaken the bar. At or above it the two arms
+ * agree at the boundary (40% of 5 is 2), which also keeps the "Multiple
+ * sessions" headline true whenever this fires.
+ */
+const MIN_FLEET_FOR_PERCENT = Math.ceil(MIN_HOT_SESSIONS / (MIN_HOT_PERCENT / 100));
+
 const MARKERS = {
   headings: [/^##\s+Context discipline\b/i],
   bodyPhrases: ['letting context grow until it auto-compacts'],
@@ -35,7 +53,12 @@ export const detector: Detector = {
       input.timelines ?? []
     );
     const summary = summarizeCompactionRisk(rows);
-    if (summary.hotSessions < MIN_HOT_SESSIONS && summary.hotPercent < MIN_HOT_PERCENT) {
+    // The percent arm needs a fleet to be a proportion OF (#3424); below that
+    // only the absolute hot-session count can fire.
+    const percentArmApplies =
+      summary.totalSessions >= MIN_FLEET_FOR_PERCENT &&
+      summary.hotPercent >= MIN_HOT_PERCENT;
+    if (summary.hotSessions < MIN_HOT_SESSIONS && !percentArmApplies) {
       return null;
     }
     const lead = summary.topSuggestion ? ` Dominant fix for the cohort: ${summary.topSuggestion}.` : '';
