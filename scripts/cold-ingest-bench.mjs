@@ -7,10 +7,20 @@
 //
 //   npm run bench:ingest:cold
 //
-// Tuning:
-//   CHD_COLD_INGEST_TARGET_MB=128
-//   CHD_COLD_INGEST_WORKERS=4
-//   CHD_COLD_INGEST_MIN_SPEEDUP=2
+// Tuning (every value is fail-closed — a value that does not parse stops the
+// run instead of silently becoming something else; see scripts/lib/env-number.mjs):
+//   CHD_COLD_INGEST_TARGET_MB=128       integer, 1..1024
+//   CHD_COLD_INGEST_WORKERS=4           integer, 1..32
+//   CHD_COLD_INGEST_MIN_SPEEDUP=2       finite, strictly positive
+//
+// Flags:
+//   --measure-only    report the timings and exit 0 without gating on the
+//                     speedup threshold. This is the explicit way to take a
+//                     measurement; do NOT reach for a threshold value that
+//                     happens to be unreachable (see #3076 — the old
+//                     "MIN_SPEEDUP=0" recipe worked only because a comparison
+//                     against a nonsense threshold is always false, the same
+//                     accident that let a real regression exit green).
 
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -19,17 +29,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { buildSampleCorpus } from './sample-data/build-corpus.mjs';
+import { envNumber } from './lib/env-number.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REGISTER_TS = join(PROJECT_DIR, 'scripts', 'register-ts.mjs');
 const RUN_ID = randomUUID();
-
-function envInt(name, fallback, min, max) {
-  const raw = process.env[name];
-  const parsed = raw == null || raw === '' ? fallback : Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, parsed));
-}
 
 function hrMs() {
   const [s, ns] = process.hrtime();
@@ -112,37 +116,22 @@ function portableRowsForHash(rows) {
 }
 
 function assembleTranscriptDataset(rows, sessionSignals) {
-  const dataset = {
-    tokenData: [],
-    toolData: [],
-    toolInventories: [],
-    timelines: [],
-    apiErrors: [],
-    permissionRows: [],
-    permissionChanges: [],
-    agentSettings: [],
-    attribution: [],
-    runtimeEvents: [],
-    churnGeometry: [],
-    assistantFeatures: [],
-    deceitSignals: [],
-    taskSuccess: [],
-    entries: [],
-  };
-  const out = {
-    tokenData: dataset.tokenData,
-    toolData: dataset.toolData,
-    toolInventories: dataset.toolInventories,
-    timelines: dataset.timelines,
-    apiErrors: dataset.apiErrors,
-    agentSettings: dataset.agentSettings,
-    attribution: dataset.attribution,
-    runtimeEvents: dataset.runtimeEvents,
-    churnGeometry: dataset.churnGeometry,
-    assistantFeatures: dataset.assistantFeatures,
-    deceitSignals: dataset.deceitSignals,
-    taskSuccess: dataset.taskSuccess,
-  };
+  // The accumulator keys are DERIVED from the signal descriptors, never
+  // restated. A hand-written key list is a second copy of SESSION_SIGNALS that
+  // rots the moment ingest gains a signal — and it did: `valueFlow` and
+  // `secretsAtRest` were added after this bench was last touched (#1373), so
+  // `out[signal.datasetKey]` was `undefined` and the benchmark died with
+  // "Cannot read properties of undefined (reading 'push')" before it ever
+  // reached the speedup comparison. Deriving the keys makes that
+  // unrepresentable; the explicit throws below turn the NEXT descriptor change
+  // into a named failure instead of a TypeError.
+  const dataset = {};
+  for (const signal of sessionSignals) {
+    if (signal.datasetKey) dataset[signal.datasetKey] = [];
+  }
+  for (const key of ['permissionRows', 'permissionChanges', 'entries']) {
+    dataset[key] ??= [];
+  }
 
   for (const row of sortRows(rows)) {
     for (const signal of sessionSignals) {
@@ -153,10 +142,10 @@ function assembleTranscriptDataset(rows, sessionSignals) {
               ? JSON.parse(row[signal.column])
               : null
             : JSON.parse(row[signal.column]);
-        if (value) out[signal.datasetKey].push(value);
+        if (value) dataset[signal.datasetKey].push(value);
       } else if (signal.aggregate === 'spread') {
         for (const value of JSON.parse(row[signal.column]) || []) {
-          out[signal.datasetKey].push(value);
+          dataset[signal.datasetKey].push(value);
         }
       } else if (signal.id === 'perm') {
         const perm = JSON.parse(row[signal.column]) || {
@@ -167,6 +156,10 @@ function assembleTranscriptDataset(rows, sessionSignals) {
         dataset.permissionChanges.push(...(perm.changes || []));
       } else if (signal.id === 'entries') {
         dataset.entries.push(...(JSON.parse(row[signal.column]) || []));
+      } else {
+        throw new Error(
+          `cold ingest bench: unhandled session signal '${signal.id}' (aggregate '${signal.aggregate}') — teach assembleTranscriptDataset about it`
+        );
       }
     }
   }
@@ -217,16 +210,51 @@ async function parseParallel(sessions, workerCount, home) {
   return results.flat();
 }
 
-const targetMb = envInt('CHD_COLD_INGEST_TARGET_MB', 384, 1, 1024);
-const targetBytes = targetMb * 1024 * 1024;
+const measureOnly = process.argv.includes('--measure-only');
 const defaultWorkers = Math.max(1, Math.min(4, availableParallelism() - 1));
-const workerCount = envInt('CHD_COLD_INGEST_WORKERS', defaultWorkers, 1, 32);
-const minSpeedup = Number(process.env.CHD_COLD_INGEST_MIN_SPEEDUP || '2');
+
+// Validate every control BEFORE building the fixture: a 384 MiB corpus is an
+// expensive way to discover a typo, and a threshold that does not parse must
+// never reach the comparison at the bottom of this file.
+let targetMb;
+let workerCount;
+let minSpeedup;
+try {
+  targetMb = envNumber('CHD_COLD_INGEST_TARGET_MB', {
+    fallback: 384,
+    integer: true,
+    min: 1,
+    max: 1024,
+  });
+  workerCount = envNumber('CHD_COLD_INGEST_WORKERS', {
+    fallback: defaultWorkers,
+    integer: true,
+    min: 1,
+    max: 32,
+  });
+  minSpeedup = envNumber('CHD_COLD_INGEST_MIN_SPEEDUP', {
+    fallback: 2,
+    // Number.MIN_VALUE is the smallest positive double, so this means
+    // "strictly positive": NaN, Infinity, 0 and negatives are all rejected.
+    // A non-positive threshold can never fail, which is a disabled gate
+    // wearing a number's clothes — use --measure-only to say that out loud.
+    min: Number.MIN_VALUE,
+  });
+} catch (err) {
+  console.error(`\n✗ cold ingest bench ERROR — ${err.message}\n`);
+  process.exit(2);
+}
+
+const targetBytes = targetMb * 1024 * 1024;
 
 console.log('\n=== cold ingest worker prototype (#855) ===\n');
 console.log(`Target corpus: ${targetMb} MiB`);
 console.log(`Workers: ${workerCount} (bounded by CHD_COLD_INGEST_WORKERS)`);
-console.log(`Minimum speedup: ${minSpeedup.toFixed(2)}x\n`);
+console.log(
+  `Minimum speedup: ${
+    measureOnly ? 'not gated (--measure-only)' : `${minSpeedup.toFixed(2)}x`
+  }\n`
+);
 
 const fixture = buildLargeFixtureHome(targetBytes);
 const dbPath = join(tmpdir(), `chd-cold-ingest-${RUN_ID}.db`);
@@ -280,6 +308,8 @@ try {
     serialMs: +serialMs.toFixed(1),
     parallelMs: +parallelMs.toFixed(1),
     speedup: +speedup.toFixed(2),
+    minSpeedup,
+    gated: !measureOnly,
     rowHash: sha1(JSON.stringify(portableRowsForHash(serialRows))),
     transcriptDatasetHash: sha1(serialDatasetJson),
     sqliteWritePolicy: 'single-writer parent merge; workers return rows only',
@@ -293,7 +323,7 @@ try {
   console.log('\nJSON summary:');
   console.log(JSON.stringify(summary, null, 2));
 
-  if (speedup < minSpeedup) {
+  if (!measureOnly && speedup < minSpeedup) {
     throw new Error(
       `speedup ${speedup.toFixed(2)}x is below required ${minSpeedup.toFixed(2)}x`
     );

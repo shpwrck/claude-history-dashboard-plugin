@@ -117,28 +117,56 @@ domain.
 
 ## Cold ingest worker prototype (#855)
 
-Measured 2026-06-11 with:
+Take a measurement with:
 
 ```
-CHD_COLD_INGEST_TARGET_MB=384 \
+CHD_COLD_INGEST_TARGET_MB=128 \
 CHD_COLD_INGEST_WORKERS=8 \
-CHD_COLD_INGEST_MIN_SPEEDUP=0 \
-node --import ./scripts/register-ts.mjs scripts/cold-ingest-bench.mjs
+node --import ./scripts/register-ts.mjs scripts/cold-ingest-bench.mjs --measure-only
 ```
+
+`--measure-only` is the supported way to report timings without gating. Do NOT
+reach for a threshold value that cannot be failed: the older recipe here passed
+`CHD_COLD_INGEST_MIN_SPEEDUP=0`, which "worked" only because a comparison
+against a non-positive threshold is always false — the same accident that let a
+real regression exit green (#3076). The threshold is now fail-closed and rejects
+zero, so drop the variable and pass the flag.
 
 The benchmark scales the deterministic sample corpus into a first-ever
 empty-cache corpus on disk, parses session rows serially and through a bounded
 worker pool, then asserts byte-equivalent `session_blob` rows and
 transcript-derived dataset slices before reporting timing.
 
+Measured 2026-07-29 (`72b62944` + #3076), 8 workers, Node 24.15 with a 2240 MB
+heap limit:
+
 | Path | Corpus | Time |
 |---|---:|---:|
-| Serial read + parse | 30,504 sessions / 384.0 MiB | 14,929.7 ms |
-| Worker read + parse | 8 workers / same corpus | 5,616.5 ms |
+| Serial read + parse | 10,043 sessions / 128.0 MiB | 14,507.2 ms |
+| Worker read + parse | 8 workers / same corpus | 4,083.8 ms |
 
-Speedup: **2.66x**. The benchmark asserts byte-identical session rows before
+Speedup: **3.55x**. The benchmark asserts byte-identical session rows before
 printing timing. Transcript-derived dataset hash:
-`1b8be9afe0738bc1a08c9feee26531478f131125`.
+`fa58a9a82c1693dab6fab64c5ad1a58973e7d0b1`.
+
+Two notes on why this supersedes the 2026-06-11 entry (30,504 sessions /
+384.0 MiB, 14,929.7 ms serial vs 5,616.5 ms worker, 2.66x, dataset hash
+`1b8be9afe0738bc1a08c9feee26531478f131125`) rather than sitting beside it:
+
+- **The old dataset hash is not reproducible and should not be compared
+  against.** `assembleTranscriptDataset` kept a hand-written copy of the
+  dataset-key list; ingest later gained the `valueFlow` and `secretsAtRest`
+  signals, and every run after that died on a `TypeError` before reporting.
+  The accumulator is now derived from `SESSION_SIGNALS`, so the hash covers
+  the current signal set — a different, larger dataset than the June figure.
+- **The 384 MiB corpus is a separate, still-open problem.** Both the serial and
+  the worker row sets are held in memory at once and then JSON-serialized twice
+  for the equivalence check, so peak heap scales with the corpus. At 384 MiB
+  that exceeds a 2240 MB heap limit and the process dies with
+  `FATAL ERROR: Reached heap limit`. This reproduces identically on `72b62944`
+  without any of the #3076 changes, so it is pre-existing rather than a
+  regression; it is filed separately. Until it is bounded, 128 MiB is the
+  largest corpus that completes on a default-heap host.
 
 The prototype keeps SQLite out of workers. Workers return parsed row payloads
 only; the parent process owns the deterministic session-id merge order and is
