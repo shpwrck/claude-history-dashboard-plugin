@@ -17,6 +17,7 @@ import {
   gate2702ResolvedSidekickConfig,
   gate2702SidekickEnvironment,
 } from "./behavior-context.mjs";
+import { assertGate2702SandboxPreDispatch } from "./sandbox-dispatch.mjs";
 
 const SCHEMA_VERSION = 1;
 const MAX_ARTIFACT_BYTES = 32 * 1024 * 1024;
@@ -848,11 +849,27 @@ function validateWorkerLifecycle(
     TREATMENT_DEFINITIONS[anchor.treatmentId],
     {},
   );
+  let sandbox = null;
+  try {
+    sandbox = assertGate2702SandboxPreDispatch({
+      preDispatch,
+      registration,
+      worktreeIdentity: identity,
+    });
+  } catch {
+    fail("worker dispatch does not rederive from its production inputs");
+  }
+  const workerDispatchValid = sameValue(sandbox.workerArgv, [
+    sandbox.workerArgv[0],
+    ...WORKER_ARGV.slice(1),
+    "--plugin-dir",
+    sandbox.sidekickSnapshot.path,
+  ]);
   if (
     preDispatch.registrationDigest !== registration.contentDigest ||
     preDispatch.worktreeIdentityDigest !== identity.contentDigest ||
     preDispatch.executionMode !== "production" ||
-    !sameValue(preDispatch.argv, WORKER_ARGV) ||
+    !workerDispatchValid ||
     !sameValue(preDispatch.sidekickEnvironment, expectedEnvironment) ||
     preDispatch.sidekickEnvironmentDigest !==
       valueDigest(expectedEnvironment) ||

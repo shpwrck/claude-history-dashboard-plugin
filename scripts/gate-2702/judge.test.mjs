@@ -11,15 +11,21 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
+  GATE_2702_SIDEKICK_VERSION,
   gate2702ModelIds,
   gate2702SidekickEnvironment,
 } from "./behavior-context.mjs";
+import {
+  GATE_2702_SANDBOX_ENV_KEYS,
+  GATE_2702_SRT_INJECTED_ENV_KEYS,
+} from "./sandbox-dispatch.mjs";
 import { captureGate2702WorktreeEvidence } from "./worktree-evidence.mjs";
+import { shellQuote } from "../lib/shell-quote.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const JUDGE = join(HERE, "judge.mjs");
@@ -139,6 +145,177 @@ function workerPrompt(snapshot, registration) {
   ].join("\n");
 }
 
+function uniqueSorted(values) {
+  return [...new Set(values.map((value) => resolve(value)))].sort();
+}
+
+function sandboxedWorkerDispatch({
+  registration,
+  worktreeIdentity,
+  sidekickEnvironment,
+  root,
+  workerArgv,
+}) {
+  const testMode = registration.executionMode === "test";
+  const hostHome = join(root, "simulated-host-home");
+  const sandboxRoot = join(registration.runDir, "sandbox");
+  const isolatedHome = join(sandboxRoot, "home");
+  const settingsPath = join(sandboxRoot, "settings.json");
+  const packageRoot = join(
+    root,
+    "runtime",
+    "node_modules",
+    "@anthropic-ai",
+    "sandbox-runtime",
+  );
+  const cliPath = join(packageRoot, "dist", "cli.js");
+  const toolRoot = join(root, "runtime", "bin");
+  const tools = ["bwrap", "socat", "rg"].map((name) => ({
+    name,
+    command: join(toolRoot, name),
+    resolved: join(toolRoot, name),
+    version: `${name} fixture`,
+  }));
+  const rg = tools.find((tool) => tool.name === "rg");
+  const claude = join(toolRoot, "claude");
+  const gitCommonDirectory = resolve(worktreeIdentity.gitDirectory, "../..");
+  const sidekickPath = resolve(
+    registration.runDir,
+    "../../../..",
+    "sandbox-runtime",
+    `claude-sidekick-${GATE_2702_SIDEKICK_VERSION}`,
+  );
+  const sandboxWorkerArgv = testMode
+    ? [...workerArgv]
+    : [claude, ...workerArgv.slice(1), "--plugin-dir", sidekickPath];
+  const allowedReadRoots = uniqueSorted([
+    registration.worktreePath,
+    registration.runDir,
+    worktreeIdentity.gitDirectory,
+    gitCommonDirectory,
+    packageRoot,
+    rg.resolved,
+    sandboxWorkerArgv[0],
+    ...(testMode ? [] : [sidekickPath]),
+  ]);
+  const allowedWriteRoots = uniqueSorted([
+    registration.worktreePath,
+    isolatedHome,
+    worktreeIdentity.gitDirectory,
+  ]);
+  const policy = {
+    network: {
+      allowedDomains: testMode ? [] : ["api.anthropic.com"],
+      deniedDomains: [],
+    },
+    filesystem: {
+      denyRead: [hostHome],
+      allowRead: allowedReadRoots,
+      allowWrite: allowedWriteRoots,
+      denyWrite: ["/tmp/claude", "/private/tmp/claude"],
+    },
+    ripgrep: { command: rg.resolved },
+    bwrapPath: tools.find((tool) => tool.name === "bwrap").resolved,
+    socatPath: tools.find((tool) => tool.name === "socat").resolved,
+  };
+  const environment = {
+    CHD_EXPERIMENT_2702_ATTEMPT: String(registration.attempt),
+    CHD_EXPERIMENT_2702_BASE_SHA: registration.baseSha,
+    CHD_EXPERIMENT_2702_RUN_DIR: registration.runDir,
+    CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
+    CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
+    CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_TMPDIR: join(isolatedHome, "tmp"),
+    CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+    DISABLE_AUTOUPDATER: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    HOME: isolatedHome,
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    NO_COLOR: "1",
+    NPM_CONFIG_CACHE: join(isolatedHome, ".npm"),
+    NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+    PATH: [
+      ...new Set([
+        dirname(rg.resolved),
+        dirname(sandboxWorkerArgv[0]),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+      ]),
+    ].join(":"),
+    SHELL: "/bin/bash",
+    TERM: "dumb",
+    TMPDIR: "/tmp",
+    TZ: "UTC",
+    XDG_CACHE_HOME: join(isolatedHome, ".cache"),
+    XDG_CONFIG_HOME: join(isolatedHome, ".config"),
+    XDG_DATA_HOME: join(isolatedHome, ".local", "share"),
+    ...sidekickEnvironment,
+  };
+  const argv = [
+    process.execPath,
+    cliPath,
+    "-s",
+    settingsPath,
+    "-c",
+    [
+      `cd ${shellQuote(registration.worktreePath)}`,
+      `exec ${sandboxWorkerArgv.map(shellQuote).join(" ")}`,
+    ].join(" && "),
+  ];
+  return {
+    argv,
+    environment,
+    environmentDigest: valueDigest(environment),
+    environmentKeys: [
+      ...new Set([
+        ...GATE_2702_SANDBOX_ENV_KEYS,
+        ...Object.keys(sidekickEnvironment),
+      ]),
+    ].sort(),
+    workerEnvironmentKeys: [
+      ...new Set([
+        ...GATE_2702_SANDBOX_ENV_KEYS,
+        ...Object.keys(sidekickEnvironment),
+        ...GATE_2702_SRT_INJECTED_ENV_KEYS,
+      ]),
+    ].sort(),
+    sandbox: {
+      enforcer: "srt",
+      package: {
+        name: "@anthropic-ai/sandbox-runtime",
+        version: "0.0.52",
+        root: packageRoot,
+        cliPath,
+        manifestDigest: `sha256:${"1".repeat(64)}`,
+        cliDigest: `sha256:${"2".repeat(64)}`,
+      },
+      launcherExecutable: argv[0],
+      tools,
+      policy,
+      policyDigest: valueDigest(policy),
+      allowedReadRoots,
+      allowedWriteRoots,
+      gitDirectory: worktreeIdentity.gitDirectory,
+      gitCommonDirectory,
+      hostHome,
+      hostHomeDenied: true,
+      isolatedHome,
+      credentialMode: "isolated-home-credential-only",
+      sidekickSnapshot: testMode
+        ? null
+        : {
+            path: sidekickPath,
+            contentDigest: `sha256:${"3".repeat(64)}`,
+          },
+      workerArgv: sandboxWorkerArgv,
+    },
+  };
+}
+
 function createFixture({
   responses,
   workerResultBytes = 0,
@@ -147,6 +324,8 @@ function createFixture({
   executionMode = "production",
   invalidPromptDigest = false,
   invalidWorktreeIdentityDigest = false,
+  protectedCanary = null,
+  omitOriginSandbox = false,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "gate-2702-judge-"));
   const repo = join(root, "repo");
@@ -163,6 +342,15 @@ function createFixture({
   mkdirSync(repo, { recursive: true });
   mkdirSync(worktrees, { recursive: true });
   mkdirSync(tools, { recursive: true });
+  if (protectedCanary) {
+    const simulatedClaudeRoot = join(root, "simulated-host-home", ".claude");
+    mkdirSync(simulatedClaudeRoot, { recursive: true });
+    writeFileSync(
+      join(simulatedClaudeRoot, "history.jsonl"),
+      `${protectedCanary}\n`,
+      "utf8",
+    );
+  }
   git(repo, ["init", "--quiet", "--initial-branch=master"]);
   git(repo, ["config", "user.name", "Gate 2702 Test"]);
   git(repo, ["config", "user.email", "gate-2702@example.invalid"]);
@@ -252,7 +440,9 @@ function createFixture({
       result:
         workerResultBytes > 0
           ? `${index}:`.padEnd(workerResultBytes, "x")
-          : `Final result for arm ${index}.`,
+          : [`Final result for arm ${index}.`, protectedCanary]
+              .filter(Boolean)
+              .join("\n"),
     })}\n`;
     const behaviorContext = {
       schemaVersion: 1,
@@ -316,6 +506,31 @@ function createFixture({
       TREATMENT_CONFIGURATIONS[treatmentId],
       modelEnv,
     );
+    const directWorkerArgv =
+      executionMode === "production"
+        ? [
+            "claude",
+            "-p",
+            "--model",
+            gate2702ModelIds(modelEnv).worker,
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+            "--strict-mcp-config",
+            "--max-budget-usd",
+            "15",
+          ]
+        : [process.execPath, "fake-worker.mjs"];
+    const sandboxedDispatch =
+      !omitOriginSandbox
+        ? sandboxedWorkerDispatch({
+            registration,
+            worktreeIdentity,
+            sidekickEnvironment,
+            root,
+            workerArgv: directWorkerArgv,
+          })
+        : { argv: directWorkerArgv };
     const preDispatch = writeReceipt(join(runDir, "pre-dispatch.json"), {
       schemaVersion: 1,
       kind: "Gate2702PreDispatch",
@@ -330,21 +545,7 @@ function createFixture({
       attempt: 1,
       baseSha,
       executionMode,
-      argv:
-        executionMode === "production"
-          ? [
-              "claude",
-              "-p",
-              "--model",
-              gate2702ModelIds(modelEnv).worker,
-              "--output-format",
-              "json",
-              "--dangerously-skip-permissions",
-              "--strict-mcp-config",
-              "--max-budget-usd",
-              "15",
-            ]
-          : [process.execPath, "fake-worker.mjs"],
+      ...sandboxedDispatch,
       sidekickEnvironment,
       sidekickEnvironmentDigest: valueDigest(sidekickEnvironment),
       cwd: worktreePath,
@@ -682,10 +883,15 @@ test("judge freezes a blind position-swapped pair and records an agreed result",
     for (const call of calls) {
       assert.deepEqual(Object.keys(call.payload).sort(), [
         "artifacts",
+        "originProvenance",
         "rubric",
         "task",
       ]);
       assert.deepEqual(Object.keys(call.payload.artifacts).sort(), ["A", "B"]);
+      assert.deepEqual(Object.keys(call.payload.originProvenance).sort(), [
+        "A",
+        "B",
+      ]);
       assert.equal(call.sidekickEnable, "0");
       assert.deepEqual(call.argv.slice(0, 2), ["-p", "--model"]);
       assert.ok(call.argv.includes("claude-haiku-4-5-20251001"));
@@ -719,6 +925,10 @@ test("judge freezes a blind position-swapped pair and records an agreed result",
     assert.deepEqual(calls[1].payload.artifacts, {
       A: calls[0].payload.artifacts.B,
       B: calls[0].payload.artifacts.A,
+    });
+    assert.deepEqual(calls[1].payload.originProvenance, {
+      A: calls[0].payload.originProvenance.B,
+      B: calls[0].payload.originProvenance.A,
     });
 
     const judgingRoot = join(fixture.trialRoot, "judging", "issue-2760");
@@ -770,6 +980,11 @@ test("judge freezes a blind position-swapped pair and records an agreed result",
     assert.equal(requests.executionMode, "production");
     assert.equal(evidence.executionMode, "production");
     assert.equal(input.armEvidence["haiku-solo"], evidence.contentDigest);
+    assert.equal(
+      input.originProvenance["haiku-solo"],
+      evidence.originProvenance.contentDigest,
+    );
+    assert.equal(evidence.originProvenance.assertions.hostHomeDenied, true);
     assert.match(
       Buffer.from(evidence.diff.trackedPatch.bytes, "base64").toString("utf8"),
       /-base\n\+control change/,
@@ -800,6 +1015,21 @@ test("production judge rejects test-mode worker evidence before dispatch", () =>
     const result = runJudge(fixture);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /execution mode/i);
+    assert.equal(existsSync(fixture.callLog), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("protected worker output without sandbox origin provenance is rejected before judge dispatch", () => {
+  const fixture = createFixture({
+    protectedCanary: "CLAUDE_HISTORY_CANARY_3086",
+    omitOriginSandbox: true,
+  });
+  try {
+    const result = runJudge(fixture);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /sandbox|origin provenance/i);
     assert.equal(existsSync(fixture.callLog), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -899,6 +1129,54 @@ test("existing frozen evidence rejects a rehashed substituted artifact", () => {
     const repeated = runJudge(fixture);
     assert.equal(repeated.status, 1);
     assert.match(repeated.stderr, /artifact is not derived from its bytes/i);
+    assert.equal(
+      readFileSync(fixture.callLog, "utf8").trim().split("\n").length,
+      callsBefore,
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("coherently rehashed origin-provenance tampering is rejected before redispatch", () => {
+  const fixture = createFixture();
+  try {
+    assert.equal(runJudge(fixture).status, 0);
+    const judgingRoot = join(fixture.trialRoot, "judging", "issue-2760");
+    const evidencePath = join(
+      judgingRoot,
+      "evidence",
+      "haiku-solo.json",
+    );
+    const evidence = readJson(evidencePath);
+    evidence.originProvenance.sandboxPolicyDigest = bytesDigest(
+      "forged sandbox policy",
+    );
+    evidence.originProvenance = withDigest(evidence.originProvenance);
+    const tamperedEvidence = withDigest(evidence);
+    writeFileSync(
+      evidencePath,
+      `${JSON.stringify(tamperedEvidence, null, 2)}\n`,
+      "utf8",
+    );
+
+    const inputPath = join(judgingRoot, "input.json");
+    const input = readJson(inputPath);
+    input.armEvidence["haiku-solo"] = tamperedEvidence.contentDigest;
+    input.originProvenance["haiku-solo"] =
+      tamperedEvidence.originProvenance.contentDigest;
+    writeFileSync(
+      inputPath,
+      `${JSON.stringify(withDigest(input), null, 2)}\n`,
+      "utf8",
+    );
+    const callsBefore = readFileSync(fixture.callLog, "utf8")
+      .trim()
+      .split("\n").length;
+
+    const repeated = runJudge(fixture);
+    assert.equal(repeated.status, 1);
+    assert.match(repeated.stderr, /origin provenance/i);
     assert.equal(
       readFileSync(fixture.callLog, "utf8").trim().split("\n").length,
       callsBefore,

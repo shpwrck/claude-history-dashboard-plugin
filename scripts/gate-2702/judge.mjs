@@ -26,6 +26,8 @@ import {
   gate2702ModelIds,
   gate2702SidekickEnvironment,
 } from "./behavior-context.mjs";
+import { buildGate2702JudgeOriginProvenance } from "./seal-judge.mjs";
+import { assertGate2702SandboxPreDispatch } from "./sandbox-dispatch.mjs";
 import { captureGate2702WorktreeEvidence } from "./worktree-evidence.mjs";
 
 const SCHEMA_VERSION = 1;
@@ -664,15 +666,34 @@ function validateSelectionInputs(paths, options) {
       preDispatch.argv.length === 0 ||
       preDispatch.argv.some(
         (argument) => typeof argument !== "string" || !argument,
-      ) ||
-      (executionMode === "production" &&
-        !sameValue(preDispatch.argv, expectedWorkerArgv()))
+      )
     ) {
       fail(
         `${treatmentId} worker dispatch is not the registered C5 invocation`,
       );
     }
-    validateWorktreeIdentity(registration, preDispatch);
+    const worktreeIdentity = validateWorktreeIdentity(
+      registration,
+      preDispatch,
+    );
+    const sandbox = assertGate2702SandboxPreDispatch({
+      preDispatch,
+      registration,
+      worktreeIdentity,
+    });
+    if (executionMode === "production") {
+      const expectedSandboxedWorkerArgv = [
+        sandbox.workerArgv[0],
+        ...expectedWorkerArgv().slice(1),
+        "--plugin-dir",
+        sandbox.sidekickSnapshot.path,
+      ];
+      if (!sameValue(sandbox.workerArgv, expectedSandboxedWorkerArgv)) {
+        fail(
+          `${treatmentId} worker origin provenance does not bind the fixed C5 invocation`,
+        );
+      }
+    }
 
     const processReceipt = assertIdentity(
       readReceipt(join(runDir, "process.json"), "Gate2702Process"),
@@ -750,6 +771,7 @@ function validateSelectionInputs(paths, options) {
       registration,
       preflight,
       preDispatch,
+      worktreeIdentity,
       processReceipt,
       terminal,
       classification,
@@ -765,6 +787,7 @@ function freezeInput(paths, options) {
   const source = validateSelectionInputs(paths, options);
   const artifacts = {};
   const armEvidence = {};
+  const originProvenance = {};
   const objectiveChecks = {};
   for (const treatmentId of TREATMENTS) {
     const arm = source.arms[treatmentId];
@@ -779,6 +802,17 @@ function freezeInput(paths, options) {
     }
     const diff = frozenWorktree.diff;
     const artifact = artifactText(workerResult, diff, arm.registration);
+    const workerResultDigest = sha256Bytes(
+      Buffer.from(workerResult, "utf8"),
+    );
+    const origin = buildGate2702JudgeOriginProvenance({
+      registration: arm.registration,
+      preDispatch: arm.preDispatch,
+      worktreeIdentity: arm.worktreeIdentity,
+      classification: arm.classification,
+      workerResultDigest,
+      worktreeEvidence: frozenWorktree.evidence,
+    });
     const evidence = writeImmutableReceipt(
       join(paths.judgingRoot, "evidence", `${treatmentId}.json`),
       {
@@ -795,14 +829,16 @@ function freezeInput(paths, options) {
         registrationDigest: arm.registration.contentDigest,
         classificationDigest: arm.classification.contentDigest,
         workerResult,
-        workerResultDigest: sha256Bytes(Buffer.from(workerResult, "utf8")),
+        workerResultDigest,
         worktreeEvidence: frozenWorktree.evidence,
         diff,
         artifact,
+        originProvenance: origin,
       },
     );
     artifacts[treatmentId] = evidence.artifact;
     armEvidence[treatmentId] = evidence.contentDigest;
+    originProvenance[treatmentId] = origin.contentDigest;
     objectiveChecks[treatmentId] = {
       classificationDigest: arm.classification.contentDigest,
       results: arm.classification.checkResults,
@@ -825,6 +861,7 @@ function freezeInput(paths, options) {
     subjectSnapshotDigest: source.snapshot.contentDigest,
     task: `${source.snapshot.title}\n\n${source.snapshot.body}`,
     armEvidence,
+    originProvenance,
     objectiveChecks,
     artifacts,
   });
@@ -922,6 +959,46 @@ function validateEvidenceContent(paths, evidence) {
       `${evidence.treatmentId} worktree evidence is not derived from its bytes`,
     );
   }
+  const origin = verifyReceipt(
+    evidence.originProvenance,
+    "Gate2702JudgeOriginProvenance",
+  );
+  const expectedOriginAssertions = {
+    hostHomeDenied: true,
+    workerResultSource: "sandboxed-worker-stdout",
+    diffSource: "sandbox-confined-disposable-worktree",
+    forbiddenSource: "host-home",
+  };
+  if (
+    !sameValue(origin.definitionRef, DEFINITION_REF) ||
+    origin.trialId !== evidence.trialId ||
+    origin.subject !== evidence.subject ||
+    origin.treatmentId !== evidence.treatmentId ||
+    origin.attempt !== evidence.attempt ||
+    origin.baseSha !== evidence.baseSha ||
+    origin.executionMode !== evidence.executionMode ||
+    !sameValue(origin.policy, {
+      id: "policies/gate-2702-judge-origin",
+      version: 1,
+    }) ||
+    origin.registrationDigest !== evidence.registrationDigest ||
+    origin.classificationDigest !== evidence.classificationDigest ||
+    origin.workerResultDigest !== evidence.workerResultDigest ||
+    origin.worktreeEvidenceDigest !== expectedWorktreeEvidence.contentDigest ||
+    ![
+      origin.preDispatchDigest,
+      origin.worktreeIdentityDigest,
+      origin.sandboxPolicyDigest,
+      origin.sandboxAllowedReadRootsDigest,
+      origin.sandboxAllowedWriteRootsDigest,
+      origin.workerStdoutDigest,
+    ].every((digest) => /^sha256:[0-9a-f]{64}$/.test(digest ?? "")) ||
+    !sameValue(origin.assertions, expectedOriginAssertions)
+  ) {
+    fail(
+      `${evidence.treatmentId} origin provenance does not bind its sandboxed sources`,
+    );
+  }
   const redactions = expectedArmPaths(
     paths,
     evidence.subject,
@@ -948,17 +1025,31 @@ function expectedPayloads(input) {
       A: input.artifacts[TREATMENTS[0]],
       B: input.artifacts[TREATMENTS[1]],
     },
+    originProvenance: {
+      A: input.originProvenance[TREATMENTS[0]],
+      B: input.originProvenance[TREATMENTS[1]],
+    },
   };
   const swapped = {
     task: input.task,
     rubric: RUBRIC,
     artifacts: { A: forward.artifacts.B, B: forward.artifacts.A },
+    originProvenance: {
+      A: forward.originProvenance.B,
+      B: forward.originProvenance.A,
+    },
   };
   return { forward, swapped };
 }
 
 function validateFrozenInput(paths, input, options) {
   const executionMode = gate2702ExecutionMode();
+  const liveSource =
+    [paths.trial, paths.snapshot, paths.selection].every((path) =>
+      existsSync(path),
+    )
+      ? validateSelectionInputs(paths, options)
+      : null;
   if (
     !sameValue(input.definitionRef, DEFINITION_REF) ||
     input.trialId !== options.trial ||
@@ -971,6 +1062,10 @@ function validateFrozenInput(paths, input, options) {
     !input.task.trim() ||
     !sameValue(
       Object.keys(input.armEvidence ?? {}).sort(),
+      [...TREATMENTS].sort(),
+    ) ||
+    !sameValue(
+      Object.keys(input.originProvenance ?? {}).sort(),
       [...TREATMENTS].sort(),
     ) ||
     !sameValue(
@@ -996,6 +1091,22 @@ function validateFrozenInput(paths, input, options) {
         "Gate2702JudgeArmEvidence",
       ),
     );
+    if (liveSource) {
+      const arm = liveSource.arms[treatmentId];
+      const expectedOrigin = buildGate2702JudgeOriginProvenance({
+        registration: arm.registration,
+        preDispatch: arm.preDispatch,
+        worktreeIdentity: arm.worktreeIdentity,
+        classification: arm.classification,
+        workerResultDigest: evidence.workerResultDigest,
+        worktreeEvidence: evidence.worktreeEvidence,
+      });
+      if (!sameValue(evidence.originProvenance, expectedOrigin)) {
+        fail(
+          `${treatmentId} origin provenance does not bind its live sandboxed sources`,
+        );
+      }
+    }
     const objective = input.objectiveChecks?.[treatmentId];
     const objectiveStatuses = Array.isArray(objective?.results)
       ? objective.results.map((check) => check?.status)
@@ -1020,6 +1131,8 @@ function validateFrozenInput(paths, input, options) {
       evidence.pairSelectionDigest !== input.pairSelectionDigest ||
       !/^sha256:[0-9a-f]{64}$/.test(evidence.registrationDigest ?? "") ||
       evidence.classificationDigest !== objective?.classificationDigest ||
+      input.originProvenance?.[treatmentId] !==
+        evidence.originProvenance.contentDigest ||
       input.artifacts?.[treatmentId] !== evidence.artifact ||
       objectiveStatuses.length !== CHECK_IDS.length ||
       !sameValue([...objectiveCheckIds].sort(), [...CHECK_IDS].sort()) ||

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { validateGate2702JudgeEvidence } from "./seal-judge.mjs";
+import { GATE_2702_SIDEKICK_VERSION } from "./behavior-context.mjs";
+import {
+  GATE_2702_SANDBOX_ENV_KEYS,
+  GATE_2702_SRT_INJECTED_ENV_KEYS,
+} from "./sandbox-dispatch.mjs";
+import { shellQuote } from "../lib/shell-quote.mjs";
 
 const TRIAL_ID = "4f503910-77de-4ac0-b454-3ac913d96288";
 const SUBJECT = 2760;
@@ -170,6 +177,154 @@ function workerArgv() {
   ];
 }
 
+function uniqueSorted(values) {
+  return [...new Set(values.map((value) => resolve(value)))].sort();
+}
+
+function sandboxedWorkerDispatch(registration, worktreeIdentity) {
+  const hostHome = "/fixture/host-home";
+  const sandboxRoot = join(registration.runDir, "sandbox");
+  const isolatedHome = join(sandboxRoot, "home");
+  const settingsPath = join(sandboxRoot, "settings.json");
+  const packageRoot =
+    "/fixture/runtime/node_modules/@anthropic-ai/sandbox-runtime";
+  const cliPath = join(packageRoot, "dist", "cli.js");
+  const toolRoot = "/fixture/runtime/bin";
+  const tools = ["bwrap", "socat", "rg"].map((name) => ({
+    name,
+    command: join(toolRoot, name),
+    resolved: join(toolRoot, name),
+    version: `${name} fixture`,
+  }));
+  const rg = tools.find((tool) => tool.name === "rg");
+  const claude = join(toolRoot, "claude");
+  const gitCommonDirectory = resolve(worktreeIdentity.gitDirectory, "../..");
+  const sidekickPath = resolve(
+    registration.runDir,
+    "../../../..",
+    "sandbox-runtime",
+    `claude-sidekick-${GATE_2702_SIDEKICK_VERSION}`,
+  );
+  const sandboxWorkerArgv = [
+    claude,
+    ...workerArgv().slice(1),
+    "--plugin-dir",
+    sidekickPath,
+  ];
+  const allowedReadRoots = uniqueSorted([
+    registration.worktreePath,
+    registration.runDir,
+    worktreeIdentity.gitDirectory,
+    gitCommonDirectory,
+    packageRoot,
+    rg.resolved,
+    claude,
+    sidekickPath,
+  ]);
+  const allowedWriteRoots = uniqueSorted([
+    registration.worktreePath,
+    isolatedHome,
+    worktreeIdentity.gitDirectory,
+  ]);
+  const policy = {
+    network: {
+      allowedDomains: ["api.anthropic.com"],
+      deniedDomains: [],
+    },
+    filesystem: {
+      denyRead: [hostHome],
+      allowRead: allowedReadRoots,
+      allowWrite: allowedWriteRoots,
+      denyWrite: ["/tmp/claude", "/private/tmp/claude"],
+    },
+    ripgrep: { command: rg.resolved },
+    bwrapPath: tools.find((tool) => tool.name === "bwrap").resolved,
+    socatPath: tools.find((tool) => tool.name === "socat").resolved,
+  };
+  const sidekickEnvironment = {};
+  const environment = {
+    CHD_EXPERIMENT_2702_ATTEMPT: String(registration.attempt),
+    CHD_EXPERIMENT_2702_BASE_SHA: registration.baseSha,
+    CHD_EXPERIMENT_2702_RUN_DIR: registration.runDir,
+    CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
+    CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
+    CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_TMPDIR: join(isolatedHome, "tmp"),
+    CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+    DISABLE_AUTOUPDATER: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    HOME: isolatedHome,
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    NO_COLOR: "1",
+    NPM_CONFIG_CACHE: join(isolatedHome, ".npm"),
+    NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+    PATH: [toolRoot, "/usr/local/bin", "/usr/bin", "/bin"].join(":"),
+    SHELL: "/bin/bash",
+    TERM: "dumb",
+    TMPDIR: "/tmp",
+    TZ: "UTC",
+    XDG_CACHE_HOME: join(isolatedHome, ".cache"),
+    XDG_CONFIG_HOME: join(isolatedHome, ".config"),
+    XDG_DATA_HOME: join(isolatedHome, ".local", "share"),
+  };
+  const argv = [
+    "/fixture/runtime/bin/node",
+    cliPath,
+    "-s",
+    settingsPath,
+    "-c",
+    [
+      `cd ${shellQuote(registration.worktreePath)}`,
+      `exec ${sandboxWorkerArgv.map(shellQuote).join(" ")}`,
+    ].join(" && "),
+  ];
+  return {
+    argv,
+    sidekickEnvironment,
+    sidekickEnvironmentDigest: valueDigest(sidekickEnvironment),
+    environment,
+    environmentDigest: valueDigest(environment),
+    environmentKeys: [...GATE_2702_SANDBOX_ENV_KEYS].sort(),
+    workerEnvironmentKeys: [
+      ...new Set([
+        ...GATE_2702_SANDBOX_ENV_KEYS,
+        ...GATE_2702_SRT_INJECTED_ENV_KEYS,
+      ]),
+    ].sort(),
+    sandbox: {
+      enforcer: "srt",
+      package: {
+        name: "@anthropic-ai/sandbox-runtime",
+        version: "0.0.52",
+        root: packageRoot,
+        cliPath,
+        manifestDigest: `sha256:${"1".repeat(64)}`,
+        cliDigest: `sha256:${"2".repeat(64)}`,
+      },
+      launcherExecutable: argv[0],
+      tools,
+      policy,
+      policyDigest: valueDigest(policy),
+      allowedReadRoots,
+      allowedWriteRoots,
+      gitDirectory: worktreeIdentity.gitDirectory,
+      gitCommonDirectory,
+      hostHome,
+      hostHomeDenied: true,
+      isolatedHome,
+      credentialMode: "isolated-home-credential-only",
+      sidekickSnapshot: {
+        path: sidekickPath,
+        contentDigest: `sha256:${"3".repeat(64)}`,
+      },
+      workerArgv: sandboxWorkerArgv,
+    },
+  };
+}
+
 function createFixture({
   executionMode = "production",
   frozenArtifact = null,
@@ -178,6 +333,8 @@ function createFixture({
   worktreeAggregateBytes = 0,
   promptDigest = null,
   worktreeIdentityDigest = null,
+  protectedCanary = null,
+  omitOriginProvenance = false,
 } = {}) {
   const artifacts = new Map();
   const put = (path, receipt) => {
@@ -187,6 +344,8 @@ function createFixture({
   };
   const putBytes = (path, bytes) => artifacts.set(path, Buffer.from(bytes));
   const registrations = {};
+  const worktreeIdentities = {};
+  const preDispatches = {};
   const classifications = {};
   const checkResults = [
     { checkId: "checks/gate-2702-vitest", status: "passed" },
@@ -296,6 +455,8 @@ function createFixture({
       identityToken: `${index + 1}${String(index + 1).repeat(7)}-${String(index + 1).repeat(4)}-4${String(index + 1).repeat(3)}-8${String(index + 1).repeat(3)}-${String(index + 1).repeat(12)}`,
       createdAt: "2026-07-20T11:00:00.000Z",
     });
+    worktreeIdentities[treatmentId] = identity;
+    const sandboxedDispatch = sandboxedWorkerDispatch(registration, identity);
     const preDispatch = put(`${prefix}/pre-dispatch.json`, {
       schemaVersion: 1,
       kind: "Gate2702PreDispatch",
@@ -308,12 +469,13 @@ function createFixture({
       baseSha: BASE_SHA,
       executionMode,
       cwd: registration.worktreePath,
-      argv: workerArgv(),
+      ...sandboxedDispatch,
       promptDigest:
         promptDigest ??
         sha256(Buffer.from(workerPrompt(snapshot, registration))),
       worktreeIdentityDigest: worktreeIdentityDigest ?? identity.contentDigest,
     });
+    preDispatches[treatmentId] = preDispatch;
     const processReceipt = put(`${prefix}/process.json`, {
       schemaVersion: 1,
       kind: "Gate2702Process",
@@ -343,7 +505,12 @@ function createFixture({
       timedOut: false,
       processGroupQuiescent: true,
     });
-    const workerResult = `Final result for ${treatmentId}.`;
+    const workerResult = [
+      `Final result for ${treatmentId}.`,
+      protectedCanary,
+    ]
+      .filter(Boolean)
+      .join("\n");
     const stdoutBytes = Buffer.from(
       `${JSON.stringify({ result: workerResult })}\n`,
     );
@@ -401,9 +568,15 @@ function createFixture({
 
   const objectiveChecks = {};
   const armEvidence = {};
+  const originProvenance = {};
   const frozenArtifacts = {};
   for (const treatmentId of TREATMENTS) {
-    const workerResult = `Final result for ${treatmentId}.`;
+    const workerResult = [
+      `Final result for ${treatmentId}.`,
+      protectedCanary,
+    ]
+      .filter(Boolean)
+      .join("\n");
     const diff = {
       trackedPatch: {
         encoding: "base64",
@@ -414,7 +587,43 @@ function createFixture({
       untracked: [],
     };
     const artifact =
-      frozenArtifact ?? "Final result for <arm>.\n\n[FINAL TRACKED DIFF]";
+      frozenArtifact ??
+      `${workerResult.replaceAll(treatmentId, "<arm>")}\n\n[FINAL TRACKED DIFF]`;
+    const workerResultDigest = sha256(Buffer.from(workerResult));
+    const preDispatch = preDispatches[treatmentId];
+    const sandbox = preDispatch.sandbox;
+    const origin = withDigest({
+      schemaVersion: 1,
+      kind: "Gate2702JudgeOriginProvenance",
+      definitionRef: DEFINITION_REF,
+      trialId: TRIAL_ID,
+      subject: SUBJECT,
+      treatmentId,
+      attempt: 1,
+      baseSha: BASE_SHA,
+      executionMode,
+      policy: {
+        id: "policies/gate-2702-judge-origin",
+        version: 1,
+      },
+      registrationDigest: registrations[treatmentId].contentDigest,
+      preDispatchDigest: preDispatch.contentDigest,
+      worktreeIdentityDigest: worktreeIdentities[treatmentId].contentDigest,
+      classificationDigest: classifications[treatmentId].contentDigest,
+      sandboxPolicyDigest: sandbox.policyDigest,
+      sandboxAllowedReadRootsDigest: valueDigest(sandbox.allowedReadRoots),
+      sandboxAllowedWriteRootsDigest: valueDigest(sandbox.allowedWriteRoots),
+      workerStdoutDigest:
+        classifications[treatmentId].workerArtifacts.stdout.contentDigest,
+      workerResultDigest,
+      worktreeEvidenceDigest: worktreeEvidence.contentDigest,
+      assertions: {
+        hostHomeDenied: true,
+        workerResultSource: "sandboxed-worker-stdout",
+        diffSource: "sandbox-confined-disposable-worktree",
+        forbiddenSource: "host-home",
+      },
+    });
     const evidence = put(
       `judging/issue-${SUBJECT}/evidence/${treatmentId}.json`,
       {
@@ -431,13 +640,15 @@ function createFixture({
         registrationDigest: registrations[treatmentId].contentDigest,
         classificationDigest: classifications[treatmentId].contentDigest,
         workerResult,
-        workerResultDigest: sha256(Buffer.from(workerResult)),
+        workerResultDigest,
         worktreeEvidence,
         diff,
         artifact,
+        ...(omitOriginProvenance ? {} : { originProvenance: origin }),
       },
     );
     armEvidence[treatmentId] = evidence.contentDigest;
+    originProvenance[treatmentId] = origin.contentDigest;
     frozenArtifacts[treatmentId] = artifact;
     objectiveChecks[treatmentId] = {
       classificationDigest: classifications[treatmentId].contentDigest,
@@ -457,6 +668,7 @@ function createFixture({
     subjectSnapshotDigest: snapshot.contentDigest,
     task: "Fixture issue\n\nImplement the requested behavior.",
     armEvidence,
+    originProvenance,
     objectiveChecks,
     artifacts: frozenArtifacts,
   });
@@ -468,6 +680,10 @@ function createFixture({
         A: frozenArtifacts[TREATMENTS[0]],
         B: frozenArtifacts[TREATMENTS[1]],
       },
+      originProvenance: {
+        A: originProvenance[TREATMENTS[0]],
+        B: originProvenance[TREATMENTS[1]],
+      },
     },
     swapped: {
       task: input.task,
@@ -475,6 +691,10 @@ function createFixture({
       artifacts: {
         A: frozenArtifacts[TREATMENTS[1]],
         B: frozenArtifacts[TREATMENTS[0]],
+      },
+      originProvenance: {
+        A: originProvenance[TREATMENTS[1]],
+        B: originProvenance[TREATMENTS[0]],
       },
     },
   };
@@ -725,6 +945,20 @@ test("production verification rejects a coherently re-digested test-mode source"
   assert.throws(
     () => validate(createFixture({ executionMode: "test" })),
     /production execution mode/,
+  );
+});
+
+test("protected worker output without bound origin provenance is rejected before judge dispatch", () => {
+  const simulatedClaudeCanary = "CLAUDE_HISTORY_CANARY_3086";
+  assert.throws(
+    () =>
+      validate(
+        createFixture({
+          protectedCanary: simulatedClaudeCanary,
+          omitOriginProvenance: true,
+        }),
+      ),
+    /origin provenance/i,
   );
 });
 

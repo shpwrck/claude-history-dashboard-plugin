@@ -15,15 +15,24 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-
-import { GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION } from "./behavior-context.mjs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
+import {
+  GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION,
+  GATE_2702_SIDEKICK_VERSION,
+} from "./behavior-context.mjs";
 import { buildGate2702Runtime } from "../build-gate-2702-runtime.mjs";
+import { shellQuote } from "../lib/shell-quote.mjs";
 import { evaluateTrial } from "./evaluate.mjs";
+import {
+  GATE_2702_SANDBOX_ENV_KEYS,
+  GATE_2702_SRT_INJECTED_ENV_KEYS,
+  digestGate2702SidekickSnapshot,
+} from "./sandbox-dispatch.mjs";
 import { deriveGate2702AccountingEvidence } from "./seal-accounting.mjs";
+import { buildGate2702JudgeOriginProvenance } from "./seal-judge.mjs";
 import { loadVerifiedTrial, sealTrial, verifyTrial } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -969,6 +978,198 @@ function sidekickEnvironment(treatmentId) {
   };
 }
 
+function uniqueSortedPaths(values) {
+  return [...new Set(values.map((value) => resolve(value)))].sort();
+}
+
+function ensureFixtureSidekickSnapshot(fixture) {
+  const snapshotRoot = join(
+    fixture.trialRoot,
+    "sandbox-runtime",
+    `claude-sidekick-${GATE_2702_SIDEKICK_VERSION}`,
+  );
+  const files = {
+    ".claude-plugin/plugin.json": '{"name":"gate-2702-fixture"}\n',
+    "hooks/checkpoint.sh": "#!/bin/sh\nexit 0\n",
+    "scripts/sidekick.mjs": "export const fixture = true;\n",
+  };
+  for (const [relativePath, content] of Object.entries(files)) {
+    const path = join(snapshotRoot, relativePath);
+    if (!existsSync(path)) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, content, "utf8");
+    }
+  }
+  return {
+    path: snapshotRoot,
+    contentDigest: digestGate2702SidekickSnapshot(snapshotRoot),
+  };
+}
+
+function sandboxedWorkerDispatch(
+  fixture,
+  registration,
+  worktreeIdentity,
+  recordedSidekickEnvironment,
+) {
+  const hostHome = fixture.home;
+  const sandboxRoot = join(registration.runDir, "sandbox");
+  const isolatedHome = join(sandboxRoot, "home");
+  const settingsPath = join(sandboxRoot, "settings.json");
+  const packageRoot = join(
+    fixture.root,
+    "runtime",
+    "node_modules",
+    "@anthropic-ai",
+    "sandbox-runtime",
+  );
+  const cliPath = join(packageRoot, "dist", "cli.js");
+  const toolRoot = join(fixture.root, "runtime", "bin");
+  const tools = ["bwrap", "socat", "rg"].map((name) => ({
+    name,
+    command: join(toolRoot, name),
+    resolved: join(toolRoot, name),
+    version: `${name} fixture`,
+  }));
+  const rg = tools.find((tool) => tool.name === "rg");
+  const claude = join(toolRoot, "claude");
+  const gitCommonDirectory = resolve(worktreeIdentity.gitDirectory, "../..");
+  const sidekickSnapshot = ensureFixtureSidekickSnapshot(fixture);
+  const workerArgv = [
+    claude,
+    ...FIXED_WORKER_ARGV.slice(1),
+    "--plugin-dir",
+    sidekickSnapshot.path,
+  ];
+  const allowedReadRoots = uniqueSortedPaths([
+    registration.worktreePath,
+    registration.runDir,
+    worktreeIdentity.gitDirectory,
+    gitCommonDirectory,
+    packageRoot,
+    rg.resolved,
+    workerArgv[0],
+    sidekickSnapshot.path,
+  ]);
+  const allowedWriteRoots = uniqueSortedPaths([
+    registration.worktreePath,
+    isolatedHome,
+    worktreeIdentity.gitDirectory,
+  ]);
+  const policy = {
+    network: {
+      allowedDomains: ["api.anthropic.com"],
+      deniedDomains: [],
+    },
+    filesystem: {
+      denyRead: [hostHome],
+      allowRead: allowedReadRoots,
+      allowWrite: allowedWriteRoots,
+      denyWrite: ["/tmp/claude", "/private/tmp/claude"],
+    },
+    ripgrep: { command: rg.resolved },
+    bwrapPath: tools.find((tool) => tool.name === "bwrap").resolved,
+    socatPath: tools.find((tool) => tool.name === "socat").resolved,
+  };
+  const environment = {
+    CHD_EXPERIMENT_2702_ATTEMPT: String(registration.attempt),
+    CHD_EXPERIMENT_2702_BASE_SHA: registration.baseSha,
+    CHD_EXPERIMENT_2702_RUN_DIR: registration.runDir,
+    CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
+    CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
+    CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_TMPDIR: join(isolatedHome, "tmp"),
+    CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+    DISABLE_AUTOUPDATER: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    HOME: isolatedHome,
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    NO_COLOR: "1",
+    NPM_CONFIG_CACHE: join(isolatedHome, ".npm"),
+    NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+    PATH: [
+      ...new Set([
+        dirname(rg.resolved),
+        dirname(workerArgv[0]),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+      ]),
+    ].join(":"),
+    SHELL: "/bin/bash",
+    TERM: "dumb",
+    TMPDIR: "/tmp",
+    TZ: "UTC",
+    XDG_CACHE_HOME: join(isolatedHome, ".cache"),
+    XDG_CONFIG_HOME: join(isolatedHome, ".config"),
+    XDG_DATA_HOME: join(isolatedHome, ".local", "share"),
+    ...recordedSidekickEnvironment,
+  };
+  const argv = [
+    process.execPath,
+    cliPath,
+    "-s",
+    settingsPath,
+    "-c",
+    [
+      `cd ${shellQuote(registration.worktreePath)}`,
+      `exec ${workerArgv.map(shellQuote).join(" ")}`,
+    ].join(" && "),
+  ];
+  mkdirSync(sandboxRoot, { recursive: true });
+  writeFileSync(
+    settingsPath,
+    `${JSON.stringify(policy, null, 2)}\n`,
+    "utf8",
+  );
+  return {
+    argv,
+    environment,
+    environmentDigest: valueDigest(environment),
+    environmentKeys: [
+      ...new Set([
+        ...GATE_2702_SANDBOX_ENV_KEYS,
+        ...Object.keys(recordedSidekickEnvironment),
+      ]),
+    ].sort(),
+    workerEnvironmentKeys: [
+      ...new Set([
+        ...GATE_2702_SANDBOX_ENV_KEYS,
+        ...Object.keys(recordedSidekickEnvironment),
+        ...GATE_2702_SRT_INJECTED_ENV_KEYS,
+      ]),
+    ].sort(),
+    sandbox: {
+      enforcer: "srt",
+      package: {
+        name: "@anthropic-ai/sandbox-runtime",
+        version: "0.0.52",
+        root: packageRoot,
+        cliPath,
+        manifestDigest: `sha256:${"1".repeat(64)}`,
+        cliDigest: `sha256:${"2".repeat(64)}`,
+      },
+      launcherExecutable: argv[0],
+      tools,
+      policy,
+      policyDigest: valueDigest(policy),
+      allowedReadRoots,
+      allowedWriteRoots,
+      gitDirectory: worktreeIdentity.gitDirectory,
+      gitCommonDirectory,
+      hostHome,
+      hostHomeDenied: true,
+      isolatedHome,
+      credentialMode: "isolated-home-credential-only",
+      sidekickSnapshot,
+      workerArgv,
+    },
+  };
+}
+
 function completeEnvironment() {
   return {
     node: { executable: process.execPath, version: process.version },
@@ -1161,6 +1362,7 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
     bytes: "",
   };
   const armEvidence = {};
+  const originProvenance = {};
   const artifacts = {};
   const objectiveChecks = Object.fromEntries(
     TREATMENTS.map((treatmentId) => [
@@ -1179,6 +1381,17 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
     const artifact = [selected.workerResult, "[FINAL TRACKED DIFF]", "", ""]
       .filter(Boolean)
       .join("\n\n");
+    const workerResultDigest = sha256(
+      Buffer.from(selected.workerResult, "utf8"),
+    );
+    const origin = buildGate2702JudgeOriginProvenance({
+      registration: selected.registration,
+      preDispatch: selected.preDispatch,
+      worktreeIdentity: selected.identity,
+      classification: selected.classification,
+      workerResultDigest,
+      worktreeEvidence: selected.classification.worktreeEvidence,
+    });
     const evidence = writeReceipt(
       join(judgeRoot, "evidence", `${treatmentId}.json`),
       {
@@ -1195,13 +1408,15 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
         registrationDigest: selected.registration.contentDigest,
         classificationDigest: selected.classification.contentDigest,
         workerResult: selected.workerResult,
-        workerResultDigest: sha256(Buffer.from(selected.workerResult, "utf8")),
+        workerResultDigest,
         worktreeEvidence: selected.classification.worktreeEvidence,
         diff,
         artifact,
+        originProvenance: origin,
       },
     );
     armEvidence[treatmentId] = evidence.contentDigest;
+    originProvenance[treatmentId] = origin.contentDigest;
     artifacts[treatmentId] = artifact;
   }
   const input = writeReceipt(join(judgeRoot, "input.json"), {
@@ -1216,6 +1431,7 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
     subjectSnapshotDigest: snapshot.contentDigest,
     task: `${snapshot.title}\n\n${snapshot.body}`,
     armEvidence,
+    originProvenance,
     objectiveChecks,
     artifacts,
   });
@@ -1227,6 +1443,10 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
         A: artifacts["haiku-solo"],
         B: artifacts["haiku-sonnet-sidekick"],
       },
+      originProvenance: {
+        A: originProvenance["haiku-solo"],
+        B: originProvenance["haiku-sonnet-sidekick"],
+      },
     },
     swapped: {
       task: input.task,
@@ -1234,6 +1454,10 @@ function writeSuccessfulJudgeEvidence(fixture, selectedByTreatment) {
       artifacts: {
         A: artifacts["haiku-sonnet-sidekick"],
         B: artifacts["haiku-solo"],
+      },
+      originProvenance: {
+        A: originProvenance["haiku-sonnet-sidekick"],
+        B: originProvenance["haiku-solo"],
       },
     },
   };
@@ -1507,7 +1731,9 @@ function promoteSuccessfulSelectedPair(
         : Buffer.alloc(0);
     if (sidekickLedger.length > 0) {
       const ledgerPath = join(
-        fixture.home,
+        arm.registration.runDir,
+        "sandbox",
+        "home",
         ".sidekick",
         sessionId,
         "__sidekick.jsonl",
@@ -1519,6 +1745,12 @@ function promoteSuccessfulSelectedPair(
     writeFileSync(join(arm.paths.runDir, "stderr.log"), "", "utf8");
     const recordedSidekickEnvironment = sidekickEnvironment(
       arm.registration.treatmentId,
+    );
+    const sandboxedDispatch = sandboxedWorkerDispatch(
+      fixture,
+      arm.registration,
+      arm.identity,
+      recordedSidekickEnvironment,
     );
     const preDispatch = writeReceipt(
       join(arm.paths.runDir, "pre-dispatch.json"),
@@ -1534,7 +1766,7 @@ function promoteSuccessfulSelectedPair(
         attempt: 1,
         baseSha: fixture.baseSha,
         executionMode: "production",
-        argv: FIXED_WORKER_ARGV,
+        ...sandboxedDispatch,
         sidekickEnvironment: recordedSidekickEnvironment,
         sidekickEnvironmentDigest: valueDigest(recordedSidekickEnvironment),
         cwd: arm.registration.worktreePath,
@@ -1575,6 +1807,11 @@ function promoteSuccessfulSelectedPair(
       processGroupQuiescent: true,
       durationMs: 240_000,
       endedAt: "2026-07-20T18:05:00.000Z",
+      stdout: retainedArtifact(
+        join(arm.paths.runDir, "stdout.log"),
+        workerBytes,
+      ),
+      stderr: emptyArtifact(join(arm.paths.runDir, "stderr.log")),
     });
     const checkResults = writeSuccessfulCheckEvidence(
       arm,
@@ -1929,6 +2166,13 @@ function promoteEligibleRetryPair(fixture) {
   const snapshot = readJson(
     join(fixture.trialRoot, "subjects", `issue-${subject}.json`),
   );
+  const recordedSidekickEnvironment = sidekickEnvironment(treatmentId);
+  const sandboxedDispatch = sandboxedWorkerDispatch(
+    fixture,
+    registration,
+    identity,
+    recordedSidekickEnvironment,
+  );
   const preDispatch = writeReceipt(join(paths.runDir, "pre-dispatch.json"), {
     schemaVersion: 1,
     kind: "Gate2702PreDispatch",
@@ -1941,9 +2185,9 @@ function promoteEligibleRetryPair(fixture) {
     attempt: 2,
     baseSha: fixture.baseSha,
     executionMode: "production",
-    argv: FIXED_WORKER_ARGV,
-    sidekickEnvironment: sidekickEnvironment(treatmentId),
-    sidekickEnvironmentDigest: valueDigest(sidekickEnvironment(treatmentId)),
+    ...sandboxedDispatch,
+    sidekickEnvironment: recordedSidekickEnvironment,
+    sidekickEnvironmentDigest: valueDigest(recordedSidekickEnvironment),
     cwd: worktreePath,
     promptDigest: sha256(Buffer.from(workerPrompt(snapshot, registration))),
     startedAt: "2026-07-20T18:07:00.000Z",
@@ -1982,6 +2226,8 @@ function promoteEligibleRetryPair(fixture) {
     processGroupQuiescent: true,
     durationMs: 60_000,
     endedAt: "2026-07-20T18:08:00.000Z",
+    stdout: retainedArtifact(join(paths.runDir, "stdout.log"), workerBytes),
+    stderr: emptyArtifact(join(paths.runDir, "stderr.log")),
   });
   const retryArm = { paths, registration };
   const checkResults = writeSuccessfulCheckEvidence(

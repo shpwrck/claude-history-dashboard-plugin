@@ -12,6 +12,8 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 
+import { assertGate2702SandboxPreDispatch } from "./sandbox-dispatch.mjs";
+
 const SCHEMA_VERSION = 1;
 const DEFINITION_REF = Object.freeze({
   definitionId: "experiments/gate-2702-c5",
@@ -29,6 +31,10 @@ const MAX_PROMPT_BYTES = 128 * 1024;
 const MAX_STREAM_BYTES = 2 * 1024 * 1024;
 const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
 const MAX_UNTRACKED_FILES = 4_096;
+const ORIGIN_POLICY = Object.freeze({
+  id: "policies/gate-2702-judge-origin",
+  version: 1,
+});
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -130,6 +136,123 @@ function receiptDigest(receipt) {
   const withoutDigest = { ...receipt };
   delete withoutDigest.contentDigest;
   return valueDigest(withoutDigest);
+}
+
+function withReceiptDigest(receipt) {
+  const withoutDigest = { ...receipt };
+  delete withoutDigest.contentDigest;
+  return { ...withoutDigest, contentDigest: valueDigest(withoutDigest) };
+}
+
+function validateSandboxedWorkerDispatch(
+  preDispatch,
+  registration,
+  worktreeIdentity,
+) {
+  const sandbox = assertGate2702SandboxPreDispatch({
+    preDispatch,
+    registration,
+    worktreeIdentity,
+  });
+  if (registration.executionMode === "production") {
+    const directArgv = expectedWorkerArgv();
+    const expectedSandboxedArgv = [
+      sandbox.workerArgv[0],
+      ...directArgv.slice(1),
+      "--plugin-dir",
+      sandbox.sidekickSnapshot.path,
+    ];
+    if (sameValue(sandbox.workerArgv, expectedSandboxedArgv)) {
+      return sandbox;
+    }
+    fail("worker origin provenance does not bind the fixed C5 invocation");
+  }
+  return sandbox;
+}
+
+export function buildGate2702JudgeOriginProvenance({
+  registration,
+  preDispatch,
+  worktreeIdentity,
+  classification,
+  workerResultDigest,
+  worktreeEvidence,
+}) {
+  const sandbox = validateSandboxedWorkerDispatch(
+    preDispatch,
+    registration,
+    worktreeIdentity,
+  );
+  const body = {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "Gate2702JudgeOriginProvenance",
+    definitionRef: DEFINITION_REF,
+    trialId: registration.trialId,
+    subject: registration.subject,
+    treatmentId: registration.treatmentId,
+    attempt: registration.attempt,
+    baseSha: registration.baseSha,
+    executionMode: registration.executionMode,
+    policy: ORIGIN_POLICY,
+    registrationDigest: registration.contentDigest,
+    preDispatchDigest: preDispatch.contentDigest,
+    worktreeIdentityDigest: worktreeIdentity.contentDigest,
+    classificationDigest: classification.contentDigest,
+    sandboxPolicyDigest: sandbox.policyDigest,
+    sandboxAllowedReadRootsDigest: valueDigest(sandbox.allowedReadRoots),
+    sandboxAllowedWriteRootsDigest: valueDigest(sandbox.allowedWriteRoots),
+    workerStdoutDigest: classification.workerArtifacts?.stdout?.contentDigest,
+    workerResultDigest,
+    worktreeEvidenceDigest: worktreeEvidence?.contentDigest,
+    assertions: {
+      hostHomeDenied: sandbox.hostHomeDenied,
+      workerResultSource: "sandboxed-worker-stdout",
+      diffSource: "sandbox-confined-disposable-worktree",
+      forbiddenSource: "host-home",
+    },
+  };
+  if (
+    !["production", "test"].includes(body.executionMode) ||
+    !SHA256_PATTERN.test(body.workerStdoutDigest ?? "") ||
+    !SHA256_PATTERN.test(body.workerResultDigest ?? "") ||
+    !SHA256_PATTERN.test(body.worktreeEvidenceDigest ?? "")
+  ) {
+    fail("worker origin provenance is not a production evidence chain");
+  }
+  return withReceiptDigest(body);
+}
+
+function validateOriginProvenance(
+  provenance,
+  sourceArm,
+  evidence,
+  worktreeEvidence,
+) {
+  if (
+    provenance === null ||
+    typeof provenance !== "object" ||
+    Array.isArray(provenance) ||
+    provenance.schemaVersion !== SCHEMA_VERSION ||
+    provenance.kind !== "Gate2702JudgeOriginProvenance" ||
+    !SHA256_PATTERN.test(provenance.contentDigest ?? "") ||
+    provenance.contentDigest !== receiptDigest(provenance)
+  ) {
+    fail(`${evidence.treatmentId} origin provenance receipt is absent or invalid`);
+  }
+  const expected = buildGate2702JudgeOriginProvenance({
+    registration: sourceArm.registration,
+    preDispatch: sourceArm.preDispatch,
+    worktreeIdentity: sourceArm.worktreeIdentity,
+    classification: sourceArm.classification,
+    workerResultDigest: evidence.workerResultDigest,
+    worktreeEvidence,
+  });
+  if (!sameValue(provenance, expected)) {
+    fail(
+      `${evidence.treatmentId} origin provenance does not bind its sandboxed sources`,
+    );
+  }
+  return provenance;
 }
 
 function requireArtifactMap(artifactBytesByPath) {
@@ -539,8 +662,7 @@ function validateFrozenSource(artifacts, anchor) {
       preDispatch.promptDigest !==
         sha256Bytes(
           Buffer.from(workerPrompt(snapshot, registration), "utf8"),
-        ) ||
-      !sameValue(preDispatch.argv, expectedWorkerArgv())
+        )
     ) {
       fail(`${treatmentId} worker dispatch prompt or invocation is invalid`);
     }
@@ -568,6 +690,7 @@ function validateFrozenSource(artifacts, anchor) {
     ) {
       fail(`${treatmentId} worktree identity is not bound to its dispatch`);
     }
+    validateSandboxedWorkerDispatch(preDispatch, registration, identity);
     const processReceipt = assertAnchor(
       readReceipt(artifacts, `${prefix}/process.json`, "Gate2702Process"),
       anchor,
@@ -662,6 +785,8 @@ function validateFrozenSource(artifacts, anchor) {
     arms[treatmentId] = {
       selected,
       registration,
+      preDispatch,
+      worktreeIdentity: identity,
       classification,
       workerResult: workerWrapper.result,
     };
@@ -683,6 +808,7 @@ function validateFrozenInput(artifacts, anchor) {
     input.subjectSnapshotDigest !== source.snapshot.contentDigest ||
     input.task !== `${source.snapshot.title}\n\n${source.snapshot.body}` ||
     !exactTreatmentKeys(input.armEvidence) ||
+    !exactTreatmentKeys(input.originProvenance) ||
     !exactTreatmentKeys(input.objectiveChecks) ||
     !exactTreatmentKeys(input.artifacts)
   ) {
@@ -744,8 +870,16 @@ function validateFrozenInput(artifacts, anchor) {
       }
       fail(`${treatmentId} frozen judge evidence is invalid`);
     }
+    const originProvenance = validateOriginProvenance(
+      evidence.originProvenance,
+      arm,
+      evidence,
+      expectedWorktreeEvidence,
+    );
     if (
       input.armEvidence[treatmentId] !== evidence.contentDigest ||
+      input.originProvenance[treatmentId] !==
+        originProvenance.contentDigest ||
       input.artifacts[treatmentId] !== evidence.artifact ||
       objective?.classificationDigest !== arm.classification.contentDigest ||
       !sameValue(objective?.results, arm.classification.checkResults) ||
@@ -766,11 +900,19 @@ function expectedPayloads(input) {
       A: input.artifacts[TREATMENTS[0]],
       B: input.artifacts[TREATMENTS[1]],
     },
+    originProvenance: {
+      A: input.originProvenance[TREATMENTS[0]],
+      B: input.originProvenance[TREATMENTS[1]],
+    },
   };
   const swapped = {
     task: input.task,
     rubric: RUBRIC,
     artifacts: { A: forward.artifacts.B, B: forward.artifacts.A },
+    originProvenance: {
+      A: forward.originProvenance.B,
+      B: forward.originProvenance.A,
+    },
   };
   return { forward, swapped };
 }

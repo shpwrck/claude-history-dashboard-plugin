@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION } from "./behavior-context.mjs";
+import { shellQuote } from "../lib/shell-quote.mjs";
+import {
+  GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION,
+  GATE_2702_SIDEKICK_VERSION,
+} from "./behavior-context.mjs";
+import {
+  GATE_2702_SANDBOX_ENV_KEYS,
+  GATE_2702_SRT_INJECTED_ENV_KEYS,
+} from "./sandbox-dispatch.mjs";
 import { validateGate2702ClassificationEvidence } from "./seal-classification.mjs";
 
 const TRIAL_ID = "4f503910-77de-4ac0-b454-3ac913d96288";
@@ -26,6 +35,18 @@ const CHECKS = [
     argv: ["npm", "run", "typecheck"],
     timeoutMs: 360_000,
   },
+];
+const WORKER_ARGV = [
+  "claude",
+  "-p",
+  "--model",
+  "claude-haiku-4-5-20251001",
+  "--output-format",
+  "json",
+  "--dangerously-skip-permissions",
+  "--strict-mcp-config",
+  "--max-budget-usd",
+  "15",
 ];
 
 function canonicalValue(value) {
@@ -104,6 +125,170 @@ function sidekickEnvironment() {
   };
 }
 
+function uniqueSortedPaths(values) {
+  return [...new Set(values.map((value) => resolve(value)))].sort();
+}
+
+function sandboxedWorkerDispatch(
+  registration,
+  worktreeIdentity,
+  recordedSidekickEnvironment,
+) {
+  const hostHome = "/fixture/host-home";
+  const sandboxRoot = join(registration.runDir, "sandbox");
+  const isolatedHome = join(sandboxRoot, "home");
+  const settingsPath = join(sandboxRoot, "settings.json");
+  const packageRoot =
+    "/fixture/runtime/node_modules/@anthropic-ai/sandbox-runtime";
+  const cliPath = join(packageRoot, "dist", "cli.js");
+  const toolRoot = "/fixture/runtime/bin";
+  const tools = ["bwrap", "socat", "rg"].map((name) => ({
+    name,
+    command: join(toolRoot, name),
+    resolved: join(toolRoot, name),
+    version: `${name} fixture`,
+  }));
+  const rg = tools.find((tool) => tool.name === "rg");
+  const claude = join(toolRoot, "claude");
+  const gitCommonDirectory = resolve(worktreeIdentity.gitDirectory, "../..");
+  const sidekickPath = resolve(
+    registration.runDir,
+    "../../../..",
+    "sandbox-runtime",
+    `claude-sidekick-${GATE_2702_SIDEKICK_VERSION}`,
+  );
+  const workerArgv = [
+    claude,
+    ...WORKER_ARGV.slice(1),
+    "--plugin-dir",
+    sidekickPath,
+  ];
+  const allowedReadRoots = uniqueSortedPaths([
+    registration.worktreePath,
+    registration.runDir,
+    worktreeIdentity.gitDirectory,
+    gitCommonDirectory,
+    packageRoot,
+    rg.resolved,
+    workerArgv[0],
+    sidekickPath,
+  ]);
+  const allowedWriteRoots = uniqueSortedPaths([
+    registration.worktreePath,
+    isolatedHome,
+    worktreeIdentity.gitDirectory,
+  ]);
+  const policy = {
+    network: {
+      allowedDomains: ["api.anthropic.com"],
+      deniedDomains: [],
+    },
+    filesystem: {
+      denyRead: [hostHome],
+      allowRead: allowedReadRoots,
+      allowWrite: allowedWriteRoots,
+      denyWrite: ["/tmp/claude", "/private/tmp/claude"],
+    },
+    ripgrep: { command: rg.resolved },
+    bwrapPath: tools.find((tool) => tool.name === "bwrap").resolved,
+    socatPath: tools.find((tool) => tool.name === "socat").resolved,
+  };
+  const environment = {
+    CHD_EXPERIMENT_2702_ATTEMPT: String(registration.attempt),
+    CHD_EXPERIMENT_2702_BASE_SHA: registration.baseSha,
+    CHD_EXPERIMENT_2702_RUN_DIR: registration.runDir,
+    CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
+    CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
+    CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_TMPDIR: join(isolatedHome, "tmp"),
+    CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+    DISABLE_AUTOUPDATER: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    HOME: isolatedHome,
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    NO_COLOR: "1",
+    NPM_CONFIG_CACHE: join(isolatedHome, ".npm"),
+    NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+    PATH: [
+      ...new Set([
+        dirname(rg.resolved),
+        dirname(workerArgv[0]),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+      ]),
+    ].join(":"),
+    SHELL: "/bin/bash",
+    TERM: "dumb",
+    TMPDIR: "/tmp",
+    TZ: "UTC",
+    XDG_CACHE_HOME: join(isolatedHome, ".cache"),
+    XDG_CONFIG_HOME: join(isolatedHome, ".config"),
+    XDG_DATA_HOME: join(isolatedHome, ".local", "share"),
+    ...recordedSidekickEnvironment,
+  };
+  const argv = [
+    "/fixture/runtime/bin/node",
+    cliPath,
+    "-s",
+    settingsPath,
+    "-c",
+    [
+      `cd ${shellQuote(registration.worktreePath)}`,
+      `exec ${workerArgv.map(shellQuote).join(" ")}`,
+    ].join(" && "),
+  ];
+  return {
+    argv,
+    environment,
+    environmentDigest: valueDigest(environment),
+    environmentKeys: [
+      ...new Set([
+        ...GATE_2702_SANDBOX_ENV_KEYS,
+        ...Object.keys(recordedSidekickEnvironment),
+      ]),
+    ].sort(),
+    workerEnvironmentKeys: [
+      ...new Set([
+        ...GATE_2702_SANDBOX_ENV_KEYS,
+        ...Object.keys(recordedSidekickEnvironment),
+        ...GATE_2702_SRT_INJECTED_ENV_KEYS,
+      ]),
+    ].sort(),
+    sandbox: {
+      enforcer: "srt",
+      package: {
+        name: "@anthropic-ai/sandbox-runtime",
+        version: "0.0.52",
+        root: packageRoot,
+        cliPath,
+        manifestDigest: `sha256:${"1".repeat(64)}`,
+        cliDigest: `sha256:${"2".repeat(64)}`,
+      },
+      launcherExecutable: argv[0],
+      tools,
+      policy,
+      policyDigest: valueDigest(policy),
+      allowedReadRoots,
+      allowedWriteRoots,
+      gitDirectory: worktreeIdentity.gitDirectory,
+      gitCommonDirectory,
+      hostHome,
+      hostHomeDenied: true,
+      isolatedHome,
+      credentialMode: "isolated-home-credential-only",
+      sidekickSnapshot: {
+        path: sidekickPath,
+        contentDigest: `sha256:${"3".repeat(64)}`,
+      },
+      workerArgv,
+    },
+  };
+}
+
 function environmentProbes(environment) {
   const probe = (name, argv) => ({
     program: environment[name].executable,
@@ -148,7 +333,11 @@ function workerPrompt(snapshot, registration) {
   ].join("\n");
 }
 
-function createSuccessfulFixture({ attempt = 1, vitestExit = 0 } = {}) {
+function createSuccessfulFixture({
+  attempt = 1,
+  vitestExit = 0,
+  unsandboxedProduction = false,
+} = {}) {
   const artifacts = new Map();
   const putReceipt = (path, receipt) => {
     const value = withDigest(receipt);
@@ -448,6 +637,14 @@ function createSuccessfulFixture({ attempt = 1, vitestExit = 0 } = {}) {
     identityToken: "11111111-1111-4111-8111-111111111111",
     createdAt: "2026-07-20T17:45:00.000Z",
   });
+  const recordedSidekickEnvironment = sidekickEnvironment();
+  const workerDispatch = unsandboxedProduction
+    ? { argv: WORKER_ARGV }
+    : sandboxedWorkerDispatch(
+        registration,
+        identity,
+        recordedSidekickEnvironment,
+      );
   const workerPreDispatch = putReceipt(`${prefix}/pre-dispatch.json`, {
     schemaVersion: 1,
     kind: "Gate2702PreDispatch",
@@ -460,20 +657,9 @@ function createSuccessfulFixture({ attempt = 1, vitestExit = 0 } = {}) {
     attempt,
     baseSha: BASE_SHA,
     executionMode: "production",
-    argv: [
-      "claude",
-      "-p",
-      "--model",
-      "claude-haiku-4-5-20251001",
-      "--output-format",
-      "json",
-      "--dangerously-skip-permissions",
-      "--strict-mcp-config",
-      "--max-budget-usd",
-      "15",
-    ],
-    sidekickEnvironment: sidekickEnvironment(),
-    sidekickEnvironmentDigest: valueDigest(sidekickEnvironment()),
+    ...workerDispatch,
+    sidekickEnvironment: recordedSidekickEnvironment,
+    sidekickEnvironmentDigest: valueDigest(recordedSidekickEnvironment),
     cwd: worktreePath,
     promptDigest: sha256(Buffer.from(workerPrompt(snapshot, registration))),
     startedAt: "2026-07-20T18:00:00.000Z",
@@ -756,6 +942,23 @@ test("classification and every declared check rederive from retained bytes", () 
       { checkId: "checks/gate-2702-vitest", status: "passed" },
       { checkId: "checks/gate-2702-typecheck", status: "passed" },
     ],
+  );
+});
+
+test("a direct production worker command without sandbox provenance is rejected", () => {
+  const fixture = createSuccessfulFixture({ unsandboxedProduction: true });
+
+  assert.throws(
+    () =>
+      validateGate2702ClassificationEvidence({
+        artifactBytesByPath: fixture.artifacts,
+        trialId: TRIAL_ID,
+        baseSha: BASE_SHA,
+        subject: SUBJECT,
+        treatmentId: TREATMENT_ID,
+        attempt: 1,
+      }),
+    /worker dispatch does not rederive from its production inputs/,
   );
 });
 
