@@ -31,10 +31,16 @@ import {
 import {
   generateStructuredEditArmSample,
   parseStructuredEditArmCorpus,
-  scriptedStructuredEditEndpoint,
+  scriptedStructuredEditTransport,
 } from '../src/lib/structured-edit-arm-eval.ts';
 import { DEFAULT_MAX_REPAIR_ROUNDS } from '../src/lib/schema-repair.ts';
 import { scoreStructuredEdit } from './lib/model-edit-benchmark.ts';
+
+/**
+ * The one transport this runner uses. Both the completions and the record's
+ * provenance come from it, so they cannot disagree (#3430).
+ */
+const TRANSPORT = scriptedStructuredEditTransport;
 
 const RUNNER_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(RUNNER_PATH), '..');
@@ -107,7 +113,7 @@ async function main() {
   for (const sample of samples) {
     const gen = await generateStructuredEditArmSample(
       sample,
-      scriptedStructuredEditEndpoint,
+      TRANSPORT,
       DEFAULT_MAX_REPAIR_ROUNDS
     );
     if (args.responsesDir) {
@@ -132,7 +138,9 @@ async function main() {
   const record = buildStructuredEditArmComparison(outcomes, {
     asOf: new Date().toISOString(),
     maxRepairRounds: DEFAULT_MAX_REPAIR_ROUNDS,
-    endpointKind: 'scripted',
+    // Read off the transport that produced the completions above, never a
+    // hand-written literal (#3430).
+    endpointKind: TRANSPORT.kind,
   });
 
   const json = `${JSON.stringify(record, null, 2)}\n`;

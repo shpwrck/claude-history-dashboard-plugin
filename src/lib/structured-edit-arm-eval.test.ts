@@ -12,6 +12,8 @@ import {
   generateStructuredEditArmSample,
   parseStructuredEditArmCorpus,
   scriptedStructuredEditEndpoint,
+  scriptedStructuredEditTransport,
+  liveStructuredEditTransport,
   type StructuredEditArmSample,
 } from './structured-edit-arm-eval';
 import type { TaskClass } from './task-class';
@@ -41,7 +43,7 @@ describe('generateStructuredEditArmSample', () => {
       freeFormResponse: SOURCE,
       constrainedResponses: [HALLUCINATED_DSL, VALID_DSL],
     });
-    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditEndpoint, 2);
+    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditTransport, 2);
     expect(gen.freeFormContent).toBe(SOURCE);
     expect(gen.freeFormContent).not.toBe(EXPECTED);
     expect(gen.constrainedContent).toBe(EXPECTED);
@@ -55,7 +57,7 @@ describe('generateStructuredEditArmSample', () => {
       freeFormResponse: EXPECTED,
       constrainedResponses: [VALID_DSL],
     });
-    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditEndpoint, 2);
+    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditTransport, 2);
     expect(gen.freeFormContent).toBe(EXPECTED);
     expect(gen.constrainedContent).toBe(EXPECTED);
     expect(gen.repairRounds).toBe(0);
@@ -67,7 +69,7 @@ describe('generateStructuredEditArmSample', () => {
       freeFormResponse: EXPECTED,
       constrainedResponses: [HALLUCINATED_DSL, HALLUCINATED_DSL, HALLUCINATED_DSL],
     });
-    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditEndpoint, 2);
+    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditTransport, 2);
     expect(gen.freeFormContent).toBe(EXPECTED);
     // On exhaustion the produced file is the source unchanged (an honest no-op).
     expect(gen.constrainedContent).toBe(SOURCE);
@@ -80,7 +82,7 @@ describe('generateStructuredEditArmSample', () => {
       id: 'no-budget',
       constrainedResponses: [HALLUCINATED_DSL, VALID_DSL],
     });
-    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditEndpoint, 0);
+    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditTransport, 0);
     expect(gen.constrainedSchemaValid).toBe(false);
     expect(gen.repairRounds).toBe(0);
   });
@@ -279,7 +281,7 @@ describe('committed structured-edit arm corpus', () => {
     const samples = parseStructuredEditArmCorpus(armCorpus)!;
     const outcomes: StructuredEditArmOutcome[] = [];
     for (const s of samples) {
-      const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditEndpoint, 2);
+      const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditTransport, 2);
       const [free, constrained] = await Promise.all([
         scoreStructuredEdit(s.expected, gen.freeFormContent, 'task.ts'),
         scoreStructuredEdit(s.expected, gen.constrainedContent, 'task.ts'),
@@ -302,5 +304,50 @@ describe('committed structured-edit arm corpus', () => {
     expect(record.pass_constrained).toBeGreaterThan(record.pass_free_form);
     expect(record.pass_constrained).toBe(6);
     expect(record.pass_free_form).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Provenance travels with the transport (#3430)
+// ---------------------------------------------------------------------------
+
+describe('structured-edit transport provenance (#3430)', () => {
+  it('the scripted transport is scripted and cannot be relabelled', () => {
+    expect(scriptedStructuredEditTransport.kind).toBe('scripted');
+    expect(Object.isFrozen(scriptedStructuredEditTransport)).toBe(true);
+    expect(() => {
+      (scriptedStructuredEditTransport as { kind: string }).kind = 'live';
+    }).toThrow();
+    expect(scriptedStructuredEditTransport.kind).toBe('scripted');
+  });
+
+  it('refuses to label the scripted fixture as a live transport', () => {
+    expect(() => liveStructuredEditTransport(scriptedStructuredEditEndpoint)).toThrow(
+      /refusing to label the scripted fixture/i
+    );
+  });
+
+  it('a constructed live transport carries live provenance', () => {
+    const realish = async () => ({ text: 'x', model: 'local-test-model' });
+    const t = liveStructuredEditTransport(realish);
+    expect(t.kind).toBe('live');
+    expect(t.complete).toBe(realish);
+  });
+
+  it('the generator completes through the transport it was given', async () => {
+    // The pairing is structural: whatever answered the calls is the same object
+    // the runner reads `kind` from when stamping the record.
+    let calls = 0;
+    const counting = async (req: Parameters<typeof scriptedStructuredEditEndpoint>[0]) => {
+      calls += 1;
+      return scriptedStructuredEditEndpoint(req);
+    };
+    const gen = await generateStructuredEditArmSample(
+      sample({ id: 'improved' }),
+      liveStructuredEditTransport(counting),
+      2
+    );
+    expect(calls).toBeGreaterThan(0);
+    expect(typeof gen.freeFormContent).toBe('string');
   });
 });

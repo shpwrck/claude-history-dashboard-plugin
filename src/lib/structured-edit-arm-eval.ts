@@ -36,6 +36,7 @@ import {
 import { applyEditDsl, validateEditDsl, type EditDslProgram } from './structured-edit-dsl';
 import { TASK_CLASSES, type TaskClass } from './task-class';
 import type { StructuredEditArm } from './structured-edit-eval';
+import type { StructuredEditArmEndpointKind } from './structured-edit-eval';
 
 /**
  * One committed corpus sample: a structured-edit task plus the synthetic model
@@ -70,6 +71,26 @@ export type StructuredEditArmEndpoint = (req: {
   callIndex: number;
   messages: RepairMessage[];
 }) => Promise<{ text: string; model?: string | null }>;
+
+/**
+ * A transport paired INSEPARABLY with its provenance (#3430, mirroring #3131).
+ *
+ * The endpoint that produced the completions and the `endpointKind` stamped
+ * onto the record used to be decided in two separate places: the runner looped
+ * samples through an endpoint, then ~90 lines later called the record builder
+ * with a hand-written `endpointKind: 'scripted'` literal. Nothing compared them,
+ * so swapping in a live endpoint while leaving the literal -- or the reverse --
+ * produced a record whose provenance did not describe what ran.
+ *
+ * Unlike #3131 that was never reachable by one mistaken call, because no single
+ * API offered both as options; it was a latent trap for the next runner. Closed
+ * the same way regardless: the kind travels with the transport, so there is
+ * nothing left to hand-write.
+ */
+export interface StructuredEditArmTransport {
+  readonly kind: StructuredEditArmEndpointKind;
+  readonly complete: StructuredEditArmEndpoint;
+}
 
 /** In-process synthetic endpoint: replays the sample's scripted responses. */
 export const scriptedStructuredEditEndpoint: StructuredEditArmEndpoint = async ({
@@ -189,6 +210,30 @@ export interface StructuredEditArmGeneration {
   repairRounds: number;
 }
 
+/** The synthetic fixture transport. Always `scripted` — it cannot be relabelled. */
+export const scriptedStructuredEditTransport: StructuredEditArmTransport = Object.freeze({
+  kind: 'scripted' as const,
+  complete: scriptedStructuredEditEndpoint,
+});
+
+/**
+ * Wrap a REAL transport so its records carry live provenance.
+ *
+ * Refuses {@link scriptedStructuredEditEndpoint}: wrapping the fixture would
+ * recreate the mislabelling this exists to prevent, one layer up.
+ */
+export function liveStructuredEditTransport(
+  complete: StructuredEditArmEndpoint
+): StructuredEditArmTransport {
+  if (complete === scriptedStructuredEditEndpoint) {
+    throw new Error(
+      'liveStructuredEditTransport: refusing to label the scripted fixture endpoint as live — ' +
+        'use scriptedStructuredEditTransport for fixture runs (#3430)'
+    );
+  }
+  return Object.freeze({ kind: 'live' as const, complete });
+}
+
 /**
  * Generate both arms' produced files for one sample against the endpoint.
  * Free-form: build the free-form prompt, take a SINGLE completion, use it as the
@@ -199,9 +244,13 @@ export interface StructuredEditArmGeneration {
  */
 export async function generateStructuredEditArmSample(
   sample: StructuredEditArmSample,
-  endpoint: StructuredEditArmEndpoint,
+  // The TRANSPORT, not a bare endpoint (#3430): the caller that supplies the
+  // completions is now the same object the record's provenance is read from, so
+  // the two cannot be chosen independently.
+  transport: StructuredEditArmTransport,
   maxRounds?: number
 ): Promise<StructuredEditArmGeneration> {
+  const endpoint = transport.complete;
   const { system, user } = buildFreeFormEditPrompt(sample.source, sample.instruction);
   const freeFormContent = (
     await endpoint({
