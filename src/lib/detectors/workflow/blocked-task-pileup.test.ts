@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { detector, toSingleLine, commentOnly } from './blocked-task-pileup';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { TaskRecord } from '../../parse-tasks';
 import { PILEUP_MIN } from '../../parse-tasks';
@@ -319,5 +320,123 @@ describe('toSingleLine / commentOnly helpers (#3231)', () => {
 
   it('prefixes any line that is not already a comment', () => {
     expect(commentOnly('# ok\nrm -rf /\n')).toBe('# ok\n# rm -rf /\n#');
+  });
+});
+
+// ── Provenance (#3232) ──────────────────────────────────────────────────────
+
+describe('workflow.blocked-task-pileup provenance (#3232)', () => {
+  const MTIME = Date.parse('2026-06-09T12:00:00.000Z');
+  const NOW = Date.parse('2026-06-20T00:00:00.000Z');
+
+  /**
+   * Two pileups in one session, deliberately declared SMALLEST FIRST so the
+   * "largest pileup" citation cannot pass by reading insertion order:
+   * root-small holds 2 tasks, root-big holds 3.
+   */
+  const firing = (): TaskRecord[] => [
+    makeTask({ id: 'root-small', sessionId: 's-1', status: 'pending', mtimeMs: MTIME }),
+    makeTask({ id: 'a', sessionId: 's-1', status: 'pending', blockedBy: ['root-small'], mtimeMs: MTIME }),
+    makeTask({ id: 'b', sessionId: 's-1', status: 'pending', blockedBy: ['root-small'], mtimeMs: MTIME }),
+    makeTask({
+      id: 'root-big',
+      subject: 'Land the shared primitive',
+      sessionId: 's-1',
+      status: 'in_progress',
+      mtimeMs: MTIME,
+    }),
+    makeTask({ id: 'c', sessionId: 's-1', status: 'pending', blockedBy: ['root-big'], mtimeMs: MTIME }),
+    makeTask({ id: 'd', sessionId: 's-1', status: 'pending', blockedBy: ['root-big'], mtimeMs: MTIME }),
+    makeTask({ id: 'e', sessionId: 's-1', status: 'pending', blockedBy: ['root-big'], mtimeMs: MTIME }),
+  ];
+
+  it('passes the contract when it fires', () => {
+    const rec = detector.rule(makeInput(firing()), NOW);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    expect(rec!.provenance!.observations.length).toBeGreaterThan(0);
+  });
+
+  it('reproduces the displayed stalled total and pileup count from the cited fields', () => {
+    const rec = detector.rule(makeInput(firing()), NOW);
+    const obs = rec!.provenance!.observations;
+    const stalled = obs.find((o) => o.claim.includes('blocker relationship(s)'));
+    const roots = obs.find((o) => o.claim.includes('root task(s)'));
+    expect(stalled!.value).toBe(rec!.affected);
+    expect(stalled!.value).toBe(5); // 2 behind root-small + 3 behind root-big
+    // No task here lists two roots, so edges and distinct tasks agree.
+    expect(obs.find((o) => o.claim.includes('distinct stalled task(s)'))!.value).toBe(5);
+    expect(roots!.value).toBe(2);
+    expect(stalled!.field).toBe('blockedBy / status');
+  });
+
+  it('cites the true largest pileup, not the first one encountered', () => {
+    const rec = detector.rule(makeInput(firing()), NOW);
+    const worst = rec!.provenance!.observations.find((o) =>
+      o.claim.includes('largest pileup')
+    );
+    expect(worst).toBeDefined();
+    expect(worst!.value).toBe(3);
+    expect(worst!.claim).toContain('Land the shared primitive');
+  });
+
+  it('counts blocker relationships, and cites the deduplicated task count too', () => {
+    // Two tasks, each blocked by TWO qualifying roots. The displayed figure
+    // sums pileup membership, so it is 4 relationships across 2 tasks —
+    // calling 4 a task count would be false (Codex review, PR #3472).
+    const both = ['root-a', 'root-b'];
+    const rec = detector.rule(
+      makeInput([
+        makeTask({ id: 'root-a', sessionId: 's-1', status: 'in_progress', mtimeMs: MTIME }),
+        makeTask({ id: 'root-b', sessionId: 's-1', status: 'in_progress', mtimeMs: MTIME }),
+        makeTask({ id: 'x', sessionId: 's-1', status: 'pending', blockedBy: both, mtimeMs: MTIME }),
+        makeTask({ id: 'y', sessionId: 's-1', status: 'pending', blockedBy: both, mtimeMs: MTIME }),
+      ]),
+      NOW
+    );
+    const obs = rec!.provenance!.observations;
+    const edges = obs.find((o) => o.claim.includes('blocker relationship(s)'));
+    const distinct = obs.find((o) => o.claim.includes('distinct stalled task(s)'));
+    expect(edges!.value).toBe(4);
+    expect(edges!.value).toBe(rec!.affected); // the figure the card shows
+    expect(distinct!.value).toBe(2); // …and the deduplicated truth beside it
+    // The edge claim must not call itself a task count.
+    expect(edges!.claim).not.toMatch(/\d+ (?:non-completed )?task\(s\)/);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
+  it('anchors asOf to the newest observed task mtime, not to now', () => {
+    const rec = detector.rule(makeInput(firing()), NOW);
+    expect(rec!.provenance!.asOf).toBe('2026-06-09');
+    expect(rec!.provenance!.asOf).not.toBe('2026-06-20');
+  });
+
+  it('ignores a task in a non-pileup session when dating the finding', () => {
+    // A freshly written task in a session with no qualifying pileup takes part
+    // in none of the reported relationships (Codex review, PR #3472).
+    const rec = detector.rule(
+      makeInput([
+        ...firing(),
+        makeTask({ id: 'lonely', sessionId: 's-other', status: 'pending', mtimeMs: NOW - 1000 }),
+      ]),
+      NOW
+    );
+    expect(rec!.provenance!.asOf).toBe('2026-06-09');
+    expect(rec!.provenance!.asOf).not.toBe('2026-06-20');
+  });
+
+  it('keeps a multi-line root subject on one line inside the citation', () => {
+    const hostile = firing().map((t) =>
+      t.id === 'root-big'
+        ? { ...t, subject: 'Land it\nrm -rf /\u2028second' }
+        : t
+    );
+    const rec = detector.rule(makeInput(hostile), NOW);
+    const worst = rec!.provenance!.observations.find((o) =>
+      o.claim.includes('largest pileup')
+    );
+    expect(worst!.claim).not.toContain('\n');
+    expect(worst!.claim).not.toContain('\u2028');
+    expect(worst!.claim).toContain('Land it rm -rf / second');
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
   });
 });

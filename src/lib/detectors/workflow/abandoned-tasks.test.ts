@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './abandoned-tasks';
 import { validateFixSnippet } from '../fix-validity';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { TaskRecord } from '../../parse-tasks';
 import { COLD_DAYS } from '../../parse-tasks';
@@ -145,6 +146,89 @@ describe('workflow.abandoned-tasks (#559)', () => {
     ];
     const rec = detector.rule(makeInput(tasks), NOW);
     expect(rec?.evidence?.[0]).toContain('3 open task(s)'); // worst first
+  });
+
+  // ── Provenance (#3232) ────────────────────────────────────────────────────
+  describe('provenance', () => {
+    const coldMtime = NOW - 10 * MS_PER_DAY;
+    const firing = (): TaskRecord[] => [
+      makeTask({ id: '1', sessionId: 's-few', status: 'pending', mtimeMs: coldMtime }),
+      makeTask({ id: '1', sessionId: 's-many', status: 'pending', mtimeMs: coldMtime }),
+      makeTask({ id: '2', sessionId: 's-many', status: 'in_progress', mtimeMs: coldMtime }),
+      makeTask({ id: '3', sessionId: 's-many', status: 'pending', mtimeMs: coldMtime }),
+      // A completed task in a cold session: contributes an mtime but no count.
+      makeTask({ id: '4', sessionId: 's-many', status: 'completed', mtimeMs: coldMtime }),
+    ];
+
+    it('passes the contract when it fires', () => {
+      const rec = detector.rule(makeInput(firing()), NOW);
+      expect(validateRecommendationProvenance(rec!)).toEqual([]);
+      expect(rec!.provenance!.observations.length).toBeGreaterThan(0);
+    });
+
+    it('reproduces the displayed open-task total from the cited field', () => {
+      const rec = detector.rule(makeInput(firing()), NOW);
+      const total = rec!.provenance!.observations.find((o) =>
+        o.claim.includes('pending or in_progress')
+      );
+      expect(total).toBeDefined();
+      // Same number the card shows: 4 open tasks, completed one excluded.
+      expect(total!.value).toBe(rec!.affected);
+      expect(total!.value).toBe(4);
+      expect(total!.field).toBe('status');
+    });
+
+    it('cites the true maximum backlog, not the head of the sorted list', () => {
+      // `abandoned` is sorted by count today, so head === max. Feeding the
+      // sessions in the opposite order proves the citation folds over `count`
+      // rather than trusting insertion order.
+      const rec = detector.rule(makeInput(firing()), NOW);
+      const worst = rec!.provenance!.observations.find((o) =>
+        o.claim.includes('largest open-task backlog')
+      );
+      expect(worst).toBeDefined();
+      expect(worst!.value).toBe(3); // s-many, not s-few
+      expect(worst!.claim).toContain('s-many');
+    });
+
+    it('anchors asOf to the newest observed task mtime, not to now', () => {
+      // Every task file was last written 10 days before the run. A
+      // `new Date(now)` implementation would emit the run date instead.
+      const rec = detector.rule(makeInput(firing()), NOW);
+      expect(rec!.provenance!.asOf).toBe(
+        new Date(coldMtime).toISOString().slice(0, 10)
+      );
+      expect(rec!.provenance!.asOf).not.toBe(new Date(NOW).toISOString().slice(0, 10));
+    });
+
+    it('ignores a warm unrelated session when dating the finding', () => {
+      // A task written today in a session that is NOT reported contributes to
+      // no count, no cold tally and no evidence row — dating the finding from
+      // it would make an old abandonment look current (Codex review, #3472).
+      const rec = detector.rule(
+        makeInput([
+          ...firing(),
+          makeTask({ id: '9', sessionId: 's-warm', status: 'pending', mtimeMs: NOW - 1000 }),
+        ]),
+        NOW
+      );
+      expect(rec!.provenance!.asOf).toBe(new Date(coldMtime).toISOString().slice(0, 10));
+      expect(rec!.provenance!.asOf).not.toBe(new Date(NOW).toISOString().slice(0, 10));
+    });
+
+    it('dates from the newest task file even when an older one is also present', () => {
+      const older = NOW - 40 * MS_PER_DAY;
+      const rec = detector.rule(
+        makeInput([
+          makeTask({ id: '1', sessionId: 's-old', status: 'pending', mtimeMs: older }),
+          makeTask({ id: '2', sessionId: 's-cold', status: 'pending', mtimeMs: coldMtime }),
+        ]),
+        NOW
+      );
+      expect(rec!.provenance!.asOf).toBe(
+        new Date(coldMtime).toISOString().slice(0, 10)
+      );
+    });
   });
 
   it('includes a copy-pasteable fix snippet with the session id', () => {

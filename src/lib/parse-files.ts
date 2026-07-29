@@ -1,3 +1,4 @@
+import { parseIsoInstantMs } from './iso-instant';
 import type { ToolUsageData, ToolCall } from './parse-tools';
 import type { SessionTokenData } from '../types';
 
@@ -105,6 +106,17 @@ export interface ChurnStat {
   sessions: number;
   /** churn / sessions — average mutating ops per session that touched it. */
   editsPerSession: number;
+  /**
+   * ISO timestamp of the newest MUTATING call counted into `churn`, or
+   * `undefined` when none of them carried a readable one.
+   *
+   * Carried here rather than re-derived by callers because the honest `asOf`
+   * for a churn claim is the newest call that CONTRIBUTED to it — a later Read
+   * or Bash on the same session says nothing about when the file was last
+   * churned, and dating the claim from one would assert a freshness the churn
+   * evidence does not have.
+   */
+  latestTimestamp?: string;
 }
 
 /**
@@ -123,7 +135,13 @@ export function topChurnFiles(
 ): ChurnStat[] {
   const agg = new Map<
     string,
-    { edits: number; writes: number; sessions: Set<string> }
+    {
+      edits: number;
+      writes: number;
+      sessions: Set<string>;
+      latestMs: number;
+      latestTimestamp?: string;
+    }
   >();
 
   for (const session of data) {
@@ -136,16 +154,29 @@ export function topChurnFiles(
       if (!filePath) continue;
 
       const entry =
-        agg.get(filePath) ?? { edits: 0, writes: 0, sessions: new Set<string>() };
+        agg.get(filePath) ??
+        { edits: 0, writes: 0, sessions: new Set<string>(), latestMs: 0 };
       if (isEdit) entry.edits += 1;
       else entry.writes += 1;
       entry.sessions.add(session.sessionId);
+      // Track the newest MUTATING call, so a churn claim can be dated from the
+      // calls it actually counted rather than from unrelated later activity.
+      // STRICT parse: a raw `Date.parse` here would let a malformed-but-
+      // coercible value ('2026-02-30', '9999') win the preselection and evict a
+      // genuinely valid timestamp, which the downstream validator would then
+      // reject — losing the date entirely rather than falling back to the good
+      // one.
+      const ms = parseIsoInstantMs(call.timestamp);
+      if (ms !== undefined && ms > entry.latestMs) {
+        entry.latestMs = ms;
+        entry.latestTimestamp = call.timestamp;
+      }
       agg.set(filePath, entry);
     }
   }
 
   return Array.from(agg.entries())
-    .map(([filePath, { edits, writes, sessions }]) => {
+    .map(([filePath, { edits, writes, sessions, latestTimestamp }]) => {
       const churn = edits + writes;
       const sessionCount = sessions.size;
       return {
@@ -155,6 +186,7 @@ export function topChurnFiles(
         writes,
         sessions: sessionCount,
         editsPerSession: sessionCount === 0 ? 0 : churn / sessionCount,
+        ...(latestTimestamp !== undefined ? { latestTimestamp } : {}),
       };
     })
     .sort((a, b) => b.churn - a.churn || b.editsPerSession - a.editsPerSession)

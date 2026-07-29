@@ -10,7 +10,7 @@
  */
 import type { Detector } from '../types';
 import type { RecommendationInput } from '../types';
-import { short } from '../shared';
+import { newestEpochDate, short, truncate } from '../shared';
 import type { TaskRecord } from '../../parse-tasks';
 import { PILEUP_MIN } from '../../parse-tasks';
 
@@ -64,6 +64,22 @@ export const detector: Detector = {
       blockedSubjects: string[];
     }
     const pileups: Pileup[] = [];
+    /**
+     * Identities of the tasks appearing in at least one qualifying pileup.
+     *
+     * A task may list SEVERAL unfinished roots, and it joins the group of every
+     * one of them — so summing `blockedCount` counts blocker RELATIONSHIPS, not
+     * tasks: two tasks each blocked by two qualifying roots sum to four. The
+     * displayed total has always been the relationship count; this set is what
+     * lets the provenance say which of the two it is, and cite the other.
+     */
+    const stalledTaskIds = new Set<string>();
+    /**
+     * Identities of every task that participates in a qualifying pileup — the
+     * blocked tasks AND their roots. Superset of {@link stalledTaskIds}; it is
+     * what the finding's `asOf` may honestly be derived from.
+     */
+    const participatingTaskIds = new Set<string>();
 
     // Group tasks by session so we only match blockedBy roots within the same session.
     const bySession = new Map<string, TaskRecord[]>();
@@ -93,6 +109,11 @@ export const detector: Detector = {
       for (const [rootId, blocked] of groups) {
         if (blocked.length < PILEUP_MIN) continue;
         const root = byId.get(rootId)!;
+        for (const t of blocked) {
+          stalledTaskIds.add(`${sessionId}\u0000${t.id}`);
+          participatingTaskIds.add(`${sessionId}\u0000${t.id}`);
+        }
+        participatingTaskIds.add(`${sessionId}\u0000${rootId}`);
         pileups.push({
           sessionId,
           rootId,
@@ -108,8 +129,23 @@ export const detector: Detector = {
     // Biggest pileup first
     pileups.sort((a, b) => b.blockedCount - a.blockedCount);
 
-    const top = pileups[0];
+    // Folded over `blockedCount` — the field the "worst" claim is about —
+    // rather than read off `pileups[0]`. The sort above uses that same field
+    // today, so the two agree; taking the max explicitly means a later
+    // re-ranking cannot silently turn "worst" into a false superlative (the
+    // #3459 defect class).
+    const top = pileups.reduce((a, b) => (b.blockedCount > a.blockedCount ? b : a));
     const totalStalled = pileups.reduce((s, p) => s + p.blockedCount, 0);
+    // Anchored to the newest mtime among the tasks that actually PARTICIPATE in
+    // a qualifying pileup — every blocked task plus its root — never to `now`
+    // and never to the whole tree. A task written today in a session with no
+    // pileup contributes to none of the reported relationships, so dating the
+    // finding from it would assert a freshness none of this evidence has.
+    const asOf = newestEpochDate(
+      data
+        .filter((t) => participatingTaskIds.has(`${t.sessionId}\u0000${t.id}`))
+        .map((t) => t.mtimeMs)
+    );
 
     const evidenceLines = pileups.slice(0, 5).map(
       (p) =>
@@ -163,6 +199,61 @@ export const detector: Detector = {
         note:
           'Review each root task. Assign an owner or split it; downstream tasks unblock automatically.',
         snippet: fixSnippet,
+      },
+      provenance: {
+        observations: [
+          {
+            // The displayed figure is a count of blocker RELATIONSHIPS, not of
+            // tasks: a task listing two qualifying roots joins both pileups and
+            // is summed twice. Calling it a task count would be unreproducible
+            // in exactly that case, so the claim names the edge and the
+            // distinct-task count is cited separately below.
+            claim: `${totalStalled} blocker relationship(s) link a non-completed task to a non-completed root in the same session`,
+            source: 'parse-tasks (~/.claude/tasks/<session>/*.json)',
+            field: 'blockedBy / status',
+            value: totalStalled,
+          },
+          {
+            claim: `those relationships span ${stalledTaskIds.size} distinct stalled task(s)`,
+            source: 'parse-tasks (~/.claude/tasks/<session>/*.json)',
+            field: 'id',
+            value: stalledTaskIds.size,
+          },
+          {
+            claim: `${pileups.length} root task(s) each hold up at least PILEUP_MIN = ${PILEUP_MIN} downstream task(s)`,
+            source: 'parse-tasks (~/.claude/tasks/<session>/*.json)',
+            field: 'blockedBy',
+            value: pileups.length,
+          },
+          {
+            claim:
+              `the largest pileup is ${top.blockedCount} task(s) behind ` +
+              `"${truncate(toSingleLine(top.rootSubject), 60)}" in session ${short(top.sessionId)}`,
+            source: 'parse-tasks (~/.claude/tasks/<session>/*.json)',
+            field: 'blockedBy / subject',
+            value: top.blockedCount,
+          },
+          {
+            claim: `a root is reported only once PILEUP_MIN = ${PILEUP_MIN} downstream task(s) wait on it`,
+            source: 'parse-tasks-summary',
+            field: 'PILEUP_MIN',
+            value: PILEUP_MIN,
+          },
+        ],
+        // What is measured is the DECLARED `blockedBy` graph plus the recorded
+        // `status` — not whether the root is genuinely what holds the work up.
+        // A blocker naming a task in a different session, or an unrecorded
+        // dependency, is invisible here; a `blockedBy` id with no matching
+        // record in the same session is skipped rather than counted. "Dead
+        // weight" in `action` is the inference drawn from the declared graph.
+        inference:
+          'Declared blockedBy edges between non-completed tasks in one session are ' +
+          'counted. Whether the root is the real constraint, and whether the ' +
+          'downstream work is genuinely stalled by it, are not measured — the graph ' +
+          'is taken at its word. The headline figure counts those edges, so a task ' +
+          'waiting on two qualifying roots contributes twice; the distinct-task ' +
+          'count above is the deduplicated figure.',
+        ...(asOf ? { asOf } : {}),
       },
     };
   },

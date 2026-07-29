@@ -63,6 +63,16 @@ import type {
 } from '../model-eval-ingest';
 import type { EvalRoutingRecommendation } from '../model-eval-result';
 import type { ProjectMemoryStore } from '../parse-memories';
+import type { TaskRecord } from '../parse-tasks';
+import { PILEUP_MIN } from '../parse-tasks';
+import type { WorkflowRun } from '../parse-workflows';
+import type {
+  ChurnGeometryFile,
+  ChurnGeometrySession,
+  StructuredPatchEdit,
+} from '../parse-churn-geometry';
+import type { AssistantFeatures } from '../../types';
+import { HIGH_CHURN, MIN_ASSISTANT_TURNS } from './shared';
 // @ts-expect-error - plain ESM build helper, no .d.ts (same import as sample-corpus.test.ts)
 import { buildSampleCorpus } from '../../../scripts/sample-data/build-corpus.mjs';
 import { parseHistoryJsonl, groupBySessions, groupByProjects } from '../parse-history';
@@ -275,7 +285,7 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * unauditable recommendation, so growing it must be a deliberate edit rather
  * than the path of least resistance. Update this number DOWNWARD only.
  */
-const EXEMPT_AT_INVERSION = 43;
+const EXEMPT_AT_INVERSION = 36;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {
@@ -1819,6 +1829,208 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now: Date.parse('2026-06-20T00:00:00.000Z'),
     };
   },
+
+  // ── workflow batch (#3232) ──────────────────────────────────────────────
+  //
+  // Each observes 2026-06-09 and runs at a later `now`, so the asOf guard
+  // below catches a clock-derived date.
+
+  'workflow.abandoned-tasks': () => {
+    // Two cold sessions with open tasks; the bigger backlog is declared LAST
+    // so the "largest backlog" citation cannot pass on insertion order.
+    const now = Date.parse('2026-06-20T00:00:00.000Z');
+    const mtimeMs = Date.parse('2026-06-09T12:00:00.000Z'); // 10 days idle > COLD_DAYS
+    const task = (over: Partial<TaskRecord> & { id: string; sessionId: string }): TaskRecord => ({
+      subject: `Task ${over.id}`,
+      description: '',
+      activeForm: '',
+      owner: '',
+      status: 'pending',
+      blocks: [],
+      blockedBy: [],
+      mtimeMs,
+      ...over,
+    });
+    return {
+      input: baseInput({
+        tasks: [
+          task({ id: '1', sessionId: 'cold-one' }),
+          task({ id: '2', sessionId: 'cold-two' }),
+          task({ id: '3', sessionId: 'cold-two', status: 'in_progress' }),
+          task({ id: '4', sessionId: 'cold-two', status: 'completed' }),
+        ],
+      } as unknown as Partial<RecommendationInput>),
+      now,
+    };
+  },
+
+  'workflow.assistant-refusal-rate': () => {
+    // 200 examined turns (over MIN_ASSISTANT_TURNS) at a 20% refusal rate.
+    const features: AssistantFeatures[] = [
+      {
+        sessionId: 'ref-1',
+        assistantTurnCount: MIN_ASSISTANT_TURNS * 4,
+        textLength: 0,
+        codeBlockCount: 0,
+        toolCallCount: 0,
+        refusalCount: Math.round(MIN_ASSISTANT_TURNS * 4 * 0.2),
+        hedgingCount: 0,
+        endsWithQuestionCount: 0,
+        thinkingByteLen: 0,
+      },
+    ];
+    return {
+      input: baseInput({ assistantFeatures: features } as unknown as Partial<RecommendationInput>),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
+
+  'workflow.blocked-task-pileup': () => {
+    const now = Date.parse('2026-06-20T00:00:00.000Z');
+    const mtimeMs = Date.parse('2026-06-09T12:00:00.000Z');
+    const task = (over: Partial<TaskRecord> & { id: string }): TaskRecord => ({
+      subject: `Task ${over.id}`,
+      description: '',
+      activeForm: '',
+      owner: '',
+      status: 'pending',
+      sessionId: 'pileup-1',
+      blocks: [],
+      blockedBy: [],
+      mtimeMs,
+      ...over,
+    });
+    return {
+      input: baseInput({
+        tasks: [
+          task({ id: 'root', subject: 'Land the shared primitive', status: 'in_progress' }),
+          ...Array.from({ length: PILEUP_MIN + 1 }, (_, i) =>
+            task({ id: `blocked-${i}`, blockedBy: ['root'] })
+          ),
+        ],
+      } as unknown as Partial<RecommendationInput>),
+      now,
+    };
+  },
+
+  'workflow.churn-geometry': () => {
+    const churnFile = (
+      over: Partial<ChurnGeometryFile> & { sessionId: string; filePath: string }
+    ): ChurnGeometryFile => ({
+      latestTimestamp: CTX_TS,
+      tasks: 1,
+      edits: 2,
+      userModifiedEdits: 0,
+      emptyPatchWrites: 0,
+      grossLines: 60,
+      netLines: 2,
+      netAbsLines: 2,
+      reeditRanges: 2,
+      postStopReeditRanges: 1,
+      reworkDistance: 30,
+      ...over,
+    });
+    const patch = (sessionId: string, timestamp: string): StructuredPatchEdit => ({
+      sessionId,
+      timestamp,
+      toolUseId: 'u',
+      toolName: 'Edit',
+      filePath: 'src/hot.ts',
+      userModified: false,
+      taskIndex: 0,
+      oldStart: 1,
+      oldLines: 1,
+      newStart: 1,
+      newLines: 1,
+      lines: 1,
+      grossLines: 1,
+      netLines: 1,
+      emptyPatch: false,
+    });
+    const sessions: ChurnGeometrySession[] = [
+      {
+        sessionId: 'churn-1',
+        edits: [patch('churn-1', CTX_TS)],
+        files: [churnFile({ sessionId: 'churn-1', filePath: 'src/hot.ts' })],
+      },
+    ];
+    return {
+      input: baseInput({ churnGeometry: sessions } as unknown as Partial<RecommendationInput>),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
+
+  'workflow.correction-mining': () => {
+    // A Read that failed at one path then succeeded at another with the same
+    // (non-generic) filename stem — the mined failed->fixed pair.
+    const calls = [
+      {
+        timestamp: '2026-06-09T11:59:00.000Z',
+        toolName: 'Read',
+        input: { file_path: 'axion-formats/src/FirstClassEntity.java' },
+        toolUseId: 'cm-1',
+        isError: true,
+        resultBytes: 0,
+      },
+      {
+        timestamp: CTX_TS,
+        toolName: 'Read',
+        input: { file_path: 'axion-scala-common/src/FirstClassEntity.scala' },
+        toolUseId: 'cm-2',
+        isError: false,
+        resultBytes: 10,
+      },
+    ] as unknown as RecommendationInput['toolData'][number]['calls'];
+    return {
+      input: baseInput({
+        toolData: [{ sessionId: 'corr-1', calls }],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
+
+  'workflow.failed-workflow-runs': () => {
+    const run = (over: Partial<WorkflowRun>): WorkflowRun => ({
+      runId: 'wf_x',
+      workflowName: 'wf',
+      status: 'completed',
+      startTime: Date.parse(CTX_TS),
+      durationMs: 1,
+      agentCount: 1,
+      totalTokens: 1_000,
+      totalToolCalls: 1,
+      defaultModel: null,
+      sessionId: 'wf-sess',
+      phases: [],
+      agents: [],
+      ...over,
+    });
+    return {
+      input: baseInput({
+        workflows: [
+          run({ runId: 'wf_ok' }),
+          run({ runId: 'wf_bad', status: 'aborted' }),
+        ],
+      } as unknown as Partial<RecommendationInput>),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
+
+  'workflow.file-churn': () => {
+    const calls = Array.from({ length: HIGH_CHURN + 3 }, (_, i) => ({
+      timestamp: CTX_TS,
+      toolName: 'Edit',
+      input: { file_path: '/repo/src/lib/hot.ts' },
+      toolUseId: `fc-${i}`,
+      isError: null,
+      resultBytes: 0,
+    })) as unknown as RecommendationInput['toolData'][number]['calls'];
+    return {
+      input: baseInput({ toolData: [{ sessionId: 'churn-sess', calls }] }),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
 };
 
 function runAllowlistedDetector(id: string): Recommendation {
@@ -1870,6 +2082,38 @@ describe('migrated context/activity detectors date claims from observed data', (
   it.each(tokenDerived)('%s anchors asOf to the newest observed entry, not today', (id) => {
     const rec = runAllowlistedDetector(id);
     expect(rec.provenance!.asOf).toBe(CTX_ASOF);
+  });
+
+  it.each([
+    // Same guard for the #3232 workflow batch: each fixture observes
+    // 2026-06-09 and runs at 2026-06-20, so `new Date(now)` is off by 11 days.
+    'workflow.churn-geometry',
+    'workflow.correction-mining',
+    'workflow.failed-workflow-runs',
+    'workflow.file-churn',
+  ])('%s anchors asOf to the newest observed datum, not today', (id) => {
+    const rec = runAllowlistedDetector(id);
+    expect(rec.provenance!.asOf).toBe(CTX_ASOF);
+  });
+
+  it.each([
+    // The task-backed pair need a COLD_DAYS gap between observation and run,
+    // so they cannot share the one-day window above — but the same rule holds:
+    // the date is the newest task-file mtime, never the run date.
+    'workflow.abandoned-tasks',
+    'workflow.blocked-task-pileup',
+  ])('%s dates from the newest task-file mtime, not the run date', (id) => {
+    const rec = runAllowlistedDetector(id);
+    expect(rec.provenance!.asOf).toBe(CTX_ASOF);
+  });
+
+  it('workflow.assistant-refusal-rate emits no asOf at all', () => {
+    // `AssistantFeatures` carries no timestamp, so there is nothing to date
+    // this rate from. Omission is the honest result; a borrowed date would
+    // assert a freshness this evidence does not have.
+    const rec = runAllowlistedDetector('workflow.assistant-refusal-rate');
+    expect(rec.provenance!.asOf).toBeUndefined();
+    expect(rec.provenance!.stale).toBeUndefined();
   });
 
   it('activity.stale-projects dates from the freshest project activity', () => {

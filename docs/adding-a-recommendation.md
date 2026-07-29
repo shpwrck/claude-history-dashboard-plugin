@@ -202,10 +202,36 @@ false claim or an unsafe copy-paste fix directly erodes trust (epic #866; the
   computed from, so a reader can reproduce the number without re-deriving the
   detector. `asOf` must be a real calendar date (`2026-02-30` is rejected).
   The only way out is `PROVENANCE_EXEMPT`, the shrink-only register of ids that
-  predate the contract — do not add to it. Adding a trigger fixture to
+  predate the contract — do not add to it. Migrating an id OFF it means deleting
+  its line **and** lowering `EXEMPT_AT_INVERSION` in `provenance-contract.test.ts`
+  to match; leaving the pin high fails the next person's unrelated change.
+  Adding a trigger fixture to
   `PROVENANCE_TRIGGER_FIXTURES` (and your id to `PROVENANCE_DETECTORS`) proves
   compliance by actually running the detector, which is the strongest tier;
   otherwise the sample-corpus sweep covers you if your detector fires on it.
+  Don't lean on the sweep — of the nine detectors migrated in #3459, only three
+  fired on the sample corpus at all.
+- **Derive `asOf` from the newest OBSERVED datum, never from `now`.** The
+  validator cannot tell `newestTokenDataDate(input)` from `new Date(now)` — both
+  are well-formed dates — so a detector can pass the whole contract while
+  asserting a freshness the corpus does not have. Use the shared derivations in
+  `detectors/shared.ts` rather than hand-rolling a "newest timestamp" loop:
+  `newestTokenDataDate` (token entries), `newestIsoDate` (any ISO timestamp
+  strings — tool calls, structured-patch edits, mined corrections), and
+  `newestEpochDate` (epoch-ms fields such as `TaskRecord.mtimeMs` or
+  `WorkflowRun.startTime`). Where the source artifact carries **no** timestamp
+  (`AssistantFeatures`, for one), **omit `asOf`** — borrowing a date off an
+  artifact you did not read is worse than saying nothing. Pin it with a test
+  whose fixture observes one date and runs at a later `now`: a clock-derived
+  date is then off by a measurable gap and fails.
+- **A superlative must fold over the field it cites.** Writing "the most X" or
+  "the highest Y" as `rows[0]` is only true if the upstream sorted by that
+  field, and several of these helpers sort by a composite score. `reduce` for
+  the max instead — or, when the head genuinely is the ranking you mean, say so
+  (`churn-geometry` cites "the highest-ranked file by the composite score", not
+  "the most churned file", because no single source field holds that order).
+  This class shipped twice inside otherwise-correct provenance: the contract
+  checks that a claim *cites* a field, not that it was *computed from* it.
 - **Fix snippets are a product surface — declare how safe they are.** Set
   `fixKind` (`detectors/types.ts`): `'validated'` (default) is copy-paste-safe
   self-contained config; `'illustrative'` is a template the user must adapt (a

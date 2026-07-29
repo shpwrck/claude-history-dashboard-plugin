@@ -80,13 +80,6 @@ export const PROVENANCE_EXEMPT: readonly string[] = [
   'security.model-deceit',
   'speed.model-latency',
   'speed.time-motion',
-  'workflow.abandoned-tasks',
-  'workflow.assistant-refusal-rate',
-  'workflow.blocked-task-pileup',
-  'workflow.churn-geometry',
-  'workflow.correction-mining',
-  'workflow.failed-workflow-runs',
-  'workflow.file-churn',
   'workflow.harmful-habit',
   'workflow.low-tool-effectiveness',
   'workflow.plan-missing-verification',
@@ -160,6 +153,14 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'reliability.agent-report-card',
   'reliability.api-errors',
   'reliability.config-drift',
+  // #3232 — the workflow batch, each proven by a trigger fixture below.
+  'workflow.abandoned-tasks',
+  'workflow.assistant-refusal-rate',
+  'workflow.blocked-task-pileup',
+  'workflow.churn-geometry',
+  'workflow.correction-mining',
+  'workflow.failed-workflow-runs',
+  'workflow.file-churn',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */

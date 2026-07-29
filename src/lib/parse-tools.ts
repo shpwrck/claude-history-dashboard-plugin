@@ -1,3 +1,4 @@
+import { parseIsoInstantMs } from './iso-instant';
 import { parseJsonl, parseMessage } from './parse-utils';
 import { bashCommandFingerprint } from './bash-command-fingerprint';
 import { shellQuoteMinimal } from './shell-quote';
@@ -4901,14 +4902,26 @@ export interface AggregatedCorrection extends CorrectionFact {
  * Group identical `failed → succeeded` corrections and rank by occurrence count
  * (a fact the agent re-guesses repeatedly ranks higher). The `sessionId`
  * retained is the first one seen, for an evidence link.
+ *
+ * `succeededTimestamp` is the NEWEST occurrence's, not the first: it is what
+ * dates the aggregate, and "when was this path last seen to work" is the
+ * question a consumer asks of it. Keeping the first would date a correction
+ * re-confirmed yesterday by the day it was first observed, understating its
+ * freshness and demoting a live fact.
  */
 export function aggregateCorrections(facts: CorrectionFact[]): AggregatedCorrection[] {
   const agg = new Map<string, AggregatedCorrection>();
   for (const f of facts) {
     const key = `${f.category}\0${f.failed}\0${f.succeeded}`;
     const prev = agg.get(key);
-    if (prev) prev.occurrences += 1;
-    else agg.set(key, { ...f, occurrences: 1 });
+    if (prev) {
+      prev.occurrences += 1;
+      const prevMs = parseIsoInstantMs(prev.succeededTimestamp);
+      const nextMs = parseIsoInstantMs(f.succeededTimestamp);
+      if (nextMs !== undefined && (prevMs === undefined || nextMs > prevMs)) {
+        prev.succeededTimestamp = f.succeededTimestamp;
+      }
+    } else agg.set(key, { ...f, occurrences: 1 });
   }
   return Array.from(agg.values()).sort((a, b) => b.occurrences - a.occurrences);
 }

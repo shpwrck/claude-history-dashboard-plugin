@@ -414,6 +414,35 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "category": "workflow",
     "detail": "30% of assistant turns (30 of 100) contain a refusal or concession ("I cannot", "I apologize", "you're right") — often a sign the prompt or project context left it guessing.",
     "id": "workflow.assistant-refusal-rate",
+    "provenance": {
+      "inference": "Turns matching a refusal/concession phrase are counted; whether the assistant was actually wrong, and whether project context caused it, are not measured. A sustained rate is read as underspecified recurring instructions — an interpretation of the count, not the count itself.",
+      "observations": [
+        {
+          "claim": "30 assistant turn(s) matched a refusal/concession marker",
+          "field": "refusalCount",
+          "source": "parse-assistant-features (assistantFeatures[], summed across sessions)",
+          "value": 30,
+        },
+        {
+          "claim": "100 assistant turn(s) were examined across 1 session(s)",
+          "field": "assistantTurnCount",
+          "source": "parse-assistant-features (assistantFeatures[], summed across sessions)",
+          "value": 100,
+        },
+        {
+          "claim": "30 / 100 of assistant turns, which rounds to 30%",
+          "field": "refusalCount / assistantTurnCount",
+          "source": "detectors/workflow/assistant-refusal-rate",
+          "value": 30,
+        },
+        {
+          "claim": "withheld below MIN_ASSISTANT_TURNS = 50 examined turns, and below a rate of HIGH_REFUSAL_RATE = 0.15",
+          "field": "MIN_ASSISTANT_TURNS / HIGH_REFUSAL_RATE",
+          "source": "detectors/shared",
+          "value": 50,
+        },
+      ],
+    },
     "severity": "info",
     "title": "Assistant frequently course-corrects",
   },
@@ -761,6 +790,29 @@ These were run repeatedly — wrap them in a script (e.g. \`scripts/dev.sh\`) or
       "churn.ts, 18 edits / 1 sessions",
     ],
     "id": "workflow.file-churn",
+    "provenance": {
+      "inference": "Edit/Write calls per file path are counted; lines changed, rework, and intent are not measured here. Repeated mutation of one path is treated as a refactor-candidate signal rather than proof of a design problem. Ranking considers at most the 20 highest-churn paths, which did not bind here.",
+      "observations": [
+        {
+          "claim": "1 of the 1 ranked file path(s) reached HIGH_CHURN = 15 mutating operations",
+          "field": "churn",
+          "source": "parse-files (topChurnFiles over toolData[].calls, probed at limit 21, reported over the top 20)",
+          "value": 1,
+        },
+        {
+          "claim": "the highest churn observed is 18 mutating op(s) on churn.ts, across 1 session(s)",
+          "field": "churn / sessions",
+          "source": "parse-files (topChurnFiles over toolData[].calls, limit 20)",
+          "value": 18,
+        },
+        {
+          "claim": "a file qualifies at HIGH_CHURN = 15 mutating operations",
+          "field": "HIGH_CHURN",
+          "source": "detectors/shared",
+          "value": 15,
+        },
+      ],
+    },
     "severity": "info",
     "title": "High-churn files",
     "view": "files",

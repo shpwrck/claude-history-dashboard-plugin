@@ -24,6 +24,7 @@ import {
 } from '../task-class';
 import { resolveModelPricing, entryCostAtModel, CHEAPEST_MODEL } from '../pricing';
 import { scopeKeyOf } from '../reclaim';
+import { parseIsoInstantMs } from '../iso-instant';
 export {
   allowShadowedByDeny,
   parsePermRule,
@@ -302,6 +303,20 @@ export function daysAgo(ts: number, now: number): number {
 const MAX_TIME_MS = 8.64e15;
 
 /**
+ * Last instant of year 9999 — the largest one `toISOString()` renders with a
+ * FOUR-DIGIT year.
+ *
+ * {@link MAX_TIME_MS} is not a tight enough bound for our purposes. Between the
+ * two, `toISOString()` switches to the expanded-year form and
+ * `.slice(0, 10)` returns `'+010000-01'` rather than a date — which fails the
+ * `YYYY-MM-DD` contract `validateRecProvenance` enforces, so the recommendation
+ * would be rejected at validation time rather than merely mis-dated.
+ * `parseWorkflowRun` takes `startTime` straight from a manifest, so such a value
+ * is reachable from data, not just from a test.
+ */
+const MAX_ISO_DATE_MS = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
+
+/**
  * An epoch-ms instant as an ISO `YYYY-MM-DD`, or `undefined` when it is not a
  * real, renderable instant.
  *
@@ -311,8 +326,23 @@ const MAX_TIME_MS = 8.64e15;
  * 1970-01-01 because every caller here uses 0 as its no-timestamp sentinel.
  */
 export function isoDateFromMs(ms: number): string | undefined {
-  if (!Number.isFinite(ms) || ms <= 0 || Math.abs(ms) > MAX_TIME_MS) return undefined;
+  if (!isRenderableMs(ms)) return undefined;
   return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * True when `ms` is an instant {@link isoDateFromMs} can actually render.
+ *
+ * Split out so a caller can reject an unrenderable candidate BEFORE it competes
+ * to be the maximum. Selecting an out-of-range value and only discovering it is
+ * unrenderable at format time discards every valid instant alongside it — one
+ * absurd number in a parsed manifest would silently strip `asOf` from otherwise
+ * reproducible evidence.
+ */
+function isRenderableMs(ms: number): boolean {
+  return (
+    Number.isFinite(ms) && ms > 0 && Math.abs(ms) <= MAX_TIME_MS && ms <= MAX_ISO_DATE_MS
+  );
 }
 
 /**
@@ -335,12 +365,61 @@ export function isoDateFromMs(ms: number): string | undefined {
 export function newestTokenDataDate(
   tokenData: readonly SessionTokenData[] | undefined
 ): string | undefined {
+  return newestIsoDate(
+    (tokenData ?? []).flatMap((d) => (d.entries ?? []).map((e) => e.timestamp))
+  );
+}
+
+/**
+ * The newest READABLE instant in a list of ISO timestamp STRINGS, as an ISO
+ * `YYYY-MM-DD` — the generic `asOf` anchor for a claim derived from any
+ * timestamped artifact (tool calls, structured-patch edits, mined corrections).
+ *
+ * Same rule and same rationale as {@link newestTokenDataDate}, which is now
+ * expressed in terms of it: the anchor comes from the DATA, never from `now`,
+ * because a claim is only true as of the last thing actually observed. Keeping
+ * one derivation matters — two hand-rolled "newest timestamp" loops are exactly
+ * the pair-that-drifts defect the audit keeps finding, and every detector must
+ * demote against the same instant.
+ *
+ * Entries that are not real ISO instants are SKIPPED, not coerced
+ * (`parseIsoInstantMs`) — these are raw transcript strings and older
+ * writers/fixtures leave non-dates in them. An input with nothing readable
+ * yields `undefined` — honest absence, since `provenance.asOf` is optional.
+ */
+export function newestIsoDate(
+  timestamps: Iterable<string | null | undefined>
+): string | undefined {
   let newest = 0;
-  for (const d of tokenData ?? []) {
-    for (const e of d.entries ?? []) {
-      const ms = Date.parse(e.timestamp);
-      if (Number.isFinite(ms) && ms > newest) newest = ms;
-    }
+  for (const t of timestamps) {
+    if (typeof t !== 'string') continue;
+    const ms = parseIsoInstantMs(t);
+    if (ms !== undefined && ms > newest) newest = ms;
+  }
+  return isoDateFromMs(newest);
+}
+
+/**
+ * The newest instant in a list of epoch-MILLISECOND values, as an ISO
+ * `YYYY-MM-DD`. The numeric sibling of {@link newestIsoDate}, for artifacts
+ * that carry a number rather than a string (`TaskRecord.mtimeMs`,
+ * `WorkflowRun.startTime`).
+ *
+ * Entries that are not RENDERABLE instants are skipped before the maximum is
+ * taken — `null`/`undefined`, non-finite, `<= 0`, and anything beyond the range
+ * `Date.prototype.toISOString` can express. Filtering first is the point:
+ * `parseWorkflowRun` takes `startTime` straight from a manifest, so one absurd
+ * finite number would otherwise WIN the max and then fail to format, stripping
+ * `asOf` from evidence that was perfectly well dated by its other runs. A
+ * corpus with no usable instant yields `undefined` rather than 1970-01-01.
+ */
+export function newestEpochDate(
+  msValues: Iterable<number | null | undefined>
+): string | undefined {
+  let newest = 0;
+  for (const ms of msValues) {
+    if (typeof ms !== 'number' || !isRenderableMs(ms)) continue;
+    if (ms > newest) newest = ms;
   }
   return isoDateFromMs(newest);
 }

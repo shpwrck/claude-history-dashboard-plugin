@@ -1,4 +1,5 @@
 import { parseJsonl, parseMessage, type RawSessionEntry } from './parse-utils';
+import { parseIsoInstantMs } from './iso-instant';
 
 export interface StructuredPatchEdit {
   sessionId: string;
@@ -22,6 +23,8 @@ export interface StructuredPatchEdit {
 export interface ChurnGeometryFile {
   sessionId: string;
   filePath: string;
+  /** Newest valid timestamp among every structured edit summarized for this file. */
+  latestTimestamp: string | null;
   tasks: number;
   edits: number;
   userModifiedEdits: number;
@@ -259,10 +262,20 @@ export function summarizeChurnGeometry(
       const netLines = fileEdits.reduce((sum, e) => sum + e.netLines, 0);
       const netAbsLines = Math.abs(netLines);
       const reworkDistance = grossLines / Math.max(1, netAbsLines);
+      let latestTimestamp: string | null = null;
+      let latestMs = Number.NEGATIVE_INFINITY;
+      for (const edit of fileEdits) {
+        const ms = parseIsoInstantMs(edit.timestamp);
+        if (ms !== undefined && ms > latestMs) {
+          latestMs = ms;
+          latestTimestamp = edit.timestamp;
+        }
+      }
 
       return {
         sessionId: fileEdits[0]?.sessionId ?? '',
         filePath,
+        latestTimestamp,
         tasks: taskIndexes.size,
         edits: fileEdits.length,
         userModifiedEdits: fileEdits.filter((e) => e.userModified).length,

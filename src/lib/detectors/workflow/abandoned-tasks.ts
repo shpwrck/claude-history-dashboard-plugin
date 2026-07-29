@@ -11,7 +11,7 @@
  */
 import type { Detector } from '../types';
 import type { RecommendationInput } from '../types';
-import { short } from '../shared';
+import { newestEpochDate, short } from '../shared';
 import type { TaskRecord } from '../../parse-tasks';
 import { COLD_DAYS } from '../../parse-tasks';
 // `sessionId` is a directory entry name read from `~/.claude/tasks/` — the
@@ -76,7 +76,23 @@ export const detector: Detector = {
     abandoned.sort((a, b) => b.count - a.count);
 
     const totalAbandoned = abandoned.reduce((s, a) => s + a.count, 0);
-    const top = abandoned[0];
+    // Folded over `count` — the field the "worst" claim is about — rather than
+    // read off `abandoned[0]`. The sort above is by that same field today, so
+    // the two agree; taking the max explicitly means a later re-ranking (by
+    // idle days, by session recency) cannot silently turn "worst" into a false
+    // superlative, which is the #3459 defect class.
+    const top = abandoned.reduce((a, b) => (b.count > a.count ? b : a));
+    // Anchored to the newest mtime among the tasks that are actually REPORTED,
+    // never to `now` and never to the whole tree. A warm session touched today
+    // contributes nothing to the count, the cold-session tally or the evidence
+    // rows, so letting it date the finding would make an old abandonment look
+    // current — freshness borrowed from data the claim never used. The
+    // idle-day figures below are deliberately `now`-relative ("how long since"
+    // is a question about the present); the evidence date is not.
+    const reportedSessions = new Set(abandoned.map((a) => a.sessionId));
+    const asOf = newestEpochDate(
+      data.filter((t) => reportedSessions.has(t.sessionId)).map((t) => t.mtimeMs)
+    );
 
     const evidenceLines = abandoned.slice(0, 5).map(
       (a) =>
@@ -127,6 +143,46 @@ export const detector: Detector = {
         note:
           'Run per-session to list tasks never completed, then close or reassign each one. Needs a POSIX shell with `jq` available (on Windows use WSL or Git Bash); adapt the traversal if your environment differs.',
         snippet: fixSnippet,
+      },
+      provenance: {
+        observations: [
+          {
+            claim: `${totalAbandoned} task(s) are still pending or in_progress across ${abandoned.length} cold session(s)`,
+            source: 'parse-tasks (~/.claude/tasks/<session>/*.json)',
+            field: 'status',
+            value: totalAbandoned,
+          },
+          {
+            claim: `${abandoned.length} session(s) have an open task and no task-file write for at least COLD_DAYS = ${COLD_DAYS} days`,
+            source: 'parse-tasks (~/.claude/tasks/<session>/*.json)',
+            field: 'mtimeMs',
+            value: abandoned.length,
+          },
+          {
+            claim: `the largest open-task backlog is ${top.count} task(s), on session ${short(top.sessionId)}, idle ${top.daysSinceActive} day(s)`,
+            source: 'parse-tasks (~/.claude/tasks/<session>/*.json)',
+            field: 'status / mtimeMs',
+            value: top.count,
+          },
+          {
+            claim: `a session is treated as cold at COLD_DAYS = ${COLD_DAYS} days without a task-file write`,
+            source: 'parse-tasks-summary',
+            field: 'COLD_DAYS',
+            value: COLD_DAYS,
+          },
+        ],
+        // What is measured is FILE MTIME and the recorded `status` string —
+        // never whether the work was actually finished elsewhere. A task closed
+        // by shipping a PR without editing its JSON still reads as open here,
+        // and idle days are measured from the newest mtime in the session, so
+        // one touched file keeps a whole session warm. "Never PR'd or formally
+        // dropped" in `detail` is the inference drawn from that, not an
+        // observation.
+        inference:
+          'Task-file status and mtime are counted; whether the work was completed ' +
+          'outside the task record is not observable here. A stale open status past ' +
+          'the cold threshold is read as abandonment.',
+        ...(asOf ? { asOf } : {}),
       },
     };
   },
