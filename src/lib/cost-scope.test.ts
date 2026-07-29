@@ -140,3 +140,98 @@ describe('filterCostDataByRoute re-export (#2718)', () => {
     ).toEqual(['b']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #3172 (beyond the finding's stated scope) — the Cost route filter had the
+// SAME quadratic shape as the two filters the finding named. `sessionProject`
+// is an `Array.find` and `tokenDataMatchesRoute` is called once per row, so a
+// project drill cost O(rows x sessions) here too. The finding listed only
+// `src/lib/route-filtering.ts`; the defect is the call shape, not the module.
+//
+// Same deterministic probe: count indexed reads of the sessions array.
+//   old: rows x sessions visits (100x100 -> 5,050 with matching indices)
+//   new: one index pass         (100x100 ->   100)
+// ---------------------------------------------------------------------------
+describe('filterCostDataByRoute resolves projects in linear session work (#3172)', () => {
+  const countingSessions = (rows: Session[], counter: { visits: number }): Session[] =>
+    new Proxy(rows, {
+      get(target, prop, receiver) {
+        if (typeof prop === 'string' && /^(0|[1-9]\d*)$/.test(prop)) counter.visits += 1;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+  // `project: undefined` is the case that actually reaches `sessionProject` —
+  // a row carrying its own project short-circuits the lookup entirely.
+  const measure = (n: number) => {
+    const counter = { visits: 0 };
+    const sessions = Array.from(
+      { length: n },
+      (_, i) => ({ sessionId: `s${i}`, project: `/proj-${i}` }) as unknown as Session
+    );
+    const tokenData = Array.from({ length: n }, (_, i) =>
+      tokenRow({ sessionId: `s${i}`, project: undefined })
+    );
+    const scoped = filterCostDataByRoute(
+      tokenData,
+      [] as unknown as ToolUsageData[],
+      countingSessions(sessions, counter),
+      { project: 'proj' }
+    );
+    return { visits: counter.visits, kept: scoped.tokenData.length };
+  };
+
+  it('visits each session a bounded number of times for a project-filtered cost drill', () => {
+    const small = measure(100);
+    const large = measure(200);
+
+    expect(small.kept).toBe(100);
+    expect(large.kept).toBe(200);
+
+    // TWO linear passes are expected and correct: one builds the index, one
+    // projects the surviving session rows at the end of filterCostDataByRoute.
+    // The contract is that session work stays a CONSTANT multiple of the
+    // session count. The old per-row `find` came to 5,150 / 20,300 here.
+    expect(small.visits).toBeLessThanOrEqual(2 * 100);
+    expect(large.visits).toBeLessThanOrEqual(2 * 200);
+
+    // Doubling the corpus roughly doubles the work; quadratic would quadruple.
+    expect(large.visits / small.visits).toBeLessThan(3);
+  });
+
+  it('still prefers the row-carried project over session attribution', () => {
+    // The `??` short-circuit is load-bearing: a row that names its own project
+    // must never be re-attributed through the index.
+    const sessions = [
+      { sessionId: 'a', project: '/from-session' },
+    ] as unknown as Session[];
+    const tokenData = [tokenRow({ sessionId: 'a', project: '/from-row' })];
+
+    expect(
+      filterCostDataByRoute(tokenData, [] as unknown as ToolUsageData[], sessions, {
+        project: 'from-row',
+      }).tokenData.map((r) => r.sessionId)
+    ).toEqual(['a']);
+    expect(
+      filterCostDataByRoute(tokenData, [] as unknown as ToolUsageData[], sessions, {
+        project: 'from-session',
+      }).tokenData
+    ).toEqual([]);
+  });
+
+  it('falls back to session attribution when the row carries none, including misses', () => {
+    const sessions = [
+      { sessionId: 'known', project: '/attributed' },
+    ] as unknown as Session[];
+    const tokenData = [
+      tokenRow({ sessionId: 'known', project: undefined }),
+      tokenRow({ sessionId: 'unknown-session', project: undefined }),
+    ];
+
+    expect(
+      filterCostDataByRoute(tokenData, [] as unknown as ToolUsageData[], sessions, {
+        project: 'attributed',
+      }).tokenData.map((r) => r.sessionId)
+    ).toEqual(['known']);
+  });
+});

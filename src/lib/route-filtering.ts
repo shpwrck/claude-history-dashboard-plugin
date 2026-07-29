@@ -32,6 +32,30 @@ export function sessionProject(
   return sessions?.find((session) => session.sessionId === sessionId)?.project;
 }
 
+/**
+ * Session-id -> project index for the route filters (#3172).
+ *
+ * `sessionProject` is an `Array.find`, so calling it once per row makes a
+ * filter O(rows x sessions). The attribution it looks up is static for the
+ * whole operation, so that scan is rebuilt work rather than needed work: build
+ * this once per filtering call and resolve each row in O(1).
+ *
+ * FIRST WRITE WINS, deliberately. `Array.find` returns the EARLIEST match, so
+ * a duplicated session id has to keep resolving to the entry it resolved to
+ * before. A plain `set` per session would keep the LAST one and quietly change
+ * results on exactly the large corpora this index exists to speed up.
+ */
+export function buildSessionProjectIndex(
+  sessions: Session[] | undefined
+): Map<string, string | undefined> {
+  const index = new Map<string, string | undefined>();
+  if (!sessions) return index;
+  for (const session of sessions) {
+    if (!index.has(session.sessionId)) index.set(session.sessionId, session.project);
+  }
+  return index;
+}
+
 export function filterToolDataByRoute(
   rows: ToolUsageData[],
   sessions: Session[] | undefined,
@@ -43,8 +67,10 @@ export function filterToolDataByRoute(
   const file = filter?.file;
   if (!project && !date && !tool && !file) return rows;
 
+  const projectBySession = project ? buildSessionProjectIndex(sessions) : undefined;
+
   return rows.flatMap((row) => {
-    if (project && !textIncludes(sessionProject(row.sessionId, sessions), project)) {
+    if (project && !textIncludes(projectBySession!.get(row.sessionId), project)) {
       return [];
     }
     const calls = row.calls.filter(
@@ -95,9 +121,11 @@ export function filterApiErrorsByRoute(
   const date = filter?.date;
   if (!project && !date) return rows;
 
+  const projectBySession = project ? buildSessionProjectIndex(sessions) : undefined;
+
   return rows.filter(
     (row) =>
       timestampMatchesDate(row.timestamp, date) &&
-      textIncludes(sessionProject(row.sessionId, sessions), project)
+      (!project || textIncludes(projectBySession!.get(row.sessionId), project))
   );
 }

@@ -74,18 +74,50 @@ interface SortedCall {
   t: number;
 }
 
-function sessionApiErrorTimes(
-  sessionId: string,
-  apiErrors: ApiErrorEvent[]
-): number[] {
-  const out: number[] = [];
+/**
+ * Bucket every API error by session once, sorting each bucket once (#3161).
+ *
+ * This was a per-session helper that walked the WHOLE `apiErrors` array and
+ * sorted the matching subset, called once per tool-data session — O(S x E)
+ * scans plus S sorts during ingest, to compute a partition that does not
+ * depend on which session is asking. One pass builds every bucket instead, and
+ * the total sort work is bounded by sorting the input once.
+ *
+ * Per-bucket results are byte-identical to the old filter: insertion order is
+ * preserved before sorting, the comparator is the same, and unparseable
+ * timestamps are dropped at the same point. A session with no errors gets no
+ * bucket, and the caller substitutes the empty array the old helper returned.
+ *
+ * SCOPED TO `wanted`, which is not an optimization detail but a parity
+ * requirement. Callers routinely pass a route-filtered `toolData` alongside the
+ * COMPLETE `apiErrors` collection (`ToolUsage.tsx` does exactly this), and the
+ * old per-session helper only ever parsed and sorted errors belonging to a
+ * session it was asked about. An unscoped eager index would parse, bucket and
+ * sort the entire error history to render a filtered view — including the
+ * empty-`toolData` case, which used to do no API-error work at all. That would
+ * relocate the cost rather than remove it.
+ */
+function apiErrorTimesBySession(
+  apiErrors: ApiErrorEvent[],
+  wanted: Set<string>
+): Map<string, number[]> {
+  const bySession = new Map<string, number[]>();
+  // No sessions asked about -> no error work, exactly as before the index.
+  if (wanted.size === 0) return bySession;
   for (const e of apiErrors) {
-    if (e.sessionId !== sessionId) continue;
+    if (!wanted.has(e.sessionId)) continue;
     const t = Date.parse(e.timestamp);
-    if (!isNaN(t)) out.push(t);
+    if (isNaN(t)) continue;
+    const bucket = bySession.get(e.sessionId);
+    if (bucket) bucket.push(t);
+    else bySession.set(e.sessionId, [t]);
   }
-  return out.sort((a, b) => a - b);
+  for (const bucket of bySession.values()) bucket.sort((a, b) => a - b);
+  return bySession;
 }
+
+/** Shared empty bucket for sessions with no API errors; never mutated. */
+const NO_API_ERROR_TIMES: number[] = [];
 
 function hasApiErrorWithin(
   errorTimes: number[],
@@ -162,13 +194,19 @@ export function computeToolEffectiveness(
     agg.set(tool, row);
   };
 
+  const apiErrTimesBySession = apiErrorTimesBySession(
+    apiErrors,
+    new Set(toolData.map((s) => s.sessionId))
+  );
+
   for (const session of toolData) {
     const sorted: SortedCall[] = session.calls
       .map((call) => ({ call, t: Date.parse(call.timestamp) }))
       .filter((row) => !isNaN(row.t))
       .sort((a, b) => a.t - b.t);
 
-    const apiErrTimes = sessionApiErrorTimes(session.sessionId, apiErrors);
+    const apiErrTimes =
+      apiErrTimesBySession.get(session.sessionId) ?? NO_API_ERROR_TIMES;
     const userTimes = sessionUserMessageTimes(
       timelineBySession.get(session.sessionId)
     );

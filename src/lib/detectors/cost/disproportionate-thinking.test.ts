@@ -88,3 +88,80 @@ describe('cost.disproportionate-thinking (#1927)', () => {
     expect(detector.rule(input([session('s1', 100_000, 0)]), 0)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #3198 — flagged-session aggregation was quadratic in session count.
+//
+// The total-output pass called `flagged.some(f => f.sessionId === d.sessionId)`
+// for every tokenData row. `flagged` grows WITH tokenData (every session can be
+// flagged), so membership work was O(rows x flagged) on exactly the histories
+// worth analysing.
+//
+// The probe counts reads of `d.sessionId` rather than timing anything, so it is
+// deterministic. In the old code that property is read INSIDE the `.some`
+// callback — once per flagged entry per row, i.e. quadratically. A Set reads it
+// once per row.
+// ---------------------------------------------------------------------------
+describe('cost.disproportionate-thinking — membership is linear (#3198)', () => {
+  /** Session whose `sessionId` getter counts every read. */
+  function countingSession(
+    id: string,
+    outputTokens: number,
+    thinkingTokens: number,
+    counter: { reads: number }
+  ): SessionTokenData {
+    const base = session(id, outputTokens, thinkingTokens) as Record<string, unknown>;
+    delete base.sessionId;
+    Object.defineProperty(base, 'sessionId', {
+      get() {
+        counter.reads += 1;
+        return id;
+      },
+      enumerable: true,
+    });
+    return base as unknown as SessionTokenData;
+  }
+
+  function readsFor(n: number): { reads: number; affected: number | undefined } {
+    const counter = { reads: 0 };
+    // Every session is flagged, which is the worst case for the old scan.
+    const rows = Array.from({ length: n }, (_, i) =>
+      countingSession(`s${i}`, 100_000, 80_000, counter)
+    );
+    const rec = detector.rule(input(rows), 0);
+    return { reads: counter.reads, affected: rec?.affected };
+  }
+
+  it('does not grow session-id reads quadratically as sessions double', () => {
+    const small = readsFor(50);
+    const large = readsFor(100);
+
+    expect(small.affected).toBe(50);
+    expect(large.affected).toBe(100);
+
+    // Old behaviour: reads scale with n^2, so doubling n roughly quadruples
+    // them (50 -> ~2,500+, 100 -> ~10,000+). Linear membership keeps the ratio
+    // at ~2. Bound well below the quadratic ratio but above linear noise.
+    const ratio = large.reads / small.reads;
+    expect(ratio).toBeLessThan(3);
+
+    // And in absolute terms: a small constant number of reads per session,
+    // nowhere near the `n` reads per session the old scan performed.
+    expect(large.reads).toBeLessThan(100 * 10);
+  });
+
+  it('reports the same totals it did before the index', () => {
+    // Two flagged sessions with different output pools; the reclaim fraction
+    // is derived from the flagged sessions' summed output, so an incorrect
+    // membership test would move it.
+    const rec = detector.rule(
+      input([session('s1', 100_000, 80_000), session('s2', 200_000, 160_000)]),
+      0
+    );
+    expect(rec?.affected).toBe(2);
+    // recoverable = (80k + 160k) * 0.5 = 120k tokens @ $25/MTok = $3.00
+    expect(rec?.estSavingsUsd).toBeCloseTo(3.0, 5);
+    // totalThink 240k * 0.5 = 120k over totalOutput 300k = 0.4
+    expect(rec?.reclaim?.counterfactual.poolDeltaFrac?.output).toBeCloseTo(0.4, 5);
+  });
+});

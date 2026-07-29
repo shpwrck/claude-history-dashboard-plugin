@@ -10,7 +10,12 @@
  *
  * MUST stay React-free — pure `src/lib/*` values + `import type` only.
  */
-import { sessionProject, textIncludes, timestampMatchesDate } from './route-filtering';
+import {
+  buildSessionProjectIndex,
+  sessionProject,
+  textIncludes,
+  timestampMatchesDate,
+} from './route-filtering';
 import type { Session, SessionTokenData } from '../types';
 import type { ToolUsageData } from './parse-tools';
 import type { RouteFilter } from './routing';
@@ -22,17 +27,32 @@ import type { RecommendationViews } from './recommendations';
 // This restores the module-level EMPTY_ROWS behavior the extraction replaced.
 const EMPTY_ROWS: never[] = [];
 
+/**
+ * Optional pre-built session-id -> project index (#3172).
+ *
+ * `tokenDataMatchesRoute` is called once per row, and its `sessionProject`
+ * fallback is an `Array.find`, so the Cost route filter is O(rows x sessions)
+ * exactly like the two filters in `route-filtering.ts` were. #3172's finding
+ * only named that file, but the defect is the call SHAPE, not the module.
+ * Passing an index built once per filtering call resolves each row in O(1);
+ * omitting it keeps the old single-row behavior for direct callers.
+ */
 export function tokenDataMatchesRoute(
   row: SessionTokenData,
   sessions: Session[],
-  filter: RouteFilter | undefined
+  filter: RouteFilter | undefined,
+  projectBySession?: Map<string, string | undefined>
 ): boolean {
   if (!filter || Object.keys(filter).length === 0) return true;
-  if (
-    filter.project &&
-    !textIncludes(row.project ?? sessionProject(row.sessionId, sessions), filter.project)
-  ) {
-    return false;
+  if (filter.project) {
+    // Only consult attribution when the row does not already carry a project —
+    // the `??` short-circuit the original expression had.
+    const project =
+      row.project ??
+      (projectBySession
+        ? projectBySession.get(row.sessionId)
+        : sessionProject(row.sessionId, sessions));
+    if (!textIncludes(project, filter.project)) return false;
   }
   if (
     filter.date &&
@@ -58,8 +78,13 @@ export function filterCostDataByRoute(
   sessions: Session[],
   filter: RouteFilter | undefined
 ) {
+  // Built once per call, not once per row (#3172). Only a `project` filter
+  // consults attribution, so anything else pays nothing for the index.
+  const projectBySession = filter?.project
+    ? buildSessionProjectIndex(sessions)
+    : undefined;
   const filteredTokenData = tokenData.filter((row) =>
-    tokenDataMatchesRoute(row, sessions, filter)
+    tokenDataMatchesRoute(row, sessions, filter, projectBySession)
   );
   if (!filter || Object.keys(filter).length === 0) {
     return { tokenData: filteredTokenData, toolData, sessions };

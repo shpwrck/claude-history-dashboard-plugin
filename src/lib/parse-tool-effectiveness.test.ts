@@ -79,3 +79,137 @@ describe('computeToolEffectiveness', () => {
     expect(r.immediatelyFollowedByProgress).toBe(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// #3161 — API errors were rescanned and resorted for every session.
+//
+// `sessionApiErrorTimes(sessionId, apiErrors)` walked the WHOLE apiErrors array
+// and sorted the matching subset, and `computeToolEffectiveness` called it once
+// per tool-data session: O(S x E) visits plus S sorts during ingest, to compute
+// a partition that does not depend on which session is asking.
+//
+// The probe counts INDEXED READS of the apiErrors array (a Proxy `get` trap on
+// numeric keys) rather than timing anything, so it is deterministic and immune
+// to host contention:
+//
+//   old: E visits per session          -> S x E   (100x100 -> 10,000)
+//   new: one bucketing pass            -> E       (100x100 ->    100)
+// ---------------------------------------------------------------------------
+
+/** Wrap an apiErrors array so every indexed element read is counted. */
+const countingErrors = (errors: ApiErrorEvent[], counter: { visits: number }): ApiErrorEvent[] =>
+  new Proxy(errors, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && /^(0|[1-9]\d*)$/.test(prop)) counter.visits += 1
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+
+describe('computeToolEffectiveness indexes API errors once (#3161)', () => {
+  const measure = (n: number) => {
+    const counter = { visits: 0 }
+    const toolData = Array.from({ length: n }, (_, i) =>
+      session(`s${i}`, [tc('Bash', { ts: at(0), input: { command: `c${i}` } })])
+    )
+    const errors = Array.from(
+      { length: n },
+      (_, i) => ({ sessionId: `s${i}`, timestamp: at(10), summary: 'x' }) as ApiErrorEvent
+    )
+    const rows = computeToolEffectiveness(toolData, countingErrors(errors, counter), [])
+    return { visits: counter.visits, errorsCounted: row(rows, 'Bash').immediatelyFollowedByError }
+  }
+
+  it('visits each API error exactly once regardless of session count', () => {
+    const small = measure(100)
+    const large = measure(200)
+
+    // The acceptance contract, literally: indexed ONCE, not once per session.
+    // The old scan visited 10,000 / 40,000 times for these same fixtures.
+    expect(small.visits).toBe(100)
+    expect(large.visits).toBe(200)
+
+    // Every session's call is still matched to its own session's error, so the
+    // speedup did not come from doing less of the actual work.
+    expect(small.errorsCounted).toBe(100)
+    expect(large.errorsCounted).toBe(200)
+  })
+
+  it('sorts each session bucket, which hasApiErrorWithin depends on', () => {
+    // hasApiErrorWithin stops at the FIRST error at or after the call, so an
+    // unsorted bucket silently loses in-window errors. Errors arrive newest
+    // first here: sorted -> the 10s error is found inside the 30s window;
+    // unsorted -> the 50s error is seen first and the scan gives up.
+    const data = [session('s', [tc('Bash', { ts: at(0), input: { command: 'x' } })])]
+    const errors = [
+      { sessionId: 's', timestamp: at(50), summary: 'late' },
+      { sessionId: 's', timestamp: at(10), summary: 'in-window' },
+    ] as ApiErrorEvent[]
+    expect(row(computeToolEffectiveness(data, errors, []), 'Bash').immediatelyFollowedByError).toBe(1)
+  })
+
+  // Codex review on PR #3467 caught the first cut of this index being eager over
+  // the WHOLE apiErrors collection. Callers pass a route-filtered toolData next
+  // to an UNSCOPED apiErrors (ToolUsage.tsx:174 does exactly that), so a filter
+  // matching few or no sessions would have parsed, bucketed and sorted the
+  // entire error history just to render an empty state — relocating the cost
+  // instead of removing it.
+  it('does no API-error work at all when there are no sessions to score', () => {
+    const counter = { visits: 0 }
+    const errors = Array.from(
+      { length: 500 },
+      (_, i) => ({ sessionId: `s${i}`, timestamp: at(10), summary: 'x' }) as ApiErrorEvent
+    )
+    const rows = computeToolEffectiveness([], countingErrors(errors, counter), [])
+    expect(rows).toEqual([])
+    // The pre-index code touched zero errors here; so must the index.
+    expect(counter.visits).toBe(0)
+  })
+
+  it('parses only the errors belonging to the sessions it was asked about', () => {
+    // One scoped session against a large unrelated error history. The old
+    // per-session helper only ever PARSED its own session's timestamps; the
+    // index must not start parsing everybody's. A getter on `timestamp` records
+    // each parse, so this is deterministic rather than timed.
+    const parsed: string[] = []
+    const errors = Array.from({ length: 200 }, (_, i) => {
+      const id = i === 7 ? 'wanted' : `other${i}`
+      return {
+        sessionId: id,
+        summary: 'x',
+        get timestamp() {
+          parsed.push(id)
+          return at(10)
+        },
+      } as unknown as ApiErrorEvent
+    })
+
+    const data = [session('wanted', [tc('Bash', { ts: at(0), input: { command: 'x' } })])]
+    const r = row(computeToolEffectiveness(data, errors, []), 'Bash')
+
+    expect(r.immediatelyFollowedByError).toBe(1)
+    // Exactly one timestamp parsed: the scoped session's.
+    expect(parsed).toEqual(['wanted'])
+  })
+
+  it('buckets interleaved sessions independently and drops unparseable timestamps', () => {
+    const data = [
+      session('a', [tc('Bash', { ts: at(0), input: { command: 'a' } })]),
+      session('b', [tc('Bash', { ts: at(0), input: { command: 'b' } })]),
+      // 'z' has no errors at all — it must see an empty bucket, not another
+      // session's, and must not be polluted by the shared empty-bucket constant.
+      session('z', [tc('Bash', { ts: at(0), input: { command: 'z' } })]),
+    ]
+    const errors = [
+      { sessionId: 'a', timestamp: at(10), summary: 'a-in' },
+      { sessionId: 'b', timestamp: at(59), summary: 'b-out-of-window' },
+      { sessionId: 'a', timestamp: 'not-a-timestamp', summary: 'unparseable' },
+      { sessionId: 'ghost', timestamp: at(5), summary: 'session not in toolData' },
+    ] as ApiErrorEvent[]
+
+    const r = row(computeToolEffectiveness(data, errors, []), 'Bash')
+    // Only 'a' has an error inside its 30s window. 'b' is at 59s (outside),
+    // 'z' has none, the unparseable one is dropped, and 'ghost' matches no session.
+    expect(r.invocations).toBe(3)
+    expect(r.immediatelyFollowedByError).toBe(1)
+  })
+})

@@ -89,11 +89,16 @@ export const detector: Detector = {
     // marginal when their output rates are uniform, and stays residual-bounded
     // (so the booked dollars can never exceed the real output bill) otherwise.
     const totalThink = flagged.reduce((s, f) => s + f.think, 0);
+    // Membership, not a search (#3198). `flagged.some(...)` once per tokenData
+    // row made this O(tokenData x flagged), and `flagged` grows WITH tokenData
+    // — every session can be flagged — so the worst case is quadratic in
+    // session count on exactly the histories worth analysing. A Set answers
+    // the same question in one pass; duplicate ids fold together, which is
+    // what `some` already did.
+    const flaggedSessionIds = new Set(flagged.map((f) => f.sessionId));
     const totalOutput = input.tokenData.reduce((s, d) => {
       // Only the flagged sessions' output backs this claim.
-      return flagged.some((f) => f.sessionId === d.sessionId)
-        ? s + d.totalOutputTokens
-        : s;
+      return flaggedSessionIds.has(d.sessionId) ? s + d.totalOutputTokens : s;
     }, 0);
     const outputDeltaFrac =
       totalOutput > 0
