@@ -160,34 +160,61 @@ describe('ingestModelEvalResults', () => {
     expect(s.models[0].baselineRuns).toBe(1);
   });
 
+  /**
+   * CHANGED in #3134. The old fixture asserted weightedScore 0.4 / 0.8 / 0.6 and
+   * evidence strengths that NO run in either artifact produced -- the
+   * cluster-a runs carried `evidence: []` and no cluster-b run existed at all.
+   * It therefore exercised dedupe over recommendations the artifacts did not
+   * support, which is the defect. Each recommendation now has a real supporting
+   * run, and the scores/evidence are DERIVED from those runs rather than
+   * asserted by the fixture, so the dedupe property is tested on claims that
+   * could actually exist.
+   */
   it('dedupes recommendations by (modelId, scope) keeping the strongest', () => {
+    // Weaker supporting run: mid scores, proxy-signal evidence only.
+    const weakRun = run({
+      runId: 'run-weak',
+      clusterId: 'cluster-a',
+      scores: { quality: 0.4, cost: 0.4, latency: 0.4, reliability: 0.4 },
+      evidence: [{ strength: 'proxy-detector-signal', detail: 'weak', delta: 0.1 }],
+    });
+    // Stronger supporting run for the SAME (model, scope): top scores, replay verdict.
+    const strongRun = run({
+      runId: 'run-strong',
+      clusterId: 'cluster-a',
+      scores: { quality: 1, cost: 1, latency: 1, reliability: 1 },
+      evidence: [{ strength: 'shadow-replay-verdict', detail: 'strong', delta: 0.4 }],
+    });
+    const otherScopeRun = run({
+      runId: 'run-other',
+      clusterId: 'cluster-b',
+      scores: { quality: 0.6, cost: 0.6, latency: 0.6, reliability: 0.6 },
+      evidence: [{ strength: 'objective-task-history', detail: 'other', delta: 0.2 }],
+    });
+
     const s = ingestModelEvalResults(
       [
         artifact({
+          runs: [weakRun],
           recommendations: [
             {
               modelId: 'claude-candidate',
               scope: 'cluster-a',
-              weightedScore: 0.4,
-              strongestEvidence: 'proxy-detector-signal',
               rationale: 'weaker earlier read',
             },
           ],
         }),
         artifact({
+          runs: [strongRun, otherScopeRun],
           recommendations: [
             {
               modelId: 'claude-candidate',
               scope: 'cluster-a',
-              weightedScore: 0.8,
-              strongestEvidence: 'shadow-replay-verdict',
               rationale: 'stronger later read',
             },
             {
               modelId: 'claude-candidate',
               scope: 'cluster-b',
-              weightedScore: 0.6,
-              strongestEvidence: 'objective-task-history',
               rationale: 'other scope',
             },
           ],
@@ -195,14 +222,29 @@ describe('ingestModelEvalResults', () => {
       ],
       fixedNow
     );
+
     expect(s.recommendations).toHaveLength(2);
-    // sorted by weightedScore desc: cluster-a (0.8) then cluster-b (0.6)
+    // The stronger supporting run wins the (modelId, scope) key...
     expect(s.recommendations[0]).toMatchObject({
       scope: 'cluster-a',
-      weightedScore: 0.8,
       rationale: 'stronger later read',
+      strongestEvidence: 'shadow-replay-verdict',
+      supportingRunIds: ['run-strong'],
     });
-    expect(s.recommendations[1].scope).toBe('cluster-b');
+    // ...and its score is the one its run produces, not one the artifact claimed.
+    expect(s.recommendations[0].weightedScore).toBeCloseTo(1, 9);
+    expect(s.recommendations[0].weightedScore).toBeGreaterThan(
+      s.recommendations[1].weightedScore
+    );
+    expect(s.recommendations[1]).toMatchObject({
+      scope: 'cluster-b',
+      supportingRunIds: ['run-other'],
+    });
+    // Both carry the artifact they came from, and when it was measured.
+    for (const rec of s.recommendations) {
+      expect(rec.batchPath).toBe('/tmp/evals/batch.json');
+      expect(rec.asOf).toBe('2026-06-10T09:30:00.000Z');
+    }
   });
 
   it('counts kept and filtered exclusions across artifacts', () => {

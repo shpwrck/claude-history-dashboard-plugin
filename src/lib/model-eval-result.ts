@@ -114,7 +114,15 @@ export interface EvalRunResult {
   vetoes: EvalVeto[];
 }
 
-/** A scoped routing recommendation distilled from the runs. */
+/**
+ * A scoped routing recommendation distilled from the runs.
+ *
+ * `weightedScore`, `strongestEvidence` and `supportingRunIds` are DERIVED from
+ * the sanitized runs, never read from the artifact (#3134) — the artifact is
+ * untrusted input, and its own `runs` are the only evidence in it. Only
+ * `modelId`, `scope` and `rationale` survive from the record as supplied, and
+ * the first two must resolve to real runs for the recommendation to exist.
+ */
 export interface EvalRoutingRecommendation {
   modelId: string;
   /** The scope this recommendation is bounded to (e.g. a cluster id or bucket). */
@@ -123,6 +131,13 @@ export interface EvalRoutingRecommendation {
   /** The strongest evidence strength backing the recommendation. */
   strongestEvidence: EvidenceStrength;
   rationale: string;
+  /**
+   * The `runId`s this recommendation was derived from (#3134). Non-empty by
+   * construction: a recommendation with no supporting run is rejected rather
+   * than emitted unsupported, so this is the audit trail from the claim back to
+   * the evidence inside the same artifact.
+   */
+  supportingRunIds: string[];
 }
 
 export interface ModelEvalResult {
@@ -267,23 +282,71 @@ function sanitizeRun(value: unknown): EvalRunResult | null {
   };
 }
 
+/**
+ * Derive a recommendation from the runs that support it, rejecting one that
+ * nothing in the artifact backs (#3134).
+ *
+ * The sanitizer used to accept `weightedScore` and `strongestEvidence` straight
+ * off the untrusted record with only scalar/enum checks, and never looked at
+ * `runs` at all. A forged artifact could therefore assert "route cluster-x to
+ * model-y, weightedScore 0.99, shadow-replay-verdict" with no run behind it, or
+ * with a run that every veto had zeroed, and ingest would promote it on that
+ * score alone.
+ *
+ * This module already applies the right discipline one function up:
+ * {@link sanitizeRun} recomputes `weightedScore` from the dimensions "so a
+ * stored score can never drift". The same rule simply had not reached the
+ * recommendation. Now it has — a recommendation is a VIEW over its supporting
+ * runs, so the artifact cannot state a number the evidence does not produce.
+ *
+ * A run is supporting when it shares the recommendation's `modelId` and its
+ * `clusterId` equals the recommendation's `scope`.
+ *
+ * Rejected outright:
+ *  - no supporting run at all (nothing to derive from);
+ *  - every supporting run vetoed (the artifact's own evidence contradicts it);
+ *  - no evidence on any surviving supporting run (nothing to rank).
+ */
 function sanitizeRecommendation(
-  value: unknown
+  value: unknown,
+  runs: readonly EvalRunResult[]
 ): EvalRoutingRecommendation | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const modelId = cleanString(raw.modelId, MAX_ID_LEN);
   const scope = cleanString(raw.scope, MAX_ID_LEN);
   const rationale = cleanString(raw.rationale, MAX_TEXT_LEN);
-  const weightedScore = cleanUnit(raw.weightedScore);
-  if (!modelId || !scope || !rationale || weightedScore === null) return null;
-  if (!isEnumMember(raw.strongestEvidence, EVIDENCE_STRENGTHS)) return null;
+  if (!modelId || !scope || !rationale) return null;
+
+  const supporting = runs.filter(
+    (run) => run.modelId === modelId && run.clusterId === scope
+  );
+  if (supporting.length === 0) return null;
+
+  // A vetoed run is not support. If every one of them is vetoed the artifact is
+  // recommending a model its own runs disqualified.
+  const unvetoed = supporting.filter((run) => run.vetoes.length === 0);
+  if (unvetoed.length === 0) return null;
+
+  // Derived, never asserted: the best score the supporting evidence produces.
+  let weightedScore = 0;
+  let strongestRank: number | null = null;
+  for (const run of unvetoed) {
+    if (run.weightedScore > weightedScore) weightedScore = run.weightedScore;
+    for (const e of run.evidence) {
+      const rank = EVIDENCE_STRENGTH_RANK[e.strength];
+      if (strongestRank === null || rank < strongestRank) strongestRank = rank;
+    }
+  }
+  if (strongestRank === null) return null;
+
   return {
     modelId,
     scope,
     weightedScore,
-    strongestEvidence: raw.strongestEvidence,
+    strongestEvidence: EVIDENCE_STRENGTHS[strongestRank],
     rationale,
+    supportingRunIds: unvetoed.map((run) => run.runId),
   };
 }
 
@@ -319,9 +382,11 @@ export function sanitizeModelEvalResult(
         .slice(0, MAX_EXCLUSIONS)
     : [];
 
+  // Recommendations are sanitized AGAINST the already-sanitized runs (#3134):
+  // they are derived from that evidence, not accepted alongside it.
   const recommendations = Array.isArray(raw.recommendations)
     ? raw.recommendations
-        .map(sanitizeRecommendation)
+        .map((rec) => sanitizeRecommendation(rec, runs))
         .filter((r): r is EvalRoutingRecommendation => r !== null)
         .slice(0, MAX_RECOMMENDATIONS)
     : [];

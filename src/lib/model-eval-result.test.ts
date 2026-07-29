@@ -203,3 +203,98 @@ describe('model eval result schema', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A recommendation must be derivable from the artifact's own runs (#3134)
+// ---------------------------------------------------------------------------
+
+describe('routing recommendations are derived, not asserted (#3134)', () => {
+  const withRecommendation = (rec: Record<string, unknown>) => {
+    const base = validResult() as Record<string, unknown>;
+    return { ...base, recommendations: [rec] };
+  };
+
+  it('rejects a recommendation with no matching run', () => {
+    // Forged: a model/scope pair that appears nowhere in `runs`.
+    const out = sanitizeModelEvalResult(
+      withRecommendation({
+        modelId: 'attacker-model',
+        scope: 'cluster-refactor',
+        weightedScore: 0.99,
+        strongestEvidence: 'shadow-replay-verdict',
+        rationale: 'route everything here',
+      }),
+      fixedNow
+    );
+    expect(out?.recommendations).toEqual([]);
+  });
+
+  it('rejects a recommendation whose scope matches no run cluster', () => {
+    const out = sanitizeModelEvalResult(
+      withRecommendation({
+        modelId: 'claude-fable-1-20260609',
+        scope: 'cluster-that-never-ran',
+        weightedScore: 0.99,
+        strongestEvidence: 'shadow-replay-verdict',
+        rationale: 'unsupported scope',
+      }),
+      fixedNow
+    );
+    expect(out?.recommendations).toEqual([]);
+  });
+
+  it('ignores an inflated score and derives it from the supporting run', () => {
+    const out = sanitizeModelEvalResult(
+      withRecommendation({
+        modelId: 'claude-fable-1-20260609',
+        scope: 'cluster-refactor',
+        // The artifact claims a score; the run's dimensions are all 1.
+        weightedScore: 0.01,
+        // ...and understates its own evidence.
+        strongestEvidence: 'token-cost-discovery',
+        rationale: 'matched on quality at materially lower cost',
+      }),
+      fixedNow
+    );
+    const rec = out!.recommendations[0];
+    expect(rec).toBeDefined();
+    // Derived from run-1 (all dimensions 1 → weighted 1), not the stated 0.01.
+    expect(rec.weightedScore).toBeCloseTo(1, 9);
+    // Derived from the run's strongest evidence, not the stated weaker label.
+    expect(rec.strongestEvidence).toBe('shadow-replay-verdict');
+    expect(rec.supportingRunIds).toEqual(['run-1']);
+  });
+
+  it('rejects a recommendation whose only supporting run is vetoed', () => {
+    const base = validResult() as Record<string, unknown>;
+    const runs = (base.runs as Record<string, unknown>[]).map((r) =>
+      r.runId === 'run-1' ? { ...r, vetoes: ['insufficient-evidence'] } : r
+    );
+    const out = sanitizeModelEvalResult(
+      { ...base, runs },
+      fixedNow
+    );
+    // The artifact's own evidence disqualified the model it recommends.
+    expect(out?.recommendations).toEqual([]);
+  });
+
+  it('rejects a recommendation whose supporting run carries no evidence', () => {
+    const base = validResult() as Record<string, unknown>;
+    const runs = (base.runs as Record<string, unknown>[]).map((r) =>
+      r.runId === 'run-1' ? { ...r, evidence: [] } : r
+    );
+    const out = sanitizeModelEvalResult({ ...base, runs }, fixedNow);
+    expect(out?.recommendations).toEqual([]);
+  });
+
+  it('round-trips a supported recommendation with its run references', () => {
+    const out = sanitizeModelEvalResult(validResult(), fixedNow);
+    const rec = out!.recommendations[0];
+    expect(rec.modelId).toBe('claude-fable-1-20260609');
+    expect(rec.scope).toBe('cluster-refactor');
+    expect(rec.supportingRunIds).toEqual(['run-1']);
+    // batchPath/createdAt live on the artifact and are attached at ingest.
+    expect(out!.batchPath).toBe('/tmp/evals/model-eval-2026-06-10.json');
+    expect(out!.createdAt).toBe('2026-06-10T09:30:00.000Z');
+  });
+});

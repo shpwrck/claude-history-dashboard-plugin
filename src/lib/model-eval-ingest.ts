@@ -103,8 +103,21 @@ export interface ModelEvalSummary {
   /**
    * Deduped routing recommendations across artifacts, keyed by (modelId, scope),
    * keeping the strongest, sorted by weightedScore desc then modelId/scope asc.
+   *
+   * Each carries the artifact it came from (#3134). Without `batchPath` and
+   * `asOf` a surviving recommendation was a bare present-tense claim with no
+   * way back to the evidence or to when it was measured — a months-old routing
+   * verdict read identically to one produced this morning.
    */
-  recommendations: EvalRoutingRecommendation[];
+  recommendations: AttributedRoutingRecommendation[];
+}
+
+/** A routing recommendation plus the artifact that produced it (#3134). */
+export interface AttributedRoutingRecommendation extends EvalRoutingRecommendation {
+  /** The eval batch this recommendation was derived from. */
+  batchPath: string;
+  /** The source artifact's `createdAt` — the claim is only as current as this. */
+  asOf: string;
 }
 
 interface ModelAccumulator {
@@ -174,7 +187,7 @@ export function ingestModelEvalResults(
   ) as Record<EvalVeto, number>;
   const exclusions = { kept: 0, filtered: 0 };
   // Best recommendation per (modelId, scope) key.
-  const recs = new Map<string, EvalRoutingRecommendation>();
+  const recs = new Map<string, AttributedRoutingRecommendation>();
 
   let runCount = 0;
   const ledger: ModelEvalArtifactLedgerEntry[] = [];
@@ -236,7 +249,13 @@ export function ingestModelEvalResults(
         (rec.weightedScore === existing.weightedScore &&
           recStrengthRank(rec) < recStrengthRank(existing))
       ) {
-        recs.set(key, rec);
+        // Carry the source artifact so the surviving claim keeps its provenance
+        // and its date (#3134).
+        recs.set(key, {
+          ...rec,
+          batchPath: artifact.batchPath,
+          asOf: artifact.createdAt,
+        });
       }
     }
 
