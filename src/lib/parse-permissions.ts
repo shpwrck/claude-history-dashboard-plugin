@@ -2076,27 +2076,85 @@ function truncateCommand(s: string): string {
   return flat.length > MAX_COMMAND_LEN ? flat.slice(0, MAX_COMMAND_LEN) : flat;
 }
 
-function evidenceRefForToolCall(
-  timelines: readonly SessionTimeline[] | undefined,
+interface TimelineEvidenceIndex {
+  byToolUseId: Map<string, number>;
+  byFallbackKey: Map<string, number>;
+}
+
+function evidenceFallbackKey(timestamp: string, toolName: string): string {
+  // Length-prefix the first tuple field so concatenation cannot collide.
+  return `${timestamp.length}:${timestamp}${toolName}`;
+}
+
+function indexTimelineEvidence(timeline: SessionTimeline): TimelineEvidenceIndex {
+  const byToolUseId = new Map<string, number>();
+  const byFallbackKey = new Map<string, number>();
+  for (let index = 0; index < timeline.entries.length; index += 1) {
+    const entry = timeline.entries[index];
+    if (entry.kind !== 'tool_use') continue;
+    if (
+      typeof entry.toolUseId === 'string' &&
+      !byToolUseId.has(entry.toolUseId)
+    ) {
+      // `findIndex` returned the earliest duplicate; keep first-write-wins.
+      byToolUseId.set(entry.toolUseId, index);
+    }
+    if (typeof entry.toolName !== 'string') continue;
+    const fallbackKey = evidenceFallbackKey(entry.timestamp, entry.toolName);
+    if (!byFallbackKey.has(fallbackKey)) {
+      // Preserve the fallback `findIndex`'s earliest-match semantics too.
+      byFallbackKey.set(fallbackKey, index);
+    }
+  }
+  return { byToolUseId, byFallbackKey };
+}
+
+/**
+ * Resolve risky-action evidence without rescanning timelines and entries per
+ * action. Both indexes are lazy: a corpus with no risky action pays no timeline
+ * work, and entries are indexed only for sessions that actually emit one.
+ */
+function createEvidenceRefResolver(
+  timelines: readonly SessionTimeline[] | undefined
+): (
   sessionId: string,
   call: { timestamp: string; toolUseId: string; toolName: string }
-): EvidenceRef | undefined {
-  const timeline = timelines?.find((candidate) => candidate.sessionId === sessionId);
-  if (!timeline) return undefined;
-  const byToolId = timeline.entries.findIndex(
-    (entry) => entry.kind === 'tool_use' && entry.toolUseId === call.toolUseId
-  );
-  const index =
-    byToolId >= 0
-      ? byToolId
-      : timeline.entries.findIndex(
-          (entry) =>
-            entry.kind === 'tool_use' &&
-            entry.timestamp === call.timestamp &&
-            entry.toolName === call.toolName
-        );
-  if (index < 0) return undefined;
-  return evidenceRefForEntry(timeline, index) ?? undefined;
+) => EvidenceRef | undefined {
+  let timelinesBySession: Map<string, SessionTimeline> | undefined;
+  let indexedTimelineCount = 0;
+  const evidenceByTimeline = new WeakMap<SessionTimeline, TimelineEvidenceIndex>();
+
+  return (sessionId, call) => {
+    if (!timelines) return undefined;
+    if (!timelinesBySession) {
+      timelinesBySession = new Map<string, SessionTimeline>();
+    }
+    let timeline = timelinesBySession.get(sessionId);
+    while (!timeline && indexedTimelineCount < timelines.length) {
+      const candidate = timelines[indexedTimelineCount];
+      indexedTimelineCount += 1;
+      if (!timelinesBySession.has(candidate.sessionId)) {
+        // The old `Array.find` selected the earliest duplicate session.
+        timelinesBySession.set(candidate.sessionId, candidate);
+      }
+      timeline = timelinesBySession.get(sessionId);
+    }
+    if (!timeline) return undefined;
+
+    let evidenceIndex = evidenceByTimeline.get(timeline);
+    if (!evidenceIndex) {
+      evidenceIndex = indexTimelineEvidence(timeline);
+      evidenceByTimeline.set(timeline, evidenceIndex);
+    }
+    const byToolUseId = evidenceIndex.byToolUseId.get(call.toolUseId);
+    const entryIndex =
+      byToolUseId ??
+      evidenceIndex.byFallbackKey.get(
+        evidenceFallbackKey(call.timestamp, call.toolName)
+    );
+    if (entryIndex === undefined) return undefined;
+    return evidenceRefForEntry(timeline, entryIndex) ?? undefined;
+  };
 }
 
 export function aggregatePermissionModes(
@@ -2351,6 +2409,7 @@ export function detectRiskyActions(
   timelines?: readonly SessionTimeline[]
 ): RiskyAction[] {
   const out: RiskyAction[] = [];
+  const evidenceRefForToolCall = createEvidenceRefResolver(timelines);
 
   for (const session of data) {
     for (const call of session.calls) {
@@ -2378,11 +2437,7 @@ export function detectRiskyActions(
           pattern: precomputedPattern.name,
           category: precomputedPattern.category,
           severity: precomputedPattern.severity,
-          evidenceRef: evidenceRefForToolCall(
-            timelines,
-            session.sessionId,
-            call
-          ),
+          evidenceRef: evidenceRefForToolCall(session.sessionId, call),
         });
         continue;
       }
@@ -2407,7 +2462,7 @@ export function detectRiskyActions(
         pattern: pattern.name,
         category: pattern.category,
         severity: pattern.severity,
-        evidenceRef: evidenceRefForToolCall(timelines, session.sessionId, call),
+        evidenceRef: evidenceRefForToolCall(session.sessionId, call),
       });
     }
   }

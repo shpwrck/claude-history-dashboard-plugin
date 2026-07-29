@@ -42,6 +42,20 @@ function timeline(calls: ToolCall[]): SessionTimeline {
   };
 }
 
+function countingArray<T>(values: T[], onRead: () => void): T[] {
+  return new Proxy(values, {
+    get(target, property, receiver) {
+      if (
+        typeof property === 'string' &&
+        /^(0|[1-9]\d*)$/.test(property)
+      ) {
+        onRead();
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+}
+
 function input(calls: ToolCall[]): RecommendationInput {
   return {
     tokenData: [],
@@ -91,6 +105,234 @@ describe('safety.risky-actions (#1309)', () => {
         toolUseId: 'secret-1',
       },
     ]);
+  });
+
+  it('indexes timelines and entries once as risky-action corpora double (#3148)', () => {
+    const measure = (sessionCount: number) => {
+      const reads = { timelines: 0, entries: 0 };
+      const data: ToolUsageData[] = [];
+      const timelineRows: SessionTimeline[] = [];
+      const callsPerSession = 4;
+
+      for (let sessionIndex = 0; sessionIndex < sessionCount; sessionIndex += 1) {
+        const sessionId = `scale-session-${sessionIndex}`;
+        const calls: ToolCall[] = Array.from(
+          { length: callsPerSession },
+          (_, callIndex) => ({
+            ...bash(
+              `${sessionId}-call-${callIndex}`,
+              'git push origin master',
+              callIndex
+            ),
+            commandRiskyActionPattern: 'repository publication',
+          })
+        );
+        data.push({ sessionId, calls });
+        timelineRows.push({
+          sessionId,
+          startTime: ts(0),
+          endTime: ts(9),
+          entries: countingArray(
+            calls.map((call) => ({
+              timestamp: call.timestamp,
+              kind: 'tool_use' as const,
+              toolName: call.toolName,
+              toolUseId: call.toolUseId,
+            })),
+            () => {
+              reads.entries += 1;
+            }
+          ),
+        });
+      }
+
+      const found = detectRiskyActions(
+        data,
+        countingArray(timelineRows, () => {
+          reads.timelines += 1;
+        })
+      );
+      return {
+        ...reads,
+        actions: found.length,
+        evidenceRefs: found.filter((action) => action.evidenceRef).length,
+      };
+    };
+
+    const small = measure(40);
+    const large = measure(80);
+
+    expect(small).toEqual({
+      timelines: 40,
+      entries: 320,
+      actions: 160,
+      evidenceRefs: 160,
+    });
+    expect(large).toEqual({
+      timelines: 80,
+      entries: 640,
+      actions: 320,
+      evidenceRefs: 320,
+    });
+    expect(large.timelines / small.timelines).toBe(2);
+    expect(large.entries / small.entries).toBe(2);
+    // Each entry is read once to build the index, then each action reads its
+    // resolved entry directly to mint the ref. The old per-action scans read
+    // 3,280 / 12,960 timeline elements and 560 / 1,120 entries for these same
+    // fixtures (including that same final direct read).
+  });
+
+  it('preserves first-match evidence semantics for duplicate ids and fallbacks (#3148)', () => {
+    const fallback = {
+      ...bash('missing-id', 'git push origin master', 1),
+      commandRiskyActionPattern: 'repository publication',
+    };
+    const duplicateId = {
+      ...bash('duplicate-id', 'git push origin master', 2),
+      commandRiskyActionPattern: 'repository publication',
+    };
+    const firstTimeline: SessionTimeline = {
+      sessionId: 'session-1',
+      startTime: ts(0),
+      endTime: ts(9),
+      entries: [
+        {
+          timestamp: fallback.timestamp,
+          kind: 'tool_use',
+          toolName: 'Bash',
+          toolUseId: 'fallback-first',
+        },
+        {
+          timestamp: fallback.timestamp,
+          kind: 'tool_use',
+          toolName: 'Bash',
+          toolUseId: 'fallback-second',
+        },
+        {
+          timestamp: duplicateId.timestamp,
+          kind: 'tool_use',
+          toolName: 'Bash',
+          toolUseId: duplicateId.toolUseId,
+        },
+        {
+          timestamp: duplicateId.timestamp,
+          kind: 'tool_use',
+          toolName: 'Bash',
+          toolUseId: duplicateId.toolUseId,
+        },
+      ],
+    };
+    const laterDuplicateTimeline: SessionTimeline = {
+      ...firstTimeline,
+      entries: [
+        {
+          timestamp: fallback.timestamp,
+          kind: 'tool_use',
+          toolName: 'Bash',
+          toolUseId: 'later-timeline',
+        },
+      ],
+    };
+
+    expect(
+      detectRiskyActions(
+        [toolSession([fallback, duplicateId])],
+        [firstTimeline, laterDuplicateTimeline]
+      ).map((action) => action.evidenceRef)
+    ).toEqual([
+      {
+        sessionId: 'session-1',
+        entryIndex: 0,
+        timestamp: fallback.timestamp,
+        toolUseId: 'fallback-first',
+      },
+      {
+        sessionId: 'session-1',
+        entryIndex: 2,
+        timestamp: duplicateId.timestamp,
+        toolUseId: 'duplicate-id',
+      },
+    ]);
+  });
+
+  it('does not build entry indexes for benign or unrelated sessions (#3148)', () => {
+    let timelineReads = 0;
+    let entryReads = 0;
+    const unrelated = Array.from({ length: 25 }, (_, sessionIndex) => ({
+      sessionId: `unrelated-${sessionIndex}`,
+      startTime: ts(0),
+      endTime: ts(9),
+      entries: countingArray(
+        Array.from({ length: 100 }, (_, entryIndex) => ({
+          timestamp: ts(entryIndex % 10),
+          kind: 'tool_use' as const,
+          toolName: 'Bash',
+          toolUseId: `unrelated-${sessionIndex}-${entryIndex}`,
+        })),
+        () => {
+          entryReads += 1;
+        }
+      ),
+    }));
+    const proxied = countingArray(unrelated, () => {
+      timelineReads += 1;
+    });
+
+    expect(
+      detectRiskyActions([toolSession([bash('benign', 'ls', 1)])], proxied)
+    ).toEqual([]);
+    expect({ timelineReads, entryReads }).toEqual({
+      timelineReads: 0,
+      entryReads: 0,
+    });
+
+    const risky = {
+      ...bash('active-call', 'git push origin master', 1),
+      commandRiskyActionPattern: 'repository publication',
+    };
+    const activeTimeline: SessionTimeline = {
+      sessionId: 'session-1',
+      startTime: ts(0),
+      endTime: ts(9),
+      entries: countingArray(
+        [
+          {
+            timestamp: risky.timestamp,
+            kind: 'tool_use',
+            toolName: 'Bash',
+            toolUseId: risky.toolUseId,
+          },
+        ],
+        () => {
+          entryReads += 1;
+        }
+      ),
+    };
+    expect(
+      detectRiskyActions(
+        [toolSession([risky])],
+        countingArray([...unrelated, activeTimeline], () => {
+          timelineReads += 1;
+        })
+      )
+    ).toHaveLength(1);
+    expect(timelineReads).toBe(26);
+    expect(entryReads).toBe(2);
+
+    timelineReads = 0;
+    entryReads = 0;
+    expect(
+      detectRiskyActions(
+        [toolSession([risky])],
+        countingArray([activeTimeline, ...unrelated], () => {
+          timelineReads += 1;
+        })
+      )
+    ).toHaveLength(1);
+    expect({ timelineReads, entryReads }).toEqual({
+      timelineReads: 1,
+      entryReads: 2,
+    });
   });
 
   it('does not flag read, search, or help-shaped commands', () => {

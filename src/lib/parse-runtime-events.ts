@@ -367,6 +367,34 @@ export interface PerTaskCostStats {
 }
 
 /**
+ * Optional deterministic operation counter for the per-task attribution path.
+ * Production callers omit it; performance-contract tests use it to distinguish
+ * logarithmic stop lookup from a restarted linear scan without timing noise.
+ */
+export interface PerTaskCostProbe {
+  stopComparisons: number;
+}
+
+function firstStopAtOrAfter(
+  stops: readonly number[],
+  timestamp: number,
+  probe?: PerTaskCostProbe
+): number {
+  let low = 0;
+  let high = stops.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (probe) probe.stopComparisons += 1;
+    if (stops[middle] < timestamp) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+/**
  * Per-task cost, where a "task" is the work between two consecutive
  * {@link StopHookEvent}s in a session. The Stop hook fires when the assistant
  * finishes responding, so it cleanly bounds one unit of agent work. Each
@@ -383,7 +411,8 @@ export interface PerTaskCostStats {
  */
 export function aggregatePerTaskCost(
   runtime: RuntimeEvents[],
-  tokenData: SessionTokenData[]
+  tokenData: SessionTokenData[],
+  probe?: PerTaskCostProbe
 ): PerTaskCostStats {
   const stopsBySession = new Map<string, number[]>();
   for (const s of runtime) {
@@ -407,8 +436,7 @@ export function aggregatePerTaskCost(
       const t = Date.parse(entry.timestamp);
       if (!isFinite(t)) continue; // undatable entry can't be placed in a span
       const cost = entryCostAtModel(entry, entry.model);
-      let idx = stops.findIndex((s) => s >= t);
-      if (idx === -1) idx = stops.length;
+      const idx = firstStopAtOrAfter(stops, t, probe);
       buckets.set(idx, (buckets.get(idx) ?? 0) + cost);
     }
     if (buckets.size === 0) continue;

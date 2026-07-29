@@ -3,10 +3,13 @@ import {
   parseRuntimeEvents,
   aggregateTurnLatency,
   aggregateStopHooks,
+  aggregatePerTaskCost,
   collectAutomationFeed,
   IDLE_TURN_THRESHOLD_MS,
 } from './parse-runtime-events'
 import type { RuntimeEvents } from './parse-runtime-events'
+import { entryCostAtModel } from './pricing'
+import type { SessionTokenData, TokenEntry } from '../types'
 
 const line = (o: Record<string, unknown>) => JSON.stringify({ type: 'system', timestamp: 't', ...o })
 
@@ -126,6 +129,177 @@ describe('aggregateStopHooks', () => {
     // diluted across all 3 events (6000 / 3) vs. honest over the 1 timed event.
     expect(stats.meanDurationMs).toBe(2000)
     expect(stats.meanTimedDurationMs).toBe(6000)
+  })
+})
+
+const taskTimestamp = (seconds: number) =>
+  new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString()
+
+const tokenEntry = (
+  seconds: number,
+  inputTokens = 1,
+  outputTokens = 1
+): TokenEntry => ({
+  timestamp: taskTimestamp(seconds),
+  inputTokens,
+  outputTokens,
+  cacheCreationTokens: 0,
+  cacheCreation1hTokens: 0,
+  cacheReadTokens: 0,
+  webSearchRequests: 0,
+  webFetchRequests: 0,
+  model: 'claude-sonnet-4-20250514',
+})
+
+function runtimeWithStops(sessionId: string, stopSeconds: number[]): RuntimeEvents {
+  return {
+    sessionId,
+    turns: [],
+    stopHooks: stopSeconds.map((seconds) => ({
+      sessionId,
+      timestamp: taskTimestamp(seconds),
+      hookCount: 1,
+      totalDurationMs: 0,
+      hadErrors: false,
+      preventedContinuation: false,
+    })),
+    awaySummaries: [],
+    scheduledFires: [],
+  }
+}
+
+function tokenSession(sessionId: string, entries: TokenEntry[]): SessionTokenData {
+  return {
+    sessionId,
+    totalInputTokens: entries.reduce((sum, entry) => sum + entry.inputTokens, 0),
+    totalOutputTokens: entries.reduce((sum, entry) => sum + entry.outputTokens, 0),
+    totalCacheCreationTokens: 0,
+    totalCacheReadTokens: 0,
+    model: 'claude-sonnet-4-20250514',
+    messageCount: entries.length,
+    entries,
+    compactionEvents: [],
+    hasUnknownModel: false,
+  }
+}
+
+function referencePerTaskCost(
+  runtimeData: RuntimeEvents[],
+  tokenData: SessionTokenData[]
+) {
+  const stopsBySession = new Map<string, number[]>()
+  for (const session of runtimeData) {
+    const stops = session.stopHooks
+      .map((hook) => Date.parse(hook.timestamp))
+      .filter((timestamp) => isFinite(timestamp))
+      .sort((left, right) => left - right)
+    if (stops.length > 0) stopsBySession.set(session.sessionId, stops)
+  }
+
+  const taskCosts: number[] = []
+  let sessions = 0
+  for (const session of tokenData) {
+    const stops = stopsBySession.get(session.sessionId)
+    if (!stops || session.entries.length === 0) continue
+    const buckets = new Map<number, number>()
+    for (const entry of session.entries) {
+      const timestamp = Date.parse(entry.timestamp)
+      if (!isFinite(timestamp)) continue
+      const cost = entryCostAtModel(entry, entry.model)
+      let index = stops.findIndex((stop) => stop >= timestamp)
+      if (index === -1) index = stops.length
+      buckets.set(index, (buckets.get(index) ?? 0) + cost)
+    }
+    if (buckets.size === 0) continue
+    sessions += 1
+    for (const cost of buckets.values()) taskCosts.push(cost)
+  }
+
+  const sorted = taskCosts.slice().sort((left, right) => left - right)
+  const quantile = (q: number) => {
+    if (sorted.length === 0) return 0
+    const position = (sorted.length - 1) * q
+    const low = Math.floor(position)
+    const high = Math.ceil(position)
+    if (low === high) return sorted[low]
+    return (
+      sorted[low] +
+      (sorted[high] - sorted[low]) * (position - low)
+    )
+  }
+  const totalCost = sorted.reduce((sum, cost) => sum + cost, 0)
+  return {
+    taskCount: sorted.length,
+    totalCost,
+    meanCost: sorted.length === 0 ? 0 : totalCost / sorted.length,
+    medianCost: quantile(0.5),
+    p95Cost: quantile(0.95),
+    sessions,
+  }
+}
+
+describe('aggregatePerTaskCost stop attribution (#3150)', () => {
+  it('matches the former linear reference byte-for-byte on awkward ordering', () => {
+    const runtimeData: RuntimeEvents[] = [
+      runtimeWithStops('a', [30, 10, 20, 20]),
+      runtimeWithStops('no-token-rows', [10]),
+      runtimeWithStops('invalid-stop-only', []),
+    ]
+    runtimeData[2].stopHooks.push({
+      sessionId: 'invalid-stop-only',
+      timestamp: 'not-a-date',
+      hookCount: 1,
+      totalDurationMs: 0,
+      hadErrors: false,
+      preventedContinuation: false,
+    })
+    const tokenData = [
+      tokenSession('a', [
+        tokenEntry(31, 5, 1),
+        tokenEntry(20, 4, 2),
+        { ...tokenEntry(5, 3, 3), timestamp: 'not-a-date' },
+        tokenEntry(5, 2, 4),
+        tokenEntry(20, 1, 5),
+      ]),
+      tokenSession('no-stops', [tokenEntry(1)]),
+      tokenSession('invalid-stop-only', [tokenEntry(1)]),
+    ]
+
+    const reference = referencePerTaskCost(runtimeData, tokenData)
+    const actual = aggregatePerTaskCost(runtimeData, tokenData)
+    expect(JSON.stringify(actual)).toBe(JSON.stringify(reference))
+  })
+
+  it('uses logarithmic stop comparisons as entries and stops double', () => {
+    const measure = (size: number) => {
+      const runtimeData = [runtimeWithStops('scale', Array.from(
+        { length: size },
+        (_, index) => index
+      ))]
+      // Put every entry after the final stop: the old restarted scan performed
+      // exactly size comparisons per entry, its worst case.
+      const tokenData = [
+        tokenSession(
+          'scale',
+          Array.from({ length: size }, () => tokenEntry(size + 1))
+        ),
+      ]
+      const probe = { stopComparisons: 0 }
+      const result = aggregatePerTaskCost(runtimeData, tokenData, probe)
+      return { comparisons: probe.stopComparisons, result }
+    }
+
+    const small = measure(512)
+    const large = measure(1_024)
+
+    expect(small.result.taskCount).toBe(1)
+    expect(large.result.taskCount).toBe(1)
+    expect(small.comparisons).toBeGreaterThanOrEqual(512)
+    expect(large.comparisons).toBeGreaterThanOrEqual(1_024)
+    expect(small.comparisons).toBeLessThanOrEqual(512 * 10)
+    expect(large.comparisons).toBeLessThanOrEqual(1_024 * 11)
+    expect(large.comparisons / small.comparisons).toBeLessThan(3)
+    // The old linear scan performed 262,144 / 1,048,576 comparisons.
   })
 })
 
