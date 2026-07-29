@@ -51,6 +51,7 @@ history — for the same user. Tiered by how directly they overlap the dashboard
 | Unified Agentic Memory Across Harnesses (TDS, Bratanic) | Inspiration: hooks as the harness-agnostic seam; external memory layer | [unified-agentic-memory-hooks.md](./unified-agentic-memory-hooks.md) | Verified cross-harness hook-event mapping (Claude Code / Codex / Cursor); feeds #1247/#1260/#2571; memory shape converges with #2233 |
 | Arize Phoenix (+ OpenInference, coding-harness-tracing, PXI) | Adjacent product: LLM observability/eval platform, ELv2; active coding-agent land grab | [phoenix.md](./phoenix.md) | **Instruments 8 coding harnesses via hooks (May 2026)**; PXI staged-diff prescriptive agent; moat wording must sharpen to retroactive + whole-session + config-as-treatment |
 | Langfuse | Adjacent product: LLM observability/eval platform, MIT open-core; ClickHouse-owned since Jan 2026 | [langfuse.md](./langfuse.md) | **First-party `~/.claude` transcript ingest (June 2026)**; agent-facing surface kit (CLI/MCP/llms.txt); no recs layer yet — the sharpest mindshare threat if one ships |
+| ECC (affaan-m) | Adjacent product: supply-side agent harness OS (skills/agents/hooks across 7 harnesses) | [ecc.md](./ecc.md) | #3440 — **largest player in the category (235k stars in 6 months)**; capabilities browser, not analytics; encroaches via `cost-tracker.js` + frequency-scored "instincts" with no control arm |
 
 ## External Guidance Tracker
 
