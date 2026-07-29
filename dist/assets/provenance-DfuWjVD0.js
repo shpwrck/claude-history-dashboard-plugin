@@ -1,1 +1,0 @@
-var e=/^\d{4}-\d{2}-\d{2}$/,t=1440*60*1e3;function n(n,r,i){if(n===void 0||!e.test(n))return!1;let a=Date.parse(n);return Number.isFinite(a)?r-a>i*t:!1}export{n as t};

@@ -323,6 +323,29 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
       "target": "CLAUDE.md",
     },
     "id": "reliability.rate-limits",
+    "provenance": {
+      "inference": "A 429/529 is answered by a retry, so the turn is paid for more than once — the count is the number of stalls, not the number of failures.",
+      "observations": [
+        {
+          "claim": "1 of 2 recorded API error event(s) carried a rate-limit/overload status",
+          "field": "apiErrors[].status",
+          "source": "parse-errors",
+          "value": 1,
+        },
+        {
+          "claim": "status codes observed across all recorded errors: 429=1,500=1",
+          "field": "apiErrors[].status",
+          "source": "parse-errors",
+          "value": "429=1,500=1",
+        },
+        {
+          "claim": "spread across 1 session(s)",
+          "field": "apiErrors[].sessionId",
+          "source": "parse-errors",
+          "value": 1,
+        },
+      ],
+    },
     "severity": "warning",
     "title": "Hitting rate-limit / overloaded errors",
     "view": "errors",

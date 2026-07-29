@@ -1,29 +1,45 @@
 /**
- * Provenance contract test (#1049, epic #866 keystone).
+ * Provenance contract test (#1049, epic #866 keystone; inverted by #3204/#3205).
  *
  * Enforces the auditability contract at the schema level:
- *  1. The validator accepts well-formed provenance and rejects each
- *     malformed shape (so siblings #1101–#1105 can rely on it).
- *  2. Every id on the PROVENANCE_DETECTORS allowlist is a real registered
- *     detector — the allowlist can't rot.
- *  3. The exemplar (activity.activity-trend) carries cited observations, a
- *     distinct inference, and an as-of date that reflects staleness, and the
- *     recommendation it emits passes the full contract.
+ *  1. The validator accepts well-formed provenance and rejects each malformed
+ *     shape — including, since #3204, a source-only citation with no `field`, a
+ *     numeric claim with no scalar `value`, and an `asOf` that matches the digit
+ *     shape but is not a real calendar date.
+ *  2. Provenance is REQUIRED by default. `PROVENANCE_EXEMPT` is the only way
+ *     out, and it is checked for rot, duplication, overlap, and growth.
+ *  3. Every detector with a trigger fixture emits compliant provenance when it
+ *     actually runs, and every recommendation that fires on the SPA sample
+ *     corpus is compliant-or-exempt on realistic input.
  *
- * NOTE: the "triggered ⇒ compliant" guarantee is proven for the exemplar by
- * name. As siblings #1101–#1105 append ids to PROVENANCE_DETECTORS, add a
- * generic trigger-and-validate harness so the guarantee extends to each.
+ * ## What changed, and why the shape of this file changed with it
+ *
+ * Until #3205 `PROVENANCE_DETECTORS` was an opt-in allowlist and the validator
+ * treated every id NOT on it as compliant, so the contract only bound detectors
+ * whose authors had enlisted them. Measured at the flip: 33 enlisted, 52 emitted
+ * nothing, and 17 emitted valid provenance while sitting outside the list —
+ * unprotected against regression despite having done the work. That default is
+ * the mechanism behind ~29 separate v0.6 audit findings, so the fix inverts it
+ * rather than enlisting 29 more ids.
+ *
+ * The three tiers of proof, weakest to strongest, are all here on purpose:
+ * the exemption register (declared), the sample-corpus sweep (realistic input),
+ * and the trigger-fixture harness (the detector actually run). None subsumes
+ * another — a detector that fires on neither corpus nor fixture is bound by the
+ * default but not exercised by it, which the sweep says out loud.
  */
 import { describe, it, expect } from 'vitest';
 import { DETECTORS } from './index';
 import {
   PROVENANCE_DETECTORS,
+  PROVENANCE_EXEMPT,
   validateRecObservation,
   validateRecProvenance,
   validateRecommendationProvenance,
   isAsOfStale,
   demoteStaleAttribution,
 } from './provenance';
+import { emittableIdsFor } from './dual-emit';
 import type {
   Recommendation,
   RecommendationInput,
@@ -46,6 +62,37 @@ import type {
 } from '../model-eval-ingest';
 import type { EvalRoutingRecommendation } from '../model-eval-result';
 import type { ProjectMemoryStore } from '../parse-memories';
+// @ts-expect-error - plain ESM build helper, no .d.ts (same import as sample-corpus.test.ts)
+import { buildSampleCorpus } from '../../../scripts/sample-data/build-corpus.mjs';
+import { parseHistoryJsonl, groupBySessions, groupByProjects } from '../parse-history';
+import { parseSessionJsonl } from '../parse-sessions';
+import { parseToolUsage } from '../parse-tools';
+import { parseApiErrors } from '../parse-errors';
+import { parsePermissionData } from '../parse-permissions';
+import { assembleRecommendationInput } from '../recommendations';
+
+/**
+ * A full {@link RecommendationInput} assembled from the SPA sample corpus by
+ * running the real parsers over it — the same path `sample-corpus.test.ts`
+ * uses, so the sweep below sees what the product sees.
+ */
+function sampleCorpusInput(): RecommendationInput {
+  const corpus = buildSampleCorpus() as { historyJsonl: string; sessions: { sessionId: string; jsonl: string }[] };
+  const files = corpus.sessions.map((s) => ({ name: `${s.sessionId}.jsonl`, text: s.jsonl }));
+  const flat = <T,>(fn: (text: string, name: string) => T[]): T[] =>
+    files.flatMap((f) => fn(f.text, f.name));
+  const collect = <T,>(fn: (text: string, name: string) => T | null): T[] =>
+    files.map((f) => fn(f.text, f.name)).filter((d): d is T => d !== null);
+  const history = parseHistoryJsonl(corpus.historyJsonl);
+  return assembleRecommendationInput({
+    tokenData: collect(parseSessionJsonl) as RecommendationInput['tokenData'],
+    toolData: collect(parseToolUsage) as RecommendationInput['toolData'],
+    sessions: groupBySessions(history) as unknown as RecommendationInput['sessions'],
+    projects: groupByProjects(history) as unknown as RecommendationInput['projects'],
+    permissionRows: collect(parsePermissionData) as RecommendationInput['permissionRows'],
+    apiErrors: flat(parseApiErrors) as RecommendationInput['apiErrors'],
+  });
+}
 
 // ── Validator unit tests ─────────────────────────────────────────────────
 
@@ -55,20 +102,36 @@ describe('validateRecObservation', () => {
   it('accepts a fully-specified observation', () => {
     expect(validateRecObservation(goodObs)).toEqual([]);
   });
-  it('accepts a claim+source-only observation (field/value optional)', () => {
-    expect(validateRecObservation({ claim: 'x', source: 'parse-tools' })).toEqual([]);
+  it('accepts a qualitative claim with no value (nothing to reproduce)', () => {
+    expect(validateRecObservation({ claim: 'a Stop hook is configured', source: 'settings.json', field: 'hooks.Stop' })).toEqual([]);
+  });
+  it('rejects a source-only observation — the citation must be locatable (#3204)', () => {
+    // Previously accepted. A `source` alone says WHICH artifact but not where
+    // in it, so the reader cannot get back to the evidence.
+    expect(validateRecObservation({ claim: 'x', source: 'parse-tools' } as never).length).toBeGreaterThan(0);
+  });
+  it('rejects a blank field', () => {
+    expect(validateRecObservation({ claim: 'x', source: 's', field: '  ' } as never).length).toBeGreaterThan(0);
+  });
+  it('rejects a numeric claim with no scalar value to reproduce it (#3204)', () => {
+    const errs = validateRecObservation({ claim: '18 of 18 assignments unread', source: 'teams/', field: 'unreadCount' } as never);
+    expect(errs.length).toBeGreaterThan(0);
+    expect(errs[0]).toMatch(/states a figure/);
+  });
+  it('accepts that same numeric claim once it cites its value', () => {
+    expect(validateRecObservation(goodObs)).toEqual([]);
   });
   it('rejects a missing/blank claim', () => {
-    expect(validateRecObservation({ claim: '  ', source: 's' } as never).length).toBeGreaterThan(0);
+    expect(validateRecObservation({ claim: '  ', source: 's', field: 'f' } as never).length).toBeGreaterThan(0);
   });
   it('rejects a missing source (the citation is the point)', () => {
-    expect(validateRecObservation({ claim: 'x' } as never).length).toBeGreaterThan(0);
+    expect(validateRecObservation({ claim: 'x', field: 'f' } as never).length).toBeGreaterThan(0);
   });
   it('rejects a non-scalar value', () => {
-    expect(validateRecObservation({ claim: 'x', source: 's', value: {} } as never).length).toBeGreaterThan(0);
+    expect(validateRecObservation({ claim: 'x', source: 's', field: 'f', value: {} } as never).length).toBeGreaterThan(0);
   });
   it('rejects a non-finite numeric value (NaN is not auditable)', () => {
-    expect(validateRecObservation({ claim: 'x', source: 's', value: NaN } as never).length).toBeGreaterThan(0);
+    expect(validateRecObservation({ claim: 'x', source: 's', field: 'f', value: NaN } as never).length).toBeGreaterThan(0);
   });
 });
 
@@ -92,6 +155,22 @@ describe('validateRecProvenance', () => {
     expect(
       validateRecProvenance({ observations: [goodObs], asOf: '2026-06-10T00:00:00Z' }).length
     ).toBeGreaterThan(0);
+  });
+  it('rejects an impossible asOf that still matches the digit shape (#3204)', () => {
+    // `2026-99-99` fails to parse at all; `2026-02-30` and `2026-06-31` DO
+    // parse — JS rolls them over to Mar 2 / Jul 1 — which is exactly why the
+    // shape regex was not enough and the check round-trips.
+    for (const asOf of ['2026-99-99', '2026-13-01', '2026-02-30', '2026-06-31']) {
+      expect(
+        validateRecProvenance({ observations: [goodObs], asOf }).length,
+        `${asOf} should be rejected as a non-calendar date`
+      ).toBeGreaterThan(0);
+    }
+  });
+  it('applies the real leap-year rule rather than the digit shape', () => {
+    // 2026 is not a leap year; 2024 is.
+    expect(validateRecProvenance({ observations: [goodObs], asOf: '2026-02-29' }).length).toBeGreaterThan(0);
+    expect(validateRecProvenance({ observations: [goodObs], asOf: '2024-02-29' })).toEqual([]);
   });
   it('rejects stale=true without an asOf to demote against', () => {
     expect(validateRecProvenance({ observations: [goodObs], stale: true }).length).toBeGreaterThan(0);
@@ -179,6 +258,85 @@ describe('PROVENANCE_DETECTORS allowlist', () => {
     for (const id of PROVENANCE_DETECTORS) {
       expect(registered.has(id), `${id} is on the allowlist but not registered`).toBe(true);
     }
+  });
+});
+
+// ── Inverted default: provenance is required unless exempt (#3205) ─────────
+
+/** Every rec id the catalog can emit, including dual-emit branches. */
+const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
+
+/**
+ * The size of the debt register the day the default was inverted.
+ *
+ * Pinned with `toBeLessThanOrEqual` so migrations (which shrink it) pass
+ * untouched while an ADDITION fails — the list is the only way to emit an
+ * unauditable recommendation, so growing it must be a deliberate edit rather
+ * than the path of least resistance. Update this number DOWNWARD only.
+ */
+const EXEMPT_AT_INVERSION = 52;
+
+describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
+  it('only lists ids the catalog can actually emit', () => {
+    for (const id of PROVENANCE_EXEMPT) {
+      expect(
+        EMITTABLE_IDS.has(id),
+        `${id} is exempt from the provenance contract but no registered detector emits it — ` +
+          `a renamed or deleted detector left its exemption behind`
+      ).toBe(true);
+    }
+  });
+
+  it('is shrink-only', () => {
+    expect(
+      PROVENANCE_EXEMPT.length,
+      `PROVENANCE_EXEMPT grew past ${EXEMPT_AT_INVERSION}. Adding an id here opts a ` +
+        `recommendation OUT of being auditable, which is the defect #3205 fixed. ` +
+        `Emit provenance instead; only lower this pin.`
+    ).toBeLessThanOrEqual(EXEMPT_AT_INVERSION);
+  });
+
+  it('never exempts a detector that is separately proven compliant', () => {
+    // A fixture-proven detector that is ALSO exempt would silently stop being
+    // required if its fixture were ever deleted.
+    const both = PROVENANCE_DETECTORS.filter((id) => PROVENANCE_EXEMPT.includes(id));
+    expect(both).toEqual([]);
+  });
+
+  it('has no duplicate entries', () => {
+    expect(new Set(PROVENANCE_EXEMPT).size).toBe(PROVENANCE_EXEMPT.length);
+  });
+});
+
+describe('provenance is required by default (#3205)', () => {
+  const bare = (id: string): Recommendation =>
+    ({
+      id,
+      category: 'workflow',
+      severity: 'info',
+      title: 't',
+      detail: 'd',
+      action: 'a',
+      view: 'sessions',
+    }) as Recommendation;
+
+  it('rejects an unrecognised id that emits no provenance', () => {
+    // The exact hole #3205 closed: before the inversion an id nobody had
+    // enlisted was treated as compliant, so a detector could make a
+    // quantitative claim with nothing behind it by never joining a list.
+    const errs = validateRecommendationProvenance(bare('workflow.brand-new-detector'));
+    expect(errs.length).toBeGreaterThan(0);
+    expect(errs[0]).toMatch(/emitted no provenance/);
+  });
+
+  it('still allows an explicitly exempt id through', () => {
+    expect(validateRecommendationProvenance(bare(PROVENANCE_EXEMPT[0]))).toEqual([]);
+  });
+
+  it('validates the block when one IS present, exempt or not', () => {
+    const rec = bare(PROVENANCE_EXEMPT[0]);
+    rec.provenance = { observations: [] };
+    expect(validateRecommendationProvenance(rec).length).toBeGreaterThan(0);
   });
 });
 
@@ -399,7 +557,96 @@ const memoryHygieneStore = (): ProjectMemoryStore[] => [
   },
 ];
 
+// Report-card fixture parts (#3205) — mirrors agent-report-card.test.ts: a
+// committed project carrying retry storms + slow TTFB, which blends to MOVE.
+const RC_ENV = {
+  node_version: 'v22.0.0',
+  terminal: 'tmux',
+  wsl_version: '2',
+  linux_distro_id: 'ubuntu',
+  arch: 'x64',
+  build_time: '2026-06-01',
+};
+const rcSession = (cwd: string, sessionId: string) =>
+  ({
+    pid: 1000 + sessionId.length,
+    sessionId,
+    cwd,
+    startedAt: Date.parse('2026-06-01T00:00:00.000Z'),
+    procStart: '12345',
+    version: '2.1.161',
+    peerProtocol: 1,
+    kind: 'interactive',
+    entrypoint: 'cli',
+  }) as unknown as RecommendationInput['sessionRegistry'][number];
+const rcTelemetry = (sessionId: string, attempt: number, elapsedMs: number) =>
+  ({
+    event_name: 'tengu_api_slow_first_byte',
+    client_timestamp: '2026-06-01T00:00:00Z',
+    model: 'claude-opus-4-8',
+    betas: '',
+    session_id: sessionId,
+    attempt,
+    elapsed_ms: elapsedMs,
+    env: RC_ENV,
+  }) as unknown as RecommendationInput['telemetry'][number];
+const rcDebug = (sessionId: string) =>
+  ({
+    sessionId,
+    ttfbP50: 6500,
+    ttfbP90: 13000,
+    ttfbMax: 13000,
+    ttfbSampleCount: 5,
+    maxRetryAttempt: 1,
+    slowFirstByteCount: 0,
+    fastModeLostCount: 5,
+  }) as unknown as RecommendationInput['debugLogs'][number];
+
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
+  'reliability.api-errors': () => {
+    // Recorded errors with NO rate-limit status, so the rule takes its
+    // detector-id branch rather than dual-emitting `reliability.rate-limits`.
+    const apiErrors = [
+      { sessionId: 'ae-1', timestamp: '2026-06-09T00:00:00.000Z', summary: 'internal error', status: 500 },
+      { sessionId: 'ae-1', timestamp: '2026-06-10T00:00:00.000Z', summary: 'internal error', status: 500 },
+      { sessionId: 'ae-2', timestamp: '2026-06-08T00:00:00.000Z', summary: 'bad gateway', status: 502 },
+    ] as unknown as RecommendationInput['apiErrors'];
+    return {
+      input: baseInput({ apiErrors, liveConfig: liveConfig() }),
+      now: Date.parse('2026-06-11T00:00:00.000Z'),
+    };
+  },
+  'reliability.config-drift': () => {
+    // One recent project-scoped drift event that disabled an MCP server — the
+    // "my tool stopped working" case, inside the 7-day window.
+    const now = Date.parse('2026-06-10T00:00:00.000Z');
+    const configBackups = [
+      {
+        kind: 'server-disabled',
+        project: '/repo/payments',
+        server: 'postgres',
+        from: true,
+        to: false,
+        timestamp: now - 3_600_000,
+        severity: 'warning',
+      },
+    ] as unknown as RecommendationInput['configBackups'];
+    return { input: baseInput({ configBackups }), now };
+  },
+  'reliability.agent-report-card': () => {
+    const ids = ['rc1', 'rc2', 'rc3', 'rc4'];
+    return {
+      input: baseInput({
+        sessionRegistry: ids.map((id) => rcSession('/repo/heavy', id)) as RecommendationInput['sessionRegistry'],
+        telemetry: ids.flatMap((id) => [
+          rcTelemetry(id, 9, 30_000),
+          rcTelemetry(id, 2, 1_000),
+        ]) as RecommendationInput['telemetry'],
+        debugLogs: ids.map(rcDebug) as RecommendationInput['debugLogs'],
+      }),
+      now: Date.parse('2026-06-11T00:00:00.000Z'),
+    };
+  },
   'workflow.shadow-prompt': () => {
     // A qualifying prompt VARIATION (#2643 receipts): 5/6 decided shadow wins,
     // dated fresh, no current proof → observational lead with cited provenance.
@@ -1379,5 +1626,55 @@ describe('activity.activity-trend provenance (exemplar)', () => {
     expect(stale!.provenance!.asOf).toBe('2026-05-01');
     expect(stale!.provenance!.stale).toBe(true);
     expect(validateRecommendationProvenance(stale!)).toEqual([]);
+  });
+});
+
+// ── Sample-corpus sweep: realistic data, not a hand-built fixture (#3205) ──
+
+/**
+ * The fixture harness above proves the strongest tier, but it can only reach a
+ * detector someone wrote a fixture for. This sweep runs the WHOLE catalog over
+ * the synthetic corpus that backs the marketing SPA — a corpus already
+ * maintained to light up every dashboard section (`sample-corpus.test.ts`,
+ * #526) — and holds every recommendation that actually fires to the contract.
+ *
+ * Why this and not another bespoke fixture: it is the closest thing the repo
+ * has to real input, it is kept alive by a different suite for a different
+ * reason, and it exercised 16 detectors at the time of writing — 9 of which
+ * emitted no provenance and are on the debt register. Each future migration is
+ * therefore proven against realistic data, not only against the fixture its own
+ * author chose.
+ *
+ * HONEST LIMIT: a detector that does not fire on this corpus is not covered
+ * here. Coverage is the fixture harness ∪ this sweep ∪ each detector's own
+ * suite — not the full catalog. The sweep is a floor that rises as the corpus
+ * grows, not a proof of total compliance.
+ */
+describe('sample-corpus sweep (#3205)', () => {
+  const input = sampleCorpusInput();
+  const NOW = Date.parse('2026-07-29T00:00:00.000Z');
+
+  const fired = DETECTORS.map((d) => d.rule(input, NOW)).filter(
+    (r): r is Recommendation => r !== null
+  );
+
+  it('fires a meaningful slice of the catalog (the sweep is not vacuous)', () => {
+    // Without this, a corpus that stopped triggering anything would report
+    // green while checking nothing at all.
+    expect(fired.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it.each(fired.map((r) => [r.id, r] as const))(
+    '%s satisfies the provenance contract on realistic input',
+    (_id, rec) => {
+      expect(validateRecommendationProvenance(rec)).toEqual([]);
+    }
+  );
+
+  it('every firing id is either compliant or on the debt register', () => {
+    const unaccounted = fired
+      .filter((r) => !r.provenance && !PROVENANCE_EXEMPT.includes(r.id))
+      .map((r) => r.id);
+    expect(unaccounted).toEqual([]);
   });
 });

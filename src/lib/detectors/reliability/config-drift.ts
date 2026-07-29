@@ -101,6 +101,55 @@ export const detector: Detector = {
       evidence,
       view: 'permissions',
       ...(projects.length ? { projects } : {}),
+      provenance: {
+        observations: [
+          {
+            claim: `${projectEvents.length} project-scoped config-drift event(s) fell inside the ${RECENCY_MS / 86_400_000}-day window`,
+            source: 'parse-backups (diffConfigDrift over ~/.claude/backups/)',
+            field: 'configBackups[].timestamp',
+            value: projectEvents.length,
+          },
+          {
+            claim: `across ${projects.length} distinct project(s)`,
+            source: 'parse-backups (diffConfigDrift over ~/.claude/backups/)',
+            field: 'configBackups[].project',
+            value: projects.length,
+          },
+          {
+            claim: `${warnings.length} of them are warning-severity (trust flip, server disabled, blanket-enable on)`,
+            source: 'parse-backups (diffConfigDrift over ~/.claude/backups/)',
+            field: 'configBackups[].severity',
+            value: warnings.length,
+          },
+          {
+            claim: disabledNames.length
+              ? `${disabledNames.length} MCP server(s) moved into a disabled state: ${disabledNames.join(', ')}`
+              : 'no MCP server moved into a disabled state',
+            source: 'parse-backups (diffConfigDrift over ~/.claude/backups/)',
+            field: 'configBackups[].kind=server-disabled',
+            ...(disabledNames.length ? { value: disabledNames.join(',') } : {}),
+          },
+          {
+            claim: 'global-churn events are excluded — only project-scoped drift is counted',
+            source: 'parse-backups (diffConfigDrift over ~/.claude/backups/)',
+            field: 'configBackups[].kind',
+          },
+        ],
+        inference:
+          'A server that left the enabled set without anyone noticing is the usual ' +
+          'cause of "my tool stopped working"; the timestamped backups are the only ' +
+          'local record of when it changed.',
+        // Dated by the newest drift event in the window rather than by `now` —
+        // the claim is about when the config moved (#3205).
+        asOf: new Date(
+          projectEvents.reduce((max, e) => (e.timestamp > max ? e.timestamp : max), 0)
+        )
+          .toISOString()
+          .slice(0, 10),
+        // Selection is already bounded to the last 7 days, so anything that
+        // reaches here is fresh by construction.
+        stale: false,
+      },
     };
   },
 };

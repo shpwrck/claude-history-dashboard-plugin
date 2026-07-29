@@ -249,12 +249,19 @@ export const detector: Detector = {
           : `freshest receipt ${v.latestTs}${v.untimed > 0 ? `, ${v.untimed} undated` : ''}`,
         source: 'parse-shadow-calls',
         field: 'byVariation[].latestTs',
-        ...(v.latestTs ? { value: v.latestTs } : {}),
+        // Both branches state a figure, so both cite the scalar behind it
+        // (#3204): the freshest timestamp, or the undated count when there
+        // isn't one.
+        value: v.latestTs ? v.latestTs : v.untimed,
       },
       {
         claim: `source proof status (cited, not linked to a winning comparison) — current ${p.current} / stale ${p.stale} / revoked ${p.revoked} / unknown ${p.unknown}`,
         source: 'parse-shadow-calls',
         field: 'byVariation[].proofStatusCounts',
+        // A four-way breakdown has no single scalar, so cite the tuple in the
+        // field's own order — the reader compares it against
+        // `proofStatusCounts` directly (#3204).
+        value: `current=${p.current},stale=${p.stale},revoked=${p.revoked},unknown=${p.unknown}`,
       },
     ];
     if (agg.truncated) {

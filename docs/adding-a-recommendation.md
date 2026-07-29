@@ -192,12 +192,20 @@ false claim or an unsafe copy-paste fix directly erodes trust (epic #866; the
 2026-06-10 audit, #1049). Every new or changed detector must hold to this:
 
 - **Evidence-backed and reproducible.** State the concrete numbers behind the
-  finding and cite the artifact/parsed field they came from. Prefer attaching a
-  structured `provenance` (`RecProvenance` in `detectors/types.ts`, validated by
-  `detectors/provenance.ts`): observed facts each citing their source, the
-  inference kept separate, and an `asOf` date for time-derived data. Migrated
-  detectors go on the `PROVENANCE_DETECTORS` allowlist so the contract test
-  enforces shape.
+  finding and cite the artifact/parsed field they came from. **Every emitted
+  recommendation must carry a structured `provenance`** (`RecProvenance` in
+  `detectors/types.ts`, validated by `detectors/provenance.ts`) — since #3205
+  this is the default, not an opt-in: observed facts each citing their source,
+  the inference kept separate, and an `asOf` date for time-derived data. Each
+  observation needs a `claim`, a `source`, and the `field` within that source;
+  a claim that **states a figure** must also carry the scalar `value` it was
+  computed from, so a reader can reproduce the number without re-deriving the
+  detector. `asOf` must be a real calendar date (`2026-02-30` is rejected).
+  The only way out is `PROVENANCE_EXEMPT`, the shrink-only register of ids that
+  predate the contract — do not add to it. Adding a trigger fixture to
+  `PROVENANCE_TRIGGER_FIXTURES` (and your id to `PROVENANCE_DETECTORS`) proves
+  compliance by actually running the detector, which is the strongest tier;
+  otherwise the sample-corpus sweep covers you if your detector fires on it.
 - **Fix snippets are a product surface — declare how safe they are.** Set
   `fixKind` (`detectors/types.ts`): `'validated'` (default) is copy-paste-safe
   self-contained config; `'illustrative'` is a template the user must adapt (a
@@ -233,7 +241,7 @@ false claim or an unsafe copy-paste fix directly erodes trust (epic #866; the
 ### Tests these require
 
 Beyond fires/stays-silent, a detector touching the above must test: evidence /
-provenance shape (if on the allowlist), stale-data demotion **and** suppression,
+provenance shape (required — see above), stale-data demotion **and** suppression,
 fix-snippet validity (validated passes the gate; templates/external are
 non-validated), and false-positive guards for any honest-language signal. These
 run in the standard `npx vitest run` gate.
