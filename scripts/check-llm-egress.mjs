@@ -44,6 +44,16 @@ const ALLOWED_ORIGIN_LINE_PATTERNS = new Map([
     ],
   ],
   ['src/components/AskClaude.tsx', [/^\s*api\.anthropic\.com\s*$/]],
+  // #3085: the Gate 2702 sandbox names the model host in its network-policy
+  // ALLOWLIST — the one domain a jailed worker may reach. That is the opposite
+  // of an unregistered egress path: it is the enforcement point that makes the
+  // worker's egress auditable, and hiding the literal (concatenating it, say)
+  // would defeat this gate's purpose rather than satisfy it. Registered as a
+  // single anchored line so the rest of the file stays scanned.
+  [
+    'scripts/gate-2702/sandbox-dispatch.mjs',
+    [/^const MODEL_DOMAIN = "api\.anthropic\.com";$/],
+  ],
   [
     'src/components/Settings.tsx',
     [

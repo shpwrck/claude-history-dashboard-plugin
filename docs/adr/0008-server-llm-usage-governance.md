@@ -132,6 +132,52 @@ enforces the per-tenant boundary for multi-tenant exposure. Human: a required
 sign-off receipt in the security release-gate epic (see `docs/RELEASING.md`) -
 a machine cannot certify "safe to expose."
 
+### 7. Subscription-authenticated experiment workers are OS-contained
+
+The opt-in #2702 C5 bridge is a local Claude Code worker, not a server Messages-API call, but its
+GitHub issue body is untrusted. The worker therefore runs under the existing
+`@anthropic-ai/sandbox-runtime` 0.0.52 enforcer on Linux (Bubblewrap, Socat, and SRT's network
+proxy/seccomp layer). The bridge fails before trial preparation if that exact runtime or a required
+host tool is unavailable. With `CHD_EXPERIMENT_2702` unset, this path remains byte-for-byte off and
+makes no external call.
+
+Each arm gets an isolated `HOME` beneath its registered run directory. The host home is denied and
+only the disposable worktree, its Git metadata, the registered run directory, the pinned Sidekick
+snapshot, and exact runtime executables are re-exposed beneath that denial. Production network
+access is limited to `api.anthropic.com`; test dispatch has no allowed domain. The bridge copies
+only `~/.claude/.credentials.json` into the isolated home, refuses symlinked or oversized
+credentials, and removes that copy plus all non-Sidekick home state after the process group
+quiesces. Sidekick's per-session ledger remains arm-local for accounting and sealing.
+
+The child environment allowlist is fixed in `scripts/gate-2702/sandbox-dispatch.mjs` and asserted
+by the hostile-canary acceptance test:
+
+- Registration: `CHD_EXPERIMENT_2702_ATTEMPT`, `CHD_EXPERIMENT_2702_BASE_SHA`,
+  `CHD_EXPERIMENT_2702_RUN_DIR`, `CHD_EXPERIMENT_2702_SUBJECT`,
+  `CHD_EXPERIMENT_2702_TREATMENT`, `CHD_EXPERIMENT_2702_TRIAL_ID`.
+- Isolated runtime: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CLAUDE_CODE_TMPDIR`,
+  `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `HOME`,
+  `LANG`, `LC_ALL`, `NO_COLOR`, `NPM_CONFIG_CACHE`, `NPM_CONFIG_USERCONFIG`, `PATH`, `SHELL`,
+  `TERM`, `TMPDIR`, `TZ`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`.
+- Fixed Sidekick treatment: `SIDEKICK_AUDITS`, `SIDEKICK_BACKOFF_AFTER`, `SIDEKICK_BACKOFF_MAX`,
+  `SIDEKICK_CALL_BUDGET_USD`, `SIDEKICK_CONCURRENCY`, `SIDEKICK_ENABLE`, `SIDEKICK_GATE`,
+  `SIDEKICK_MIN_DELTA`, `SIDEKICK_MODEL`, `SIDEKICK_NEARDUP`, `SIDEKICK_NEARDUP_MIN_SHARED`,
+  `SIDEKICK_NESTED`, `SIDEKICK_SESSION_BUDGET_USD`, `SIDEKICK_SHIP_COOLDOWN`,
+  `SIDEKICK_SIGHTED`, `SIDEKICK_SYNC`, `SIDEKICK_TRIAGE_MODEL`, `SIDEKICK_TRIGGERS`,
+  `SIDEKICK_TRIGGER_RESERVE_USD`, `SIDEKICK_VERIFY_LENS`, `SIDEKICK_WARMUP_TOKENS`.
+- SRT-owned proxy/shell variables: `ALL_PROXY`, `CLAUDE_CODE_HOST_HTTP_PROXY_PORT`,
+  `CLAUDE_CODE_HOST_SOCKS_PROXY_PORT`, `CLOUDSDK_PROXY_ADDRESS`, `CLOUDSDK_PROXY_PORT`,
+  `CLOUDSDK_PROXY_TYPE`, `DOCKER_HTTP_PROXY`, `DOCKER_HTTPS_PROXY`, `FTP_PROXY`,
+  `GIT_SSH_COMMAND`, `GRPC_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `OLDPWD`, `PWD`,
+  `RSYNC_PROXY`, `SANDBOX_RUNTIME`, `SHLVL`, and the lowercase `all_proxy`, `ftp_proxy`,
+  `grpc_proxy`, `http_proxy`, `https_proxy`, `no_proxy` variants.
+
+The immutable pre-dispatch receipt binds the exact enforcer package digests, policy and roots,
+launcher environment, worker environment keys, prompt digest, worker argv, and registration. The
+terminal receipt binds retained stdout/stderr byte counts and digests. This makes the boundary
+independently auditable by the sealer rather than relying on the issue prompt's instructions
+(security fix #3085).
+
 ## Consequences
 
 ### Positive

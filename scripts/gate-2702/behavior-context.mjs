@@ -6,6 +6,21 @@ export const GATE_2702_WORKER_MODEL_ID = "claude-haiku-4-5-20251001";
 export const GATE_2702_SIDEKICK_MODEL_ID = "claude-sonnet-5";
 export const GATE_2702_SIDEKICK_VERSION = "0.3.3";
 
+/**
+ * The behavior context's OWN schema version. Deliberately a separate constant
+ * from any receipt's `SCHEMA_VERSION`: classify.mjs and seal-classification.mjs
+ * validated this nested object against THEIR receipt version, which silently
+ * pinned the two together -- so the behavior context could not be versioned at
+ * all without breaking receipt validation everywhere.
+ *
+ * v2 (#3085): the context is captured against the HOME the WORKER runs under
+ * -- the jail's isolated home -- not the launcher's. For an operator with
+ * ~/.sidekick/SIDEKICK.md the recorded instructionSources change meaning, so
+ * the version moves rather than letting a v1 digest silently stand for a
+ * different capture basis.
+ */
+export const GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION = 2;
+
 export function gate2702ExecutionMode(env = process.env) {
   return env.CHD_EXPERIMENT_2702_TEST_MODE === "1" ? "test" : "production";
 }
@@ -227,7 +242,7 @@ export function captureGate2702BehaviorContext({
     );
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION,
     observedAt,
     workerModelQualifiedId: models.worker,
     sidekickModelQualifiedId: enabled ? models.sidekick : null,

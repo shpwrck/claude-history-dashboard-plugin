@@ -112,7 +112,7 @@ function serializeCanonical(value) {
 	return `{${Object.keys(value).sort(compareUtf16).map((key) => `${JSON.stringify(key)}:${serializeCanonical(value[key])}`).join(",")}}`;
 }
 /** RFC 8785/JCS serialization for values that pass the contract JSON preflight. */
-function canonicalJson$5(value) {
+function canonicalJson$6(value) {
 	return serializeCanonical(toJsonValue(value));
 }
 function asRecord(value) {
@@ -125,16 +125,16 @@ function sortArray(parent, key, identity) {
 }
 function stringAt(value, key) {
 	const record = asRecord(value);
-	return typeof record?.[key] === "string" ? record[key] : canonicalJson$5(value);
+	return typeof record?.[key] === "string" ? record[key] : canonicalJson$6(value);
 }
 function semanticsIdentity(value) {
 	const semantics = asRecord(asRecord(value)?.semanticsRef ?? value);
-	if (!semantics) return canonicalJson$5(value);
+	if (!semantics) return canonicalJson$6(value);
 	return `${String(semantics.id)}\u0000${String(semantics.version)}\u0000${String(semantics.contentDigest)}`;
 }
 function evidenceIdentity(value) {
 	const record = asRecord(value);
-	if (!record) return canonicalJson$5(value);
+	if (!record) return canonicalJson$6(value);
 	if (record.kind === "session") {
 		const session = asRecord(record.sessionRef);
 		return `session\u0000${String(session?.harness)}\u0000${String(session?.sourceId)}\u0000${String(session?.sessionId)}\u0000${String(record.contentDigest)}`;
@@ -152,7 +152,7 @@ function normalizeDefinition(root) {
 	sortArray(root, "treatments", (value) => stringAt(value, "id"));
 	if (Array.isArray(root.treatments)) for (const treatment of root.treatments) sortArray(asRecord(treatment), "interventions", (value) => {
 		const record = asRecord(value);
-		return `${semanticsIdentity(record?.capability ?? value)}\u0000${String(record?.operation)}\u0000${canonicalJson$5(record?.value)}`;
+		return `${semanticsIdentity(record?.capability ?? value)}\u0000${String(record?.operation)}\u0000${canonicalJson$6(record?.value)}`;
 	});
 	sortArray(root, "metrics", (value) => stringAt(value, "id"));
 	sortArray(root, "checks", (value) => stringAt(value, "id"));
@@ -197,14 +197,14 @@ function normalizeDocument(document) {
 function canonicalDocumentJson(document) {
 	return serializeCanonical(normalizeDocument(document));
 }
-function sha256$1(value) {
+function sha256$2(value) {
 	return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
 /** Digest a complete authoritative document after omitting its own digest. */
 function computeDocumentDigest(document) {
 	const normalized = normalizeDocument(document);
 	delete normalized.contentDigest;
-	return sha256$1(serializeCanonical(normalized));
+	return sha256$2(serializeCanonical(normalized));
 }
 /** Return a normalized immutable-document candidate with its digest populated. */
 function withDocumentDigest(document) {
@@ -217,7 +217,7 @@ function computeBehaviorFingerprintDigest(fingerprint) {
 	const cloned = toJsonValue(fingerprint);
 	delete cloned.digest;
 	normalizeFingerprint(cloned);
-	return sha256$1(serializeCanonical(cloned));
+	return sha256$2(serializeCanonical(cloned));
 }
 function withBehaviorFingerprintDigest(fingerprint) {
 	const cloned = toJsonValue(fingerprint);
@@ -8628,7 +8628,7 @@ function validateRunSemantics(run, context, issues) {
 	run.safeguardAuthorizations.forEach((authorization, index) => {
 		const request = context.definition.safeguards.relaxationRequests.find((candidate) => candidate.requestId === authorization.requestId);
 		if (!request) add(issues, "run-reference", "run.unknown-safeguard-authorization", `$/safeguardAuthorizations/${index}/requestId`, "authorization does not match a Definition relaxation request");
-		if (!(request !== void 0 && context.operatorSafeguardAuthorizations.some((candidate) => sameDefinitionRef(candidate.definitionRef, run.definitionRef) && candidate.trialId === run.trialId && candidate.runId === run.runId && canonicalJson$5(candidate.request) === canonicalJson$5(request) && candidate.approvedBy === authorization.approvedBy && candidate.approvedAt === authorization.approvedAt && candidate.reason === authorization.reason))) add(issues, "run-reference", "run.safeguard-authorization-unresolved", `$/safeguardAuthorizations/${index}`, "Run safeguard authorization is not backed by exact operator authority");
+		if (!(request !== void 0 && context.operatorSafeguardAuthorizations.some((candidate) => sameDefinitionRef(candidate.definitionRef, run.definitionRef) && candidate.trialId === run.trialId && candidate.runId === run.runId && canonicalJson$6(candidate.request) === canonicalJson$6(request) && candidate.approvedBy === authorization.approvedBy && candidate.approvedAt === authorization.approvedAt && candidate.reason === authorization.reason))) add(issues, "run-reference", "run.safeguard-authorization-unresolved", `$/safeguardAuthorizations/${index}`, "Run safeguard authorization is not backed by exact operator authority");
 		const approvedAt = timestamp(authorization.approvedAt, `$/safeguardAuthorizations/${index}/approvedAt`, issues);
 		if (Number.isFinite(approvedAt) && Number.isFinite(Date.parse(run.startedAt)) && compareUtcTimestamps(authorization.approvedAt, run.startedAt) > 0) add(issues, "run-reference", "run.safeguard-authorization-late", `$/safeguardAuthorizations/${index}/approvedAt`, "safeguard relaxation must be authorized before dispatch");
 	});
@@ -9184,7 +9184,7 @@ var v1_exports = /* @__PURE__ */ __exportAll({
 	EMPTY_SHA256: () => EMPTY_SHA256,
 	EXPERIMENT_CONTRACT_SCHEMAS_V1: () => EXPERIMENT_CONTRACT_SCHEMAS_V1,
 	canonicalDocumentJson: () => canonicalDocumentJson,
-	canonicalJson: () => canonicalJson$5,
+	canonicalJson: () => canonicalJson$6,
 	computeBehaviorFingerprintDigest: () => computeBehaviorFingerprintDigest,
 	computeDocumentDigest: () => computeDocumentDigest,
 	decodeDefinitionV1: () => decodeDefinitionV1,
@@ -9233,7 +9233,7 @@ function deepFreeze(value, seen = /* @__PURE__ */ new WeakSet()) {
 	return Object.freeze(value);
 }
 function semanticsDigest(value) {
-	return `sha256:${createHash("sha256").update(canonicalJson$5(value), "utf8").digest("hex")}`;
+	return `sha256:${createHash("sha256").update(canonicalJson$6(value), "utf8").digest("hex")}`;
 }
 /** Build exact schemas without object-valued const/enum (#2838). */
 function literalSchema(value) {
@@ -9780,6 +9780,82 @@ var init_definition = __esmMin((() => {
 	});
 }));
 //#endregion
+//#region scripts/gate-2702/behavior-context.mjs
+function configuredModel(env, name, fallback, tier) {
+	const value = String(env[name] || fallback).trim();
+	if (!new RegExp(`^claude-${tier}-[a-z0-9-]+$`).test(value)) throw new Error(`${name} must be a fully qualified Claude ${tier} model`);
+	return value;
+}
+function gate2702ModelIds(env = process.env) {
+	return {
+		worker: configuredModel(env, "CHD_EXPERIMENT_2702_WORKER_MODEL_ID", GATE_2702_WORKER_MODEL_ID, "haiku"),
+		sidekick: configuredModel(env, "CHD_EXPERIMENT_2702_SIDEKICK_MODEL_ID", GATE_2702_SIDEKICK_MODEL_ID, "sonnet")
+	};
+}
+function gate2702ResolvedSidekickConfig(treatment, env = process.env) {
+	const models = gate2702ModelIds(env);
+	const enabled = treatment.configuration.sidekick.enabled;
+	return {
+		enabled,
+		model: models.sidekick,
+		gate: enabled ? treatment.configuration.sidekick.gate : "off",
+		warmupTokens: 15e4,
+		backoffAfter: 3,
+		backoffMax: 8,
+		sessionBudgetUsd: enabled ? treatment.configuration.sidekick.sessionBudgetUsd : 0,
+		triggerReserveUsd: enabled ? 1 : 0,
+		callBudgetUsd: enabled ? treatment.configuration.sidekick.perCallBudgetUsd : 0,
+		sighted: true,
+		verifyLens: true,
+		sync: false,
+		triggers: [
+			"push-or-pr",
+			"merge-conflict",
+			"sensitive-file-edit",
+			"destructive"
+		],
+		triageModel: "claude-haiku-4-5",
+		audits: ["file"],
+		shipCooldown: 2,
+		nearDup: .5,
+		nearDupMinShared: 4,
+		concurrency: 1,
+		minDelta: 120
+	};
+}
+function gate2702SidekickEnvironment(treatment, env = process.env) {
+	const config = gate2702ResolvedSidekickConfig(treatment, env);
+	return {
+		SIDEKICK_ENABLE: config.enabled ? "1" : "0",
+		SIDEKICK_MODEL: config.model,
+		SIDEKICK_GATE: config.gate,
+		SIDEKICK_WARMUP_TOKENS: String(config.warmupTokens),
+		SIDEKICK_BACKOFF_AFTER: String(config.backoffAfter),
+		SIDEKICK_BACKOFF_MAX: String(config.backoffMax),
+		SIDEKICK_SESSION_BUDGET_USD: String(config.sessionBudgetUsd),
+		SIDEKICK_TRIGGER_RESERVE_USD: String(config.triggerReserveUsd),
+		SIDEKICK_CALL_BUDGET_USD: String(config.callBudgetUsd),
+		SIDEKICK_SIGHTED: config.sighted ? "1" : "0",
+		SIDEKICK_VERIFY_LENS: config.verifyLens ? "1" : "0",
+		SIDEKICK_SYNC: config.sync ? "1" : "0",
+		SIDEKICK_TRIGGERS: config.triggers.join(","),
+		SIDEKICK_TRIAGE_MODEL: config.triageModel,
+		SIDEKICK_AUDITS: config.audits.join(","),
+		SIDEKICK_SHIP_COOLDOWN: String(config.shipCooldown),
+		SIDEKICK_NEARDUP: String(config.nearDup),
+		SIDEKICK_NEARDUP_MIN_SHARED: String(config.nearDupMinShared),
+		SIDEKICK_CONCURRENCY: String(config.concurrency),
+		SIDEKICK_MIN_DELTA: String(config.minDelta),
+		SIDEKICK_NESTED: "0"
+	};
+}
+var GATE_2702_WORKER_MODEL_ID, GATE_2702_SIDEKICK_MODEL_ID, GATE_2702_SIDEKICK_VERSION;
+var init_behavior_context = __esmMin((() => {
+	GATE_2702_WORKER_MODEL_ID = "claude-haiku-4-5-20251001";
+	GATE_2702_SIDEKICK_MODEL_ID = "claude-sonnet-5";
+	GATE_2702_SIDEKICK_VERSION = "0.3.3";
+}));
+//#endregion
 //#region scripts/gate-2702/seal-accounting.mjs
 /**
 * Pure accounting rederivation for the sealed #2702 C5 bridge.
@@ -9794,24 +9870,24 @@ var init_definition = __esmMin((() => {
 * in its session, numeric, count, usage, observation, or source-evidence fields.
 * The caller remains responsible for validating receipt identity and lineage.
 */
-function fail$4(message) {
+function fail$5(message) {
 	throw new Error(message);
 }
-function canonicalValue$4(value) {
-	if (Array.isArray(value)) return value.map(canonicalValue$4);
+function canonicalValue$5(value) {
+	if (Array.isArray(value)) return value.map(canonicalValue$5);
 	if (value === null || typeof value !== "object") return value;
-	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue$4(value[key])]));
+	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue$5(value[key])]));
 }
-function canonicalJson$4(value) {
-	return JSON.stringify(canonicalValue$4(value));
+function canonicalJson$5(value) {
+	return JSON.stringify(canonicalValue$5(value));
 }
-function sha256(value) {
+function sha256$1(value) {
 	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 function retainedBytes$2(value, maximumBytes, label) {
-	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$4(`${label} must be retained bytes`);
+	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$5(`${label} must be retained bytes`);
 	const bytes = Buffer.from(value);
-	if (bytes.length > maximumBytes) fail$4(`${label} exceeds its fixed size limit`);
+	if (bytes.length > maximumBytes) fail$5(`${label} exceeds its fixed size limit`);
 	return bytes;
 }
 function workerEvidence(workerStdoutBytes) {
@@ -9834,7 +9910,7 @@ function workerEvidence(workerStdoutBytes) {
 		evidence: {
 			source: "worker-terminal-json",
 			byteLength: bytes.length,
-			contentDigest: sha256(bytes)
+			contentDigest: sha256$1(bytes)
 		}
 	};
 }
@@ -9849,7 +9925,7 @@ function parseLedgerRows(sidekickLedgerBytes) {
 	const bytes = retainedBytes$2(sidekickLedgerBytes, MAX_SIDEKICK_LEDGER_BYTES, "exact Sidekick ledger");
 	const lines = bytes.toString("utf8").split("\n");
 	if (lines.at(-1) === "") lines.pop();
-	if (lines.length > MAX_SIDEKICK_LEDGER_ROWS) fail$4("exact Sidekick ledger exceeds its fixed row limit");
+	if (lines.length > MAX_SIDEKICK_LEDGER_ROWS) fail$5("exact Sidekick ledger exceeds its fixed row limit");
 	let malformed = false;
 	return {
 		bytes,
@@ -9868,22 +9944,22 @@ function parseLedgerRows(sidekickLedgerBytes) {
 			return {
 				rowNumber: index + 1,
 				row,
-				contentDigest: sha256(line)
+				contentDigest: sha256$1(line)
 			};
 		}),
 		malformed
 	};
 }
 function requiredString(value, label) {
-	if (typeof value !== "string" || value.length === 0) fail$4(`${label} is missing`);
+	if (typeof value !== "string" || value.length === 0) fail$5(`${label} is missing`);
 	return value;
 }
 function requiredTurn(value, label) {
-	if (!Number.isSafeInteger(value) || value < 0) fail$4(`${label} is invalid`);
+	if (!Number.isSafeInteger(value) || value < 0) fail$5(`${label} is invalid`);
 	return value;
 }
 function requireZeroCost(row, label) {
-	if (row.costUsd !== 0 || Object.is(row.costUsd, -0)) fail$4(`${label} must have known zero cost`);
+	if (row.costUsd !== 0 || Object.is(row.costUsd, -0)) fail$5(`${label} must have known zero cost`);
 }
 function normalizeGate2702Cost(value) {
 	if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || Object.is(value, -0)) return null;
@@ -9891,10 +9967,10 @@ function normalizeGate2702Cost(value) {
 	return Number.isFinite(normalized) && !Object.is(normalized, -0) ? normalized : null;
 }
 function requireNoShippedField(row, label) {
-	if (row.shipped !== void 0) fail$4(`${label} cannot declare a shipped intervention`);
+	if (row.shipped !== void 0) fail$5(`${label} cannot declare a shipped intervention`);
 }
 function requireShippedBoolean(row, label, expected) {
-	if (typeof row.shipped !== "boolean" || expected !== void 0 && row.shipped !== expected) fail$4(`${label} has an invalid shipped state`);
+	if (typeof row.shipped !== "boolean" || expected !== void 0 && row.shipped !== expected) fail$5(`${label} has an invalid shipped state`);
 }
 function unknownSidekickValues(reason, rowEvidence) {
 	const reasons = [reason];
@@ -9935,7 +10011,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 		"guard"
 	]);
 	const acceptLifecycle = (identity, row) => {
-		const canonical = canonicalJson$4(row);
+		const canonical = canonicalJson$5(row);
 		const existing = lifecycleRows.get(identity);
 		if (existing === void 0) {
 			lifecycleRows.set(identity, canonical);
@@ -9980,7 +10056,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 			const turn = requiredTurn(row.turn, `${row.model} Sidekick turn`);
 			const trigger = requiredString(row.trigger, `${row.model} Sidekick trigger`);
 			const skipped = row.model === "stop-review" && row.skipped === "empty-tail";
-			if (row.skipped !== void 0 && !skipped) fail$4(`${row.model} Sidekick skipped state is unrecognized`);
+			if (row.skipped !== void 0 && !skipped) fail$5(`${row.model} Sidekick skipped state is unrecognized`);
 			if (skipped) {
 				requireZeroCost(row, "skipped stop-review Sidekick row");
 				requireNoShippedField(row, "skipped stop-review Sidekick row");
@@ -9998,7 +10074,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 			else conflict = true;
 		} else if (row.model === "triage") {
 			const turn = requiredTurn(row.turn, "triage Sidekick turn");
-			if (typeof row.fired !== "boolean") fail$4("triage Sidekick fired result is invalid");
+			if (typeof row.fired !== "boolean") fail$5("triage Sidekick fired result is invalid");
 			requireNoShippedField(row, "triage Sidekick row");
 			identity = `probe:${workerSessionId}:triage:${turn}`;
 			lifecycle = "triage";
@@ -10062,7 +10138,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 			rowNumber: evidence.rowNumber,
 			contentDigest: evidence.contentDigest,
 			lifecycle,
-			...identity ? { identityDigest: sha256(identity) } : {},
+			...identity ? { identityDigest: sha256$1(identity) } : {},
 			...duplicate ? { duplicate: true } : {},
 			...conflict ? { conflict: true } : {}
 		});
@@ -10122,8 +10198,8 @@ function unavailableSidekickValues(reason) {
 	};
 }
 function deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) {
-	if (typeof sidekickModel !== "string" || sidekickModel.length === 0) fail$4("sidekickModel must identify the configured Sidekick model");
-	if (worker.workerSessionId === null && sidekickLedgerBytes != null) fail$4("Sidekick ledger bytes cannot bind without a worker session id");
+	if (typeof sidekickModel !== "string" || sidekickModel.length === 0) fail$5("sidekickModel must identify the configured Sidekick model");
+	if (worker.workerSessionId === null && sidekickLedgerBytes != null) fail$5("Sidekick ledger bytes cannot bind without a worker session id");
 	const relativePath = worker.workerSessionId === null ? null : `${worker.workerSessionId}/__sidekick.jsonl`;
 	const ledger = worker.workerSessionId === null ? {
 		status: "unavailable",
@@ -10151,7 +10227,7 @@ function deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) {
 		...invalidAllInCost ? ["all-in-cost-invalid"] : []
 	])];
 	const unknownReasons = [...new Set([...allInUnknownReasons, ...values.unknownReasons])];
-	const ledgerDigest = ledger.status === "settled" ? sha256(ledger.bytes) : null;
+	const ledgerDigest = ledger.status === "settled" ? sha256$1(ledger.bytes) : null;
 	const evidenceDigests = [worker.evidence.contentDigest, ...ledgerDigest === null ? [] : [ledgerDigest]];
 	return {
 		workerSessionId: worker.workerSessionId,
@@ -10232,9 +10308,9 @@ function deriveControl(worker, definitionDigest) {
 * @param {string} input.sidekickModel Pinned Sidekick advisor model id.
 */
 function deriveGate2702AccountingEvidence({ workerStdoutBytes, sidekickLedgerBytes = null, sidekickEnabled, definitionDigest, sidekickModel }) {
-	if (typeof sidekickEnabled !== "boolean") fail$4("sidekickEnabled must be a boolean Definition value");
-	if (!SHA256_PATTERN$2.test(definitionDigest ?? "")) fail$4("definitionDigest must be a sha256 content digest");
-	if (!sidekickEnabled && sidekickLedgerBytes != null) fail$4("a Sidekick-disabled treatment cannot bind Sidekick ledger bytes");
+	if (typeof sidekickEnabled !== "boolean") fail$5("sidekickEnabled must be a boolean Definition value");
+	if (!SHA256_PATTERN$2.test(definitionDigest ?? "")) fail$5("definitionDigest must be a sha256 content digest");
+	if (!sidekickEnabled && sidekickLedgerBytes != null) fail$5("a Sidekick-disabled treatment cannot bind Sidekick ledger bytes");
 	const worker = workerEvidence(workerStdoutBytes);
 	return sidekickEnabled ? deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) : deriveControl(worker, definitionDigest);
 }
@@ -10247,11 +10323,11 @@ function deriveGate2702AccountingEvidence({ workerStdoutBytes, sidekickLedgerByt
 * @param {object} input.accounting Parsed Gate2702Accounting receipt.
 */
 function validateGate2702AccountingEvidence({ accounting, ...inputs }) {
-	if (accounting === null || typeof accounting !== "object" || Array.isArray(accounting)) fail$4("Gate2702Accounting receipt must be an object");
+	if (accounting === null || typeof accounting !== "object" || Array.isArray(accounting)) fail$5("Gate2702Accounting receipt must be an object");
 	const expected = deriveGate2702AccountingEvidence(inputs);
 	for (const field of ACCOUNTING_EVIDENCE_FIELDS) {
 		const expectedHasField = Object.hasOwn(expected, field);
-		if (expectedHasField !== Object.hasOwn(accounting, field) || expectedHasField && !isDeepStrictEqual(accounting[field], expected[field])) fail$4(`Gate2702Accounting ${field} does not rederive from retained evidence`);
+		if (expectedHasField !== Object.hasOwn(accounting, field) || expectedHasField && !isDeepStrictEqual(accounting[field], expected[field])) fail$5(`Gate2702Accounting ${field} does not rederive from retained evidence`);
 	}
 	return expected;
 }
@@ -10278,81 +10354,6 @@ var init_seal_accounting = __esmMin((() => {
 	];
 }));
 //#endregion
-//#region scripts/gate-2702/behavior-context.mjs
-function configuredModel(env, name, fallback, tier) {
-	const value = String(env[name] || fallback).trim();
-	if (!new RegExp(`^claude-${tier}-[a-z0-9-]+$`).test(value)) throw new Error(`${name} must be a fully qualified Claude ${tier} model`);
-	return value;
-}
-function gate2702ModelIds(env = process.env) {
-	return {
-		worker: configuredModel(env, "CHD_EXPERIMENT_2702_WORKER_MODEL_ID", GATE_2702_WORKER_MODEL_ID, "haiku"),
-		sidekick: configuredModel(env, "CHD_EXPERIMENT_2702_SIDEKICK_MODEL_ID", GATE_2702_SIDEKICK_MODEL_ID, "sonnet")
-	};
-}
-function gate2702ResolvedSidekickConfig(treatment, env = process.env) {
-	const models = gate2702ModelIds(env);
-	const enabled = treatment.configuration.sidekick.enabled;
-	return {
-		enabled,
-		model: models.sidekick,
-		gate: enabled ? treatment.configuration.sidekick.gate : "off",
-		warmupTokens: 15e4,
-		backoffAfter: 3,
-		backoffMax: 8,
-		sessionBudgetUsd: enabled ? treatment.configuration.sidekick.sessionBudgetUsd : 0,
-		triggerReserveUsd: enabled ? 1 : 0,
-		callBudgetUsd: enabled ? treatment.configuration.sidekick.perCallBudgetUsd : 0,
-		sighted: true,
-		verifyLens: true,
-		sync: false,
-		triggers: [
-			"push-or-pr",
-			"merge-conflict",
-			"sensitive-file-edit",
-			"destructive"
-		],
-		triageModel: "claude-haiku-4-5",
-		audits: ["file"],
-		shipCooldown: 2,
-		nearDup: .5,
-		nearDupMinShared: 4,
-		concurrency: 1,
-		minDelta: 120
-	};
-}
-function gate2702SidekickEnvironment(treatment, env = process.env) {
-	const config = gate2702ResolvedSidekickConfig(treatment, env);
-	return {
-		SIDEKICK_ENABLE: config.enabled ? "1" : "0",
-		SIDEKICK_MODEL: config.model,
-		SIDEKICK_GATE: config.gate,
-		SIDEKICK_WARMUP_TOKENS: String(config.warmupTokens),
-		SIDEKICK_BACKOFF_AFTER: String(config.backoffAfter),
-		SIDEKICK_BACKOFF_MAX: String(config.backoffMax),
-		SIDEKICK_SESSION_BUDGET_USD: String(config.sessionBudgetUsd),
-		SIDEKICK_TRIGGER_RESERVE_USD: String(config.triggerReserveUsd),
-		SIDEKICK_CALL_BUDGET_USD: String(config.callBudgetUsd),
-		SIDEKICK_SIGHTED: config.sighted ? "1" : "0",
-		SIDEKICK_VERIFY_LENS: config.verifyLens ? "1" : "0",
-		SIDEKICK_SYNC: config.sync ? "1" : "0",
-		SIDEKICK_TRIGGERS: config.triggers.join(","),
-		SIDEKICK_TRIAGE_MODEL: config.triageModel,
-		SIDEKICK_AUDITS: config.audits.join(","),
-		SIDEKICK_SHIP_COOLDOWN: String(config.shipCooldown),
-		SIDEKICK_NEARDUP: String(config.nearDup),
-		SIDEKICK_NEARDUP_MIN_SHARED: String(config.nearDupMinShared),
-		SIDEKICK_CONCURRENCY: String(config.concurrency),
-		SIDEKICK_MIN_DELTA: String(config.minDelta),
-		SIDEKICK_NESTED: "0"
-	};
-}
-var GATE_2702_WORKER_MODEL_ID, GATE_2702_SIDEKICK_MODEL_ID;
-var init_behavior_context = __esmMin((() => {
-	GATE_2702_WORKER_MODEL_ID = "claude-haiku-4-5-20251001";
-	GATE_2702_SIDEKICK_MODEL_ID = "claude-sonnet-5";
-}));
-//#endregion
 //#region scripts/gate-2702/seal-classification.mjs
 /**
 * Pure classification-evidence verification for the sealed #2702 C5 bridge.
@@ -10362,25 +10363,25 @@ var init_behavior_context = __esmMin((() => {
 * arm identity; all receipt identity, lifecycle, stream, check-result, and
 * classification claims are rederived from the retained artifacts.
 */
-function fail$3(message) {
+function fail$4(message) {
 	throw new Error(message);
 }
-function canonicalValue$3(value) {
-	if (Array.isArray(value)) return value.map(canonicalValue$3);
+function canonicalValue$4(value) {
+	if (Array.isArray(value)) return value.map(canonicalValue$4);
 	if (value === null || typeof value !== "object") return value;
-	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue$3(value[key])]));
+	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue$4(value[key])]));
 }
-function canonicalJson$3(value) {
-	return JSON.stringify(canonicalValue$3(value));
+function canonicalJson$4(value) {
+	return JSON.stringify(canonicalValue$4(value));
 }
-function sameValue$3(left, right) {
-	return canonicalJson$3(left) === canonicalJson$3(right);
+function sameValue$4(left, right) {
+	return canonicalJson$4(left) === canonicalJson$4(right);
 }
 function sha256Bytes$2(value) {
 	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 function valueDigest$3(value) {
-	return sha256Bytes$2(Buffer.from(canonicalJson$3(value), "utf8"));
+	return sha256Bytes$2(Buffer.from(canonicalJson$4(value), "utf8"));
 }
 function receiptDigest$2(receipt) {
 	const withoutDigest = { ...receipt };
@@ -10388,19 +10389,19 @@ function receiptDigest$2(receipt) {
 	return valueDigest$3(withoutDigest);
 }
 function requireArtifactMap$1(artifactBytesByPath) {
-	if (artifactBytesByPath === null || typeof artifactBytesByPath !== "object" || typeof artifactBytesByPath.get !== "function" || typeof artifactBytesByPath.has !== "function" || typeof artifactBytesByPath.keys !== "function") fail$3("artifactBytesByPath must be a retained-artifact map");
-	for (const path of artifactBytesByPath.keys()) if (typeof path !== "string" || !path) fail$3("retained classification artifact map contains an invalid path");
+	if (artifactBytesByPath === null || typeof artifactBytesByPath !== "object" || typeof artifactBytesByPath.get !== "function" || typeof artifactBytesByPath.has !== "function" || typeof artifactBytesByPath.keys !== "function") fail$4("artifactBytesByPath must be a retained-artifact map");
+	for (const path of artifactBytesByPath.keys()) if (typeof path !== "string" || !path) fail$4("retained classification artifact map contains an invalid path");
 	return artifactBytesByPath;
 }
 function retainedBytes$1(artifacts, path, required = true) {
 	if (!artifacts.has(path)) {
 		if (!required) return null;
-		fail$3(`missing retained classification artifact: ${path}`);
+		fail$4(`missing retained classification artifact: ${path}`);
 	}
 	const value = artifacts.get(path);
-	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$3(`retained classification artifact is not bytes: ${path}`);
+	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$4(`retained classification artifact is not bytes: ${path}`);
 	const bytes = Buffer.from(value);
-	if (bytes.length > MAX_ARTIFACT_BYTES) fail$3(`retained classification artifact exceeds its bound: ${path}`);
+	if (bytes.length > MAX_ARTIFACT_BYTES) fail$4(`retained classification artifact exceeds its bound: ${path}`);
 	return bytes;
 }
 function readJson$1(artifacts, path, required = true) {
@@ -10409,13 +10410,13 @@ function readJson$1(artifacts, path, required = true) {
 	try {
 		return JSON.parse(bytes.toString("utf8"));
 	} catch (error) {
-		fail$3(`could not decode retained classification artifact ${path}: ${error.message}`);
+		fail$4(`could not decode retained classification artifact ${path}: ${error.message}`);
 	}
 }
 function readReceipt$2(artifacts, path, kind, required = true) {
 	const receipt = readJson$1(artifacts, path, required);
 	if (receipt === null) return null;
-	if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt) || receipt.schemaVersion !== SCHEMA_VERSION$1 || receipt.kind !== kind || !SHA256_PATTERN$1.test(receipt.contentDigest ?? "") || receipt.contentDigest !== receiptDigest$2(receipt)) fail$3(`retained ${kind} receipt is invalid: ${path}`);
+	if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt) || receipt.schemaVersion !== SCHEMA_VERSION$1 || receipt.kind !== kind || !SHA256_PATTERN$1.test(receipt.contentDigest ?? "") || receipt.contentDigest !== receiptDigest$2(receipt)) fail$4(`retained ${kind} receipt is invalid: ${path}`);
 	return receipt;
 }
 function anchorFor({ trialId, baseSha, subject, treatmentId, attempt }) {
@@ -10428,12 +10429,12 @@ function anchorFor({ trialId, baseSha, subject, treatmentId, attempt }) {
 	};
 }
 function assertDefinition(value, label) {
-	if (!sameValue$3(value, DEFINITION_REF$2)) fail$3(`${label} does not use the fixed C5 Definition`);
+	if (!sameValue$4(value, DEFINITION_REF$2)) fail$4(`${label} does not use the fixed C5 Definition`);
 }
 function assertAnchor$1(receipt, anchor, label) {
-	if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) fail$3(`${label} is not an object`);
+	if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) fail$4(`${label} is not an object`);
 	assertDefinition(receipt.definitionRef, label);
-	if (receipt.trialId !== anchor.trialId || receipt.baseSha !== anchor.baseSha || receipt.subject !== anchor.subject || receipt.treatmentId !== anchor.treatmentId || receipt.attempt !== anchor.attempt) fail$3(`${label} does not match the trusted arm identity`);
+	if (receipt.trialId !== anchor.trialId || receipt.baseSha !== anchor.baseSha || receipt.subject !== anchor.subject || receipt.treatmentId !== anchor.treatmentId || receipt.attempt !== anchor.attempt) fail$4(`${label} does not match the trusted arm identity`);
 	return receipt;
 }
 function validTimestamp(value) {
@@ -10477,16 +10478,16 @@ function validateSnapshot(artifacts, trial, anchor) {
 	const snapshot = readReceipt$2(artifacts, `subjects/issue-${anchor.subject}.json`, "Gate2702SubjectSnapshot");
 	assertDefinition(snapshot.definitionRef, "subject snapshot");
 	const manifest = trial.subjectSnapshots?.find((entry) => entry?.subject === anchor.subject);
-	if (snapshot.trialId !== anchor.trialId || snapshot.subject !== anchor.subject || snapshot.baseSha !== anchor.baseSha || snapshot.repository !== "shpwrck/claude-history-dashboard" || snapshot.executionMode !== "production" || typeof snapshot.title !== "string" || !snapshot.title || typeof snapshot.body !== "string" || !manifest || manifest.contentDigest !== snapshot.contentDigest) fail$3("subject snapshot is not bound to the production C5 trial");
+	if (snapshot.trialId !== anchor.trialId || snapshot.subject !== anchor.subject || snapshot.baseSha !== anchor.baseSha || snapshot.repository !== "shpwrck/claude-history-dashboard" || snapshot.executionMode !== "production" || typeof snapshot.title !== "string" || !snapshot.title || typeof snapshot.body !== "string" || !manifest || manifest.contentDigest !== snapshot.contentDigest) fail$4("subject snapshot is not bound to the production C5 trial");
 	return snapshot;
 }
 function validateRegistration(artifacts, trial, anchor) {
 	const prefix = expectedRunPrefix(anchor);
 	const registration = assertAnchor$1(readReceipt$2(artifacts, `${prefix}/registration.json`, "Gate2702ArmRegistration"), anchor, "arm registration");
-	if (registration.subjectRef !== `github:shpwrck/claude-history-dashboard#${anchor.subject}` || registration.executionMode !== "production" || typeof registration.runDir !== "string" || !isAbsolute(registration.runDir) || !registration.runDir.replaceAll("\\", "/").endsWith(`/${prefix}`) || typeof registration.worktreePath !== "string" || !isAbsolute(registration.worktreePath)) fail$3("arm registration is not the fixed production C5 arm");
+	if (registration.subjectRef !== `github:shpwrck/claude-history-dashboard#${anchor.subject}` || registration.executionMode !== "production" || typeof registration.runDir !== "string" || !isAbsolute(registration.runDir) || !registration.runDir.replaceAll("\\", "/").endsWith(`/${prefix}`) || typeof registration.worktreePath !== "string" || !isAbsolute(registration.worktreePath)) fail$4("arm registration is not the fixed production C5 arm");
 	if (anchor.attempt === 1) {
 		const embedded = trial.registrations?.find((candidate) => candidate?.subject === anchor.subject && candidate?.treatmentId === anchor.treatmentId && candidate?.attempt === 1);
-		if (!embedded || !sameValue$3(embedded, registration)) fail$3("attempt-1 registration is not embedded in the trial receipt");
+		if (!embedded || !sameValue$4(embedded, registration)) fail$4("attempt-1 registration is not embedded in the trial receipt");
 	} else {
 		const parentAnchor = {
 			...anchor,
@@ -10500,7 +10501,7 @@ function validateRegistration(artifacts, trial, anchor) {
 			registrationDigest: parentRegistration.contentDigest,
 			classificationDigest: parentClassification.contentDigest
 		};
-		if (parentClassification.registrationDigest !== parentRegistration.contentDigest || parentClassification.retry?.authorized !== true || !sameValue$3(registration.retryOf, retryOf)) fail$3("attempt-2 registration is not authorized by attempt 1");
+		if (parentClassification.registrationDigest !== parentRegistration.contentDigest || parentClassification.retry?.authorized !== true || !sameValue$4(registration.retryOf, retryOf)) fail$4("attempt-2 registration is not authorized by attempt 1");
 	}
 	return registration;
 }
@@ -10508,15 +10509,15 @@ function validateBehaviorContext(context, treatmentId) {
 	const treatment = TREATMENT_DEFINITIONS[treatmentId];
 	const enabled = treatment.configuration.sidekick.enabled;
 	const resolvedConfig = gate2702ResolvedSidekickConfig(treatment, {});
-	if (context === null || typeof context !== "object" || Array.isArray(context) || context.schemaVersion !== SCHEMA_VERSION$1 || !validTimestamp(context.observedAt) || context.workerModelQualifiedId !== "claude-haiku-4-5-20251001" || context.sidekickModelQualifiedId !== (enabled ? "claude-sonnet-5" : null) || context.sidekickVersion !== (enabled ? "0.3.3" : null) || (enabled ? !SHA256_PATTERN$1.test(context.sidekickImplementationDigest ?? "") : context.sidekickImplementationDigest !== null) || !sameValue$3(context.sidekickActivation, enabled ? {
+	if (context === null || typeof context !== "object" || Array.isArray(context) || context.schemaVersion !== 2 || !validTimestamp(context.observedAt) || context.workerModelQualifiedId !== "claude-haiku-4-5-20251001" || context.sidekickModelQualifiedId !== (enabled ? "claude-sonnet-5" : null) || context.sidekickVersion !== (enabled ? "0.3.3" : null) || (enabled ? !SHA256_PATTERN$1.test(context.sidekickImplementationDigest ?? "") : context.sidekickImplementationDigest !== null) || !sameValue$4(context.sidekickActivation, enabled ? {
 		pluginEnabled: true,
 		globalPauseAbsent: true
-	} : null) || !sameValue$3(context.resolvedSidekickConfig, resolvedConfig) || context.resolvedSidekickConfigDigest !== valueDigest$3(resolvedConfig) || !Array.isArray(context.instructionSources) || context.instructionsDigest !== valueDigest$3(context.instructionSources)) fail$3("preflight behavior context is not the fixed C5 treatment context");
+	} : null) || !sameValue$4(context.resolvedSidekickConfig, resolvedConfig) || context.resolvedSidekickConfigDigest !== valueDigest$3(resolvedConfig) || !Array.isArray(context.instructionSources) || context.instructionsDigest !== valueDigest$3(context.instructionSources)) fail$4("preflight behavior context is not the fixed C5 treatment context");
 	const order = ["user", "project"];
 	let previous = -1;
 	for (const source of context.instructionSources) {
 		const index = order.indexOf(source?.scope);
-		if (index <= previous || !SHA256_PATTERN$1.test(source?.contentDigest ?? "") || !Number.isSafeInteger(source?.characterLength) || source.characterLength <= 0 || source.characterLength > 6e3 || typeof source.truncated !== "boolean") fail$3("preflight instruction evidence is invalid");
+		if (index <= previous || !SHA256_PATTERN$1.test(source?.contentDigest ?? "") || !Number.isSafeInteger(source?.characterLength) || source.characterLength <= 0 || source.characterLength > 6e3 || typeof source.truncated !== "boolean") fail$4("preflight instruction evidence is invalid");
 		previous = index;
 	}
 	return context;
@@ -10524,7 +10525,7 @@ function validateBehaviorContext(context, treatmentId) {
 function validateInstallStream(artifacts, stream, relativePath, absolutePath, label) {
 	const bytes = retainedBytes$1(artifacts, relativePath);
 	const capturedDigest = sha256Bytes$2(bytes);
-	if (stream === null || typeof stream !== "object" || Array.isArray(stream) || stream.path !== absolutePath || !Number.isSafeInteger(stream.byteLength) || stream.byteLength < 0 || !Number.isSafeInteger(stream.capturedBytes) || stream.capturedBytes !== Math.min(stream.byteLength, INSTALL_CAPTURE_BYTES) || stream.capturedBytes !== bytes.length || stream.truncated !== stream.byteLength > stream.capturedBytes || !SHA256_PATTERN$1.test(stream.contentDigest ?? "") || stream.capturedContentDigest !== capturedDigest || !stream.truncated && stream.contentDigest !== capturedDigest) fail$3(`${label} does not match its retained npm-ci stream bytes`);
+	if (stream === null || typeof stream !== "object" || Array.isArray(stream) || stream.path !== absolutePath || !Number.isSafeInteger(stream.byteLength) || stream.byteLength < 0 || !Number.isSafeInteger(stream.capturedBytes) || stream.capturedBytes !== Math.min(stream.byteLength, INSTALL_CAPTURE_BYTES) || stream.capturedBytes !== bytes.length || stream.truncated !== stream.byteLength > stream.capturedBytes || !SHA256_PATTERN$1.test(stream.contentDigest ?? "") || stream.capturedContentDigest !== capturedDigest || !stream.truncated && stream.contentDigest !== capturedDigest) fail$4(`${label} does not match its retained npm-ci stream bytes`);
 	return bytes;
 }
 function validateInstallOutcome(artifacts, path, dispatchToken, stdoutBytes, stderrBytes, required) {
@@ -10541,25 +10542,25 @@ function validateInstallOutcome(artifacts, path, dispatchToken, stdoutBytes, std
 		"token"
 	];
 	if (outcome.spawnError !== void 0) expectedKeys.push("spawnError");
-	if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome) || outcome.token !== dispatchToken || !(outcome.exitCode === null || Number.isSafeInteger(outcome.exitCode) && outcome.exitCode >= 0) || !(outcome.signal === null || typeof outcome.signal === "string") || outcome.spawnError !== void 0 && (typeof outcome.spawnError !== "string" || !outcome.spawnError) || typeof outcome.durationMs !== "number" || !Number.isFinite(outcome.durationMs) || outcome.durationMs < 0 || typeof outcome.timedOut !== "boolean" || !validStream(outcome.stdout, stdoutBytes) || !validStream(outcome.stderr, stderrBytes) || !sameValue$3(Object.keys(outcome).sort(), expectedKeys.sort())) fail$3("retained npm-ci wrapper outcome is invalid");
+	if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome) || outcome.token !== dispatchToken || !(outcome.exitCode === null || Number.isSafeInteger(outcome.exitCode) && outcome.exitCode >= 0) || !(outcome.signal === null || typeof outcome.signal === "string") || outcome.spawnError !== void 0 && (typeof outcome.spawnError !== "string" || !outcome.spawnError) || typeof outcome.durationMs !== "number" || !Number.isFinite(outcome.durationMs) || outcome.durationMs < 0 || typeof outcome.timedOut !== "boolean" || !validStream(outcome.stdout, stdoutBytes) || !validStream(outcome.stderr, stderrBytes) || !sameValue$4(Object.keys(outcome).sort(), expectedKeys.sort())) fail$4("retained npm-ci wrapper outcome is invalid");
 	return outcome;
 }
 function validateInstallLifecycle(artifacts, registration, embedded, preflightStatus, anchor) {
 	const root = `${expectedRunPrefix(anchor)}/preflight-install`;
 	const preDispatch = assertAnchor$1(readReceipt$2(artifacts, `${root}/pre-dispatch.json`, "Gate2702InstallPreDispatch"), anchor, "npm-ci pre-dispatch");
-	if (preDispatch.registrationDigest !== registration.contentDigest || preDispatch.program !== (preDispatch.executable ?? "npm") || !(preDispatch.executable === null || isAbsolute(preDispatch.executable)) || !sameValue$3(preDispatch.argv, ["npm", "ci"]) || preDispatch.timeoutMs !== INSTALL_TIMEOUT_MS || preDispatch.maxBufferBytes !== INSTALL_CAPTURE_BYTES || resolve(preDispatch.cwd ?? "") !== resolve(registration.worktreePath) || !UUID_PATTERN$3.test(preDispatch.dispatchToken ?? "") || !Number.isSafeInteger(preDispatch.ownerPid) || preDispatch.ownerPid <= 1 || !validTimestamp(preDispatch.startedAt)) fail$3("npm-ci pre-dispatch is not the fixed production invocation");
+	if (preDispatch.registrationDigest !== registration.contentDigest || preDispatch.program !== (preDispatch.executable ?? "npm") || !(preDispatch.executable === null || isAbsolute(preDispatch.executable)) || !sameValue$4(preDispatch.argv, ["npm", "ci"]) || preDispatch.timeoutMs !== INSTALL_TIMEOUT_MS || preDispatch.maxBufferBytes !== INSTALL_CAPTURE_BYTES || resolve(preDispatch.cwd ?? "") !== resolve(registration.worktreePath) || !UUID_PATTERN$3.test(preDispatch.dispatchToken ?? "") || !Number.isSafeInteger(preDispatch.ownerPid) || preDispatch.ownerPid <= 1 || !validTimestamp(preDispatch.startedAt)) fail$4("npm-ci pre-dispatch is not the fixed production invocation");
 	const execution = assertAnchor$1(readReceipt$2(artifacts, `${root}/execution.json`, "Gate2702InstallExecution"), anchor, "npm-ci execution");
-	if (execution.registrationDigest !== registration.contentDigest || execution.preDispatchDigest !== preDispatch.contentDigest || execution.program !== preDispatch.program || execution.executable !== preDispatch.executable || !sameValue$3(execution.argv, ["npm", "ci"]) || execution.timeoutMs !== INSTALL_TIMEOUT_MS || execution.maxBufferBytes !== INSTALL_CAPTURE_BYTES || execution.startedAt !== preDispatch.startedAt || !(execution.pid === null || Number.isSafeInteger(execution.pid) && execution.pid > 1) || !(execution.durationMs === null || typeof execution.durationMs === "number" && Number.isFinite(execution.durationMs) && execution.durationMs >= 0) || !(execution.exitCode === null || Number.isSafeInteger(execution.exitCode) && execution.exitCode >= 0) || !(execution.signal === null || typeof execution.signal === "string") || typeof execution.timedOut !== "boolean" || typeof execution.interrupted !== "boolean" || execution.interrupted !== (execution.durationMs === null) || typeof execution.processGroupQuiescent !== "boolean" || typeof execution.truncated !== "boolean" || typeof execution.stdout !== "string" || typeof execution.stderr !== "string" || execution.error !== void 0 && (typeof execution.error !== "string" || !execution.error)) fail$3("retained npm-ci execution receipt is invalid");
+	if (execution.registrationDigest !== registration.contentDigest || execution.preDispatchDigest !== preDispatch.contentDigest || execution.program !== preDispatch.program || execution.executable !== preDispatch.executable || !sameValue$4(execution.argv, ["npm", "ci"]) || execution.timeoutMs !== INSTALL_TIMEOUT_MS || execution.maxBufferBytes !== INSTALL_CAPTURE_BYTES || execution.startedAt !== preDispatch.startedAt || !(execution.pid === null || Number.isSafeInteger(execution.pid) && execution.pid > 1) || !(execution.durationMs === null || typeof execution.durationMs === "number" && Number.isFinite(execution.durationMs) && execution.durationMs >= 0) || !(execution.exitCode === null || Number.isSafeInteger(execution.exitCode) && execution.exitCode >= 0) || !(execution.signal === null || typeof execution.signal === "string") || typeof execution.timedOut !== "boolean" || typeof execution.interrupted !== "boolean" || execution.interrupted !== (execution.durationMs === null) || typeof execution.processGroupQuiescent !== "boolean" || typeof execution.truncated !== "boolean" || typeof execution.stdout !== "string" || typeof execution.stderr !== "string" || execution.error !== void 0 && (typeof execution.error !== "string" || !execution.error)) fail$4("retained npm-ci execution receipt is invalid");
 	let processReceipt = null;
 	if (execution.processDigest !== void 0) {
 		processReceipt = assertAnchor$1(readReceipt$2(artifacts, `${root}/process.json`, "Gate2702InstallProcess"), anchor, "npm-ci process");
-		if (processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || processReceipt.dispatchToken !== preDispatch.dispatchToken || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1 || execution.processDigest !== processReceipt.contentDigest || execution.pid !== processReceipt.pid || !retainedBytes$1(artifacts, `${root}/dispatch-gate`).equals(Buffer.from(`${preDispatch.dispatchToken}\n`, "utf8"))) fail$3("npm-ci process/gate lineage is invalid");
-	} else if (artifacts.has(`${root}/process.json`) || artifacts.has(`${root}/dispatch-gate`) || execution.pid !== null) fail$3("npm-ci execution omits retained process/gate evidence");
+		if (processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || processReceipt.dispatchToken !== preDispatch.dispatchToken || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1 || execution.processDigest !== processReceipt.contentDigest || execution.pid !== processReceipt.pid || !retainedBytes$1(artifacts, `${root}/dispatch-gate`).equals(Buffer.from(`${preDispatch.dispatchToken}\n`, "utf8"))) fail$4("npm-ci process/gate lineage is invalid");
+	} else if (artifacts.has(`${root}/process.json`) || artifacts.has(`${root}/dispatch-gate`) || execution.pid !== null) fail$4("npm-ci execution omits retained process/gate evidence");
 	const stdoutBytes = validateInstallStream(artifacts, execution.stdoutEvidence, `${root}/stdout.log`, `${registration.runDir}/preflight-install/stdout.log`, "npm-ci stdout");
 	const stderrBytes = validateInstallStream(artifacts, execution.stderrEvidence, `${root}/stderr.log`, `${registration.runDir}/preflight-install/stderr.log`, "npm-ci stderr");
-	if (execution.stdout !== stdoutBytes.toString("utf8").trim() || execution.stderr !== stderrBytes.toString("utf8").trim() || execution.truncated !== (execution.stdoutEvidence.truncated || execution.stderrEvidence.truncated)) fail$3("npm-ci captured output does not match its retained bytes");
+	if (execution.stdout !== stdoutBytes.toString("utf8").trim() || execution.stderr !== stderrBytes.toString("utf8").trim() || execution.truncated !== (execution.stdoutEvidence.truncated || execution.stderrEvidence.truncated)) fail$4("npm-ci captured output does not match its retained bytes");
 	const outcome = validateInstallOutcome(artifacts, `${root}/outcome.json`, preDispatch.dispatchToken, stdoutBytes, stderrBytes, execution.error === void 0 && execution.interrupted === false);
-	if (processReceipt === null && outcome !== null) fail$3("npm-ci outcome has no dispatched wrapper process");
+	if (processReceipt === null && outcome !== null) fail$4("npm-ci outcome has no dispatched wrapper process");
 	if (outcome !== null) {
 		const outcomeStdout = {
 			path: execution.stdoutEvidence.path,
@@ -10570,10 +10571,10 @@ function validateInstallLifecycle(artifacts, registration, embedded, preflightSt
 			...outcome.stderr
 		};
 		const expectedError = outcome.spawnError ?? (outcome.timedOut ? "install-timeout" : void 0);
-		if (execution.interrupted || execution.durationMs !== outcome.durationMs || execution.exitCode !== outcome.exitCode || execution.signal !== outcome.signal || execution.timedOut !== outcome.timedOut || execution.error !== expectedError || !sameValue$3(execution.stdoutEvidence, outcomeStdout) || !sameValue$3(execution.stderrEvidence, outcomeStderr) || outcome.spawnError !== void 0 && execution.error !== outcome.spawnError) fail$3("npm-ci execution does not rederive from its wrapper outcome");
+		if (execution.interrupted || execution.durationMs !== outcome.durationMs || execution.exitCode !== outcome.exitCode || execution.signal !== outcome.signal || execution.timedOut !== outcome.timedOut || execution.error !== expectedError || !sameValue$4(execution.stdoutEvidence, outcomeStdout) || !sameValue$4(execution.stderrEvidence, outcomeStderr) || outcome.spawnError !== void 0 && execution.error !== outcome.spawnError) fail$4("npm-ci execution does not rederive from its wrapper outcome");
 	}
-	if (!sameValue$3(embedded, execution)) fail$3("preflight embedded npm-ci execution differs from retained bytes");
-	if (preflightStatus === "passed" && (execution.exitCode !== 0 || execution.signal !== null || execution.timedOut || execution.interrupted || execution.processGroupQuiescent !== true || execution.error !== void 0)) fail$3("passed preflight does not contain a successful npm-ci execution");
+	if (!sameValue$4(embedded, execution)) fail$4("preflight embedded npm-ci execution differs from retained bytes");
+	if (preflightStatus === "passed" && (execution.exitCode !== 0 || execution.signal !== null || execution.timedOut || execution.interrupted || execution.processGroupQuiescent !== true || execution.error !== void 0)) fail$4("passed preflight does not contain a successful npm-ci execution");
 	return {
 		preDispatch,
 		process: processReceipt,
@@ -10588,24 +10589,24 @@ function validatePreflight(artifacts, registration, anchor) {
 	const receipt = readReceipt$2(artifacts, anchor.attempt === 1 ? `preflight/issue-${anchor.subject}.json` : `${expectedRunPrefix(anchor)}/preflight.json`, anchor.attempt === 1 ? "Gate2702PairPreflight" : "Gate2702RetryPreflight");
 	assertDefinition(receipt.definitionRef, "arm preflight");
 	const arm = anchor.attempt === 1 ? receipt.arms?.[anchor.treatmentId] : receipt;
-	if (receipt.trialId !== anchor.trialId || receipt.subject !== anchor.subject || receipt.baseSha !== anchor.baseSha || !["passed", "failed"].includes(receipt.status) || anchor.attempt === 2 && (receipt.treatmentId !== anchor.treatmentId || receipt.attempt !== 2) || arm?.registrationDigest !== registration.contentDigest || arm.treatmentId !== void 0 && arm.treatmentId !== anchor.treatmentId || arm.attempt !== void 0 && arm.attempt !== anchor.attempt || arm.worktreePath !== void 0 && resolve(arm.worktreePath) !== resolve(registration.worktreePath) || receipt.status === "passed" && arm.environment === void 0 || (arm.environment !== void 0 || arm.environmentDigest !== void 0) && (arm.environment === void 0 || arm.environmentDigest !== valueDigest$3(arm.environment))) fail$3("arm preflight is not identity-bound to the registration");
+	if (receipt.trialId !== anchor.trialId || receipt.subject !== anchor.subject || receipt.baseSha !== anchor.baseSha || !["passed", "failed"].includes(receipt.status) || anchor.attempt === 2 && (receipt.treatmentId !== anchor.treatmentId || receipt.attempt !== 2) || arm?.registrationDigest !== registration.contentDigest || arm.treatmentId !== void 0 && arm.treatmentId !== anchor.treatmentId || arm.attempt !== void 0 && arm.attempt !== anchor.attempt || arm.worktreePath !== void 0 && resolve(arm.worktreePath) !== resolve(registration.worktreePath) || receipt.status === "passed" && arm.environment === void 0 || (arm.environment !== void 0 || arm.environmentDigest !== void 0) && (arm.environment === void 0 || arm.environmentDigest !== valueDigest$3(arm.environment))) fail$4("arm preflight is not identity-bound to the registration");
 	const expectedSidekick = treatment.configuration.sidekick;
 	const enabled = expectedSidekick.enabled;
-	const sidekickComplete = arm.sidekick?.version === "0.3.3" && SHA256_PATTERN$1.test(arm.sidekick?.implementationDigest ?? "") && sameValue$3(arm.sidekick?.activation, {
+	const sidekickComplete = arm.sidekick?.version === "0.3.3" && SHA256_PATTERN$1.test(arm.sidekick?.implementationDigest ?? "") && sameValue$4(arm.sidekick?.activation, {
 		pluginEnabled: true,
 		globalPauseAbsent: true
 	});
 	const sidekickUnavailable = arm.sidekick?.version === null && arm.sidekick?.implementationDigest === null && arm.sidekick?.activation === null;
-	const sidekickIncompatible = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(arm.sidekick?.version ?? "") && SHA256_PATTERN$1.test(arm.sidekick?.implementationDigest ?? "") && sameValue$3(arm.sidekick?.activation, {
+	const sidekickIncompatible = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(arm.sidekick?.version ?? "") && SHA256_PATTERN$1.test(arm.sidekick?.implementationDigest ?? "") && sameValue$4(arm.sidekick?.activation, {
 		pluginEnabled: true,
 		globalPauseAbsent: true
 	});
 	const sidekickProvided = arm.sidekick !== void 0;
-	if ((receipt.status === "passed" || sidekickProvided) && (!sameValue$3(arm.sidekick?.configuration, expectedSidekick) || !enabled && !sidekickUnavailable || enabled && (receipt.status === "passed" ? !sidekickComplete : !sidekickComplete && !sidekickUnavailable && !sidekickIncompatible))) fail$3("arm preflight Sidekick evidence is not the fixed treatment");
+	if ((receipt.status === "passed" || sidekickProvided) && (!sameValue$4(arm.sidekick?.configuration, expectedSidekick) || !enabled && !sidekickUnavailable || enabled && (receipt.status === "passed" ? !sidekickComplete : !sidekickComplete && !sidekickUnavailable && !sidekickIncompatible))) fail$4("arm preflight Sidekick evidence is not the fixed treatment");
 	let behaviorContext = null;
 	if (receipt.status === "passed") behaviorContext = validateBehaviorContext(arm.behaviorContext, anchor.treatmentId);
 	else {
-		if (!Array.isArray(receipt.errors) || receipt.errors.length === 0) fail$3("failed preflight has no structured error evidence");
+		if (!Array.isArray(receipt.errors) || receipt.errors.length === 0) fail$4("failed preflight has no structured error evidence");
 		if (arm.behaviorContext !== null && arm.behaviorContext !== void 0) behaviorContext = validateBehaviorContext(arm.behaviorContext, anchor.treatmentId);
 	}
 	const install = validateInstallLifecycle(artifacts, registration, arm.install, receipt.status, anchor);
@@ -10618,7 +10619,7 @@ function validatePreflight(artifacts, registration, anchor) {
 }
 function validateWorktreeIdentity(artifacts, registration, anchor) {
 	const receipt = assertAnchor$1(readReceipt$2(artifacts, `${expectedRunPrefix(anchor)}/worktree-identity.json`, "Gate2702WorktreeIdentity"), anchor, "worktree identity");
-	if (receipt.registrationDigest !== registration.contentDigest || receipt.executionMode !== "production" || resolve(receipt.worktreePath ?? "") !== resolve(registration.worktreePath) || typeof receipt.gitDirectory !== "string" || !isAbsolute(receipt.gitDirectory) || !UUID_PATTERN$3.test(receipt.identityToken ?? "") || !validTimestamp(receipt.createdAt)) fail$3("worktree identity is not bound to its production registration");
+	if (receipt.registrationDigest !== registration.contentDigest || receipt.executionMode !== "production" || resolve(receipt.worktreePath ?? "") !== resolve(registration.worktreePath) || typeof receipt.gitDirectory !== "string" || !isAbsolute(receipt.gitDirectory) || !UUID_PATTERN$3.test(receipt.identityToken ?? "") || !validTimestamp(receipt.createdAt)) fail$4("worktree identity is not bound to its production registration");
 	return receipt;
 }
 function validateWorkerLifecycle(artifacts, registration, snapshot, preflight, identity, anchor) {
@@ -10627,7 +10628,7 @@ function validateWorkerLifecycle(artifacts, registration, snapshot, preflight, i
 	const stdoutBytes = retainedBytes$1(artifacts, `${prefix}/stdout.log`);
 	const stderrBytes = retainedBytes$1(artifacts, `${prefix}/stderr.log`);
 	if (preflight.receipt.status === "failed") {
-		if (artifacts.has(`${prefix}/pre-dispatch.json`) || artifacts.has(`${prefix}/process.json`) || terminal.preflightDigest !== preflight.receipt.contentDigest || terminal.outcome !== "preflight-failed" || terminal.exitCode !== null || terminal.signal !== null || terminal.timedOut !== false || terminal.processGroupQuiescent !== true || !validTimestamp(terminal.endedAt) || stdoutBytes.length !== 0 || stderrBytes.length !== 0) fail$3("preflight-failed arm contains a worker dispatch");
+		if (artifacts.has(`${prefix}/pre-dispatch.json`) || artifacts.has(`${prefix}/process.json`) || terminal.preflightDigest !== preflight.receipt.contentDigest || terminal.outcome !== "preflight-failed" || terminal.exitCode !== null || terminal.signal !== null || terminal.timedOut !== false || terminal.processGroupQuiescent !== true || !validTimestamp(terminal.endedAt) || stdoutBytes.length !== 0 || stderrBytes.length !== 0) fail$4("preflight-failed arm contains a worker dispatch");
 		return {
 			terminal,
 			preDispatch: null,
@@ -10638,13 +10639,13 @@ function validateWorkerLifecycle(artifacts, registration, snapshot, preflight, i
 	}
 	const preDispatch = assertAnchor$1(readReceipt$2(artifacts, `${prefix}/pre-dispatch.json`, "Gate2702PreDispatch"), anchor, "worker pre-dispatch");
 	const expectedEnvironment = gate2702SidekickEnvironment(TREATMENT_DEFINITIONS[anchor.treatmentId], {});
-	if (preDispatch.registrationDigest !== registration.contentDigest || preDispatch.worktreeIdentityDigest !== identity.contentDigest || preDispatch.executionMode !== "production" || !sameValue$3(preDispatch.argv, WORKER_ARGV) || !sameValue$3(preDispatch.sidekickEnvironment, expectedEnvironment) || preDispatch.sidekickEnvironmentDigest !== valueDigest$3(expectedEnvironment) || resolve(preDispatch.cwd ?? "") !== resolve(registration.worktreePath) || preDispatch.promptDigest !== sha256Bytes$2(Buffer.from(workerPrompt$1(snapshot, registration), "utf8")) || !validTimestamp(preDispatch.startedAt) || terminal.preDispatchDigest !== preDispatch.contentDigest || typeof terminal.durationMs !== "number" || !Number.isFinite(terminal.durationMs) || terminal.durationMs < 0 || !validTimestamp(terminal.endedAt)) fail$3("worker dispatch does not rederive from its production inputs");
+	if (preDispatch.registrationDigest !== registration.contentDigest || preDispatch.worktreeIdentityDigest !== identity.contentDigest || preDispatch.executionMode !== "production" || !sameValue$4(preDispatch.argv, WORKER_ARGV) || !sameValue$4(preDispatch.sidekickEnvironment, expectedEnvironment) || preDispatch.sidekickEnvironmentDigest !== valueDigest$3(expectedEnvironment) || resolve(preDispatch.cwd ?? "") !== resolve(registration.worktreePath) || preDispatch.promptDigest !== sha256Bytes$2(Buffer.from(workerPrompt$1(snapshot, registration), "utf8")) || !validTimestamp(preDispatch.startedAt) || terminal.preDispatchDigest !== preDispatch.contentDigest || typeof terminal.durationMs !== "number" || !Number.isFinite(terminal.durationMs) || terminal.durationMs < 0 || !validTimestamp(terminal.endedAt)) fail$4("worker dispatch does not rederive from its production inputs");
 	let processReceipt = null;
 	if (terminal.outcome === "spawn-error") {
-		if (artifacts.has(`${prefix}/process.json`) || terminal.processDigest !== void 0 || typeof terminal.error !== "string" || !terminal.error) fail$3("spawn-error worker has contradictory process evidence");
+		if (artifacts.has(`${prefix}/process.json`) || terminal.processDigest !== void 0 || typeof terminal.error !== "string" || !terminal.error) fail$4("spawn-error worker has contradictory process evidence");
 	} else {
 		processReceipt = assertAnchor$1(readReceipt$2(artifacts, `${prefix}/process.json`, "Gate2702Process"), anchor, "worker process");
-		if (processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1 || typeof processReceipt.detachedProcessGroup !== "boolean" || !validTimestamp(processReceipt.startedAt) || processReceipt.startedAt !== preDispatch.startedAt || terminal.processDigest !== processReceipt.contentDigest || !["exited", "timed-out"].includes(terminal.outcome) || !(terminal.exitCode === null || Number.isSafeInteger(terminal.exitCode) && terminal.exitCode >= 0) || !(terminal.signal === null || typeof terminal.signal === "string") || typeof terminal.timedOut !== "boolean" || terminal.timedOut !== (terminal.outcome === "timed-out") || typeof terminal.processGroupQuiescent !== "boolean" || terminal.error !== void 0 && (typeof terminal.error !== "string" || !terminal.error)) fail$3("worker terminal does not bind its exact process lifecycle");
+		if (processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1 || typeof processReceipt.detachedProcessGroup !== "boolean" || !validTimestamp(processReceipt.startedAt) || processReceipt.startedAt !== preDispatch.startedAt || terminal.processDigest !== processReceipt.contentDigest || !["exited", "timed-out"].includes(terminal.outcome) || !(terminal.exitCode === null || Number.isSafeInteger(terminal.exitCode) && terminal.exitCode >= 0) || !(terminal.signal === null || typeof terminal.signal === "string") || typeof terminal.timedOut !== "boolean" || terminal.timedOut !== (terminal.outcome === "timed-out") || typeof terminal.processGroupQuiescent !== "boolean" || terminal.error !== void 0 && (typeof terminal.error !== "string" || !terminal.error)) fail$4("worker terminal does not bind its exact process lifecycle");
 	}
 	return {
 		terminal,
@@ -10655,7 +10656,7 @@ function validateWorkerLifecycle(artifacts, registration, snapshot, preflight, i
 	};
 }
 function validateProbe(probe, program, args, environmentEntry, label) {
-	if (probe === null || typeof probe !== "object" || Array.isArray(probe) || !sameValue$3(probe.argv, [program, ...args]) || probe.timeoutMs !== 6e4 || probe.maxBufferBytes !== 256 * 1024 || probe.processGroupQuiescent !== true || typeof probe.program !== "string" || !probe.program || environmentEntry?.executable !== probe.program || environmentEntry?.version !== probe.stdout) fail$3(`${label} does not retain its exact environment probe`);
+	if (probe === null || typeof probe !== "object" || Array.isArray(probe) || !sameValue$4(probe.argv, [program, ...args]) || probe.timeoutMs !== 6e4 || probe.maxBufferBytes !== 256 * 1024 || probe.processGroupQuiescent !== true || typeof probe.program !== "string" || !probe.program || environmentEntry?.executable !== probe.program || environmentEntry?.version !== probe.stdout) fail$4(`${label} does not retain its exact environment probe`);
 }
 function validateCheckEnvironment(probes, environment, label) {
 	for (const [name, [program, args]] of Object.entries({
@@ -10672,12 +10673,12 @@ function validateCheckEnvironment(probes, environment, label) {
 			"--version"
 		]]
 	})) validateProbe(probes?.[name], program, args, environment?.[name], `${label} ${name}`);
-	if (typeof environment?.node?.executable !== "string" || !environment.node.executable || typeof environment.node.version !== "string" || !environment.node.version) fail$3(`${label} node environment is invalid`);
+	if (typeof environment?.node?.executable !== "string" || !environment.node.executable || typeof environment.node.version !== "string" || !environment.node.version) fail$4(`${label} node environment is invalid`);
 }
 function validateCapturedStream(artifacts, stream, relativePath, absolutePath, label) {
 	const bytes = retainedBytes$1(artifacts, relativePath);
 	const capturedDigest = sha256Bytes$2(bytes);
-	if (stream === null || typeof stream !== "object" || Array.isArray(stream) || stream.path !== absolutePath || !Number.isSafeInteger(stream.byteLength) || stream.byteLength < 0 || !Number.isSafeInteger(stream.capturedBytes) || stream.capturedBytes !== Math.min(stream.byteLength, MAX_CAPTURE_BYTES) || stream.capturedBytes !== bytes.length || stream.truncated !== stream.byteLength > stream.capturedBytes || !SHA256_PATTERN$1.test(stream.contentDigest ?? "") || stream.capturedContentDigest !== capturedDigest || !stream.truncated && stream.contentDigest !== capturedDigest) fail$3(`${label} does not match its retained stream bytes`);
+	if (stream === null || typeof stream !== "object" || Array.isArray(stream) || stream.path !== absolutePath || !Number.isSafeInteger(stream.byteLength) || stream.byteLength < 0 || !Number.isSafeInteger(stream.capturedBytes) || stream.capturedBytes !== Math.min(stream.byteLength, MAX_CAPTURE_BYTES) || stream.capturedBytes !== bytes.length || stream.truncated !== stream.byteLength > stream.capturedBytes || !SHA256_PATTERN$1.test(stream.contentDigest ?? "") || stream.capturedContentDigest !== capturedDigest || !stream.truncated && stream.contentDigest !== capturedDigest) fail$4(`${label} does not match its retained stream bytes`);
 	return bytes;
 }
 function checkSummary(execution) {
@@ -10705,7 +10706,7 @@ function validatePlainOutcome(artifacts, path, dispatchToken, required) {
 		"token"
 	];
 	if (outcome.spawnError !== void 0) expectedKeys.push("spawnError");
-	if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome) || outcome.token !== dispatchToken || !(outcome.exitCode === null || Number.isSafeInteger(outcome.exitCode) && outcome.exitCode >= 0) || !(outcome.signal === null || typeof outcome.signal === "string") || outcome.spawnError !== void 0 && (typeof outcome.spawnError !== "string" || !outcome.spawnError) || !sameValue$3(Object.keys(outcome).sort(), expectedKeys.sort())) fail$3("declared check wrapper outcome is invalid");
+	if (outcome === null || typeof outcome !== "object" || Array.isArray(outcome) || outcome.token !== dispatchToken || !(outcome.exitCode === null || Number.isSafeInteger(outcome.exitCode) && outcome.exitCode >= 0) || !(outcome.signal === null || typeof outcome.signal === "string") || outcome.spawnError !== void 0 && (typeof outcome.spawnError !== "string" || !outcome.spawnError) || !sameValue$4(Object.keys(outcome).sort(), expectedKeys.sort())) fail$4("declared check wrapper outcome is invalid");
 	return outcome;
 }
 function validateOneCheck(artifacts, registration, anchor, check) {
@@ -10713,22 +10714,22 @@ function validateOneCheck(artifacts, registration, anchor, check) {
 	const slug = check.id.replaceAll("/", "_");
 	const root = `${prefix}/checks/${slug}`;
 	const preDispatch = assertAnchor$1(readReceipt$2(artifacts, `${root}.pre-dispatch.json`, "Gate2702CheckPreDispatch"), anchor, `${check.id} pre-dispatch`);
-	if (preDispatch.registrationDigest !== registration.contentDigest || preDispatch.checkId !== check.id || !sameValue$3(preDispatch.argv, check.argv) || preDispatch.timeoutMs !== check.timeoutMs || preDispatch.testEffectiveTimeoutMs !== void 0 || resolve(preDispatch.cwd ?? "") !== resolve(registration.worktreePath) || preDispatch.environmentDigest !== valueDigest$3(preDispatch.environment) || preDispatch.environmentErrors !== void 0 && !Array.isArray(preDispatch.environmentErrors) || !UUID_PATTERN$3.test(preDispatch.dispatchToken ?? "") || !Number.isSafeInteger(preDispatch.ownerPid) || preDispatch.ownerPid <= 1 || !validTimestamp(preDispatch.startedAt)) fail$3(`${check.id} pre-dispatch is not the fixed production check`);
+	if (preDispatch.registrationDigest !== registration.contentDigest || preDispatch.checkId !== check.id || !sameValue$4(preDispatch.argv, check.argv) || preDispatch.timeoutMs !== check.timeoutMs || preDispatch.testEffectiveTimeoutMs !== void 0 || resolve(preDispatch.cwd ?? "") !== resolve(registration.worktreePath) || preDispatch.environmentDigest !== valueDigest$3(preDispatch.environment) || preDispatch.environmentErrors !== void 0 && !Array.isArray(preDispatch.environmentErrors) || !UUID_PATTERN$3.test(preDispatch.dispatchToken ?? "") || !Number.isSafeInteger(preDispatch.ownerPid) || preDispatch.ownerPid <= 1 || !validTimestamp(preDispatch.startedAt)) fail$4(`${check.id} pre-dispatch is not the fixed production check`);
 	validateCheckEnvironment(preDispatch.environmentProbes, preDispatch.environment, `${check.id} pre-dispatch`);
 	const execution = assertAnchor$1(readReceipt$2(artifacts, `${root}.json`, "Gate2702CheckExecution"), anchor, `${check.id} execution`);
-	if (execution.registrationDigest !== registration.contentDigest || execution.preDispatchDigest !== preDispatch.contentDigest || execution.checkId !== check.id || !sameValue$3(execution.argv, check.argv) || execution.timeoutMs !== check.timeoutMs || execution.testEffectiveTimeoutMs !== void 0 || execution.environmentDigest !== preDispatch.environmentDigest || !sameValue$3(execution.environment, preDispatch.environment) || !sameValue$3(execution.environmentProbes, preDispatch.environmentProbes) || !sameValue$3(execution.environmentErrors, preDispatch.environmentErrors) || execution.startedAt !== preDispatch.startedAt || !(execution.durationMs === null || typeof execution.durationMs === "number" && Number.isFinite(execution.durationMs) && execution.durationMs >= 0) || !(execution.exitCode === null || Number.isSafeInteger(execution.exitCode) && execution.exitCode >= 0) || !(execution.signal === null || typeof execution.signal === "string") || typeof execution.timedOut !== "boolean" || typeof execution.interrupted !== "boolean" || execution.interrupted !== (execution.durationMs === null) || typeof execution.processGroupQuiescent !== "boolean" || typeof execution.truncated !== "boolean" || execution.spawnError !== void 0 && (typeof execution.spawnError !== "string" || !execution.spawnError)) fail$3(`${check.id} execution receipt is invalid`);
+	if (execution.registrationDigest !== registration.contentDigest || execution.preDispatchDigest !== preDispatch.contentDigest || execution.checkId !== check.id || !sameValue$4(execution.argv, check.argv) || execution.timeoutMs !== check.timeoutMs || execution.testEffectiveTimeoutMs !== void 0 || execution.environmentDigest !== preDispatch.environmentDigest || !sameValue$4(execution.environment, preDispatch.environment) || !sameValue$4(execution.environmentProbes, preDispatch.environmentProbes) || !sameValue$4(execution.environmentErrors, preDispatch.environmentErrors) || execution.startedAt !== preDispatch.startedAt || !(execution.durationMs === null || typeof execution.durationMs === "number" && Number.isFinite(execution.durationMs) && execution.durationMs >= 0) || !(execution.exitCode === null || Number.isSafeInteger(execution.exitCode) && execution.exitCode >= 0) || !(execution.signal === null || typeof execution.signal === "string") || typeof execution.timedOut !== "boolean" || typeof execution.interrupted !== "boolean" || execution.interrupted !== (execution.durationMs === null) || typeof execution.processGroupQuiescent !== "boolean" || typeof execution.truncated !== "boolean" || execution.spawnError !== void 0 && (typeof execution.spawnError !== "string" || !execution.spawnError)) fail$4(`${check.id} execution receipt is invalid`);
 	let processReceipt = null;
 	if (execution.processDigest !== void 0) {
 		processReceipt = assertAnchor$1(readReceipt$2(artifacts, `${root}.process.json`, "Gate2702CheckProcess"), anchor, `${check.id} process`);
-		if (processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || processReceipt.checkId !== check.id || processReceipt.dispatchToken !== preDispatch.dispatchToken || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1 || execution.processDigest !== processReceipt.contentDigest || !retainedBytes$1(artifacts, `${root}.dispatch-gate`).equals(Buffer.from(`${preDispatch.dispatchToken}\n`, "utf8"))) fail$3(`${check.id} process/gate lineage is invalid`);
-	} else if (artifacts.has(`${root}.process.json`) || artifacts.has(`${root}.dispatch-gate`)) fail$3(`${check.id} execution omits retained process/gate evidence`);
+		if (processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || processReceipt.checkId !== check.id || processReceipt.dispatchToken !== preDispatch.dispatchToken || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1 || execution.processDigest !== processReceipt.contentDigest || !retainedBytes$1(artifacts, `${root}.dispatch-gate`).equals(Buffer.from(`${preDispatch.dispatchToken}\n`, "utf8"))) fail$4(`${check.id} process/gate lineage is invalid`);
+	} else if (artifacts.has(`${root}.process.json`) || artifacts.has(`${root}.dispatch-gate`)) fail$4(`${check.id} execution omits retained process/gate evidence`);
 	const successfulWrapper = execution.timedOut === false && execution.interrupted === false && execution.spawnError === void 0;
 	const outcome = validatePlainOutcome(artifacts, `${root}.outcome.json`, preDispatch.dispatchToken, successfulWrapper);
-	if (successfulWrapper && processReceipt === null || processReceipt === null && outcome !== null || execution.interrupted && outcome !== null) fail$3(`${check.id} outcome has no valid dispatched wrapper lineage`);
-	if (outcome && execution.timedOut === false && (execution.exitCode !== outcome.exitCode || execution.signal !== outcome.signal || execution.spawnError !== outcome.spawnError)) fail$3(`${check.id} execution does not rederive from its wrapper outcome`);
+	if (successfulWrapper && processReceipt === null || processReceipt === null && outcome !== null || execution.interrupted && outcome !== null) fail$4(`${check.id} outcome has no valid dispatched wrapper lineage`);
+	if (outcome && execution.timedOut === false && (execution.exitCode !== outcome.exitCode || execution.signal !== outcome.signal || execution.spawnError !== outcome.spawnError)) fail$4(`${check.id} execution does not rederive from its wrapper outcome`);
 	const stdoutBytes = validateCapturedStream(artifacts, execution.stdout, `${root}.stdout.log`, `${registration.runDir}/checks/${slug}.stdout.log`, `${check.id} stdout`);
 	const stderrBytes = validateCapturedStream(artifacts, execution.stderr, `${root}.stderr.log`, `${registration.runDir}/checks/${slug}.stderr.log`, `${check.id} stderr`);
-	if (execution.truncated !== (execution.stdout.truncated || execution.stderr.truncated)) fail$3(`${check.id} truncation summary does not rederive`);
+	if (execution.truncated !== (execution.stdout.truncated || execution.stderr.truncated)) fail$4(`${check.id} truncation summary does not rederive`);
 	return {
 		preDispatch,
 		process: processReceipt,
@@ -10743,28 +10744,28 @@ function validateChecks(artifacts, registration, anchor) {
 	return CHECKS.map((check) => validateOneCheck(artifacts, registration, anchor, check));
 }
 function decodeCanonicalBase64(value, label) {
-	if (typeof value !== "string") fail$3(`${label} has no base64 bytes`);
+	if (typeof value !== "string") fail$4(`${label} has no base64 bytes`);
 	const bytes = Buffer.from(value, "base64");
-	if (bytes.toString("base64") !== value) fail$3(`${label} has malformed base64 bytes`);
+	if (bytes.toString("base64") !== value) fail$4(`${label} has malformed base64 bytes`);
 	return bytes;
 }
 function validateWorktreeEvidence(artifacts, registration, anchor) {
 	const diff = readJson$1(artifacts, `generated/diffs/issue-${anchor.subject}.${anchor.treatmentId}.attempt-${anchor.attempt}.json`);
 	assertAnchor$1(diff, anchor, "sealed worktree diff");
-	if (diff.schemaVersion !== SCHEMA_VERSION$1 || diff.kind !== "Gate2702SealedWorktreeDiff" || diff.registrationDigest !== registration.contentDigest || !/^[0-9a-f]{40}$/.test(diff.head ?? "") || !Array.isArray(diff.untracked)) fail$3("sealed worktree diff has invalid arm lineage");
+	if (diff.schemaVersion !== SCHEMA_VERSION$1 || diff.kind !== "Gate2702SealedWorktreeDiff" || diff.registrationDigest !== registration.contentDigest || !/^[0-9a-f]{40}$/.test(diff.head ?? "") || !Array.isArray(diff.untracked)) fail$4("sealed worktree diff has invalid arm lineage");
 	const patchBytes = decodeCanonicalBase64(diff.trackedPatch?.bytes, "tracked worktree patch");
-	if (diff.trackedPatch.encoding !== "base64" || diff.trackedPatch.sizeBytes !== patchBytes.length || diff.trackedPatch.contentDigest !== sha256Bytes$2(patchBytes)) fail$3("tracked worktree patch does not match its retained bytes");
-	if (diff.untracked.length > MAX_UNTRACKED_FILES$1) fail$3("sealed worktree diff exceeds its file-count bound");
+	if (diff.trackedPatch.encoding !== "base64" || diff.trackedPatch.sizeBytes !== patchBytes.length || diff.trackedPatch.contentDigest !== sha256Bytes$2(patchBytes)) fail$4("tracked worktree patch does not match its retained bytes");
+	if (diff.untracked.length > MAX_UNTRACKED_FILES$1) fail$4("sealed worktree diff exceeds its file-count bound");
 	const paths = diff.untracked.map((entry) => entry?.path);
-	if (!sameValue$3(paths, [...paths].sort()) || new Set(paths).size !== paths.length) fail$3("sealed untracked paths are not uniquely sorted");
+	if (!sameValue$4(paths, [...paths].sort()) || new Set(paths).size !== paths.length) fail$4("sealed untracked paths are not uniquely sorted");
 	let aggregateBytes = patchBytes.length;
 	const untracked = diff.untracked.map((entry) => {
 		const normalizedPath = typeof entry?.path === "string" ? normalize(entry.path) : null;
-		if (typeof entry.path !== "string" || !entry.path || isAbsolute(entry.path) || normalizedPath === ".." || normalizedPath.startsWith(`..${sep}`) || entry.path.includes("\0") || !["file", "symlink"].includes(entry.kind) || !Number.isSafeInteger(entry.mode) || entry.mode < 0) fail$3("sealed untracked worktree entry is invalid");
+		if (typeof entry.path !== "string" || !entry.path || isAbsolute(entry.path) || normalizedPath === ".." || normalizedPath.startsWith(`..${sep}`) || entry.path.includes("\0") || !["file", "symlink"].includes(entry.kind) || !Number.isSafeInteger(entry.mode) || entry.mode < 0) fail$4("sealed untracked worktree entry is invalid");
 		const bytes = entry.encoding === "base64" ? decodeCanonicalBase64(entry.bytes, `untracked ${entry.path}`) : entry.encoding === "utf8" && typeof entry.bytes === "string" ? Buffer.from(entry.bytes, "utf8") : null;
-		if (bytes === null || entry.kind === "file" && entry.encoding !== "base64" || entry.kind === "symlink" && entry.encoding !== "utf8" || entry.sizeBytes !== bytes.length || entry.contentDigest !== sha256Bytes$2(bytes)) fail$3(`sealed untracked ${entry.path} does not match its bytes`);
+		if (bytes === null || entry.kind === "file" && entry.encoding !== "base64" || entry.kind === "symlink" && entry.encoding !== "utf8" || entry.sizeBytes !== bytes.length || entry.contentDigest !== sha256Bytes$2(bytes)) fail$4(`sealed untracked ${entry.path} does not match its bytes`);
 		aggregateBytes += bytes.length;
-		if (aggregateBytes > MAX_ARTIFACT_BYTES) fail$3("sealed worktree source exceeds its aggregate byte bound");
+		if (aggregateBytes > MAX_ARTIFACT_BYTES) fail$4("sealed worktree source exceeds its aggregate byte bound");
 		return {
 			path: entry.path,
 			kind: entry.kind,
@@ -10793,7 +10794,7 @@ function validateWorktreeEvidence(artifacts, registration, anchor) {
 }
 function assertNoCheckArtifacts(artifacts, anchor) {
 	const prefix = `${expectedRunPrefix(anchor)}/checks/`;
-	for (const path of artifacts.keys()) if (path.startsWith(prefix)) fail$3("classification contains check evidence for an undispatched check");
+	for (const path of artifacts.keys()) if (path.startsWith(prefix)) fail$4("classification contains check evidence for an undispatched check");
 }
 function classificationBase(registration, preflight, terminal) {
 	return {
@@ -10819,7 +10820,7 @@ function retryDisposition(attempt, reason, authorized = attempt === 1) {
 }
 function assertBehaviorVerification(classification, behaviorContext) {
 	const verification = classification.behaviorVerification;
-	if (verification === null || typeof verification !== "object" || Array.isArray(verification) || verification.behaviorContextDigest !== valueDigest$3(behaviorContext) || !validTimestamp(verification.verifiedAt)) fail$3("classification behavior verification does not bind its preflight context");
+	if (verification === null || typeof verification !== "object" || Array.isArray(verification) || verification.behaviorContextDigest !== valueDigest$3(behaviorContext) || !validTimestamp(verification.verifiedAt)) fail$4("classification behavior verification does not bind its preflight context");
 	return verification;
 }
 function parseWorkerResult(bytes) {
@@ -10837,7 +10838,7 @@ function validateClassification(artifacts, registration, preflight, lifecycle, a
 		stdout: artifactClaim(lifecycle.stdoutBytes, `${registration.runDir}/stdout.log`),
 		stderr: artifactClaim(lifecycle.stderrBytes, `${registration.runDir}/stderr.log`)
 	};
-	if (!sameValue$3(classification.workerArtifacts, workerArtifacts)) fail$3("classification worker artifacts do not match retained bytes");
+	if (!sameValue$4(classification.workerArtifacts, workerArtifacts)) fail$4("classification worker artifacts do not match retained bytes");
 	let expected;
 	let checks = [];
 	let worktree = null;
@@ -10859,7 +10860,7 @@ function validateClassification(artifacts, registration, preflight, lifecycle, a
 	} else if (classification.error?.code === "behavior-context-drift") {
 		assertNoCheckArtifacts(artifacts, anchor);
 		const behaviorVerification = assertBehaviorVerification(classification, preflight.behaviorContext);
-		if (typeof classification.error.detail !== "string" || !classification.error.detail) fail$3("behavior-context drift has no retained failure detail");
+		if (typeof classification.error.detail !== "string" || !classification.error.detail) fail$4("behavior-context drift has no retained failure detail");
 		expected = {
 			...base,
 			status: "failed",
@@ -10937,7 +10938,7 @@ function validateClassification(artifacts, registration, preflight, lifecycle, a
 				},
 				retry: retryDisposition(anchor.attempt, "tooling-artifact")
 			};
-		} else if (lifecycle.terminal.outcome !== "exited" || lifecycle.terminal.exitCode !== 0 || lifecycle.terminal.timedOut === true || lifecycle.terminal.processGroupQuiescent !== true) fail$3("worker terminal is not a completed C5 arm");
+		} else if (lifecycle.terminal.outcome !== "exited" || lifecycle.terminal.exitCode !== 0 || lifecycle.terminal.timedOut === true || lifecycle.terminal.processGroupQuiescent !== true) fail$4("worker terminal is not a completed C5 arm");
 		else if (workerResult?.type !== "result" || workerResult?.subtype !== "success" || typeof workerResult?.result !== "string") {
 			assertNoCheckArtifacts(artifacts, anchor);
 			expected = {
@@ -11019,7 +11020,7 @@ function validateClassification(artifacts, registration, preflight, lifecycle, a
 			};
 		}
 	}
-	if (!sameValue$3(withoutDigest(classification), expected)) fail$3("classification does not rederive from retained worker/check evidence");
+	if (!sameValue$4(withoutDigest(classification), expected)) fail$4("classification does not rederive from retained worker/check evidence");
 	return {
 		classification,
 		checks,
@@ -11041,13 +11042,13 @@ function validateClassification(artifacts, registration, preflight, lifecycle, a
 */
 function validateGate2702ClassificationEvidence({ artifactBytesByPath, trialId, baseSha, subject, treatmentId, attempt }) {
 	const artifacts = requireArtifactMap$1(artifactBytesByPath);
-	if (!UUID_PATTERN$3.test(trialId ?? "")) fail$3("trialId is not an RFC 4122 UUID");
-	if (!/^[0-9a-f]{40}$/.test(baseSha ?? "")) fail$3("baseSha is not a pinned Git SHA");
-	if (!SUBJECTS$1.has(subject)) fail$3("subject is not part of the fixed C5 workload");
-	if (!TREATMENTS$2.has(treatmentId)) fail$3("treatmentId is not part of C5");
-	if (attempt !== 1 && attempt !== 2) fail$3("attempt must be 1 or 2");
+	if (!UUID_PATTERN$3.test(trialId ?? "")) fail$4("trialId is not an RFC 4122 UUID");
+	if (!/^[0-9a-f]{40}$/.test(baseSha ?? "")) fail$4("baseSha is not a pinned Git SHA");
+	if (!SUBJECTS$1.has(subject)) fail$4("subject is not part of the fixed C5 workload");
+	if (!TREATMENTS$2.has(treatmentId)) fail$4("treatmentId is not part of C5");
+	if (attempt !== 1 && attempt !== 2) fail$4("attempt must be 1 or 2");
 	const trial = readReceipt$2(artifacts, "trial.json", "Gate2702Trial");
-	if (trial.trialId !== trialId || trial.baseSha !== baseSha || trial.repository !== "shpwrck/claude-history-dashboard" || trial.executionMode !== "production" || !sameValue$3(trial.definitionRef, DEFINITION_REF$2)) fail$3("retained trial does not match the trusted production C5 identity");
+	if (trial.trialId !== trialId || trial.baseSha !== baseSha || trial.repository !== "shpwrck/claude-history-dashboard" || trial.executionMode !== "production" || !sameValue$4(trial.definitionRef, DEFINITION_REF$2)) fail$4("retained trial does not match the trusted production C5 identity");
 	const anchor = anchorFor({
 		trialId,
 		baseSha,
@@ -11163,25 +11164,25 @@ var init_seal_classification = __esmMin((() => {
 * input, both blind requests, every referenced durable attempt lifecycle, and
 * the final `Gate2702JudgeResult` body.
 */
-function fail$2(message) {
+function fail$3(message) {
 	throw new Error(message);
 }
-function canonicalValue$2(value) {
-	if (Array.isArray(value)) return value.map(canonicalValue$2);
+function canonicalValue$3(value) {
+	if (Array.isArray(value)) return value.map(canonicalValue$3);
 	if (value === null || typeof value !== "object") return value;
-	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue$2(value[key])]));
+	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue$3(value[key])]));
 }
-function canonicalJson$2(value) {
-	return JSON.stringify(canonicalValue$2(value));
+function canonicalJson$3(value) {
+	return JSON.stringify(canonicalValue$3(value));
 }
-function sameValue$2(left, right) {
-	return canonicalJson$2(left) === canonicalJson$2(right);
+function sameValue$3(left, right) {
+	return canonicalJson$3(left) === canonicalJson$3(right);
 }
 function sha256Bytes$1(value) {
 	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 function valueDigest$2(value) {
-	return sha256Bytes$1(Buffer.from(canonicalJson$2(value), "utf8"));
+	return sha256Bytes$1(Buffer.from(canonicalJson$3(value), "utf8"));
 }
 function receiptDigest$1(receipt) {
 	const withoutDigest = { ...receipt };
@@ -11189,19 +11190,19 @@ function receiptDigest$1(receipt) {
 	return valueDigest$2(withoutDigest);
 }
 function requireArtifactMap(artifactBytesByPath) {
-	if (artifactBytesByPath === null || typeof artifactBytesByPath !== "object" || typeof artifactBytesByPath.get !== "function" || typeof artifactBytesByPath.has !== "function" || typeof artifactBytesByPath.keys !== "function") fail$2("artifactBytesByPath must be a retained-artifact map");
-	for (const path of artifactBytesByPath.keys()) if (typeof path !== "string" || path.length === 0) fail$2("retained artifact map contains an invalid path");
+	if (artifactBytesByPath === null || typeof artifactBytesByPath !== "object" || typeof artifactBytesByPath.get !== "function" || typeof artifactBytesByPath.has !== "function" || typeof artifactBytesByPath.keys !== "function") fail$3("artifactBytesByPath must be a retained-artifact map");
+	for (const path of artifactBytesByPath.keys()) if (typeof path !== "string" || path.length === 0) fail$3("retained artifact map contains an invalid path");
 	return artifactBytesByPath;
 }
 function retainedBytes(artifacts, path, required = true) {
 	if (!artifacts.has(path)) {
 		if (!required) return null;
-		fail$2(`missing retained judge artifact: ${path}`);
+		fail$3(`missing retained judge artifact: ${path}`);
 	}
 	const value = artifacts.get(path);
-	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$2(`retained judge artifact is not bytes: ${path}`);
+	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$3(`retained judge artifact is not bytes: ${path}`);
 	const bytes = Buffer.from(value);
-	if (bytes.length > MAX_SOURCE_BYTES) fail$2(`retained judge artifact exceeds its fixed size limit: ${path}`);
+	if (bytes.length > MAX_SOURCE_BYTES) fail$3(`retained judge artifact exceeds its fixed size limit: ${path}`);
 	return bytes;
 }
 function readReceipt$1(artifacts, path, kind, required = true) {
@@ -11211,47 +11212,47 @@ function readReceipt$1(artifacts, path, kind, required = true) {
 	try {
 		receipt = JSON.parse(bytes.toString("utf8"));
 	} catch (error) {
-		fail$2(`could not decode retained ${kind} at ${path}: ${error.message}`);
+		fail$3(`could not decode retained ${kind} at ${path}: ${error.message}`);
 	}
-	if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt) || receipt.schemaVersion !== SCHEMA_VERSION || receipt.kind !== kind) fail$2(`expected retained ${kind} schema version ${SCHEMA_VERSION}: ${path}`);
-	if (!SHA256_PATTERN.test(receipt.contentDigest ?? "") || receipt.contentDigest !== receiptDigest$1(receipt)) fail$2(`retained ${kind} content digest does not match: ${path}`);
+	if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt) || receipt.schemaVersion !== SCHEMA_VERSION || receipt.kind !== kind) fail$3(`expected retained ${kind} schema version ${SCHEMA_VERSION}: ${path}`);
+	if (!SHA256_PATTERN.test(receipt.contentDigest ?? "") || receipt.contentDigest !== receiptDigest$1(receipt)) fail$3(`retained ${kind} content digest does not match: ${path}`);
 	return receipt;
 }
 function assertAnchor(receipt, anchor, label, includeSubject = true) {
-	if (!sameValue$2(receipt.definitionRef, DEFINITION_REF$1) || receipt.trialId !== anchor.trialId || receipt.baseSha !== anchor.baseSha || includeSubject && receipt.subject !== anchor.subject) fail$2(`${label} identity does not match the retained C5 trial`);
+	if (!sameValue$3(receipt.definitionRef, DEFINITION_REF$1) || receipt.trialId !== anchor.trialId || receipt.baseSha !== anchor.baseSha || includeSubject && receipt.subject !== anchor.subject) fail$3(`${label} identity does not match the retained C5 trial`);
 	return receipt;
 }
 function assertProduction(receipt, label) {
-	if (receipt.executionMode !== "production") fail$2(`${label} does not bind production execution mode`);
+	if (receipt.executionMode !== "production") fail$3(`${label} does not bind production execution mode`);
 }
 function decodeBase64$1(value, label) {
-	if (typeof value !== "string") fail$2(`${label} has no retained bytes`);
+	if (typeof value !== "string") fail$3(`${label} has no retained bytes`);
 	const bytes = Buffer.from(value, "base64");
-	if (bytes.toString("base64") !== value) fail$2(`${label} has invalid base64`);
+	if (bytes.toString("base64") !== value) fail$3(`${label} has invalid base64`);
 	return bytes;
 }
 function decodeFrozenEntry(entry, label) {
 	if (entry?.encoding === "base64") return decodeBase64$1(entry.bytes, label);
 	if (entry?.encoding === "utf8" && typeof entry.bytes === "string") return Buffer.from(entry.bytes, "utf8");
-	fail$2(`${label} has an unsupported encoding`);
+	fail$3(`${label} has an unsupported encoding`);
 }
 function validateFrozenDiff$1(diff, treatmentId) {
 	const patch = diff?.trackedPatch;
-	if (patch?.encoding !== "base64") fail$2(`${treatmentId} tracked patch encoding is invalid`);
+	if (patch?.encoding !== "base64") fail$3(`${treatmentId} tracked patch encoding is invalid`);
 	const patchBytes = decodeFrozenEntry(patch, `${treatmentId} tracked patch`);
-	if (patch.sizeBytes !== patchBytes.length || patch.contentDigest !== sha256Bytes$1(patchBytes)) fail$2(`${treatmentId} tracked patch digest is invalid`);
-	if (!Array.isArray(diff?.untracked)) fail$2(`${treatmentId} untracked evidence is invalid`);
-	if (diff.untracked.length > MAX_UNTRACKED_FILES) fail$2(`${treatmentId} untracked evidence exceeds its fixed file limit`);
+	if (patch.sizeBytes !== patchBytes.length || patch.contentDigest !== sha256Bytes$1(patchBytes)) fail$3(`${treatmentId} tracked patch digest is invalid`);
+	if (!Array.isArray(diff?.untracked)) fail$3(`${treatmentId} untracked evidence is invalid`);
+	if (diff.untracked.length > MAX_UNTRACKED_FILES) fail$3(`${treatmentId} untracked evidence exceeds its fixed file limit`);
 	const paths = diff.untracked.map((entry) => entry?.path);
-	if (paths.some((path) => typeof path !== "string" || path.length === 0 || path.startsWith("/") || path.split("/").includes("..")) || new Set(paths).size !== paths.length || !sameValue$2(paths, [...paths].sort())) fail$2(`${treatmentId} untracked evidence paths are invalid`);
+	if (paths.some((path) => typeof path !== "string" || path.length === 0 || path.startsWith("/") || path.split("/").includes("..")) || new Set(paths).size !== paths.length || !sameValue$3(paths, [...paths].sort())) fail$3(`${treatmentId} untracked evidence paths are invalid`);
 	let aggregateBytes = patchBytes.length;
 	const untrackedEvidence = [];
 	for (const entry of diff.untracked) {
-		if (!["file", "symlink"].includes(entry?.kind) || !Number.isInteger(entry.mode) || entry.mode < 0 || entry.kind === "file" && entry.encoding !== "base64" || entry.kind === "symlink" && entry.encoding !== "utf8") fail$2(`${treatmentId} untracked ${entry?.path} identity is invalid`);
+		if (!["file", "symlink"].includes(entry?.kind) || !Number.isInteger(entry.mode) || entry.mode < 0 || entry.kind === "file" && entry.encoding !== "base64" || entry.kind === "symlink" && entry.encoding !== "utf8") fail$3(`${treatmentId} untracked ${entry?.path} identity is invalid`);
 		const bytes = decodeFrozenEntry(entry, `${treatmentId} untracked ${entry.path}`);
-		if (entry.sizeBytes !== bytes.length || entry.contentDigest !== sha256Bytes$1(bytes)) fail$2(`${treatmentId} untracked ${entry.path} digest is invalid`);
+		if (entry.sizeBytes !== bytes.length || entry.contentDigest !== sha256Bytes$1(bytes)) fail$3(`${treatmentId} untracked ${entry.path} digest is invalid`);
 		aggregateBytes += bytes.length;
-		if (aggregateBytes > MAX_SOURCE_BYTES) fail$2(`${treatmentId} aggregate source exceeds its evidence cap`);
+		if (aggregateBytes > MAX_SOURCE_BYTES) fail$3(`${treatmentId} aggregate source exceeds its evidence cap`);
 		const { bytes: _bytes, ...metadata } = entry;
 		untrackedEvidence.push(metadata);
 	}
@@ -11318,73 +11319,73 @@ function expectedWorkerArgv() {
 	];
 }
 function exactTreatmentKeys(value) {
-	return value !== null && typeof value === "object" && !Array.isArray(value) && sameValue$2(Object.keys(value).sort(), [...TREATMENTS$1].sort());
+	return value !== null && typeof value === "object" && !Array.isArray(value) && sameValue$3(Object.keys(value).sort(), [...TREATMENTS$1].sort());
 }
 function validateFrozenSource(artifacts, anchor) {
 	const trial = assertAnchor(readReceipt$1(artifacts, "trial.json", "Gate2702Trial"), anchor, "trial", false);
 	assertProduction(trial, "trial");
-	if (typeof trial.worktreeRoot !== "string" || !isAbsolute(trial.worktreeRoot)) fail$2("trial does not retain its production worktree root");
+	if (typeof trial.worktreeRoot !== "string" || !isAbsolute(trial.worktreeRoot)) fail$3("trial does not retain its production worktree root");
 	const snapshot = assertAnchor(readReceipt$1(artifacts, `subjects/issue-${anchor.subject}.json`, "Gate2702SubjectSnapshot"), anchor, "subject snapshot");
 	assertProduction(snapshot, "subject snapshot");
-	if (typeof snapshot.title !== "string" || typeof snapshot.body !== "string") fail$2("subject snapshot lacks frozen task text");
+	if (typeof snapshot.title !== "string" || typeof snapshot.body !== "string") fail$3("subject snapshot lacks frozen task text");
 	const snapshotManifest = Array.isArray(trial.subjectSnapshots) ? trial.subjectSnapshots.filter((entry) => entry?.subject === anchor.subject) : [];
-	if (snapshotManifest.length !== 1 || !sameValue$2(snapshotManifest[0], {
+	if (snapshotManifest.length !== 1 || !sameValue$3(snapshotManifest[0], {
 		subject: anchor.subject,
 		contentDigest: snapshot.contentDigest
-	})) fail$2("subject snapshot is not bound by the trial manifest");
+	})) fail$3("subject snapshot is not bound by the trial manifest");
 	const selection = assertAnchor(readReceipt$1(artifacts, `pair-selection/issue-${anchor.subject}.json`, "Gate2702PairSelection"), anchor, "pair selection");
-	if (!exactTreatmentKeys(selection.arms)) fail$2("pair selection does not contain the exact C5 treatments");
+	if (!exactTreatmentKeys(selection.arms)) fail$3("pair selection does not contain the exact C5 treatments");
 	const arms = {};
 	for (const treatmentId of TREATMENTS$1) {
 		const selected = selection.arms[treatmentId];
-		if (selected?.treatmentId !== treatmentId || ![1, 2].includes(selected.attempt) || !SHA256_PATTERN.test(selected.registrationDigest ?? "") || !SHA256_PATTERN.test(selected.classificationDigest ?? "")) fail$2(`pair selection has no exact ${treatmentId} arm`);
+		if (selected?.treatmentId !== treatmentId || ![1, 2].includes(selected.attempt) || !SHA256_PATTERN.test(selected.registrationDigest ?? "") || !SHA256_PATTERN.test(selected.classificationDigest ?? "")) fail$3(`pair selection has no exact ${treatmentId} arm`);
 		const prefix = `runs/issue-${anchor.subject}/${treatmentId}/attempt-${selected.attempt}`;
 		const registration = assertAnchor(readReceipt$1(artifacts, `${prefix}/registration.json`, "Gate2702ArmRegistration"), anchor, `${treatmentId} registration`);
 		assertProduction(registration, `${treatmentId} registration`);
 		const worktreeSuffix = `worktrees/issue-${anchor.subject}.${treatmentId}.attempt-${selected.attempt}`;
-		if (registration.treatmentId !== treatmentId || registration.attempt !== selected.attempt || registration.contentDigest !== selected.registrationDigest || typeof registration.runDir !== "string" || !absolutePathEndsWith(registration.runDir, prefix) || typeof registration.worktreePath !== "string" || !absolutePathEndsWith(registration.worktreePath, worktreeSuffix) || normalizedPath(registration.worktreePath) !== `${normalizedPath(trial.worktreeRoot).replace(/\/$/, "")}/${worktreeSuffix.slice(10)}`) fail$2(`${treatmentId} registration does not match pair selection`);
+		if (registration.treatmentId !== treatmentId || registration.attempt !== selected.attempt || registration.contentDigest !== selected.registrationDigest || typeof registration.runDir !== "string" || !absolutePathEndsWith(registration.runDir, prefix) || typeof registration.worktreePath !== "string" || !absolutePathEndsWith(registration.worktreePath, worktreeSuffix) || normalizedPath(registration.worktreePath) !== `${normalizedPath(trial.worktreeRoot).replace(/\/$/, "")}/${worktreeSuffix.slice(10)}`) fail$3(`${treatmentId} registration does not match pair selection`);
 		if (selected.attempt === 1) {
 			const embedded = Array.isArray(trial.registrations) ? trial.registrations.filter((candidate) => candidate?.subject === anchor.subject && candidate?.treatmentId === treatmentId && candidate?.attempt === 1) : [];
-			if (embedded.length !== 1 || !sameValue$2(embedded[0], registration)) fail$2(`${treatmentId} registration is not bound into the trial`);
+			if (embedded.length !== 1 || !sameValue$3(embedded[0], registration)) fail$3(`${treatmentId} registration is not bound into the trial`);
 		} else {
 			const firstPrefix = `runs/issue-${anchor.subject}/${treatmentId}/attempt-1`;
 			const firstRegistration = assertAnchor(readReceipt$1(artifacts, `${firstPrefix}/registration.json`, "Gate2702ArmRegistration"), anchor, `${treatmentId} first registration`);
 			const firstClassification = assertAnchor(readReceipt$1(artifacts, `${firstPrefix}/classification.json`, "Gate2702ArmClassification"), anchor, `${treatmentId} first classification`);
 			assertProduction(firstRegistration, `${treatmentId} first registration`);
-			if (firstClassification.registrationDigest !== firstRegistration.contentDigest || firstClassification.retry?.authorized !== true || !sameValue$2(registration.retryOf, {
+			if (firstClassification.registrationDigest !== firstRegistration.contentDigest || firstClassification.retry?.authorized !== true || !sameValue$3(registration.retryOf, {
 				attempt: 1,
 				registrationDigest: firstRegistration.contentDigest,
 				classificationDigest: firstClassification.contentDigest
-			})) fail$2(`${treatmentId} retry registration has no authorized lineage`);
+			})) fail$3(`${treatmentId} retry registration has no authorized lineage`);
 		}
 		const preflight = assertAnchor(readReceipt$1(artifacts, selected.attempt === 1 ? `preflight/issue-${anchor.subject}.json` : `${prefix}/preflight.json`, selected.attempt === 1 ? "Gate2702PairPreflight" : "Gate2702RetryPreflight"), anchor, `${treatmentId} preflight`);
 		const preflightArm = selected.attempt === 1 ? preflight.arms?.[treatmentId] : preflight;
-		if (preflight.status !== "passed" || preflightArm?.registrationDigest !== registration.contentDigest || preflightArm?.behaviorContext === null || typeof preflightArm?.behaviorContext !== "object") fail$2(`${treatmentId} preflight is not bound to behavior evidence`);
+		if (preflight.status !== "passed" || preflightArm?.registrationDigest !== registration.contentDigest || preflightArm?.behaviorContext === null || typeof preflightArm?.behaviorContext !== "object") fail$3(`${treatmentId} preflight is not bound to behavior evidence`);
 		const preDispatch = assertAnchor(readReceipt$1(artifacts, `${prefix}/pre-dispatch.json`, "Gate2702PreDispatch"), anchor, `${treatmentId} worker pre-dispatch`);
 		assertProduction(preDispatch, `${treatmentId} worker pre-dispatch`);
-		if (preDispatch.treatmentId !== treatmentId || preDispatch.attempt !== selected.attempt || preDispatch.registrationDigest !== registration.contentDigest || normalizedPath(preDispatch.cwd) !== normalizedPath(registration.worktreePath) || preDispatch.promptDigest !== sha256Bytes$1(Buffer.from(workerPrompt(snapshot, registration), "utf8")) || !sameValue$2(preDispatch.argv, expectedWorkerArgv())) fail$2(`${treatmentId} worker dispatch prompt or invocation is invalid`);
+		if (preDispatch.treatmentId !== treatmentId || preDispatch.attempt !== selected.attempt || preDispatch.registrationDigest !== registration.contentDigest || normalizedPath(preDispatch.cwd) !== normalizedPath(registration.worktreePath) || preDispatch.promptDigest !== sha256Bytes$1(Buffer.from(workerPrompt(snapshot, registration), "utf8")) || !sameValue$3(preDispatch.argv, expectedWorkerArgv())) fail$3(`${treatmentId} worker dispatch prompt or invocation is invalid`);
 		const identity = assertAnchor(readReceipt$1(artifacts, `${prefix}/worktree-identity.json`, "Gate2702WorktreeIdentity"), anchor, `${treatmentId} worktree identity`);
 		assertProduction(identity, `${treatmentId} worktree identity`);
-		if (identity.treatmentId !== treatmentId || identity.attempt !== selected.attempt || identity.registrationDigest !== registration.contentDigest || normalizedPath(identity.worktreePath) !== normalizedPath(registration.worktreePath) || typeof identity.gitDirectory !== "string" || !isAbsolute(identity.gitDirectory) || !UUID_PATTERN$2.test(identity.identityToken ?? "") || !Number.isFinite(Date.parse(identity.createdAt ?? "")) || preDispatch.worktreeIdentityDigest !== identity.contentDigest) fail$2(`${treatmentId} worktree identity is not bound to its dispatch`);
+		if (identity.treatmentId !== treatmentId || identity.attempt !== selected.attempt || identity.registrationDigest !== registration.contentDigest || normalizedPath(identity.worktreePath) !== normalizedPath(registration.worktreePath) || typeof identity.gitDirectory !== "string" || !isAbsolute(identity.gitDirectory) || !UUID_PATTERN$2.test(identity.identityToken ?? "") || !Number.isFinite(Date.parse(identity.createdAt ?? "")) || preDispatch.worktreeIdentityDigest !== identity.contentDigest) fail$3(`${treatmentId} worktree identity is not bound to its dispatch`);
 		const processReceipt = assertAnchor(readReceipt$1(artifacts, `${prefix}/process.json`, "Gate2702Process"), anchor, `${treatmentId} worker process`);
-		if (processReceipt.treatmentId !== treatmentId || processReceipt.attempt !== selected.attempt || processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1) fail$2(`${treatmentId} worker process is not bound to its dispatch`);
+		if (processReceipt.treatmentId !== treatmentId || processReceipt.attempt !== selected.attempt || processReceipt.registrationDigest !== registration.contentDigest || processReceipt.preDispatchDigest !== preDispatch.contentDigest || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 1) fail$3(`${treatmentId} worker process is not bound to its dispatch`);
 		const terminal = assertAnchor(readReceipt$1(artifacts, `${prefix}/terminal.json`, "Gate2702Terminal"), anchor, `${treatmentId} worker terminal`);
-		if (terminal.treatmentId !== treatmentId || terminal.attempt !== selected.attempt || terminal.preDispatchDigest !== preDispatch.contentDigest || terminal.processDigest !== processReceipt.contentDigest || terminal.outcome !== "exited" || terminal.exitCode !== 0 || terminal.timedOut !== false || terminal.processGroupQuiescent !== true) fail$2(`${treatmentId} worker terminal is not a completed C5 arm`);
+		if (terminal.treatmentId !== treatmentId || terminal.attempt !== selected.attempt || terminal.preDispatchDigest !== preDispatch.contentDigest || terminal.processDigest !== processReceipt.contentDigest || terminal.outcome !== "exited" || terminal.exitCode !== 0 || terminal.timedOut !== false || terminal.processGroupQuiescent !== true) fail$3(`${treatmentId} worker terminal is not a completed C5 arm`);
 		const classification = assertAnchor(readReceipt$1(artifacts, `${prefix}/classification.json`, "Gate2702ArmClassification"), anchor, `${treatmentId} classification`);
 		const statuses = Array.isArray(classification.checkResults) ? classification.checkResults.map((check) => check?.status) : [];
 		const checkIds = Array.isArray(classification.checkResults) ? classification.checkResults.map((check) => check?.checkId) : [];
-		if (classification.treatmentId !== treatmentId || classification.attempt !== selected.attempt || classification.registrationDigest !== registration.contentDigest || classification.preflightDigest !== preflight.contentDigest || classification.terminalDigest !== terminal.contentDigest || classification.contentDigest !== selected.classificationDigest || classification.status !== "succeeded" || classification.eligible !== true || classification.behaviorVerification?.behaviorContextDigest !== valueDigest$2(preflightArm.behaviorContext) || !Number.isFinite(Date.parse(classification.behaviorVerification?.verifiedAt ?? "")) || statuses.length !== CHECK_IDS$1.length || !sameValue$2([...checkIds].sort(), [...CHECK_IDS$1].sort()) || !statuses.every((status) => ["passed", "failed"].includes(status))) fail$2(`${treatmentId} classification is absent, ineligible, or tampered`);
+		if (classification.treatmentId !== treatmentId || classification.attempt !== selected.attempt || classification.registrationDigest !== registration.contentDigest || classification.preflightDigest !== preflight.contentDigest || classification.terminalDigest !== terminal.contentDigest || classification.contentDigest !== selected.classificationDigest || classification.status !== "succeeded" || classification.eligible !== true || classification.behaviorVerification?.behaviorContextDigest !== valueDigest$2(preflightArm.behaviorContext) || !Number.isFinite(Date.parse(classification.behaviorVerification?.verifiedAt ?? "")) || statuses.length !== CHECK_IDS$1.length || !sameValue$3([...checkIds].sort(), [...CHECK_IDS$1].sort()) || !statuses.every((status) => ["passed", "failed"].includes(status))) fail$3(`${treatmentId} classification is absent, ineligible, or tampered`);
 		const stdoutPath = `${prefix}/stdout.log`;
 		const stdoutBytes = retainedBytes(artifacts, stdoutPath);
 		const recordedStdout = classification.workerArtifacts?.stdout;
-		if (!absolutePathEndsWith(recordedStdout?.path, stdoutPath) || recordedStdout.byteLength !== stdoutBytes.length || recordedStdout.capturedBytes !== stdoutBytes.length || recordedStdout.truncated !== false || recordedStdout.contentDigest !== sha256Bytes$1(stdoutBytes)) fail$2(`${treatmentId} worker stdout is not bound to its classification`);
+		if (!absolutePathEndsWith(recordedStdout?.path, stdoutPath) || recordedStdout.byteLength !== stdoutBytes.length || recordedStdout.capturedBytes !== stdoutBytes.length || recordedStdout.truncated !== false || recordedStdout.contentDigest !== sha256Bytes$1(stdoutBytes)) fail$3(`${treatmentId} worker stdout is not bound to its classification`);
 		let workerWrapper;
 		try {
 			workerWrapper = JSON.parse(stdoutBytes.toString("utf8"));
 		} catch {
-			fail$2(`${treatmentId} worker stdout is not valid Claude JSON`);
+			fail$3(`${treatmentId} worker stdout is not valid Claude JSON`);
 		}
-		if (typeof workerWrapper?.result !== "string" || !workerWrapper.result.trim()) fail$2(`${treatmentId} worker stdout has no final result`);
+		if (typeof workerWrapper?.result !== "string" || !workerWrapper.result.trim()) fail$3(`${treatmentId} worker stdout has no final result`);
 		arms[treatmentId] = {
 			selected,
 			registration,
@@ -11404,7 +11405,7 @@ function validateFrozenInput(artifacts, anchor) {
 	const prefix = `judging/issue-${anchor.subject}`;
 	const input = assertAnchor(readReceipt$1(artifacts, `${prefix}/input.json`, "Gate2702JudgeInput"), anchor, "frozen judge input");
 	assertProduction(input, "frozen judge input");
-	if (input.pairSelectionDigest !== source.selection.contentDigest || input.subjectSnapshotDigest !== source.snapshot.contentDigest || input.task !== `${source.snapshot.title}\n\n${source.snapshot.body}` || !exactTreatmentKeys(input.armEvidence) || !exactTreatmentKeys(input.objectiveChecks) || !exactTreatmentKeys(input.artifacts)) fail$2("frozen judge input does not rederive from the selected C5 pair");
+	if (input.pairSelectionDigest !== source.selection.contentDigest || input.subjectSnapshotDigest !== source.snapshot.contentDigest || input.task !== `${source.snapshot.title}\n\n${source.snapshot.body}` || !exactTreatmentKeys(input.armEvidence) || !exactTreatmentKeys(input.objectiveChecks) || !exactTreatmentKeys(input.artifacts)) fail$3("frozen judge input does not rederive from the selected C5 pair");
 	const frozenArms = {};
 	for (const treatmentId of TREATMENTS$1) {
 		const evidence = assertAnchor(readReceipt$1(artifacts, `${prefix}/evidence/${treatmentId}.json`, "Gate2702JudgeArmEvidence"), anchor, `${treatmentId} frozen judge evidence`);
@@ -11414,11 +11415,11 @@ function validateFrozenInput(artifacts, anchor) {
 		const workerBytes = Buffer.from(evidence.workerResult ?? "", "utf8");
 		const objectiveState = arm.classification.checkResults.every((check) => check.status === "passed") ? "passed" : "failed";
 		const objective = input.objectiveChecks[treatmentId];
-		if (evidence.treatmentId !== treatmentId || evidence.attempt !== arm.registration.attempt || evidence.pairSelectionDigest !== source.selection.contentDigest || evidence.registrationDigest !== arm.registration.contentDigest || evidence.classificationDigest !== arm.classification.contentDigest || typeof evidence.workerResult !== "string" || !evidence.workerResult.trim() || evidence.workerResult !== arm.workerResult || evidence.workerResultDigest !== sha256Bytes$1(workerBytes) || !sameValue$2(evidence.worktreeEvidence, expectedWorktreeEvidence) || !sameValue$2(arm.classification.worktreeEvidence, expectedWorktreeEvidence) || evidence.artifact !== artifactText(evidence.workerResult, evidence.diff, arm.registration)) {
-			if (typeof evidence.artifact === "string" && evidence.artifact !== artifactText(evidence.workerResult ?? "", evidence.diff, arm.registration)) fail$2(`${treatmentId} frozen artifact does not rederive`);
-			fail$2(`${treatmentId} frozen judge evidence is invalid`);
+		if (evidence.treatmentId !== treatmentId || evidence.attempt !== arm.registration.attempt || evidence.pairSelectionDigest !== source.selection.contentDigest || evidence.registrationDigest !== arm.registration.contentDigest || evidence.classificationDigest !== arm.classification.contentDigest || typeof evidence.workerResult !== "string" || !evidence.workerResult.trim() || evidence.workerResult !== arm.workerResult || evidence.workerResultDigest !== sha256Bytes$1(workerBytes) || !sameValue$3(evidence.worktreeEvidence, expectedWorktreeEvidence) || !sameValue$3(arm.classification.worktreeEvidence, expectedWorktreeEvidence) || evidence.artifact !== artifactText(evidence.workerResult, evidence.diff, arm.registration)) {
+			if (typeof evidence.artifact === "string" && evidence.artifact !== artifactText(evidence.workerResult ?? "", evidence.diff, arm.registration)) fail$3(`${treatmentId} frozen artifact does not rederive`);
+			fail$3(`${treatmentId} frozen judge evidence is invalid`);
 		}
-		if (input.armEvidence[treatmentId] !== evidence.contentDigest || input.artifacts[treatmentId] !== evidence.artifact || objective?.classificationDigest !== arm.classification.contentDigest || !sameValue$2(objective?.results, arm.classification.checkResults) || objective?.state !== objectiveState) fail$2(`${treatmentId} frozen judge evidence does not match its input`);
+		if (input.armEvidence[treatmentId] !== evidence.contentDigest || input.artifacts[treatmentId] !== evidence.artifact || objective?.classificationDigest !== arm.classification.contentDigest || !sameValue$3(objective?.results, arm.classification.checkResults) || objective?.state !== objectiveState) fail$3(`${treatmentId} frozen judge evidence does not match its input`);
 		frozenArms[treatmentId] = evidence;
 	}
 	return {
@@ -11452,14 +11453,14 @@ function validateRequests(artifacts, anchor, input) {
 	const requests = assertAnchor(readReceipt$1(artifacts, `judging/issue-${anchor.subject}/requests.json`, "Gate2702JudgeRequests"), anchor, "frozen judge requests");
 	assertProduction(requests, "frozen judge requests");
 	const payloads = expectedPayloads(input);
-	if (requests.judgeInputDigest !== input.contentDigest || requests.judgeModel !== JUDGE_MODEL$1 || requests.timeoutMs !== JUDGE_TIMEOUT_MS$1 || requests.maxBudgetUsd !== Number(JUDGE_BUDGET_USD$1) || requests.maxAttemptsPerOrder !== MAX_ATTEMPTS || requests.maxPayloadBytes !== MAX_PROMPT_BYTES || requests.maxStdoutBytes !== MAX_STREAM_BYTES || requests.maxStderrBytes !== MAX_STREAM_BYTES || requests.rubric !== RUBRIC || !sameValue$2(requests.schema, JUDGE_SCHEMA$1) || !sameValue$2(requests.requests?.forward?.payload, payloads.forward) || !sameValue$2(requests.requests?.swapped?.payload, payloads.swapped) || requests.requests?.forward?.payloadDigest !== valueDigest$2(payloads.forward) || requests.requests?.swapped?.payloadDigest !== valueDigest$2(payloads.swapped) || !sameValue$2(requests.requests?.forward?.order, {
+	if (requests.judgeInputDigest !== input.contentDigest || requests.judgeModel !== JUDGE_MODEL$1 || requests.timeoutMs !== JUDGE_TIMEOUT_MS$1 || requests.maxBudgetUsd !== Number(JUDGE_BUDGET_USD$1) || requests.maxAttemptsPerOrder !== MAX_ATTEMPTS || requests.maxPayloadBytes !== MAX_PROMPT_BYTES || requests.maxStdoutBytes !== MAX_STREAM_BYTES || requests.maxStderrBytes !== MAX_STREAM_BYTES || requests.rubric !== RUBRIC || !sameValue$3(requests.schema, JUDGE_SCHEMA$1) || !sameValue$3(requests.requests?.forward?.payload, payloads.forward) || !sameValue$3(requests.requests?.swapped?.payload, payloads.swapped) || requests.requests?.forward?.payloadDigest !== valueDigest$2(payloads.forward) || requests.requests?.swapped?.payloadDigest !== valueDigest$2(payloads.swapped) || !sameValue$3(requests.requests?.forward?.order, {
 		A: TREATMENTS$1[0],
 		B: TREATMENTS$1[1]
-	}) || !sameValue$2(requests.requests?.swapped?.order, {
+	}) || !sameValue$3(requests.requests?.swapped?.order, {
 		A: TREATMENTS$1[1],
 		B: TREATMENTS$1[0]
-	})) fail$2("frozen judge request or arm order differs from the C5 contract");
-	for (const payload of Object.values(payloads)) if (Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_PROMPT_BYTES) fail$2("frozen judge request exceeds the C5 payload bound");
+	})) fail$3("frozen judge request or arm order differs from the C5 contract");
+	for (const payload of Object.values(payloads)) if (Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_PROMPT_BYTES) fail$3("frozen judge request exceeds the C5 payload bound");
 	return requests;
 }
 function judgeArgv() {
@@ -11479,10 +11480,10 @@ function judgeArgv() {
 	];
 }
 function validScores(value) {
-	return value !== null && typeof value === "object" && !Array.isArray(value) && sameValue$2(Object.keys(value).sort(), DIMENSIONS.map(([key]) => key).sort()) && Object.values(value).every((score) => Number.isInteger(score) && score >= 1 && score <= 10);
+	return value !== null && typeof value === "object" && !Array.isArray(value) && sameValue$3(Object.keys(value).sort(), DIMENSIONS.map(([key]) => key).sort()) && Object.values(value).every((score) => Number.isInteger(score) && score >= 1 && score <= 10);
 }
 function validResponse(value) {
-	return value !== null && typeof value === "object" && !Array.isArray(value) && sameValue$2(Object.keys(value).sort(), [
+	return value !== null && typeof value === "object" && !Array.isArray(value) && sameValue$3(Object.keys(value).sort(), [
 		"rationale",
 		"scores",
 		"winner"
@@ -11490,7 +11491,7 @@ function validResponse(value) {
 		"A",
 		"B",
 		"tie"
-	].includes(value.winner) && typeof value.rationale === "string" && Boolean(value.rationale.trim()) && value.rationale.length <= 4096 && value.scores !== null && typeof value.scores === "object" && !Array.isArray(value.scores) && sameValue$2(Object.keys(value.scores).sort(), ["A", "B"]) && validScores(value.scores.A) && validScores(value.scores.B);
+	].includes(value.winner) && typeof value.rationale === "string" && Boolean(value.rationale.trim()) && value.rationale.length <= 4096 && value.scores !== null && typeof value.scores === "object" && !Array.isArray(value.scores) && sameValue$3(Object.keys(value.scores).sort(), ["A", "B"]) && validScores(value.scores.A) && validScores(value.scores.B);
 }
 function normalizedPath(value) {
 	return typeof value === "string" ? value.replaceAll("\\", "/") : "";
@@ -11504,7 +11505,7 @@ function rootBeforeSuffix(value, suffix) {
 	return normalizedPath(value).slice(0, -1 * `/${suffix}`.length);
 }
 function validatePreDispatch(preDispatch, anchor, requests, request, order, n) {
-	if (!sameValue$2(preDispatch.definitionRef, DEFINITION_REF$1) || preDispatch.trialId !== anchor.trialId || preDispatch.subject !== anchor.subject || preDispatch.baseSha !== anchor.baseSha || preDispatch.executionMode !== "production" || preDispatch.requestSetDigest !== requests.contentDigest || preDispatch.payloadDigest !== request.payloadDigest || !sameValue$2(preDispatch.payload, request.payload) || preDispatch.order !== order || preDispatch.attempt !== n || preDispatch.executable !== "claude" || !sameValue$2(preDispatch.argv, judgeArgv()) || preDispatch.judgeModel !== JUDGE_MODEL$1 || preDispatch.sidekickEnabled !== false || preDispatch.toolAccess !== false || preDispatch.permissionBypass !== false || preDispatch.maxBudgetUsd !== Number(JUDGE_BUDGET_USD$1) || preDispatch.timeoutMs !== JUDGE_TIMEOUT_MS$1 || preDispatch.maxStdoutBytes !== MAX_STREAM_BYTES || preDispatch.maxStderrBytes !== MAX_STREAM_BYTES || !UUID_PATTERN$2.test(preDispatch.dispatchToken ?? "") || !Number.isFinite(Date.parse(preDispatch.createdAt ?? ""))) fail$2(`${order} pre-dispatch receipt is not the frozen production call`);
+	if (!sameValue$3(preDispatch.definitionRef, DEFINITION_REF$1) || preDispatch.trialId !== anchor.trialId || preDispatch.subject !== anchor.subject || preDispatch.baseSha !== anchor.baseSha || preDispatch.executionMode !== "production" || preDispatch.requestSetDigest !== requests.contentDigest || preDispatch.payloadDigest !== request.payloadDigest || !sameValue$3(preDispatch.payload, request.payload) || preDispatch.order !== order || preDispatch.attempt !== n || preDispatch.executable !== "claude" || !sameValue$3(preDispatch.argv, judgeArgv()) || preDispatch.judgeModel !== JUDGE_MODEL$1 || preDispatch.sidekickEnabled !== false || preDispatch.toolAccess !== false || preDispatch.permissionBypass !== false || preDispatch.maxBudgetUsd !== Number(JUDGE_BUDGET_USD$1) || preDispatch.timeoutMs !== JUDGE_TIMEOUT_MS$1 || preDispatch.maxStdoutBytes !== MAX_STREAM_BYTES || preDispatch.maxStderrBytes !== MAX_STREAM_BYTES || !UUID_PATTERN$2.test(preDispatch.dispatchToken ?? "") || !Number.isFinite(Date.parse(preDispatch.createdAt ?? ""))) fail$3(`${order} pre-dispatch receipt is not the frozen production call`);
 	return preDispatch;
 }
 function validateProcessReceipt(processReceipt, preDispatch, anchor, order, n) {
@@ -11517,28 +11518,28 @@ function validateProcessReceipt(processReceipt, preDispatch, anchor, order, n) {
 	];
 	const argv = processReceipt.argv;
 	const wrapperPathsValid = Array.isArray(argv) && argv.length === 6 && absolutePathEndsWith(argv[0], "scripts/gate-2702/judge.mjs") && argv[1] === "__dispatch" && expectedSuffixes.every((suffix, index) => absolutePathEndsWith(argv[index + 2], suffix)) && new Set(expectedSuffixes.map((suffix, index) => rootBeforeSuffix(argv[index + 2], suffix))).size === 1;
-	if (!sameValue$2(processReceipt.definitionRef, DEFINITION_REF$1) || processReceipt.trialId !== preDispatch.trialId || processReceipt.subject !== preDispatch.subject || processReceipt.baseSha !== preDispatch.baseSha || processReceipt.executionMode !== "production" || processReceipt.requestSetDigest !== preDispatch.requestSetDigest || processReceipt.payloadDigest !== preDispatch.payloadDigest || processReceipt.order !== order || processReceipt.attempt !== n || processReceipt.dispatchToken !== preDispatch.dispatchToken || processReceipt.preDispatchDigest !== preDispatch.contentDigest || typeof processReceipt.executable !== "string" || !isAbsolute(processReceipt.executable) || !wrapperPathsValid || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 0 || !(processReceipt.processStartTimeTicks === null || /^\d+$/.test(processReceipt.processStartTimeTicks ?? "")) || !Number.isFinite(Date.parse(processReceipt.launchedAt ?? ""))) fail$2(`${order} judge process receipt is invalid`);
+	if (!sameValue$3(processReceipt.definitionRef, DEFINITION_REF$1) || processReceipt.trialId !== preDispatch.trialId || processReceipt.subject !== preDispatch.subject || processReceipt.baseSha !== preDispatch.baseSha || processReceipt.executionMode !== "production" || processReceipt.requestSetDigest !== preDispatch.requestSetDigest || processReceipt.payloadDigest !== preDispatch.payloadDigest || processReceipt.order !== order || processReceipt.attempt !== n || processReceipt.dispatchToken !== preDispatch.dispatchToken || processReceipt.preDispatchDigest !== preDispatch.contentDigest || typeof processReceipt.executable !== "string" || !isAbsolute(processReceipt.executable) || !wrapperPathsValid || !Number.isSafeInteger(processReceipt.pid) || processReceipt.pid <= 0 || !(processReceipt.processStartTimeTicks === null || /^\d+$/.test(processReceipt.processStartTimeTicks ?? "")) || !Number.isFinite(Date.parse(processReceipt.launchedAt ?? ""))) fail$3(`${order} judge process receipt is invalid`);
 	return processReceipt;
 }
 function validateGate(gate, preDispatch, processReceipt, order, n) {
-	if (!sameValue$2(gate.definitionRef, DEFINITION_REF$1) || gate.trialId !== preDispatch.trialId || gate.subject !== preDispatch.subject || gate.baseSha !== preDispatch.baseSha || gate.executionMode !== "production" || gate.requestSetDigest !== preDispatch.requestSetDigest || gate.payloadDigest !== preDispatch.payloadDigest || gate.order !== order || gate.attempt !== n || gate.dispatchToken !== preDispatch.dispatchToken || gate.preDispatchDigest !== preDispatch.contentDigest || gate.processDigest !== processReceipt.contentDigest || !Number.isFinite(Date.parse(gate.authorizedAt ?? ""))) fail$2(`${order} judge gate is invalid`);
+	if (!sameValue$3(gate.definitionRef, DEFINITION_REF$1) || gate.trialId !== preDispatch.trialId || gate.subject !== preDispatch.subject || gate.baseSha !== preDispatch.baseSha || gate.executionMode !== "production" || gate.requestSetDigest !== preDispatch.requestSetDigest || gate.payloadDigest !== preDispatch.payloadDigest || gate.order !== order || gate.attempt !== n || gate.dispatchToken !== preDispatch.dispatchToken || gate.preDispatchDigest !== preDispatch.contentDigest || gate.processDigest !== processReceipt.contentDigest || !Number.isFinite(Date.parse(gate.authorizedAt ?? ""))) fail$3(`${order} judge gate is invalid`);
 	return gate;
 }
 function capturedStreamBytes(stream, label) {
 	if (stream === null) return null;
-	if (stream?.encoding !== "base64" || !Number.isSafeInteger(stream.capturedBytes) || !Number.isSafeInteger(stream.totalBytes) || stream.capturedBytes < 0 || stream.totalBytes < stream.capturedBytes || stream.capturedBytes > MAX_STREAM_BYTES || !SHA256_PATTERN.test(stream.contentDigest ?? "") || typeof stream.truncated !== "boolean") fail$2(`${label} capture metadata is invalid`);
+	if (stream?.encoding !== "base64" || !Number.isSafeInteger(stream.capturedBytes) || !Number.isSafeInteger(stream.totalBytes) || stream.capturedBytes < 0 || stream.totalBytes < stream.capturedBytes || stream.capturedBytes > MAX_STREAM_BYTES || !SHA256_PATTERN.test(stream.contentDigest ?? "") || typeof stream.truncated !== "boolean") fail$3(`${label} capture metadata is invalid`);
 	const bytes = decodeBase64$1(stream.bytes, label);
-	if (bytes.length !== stream.capturedBytes || stream.truncated !== stream.totalBytes > stream.capturedBytes || !stream.truncated && stream.contentDigest !== sha256Bytes$1(bytes)) fail$2(`${label} capture digest or bounds are invalid`);
+	if (bytes.length !== stream.capturedBytes || stream.truncated !== stream.totalBytes > stream.capturedBytes || !stream.truncated && stream.contentDigest !== sha256Bytes$1(bytes)) fail$3(`${label} capture digest or bounds are invalid`);
 	return bytes;
 }
 function validateOutcome(outcome, preDispatch, processReceipt, gate, order, n) {
-	if (!sameValue$2(outcome.definitionRef, DEFINITION_REF$1) || outcome.trialId !== preDispatch.trialId || outcome.subject !== preDispatch.subject || outcome.baseSha !== preDispatch.baseSha || outcome.executionMode !== "production" || outcome.requestSetDigest !== preDispatch.requestSetDigest || outcome.payloadDigest !== preDispatch.payloadDigest || outcome.order !== order || outcome.attempt !== n || outcome.dispatchToken !== preDispatch.dispatchToken || outcome.preDispatchDigest !== preDispatch.contentDigest || outcome.processDigest !== (processReceipt?.contentDigest ?? null) || outcome.gateDigest !== (gate?.contentDigest ?? null) || !Number.isFinite(Date.parse(outcome.startedAt ?? "")) || !Number.isFinite(Date.parse(outcome.endedAt ?? "")) || !(outcome.startedMonotonicNs === null || /^\d+$/.test(outcome.startedMonotonicNs ?? "")) || !(outcome.endedMonotonicNs === null || /^\d+$/.test(outcome.endedMonotonicNs ?? "")) || !(outcome.durationMs === null || typeof outcome.durationMs === "number" && Number.isFinite(outcome.durationMs) && outcome.durationMs >= 0) || !(outcome.exitCode === null || Number.isSafeInteger(outcome.exitCode) && outcome.exitCode >= 0) || !(outcome.signal === null || typeof outcome.signal === "string" && outcome.signal.length > 0) || typeof outcome.timedOut !== "boolean" || !(outcome.spawnError === null || typeof outcome.spawnError === "string" && outcome.spawnError.length > 0)) fail$2(`${order} judge outcome is invalid`);
+	if (!sameValue$3(outcome.definitionRef, DEFINITION_REF$1) || outcome.trialId !== preDispatch.trialId || outcome.subject !== preDispatch.subject || outcome.baseSha !== preDispatch.baseSha || outcome.executionMode !== "production" || outcome.requestSetDigest !== preDispatch.requestSetDigest || outcome.payloadDigest !== preDispatch.payloadDigest || outcome.order !== order || outcome.attempt !== n || outcome.dispatchToken !== preDispatch.dispatchToken || outcome.preDispatchDigest !== preDispatch.contentDigest || outcome.processDigest !== (processReceipt?.contentDigest ?? null) || outcome.gateDigest !== (gate?.contentDigest ?? null) || !Number.isFinite(Date.parse(outcome.startedAt ?? "")) || !Number.isFinite(Date.parse(outcome.endedAt ?? "")) || !(outcome.startedMonotonicNs === null || /^\d+$/.test(outcome.startedMonotonicNs ?? "")) || !(outcome.endedMonotonicNs === null || /^\d+$/.test(outcome.endedMonotonicNs ?? "")) || !(outcome.durationMs === null || typeof outcome.durationMs === "number" && Number.isFinite(outcome.durationMs) && outcome.durationMs >= 0) || !(outcome.exitCode === null || Number.isSafeInteger(outcome.exitCode) && outcome.exitCode >= 0) || !(outcome.signal === null || typeof outcome.signal === "string" && outcome.signal.length > 0) || typeof outcome.timedOut !== "boolean" || !(outcome.spawnError === null || typeof outcome.spawnError === "string" && outcome.spawnError.length > 0)) fail$3(`${order} judge outcome is invalid`);
 	const stdoutBytes = capturedStreamBytes(outcome.stdout, `${order} outcome stdout`);
 	const stderrBytes = capturedStreamBytes(outcome.stderr, `${order} outcome stderr`);
-	if (outcome.spawnError === null && stdoutBytes === null) fail$2(`${order} judge outcome has no stdout capture`);
+	if (outcome.spawnError === null && stdoutBytes === null) fail$3(`${order} judge outcome has no stdout capture`);
 	const wallDuration = Date.parse(outcome.endedAt) - Date.parse(outcome.startedAt);
 	const monotonicPair = outcome.startedMonotonicNs !== null && outcome.endedMonotonicNs !== null;
-	if (wallDuration < 0 || monotonicPair && BigInt(outcome.endedMonotonicNs) < BigInt(outcome.startedMonotonicNs) || monotonicPair && outcome.durationMs === null || !monotonicPair && (outcome.startedMonotonicNs !== null || outcome.endedMonotonicNs !== null || outcome.durationMs !== null)) fail$2(`${order} judge outcome timing is invalid`);
+	if (wallDuration < 0 || monotonicPair && BigInt(outcome.endedMonotonicNs) < BigInt(outcome.startedMonotonicNs) || monotonicPair && outcome.durationMs === null || !monotonicPair && (outcome.startedMonotonicNs !== null || outcome.endedMonotonicNs !== null || outcome.durationMs !== null)) fail$3(`${order} judge outcome timing is invalid`);
 	return {
 		outcome,
 		stdoutBytes,
@@ -11644,13 +11645,13 @@ function validateAttempt(artifacts, anchor, requests, order, attemptNumber) {
 	const processReceipt = readReceipt$1(artifacts, lifecyclePath(anchor.subject, order, attemptNumber, "process"), "Gate2702JudgeProcess", false);
 	if (processReceipt) validateProcessReceipt(processReceipt, preDispatch, anchor, order, attemptNumber);
 	const gate = readReceipt$1(artifacts, lifecyclePath(anchor.subject, order, attemptNumber, "gate"), "Gate2702JudgeGate", false);
-	if (gate && !processReceipt) fail$2(`${order} judge gate has no process receipt`);
+	if (gate && !processReceipt) fail$3(`${order} judge gate has no process receipt`);
 	if (gate) validateGate(gate, preDispatch, processReceipt, order, attemptNumber);
 	const outcomeData = validateOutcome(readReceipt$1(artifacts, lifecyclePath(anchor.subject, order, attemptNumber, "outcome"), "Gate2702JudgeOutcome"), preDispatch, processReceipt, gate, order, attemptNumber);
 	const derived = deriveAttempt(outcomeData);
 	const attempt = readReceipt$1(artifacts, lifecyclePath(anchor.subject, order, attemptNumber, "attempt"), "Gate2702JudgeAttempt");
 	const expectedArgv = [preDispatch.executable, ...preDispatch.argv];
-	if (!sameValue$2(attempt.definitionRef, DEFINITION_REF$1) || attempt.trialId !== anchor.trialId || attempt.subject !== anchor.subject || attempt.baseSha !== anchor.baseSha || attempt.executionMode !== "production" || attempt.requestSetDigest !== requests.contentDigest || attempt.payloadDigest !== request.payloadDigest || attempt.order !== order || attempt.attempt !== attemptNumber || attempt.preDispatchDigest !== preDispatch.contentDigest || attempt.processDigest !== (processReceipt?.contentDigest ?? null) || attempt.outcomeDigest !== outcomeData.outcome.contentDigest || !sameValue$2(attempt.argv, expectedArgv) || attempt.judgeModel !== JUDGE_MODEL$1 || attempt.sidekickEnabled !== false || attempt.startedAt !== outcomeData.outcome.startedAt || attempt.endedAt !== outcomeData.outcome.endedAt || attempt.startedMonotonicNs !== outcomeData.outcome.startedMonotonicNs || attempt.endedMonotonicNs !== outcomeData.outcome.endedMonotonicNs || attempt.durationMs !== outcomeData.outcome.durationMs || attempt.exitCode !== outcomeData.outcome.exitCode || attempt.signal !== outcomeData.outcome.signal || attempt.timedOut !== outcomeData.outcome.timedOut || !sameValue$2(attempt.stdout, outcomeData.outcome.stdout) || !sameValue$2(attempt.stderr, outcomeData.outcome.stderr) || attempt.outcome !== derived.outcome || attempt.retryable !== derived.retryable || attempt.failureClass !== derived.failureClass || !sameValue$2(attempt.response, derived.response) || attempt.costUsd !== derived.costUsd || !(attempt.costUsd === null || typeof attempt.costUsd === "number" && Number.isFinite(attempt.costUsd) && attempt.costUsd >= 0)) fail$2(`${order} attempt ${attemptNumber} does not rederive`);
+	if (!sameValue$3(attempt.definitionRef, DEFINITION_REF$1) || attempt.trialId !== anchor.trialId || attempt.subject !== anchor.subject || attempt.baseSha !== anchor.baseSha || attempt.executionMode !== "production" || attempt.requestSetDigest !== requests.contentDigest || attempt.payloadDigest !== request.payloadDigest || attempt.order !== order || attempt.attempt !== attemptNumber || attempt.preDispatchDigest !== preDispatch.contentDigest || attempt.processDigest !== (processReceipt?.contentDigest ?? null) || attempt.outcomeDigest !== outcomeData.outcome.contentDigest || !sameValue$3(attempt.argv, expectedArgv) || attempt.judgeModel !== JUDGE_MODEL$1 || attempt.sidekickEnabled !== false || attempt.startedAt !== outcomeData.outcome.startedAt || attempt.endedAt !== outcomeData.outcome.endedAt || attempt.startedMonotonicNs !== outcomeData.outcome.startedMonotonicNs || attempt.endedMonotonicNs !== outcomeData.outcome.endedMonotonicNs || attempt.durationMs !== outcomeData.outcome.durationMs || attempt.exitCode !== outcomeData.outcome.exitCode || attempt.signal !== outcomeData.outcome.signal || attempt.timedOut !== outcomeData.outcome.timedOut || !sameValue$3(attempt.stdout, outcomeData.outcome.stdout) || !sameValue$3(attempt.stderr, outcomeData.outcome.stderr) || attempt.outcome !== derived.outcome || attempt.retryable !== derived.retryable || attempt.failureClass !== derived.failureClass || !sameValue$3(attempt.response, derived.response) || attempt.costUsd !== derived.costUsd || !(attempt.costUsd === null || typeof attempt.costUsd === "number" && Number.isFinite(attempt.costUsd) && attempt.costUsd >= 0)) fail$3(`${order} attempt ${attemptNumber} does not rederive`);
 	return attempt;
 }
 function lifecycleExists(artifacts, subject, order, attempt) {
@@ -11666,22 +11667,22 @@ function assertNoOverCapArtifacts(artifacts, subject, order) {
 	const pattern = new RegExp(`^judging/issue-${subject}/${order}/attempt-(\\d+)(?:\\.(?:pre-dispatch|process|gate|outcome))?\\.json$`);
 	for (const path of artifacts.keys()) {
 		const match = pattern.exec(path);
-		if (match && Number(match[1]) > MAX_ATTEMPTS) fail$2(`${order} judge call cap was exceeded by ${path}`);
+		if (match && Number(match[1]) > MAX_ATTEMPTS) fail$3(`${order} judge call cap was exceeded by ${path}`);
 	}
 }
 function validateAttemptSequence(artifacts, anchor, requests, result, order) {
 	const manifest = result.attempts?.[order];
-	if (!Array.isArray(manifest) || manifest.length < 1 || manifest.length > MAX_ATTEMPTS || manifest.some((entry, index) => !sameValue$2(Object.keys(entry ?? {}).sort(), ["attempt", "contentDigest"]) || entry.attempt !== index + 1 || !SHA256_PATTERN.test(entry.contentDigest ?? ""))) fail$2(`${order} judge result has an invalid attempt manifest`);
+	if (!Array.isArray(manifest) || manifest.length < 1 || manifest.length > MAX_ATTEMPTS || manifest.some((entry, index) => !sameValue$3(Object.keys(entry ?? {}).sort(), ["attempt", "contentDigest"]) || entry.attempt !== index + 1 || !SHA256_PATTERN.test(entry.contentDigest ?? ""))) fail$3(`${order} judge result has an invalid attempt manifest`);
 	assertNoOverCapArtifacts(artifacts, anchor.subject, order);
 	const attempts = manifest.map((reference, index) => {
 		const attempt = validateAttempt(artifacts, anchor, requests, order, index + 1);
-		if (attempt.contentDigest !== reference.contentDigest) fail$2(`${order} judge result references a different attempt`);
+		if (attempt.contentDigest !== reference.contentDigest) fail$3(`${order} judge result references a different attempt`);
 		return attempt;
 	});
-	for (const attempt of attempts.slice(0, -1)) if (attempt.outcome !== "failed" || attempt.retryable !== true) fail$2(`${order} judge continued after a terminal attempt`);
+	for (const attempt of attempts.slice(0, -1)) if (attempt.outcome !== "failed" || attempt.retryable !== true) fail$3(`${order} judge continued after a terminal attempt`);
 	const terminal = attempts.at(-1);
-	if (terminal.outcome !== "valid" && terminal.retryable === true && terminal.attempt < MAX_ATTEMPTS) fail$2(`${order} judge stopped before its fixed retry cap`);
-	for (let future = attempts.length + 1; future <= MAX_ATTEMPTS; future += 1) if (lifecycleExists(artifacts, anchor.subject, order, future)) fail$2(`${order} judge result omits a later attempt`);
+	if (terminal.outcome !== "valid" && terminal.retryable === true && terminal.attempt < MAX_ATTEMPTS) fail$3(`${order} judge stopped before its fixed retry cap`);
+	for (let future = attempts.length + 1; future <= MAX_ATTEMPTS; future += 1) if (lifecycleExists(artifacts, anchor.subject, order, future)) fail$3(`${order} judge result omits a later attempt`);
 	return attempts;
 }
 function canonicalWinner(attempt, request) {
@@ -11761,9 +11762,9 @@ function resultBody(input, requests, attempts) {
 */
 function validateGate2702JudgeEvidence({ artifactBytesByPath, trialId, subject, baseSha }) {
 	const artifacts = requireArtifactMap(artifactBytesByPath);
-	if (!UUID_PATTERN$2.test(trialId ?? "")) fail$2("trialId is not an RFC 4122 UUID");
-	if (!Number.isSafeInteger(subject) || subject <= 0) fail$2("subject is not a valid issue number");
-	if (!/^[0-9a-f]{40}$/.test(baseSha ?? "")) fail$2("baseSha is not a pinned Git SHA");
+	if (!UUID_PATTERN$2.test(trialId ?? "")) fail$3("trialId is not an RFC 4122 UUID");
+	if (!Number.isSafeInteger(subject) || subject <= 0) fail$3("subject is not a valid issue number");
+	if (!/^[0-9a-f]{40}$/.test(baseSha ?? "")) fail$3("baseSha is not a pinned Git SHA");
 	const anchor = {
 		trialId,
 		subject,
@@ -11780,7 +11781,7 @@ function validateGate2702JudgeEvidence({ artifactBytesByPath, trialId, subject, 
 	const expected = resultBody(input, requests, attempts);
 	const actual = { ...result };
 	delete actual.contentDigest;
-	if (!sameValue$2(actual, expected)) fail$2("judge result does not match its frozen evidence");
+	if (!sameValue$3(actual, expected)) fail$3("judge result does not match its frozen evidence");
 	return {
 		input,
 		requests,
@@ -11865,6 +11866,243 @@ var init_seal_judge = __esmMin((() => {
 		"Judge output quality, not length, apparent effort, model, or cost. Return tie only when equivalent.",
 		`Score 1-10 on: ${DIMENSIONS.map(([key, description]) => `${key} (${description})`).join("; ")}`
 	].join("\n");
+}));
+//#endregion
+//#region scripts/lib/shell-quote.mjs
+/** POSIX single-quote `value` so it survives copy-paste as one inert argv element. */
+function shellQuote(value) {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+var init_shell_quote = __esmMin((() => {}));
+//#endregion
+//#region scripts/gate-2702/sandbox-dispatch.mjs
+function fail$2(message) {
+	throw new Error(message);
+}
+function canonicalValue$2(value) {
+	if (Array.isArray(value)) return value.map(canonicalValue$2);
+	if (value === null || typeof value !== "object") return value;
+	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue$2(value[key])]));
+}
+function canonicalJson$2(value) {
+	return JSON.stringify(canonicalValue$2(value));
+}
+function sameValue$2(left, right) {
+	return canonicalJson$2(left) === canonicalJson$2(right);
+}
+function sha256(value) {
+	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+function pluginFiles(root) {
+	const files = [];
+	let totalBytes = 0;
+	const walk = (directory) => {
+		for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+			const path = join(directory, entry.name);
+			const metadata = lstatSync(path);
+			if (metadata.isSymbolicLink()) fail$2(`Sidekick plugin snapshot refuses symlink ${path}`);
+			if (metadata.isDirectory()) {
+				walk(path);
+				continue;
+			}
+			if (!metadata.isFile()) fail$2(`Sidekick plugin snapshot refuses special file ${path}`);
+			totalBytes += metadata.size;
+			files.push({
+				path,
+				relativePath: relative(root, path),
+				metadata
+			});
+			if (files.length > MAX_PLUGIN_FILES || totalBytes > MAX_PLUGIN_BYTES) fail$2("Sidekick plugin snapshot exceeds its fixed bounds");
+		}
+	};
+	for (const relativeRoot of SIDEKICK_SNAPSHOT_ROOTS) {
+		const directory = join(root, relativeRoot);
+		if (!existsSync(directory)) fail$2(`Sidekick plugin snapshot is missing ${relativeRoot}`);
+		const metadata = lstatSync(directory);
+		if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail$2(`Sidekick plugin snapshot root is not a real directory: ${directory}`);
+		walk(directory);
+	}
+	return files;
+}
+function pluginTreeDigest(root) {
+	const hash = createHash("sha256");
+	for (const file of pluginFiles(root)) {
+		hash.update(file.relativePath);
+		hash.update("\0");
+		hash.update(readFileSync(file.path));
+		hash.update("\0");
+	}
+	return `sha256:${hash.digest("hex")}`;
+}
+function digestGate2702SidekickSnapshot(root) {
+	return pluginTreeDigest(resolve(root));
+}
+function uniqueSorted(values) {
+	return [...new Set(values.map((value) => resolve(value)))].sort();
+}
+function sandboxEnvironmentValue({ registration, sidekickEnvironment, isolatedHome, runtimeExecutables }) {
+	const tmp = join(isolatedHome, "tmp");
+	const xdgConfig = join(isolatedHome, ".config");
+	const xdgCache = join(isolatedHome, ".cache");
+	const xdgData = join(isolatedHome, ".local", "share");
+	const npmCache = join(isolatedHome, ".npm");
+	return {
+		CHD_EXPERIMENT_2702_ATTEMPT: String(registration.attempt),
+		CHD_EXPERIMENT_2702_BASE_SHA: registration.baseSha,
+		CHD_EXPERIMENT_2702_RUN_DIR: registration.runDir,
+		CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
+		CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
+		CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+		CLAUDE_CODE_TMPDIR: tmp,
+		CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+		DISABLE_AUTOUPDATER: "1",
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_NOSYSTEM: "1",
+		HOME: isolatedHome,
+		LANG: "C.UTF-8",
+		LC_ALL: "C.UTF-8",
+		NO_COLOR: "1",
+		NPM_CONFIG_CACHE: npmCache,
+		NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+		PATH: [...new Set([
+			...runtimeExecutables.map((path) => dirname(path)),
+			"/usr/local/bin",
+			"/usr/bin",
+			"/bin"
+		])].join(":"),
+		SHELL: "/bin/bash",
+		TERM: "dumb",
+		TMPDIR: "/tmp",
+		TZ: "UTC",
+		XDG_CACHE_HOME: xdgCache,
+		XDG_CONFIG_HOME: xdgConfig,
+		XDG_DATA_HOME: xdgData,
+		...sidekickEnvironment
+	};
+}
+function assertGate2702SandboxPreDispatch({ preDispatch, registration, worktreeIdentity }) {
+	const sandbox = preDispatch?.sandbox;
+	if (!sandbox || sandbox.enforcer !== "srt" || sandbox.package?.name !== "@anthropic-ai/sandbox-runtime" || sandbox.package?.version !== EXPECTED_SRT_VERSION || !sandbox.package?.root?.endsWith("/node_modules/@anthropic-ai/sandbox-runtime") || !DIGEST_PATTERN$1.test(sandbox.package?.manifestDigest ?? "") || !DIGEST_PATTERN$1.test(sandbox.package?.cliDigest ?? "") || !isAbsolute(sandbox.package?.root ?? "") || sandbox.package?.cliPath !== join(sandbox.package?.root ?? "", "dist", "cli.js") || sandbox.launcherExecutable !== preDispatch.argv?.[0] || sandbox.package.cliPath !== preDispatch.argv?.[1] || preDispatch.argv?.[2] !== "-s" || preDispatch.argv?.[3] !== join(registration.runDir, "sandbox", "settings.json") || preDispatch.argv?.[4] !== "-c" || typeof preDispatch.argv?.[5] !== "string" || preDispatch.argv.length !== 6 || sandbox.credentialMode !== "isolated-home-credential-only" || sandbox.hostHomeDenied !== true || typeof sandbox.hostHome !== "string" || typeof sandbox.isolatedHome !== "string" || typeof sandbox.gitDirectory !== "string" || typeof sandbox.gitCommonDirectory !== "string") fail$2("pre-dispatch receipt has no valid sandbox enforcer attestation");
+	if (!sandbox.policy || sandbox.policyDigest !== sha256(canonicalJson$2(sandbox.policy)) || !Array.isArray(sandbox.allowedReadRoots) || !Array.isArray(sandbox.allowedWriteRoots) || sandbox.allowedReadRoots.some((path) => !isAbsolute(path)) || sandbox.allowedWriteRoots.some((path) => !isAbsolute(path)) || !sameValue$2(sandbox.policy.filesystem?.allowRead, sandbox.allowedReadRoots) || !sameValue$2(sandbox.policy.filesystem?.allowWrite, sandbox.allowedWriteRoots)) fail$2("pre-dispatch sandbox policy attestation is inconsistent");
+	const hostHome = resolve(sandbox.hostHome);
+	const isolatedHome = resolve(sandbox.isolatedHome);
+	const expectedIsolatedHome = resolve(registration.runDir, "sandbox", "home");
+	const expectedSidekickPath = resolve(registration.runDir, "../../../..", "sandbox-runtime", SIDEKICK_SNAPSHOT_DIRECTORY$1);
+	if (!Array.isArray(sandbox.tools) || sandbox.tools.length !== 3 || sandbox.tools.some((tool) => !tool || typeof tool !== "object" || Array.isArray(tool) || ![
+		"bwrap",
+		"socat",
+		"rg"
+	].includes(tool.name) || !isAbsolute(tool.command ?? "") || !isAbsolute(tool.resolved ?? "") || tool.version !== null && typeof tool.version !== "string") || new Set(sandbox.tools.map((tool) => tool.name)).size !== 3) fail$2("pre-dispatch sandbox tools are not the fixed runtime set");
+	const bwrap = sandbox.tools.find((tool) => tool.name === "bwrap");
+	const socat = sandbox.tools.find((tool) => tool.name === "socat");
+	const rg = sandbox.tools.find((tool) => tool.name === "rg");
+	if (sandbox.policy.bwrapPath !== bwrap.resolved || sandbox.policy.socatPath !== socat.resolved || sandbox.policy.ripgrep?.command !== rg.resolved) fail$2("pre-dispatch sandbox policy does not bind its runtime tools");
+	if (resolve(sandbox.gitDirectory) !== resolve(worktreeIdentity.gitDirectory) || resolve(sandbox.gitCommonDirectory) !== resolve(worktreeIdentity.gitDirectory, "../..") || !Array.isArray(sandbox.workerArgv) || sandbox.workerArgv.length === 0 || sandbox.workerArgv.some((value) => typeof value !== "string" || !value) || !isAbsolute(sandbox.workerArgv[0])) fail$2("pre-dispatch sandbox command scope is not the registered scope");
+	if (preDispatch.executionMode === "test" && sandbox.sidekickSnapshot !== null || preDispatch.executionMode !== "test" && (sandbox.sidekickSnapshot?.path !== expectedSidekickPath || !DIGEST_PATTERN$1.test(sandbox.sidekickSnapshot?.contentDigest ?? ""))) fail$2("pre-dispatch sandbox has no fixed Sidekick snapshot");
+	const expectedAllowedReadRoots = uniqueSorted([
+		registration.worktreePath,
+		registration.runDir,
+		worktreeIdentity.gitDirectory,
+		sandbox.gitCommonDirectory,
+		sandbox.package.root,
+		rg.resolved,
+		sandbox.workerArgv[0],
+		...sandbox.sidekickSnapshot ? [sandbox.sidekickSnapshot.path] : []
+	]);
+	if (hostHome === resolve("/") || isolatedHome !== expectedIsolatedHome || !sameValue$2(sandbox.policy.filesystem.denyRead, [hostHome]) || sandbox.policy.filesystem.allowRead.includes(hostHome) || !sameValue$2(sandbox.policy.filesystem.denyWrite, ["/tmp/claude", "/private/tmp/claude"]) || !sameValue$2(sandbox.allowedWriteRoots, uniqueSorted([
+		registration.worktreePath,
+		isolatedHome,
+		worktreeIdentity.gitDirectory
+	])) || !sameValue$2(sandbox.allowedReadRoots, expectedAllowedReadRoots) || preDispatch.argv[5] !== [`cd ${shellQuote(registration.worktreePath)}`, `exec ${sandbox.workerArgv.map(shellQuote).join(" ")}`].join(" && ")) fail$2("pre-dispatch sandbox filesystem scope is not the registered scope");
+	const expectedDomains = preDispatch.executionMode === "test" ? [] : [MODEL_DOMAIN];
+	if (!sameValue$2(sandbox.policy.network?.allowedDomains, expectedDomains) || !sameValue$2(sandbox.policy.network?.deniedDomains, [])) fail$2("pre-dispatch sandbox network scope is not model-only");
+	if (!preDispatch.environment || Array.isArray(preDispatch.environment) || Object.values(preDispatch.environment).some((value) => typeof value !== "string") || preDispatch.environmentDigest !== sha256(canonicalJson$2(preDispatch.environment))) fail$2("pre-dispatch sandbox environment has no valid attestation");
+	const expectedEnvironmentKeys = [...new Set([...GATE_2702_SANDBOX_ENV_KEYS, ...Object.keys(preDispatch.sidekickEnvironment ?? {})])].sort();
+	const expectedWorkerEnvironmentKeys = [...new Set([...expectedEnvironmentKeys, ...GATE_2702_SRT_INJECTED_ENV_KEYS])].sort();
+	const expectedEnvironment = sandboxEnvironmentValue({
+		registration,
+		sidekickEnvironment: preDispatch.sidekickEnvironment,
+		isolatedHome,
+		runtimeExecutables: [rg.resolved, sandbox.workerArgv[0]]
+	});
+	if (!sameValue$2(preDispatch.environmentKeys, expectedEnvironmentKeys) || !sameValue$2(Object.keys(preDispatch.environment).sort(), expectedEnvironmentKeys) || !sameValue$2(preDispatch.workerEnvironmentKeys, expectedWorkerEnvironmentKeys) || !sameValue$2(preDispatch.environment, expectedEnvironment)) fail$2("pre-dispatch sandbox environment exceeds its fixed allowlist");
+	return sandbox;
+}
+var SRT_PACKAGE_ROOT, EXPECTED_SRT_VERSION, MAX_PLUGIN_FILES, MAX_PLUGIN_BYTES, MODEL_DOMAIN, SIDEKICK_SNAPSHOT_ROOTS, SIDEKICK_SNAPSHOT_DIRECTORY$1, DIGEST_PATTERN$1, GATE_2702_SANDBOX_ENV_KEYS, GATE_2702_SRT_INJECTED_ENV_KEYS;
+var init_sandbox_dispatch = __esmMin((() => {
+	init_shell_quote();
+	init_behavior_context();
+	SRT_PACKAGE_ROOT = join(resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."), "node_modules", "@anthropic-ai", "sandbox-runtime");
+	join(SRT_PACKAGE_ROOT, "package.json");
+	join(SRT_PACKAGE_ROOT, "dist", "cli.js");
+	join(SRT_PACKAGE_ROOT, "dist", "index.js");
+	EXPECTED_SRT_VERSION = "0.0.52";
+	MAX_PLUGIN_FILES = 1024;
+	MAX_PLUGIN_BYTES = 16 * 1024 * 1024;
+	MODEL_DOMAIN = "api.anthropic.com";
+	SIDEKICK_SNAPSHOT_ROOTS = [
+		".claude-plugin",
+		"hooks",
+		"scripts"
+	];
+	SIDEKICK_SNAPSHOT_DIRECTORY$1 = `claude-sidekick-${GATE_2702_SIDEKICK_VERSION}`;
+	DIGEST_PATTERN$1 = /^sha256:[0-9a-f]{64}$/;
+	GATE_2702_SANDBOX_ENV_KEYS = [
+		"CHD_EXPERIMENT_2702_ATTEMPT",
+		"CHD_EXPERIMENT_2702_BASE_SHA",
+		"CHD_EXPERIMENT_2702_RUN_DIR",
+		"CHD_EXPERIMENT_2702_SUBJECT",
+		"CHD_EXPERIMENT_2702_TREATMENT",
+		"CHD_EXPERIMENT_2702_TRIAL_ID",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+		"CLAUDE_CODE_TMPDIR",
+		"CLAUDE_CONFIG_DIR",
+		"DISABLE_AUTOUPDATER",
+		"GIT_CONFIG_GLOBAL",
+		"GIT_CONFIG_NOSYSTEM",
+		"HOME",
+		"LANG",
+		"LC_ALL",
+		"NO_COLOR",
+		"NPM_CONFIG_CACHE",
+		"NPM_CONFIG_USERCONFIG",
+		"PATH",
+		"SHELL",
+		"TERM",
+		"TMPDIR",
+		"TZ",
+		"XDG_CACHE_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME"
+	];
+	GATE_2702_SRT_INJECTED_ENV_KEYS = [
+		"ALL_PROXY",
+		"CLAUDE_CODE_HOST_HTTP_PROXY_PORT",
+		"CLAUDE_CODE_HOST_SOCKS_PROXY_PORT",
+		"CLOUDSDK_PROXY_ADDRESS",
+		"CLOUDSDK_PROXY_PORT",
+		"CLOUDSDK_PROXY_TYPE",
+		"DOCKER_HTTP_PROXY",
+		"DOCKER_HTTPS_PROXY",
+		"FTP_PROXY",
+		"GIT_SSH_COMMAND",
+		"GRPC_PROXY",
+		"HTTPS_PROXY",
+		"HTTP_PROXY",
+		"NO_PROXY",
+		"OLDPWD",
+		"PWD",
+		"RSYNC_PROXY",
+		"SANDBOX_RUNTIME",
+		"SHLVL",
+		"all_proxy",
+		"ftp_proxy",
+		"grpc_proxy",
+		"http_proxy",
+		"https_proxy",
+		"no_proxy"
+	];
 }));
 //#endregion
 //#region scripts/gate-2702/seal.mjs
@@ -12220,7 +12458,33 @@ function validateTerminalArm(runtime, paths, registration, validators, options) 
 			"--max-budget-usd",
 			String(runtime.plan.costCaps.workerUsd)
 		];
-		if (preDispatch.executionMode !== "production" || registration.executionMode !== "production" || !sameValue$1(preDispatch.argv, expectedArgv) || preDispatch.registrationDigest !== registration.contentDigest) fail$1("sealing refuses test-mode or non-registered worker argv");
+		if (!(validators !== productionValidators && preDispatch.sandbox === void 0 && sameValue$1(preDispatch.argv, expectedArgv))) {
+			const worktreeIdentity = readReceipt(join(runDir, "worktree-identity.json"), "Gate2702WorktreeIdentity", "worker worktree identity");
+			let sandbox;
+			try {
+				sandbox = assertGate2702SandboxPreDispatch({
+					preDispatch,
+					registration,
+					worktreeIdentity
+				});
+			} catch (error) {
+				fail$1(`sealing refuses test-mode or non-registered worker argv: ${error.message}`);
+			}
+			const expectedSidekickPath = join(paths.trialRoot, "sandbox-runtime", SIDEKICK_SNAPSHOT_DIRECTORY);
+			const settingsPath = join(runDir, "sandbox", "settings.json");
+			const expectedWorkerArgv = [
+				sandbox.workerArgv[0],
+				...expectedArgv.slice(1),
+				"--plugin-dir",
+				expectedSidekickPath
+			];
+			if (!isAbsolute(sandbox.workerArgv[0]) || !sandbox.allowedReadRoots.includes(resolve(sandbox.workerArgv[0])) || !sameValue$1(sandbox.workerArgv, expectedWorkerArgv) || !sameValue$1(readJson(settingsPath, MAX_RECEIPT_BYTES, "sandbox settings"), sandbox.policy) || sandbox.sidekickSnapshot?.path !== expectedSidekickPath || !DIGEST_PATTERN.test(sandbox.sidekickSnapshot?.contentDigest ?? "") || digestGate2702SidekickSnapshot(expectedSidekickPath) !== sandbox.sidekickSnapshot.contentDigest) fail$1("worker sandbox does not bind the fixed Claude/Sidekick runtime");
+			for (const [name, logEvidence] of [["stdout.log", terminal.stdout], ["stderr.log", terminal.stderr]]) {
+				const bytes = readRegularBytes(join(runDir, name), MAX_RECEIPT_BYTES, `worker ${name}`);
+				if (logEvidence?.byteLength !== bytes.length || logEvidence?.contentDigest !== sha256Bytes(bytes)) fail$1("worker terminal does not bind its retained logs");
+			}
+		}
+		if (preDispatch.executionMode !== "production" || registration.executionMode !== "production" || preDispatch.registrationDigest !== registration.contentDigest) fail$1("sealing refuses test-mode or non-registered worker argv");
 	} else if (terminal.outcome !== "preflight-failed") fail$1("terminal worker arm has no production pre-dispatch receipt");
 	if (!sameValue$1(validators.classification(options, registration), classification)) fail$1("classification did not rederive from its terminal/check evidence");
 	const accounting = assertArmIdentity(readReceipt(join(runDir, "accounting.json"), "Gate2702Accounting", "accounting receipt"), registration, "accounting receipt");
@@ -12302,6 +12566,8 @@ function expectedEvidencePaths(paths, armEvidence, selected) {
 			"classification.json",
 			"accounting.json"
 		]) if (existsSync(join(registration.runDir, name))) expected.add(join(prefix, name));
+		const preDispatchPath = join(registration.runDir, "pre-dispatch.json");
+		if (existsSync(preDispatchPath) && readReceipt(preDispatchPath, "Gate2702PreDispatch", "worker pre-dispatch").sandbox !== void 0) expected.add(join(prefix, "sandbox", "settings.json"));
 		for (const name of [
 			"pre-dispatch.json",
 			"process.json",
@@ -12350,6 +12616,8 @@ function expectedEvidencePaths(paths, armEvidence, selected) {
 			if (existsSync(join(paths.trialRoot, prefix, name))) expected.add(join(prefix, name));
 		}
 	}
+	const sidekickSnapshotRoot = join(paths.trialRoot, "sandbox-runtime", SIDEKICK_SNAPSHOT_DIRECTORY);
+	if (existsSync(sidekickSnapshotRoot)) for (const path of walkEvidenceFiles(sidekickSnapshotRoot)) expected.add(join("sandbox-runtime", SIDEKICK_SNAPSHOT_DIRECTORY, path));
 	if (existsSync(join(paths.trialRoot, "supervisor.log"))) expected.add("supervisor.log");
 	return expected;
 }
@@ -12357,6 +12625,12 @@ function walkEvidenceFiles(root, current = root, result = []) {
 	for (const name of readdirSync(current).sort()) {
 		const path = join(current, name);
 		const rel = relative(root, path);
+		const parts = rel.split(process.platform === "win32" ? "\\" : "/");
+		if (parts[0] === "runs" && /^issue-\d+$/.test(parts[1] ?? "") && /^attempt-[12]$/.test(parts[3] ?? "") && parts[4] === "sandbox" && parts[5] === "home" && parts[6] === ".sidekick") {
+			const sidekickRoot = lstatSync(path);
+			if (!sidekickRoot.isDirectory() || sidekickRoot.isSymbolicLink()) fail$1(`sandbox Sidekick state is not a real directory: ${rel}`);
+			continue;
+		}
 		if (rel === "seal" || rel.startsWith(`seal${process.platform === "win32" ? "\\" : "/"}`)) continue;
 		if (rel === "worktrees" || rel.startsWith(`worktrees${process.platform === "win32" ? "\\" : "/"}`)) continue;
 		const metadata = lstatSync(path);
@@ -12929,7 +13203,12 @@ function collectExternalAccountingObjects(objectMap, armEvidence) {
 		if (source?.source !== "sidekick-session-ledger" || source.status !== "settled") continue;
 		const sessionId = evidence.accounting.workerSessionId;
 		if (!UUID_PATTERN$1.test(sessionId ?? "") || typeof source.relativePath !== "string") fail$1("settled Sidekick accounting lacks an exact session path");
-		const root = resolve(process.env.HOME || homedir(), ".sidekick");
+		let root = resolve(process.env.HOME || homedir(), ".sidekick");
+		if (evidence.preDispatch?.sandbox?.isolatedHome !== void 0) {
+			const expectedHome = resolve(evidence.registration.runDir, "sandbox", "home");
+			if (resolve(evidence.preDispatch.sandbox.isolatedHome) !== expectedHome) fail$1("sandbox Sidekick root is not bound to the registered run");
+			root = join(expectedHome, ".sidekick");
+		}
 		const path = resolve(root, source.relativePath);
 		if (!isWithin(root, path)) fail$1("Sidekick ledger path escapes its fixed root");
 		const bytes = readRegularBytes(path, 4 * 1024 * 1024, "Sidekick ledger");
@@ -13049,7 +13328,10 @@ function verifyArtifactCoverage(manifest, objectBytes, byPath) {
 		]) required.add(`${prefix}/${name}`);
 		required.add(`generated/diffs/issue-${candidate.subject}.${candidate.treatmentId}.attempt-${candidate.attempt}.json`);
 		const terminal = parseArtifactJson(objectBytes, byPath.get(`${prefix}/terminal.json`), "Gate2702Terminal");
-		if (terminal.outcome !== "preflight-failed") required.add(`${prefix}/pre-dispatch.json`);
+		if (terminal.outcome !== "preflight-failed") {
+			required.add(`${prefix}/pre-dispatch.json`);
+			if (parseArtifactJson(objectBytes, byPath.get(`${prefix}/pre-dispatch.json`), "Gate2702PreDispatch").sandbox !== void 0) required.add(`${prefix}/sandbox/settings.json`);
+		}
 		if (candidate.attempt === 2) required.add(`${prefix}/preflight.json`);
 		if (["exited", "timed-out"].includes(terminal.outcome)) required.add(`${prefix}/process.json`);
 		const classification = parseArtifactJson(objectBytes, byPath.get(`${prefix}/classification.json`), "Gate2702ArmClassification");
@@ -13092,7 +13374,7 @@ function verifyArtifactCoverage(manifest, objectBytes, byPath) {
 		}
 	}
 	for (const path of byPath.keys()) {
-		const knownOperationalPath = path === "supervisor.log" || /^retries\/sets\/sha256-[0-9a-f]{64}\.json$/.test(path) || /^runs\/issue-[0-9]+\/(?:haiku-solo|haiku-sonnet-sidekick)\/attempt-[12]\/(?:preflight\.json|preflight-install\/(?:pre-dispatch\.json|process\.json|dispatch-gate|outcome\.json|stdout\.log|stderr\.log|execution\.json)|checks\/checks_gate-2702-(?:vitest|typecheck)(?:\.pre-dispatch\.json|\.process\.json|\.dispatch-gate|\.outcome\.json|\.stdout\.log|\.stderr\.log))$/.test(path);
+		const knownOperationalPath = path === "supervisor.log" || SIDEKICK_SNAPSHOT_PATH_RE.test(path) || /^runs\/issue-[0-9]+\/(?:haiku-solo|haiku-sonnet-sidekick)\/attempt-[12]\/sandbox\/settings\.json$/.test(path) || /^retries\/sets\/sha256-[0-9a-f]{64}\.json$/.test(path) || /^runs\/issue-[0-9]+\/(?:haiku-solo|haiku-sonnet-sidekick)\/attempt-[12]\/(?:preflight\.json|preflight-install\/(?:pre-dispatch\.json|process\.json|dispatch-gate|outcome\.json|stdout\.log|stderr\.log|execution\.json)|checks\/checks_gate-2702-(?:vitest|typecheck)(?:\.pre-dispatch\.json|\.process\.json|\.dispatch-gate|\.outcome\.json|\.stdout\.log|\.stderr\.log))$/.test(path);
 		if (!required.has(path) && !knownOperationalPath) fail$1(`seal bundle contains unknown artifact path: ${path}`);
 	}
 	for (const path of required) if (!byPath.has(path)) fail$1(`seal bundle omits required artifact path: ${path}`);
@@ -13203,6 +13485,43 @@ function sealedCandidateExclusion(evidence, judge, selectionInfo, workerBytes) {
 	}
 	return null;
 }
+function sealedSidekickSnapshotDigest(objectBytes, byPath) {
+	const prefix = SIDEKICK_SNAPSHOT_PREFIX;
+	const entries = [...byPath.entries()].filter(([path]) => path.startsWith(prefix)).map(([path, entry]) => ({
+		relativePath: path.slice(prefix.length),
+		bytes: objectBytes.get(entry.contentDigest)
+	})).sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+	if (entries.length === 0 || entries.some(({ relativePath, bytes }) => !(relativePath.startsWith(".claude-plugin/") || relativePath.startsWith("hooks/") || relativePath.startsWith("scripts/")) || !Buffer.isBuffer(bytes))) fail$1("sealed Sidekick snapshot is missing or outside its fixed roots");
+	const hash = createHash("sha256");
+	for (const entry of entries) {
+		hash.update(entry.relativePath);
+		hash.update("\0");
+		hash.update(entry.bytes);
+		hash.update("\0");
+	}
+	return `sha256:${hash.digest("hex")}`;
+}
+function assertSealedSandboxDispatch({ preDispatch, registration, identityReceipt, terminal, prefix, objectBytes, byPath, expectedArgv }) {
+	const sandbox = assertGate2702SandboxPreDispatch({
+		preDispatch,
+		registration,
+		worktreeIdentity: identityReceipt
+	});
+	const settings = parseArtifactJson(objectBytes, byPath.get(`${prefix}/sandbox/settings.json`));
+	const expectedSidekickPath = join(resolve(registration.runDir, "../../../.."), "sandbox-runtime", SIDEKICK_SNAPSHOT_DIRECTORY);
+	const expectedWorkerArgv = [
+		sandbox.workerArgv[0],
+		...expectedArgv.slice(1),
+		"--plugin-dir",
+		expectedSidekickPath
+	];
+	if (!sameValue$1(settings, sandbox.policy) || !isAbsolute(sandbox.workerArgv[0]) || !sandbox.allowedReadRoots.includes(resolve(sandbox.workerArgv[0])) || !sameValue$1(sandbox.workerArgv, expectedWorkerArgv) || sandbox.sidekickSnapshot?.path !== expectedSidekickPath || sandbox.sidekickSnapshot?.contentDigest !== sealedSidekickSnapshotDigest(objectBytes, byPath)) fail$1("sealed worker sandbox does not rederive from retained policy inputs");
+	for (const [name, evidence] of [["stdout.log", terminal.stdout], ["stderr.log", terminal.stderr]]) {
+		const entry = byPath.get(`${prefix}/${name}`);
+		const bytes = entry && objectBytes.get(entry.contentDigest);
+		if (!Buffer.isBuffer(bytes) || evidence?.byteLength !== bytes.length || evidence?.contentDigest !== sha256Bytes(bytes)) fail$1("sealed worker terminal does not bind its retained logs");
+	}
+}
 function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
 	if (!Number.isSafeInteger(manifest.registrationCount) || manifest.registrationCount < 12 || !Array.isArray(manifest.runCandidates) || manifest.runCandidates.length !== manifest.registrationCount) fail$1("seal manifest does not cover its exact registration count");
 	const identities = manifest.runCandidates.map((candidate) => `${candidate.subject}/${candidate.treatmentId}/${candidate.attempt}`);
@@ -13233,7 +13552,7 @@ function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
 		} else {
 			const preDispatch = parseArtifactJson(objectBytes, byPath.get(`${prefix}/pre-dispatch.json`), "Gate2702PreDispatch");
 			assertArmIdentity(preDispatch, registration, "sealed worker pre-dispatch");
-			if (preDispatch.executionMode !== "production" || preDispatch.registrationDigest !== registration.contentDigest || preDispatch.worktreeIdentityDigest !== identityReceipt.contentDigest || resolve(preDispatch.cwd) !== resolve(registration.worktreePath) || !sameValue$1(preDispatch.argv, [
+			const expectedArgv = [
 				"claude",
 				"-p",
 				"--model",
@@ -13244,7 +13563,20 @@ function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
 				"--strict-mcp-config",
 				"--max-budget-usd",
 				"15"
-			]) || terminal.preDispatchDigest !== preDispatch.contentDigest) fail$1("sealed worker dispatch is not the fixed production invocation");
+			];
+			if (preDispatch.executionMode !== "production" || preDispatch.registrationDigest !== registration.contentDigest || preDispatch.worktreeIdentityDigest !== identityReceipt.contentDigest || resolve(preDispatch.cwd) !== resolve(registration.worktreePath) || terminal.preDispatchDigest !== preDispatch.contentDigest) fail$1("sealed worker dispatch is not the fixed production invocation");
+			if (preDispatch.sandbox === void 0) {
+				if (!sameValue$1(preDispatch.argv, expectedArgv)) fail$1("sealed worker dispatch is not the fixed production invocation");
+			} else assertSealedSandboxDispatch({
+				preDispatch,
+				registration,
+				identityReceipt,
+				terminal,
+				prefix,
+				objectBytes,
+				byPath,
+				expectedArgv
+			});
 			if (["exited", "timed-out"].includes(terminal.outcome)) {
 				const processReceipt = parseArtifactJson(objectBytes, byPath.get(`${prefix}/process.json`), "Gate2702Process");
 				assertArmIdentity(processReceipt, registration, "sealed worker process");
@@ -13986,12 +14318,17 @@ async function main$1() {
 	const result = options.command === "seal" ? await sealTrial(options) : await verifyTrial(options);
 	process.stdout.write(`${JSON.stringify(result)}\n`);
 }
-var PROJECT_ROOT, CLASSIFIER_PATH, ACCOUNTING_PATH, JUDGE_PATH, DEFINITION_DIGEST, DEFINITION_ID, DEFINITION_VERSION, REPOSITORY, SUBJECTS, TREATMENTS, CHECK_IDS, MAX_RECEIPT_BYTES, MAX_OBJECT_BYTES, MAX_GIT_BYTES, MAX_WORKTREE_DIFF_ARTIFACTS, MAX_WORKTREE_DIFF_RAW_BYTES, MAX_TRIAL_DIFF_ARTIFACTS, MAX_TRIAL_DIFF_RAW_BYTES, JUDGE_MODEL, SIDEKICK_MODEL, JUDGE_TIMEOUT_MS, JUDGE_BUDGET_USD, JUDGE_MAX_STREAM_BYTES, JUDGE_DIMENSIONS, JUDGE_SCHEMA, UUID_PATTERN$1, DIGEST_PATTERN, DEFINITION_REF, productionValidators;
+var PROJECT_ROOT, SIDEKICK_SNAPSHOT_DIRECTORY, SIDEKICK_SNAPSHOT_PREFIX, SIDEKICK_SNAPSHOT_PATH_RE, CLASSIFIER_PATH, ACCOUNTING_PATH, JUDGE_PATH, DEFINITION_DIGEST, DEFINITION_ID, DEFINITION_VERSION, REPOSITORY, SUBJECTS, TREATMENTS, CHECK_IDS, MAX_RECEIPT_BYTES, MAX_OBJECT_BYTES, MAX_GIT_BYTES, MAX_WORKTREE_DIFF_ARTIFACTS, MAX_WORKTREE_DIFF_RAW_BYTES, MAX_TRIAL_DIFF_ARTIFACTS, MAX_TRIAL_DIFF_RAW_BYTES, JUDGE_MODEL, SIDEKICK_MODEL, JUDGE_TIMEOUT_MS, JUDGE_BUDGET_USD, JUDGE_MAX_STREAM_BYTES, JUDGE_DIMENSIONS, JUDGE_SCHEMA, UUID_PATTERN$1, DIGEST_PATTERN, DEFINITION_REF, productionValidators;
 var init_seal = __esmMin((() => {
+	init_behavior_context();
 	init_seal_accounting();
 	init_seal_classification();
 	init_seal_judge();
+	init_sandbox_dispatch();
 	PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+	SIDEKICK_SNAPSHOT_DIRECTORY = `claude-sidekick-${GATE_2702_SIDEKICK_VERSION}`;
+	SIDEKICK_SNAPSHOT_PREFIX = `sandbox-runtime/${SIDEKICK_SNAPSHOT_DIRECTORY}/`;
+	SIDEKICK_SNAPSHOT_PATH_RE = new RegExp(`^sandbox-runtime/${SIDEKICK_SNAPSHOT_DIRECTORY.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)}/(?:\\.claude-plugin|hooks|scripts)/.+$`);
 	CLASSIFIER_PATH = join(PROJECT_ROOT, "scripts/gate-2702/classify.mjs");
 	ACCOUNTING_PATH = join(PROJECT_ROOT, "scripts/gate-2702/accounting.mjs");
 	JUDGE_PATH = join(PROJECT_ROOT, "scripts/gate-2702/judge.mjs");

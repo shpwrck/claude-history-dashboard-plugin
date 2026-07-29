@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 import {
   GATE_2702_SIDEKICK_MODEL_ID,
+  GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION,
   GATE_2702_SIDEKICK_VERSION,
   GATE_2702_WORKER_MODEL_ID,
   gate2702ResolvedSidekickConfig,
@@ -359,7 +360,7 @@ function validateBehaviorContext(context, treatmentId) {
     context === null ||
     typeof context !== "object" ||
     Array.isArray(context) ||
-    context.schemaVersion !== SCHEMA_VERSION ||
+    context.schemaVersion !== GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION ||
     !validTimestamp(context.observedAt) ||
     context.workerModelQualifiedId !== GATE_2702_WORKER_MODEL_ID ||
     context.sidekickModelQualifiedId !==

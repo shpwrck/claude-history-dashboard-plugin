@@ -364,12 +364,8 @@ function addRetryAttempt(fixture, workerResult) {
   };
 }
 
-function writeSidekickLedger(fixture, rows) {
-  const sessionDir = join(
-    fixture.root,
-    ".sidekick",
-    fixture.workerResult.session_id,
-  );
+function writeSidekickLedger(fixture, rows, home = fixture.root) {
+  const sessionDir = join(home, ".sidekick", fixture.workerResult.session_id);
   mkdirSync(sessionDir, { recursive: true });
   const path = join(sessionDir, "__sidekick.jsonl");
   writeFileSync(
@@ -380,6 +376,66 @@ function writeSidekickLedger(fixture, rows) {
   );
   return path;
 }
+
+test("sandboxed accounting reads only the arm-local Sidekick ledger", () => {
+  const fixture = createEvidenceFixture({
+    treatmentId: "haiku-sonnet-sidekick",
+    workerResult: {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      session_id: randomUUID(),
+      total_cost_usd: 0.5,
+    },
+  });
+  try {
+    const isolatedHome = join(fixture.runDir, "sandbox", "home");
+    writeReceipt(join(fixture.runDir, "pre-dispatch.json"), {
+      schemaVersion: 1,
+      kind: "Gate2702PreDispatch",
+      definitionRef: DEFINITION_REF,
+      registrationDigest: fixture.registration.contentDigest,
+      trialId: fixture.trialId,
+      subject: 2760,
+      treatmentId: "haiku-sonnet-sidekick",
+      attempt: 1,
+      baseSha: fixture.registration.baseSha,
+      sandbox: { isolatedHome },
+    });
+    writeSidekickLedger(fixture, [
+      {
+        model: "sync",
+        trigger: "checkpoint",
+        turn: 1,
+        costUsd: 99,
+        shipped: true,
+      },
+    ]);
+    writeSidekickLedger(
+      fixture,
+      [
+        {
+          model: "sync",
+          trigger: "checkpoint",
+          turn: 1,
+          costUsd: 0.25,
+          shipped: true,
+        },
+      ],
+      isolatedHome,
+    );
+
+    const result = collect(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.sidekickCostUsd, 0.25);
+    assert.equal(receipt.allInCostUsd, 0.75);
+    assert.equal(receipt.sidekickPaidCallCount, 1);
+    assert.equal(receipt.sidekickShippedInterventionCount, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
 
 test("the C5 accounting collector is inert without its explicit opt-in", () => {
   const root = mkdtempSync(join(tmpdir(), "gate-2702-accounting-off-"));
@@ -1510,12 +1566,7 @@ test("a bounded ledger cannot amplify past the fixed row limit", () => {
 });
 
 test("active, linked, special, and oversized Sidekick sources write no immutable receipt", () => {
-  for (const unsafe of [
-    "unsettled-job",
-    "symlink",
-    "special",
-    "oversized",
-  ]) {
+  for (const unsafe of ["unsettled-job", "symlink", "special", "oversized"]) {
     const fixture = createEvidenceFixture({
       treatmentId: "haiku-sonnet-sidekick",
       workerResult: {

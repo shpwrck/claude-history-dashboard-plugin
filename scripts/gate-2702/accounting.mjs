@@ -19,6 +19,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { gate2702ModelIds } from "./behavior-context.mjs";
+import { gate2702IsolatedHome } from "./sandbox-dispatch.mjs";
 
 const SCHEMA_VERSION = 1;
 const MAX_RECEIPT_BYTES = 4 * 1024 * 1024;
@@ -222,6 +223,7 @@ function pathsFor(plan, options) {
     registration: join(runDir, "registration.json"),
     terminal: join(runDir, "terminal.json"),
     classification: join(runDir, "classification.json"),
+    preDispatch: join(runDir, "pre-dispatch.json"),
     stdout: join(runDir, "stdout.log"),
     accounting: join(runDir, "accounting.json"),
   };
@@ -543,8 +545,7 @@ function findUnsettledJobs(root) {
   return pending;
 }
 
-async function readSettledLedger(workerSessionId) {
-  const sidekickRoot = join(homedir(), ".sidekick");
+async function readSettledLedger(workerSessionId, sidekickRoot) {
   const relativePath = `${workerSessionId}/__sidekick.jsonl`;
   if (!existsSync(sidekickRoot)) return { status: "missing", relativePath };
   assertDirectory(sidekickRoot, "Sidekick root");
@@ -955,11 +956,11 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
   };
 }
 
-async function collectTreatment(worker, sidekickModel) {
+async function collectTreatment(worker, sidekickModel, sidekickRoot) {
   const ledger =
     worker.workerSessionId === null
       ? { status: "unavailable", relativePath: null }
-      : await readSettledLedger(worker.workerSessionId);
+      : await readSettledLedger(worker.workerSessionId, sidekickRoot);
   const values =
     ledger.status !== "settled"
       ? {
@@ -1167,8 +1168,22 @@ async function collect(plan, options) {
   const paths = pathsFor(plan, options);
   const evidence = validateArmEvidence(plan, options, paths);
   const worker = workerEvidence(paths, evidence.classification);
+  const isolatedHome = gate2702IsolatedHome({
+    runDir: paths.runDir,
+    preDispatch: existsSync(paths.preDispatch)
+      ? readReceipt(
+          paths.preDispatch,
+          "Gate2702PreDispatch",
+          "worker pre-dispatch receipt",
+        )
+      : null,
+  });
+  const sidekickRoot =
+    isolatedHome === null
+      ? join(homedir(), ".sidekick")
+      : join(isolatedHome, ".sidekick");
   const collected = treatment.configuration.sidekick.enabled
-    ? await collectTreatment(worker, gate2702ModelIds().sidekick)
+    ? await collectTreatment(worker, gate2702ModelIds().sidekick, sidekickRoot)
     : {
         receiptValues: collectControl(plan, evidence, worker),
         verifySource: null,

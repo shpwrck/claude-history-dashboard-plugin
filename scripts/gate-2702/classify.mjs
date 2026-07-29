@@ -20,12 +20,14 @@ import {
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import {
+  GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION,
   GATE_2702_SIDEKICK_VERSION,
   captureGate2702BehaviorContext,
   gate2702ModelIds,
   gate2702ResolvedSidekickConfig,
   gate2702SidekickEnvironment,
 } from "./behavior-context.mjs";
+import { gate2702IsolatedHome } from "./sandbox-dispatch.mjs";
 import { captureGate2702WorktreeEvidence } from "./worktree-evidence.mjs";
 
 const SCHEMA_VERSION = 1;
@@ -1415,7 +1417,7 @@ function assertBehaviorContext(context, treatment, sidekick) {
   const models = gate2702ModelIds();
   const resolvedSidekickConfig = gate2702ResolvedSidekickConfig(treatment);
   if (
-    context?.schemaVersion !== SCHEMA_VERSION ||
+    context?.schemaVersion !== GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION ||
     typeof context.observedAt !== "string" ||
     !Number.isFinite(Date.parse(context.observedAt)) ||
     context.workerModelQualifiedId !== models.worker ||
@@ -1498,6 +1500,34 @@ function assertSidekickPreflightEvidence(sidekick, treatment, status, label) {
   }
 }
 
+/**
+ * The environment the behavior context must be captured against: the one the
+ * WORKER runs under, not the launcher's.
+ *
+ * gate2702InstructionContext states its own invariant -- "C5 requires an
+ * absolute HOME matching Sidekick resolution". Under the #3085 jail, Sidekick
+ * resolves user-scope instructions against the isolated HOME, while an
+ * unqualified capture reads the launcher's process.env.HOME. For an operator
+ * with ~/.sidekick/SIDEKICK.md that records instructions the arm never
+ * applied, and it does so SILENTLY: the live re-check recomputed against the
+ * same launcher HOME, so it agreed with itself and never fired. Both callers
+ * therefore resolve the same isolated home from the same shared derivation.
+ */
+function behaviorContextEnv(registration) {
+  const preDispatchPath = join(registration.runDir, "pre-dispatch.json");
+  const isolatedHome = gate2702IsolatedHome({
+    runDir: registration.runDir,
+    preDispatch: existsSync(preDispatchPath)
+      ? readReceipt(preDispatchPath, "Gate2702PreDispatch")
+      : null,
+    // Preflight captures before the receipt exists, so predict the worker's home.
+    unattested: "derive",
+  });
+  return isolatedHome === null
+    ? process.env
+    : { ...process.env, HOME: isolatedHome };
+}
+
 function captureBehaviorContext(registration, treatment, installation) {
   return captureGate2702BehaviorContext({
     cwd: registration.worktreePath,
@@ -1505,6 +1535,7 @@ function captureBehaviorContext(registration, treatment, installation) {
     sidekickVersion: installation?.version ?? null,
     sidekickImplementationDigest: installation?.implementationDigest ?? null,
     sidekickActivation: installation?.activation ?? null,
+    env: behaviorContextEnv(registration),
   });
 }
 
@@ -1519,6 +1550,7 @@ function assertLiveBehaviorContext(registration, treatment, recorded) {
     sidekickImplementationDigest: installation?.implementationDigest ?? null,
     sidekickActivation: installation?.activation ?? null,
     observedAt: recorded.observedAt,
+    env: behaviorContextEnv(registration),
   });
   if (!sameValue(live, recorded)) {
     fail(`live C5 behavior context drifted for ${treatment.id}`);

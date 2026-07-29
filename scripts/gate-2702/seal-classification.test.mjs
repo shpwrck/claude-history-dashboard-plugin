@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
+
+import { GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION } from "./behavior-context.mjs";
 import { validateGate2702ClassificationEvidence } from "./seal-classification.mjs";
 
 const TRIAL_ID = "4f503910-77de-4ac0-b454-3ac913d96288";
@@ -275,7 +277,8 @@ function createSuccessfulFixture({ attempt = 1, vitestExit = 0 } = {}) {
     minDelta: 120,
   };
   const behaviorContext = {
-    schemaVersion: 1,
+    // Imported, not re-typed -- see seal.test.mjs completeBehaviorContext.
+    schemaVersion: GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION,
     observedAt: "2026-07-20T17:50:00.000Z",
     workerModelQualifiedId: "claude-haiku-4-5-20251001",
     sidekickModelQualifiedId: null,

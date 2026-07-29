@@ -16,6 +16,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION } from "./behavior-context.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
@@ -893,7 +895,9 @@ function completeBehaviorContext(treatmentId) {
     minDelta: 120,
   };
   return {
-    schemaVersion: 1,
+    // Imported, not re-typed: a hand-written 1 here would silently pin the
+    // fixture to a stale capture basis the moment the context is versioned.
+    schemaVersion: GATE_2702_BEHAVIOR_CONTEXT_SCHEMA_VERSION,
     observedAt: "2026-07-20T18:00:00.000Z",
     workerModelQualifiedId: "claude-haiku-4-5-20251001",
     sidekickModelQualifiedId: enabled ? "claude-sonnet-5" : null,

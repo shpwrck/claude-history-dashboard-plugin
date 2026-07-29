@@ -38,14 +38,32 @@ import {
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { GATE_2702_SIDEKICK_VERSION } from "./behavior-context.mjs";
 import {
   normalizeGate2702Cost,
   validateGate2702AccountingEvidence,
 } from "./seal-accounting.mjs";
 import { validateGate2702ClassificationEvidence } from "./seal-classification.mjs";
 import { validateGate2702JudgeEvidence } from "./seal-judge.mjs";
+import {
+  assertGate2702SandboxPreDispatch,
+  digestGate2702SidekickSnapshot,
+} from "./sandbox-dispatch.mjs";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// Derived from the shared pin, never re-typed. The sealer re-derives the
+// snapshot path the dispatcher attested; a hand-written copy here would keep
+// looking for the OLD directory the moment GATE_2702_SIDEKICK_VERSION moves,
+// so every otherwise valid production run under the new pin would fail sealing
+// with an opaque runtime-binding error instead of a version bump.
+const SIDEKICK_SNAPSHOT_DIRECTORY = `claude-sidekick-${GATE_2702_SIDEKICK_VERSION}`;
+const SIDEKICK_SNAPSHOT_PREFIX = `sandbox-runtime/${SIDEKICK_SNAPSHOT_DIRECTORY}/`;
+const SIDEKICK_SNAPSHOT_PATH_RE = new RegExp(
+  `^sandbox-runtime/${SIDEKICK_SNAPSHOT_DIRECTORY.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    String.raw`\$&`,
+  )}/(?:\\.claude-plugin|hooks|scripts)/.+$`,
+);
 const CLASSIFIER_PATH = join(PROJECT_ROOT, "scripts/gate-2702/classify.mjs");
 const ACCOUNTING_PATH = join(PROJECT_ROOT, "scripts/gate-2702/accounting.mjs");
 const JUDGE_PATH = join(PROJECT_ROOT, "scripts/gate-2702/judge.mjs");
@@ -798,10 +816,75 @@ function validateTerminalArm(
       "--max-budget-usd",
       String(runtime.plan.costCaps.workerUsd),
     ];
+    const legacyTestDispatch =
+      validators !== productionValidators &&
+      preDispatch.sandbox === undefined &&
+      sameValue(preDispatch.argv, expectedArgv);
+    if (!legacyTestDispatch) {
+      const worktreeIdentity = readReceipt(
+        join(runDir, "worktree-identity.json"),
+        "Gate2702WorktreeIdentity",
+        "worker worktree identity",
+      );
+      let sandbox;
+      try {
+        sandbox = assertGate2702SandboxPreDispatch({
+          preDispatch,
+          registration,
+          worktreeIdentity,
+        });
+      } catch (error) {
+        fail(
+          `sealing refuses test-mode or non-registered worker argv: ${error.message}`,
+        );
+      }
+      const expectedSidekickPath = join(
+        paths.trialRoot,
+        "sandbox-runtime",
+        SIDEKICK_SNAPSHOT_DIRECTORY,
+      );
+      const settingsPath = join(runDir, "sandbox", "settings.json");
+      const expectedWorkerArgv = [
+        sandbox.workerArgv[0],
+        ...expectedArgv.slice(1),
+        "--plugin-dir",
+        expectedSidekickPath,
+      ];
+      if (
+        !isAbsolute(sandbox.workerArgv[0]) ||
+        !sandbox.allowedReadRoots.includes(resolve(sandbox.workerArgv[0])) ||
+        !sameValue(sandbox.workerArgv, expectedWorkerArgv) ||
+        !sameValue(
+          readJson(settingsPath, MAX_RECEIPT_BYTES, "sandbox settings"),
+          sandbox.policy,
+        ) ||
+        sandbox.sidekickSnapshot?.path !== expectedSidekickPath ||
+        !DIGEST_PATTERN.test(sandbox.sidekickSnapshot?.contentDigest ?? "") ||
+        digestGate2702SidekickSnapshot(expectedSidekickPath) !==
+          sandbox.sidekickSnapshot.contentDigest
+      ) {
+        fail("worker sandbox does not bind the fixed Claude/Sidekick runtime");
+      }
+      for (const [name, logEvidence] of [
+        ["stdout.log", terminal.stdout],
+        ["stderr.log", terminal.stderr],
+      ]) {
+        const bytes = readRegularBytes(
+          join(runDir, name),
+          MAX_RECEIPT_BYTES,
+          `worker ${name}`,
+        );
+        if (
+          logEvidence?.byteLength !== bytes.length ||
+          logEvidence?.contentDigest !== sha256Bytes(bytes)
+        ) {
+          fail("worker terminal does not bind its retained logs");
+        }
+      }
+    }
     if (
       preDispatch.executionMode !== "production" ||
       registration.executionMode !== "production" ||
-      !sameValue(preDispatch.argv, expectedArgv) ||
       preDispatch.registrationDigest !== registration.contentDigest
     ) {
       fail("sealing refuses test-mode or non-registered worker argv");
@@ -968,6 +1051,14 @@ function expectedEvidencePaths(paths, armEvidence, selected) {
       const path = join(registration.runDir, name);
       if (existsSync(path)) expected.add(join(prefix, name));
     }
+    const preDispatchPath = join(registration.runDir, "pre-dispatch.json");
+    if (
+      existsSync(preDispatchPath) &&
+      readReceipt(preDispatchPath, "Gate2702PreDispatch", "worker pre-dispatch")
+        .sandbox !== undefined
+    ) {
+      expected.add(join(prefix, "sandbox", "settings.json"));
+    }
     for (const name of [
       "pre-dispatch.json",
       "process.json",
@@ -1035,6 +1126,16 @@ function expectedEvidencePaths(paths, armEvidence, selected) {
       }
     }
   }
+  const sidekickSnapshotRoot = join(
+    paths.trialRoot,
+    "sandbox-runtime",
+    SIDEKICK_SNAPSHOT_DIRECTORY,
+  );
+  if (existsSync(sidekickSnapshotRoot)) {
+    for (const path of walkEvidenceFiles(sidekickSnapshotRoot)) {
+      expected.add(join("sandbox-runtime", SIDEKICK_SNAPSHOT_DIRECTORY, path));
+    }
+  }
   if (existsSync(join(paths.trialRoot, "supervisor.log")))
     expected.add("supervisor.log");
   return expected;
@@ -1044,6 +1145,21 @@ function walkEvidenceFiles(root, current = root, result = []) {
   for (const name of readdirSync(current).sort()) {
     const path = join(current, name);
     const rel = relative(root, path);
+    const parts = rel.split(process.platform === "win32" ? "\\" : "/");
+    if (
+      parts[0] === "runs" &&
+      /^issue-\d+$/.test(parts[1] ?? "") &&
+      /^attempt-[12]$/.test(parts[3] ?? "") &&
+      parts[4] === "sandbox" &&
+      parts[5] === "home" &&
+      parts[6] === ".sidekick"
+    ) {
+      const sidekickRoot = lstatSync(path);
+      if (!sidekickRoot.isDirectory() || sidekickRoot.isSymbolicLink()) {
+        fail(`sandbox Sidekick state is not a real directory: ${rel}`);
+      }
+      continue;
+    }
     if (
       rel === "seal" ||
       rel.startsWith(`seal${process.platform === "win32" ? "\\" : "/"}`)
@@ -2047,7 +2163,18 @@ function collectExternalAccountingObjects(objectMap, armEvidence) {
     ) {
       fail("settled Sidekick accounting lacks an exact session path");
     }
-    const root = resolve(process.env.HOME || homedir(), ".sidekick");
+    let root = resolve(process.env.HOME || homedir(), ".sidekick");
+    if (evidence.preDispatch?.sandbox?.isolatedHome !== undefined) {
+      const expectedHome = resolve(
+        evidence.registration.runDir,
+        "sandbox",
+        "home",
+      );
+      if (resolve(evidence.preDispatch.sandbox.isolatedHome) !== expectedHome) {
+        fail("sandbox Sidekick root is not bound to the registered run");
+      }
+      root = join(expectedHome, ".sidekick");
+    }
     const path = resolve(root, source.relativePath);
     if (!isWithin(root, path))
       fail("Sidekick ledger path escapes its fixed root");
@@ -2380,6 +2507,14 @@ function verifyArtifactCoverage(manifest, objectBytes, byPath) {
     );
     if (terminal.outcome !== "preflight-failed") {
       required.add(`${prefix}/pre-dispatch.json`);
+      const preDispatch = parseArtifactJson(
+        objectBytes,
+        byPath.get(`${prefix}/pre-dispatch.json`),
+        "Gate2702PreDispatch",
+      );
+      if (preDispatch.sandbox !== undefined) {
+        required.add(`${prefix}/sandbox/settings.json`);
+      }
     }
     if (candidate.attempt === 2) required.add(`${prefix}/preflight.json`);
     if (["exited", "timed-out"].includes(terminal.outcome)) {
@@ -2463,6 +2598,10 @@ function verifyArtifactCoverage(manifest, objectBytes, byPath) {
   for (const path of byPath.keys()) {
     const knownOperationalPath =
       path === "supervisor.log" ||
+      SIDEKICK_SNAPSHOT_PATH_RE.test(path) ||
+      /^runs\/issue-[0-9]+\/(?:haiku-solo|haiku-sonnet-sidekick)\/attempt-[12]\/sandbox\/settings\.json$/.test(
+        path,
+      ) ||
       /^retries\/sets\/sha256-[0-9a-f]{64}\.json$/.test(path) ||
       /^runs\/issue-[0-9]+\/(?:haiku-solo|haiku-sonnet-sidekick)\/attempt-[12]\/(?:preflight\.json|preflight-install\/(?:pre-dispatch\.json|process\.json|dispatch-gate|outcome\.json|stdout\.log|stderr\.log|execution\.json)|checks\/checks_gate-2702-(?:vitest|typecheck)(?:\.pre-dispatch\.json|\.process\.json|\.dispatch-gate|\.outcome\.json|\.stdout\.log|\.stderr\.log))$/.test(
         path,
@@ -2684,6 +2823,96 @@ function sealedCandidateExclusion(evidence, judge, selectionInfo, workerBytes) {
   return null;
 }
 
+function sealedSidekickSnapshotDigest(objectBytes, byPath) {
+  const prefix = SIDEKICK_SNAPSHOT_PREFIX;
+  const entries = [...byPath.entries()]
+    .filter(([path]) => path.startsWith(prefix))
+    .map(([path, entry]) => ({
+      relativePath: path.slice(prefix.length),
+      bytes: objectBytes.get(entry.contentDigest),
+    }))
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  if (
+    entries.length === 0 ||
+    entries.some(
+      ({ relativePath, bytes }) =>
+        !(
+          relativePath.startsWith(".claude-plugin/") ||
+          relativePath.startsWith("hooks/") ||
+          relativePath.startsWith("scripts/")
+        ) || !Buffer.isBuffer(bytes),
+    )
+  ) {
+    fail("sealed Sidekick snapshot is missing or outside its fixed roots");
+  }
+  const hash = createHash("sha256");
+  for (const entry of entries) {
+    hash.update(entry.relativePath);
+    hash.update("\0");
+    hash.update(entry.bytes);
+    hash.update("\0");
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+function assertSealedSandboxDispatch({
+  preDispatch,
+  registration,
+  identityReceipt,
+  terminal,
+  prefix,
+  objectBytes,
+  byPath,
+  expectedArgv,
+}) {
+  const sandbox = assertGate2702SandboxPreDispatch({
+    preDispatch,
+    registration,
+    worktreeIdentity: identityReceipt,
+  });
+  const settings = parseArtifactJson(
+    objectBytes,
+    byPath.get(`${prefix}/sandbox/settings.json`),
+  );
+  const recordedTrialRoot = resolve(registration.runDir, "../../../..");
+  const expectedSidekickPath = join(
+    recordedTrialRoot,
+    "sandbox-runtime",
+    SIDEKICK_SNAPSHOT_DIRECTORY,
+  );
+  const expectedWorkerArgv = [
+    sandbox.workerArgv[0],
+    ...expectedArgv.slice(1),
+    "--plugin-dir",
+    expectedSidekickPath,
+  ];
+  if (
+    !sameValue(settings, sandbox.policy) ||
+    !isAbsolute(sandbox.workerArgv[0]) ||
+    !sandbox.allowedReadRoots.includes(resolve(sandbox.workerArgv[0])) ||
+    !sameValue(sandbox.workerArgv, expectedWorkerArgv) ||
+    sandbox.sidekickSnapshot?.path !== expectedSidekickPath ||
+    sandbox.sidekickSnapshot?.contentDigest !==
+      sealedSidekickSnapshotDigest(objectBytes, byPath)
+  ) {
+    fail("sealed worker sandbox does not rederive from retained policy inputs");
+  }
+  for (const [name, evidence] of [
+    ["stdout.log", terminal.stdout],
+    ["stderr.log", terminal.stderr],
+  ]) {
+    const entry = byPath.get(`${prefix}/${name}`);
+    const bytes = entry && objectBytes.get(entry.contentDigest);
+    if (
+      !Buffer.isBuffer(bytes) ||
+      evidence?.byteLength !== bytes.length ||
+      evidence?.contentDigest !== sha256Bytes(bytes)
+    ) {
+      fail("sealed worker terminal does not bind its retained logs");
+    }
+  }
+}
+
 function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
   if (
     !Number.isSafeInteger(manifest.registrationCount) ||
@@ -2813,10 +3042,28 @@ function verifySealedArmsAndLiveDiffs(runtime, manifest, objectBytes, byPath) {
         preDispatch.registrationDigest !== registration.contentDigest ||
         preDispatch.worktreeIdentityDigest !== identityReceipt.contentDigest ||
         resolve(preDispatch.cwd) !== resolve(registration.worktreePath) ||
-        !sameValue(preDispatch.argv, expectedArgv) ||
         terminal.preDispatchDigest !== preDispatch.contentDigest
       ) {
         fail("sealed worker dispatch is not the fixed production invocation");
+      }
+      if (preDispatch.sandbox === undefined) {
+        // Backward-compatible verification for bundles sealed before #3085.
+        // New live bundles cannot enter this branch: production sealing above
+        // requires the SRT attestation before publishing cleanup authority.
+        if (!sameValue(preDispatch.argv, expectedArgv)) {
+          fail("sealed worker dispatch is not the fixed production invocation");
+        }
+      } else {
+        assertSealedSandboxDispatch({
+          preDispatch,
+          registration,
+          identityReceipt,
+          terminal,
+          prefix,
+          objectBytes,
+          byPath,
+          expectedArgv,
+        });
       }
       if (["exited", "timed-out"].includes(terminal.outcome)) {
         const processReceipt = parseArtifactJson(

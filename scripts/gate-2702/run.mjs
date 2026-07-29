@@ -36,6 +36,14 @@ import {
   gate2702ModelIds,
   gate2702SidekickEnvironment,
 } from "./behavior-context.mjs";
+import {
+  assertGate2702SandboxReady,
+  assertGate2702SandboxPreDispatch,
+  buildGate2702SandboxLaunch,
+  finalizeGate2702SandboxHome,
+  gate2702SandboxEnabled,
+  prepareGate2702SandboxRuntime,
+} from "./sandbox-dispatch.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = dirname(SCRIPT_PATH);
@@ -67,7 +75,10 @@ function assertSidekickLaunchReady(repoPath) {
     ) {
       fail("C5 launch requires the enabled pinned Sidekick plugin");
     }
-    return;
+    return {
+      version: GATE_2702_SIDEKICK_VERSION,
+      installPath: null,
+    };
   }
   const result = spawnSync("claude", ["plugin", "list", "--json"], {
     cwd: repoPath,
@@ -98,6 +109,16 @@ function assertSidekickLaunchReady(repoPath) {
   ) {
     fail("C5 launch requires the enabled pinned Sidekick plugin");
   }
+  if (
+    typeof matches[0].installPath !== "string" ||
+    !isAbsolute(matches[0].installPath)
+  ) {
+    fail("C5 launch requires the pinned Sidekick install path");
+  }
+  return {
+    version: matches[0].version,
+    installPath: matches[0].installPath,
+  };
 }
 
 function canonicalValue(value) {
@@ -1149,6 +1170,13 @@ function inspectArm(registration) {
       "pre-dispatch receipt",
     );
     const worktreeIdentity = readOperationalWorktreeIdentity(registration);
+    if (gate2702SandboxEnabled() || preDispatch.sandbox !== undefined) {
+      assertGate2702SandboxPreDispatch({
+        preDispatch,
+        registration,
+        worktreeIdentity,
+      });
+    }
     if (
       preDispatch.registrationDigest !== registration.contentDigest ||
       preDispatch.worktreeIdentityDigest !== worktreeIdentity.contentDigest ||
@@ -1202,12 +1230,18 @@ function inspectArm(registration) {
     ) {
       fail("dispatched terminal receipt has no monotonic duration");
     }
+    assertLogFile(stdoutPath);
+    assertLogFile(stderrPath);
+    if (
+      !sameValue(terminal.stdout, retainedLogEvidence(stdoutPath)) ||
+      !sameValue(terminal.stderr, retainedLogEvidence(stderrPath))
+    ) {
+      fail("terminal receipt does not bind the retained worker logs");
+    }
     if (terminal.outcome === "spawn-error") {
       if (processReceipt || terminal.processDigest !== undefined) {
         fail("spawn-error terminal unexpectedly has a process receipt");
       }
-      assertLogFile(stdoutPath);
-      assertLogFile(stderrPath);
       return {
         state: "terminal",
         terminal,
@@ -1542,6 +1576,14 @@ function writeTerminal(runDir, registration, fields) {
   });
 }
 
+function retainedLogEvidence(path) {
+  const bytes = readFileSync(path);
+  return {
+    byteLength: bytes.length,
+    contentDigest: sha256(bytes),
+  };
+}
+
 function writePreflightFailureArm(registration, preflight) {
   const existing = inspectArm(registration);
   if (existing.state === "terminal") return existing.terminal;
@@ -1564,7 +1606,7 @@ function writePreflightFailureArm(registration, preflight) {
   });
 }
 
-async function executeArm(plan, paths, trial, registration) {
+async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
   const runDir = registration.runDir;
   const preDispatchPath = join(runDir, "pre-dispatch.json");
   const processPath = join(runDir, "process.json");
@@ -1597,32 +1639,76 @@ async function executeArm(plan, paths, trial, registration) {
     (candidate) => candidate.id === registration.treatmentId,
   );
   if (!treatment) fail(`unknown treatment ${registration.treatmentId}`);
-  const argv = armCommand(plan);
+  const workerArgv = armCommand(plan);
   const sidekickEnvironment = gate2702SidekickEnvironment(treatment);
-  const environment = armEnvironment(registration, sidekickEnvironment);
   const prompt = workerPrompt(snapshot, registration);
   const worktreeIdentity = readOperationalWorktreeIdentity(registration);
+  const gitCommonDirectory = resolve(
+    registration.worktreePath,
+    git(registration.worktreePath, ["rev-parse", "--git-common-dir"]),
+  );
+  // Fail closed HERE, not only at the caller. Both launch paths decide
+  // separately whether to prepare a runtime, and `argv`/`environment` below
+  // fall back to the unjailed host spawn when `sandboxRuntime` is absent. A
+  // third call site that forgot to thread it would therefore silently restore
+  // exactly the defect #3085 fixes — and the sealer would only notice after
+  // the egress had already happened. Re-assert the invariant at the point of
+  // dispatch so the unjailed path is unreachable while the sandbox is on.
+  if (gate2702SandboxEnabled() && !sandboxRuntime) {
+    fail(
+      `arm ${registration.subject}/${registration.treatmentId} cannot dispatch without the mandatory C5 sandbox runtime`,
+    );
+  }
+  const sandboxLaunch = sandboxRuntime
+    ? await buildGate2702SandboxLaunch({
+        workerArgv,
+        registration,
+        gitDirectory: worktreeIdentity.gitDirectory,
+        gitCommonDirectory,
+        sandboxRuntime,
+        sidekickEnvironment,
+      })
+    : null;
+  const argv = sandboxLaunch?.argv ?? workerArgv;
+  const environment =
+    sandboxLaunch?.environment ??
+    armEnvironment(registration, sidekickEnvironment);
   const startedAt = new Date().toISOString();
   const startedNs = process.hrtime.bigint();
-  const preDispatch = writeImmutableReceipt(preDispatchPath, {
-    schemaVersion: SCHEMA_VERSION,
-    kind: "Gate2702PreDispatch",
-    definitionRef: registration.definitionRef,
-    registrationDigest: registration.contentDigest,
-    worktreeIdentityDigest: worktreeIdentity.contentDigest,
-    trialId: registration.trialId,
-    subject: registration.subject,
-    treatmentId: registration.treatmentId,
-    attempt: registration.attempt,
-    baseSha: registration.baseSha,
-    executionMode: gate2702ExecutionMode(),
-    argv,
-    sidekickEnvironment,
-    sidekickEnvironmentDigest: valueDigest(sidekickEnvironment),
-    cwd: registration.worktreePath,
-    promptDigest: sha256(prompt),
-    startedAt,
-  });
+  let preDispatch;
+  try {
+    preDispatch = writeImmutableReceipt(preDispatchPath, {
+      schemaVersion: SCHEMA_VERSION,
+      kind: "Gate2702PreDispatch",
+      definitionRef: registration.definitionRef,
+      registrationDigest: registration.contentDigest,
+      worktreeIdentityDigest: worktreeIdentity.contentDigest,
+      trialId: registration.trialId,
+      subject: registration.subject,
+      treatmentId: registration.treatmentId,
+      attempt: registration.attempt,
+      baseSha: registration.baseSha,
+      executionMode: gate2702ExecutionMode(),
+      argv,
+      sidekickEnvironment,
+      sidekickEnvironmentDigest: valueDigest(sidekickEnvironment),
+      ...(sandboxLaunch
+        ? {
+            sandbox: sandboxLaunch.attestation,
+            environment,
+            environmentKeys: Object.keys(environment).sort(),
+            environmentDigest: valueDigest(environment),
+            workerEnvironmentKeys: sandboxLaunch.workerEnvironmentKeys,
+          }
+        : {}),
+      cwd: registration.worktreePath,
+      promptDigest: sha256(prompt),
+      startedAt,
+    });
+  } catch (error) {
+    finalizeGate2702SandboxHome(sandboxLaunch);
+    throw error;
+  }
 
   const stdoutPath = join(runDir, "stdout.log");
   const stderrPath = join(runDir, "stderr.log");
@@ -1642,6 +1728,7 @@ async function executeArm(plan, paths, trial, registration) {
   } catch (error) {
     if (stdoutFd !== undefined) closeSync(stdoutFd);
     if (stderrFd !== undefined) closeSync(stderrFd);
+    finalizeGate2702SandboxHome(sandboxLaunch);
     throw error;
   }
 
@@ -1657,10 +1744,13 @@ async function executeArm(plan, paths, trial, registration) {
   } catch (error) {
     closeSync(stdoutFd);
     closeSync(stderrFd);
+    finalizeGate2702SandboxHome(sandboxLaunch);
     writeTerminal(runDir, registration, {
       preDispatchDigest: preDispatch.contentDigest,
       outcome: "spawn-error",
       error: error.message,
+      stdout: retainedLogEvidence(stdoutPath),
+      stderr: retainedLogEvidence(stderrPath),
       durationMs: Number(process.hrtime.bigint() - startedNs) / 1_000_000,
       endedAt: new Date().toISOString(),
     });
@@ -1673,75 +1763,98 @@ async function executeArm(plan, paths, trial, registration) {
     const spawnError = await new Promise((resolveError) => {
       child.once("error", resolveError);
     });
+    finalizeGate2702SandboxHome(sandboxLaunch);
     writeTerminal(runDir, registration, {
       preDispatchDigest: preDispatch.contentDigest,
       outcome: "spawn-error",
       error: spawnError.message,
+      stdout: retainedLogEvidence(stdoutPath),
+      stderr: retainedLogEvidence(stderrPath),
       durationMs: Number(process.hrtime.bigint() - startedNs) / 1_000_000,
       endedAt: new Date().toISOString(),
     });
     return;
   }
 
-  const processReceipt = writeImmutableReceipt(processPath, {
-    schemaVersion: SCHEMA_VERSION,
-    kind: "Gate2702Process",
-    definitionRef: registration.definitionRef,
-    registrationDigest: registration.contentDigest,
-    preDispatchDigest: preDispatch.contentDigest,
-    trialId: registration.trialId,
-    subject: registration.subject,
-    treatmentId: registration.treatmentId,
-    attempt: registration.attempt,
-    baseSha: registration.baseSha,
-    pid: child.pid,
-    detachedProcessGroup: process.platform !== "win32",
-    startedAt,
-  });
+  let processReceipt;
+  try {
+    processReceipt = writeImmutableReceipt(processPath, {
+      schemaVersion: SCHEMA_VERSION,
+      kind: "Gate2702Process",
+      definitionRef: registration.definitionRef,
+      registrationDigest: registration.contentDigest,
+      preDispatchDigest: preDispatch.contentDigest,
+      trialId: registration.trialId,
+      subject: registration.subject,
+      treatmentId: registration.treatmentId,
+      attempt: registration.attempt,
+      baseSha: registration.baseSha,
+      pid: child.pid,
+      detachedProcessGroup: process.platform !== "win32",
+      startedAt,
+    });
+  } catch (error) {
+    await quiesceManagedProcessGroup(child.pid);
+    finalizeGate2702SandboxHome(sandboxLaunch);
+    throw error;
+  }
 
   let killTimer;
-  const result = await new Promise((resolveResult) => {
-    let settled = false;
-    let timedOut = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutTimer);
-      // Do not cancel a pending group SIGKILL merely because the direct child
-      // exited. A descendant may still be alive in the detached process group.
-      resolveResult({ ...value, timedOut });
-    };
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      try {
-        signalManagedProcess(child.pid, "SIGTERM");
-      } catch (error) {
-        if (error?.code !== "ESRCH")
-          finish({ exitCode: null, signal: "SIGTERM" });
-      }
-      killTimer = setTimeout(() => {
+  let result;
+  try {
+    result = await new Promise((resolveResult) => {
+      let settled = false;
+      let timedOut = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+        // Do not cancel a pending group SIGKILL merely because the direct child
+        // exited. A descendant may still be alive in the detached process group.
+        resolveResult({ ...value, timedOut });
+      };
+      const timeoutTimer = setTimeout(() => {
+        timedOut = true;
         try {
-          signalManagedProcess(child.pid, "SIGKILL");
+          signalManagedProcess(child.pid, "SIGTERM");
         } catch (error) {
           if (error?.code !== "ESRCH")
-            finish({ exitCode: null, signal: "SIGKILL" });
+            finish({ exitCode: null, signal: "SIGTERM" });
         }
-      }, 5_000);
-      killTimer.unref?.();
-    }, plan.limits.wallTimeMs);
-    child.once("error", (error) =>
-      finish({ exitCode: null, signal: null, error: error.message }),
-    );
-    child.once("close", (exitCode, signal) => finish({ exitCode, signal }));
-    child.stdin.on("error", (error) => {
-      if (error?.code !== "EPIPE")
-        finish({ exitCode: null, signal: null, error: error.message });
+        killTimer = setTimeout(() => {
+          try {
+            signalManagedProcess(child.pid, "SIGKILL");
+          } catch (error) {
+            if (error?.code !== "ESRCH")
+              finish({ exitCode: null, signal: "SIGKILL" });
+          }
+        }, 5_000);
+        killTimer.unref?.();
+      }, plan.limits.wallTimeMs);
+      child.once("error", (error) =>
+        finish({ exitCode: null, signal: null, error: error.message }),
+      );
+      child.once("close", (exitCode, signal) => finish({ exitCode, signal }));
+      child.stdin.on("error", (error) => {
+        if (error?.code !== "EPIPE")
+          finish({ exitCode: null, signal: null, error: error.message });
+      });
+      child.stdin.end(prompt);
     });
-    child.stdin.end(prompt);
-  });
+  } catch (error) {
+    if (killTimer) clearTimeout(killTimer);
+    await quiesceManagedProcessGroup(child.pid);
+    finalizeGate2702SandboxHome(sandboxLaunch);
+    throw error;
+  }
 
-  const processGroupQuiescent = await quiesceManagedProcessGroup(child.pid);
-  if (killTimer) clearTimeout(killTimer);
+  let processGroupQuiescent;
+  try {
+    processGroupQuiescent = await quiesceManagedProcessGroup(child.pid);
+  } finally {
+    if (killTimer) clearTimeout(killTimer);
+    finalizeGate2702SandboxHome(sandboxLaunch);
+  }
 
   writeTerminal(runDir, registration, {
     preDispatchDigest: preDispatch.contentDigest,
@@ -1751,6 +1864,8 @@ async function executeArm(plan, paths, trial, registration) {
     signal: result.signal,
     timedOut: result.timedOut,
     processGroupQuiescent,
+    stdout: retainedLogEvidence(stdoutPath),
+    stderr: retainedLogEvidence(stderrPath),
     durationMs: Number(process.hrtime.bigint() - startedNs) / 1_000_000,
     ...(result.error ? { error: result.error } : {}),
     endedAt: new Date().toISOString(),
@@ -1776,6 +1891,13 @@ async function supervise(plan, paths, trial, token) {
     }
     if (status.state === "terminal") return;
 
+    const sidekick = assertSidekickLaunchReady(trial.repoPath);
+    const sandboxRuntime = gate2702SandboxEnabled()
+      ? prepareGate2702SandboxRuntime({
+          trialRoot: paths.trialRoot,
+          sidekickInstallPath: sidekick.installPath,
+        })
+      : null;
     const registrations = validateRegistrationFiles(trial, paths);
     for (const registration of registrations) {
       ensureWorktree(trial.repoPath, registration, trial.worktreeRoot);
@@ -1819,7 +1941,7 @@ async function supervise(plan, paths, trial, token) {
       } else if (preflight.status === "passed") {
         const results = await Promise.allSettled(
           pairRegistrations.map((registration) =>
-            executeArm(plan, paths, trial, registration),
+            executeArm(plan, paths, trial, registration, sandboxRuntime),
           ),
         );
         const rejected = results.find((result) => result.status === "rejected");
@@ -1863,6 +1985,13 @@ async function superviseRetry(plan, paths, trial, registration, token) {
       );
       return;
     }
+    const sidekick = assertSidekickLaunchReady(trial.repoPath);
+    const sandboxRuntime = gate2702SandboxEnabled()
+      ? prepareGate2702SandboxRuntime({
+          trialRoot: paths.trialRoot,
+          sidekickInstallPath: sidekick.installPath,
+        })
+      : null;
     const preflight = invokeClassifier(
       "preflight-retry",
       paths,
@@ -1873,7 +2002,7 @@ async function superviseRetry(plan, paths, trial, registration, token) {
     if (preflight.status === "failed") {
       writePreflightFailureArm(registration, preflight);
     } else if (preflight.status === "passed") {
-      await executeArm(plan, paths, trial, registration);
+      await executeArm(plan, paths, trial, registration, sandboxRuntime);
     } else {
       fail(`retry preflight has invalid status ${String(preflight.status)}`);
     }
@@ -2001,6 +2130,7 @@ async function commandLaunch(plan, options) {
       fail("resume repository does not match the original trial");
     }
     assertSidekickLaunchReady(repoPath);
+    assertGate2702SandboxReady();
     const baseSha = existing ? existing.baseSha : pinOriginMaster(repoPath);
     if (existing) verifyPinnedCommit(repoPath, baseSha);
     const trial =
@@ -2064,9 +2194,8 @@ async function commandRetry(plan, options) {
   if (resolve(repoPath) !== resolve(trial.repoPath)) {
     fail("retry repository does not match the original trial");
   }
-  if (options.treatment === "haiku-sonnet-sidekick") {
-    assertSidekickLaunchReady(repoPath);
-  }
+  assertSidekickLaunchReady(repoPath);
+  assertGate2702SandboxReady();
   const token = acquireLock(paths, options.trial);
   let handedOff = false;
   try {
