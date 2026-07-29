@@ -130,15 +130,59 @@ export interface AnalyzeEvalRecord {
   asOf: string;
 }
 
+/**
+ * A transport paired INSEPARABLY with its provenance (#3131).
+ *
+ * `endpoint` and `endpointKind` used to be independent options, so
+ * `{ endpoint: scriptedAnalyzeEndpoint, endpointKind: 'live' }` was a
+ * representable call — it ran the synthetic fixture and stamped the record as
+ * real local-model evidence, which #2138's confidence loop then consumes as
+ * calibration. Nothing detected it, because the two fields were simply never
+ * compared. The repo's own test asserted that pairing worked.
+ *
+ * Carrying the kind ON the transport removes the pairing entirely: there is no
+ * longer a field to disagree with. The only way to obtain `kind: 'live'` is
+ * {@link liveAnalyzeTransport}, which refuses the scripted endpoint.
+ */
+export interface AnalyzeEvalTransport {
+  readonly kind: AnalyzeEvalEndpointKind;
+  readonly complete: AnalyzeEvalEndpoint;
+}
+
+/** The synthetic fixture transport. Always `scripted` — it cannot be relabelled. */
+export const scriptedAnalyzeTransport: AnalyzeEvalTransport = Object.freeze({
+  kind: 'scripted' as const,
+  complete: scriptedAnalyzeEndpoint,
+});
+
+/**
+ * Wrap a REAL local-model transport so its records carry live provenance.
+ *
+ * Refuses {@link scriptedAnalyzeEndpoint} outright: wrapping the fixture would
+ * recreate the exact mislabelling this abstraction exists to prevent, one layer
+ * up. A caller that genuinely wants fixture behaviour uses
+ * {@link scriptedAnalyzeTransport}, which is honest about what it is.
+ */
+export function liveAnalyzeTransport(
+  complete: AnalyzeEvalEndpoint
+): AnalyzeEvalTransport {
+  if (complete === scriptedAnalyzeEndpoint) {
+    throw new Error(
+      'liveAnalyzeTransport: refusing to label the scripted fixture endpoint as live — ' +
+        'use scriptedAnalyzeTransport for fixture runs (#3131)'
+    );
+  }
+  return Object.freeze({ kind: 'live' as const, complete });
+}
+
 export interface RunAnalyzeEvalOptions {
   samples: AnalyzeEvalSample[];
-  /** The mock/loopback transport; defaults to {@link scriptedAnalyzeEndpoint}. */
-  endpoint?: AnalyzeEvalEndpoint;
   /**
-   * Provenance stamped into the record; defaults to `'scripted'`. A caller
-   * wiring a real local-model transport MUST pass `'live'`.
+   * The transport AND its provenance, inseparable. Defaults to
+   * {@link scriptedAnalyzeTransport}; a real run passes
+   * {@link liveAnalyzeTransport}(realEndpoint).
    */
-  endpointKind?: AnalyzeEvalEndpointKind;
+  transport?: AnalyzeEvalTransport;
   /** ISO timestamp stamped onto the record's `asOf`. */
   asOf: string;
   /** Repair-round bound for the constrained arm; defaults to the #2682 default. */
@@ -228,14 +272,19 @@ export function buildAnalyzeEvalRecord(
 export async function runAnalyzeEval(
   options: RunAnalyzeEvalOptions
 ): Promise<AnalyzeEvalRecord> {
-  const endpoint = options.endpoint ?? scriptedAnalyzeEndpoint;
-  const endpointKind = options.endpointKind ?? 'scripted';
+  const transport = options.transport ?? scriptedAnalyzeTransport;
   const maxRounds = options.maxRounds ?? DEFAULT_MAX_REPAIR_ROUNDS;
   const outcomes: AnalyzeEvalSampleOutcome[] = [];
   for (const sample of options.samples) {
-    outcomes.push(await runAnalyzeEvalSample(sample, endpoint, maxRounds));
+    outcomes.push(await runAnalyzeEvalSample(sample, transport.complete, maxRounds));
   }
-  return buildAnalyzeEvalRecord(outcomes, { asOf: options.asOf, maxRounds, endpointKind });
+  // Provenance is read off the transport that actually ran, never from a
+  // caller-supplied field (#3131).
+  return buildAnalyzeEvalRecord(outcomes, {
+    asOf: options.asOf,
+    maxRounds,
+    endpointKind: transport.kind,
+  });
 }
 
 /**

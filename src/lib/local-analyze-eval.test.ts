@@ -10,6 +10,8 @@ import {
   runAnalyzeEval,
   runAnalyzeEvalSample,
   scriptedAnalyzeEndpoint,
+  scriptedAnalyzeTransport,
+  liveAnalyzeTransport,
   type AnalyzeEvalSample,
 } from './local-analyze-eval';
 import type { LocalAnalyzeRecommendation } from './local-analyze';
@@ -134,7 +136,14 @@ describe('runAnalyzeEval / buildAnalyzeEvalRecord', () => {
     expect(record.endpointKind).toBe('scripted');
   });
 
-  it('stamps endpointKind provenance: scripted by default, live when the caller wires a real transport', async () => {
+  /**
+   * CHANGED in #3131. This test used to pass `endpoint: scriptedAnalyzeEndpoint`
+   * together with `endpointKind: 'live'` and assert the record came out `live` —
+   * i.e. it VALIDATED publishing synthetic fixture results as real local-model
+   * calibration evidence, which is the defect rather than the contract. That
+   * pairing is now unrepresentable: provenance rides on the transport.
+   */
+  it('reads provenance off the transport that actually ran', async () => {
     const samples = [
       sample({
         id: 'both-pass',
@@ -144,15 +153,36 @@ describe('runAnalyzeEval / buildAnalyzeEvalRecord', () => {
     ];
     const scripted = await runAnalyzeEval({ samples, asOf: ASOF });
     expect(scripted.endpointKind).toBe('scripted');
-    // A caller wiring a real local-model transport MUST pass 'live'; the record
-    // then carries that provenance so #2138 cannot over-read it as scripted.
+
+    // Only a constructed live transport can emit 'live', and it must wrap a
+    // transport that is not the fixture.
+    const realish: typeof scriptedAnalyzeEndpoint = async () => ({
+      text: validFor(['a']),
+      model: 'local-test-model',
+    });
     const live = await runAnalyzeEval({
       samples,
       asOf: ASOF,
-      endpoint: scriptedAnalyzeEndpoint,
-      endpointKind: 'live',
+      transport: liveAnalyzeTransport(realish),
     });
     expect(live.endpointKind).toBe('live');
+  });
+
+  it('refuses to label the scripted fixture as a live transport (#3131)', () => {
+    // The exact call the old test asserted worked.
+    expect(() => liveAnalyzeTransport(scriptedAnalyzeEndpoint)).toThrow(
+      /refusing to label the scripted fixture/i
+    );
+  });
+
+  it('the scripted transport cannot be relabelled', () => {
+    expect(scriptedAnalyzeTransport.kind).toBe('scripted');
+    // Frozen, so a caller cannot mutate provenance after the fact.
+    expect(Object.isFrozen(scriptedAnalyzeTransport)).toBe(true);
+    expect(() => {
+      (scriptedAnalyzeTransport as { kind: string }).kind = 'live';
+    }).toThrow();
+    expect(scriptedAnalyzeTransport.kind).toBe('scripted');
   });
 
   it('stamps asOf/endpointKind verbatim onto an empty corpus without inventing samples', () => {

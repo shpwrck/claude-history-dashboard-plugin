@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseAnalyzeEvalCorpus,
   runAnalyzeEval,
-  scriptedAnalyzeEndpoint,
+  scriptedAnalyzeTransport,
 } from '../src/lib/local-analyze-eval.ts';
 
 const RUNNER_PATH = fileURLToPath(import.meta.url);
@@ -81,8 +81,9 @@ async function main() {
 
   const record = await runAnalyzeEval({
     samples,
-    endpoint: scriptedAnalyzeEndpoint,
-    endpointKind: 'scripted',
+    // The transport carries its own provenance (#3131) — this run cannot be
+    // relabelled as live.
+    transport: scriptedAnalyzeTransport,
     asOf: new Date().toISOString(),
   });
 
