@@ -285,7 +285,7 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * unauditable recommendation, so growing it must be a deliberate edit rather
  * than the path of least resistance. Update this number DOWNWARD only.
  */
-const EXEMPT_AT_INVERSION = 36;
+const EXEMPT_AT_INVERSION = 31;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {
@@ -894,6 +894,111 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     ] as unknown as RecommendationInput['configBackups'];
     return { input: baseInput({ configBackups }), now };
   },
+  'reliability.dropped-assignments': () => ({
+    input: baseInput({
+      teams: [
+        {
+          teamId: 'prov-team',
+          firstAssignmentAt: '2026-06-09T11:00:00.000Z',
+          latestAssignmentAt: CTX_TS,
+          totalAssignments: 2,
+          droppedCount: 1,
+          droppedPct: 50,
+          droppedAssignments: [
+            {
+              agent: 'prov-worker',
+              taskId: 'prov-task',
+              subject: 'Prove provenance',
+              ageMinutes: 60,
+            },
+          ],
+          stalledAgents: [],
+        },
+      ] as unknown as RecommendationInput['teams'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+  'reliability.retry-prefix-rewaste': () => ({
+    input: baseInput({
+      tokenData: [ctxSession('prov-retry-prefix', { cacheReadTokens: 2_000_000 })],
+      toolData: [
+        {
+          sessionId: 'prov-retry-prefix',
+          calls: [
+            {
+              timestamp: '2026-06-09T11:59:59.000Z',
+              toolName: 'Bash',
+              input: { command: 'printf one' },
+              toolUseId: 'prov-rp-1',
+              isError: true,
+              resultBytes: 0,
+            },
+            {
+              timestamp: '2026-06-09T12:00:01.000Z',
+              toolName: 'Bash',
+              input: { command: 'printf two' },
+              toolUseId: 'prov-rp-2',
+              isError: false,
+              resultBytes: 0,
+            },
+          ],
+        },
+      ] as RecommendationInput['toolData'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+  'reliability.retry-storms': () => ({
+    input: baseInput({
+      toolData: [
+        {
+          sessionId: 'prov-retry-storm',
+          calls: Array.from({ length: 4 }, (_, i) => ({
+            timestamp: `2026-06-09T12:00:0${i}.000Z`,
+            toolName: 'Bash',
+            input: { command: `printf attempt-${i}` },
+            toolUseId: `prov-rs-${i}`,
+            isError: i === 0,
+            resultBytes: 0,
+          })),
+        },
+      ] as RecommendationInput['toolData'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+  'reliability.self-update-health': () => ({
+    input: baseInput({
+      updateResults: [
+        {
+          timestamp: CTX_TS,
+          path: 'npm-global',
+          outcome: 'failure',
+          status: 'failure',
+          version_from: '2.1.160',
+          version_to: '2.1.161',
+          error_code: 'EACCES',
+        },
+      ] as RecommendationInput['updateResults'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+  'reliability.tool-errors': () => ({
+    input: baseInput({
+      toolData: [
+        {
+          sessionId: 'prov-tool-errors',
+          calls: Array.from({ length: 5 }, (_, i) => ({
+            timestamp: `2026-06-09T12:00:0${i}.000Z`,
+            toolName: 'Edit',
+            input: { file_path: '/repo/src/a.ts' },
+            toolUseId: `prov-te-${i}`,
+            isError: i < 2,
+            resultBytes: 0,
+          })),
+        },
+      ] as RecommendationInput['toolData'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
   'reliability.agent-report-card': () => {
     const ids = ['rc1', 'rc2', 'rc3', 'rc4'];
     return {
@@ -2091,6 +2196,11 @@ describe('migrated context/activity detectors date claims from observed data', (
     'workflow.correction-mining',
     'workflow.failed-workflow-runs',
     'workflow.file-churn',
+    'reliability.dropped-assignments',
+    'reliability.retry-prefix-rewaste',
+    'reliability.retry-storms',
+    'reliability.self-update-health',
+    'reliability.tool-errors',
   ])('%s anchors asOf to the newest observed datum, not today', (id) => {
     const rec = runAllowlistedDetector(id);
     expect(rec.provenance!.asOf).toBe(CTX_ASOF);

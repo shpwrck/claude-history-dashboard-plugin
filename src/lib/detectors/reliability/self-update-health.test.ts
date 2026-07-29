@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './self-update-health';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { UpdateResult } from '../../parse-last-update';
 
@@ -102,6 +103,66 @@ describe('reliability.self-update-health (#566)', () => {
     it('detail references the total and success count', () => {
       expect(rec?.detail).toMatch(/10/);
       expect(rec?.detail).toMatch(/8/);
+    });
+  });
+
+  describe('structured provenance and freshness (#3216, #3217)', () => {
+    it('cites every displayed report figure and the newest observed timestamp', () => {
+      const rec = detector.rule(
+        withResults(PROTO_SERIES),
+        Date.parse('2026-06-10T00:00:00.000Z')
+      );
+      expect(rec?.provenance).toBeDefined();
+      expect(validateRecommendationProvenance(rec!)).toEqual([]);
+      expect(rec?.provenance?.asOf).toBe('2026-06-03');
+      expect(rec?.provenance?.stale).toBe(false);
+      expect(rec?.provenance?.observations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            field: 'analyzeUpdateHealth().{total,successCount,successRate}',
+            value: '10/8/80',
+          }),
+          expect.objectContaining({
+            field: 'analyzeUpdateHealth().failedCount',
+            value: 2,
+          }),
+          expect.objectContaining({
+            field: 'analyzeUpdateHealth().immediateRetries',
+            value: 1,
+          }),
+          expect.objectContaining({
+            field: 'updateResults[].timestamp',
+            value: '2026-06-03',
+          }),
+        ])
+      );
+    });
+
+    it('qualifies stale history with its date and demotes a warning posture', () => {
+      const rec = detector.rule(
+        withResults([
+          fail('2026-01-04T09:00:00Z', '2.1.160', '2.1.161', 'EACCES'),
+        ]),
+        Date.parse('2026-06-10T00:00:00.000Z')
+      );
+      expect(rec?.provenance?.asOf).toBe('2026-01-04');
+      expect(rec?.provenance?.stale).toBe(true);
+      expect(rec?.severity).toBe('info');
+      expect(rec?.detail).toMatch(/as of 2026-01-04/i);
+      expect(rec?.action).toMatch(/re-check|check.*current/i);
+    });
+
+    it('retains the normal warning posture for fresh failed-update history', () => {
+      const rec = detector.rule(
+        withResults([
+          fail('2026-06-09T09:00:00Z', '2.1.160', '2.1.161', 'EACCES'),
+        ]),
+        Date.parse('2026-06-10T00:00:00.000Z')
+      );
+      expect(rec?.provenance?.asOf).toBe('2026-06-09');
+      expect(rec?.provenance?.stale).toBe(false);
+      expect(rec?.severity).toBe('warning');
+      expect(rec?.detail).not.toMatch(/as of 2026-06-09/i);
     });
   });
 

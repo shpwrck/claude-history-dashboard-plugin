@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { detector } from './tool-errors';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { LiveConfig } from '../../../types';
 import type { ToolCall, ToolUsageData } from '../../parse-tools';
@@ -61,6 +62,37 @@ describe('reliability.tool-errors', () => {
       severity: 'warning',
       fix: { target: 'hook', label: 'Add a post-edit typecheck hook' },
     });
+  });
+
+  it('cites qualifying tool, error-call, threshold, and evidence figures (#3216)', () => {
+    const rec = detector.rule(
+      input({ toolData: [failingTool()] }),
+      Date.parse('2026-06-13T00:00:00.000Z')
+    );
+    expect(rec?.provenance).toBeDefined();
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    expect(rec?.provenance?.asOf).toBe('2026-06-12');
+    expect(rec?.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'aggregateToolErrors().{totalCalls,errorRate}',
+          value: 1,
+        }),
+        expect.objectContaining({
+          field: 'aggregateToolErrors().errorCalls',
+          value: 2,
+        }),
+        expect.objectContaining({
+          field: 'MIN_TOOL_ERROR_RATE',
+          value: 20,
+        }),
+        expect.objectContaining({
+          field: 'aggregateToolErrors().{toolName,errorRate,totalCalls}',
+        }),
+      ])
+    );
+    expect(rec?.detail).not.toMatch(/often trigger retries/i);
+    expect(rec?.provenance?.inference).toMatch(/does not establish.*retry/i);
   });
 
   it('stays silent below the call/rate thresholds', () => {

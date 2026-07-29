@@ -14,6 +14,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { detector } from './dropped-assignments';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { TeamSummary } from '../../parse-teams';
 
@@ -27,6 +28,8 @@ function makeTeamSummary(
 ): TeamSummary {
   return {
     teamId,
+    firstAssignmentAt: '2026-06-08T09:00:00.000Z',
+    latestAssignmentAt: '2026-06-09T09:00:00.000Z',
     totalAssignments,
     droppedCount: droppedAssignments.length,
     droppedPct: Math.round((droppedAssignments.length / totalAssignments) * 100),
@@ -94,7 +97,7 @@ describe('reliability.dropped-assignments — HIGH severity (stalled agents)', (
     expect(rec?.category).toBe('reliability');
     expect(rec?.severity).toBe('warning');
     expect(rec?.affected).toBe(2);
-    expect(rec?.detail).toContain('stalled agents');
+    expect(rec?.detail).toContain('all-unread agent queues');
     expect(rec?.detail).toContain('wave1-refund-engine');
   });
 });
@@ -137,6 +140,56 @@ describe('reliability.dropped-assignments — HIGH severity (>= 50% dropped)', (
   });
 });
 
+describe('reliability.dropped-assignments — structured provenance (#3208)', () => {
+  it('cites stalled-agent input fields without presenting unread state as proof work never started', () => {
+    const teams = [
+      makeTeamSummary(
+        'team-billing-pipeline',
+        4,
+        [
+          { agent: 'wave1-refund-engine', taskId: 'b2', subject: 'Refund eligibility engine', ageMinutes: 6325 },
+          { agent: 'wave1-refund-engine', taskId: 'b2b', subject: 'Refund audit log', ageMinutes: 6310 },
+        ],
+        [{ agent: 'wave1-refund-engine', unreadCount: 2 }]
+      ),
+    ];
+
+    const rec = detector.rule(input(teams), Date.parse('2026-06-10T00:00:00.000Z'));
+    expect(rec?.provenance).toBeDefined();
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    expect(rec?.provenance?.asOf).toBe('2026-06-09');
+    expect(rec?.provenance?.observations.map((o) => o.field)).toEqual(
+      expect.arrayContaining([
+        'teams[].droppedCount',
+        'teams[].totalAssignments',
+        'teams[].stalledAgents',
+        'teams[].droppedAssignments',
+      ])
+    );
+    expect(`${rec?.title} ${rec?.detail}`).not.toMatch(
+      /silently|never started|never acknowledged/i
+    );
+    expect(rec?.provenance?.inference).toMatch(/cannot prove/i);
+  });
+
+  it('cites droppedPct for the percentage-only warning path', () => {
+    const teams = [
+      makeTeamSummary(
+        'team-half-dropped',
+        2,
+        [{ agent: 'agent-a', taskId: 't1', subject: 'Task one', ageMinutes: 100 }]
+      ),
+    ];
+
+    const rec = detector.rule(input(teams), Date.parse('2026-06-10T00:00:00.000Z'));
+    expect(rec?.severity).toBe('warning');
+    expect(rec?.provenance?.observations.map((o) => o.field)).toContain(
+      'teams[].droppedPct'
+    );
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+});
+
 describe('reliability.dropped-assignments — evidence and fix', () => {
   it('populates evidence rows with team/agent/taskId info', () => {
     const teams = [
@@ -164,7 +217,7 @@ describe('reliability.dropped-assignments — evidence and fix', () => {
       ),
     ];
     const rec = detector.rule(input(teams), 0);
-    expect(rec?.action).toMatch(/Re-dispatch the unread tasks/);
+    expect(rec?.action).toMatch(/re-dispatch/i);
     expect(rec?.fix).toBeUndefined();
     expect(JSON.stringify(rec)).not.toContain('claude-team');
   });

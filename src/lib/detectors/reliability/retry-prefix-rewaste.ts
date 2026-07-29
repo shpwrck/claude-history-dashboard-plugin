@@ -1,5 +1,5 @@
 import type { Detector } from '../types';
-import { short } from '../shared';
+import { newestIsoDate, short } from '../shared';
 import { detectRetryGroups } from '../../parse-errors';
 import { type ReclaimClaim } from '../../reclaim';
 import {
@@ -76,18 +76,20 @@ export const detector: Detector = {
     };
 
     const sessions = new Set(scopeKeys.map((k) => k.split('|')[0]));
+    const attributedPct = Math.round(PREFIX_REWASTE_FRAC * 100);
+    const asOf = newestIsoDate(
+      errored.flatMap((g) => [g.startTimestamp, g.endTimestamp])
+    );
     return {
       id: LEVER_ID,
       category: 'reliability',
       severity: 'info',
-      title: 'Failed-tool retries re-pay the cached prefix',
-      detail: `${errored.length} errored retry run(s) replayed their turn across ${sessions.size} session(s); each replay re-reads the cached prefix. A conservative ${Math.round(
-        PREFIX_REWASTE_FRAC * 100
-      )}% of the in-window cache-read (~${(cacheReadTokens / 1_000_000).toFixed(
+      title: 'Errored same-tool runs overlap cached-prefix reads',
+      detail: `${errored.length} errored consecutive same-tool run(s) were observed; their session windows contained priced cache-read in ${sessions.size} session(s). The conservative attribution model books ${attributedPct}% of that in-window cache-read (~${(cacheReadTokens / 1_000_000).toFixed(
         2
-      )}M tokens) is re-paid waste — only the re-paid residual, not the legitimate co-located work.`,
+      )}M tokens) as possible re-paid prefix, leaving the legitimate co-located work untouched.`,
       action:
-        'Fix the root tool error once instead of re-running it — a single failed Bash/Edit/MCP call replays the whole turn and re-feeds its cache-read prefix. Check the Errors view for the recurring failure.',
+        'Investigate the root tool error before repeating the call; use the Errors view to find the recurring failure.',
       estSavingsUsd,
       reclaim,
       affected: sessions.size,
@@ -95,6 +97,50 @@ export const detector: Detector = {
         .slice(0, 5)
         .map((g) => `${short(g.sessionId)}, ${g.toolName} ×${g.count}`),
       view: 'errors',
+      provenance: {
+        observations: [
+          {
+            claim: `${errored.length} consecutive same-tool run(s) included at least one error`,
+            source: 'parse-errors (detectRetryGroups over parse-tools)',
+            field: 'detectRetryGroups().hasErrors',
+            value: errored.length,
+          },
+          {
+            claim: `${sessions.size} session(s) had priced cache-read inside those timestamp windows`,
+            source: 'detectors/reliability/reclaim-prefix',
+            field: 'resolveReliabilityScopes().scopeKeys',
+            value: sessions.size,
+          },
+          {
+            claim: `${cacheReadTokens} cache-read token(s) fell inside the resolved windows`,
+            source: 'detectors/reliability/reclaim-prefix',
+            field: 'resolveReliabilityScopes().cacheReadTokens',
+            value: cacheReadTokens,
+          },
+          {
+            claim: `the conservative attribution fraction is ${attributedPct}%`,
+            source: 'detectors/reliability/reclaim-prefix',
+            field: 'PREFIX_REWASTE_FRAC',
+            value: attributedPct,
+          },
+          {
+            claim: `the resulting estimated saving is $${estSavingsUsd.toFixed(4)}`,
+            source: 'detectors/reliability/reclaim-prefix',
+            field: 'resolveReliabilityScopes().estSavingsUsd',
+            value: estSavingsUsd,
+          },
+          {
+            claim: 'displayed evidence rows identify the session, tool, and same-tool run length',
+            source: 'parse-errors (detectRetryGroups over parse-tools)',
+            field: 'detectRetryGroups().{sessionId,toolName,count}',
+          },
+        ],
+        inference:
+          'The errored tool runs and token rows are joined only by session and timestamp. ' +
+          'There is no toolUseId edge, so the fixed fraction is a conservative accounting ' +
+          'attribution rather than proof that every overlapping cache-read token was caused by a retry.',
+        ...(asOf ? { asOf } : {}),
+      },
     };
   },
 };

@@ -3,6 +3,7 @@ import type { AppliedMarkers } from '../types';
 import {
   hasPostEditHook,
   claudeMdMarksApplied,
+  newestIsoDate,
   MIN_TOOL_ERROR_RATE,
   MIN_TOOL_ERROR_CALLS,
 } from '../shared';
@@ -44,18 +45,29 @@ export const detector: Detector = {
       (e) => e.totalCalls >= MIN_TOOL_ERROR_CALLS && e.errorRate >= MIN_TOOL_ERROR_RATE
     );
     if (errs.length === 0) return null;
+    const errorCalls = errs.reduce((sum, e) => sum + e.errorCalls, 0);
+    const qualifyingTools = new Set(errs.map((e) => e.toolName));
+    const evidence = errs
+      .slice(0, 5)
+      .map((e) => `${e.toolName}: ${(e.errorRate * 100).toFixed(0)}% of ${e.totalCalls}`);
+    const thresholdPct = Number((MIN_TOOL_ERROR_RATE * 100).toFixed(0));
+    const asOf = newestIsoDate(
+      input.toolData.flatMap((session) =>
+        session.calls
+          .filter((call) => qualifyingTools.has(call.toolName))
+          .map((call) => call.timestamp)
+      )
+    );
     return {
       id: 'reliability.tool-errors',
       category: 'reliability',
       severity: 'warning',
       title: 'Tools with high error rates',
-      detail: `${errs.length} tool(s) failed on ${(MIN_TOOL_ERROR_RATE * 100).toFixed(0)}%+ of calls. Failed calls waste a round-trip and often trigger retries.`,
+      detail: `${errs.length} tool(s) recorded errors on ${thresholdPct}%+ of calls; ${errorCalls} qualifying call(s) carried an error outcome.`,
       action:
         'Investigate the top offenders — common causes are stale file state, wrong paths, or missing permissions.',
-      affected: errs.reduce((s, e) => s + e.errorCalls, 0),
-      evidence: errs
-        .slice(0, 5)
-        .map((e) => `${e.toolName}: ${(e.errorRate * 100).toFixed(0)}% of ${e.totalCalls}`),
+      affected: errorCalls,
+      evidence,
       view: 'errors',
       fix: {
         target: 'hook',
@@ -80,6 +92,43 @@ export const detector: Detector = {
         // Matches the adopt-block wrapper (not this settings.json snippet) so the
         // suppression-transition receipt can resolve a heading (#1783).
         appliedMarkers: MARKERS_TOOL_ERRORS,
+      },
+      provenance: {
+        observations: [
+          {
+            claim: `${errs.length} tool(s) met both the call-count and error-rate floors`,
+            source: 'parse-errors (aggregateToolErrors over parse-tools)',
+            field: 'aggregateToolErrors().{totalCalls,errorRate}',
+            value: errs.length,
+          },
+          {
+            claim: `${errorCalls} qualifying call(s) carried an error outcome`,
+            source: 'parse-errors (aggregateToolErrors over parse-tools)',
+            field: 'aggregateToolErrors().errorCalls',
+            value: errorCalls,
+          },
+          {
+            claim: `the minimum qualifying error rate is ${thresholdPct}%`,
+            source: 'detectors/shared',
+            field: 'MIN_TOOL_ERROR_RATE',
+            value: thresholdPct,
+          },
+          {
+            claim: `the minimum qualifying call count is ${MIN_TOOL_ERROR_CALLS}`,
+            source: 'detectors/shared',
+            field: 'MIN_TOOL_ERROR_CALLS',
+            value: MIN_TOOL_ERROR_CALLS,
+          },
+          {
+            claim: 'displayed evidence rows identify each tool, observed error rate, and call count',
+            source: 'parse-errors (aggregateToolErrors over parse-tools)',
+            field: 'aggregateToolErrors().{toolName,errorRate,totalCalls}',
+          },
+        ],
+        inference:
+          'A sustained observed error rate warrants investigating the affected tool paths. ' +
+          'This aggregate does not establish the root cause or whether any failed call triggered a retry.',
+        ...(asOf ? { asOf } : {}),
       },
     };
   },

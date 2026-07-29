@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './retry-prefix-rewaste';
 import { PREFIX_REWASTE_FRAC } from './reclaim-prefix';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { ToolUsageData, ToolCall } from '../../parse-tools';
 import type { SessionTokenData, TokenEntry } from '../../types';
@@ -83,6 +84,30 @@ describe('reliability.retry-prefix-rewaste (#950)', () => {
     expect(rec?.reclaim?.cause).toBe('failed-tool-retry');
     expect(rec?.reclaim?.ownedPools).toEqual(['cacheRead']);
     expect(rec?.reclaim?.scopeKeys).toEqual([scopeKeyOf('s1', 'claude-opus-4-7')]);
+    expect(rec?.provenance).toBeDefined();
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    expect(rec?.provenance?.asOf).toBe('2026-01-01');
+    expect(rec?.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'detectRetryGroups().hasErrors',
+          value: 1,
+        }),
+        expect.objectContaining({
+          field: 'resolveReliabilityScopes().scopeKeys',
+          value: 1,
+        }),
+        expect.objectContaining({
+          field: 'resolveReliabilityScopes().cacheReadTokens',
+          value: 2_000_000,
+        }),
+        expect.objectContaining({
+          field: 'PREFIX_REWASTE_FRAC',
+          value: Math.round(PREFIX_REWASTE_FRAC * 100),
+        }),
+      ])
+    );
+    expect(rec?.provenance?.inference).toMatch(/no toolUseId/i);
   });
 
   it('books $0 on a high-count but error-FREE retry group (hasErrors gate, not count)', () => {

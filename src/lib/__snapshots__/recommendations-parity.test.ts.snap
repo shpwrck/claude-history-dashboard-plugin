@@ -79,7 +79,7 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
     "action": "Investigate the top offenders — common causes are stale file state, wrong paths, or missing permissions.",
     "affected": 12,
     "category": "reliability",
-    "detail": "2 tool(s) failed on 20%+ of calls. Failed calls waste a round-trip and often trigger retries.",
+    "detail": "2 tool(s) recorded errors on 20%+ of calls; 12 qualifying call(s) carried an error outcome.",
     "evidence": [
       "Grep: 100% of 6",
       "Read: 50% of 12",
@@ -111,6 +111,40 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
       "target": "hook",
     },
     "id": "reliability.tool-errors",
+    "provenance": {
+      "inference": "A sustained observed error rate warrants investigating the affected tool paths. This aggregate does not establish the root cause or whether any failed call triggered a retry.",
+      "observations": [
+        {
+          "claim": "2 tool(s) met both the call-count and error-rate floors",
+          "field": "aggregateToolErrors().{totalCalls,errorRate}",
+          "source": "parse-errors (aggregateToolErrors over parse-tools)",
+          "value": 2,
+        },
+        {
+          "claim": "12 qualifying call(s) carried an error outcome",
+          "field": "aggregateToolErrors().errorCalls",
+          "source": "parse-errors (aggregateToolErrors over parse-tools)",
+          "value": 12,
+        },
+        {
+          "claim": "the minimum qualifying error rate is 20%",
+          "field": "MIN_TOOL_ERROR_RATE",
+          "source": "detectors/shared",
+          "value": 20,
+        },
+        {
+          "claim": "the minimum qualifying call count is 5",
+          "field": "MIN_TOOL_ERROR_CALLS",
+          "source": "detectors/shared",
+          "value": 5,
+        },
+        {
+          "claim": "displayed evidence rows identify each tool, observed error rate, and call count",
+          "field": "aggregateToolErrors().{toolName,errorRate,totalCalls}",
+          "source": "parse-errors (aggregateToolErrors over parse-tools)",
+        },
+      ],
+    },
     "severity": "warning",
     "title": "Tools with high error rates",
     "view": "errors",
