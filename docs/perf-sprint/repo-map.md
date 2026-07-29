@@ -42,11 +42,14 @@ Run the gate host-side (it generates the map, which needs the WASM grammars):
 npm run gate:repo-map                 # gate this repo against repo-map-budget.json
 npm run gate:repo-map -- --measure-only   # print numbers, do not gate
 npm run gate:repo-map -- --root <dir> --json out.json
+npm run gate:repo-map -- --max-persisted-bytes 20000   # override the size ceiling
 ```
 
 | Metric | What it captures | Bound (budget key) |
 |---|---|---|
-| `datasetPayloadBytes` | persisted-artifact size (dataset payload delta) | `datasetPayloadMaxBytes` (max) |
+| `unboundedPayloadBytes` | what the artifact serializes to with **no** size ceiling — the real growth signal | `unboundedPayloadMaxBytes` (max) |
+| `retainedFiles` | ranked files surviving the persisted-size clamp | `retainedFilesMin` (min, absolute count) |
+| `datasetPayloadBytes` | persisted-artifact size — **reported, never gated** (see below) | — |
 | `coldIngestMs` | walk + parse + render from cold (cold ingest/build cost) | `coldIngestMaxMs` (max) |
 | `localizationRecallPct` | share of a task's touched files that fall in the map's top-K ranked slice — the map's top-ranked files vs the files a session actually touches | `localizationRecallMinPct` (min) |
 | `rereadWasteTokensSaved` | reread/search tokens the bounded map saves vs. scanning the whole tree (reread-token waste over time) | `rereadTokensSavedMin` (min) |
@@ -77,6 +80,50 @@ the unchanged 77% floor; and top-67 measures 131/168 (78.0%), restoring normal
 gate headroom. This is a gate-only rebaseline for a larger working set: it does
 not affect runtime output or claim that ranking quality improved.
 
+### Why the persisted size is reported but not gated (#3452)
+
+`enforceSizeLimit` binary-searches the largest prefix of the ranked file list that
+fits `DEFAULT_MAX_PERSISTED_BYTES` and **drops the rest**, so the persisted size is
+clamped to that ceiling by construction. The gate used to compare that clamped
+value against `datasetPayloadMaxBytes` — the same 1,048,576 — which made the check
+a tautology that could never fail, whatever the repo grew to. Growth was absorbed
+by silently shedding ranked files rather than failing CI. `datasetPayloadMaxBytes`
+is therefore **removed**; the clamped figure is still printed because it is what
+ships, but a clamped value cannot carry a budget.
+
+`retainedFilesMin` is an absolute **count**, not a percentage, on purpose:
+retained-*share* falls with repo growth **by construction** (the byte ceiling is
+fixed, so a constant-size artifact covers a shrinking fraction of a growing tree),
+which would make a percentage floor a self-lowering ratchet needing renegotiation
+with no regression having occurred — the pathology #3471 documents for
+`localizationRecallMinPct`.
+
+The count is **more robust, not immune**. It is bounded by `maxPersistedBytes` ÷ the
+average retained entry size, so it holds while that average holds; a batch of
+high-ranking files with large entries can displace several smaller ones and lower it
+with no per-file bloat. What it does *not* do is drift down merely because the tree
+got bigger.
+
+The **500 floor** is a round number ~5 % below the measured 527, chosen to match the
+~5 % headroom on `unboundedPayloadMaxBytes` rather than derived from a separate
+measurement. It trips when the average retained entry size grows by roughly 5 %. If
+ordinary churn starts tripping it, re-baseline deliberately with a note.
+
+The gate honors the producer's `REPO_MAP_MAX_BYTES` (CLI `--max-persisted-bytes`
+takes precedence), so it measures the ceiling that actually ships rather than the
+built-in default — otherwise a 512 KiB deployment would be gated on a 1 MiB artifact
+nobody has.
+
+Note that `localizationRecallPct` and `rereadWasteTokensSaved` are computed on the
+**unbounded** map, not the persisted one. That is conservative for recall rather
+than inflationary (top-K sits far below the retained count, so every hit is present
+in the shipped artifact), but it does mean the value metrics describe a larger
+artifact than the one that ships — see #3471 and #3475.
+
+`scripts/repo-map-gate.test.mjs` pins that the gate can fail: it asserts a non-zero
+exit for an over-budget natural serialization, for shedding past the retained floor,
+and for a missing budget key.
+
 ### Baseline (2026-06-09, this repo, 426 source files)
 
 | Metric | Measured | Budget |
@@ -85,6 +132,25 @@ not affect runtime output or claim that ranking quality improved.
 | cold ingest | ~2.5 s | <= 30,000 ms |
 | localization recall (top-60) | 92 % | >= 80 % |
 | reread tokens saved | 15,032 tok | >= 1,000 tok |
+
+### Baseline (2026-07-29, this repo, 1,192 source files)
+
+Re-measured while repairing the gate (#3452). Recorded because the 2026-06-09 row's
+"dataset payload 470,031 B" no longer describes the artifact — the map has since
+grown past its ceiling and is being trimmed to fit.
+
+| Metric | Measured | Budget |
+|---|---|---|
+| payload (unbounded) | 1,759,234 B | <= 1,850,000 B |
+| files retained | 527 of 1,192 (44.2 %) | >= 500 files |
+| persisted payload | 1,047,416 B | not gated (clamped) |
+| cold ingest | ~6.9 s | <= 30,000 ms |
+| localization recall (top-78) | 77.6 % | >= 77 % |
+| reread tokens saved | 84,564 tok | >= 1,000 tok |
+
+The artifact currently sheds **664 of 1,192 ranked files (55.8 %)** to fit the 1 MiB
+persisted ceiling. These baselines are **measured status quo, not targets** — the
+shedding is a known-bad state tracked in #3475.
 
 Raise a ceiling/floor in `repo-map-budget.json` deliberately, with a note on
 why, when a change is a real win (a denser map, a legitimately larger root).

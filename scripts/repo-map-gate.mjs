@@ -15,9 +15,19 @@
 //   ... --json out.json        also write the structured metrics
 //   ... --measure-only         print numbers, do not gate (exit 0)
 //   ... --budget <file>        override the budget JSON
+//   ... --max-persisted-bytes  override the producer's size ceiling (tests)
 //
 // Metrics (each checked against repo-map-budget.json):
-//   - datasetPayloadBytes        persisted-artifact size (dataset payload delta)
+//   - unboundedPayloadBytes      what the artifact serializes to with NO size
+//                                ceiling — the real growth signal, and the one
+//                                that gates. The persisted size is CLAMPED to
+//                                the ceiling by enforceSizeLimit, so gating it
+//                                against an equal budget was a tautology that
+//                                could never fail (#3452); it is now reported
+//                                but not gated.
+//   - retainedFilesPct           share of ranked files surviving the clamp, so
+//                                an artifact silently shedding files fails here
+//                                instead of only showing up as worse recall
 //   - coldIngestMs               wall-clock to walk + parse + render cold
 //   - localizationRecallPct      map's top-ranked files vs the files a task
 //                                touches, on a sampled "session" set — the
@@ -41,6 +51,7 @@ const {
   enforceSizeLimit,
   serializedBytes,
   assertNoBodyLeakage,
+  DEFAULT_MAX_PERSISTED_BYTES,
 } = await import(join(REPO_ROOT, 'src', 'lib', 'repo-map', 'index.ts'));
 
 function parseArgs(argv) {
@@ -51,7 +62,19 @@ function parseArgs(argv) {
     else if (a === '--budget') out.budget = argv[++i];
     else if (a === '--json') out.json = argv[++i];
     else if (a === '--measure-only') out.measureOnly = true;
-    else {
+    else if (a === '--max-persisted-bytes') {
+      // The producer's real ceiling, overridable so a test can exercise the
+      // size-bounding path without building a 1 MiB corpus. Parsed FAIL-CLOSED
+      // (#3076): bad input exits non-zero rather than silently falling back to
+      // a default and measuring something other than what was asked for.
+      const raw = argv[++i];
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n <= 0) {
+        console.error(`--max-persisted-bytes must be a positive integer, got: ${raw}`);
+        process.exit(2);
+      }
+      out.maxPersistedBytes = n;
+    } else {
       console.error(`Unknown argument: ${a}`);
       process.exit(2);
     }
@@ -187,15 +210,52 @@ async function main() {
   });
   const coldIngestMs = hrMs() - t0;
 
-  // Dataset payload = the persisted, size-bounded artifact's serialized bytes.
+  // Dataset payload (#3452). TWO figures, and only one of them can gate.
+  //
+  // `enforceSizeLimit` binary-searches the largest prefix of the ranked file
+  // list that fits `maxPersistedBytes` and drops the rest, so the PERSISTED
+  // size is clamped to that ceiling by construction. Comparing it against a
+  // budget equal to the same ceiling — which is what this gate used to do —
+  // is a tautology: `datasetPayloadBytes <= datasetPayloadMaxBytes` could
+  // never be false, whatever the repo grew to. Growth was absorbed silently by
+  // shedding ranked files instead of failing CI, which is the opposite of what
+  // the gate exists for.
+  //
+  // So we gate the UNBOUNDED serialization — what the artifact would be if
+  // nothing were dropped — which is the real growth signal and can actually
+  // fail. The persisted figure is still reported (it is what ships) but is
+  // deliberately NOT gated, because a clamped value cannot carry a budget.
+  // We also gate how much of the map survives the clamp, so an artifact
+  // quietly shedding ranked files is itself a failure rather than a silent
+  // degradation that only ever surfaced on localization recall.
+  // Measure the ceiling the PRODUCER will actually apply, or the retention check
+  // guards an artifact nobody ships: scripts/repo-map-generate.mjs honors
+  // REPO_MAP_MAX_BYTES, so a deployment setting it to 512 KiB ships far fewer
+  // files than a gate hard-coded to the 1 MiB default would ever notice.
+  // Precedence: explicit CLI flag > REPO_MAP_MAX_BYTES > built-in default.
+  // Parsed fail-closed (#3076) — an unusable override is an error, not a silent
+  // fallback that measures a different artifact than the one being shipped.
+  const envMaxBytes = process.env.REPO_MAP_MAX_BYTES;
+  let maxPersistedBytes = args.maxPersistedBytes ?? DEFAULT_MAX_PERSISTED_BYTES;
+  if (args.maxPersistedBytes == null && envMaxBytes != null && envMaxBytes !== '') {
+    const n = Number(envMaxBytes);
+    if (!Number.isInteger(n) || n <= 0) {
+      die(`REPO_MAP_MAX_BYTES must be a positive integer, got: ${envMaxBytes}`);
+    }
+    maxPersistedBytes = n;
+  }
   const absFiles = map.files.map((f) => join(args.root, f.path));
   const cacheKey = computeCacheKey(args.root, gitSha, absFiles);
-  const persisted = enforceSizeLimit(
-    map,
-    cacheKey,
-    (files) => renderRepoMap(files, tokenBudget),
-  );
+  const render = (files) => renderRepoMap(files, tokenBudget);
+  const persisted = enforceSizeLimit(map, cacheKey, render, maxPersistedBytes);
   const datasetPayloadBytes = serializedBytes(persisted);
+  // Same envelope, no ceiling — the size the artifact naturally wants to be.
+  const unbounded = enforceSizeLimit(map, cacheKey, render, Number.MAX_SAFE_INTEGER);
+  const unboundedPayloadBytes = serializedBytes(unbounded);
+  const retainedFilesPct =
+    map.files.length === 0
+      ? 100
+      : (persisted.map.files.length / map.files.length) * 100;
 
   // Privacy: even a measurement run asserts no bodies leaked. We can't know the
   // corpus's real secrets, but a non-empty structural map must still scan clean
@@ -209,6 +269,10 @@ async function main() {
 
   const metrics = {
     datasetPayloadBytes,
+    unboundedPayloadBytes,
+    retainedFiles: persisted.map.files.length,
+    retainedFilesPct: +retainedFilesPct.toFixed(1),
+    maxPersistedBytes,
     coldIngestMs: +coldIngestMs.toFixed(1),
     localizationRecallPct: +localizationRecallPct(map, topK, sampleSize).toFixed(1),
     rereadWasteTokensSaved: rereadWasteTokensSaved(map),
@@ -218,20 +282,65 @@ async function main() {
   };
 
   // Gate checks: max-ceilings for cost/payload, min-floors for the value metrics.
+  // `required` is load-bearing (#3452): a missing or misspelled budget key used
+  // to make its check silently pass and print "(no budget)" — the same
+  // cannot-fail failure mode this file is being repaired for. All four are
+  // mandatory, so an absent bound is an ERROR, not a free pass.
   const checks = [
-    { name: 'dataset payload', actual: metrics.datasetPayloadBytes, bound: budget.datasetPayloadMaxBytes, dir: 'max', unit: 'B' },
-    { name: 'cold ingest', actual: metrics.coldIngestMs, bound: budget.coldIngestMaxMs, dir: 'max', unit: 'ms' },
-    { name: 'localization recall', actual: metrics.localizationRecallPct, bound: budget.localizationRecallMinPct, dir: 'min', unit: '%' },
-    { name: 'reread tokens saved', actual: metrics.rereadWasteTokensSaved, bound: budget.rereadTokensSavedMin, dir: 'min', unit: 'tok' },
+    { name: 'payload (unbounded)', actual: metrics.unboundedPayloadBytes, bound: budget.unboundedPayloadMaxBytes, dir: 'max', unit: 'B', required: true },
+    // Absolute COUNT, deliberately not a percentage. Retained-SHARE falls with
+    // repo growth BY CONSTRUCTION — the byte ceiling is fixed, so the same
+    // artifact covers a smaller fraction of a bigger tree — which would make a
+    // percentage floor a self-lowering ratchet needing periodic renegotiation
+    // with no regression having occurred (the #3471 pathology).
+    //
+    // The count is MORE ROBUST, not immune. It is bounded by
+    // maxPersistedBytes / average retained entry size, so it holds steady while
+    // that average holds; a batch of high-ranking files with large entries can
+    // displace several smaller ones and lower it without any per-file bloat.
+    // What it does not do is drift downward merely because the tree got bigger.
+    // The share is still reported for humans.
+    { name: 'files retained', actual: metrics.retainedFiles, bound: budget.retainedFilesMin, dir: 'min', unit: 'files', required: true },
+    { name: 'cold ingest', actual: metrics.coldIngestMs, bound: budget.coldIngestMaxMs, dir: 'max', unit: 'ms', required: true },
+    { name: 'localization recall', actual: metrics.localizationRecallPct, bound: budget.localizationRecallMinPct, dir: 'min', unit: '%', required: true },
+    { name: 'reread tokens saved', actual: metrics.rereadWasteTokensSaved, bound: budget.rereadTokensSavedMin, dir: 'min', unit: 'tok', required: true },
   ];
+
+  // In GATING mode a missing bound is fatal. `--measure-only` is exempt so a
+  // new budget file can be bootstrapped from a measurement run — it cannot
+  // silently pass a gate because it does not gate at all.
+  const missing = checks
+    .filter((c) => c.required && !Number.isFinite(c.bound))
+    .map((c) => c.name);
+  if (missing.length > 0 && !args.measureOnly) {
+    die(
+      `budget ${args.budget} is missing a numeric bound for: ${missing.join(', ')}. ` +
+        'Every check here is mandatory — a missing key must not silently pass.',
+    );
+  }
 
   console.log(`\nRepo-map measurement gates — root ${args.root}`);
   console.log(`  (${metrics.fileCount} files, sha ${gitSha ?? 'none'}${metrics.sizeBounded ? `, size-bounded: dropped ${metrics.droppedFiles}` : ''})\n`);
+  // Reported, never gated: this value is clamped to `maxPersistedBytes` by
+  // construction, so any budget on it would be a tautology (#3452).
+  console.log(
+    `  · REPORT persisted payload      ${String(metrics.datasetPayloadBytes).padStart(12)} B   ` +
+      `/ clamped to ${maxPersistedBytes} B (not gated — clamped value)`,
+  );
+  console.log(
+    `  · REPORT files retained         ${String(metrics.retainedFiles).padStart(12)}     ` +
+      `/ of ${map.files.length} ranked (${metrics.retainedFilesPct}% — see #3475)`,
+  );
   const failures = [];
   for (const c of checks) {
-    const ok = c.bound == null ? true : c.dir === 'max' ? c.actual <= c.bound : c.actual >= c.bound;
-    const mark = ok ? '✓' : '✗';
-    const boundStr = c.bound == null ? '(no budget)' : `${c.dir === 'max' ? '<=' : '>='} ${c.bound} ${c.unit}`;
+    // A null bound only ever reaches here under --measure-only (gating mode
+    // died above), so it can never silently pass a real gate.
+    const unbudgeted = !Number.isFinite(c.bound);
+    const ok = unbudgeted || (c.dir === 'max' ? c.actual <= c.bound : c.actual >= c.bound);
+    const mark = unbudgeted ? '·' : ok ? '✓' : '✗';
+    const boundStr = unbudgeted
+      ? '(no budget — measure-only)'
+      : `${c.dir === 'max' ? '<=' : '>='} ${c.bound} ${c.unit}`;
     console.log(`  ${mark} ${c.name.padEnd(22)} ${String(c.actual).padStart(12)} ${c.unit.padEnd(3)} / budget ${boundStr}`);
     if (!ok) failures.push(`${c.name} ${c.actual} ${c.unit} fails budget ${boundStr}`);
   }
