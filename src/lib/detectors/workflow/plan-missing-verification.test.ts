@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { detector } from './plan-missing-verification';
 import type { RecommendationInput } from '../types';
 import type { PlanSignature } from '../../parse-plans';
+import { validateRecommendationProvenance } from '../provenance';
+import { validateFixSnippet } from '../fix-validity';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -137,5 +139,53 @@ describe('workflow.plan-missing-verification (#565)', () => {
   it('has correct id and category', () => {
     expect(detector.id).toBe('workflow.plan-missing-verification');
     expect(detector.category).toBe('workflow');
+  });
+
+  it('cites every flagged plan and the aggregate calculation without inventing freshness', () => {
+    const plans = [
+      plan({ name: 'many-files', id: 'many-files.md', fileRefs: 8 }),
+      plan({ name: 'many-words', id: 'many-words.md', words: 1400 }),
+      plan({ name: 'small', id: 'small.md', fileRefs: 2, words: 400 }),
+    ];
+    const rec = detector.rule(input(plans), Date.parse('2026-06-10T00:00:00Z'))!;
+
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.provenance?.asOf).toBeUndefined();
+    expect(rec.provenance?.stale).toBeUndefined();
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'plans[].{id,fileRefs,words,hasVerification}',
+          value: expect.stringContaining('many-files.md'),
+        }),
+        expect.objectContaining({
+          field: 'plans[].{id,fileRefs,words,hasVerification}',
+          value: expect.stringContaining('many-words.md'),
+        }),
+        expect.objectContaining({
+          field: 'flagged.length / plans.length',
+          value: '2/3/67',
+        }),
+        expect.objectContaining({
+          field: 'FILE_REFS_THRESHOLD',
+          value: 6,
+        }),
+        expect.objectContaining({
+          field: 'WORDS_THRESHOLD',
+          value: 1000,
+        }),
+      ])
+    );
+    expect(rec.detail).not.toMatch(/most likely/i);
+    expect(rec.provenance?.inference).toMatch(/does not measure|not.*outcome/i);
+  });
+
+  it('declares and validates the copy-paste-safe CLAUDE.md fix', () => {
+    const rec = detector.rule(
+      input([plan({ name: 'x', fileRefs: 8 })]),
+      0
+    )!;
+    expect(rec.fix?.fixKind).toBe('validated');
+    expect(validateFixSnippet(rec.fix!)).toEqual([]);
   });
 });

@@ -2,12 +2,10 @@ import type { AppliedMarkers, Detector, RecommendationInput } from '../types';
 import type { PlanSignature } from '../../parse-plans';
 
 /**
- * Plans that are large or sprawling (many file-change refs or high word count)
- * tend to ship WITHOUT a Verification section — exactly the plans where a
- * missing Verification is most costly (#565, P5 Riley).
- *
- * When a plan crosses ~6 file refs OR ~1000 words and has no Verification
- * section, the user should be nudged to add one before running the plan.
+ * Surface large or sprawling plans (many file-change refs or high word count)
+ * that carry no Verification section (#565, P5 Riley). The structural fields
+ * do not measure whether a plan later shipped or whether it was under-specified;
+ * they only support a review cue before the plan runs.
  */
 
 const FILE_REFS_THRESHOLD = 6;
@@ -51,7 +49,7 @@ export const detector: Detector = {
       detail:
         `${flagged.length} of ${total} plan(s) (${pct}%) exceed the complexity threshold` +
         ` (${FILE_REFS_THRESHOLD}+ file refs or ${WORDS_THRESHOLD}+ words) and carry no` +
-        ` ## Verification or ## Test section — the plans most likely to ship under-specified.`,
+        ` ## Verification or ## Test section.`,
       action:
         `Add a ## Verification section to each large plan before running it.` +
         ` Describe the minimal observable signal that proves the plan succeeded.`,
@@ -59,6 +57,7 @@ export const detector: Detector = {
       evidence: names,
       fix: {
         target: 'CLAUDE.md',
+        fixKind: 'validated',
         label: 'Add plan Verification rule',
         note:
           'Paste this into your CLAUDE.md to enforce a Verification section on large plans.',
@@ -69,6 +68,51 @@ export const detector: Detector = {
           ` the minimal observable signal that proves the plan succeeded.` +
           ` No Verification section = plan is not ready to run.`,
         appliedMarkers: MARKERS_PLAN_VERIFICATION,
+      },
+      provenance: {
+        observations: [
+          {
+            claim:
+              `${flagged.length} of ${total} plan(s) crossed a complexity threshold ` +
+              `without a Verification or Test section (${pct}%)`,
+            source: '~/.claude/plans/*.md via parse-plans',
+            field: 'flagged.length / plans.length',
+            value: `${flagged.length}/${total}/${pct}`,
+          },
+          {
+            claim: `the file-reference threshold is ${FILE_REFS_THRESHOLD}`,
+            source: 'workflow.plan-missing-verification detector',
+            field: 'FILE_REFS_THRESHOLD',
+            value: FILE_REFS_THRESHOLD,
+          },
+          {
+            claim: `the word-count threshold is ${WORDS_THRESHOLD}`,
+            source: 'workflow.plan-missing-verification detector',
+            field: 'WORDS_THRESHOLD',
+            value: WORDS_THRESHOLD,
+          },
+          {
+            claim:
+              'the qualifying plan rows record each source id, threshold-driving ' +
+              'counts, and missing-verification flag',
+            source: '~/.claude/plans/*.md via parse-plans',
+            field: 'plans[].{id,fileRefs,words,hasVerification}',
+            value: JSON.stringify(
+              flagged.map(({ id, fileRefs, words, hasVerification }) => ({
+                id,
+                fileRefs,
+                words,
+                hasVerification,
+              }))
+            ),
+          },
+        ],
+        inference:
+          'Crossing a size threshold without a Verification section is a structural ' +
+          'review cue. The signature does not measure actual underspecification or ' +
+          'shipping outcomes.',
+        // PlanSignature intentionally carries no timestamp. An `asOf` date here
+        // would be invented rather than observed.
       },
     };
   },

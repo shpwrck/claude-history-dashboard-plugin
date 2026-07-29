@@ -285,7 +285,7 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * unauditable recommendation, so growing it must be a deliberate edit rather
  * than the path of least resistance. Update this number DOWNWARD only.
  */
-const EXEMPT_AT_INVERSION = 31;
+const EXEMPT_AT_INVERSION = 27;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {
@@ -2122,6 +2122,48 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     };
   },
 
+  'workflow.prompt-clarity': () => {
+    const low = ['prompt-low-1', 'prompt-low-2', 'prompt-low-3'];
+    const comparison = ['prompt-cmp-1', 'prompt-cmp-2', 'prompt-cmp-3'];
+    const promptAnalysis = [
+      ...low.map((sessionId) => ({
+        sessionId,
+        promptTurnCount: 2,
+        lowSpecificityTurnCount: 2,
+      })),
+      ...comparison.map((sessionId) => ({
+        sessionId,
+        promptTurnCount: 2,
+        lowSpecificityTurnCount: 0,
+      })),
+    ];
+    const timeline = (sessionId: string, userTurns: number): SessionTimeline => ({
+      sessionId,
+      startTime: CTX_TS,
+      endTime: '2026-06-09T12:00:10.000Z',
+      entries: Array.from({ length: userTurns }, (_, i) => ({
+        timestamp: `2026-06-09T12:00:0${i}.000Z`,
+        kind: 'user',
+        summary: `prompt ${i}`,
+      })),
+    });
+    return {
+      input: baseInput({
+        promptAnalysis,
+        timelines: [
+          ...low.map((sessionId) => timeline(sessionId, 3)),
+          ...comparison.map((sessionId) => timeline(sessionId, 1)),
+        ],
+        apiErrors: low.map((sessionId) => ({
+          sessionId,
+          timestamp: '2026-06-09T12:00:05.000Z',
+          summary: 'rate limited',
+        })),
+      }),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
+
   'workflow.file-churn': () => {
     const calls = Array.from({ length: HIGH_CHURN + 3 }, (_, i) => ({
       timestamp: CTX_TS,
@@ -2201,6 +2243,7 @@ describe('migrated context/activity detectors date claims from observed data', (
     'reliability.retry-storms',
     'reliability.self-update-health',
     'reliability.tool-errors',
+    'workflow.prompt-clarity',
   ])('%s anchors asOf to the newest observed datum, not today', (id) => {
     const rec = runAllowlistedDetector(id);
     expect(rec.provenance!.asOf).toBe(CTX_ASOF);

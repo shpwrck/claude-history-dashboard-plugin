@@ -1,5 +1,6 @@
 import type { Detector, RecSeverity } from '../types';
-import { short } from '../shared';
+import { newestIsoDate, short, STALE_WEEKS } from '../shared';
+import { isAsOfStale } from '../provenance';
 import {
   analyzeHabitImpact,
   type HabitFactor,
@@ -54,7 +55,7 @@ export const detector: Detector = {
   id: 'workflow.harmful-habit',
   category: 'workflow',
   dataDeps: ['timelines', 'tokenData', 'toolData', 'apiErrors'],
-  rule(input) {
+  rule(input, now) {
     const report = analyzeHabitImpact(
       input.timelines ?? [],
       input.tokenData,
@@ -74,13 +75,42 @@ export const detector: Detector = {
     // warning, a slim one stays informational.
     const severity: RecSeverity = gap >= 0.25 ? 'warning' : 'info';
     const hint = ACTION_HINT[top.key];
+    // Every timeline contributes to analyzeHabitImpact's population medians and
+    // factor split; token/tool/error rows contribute only when their session is
+    // in that population. Date from every timestamped field feeding those rows,
+    // never from `now` or from a newer unrelated session.
+    const contributingSessionIds = new Set(
+      (input.timelines ?? []).map((timeline) => timeline.sessionId)
+    );
+    const asOf = newestIsoDate([
+      ...(input.timelines ?? []).flatMap((timeline) => [
+        timeline.startTime,
+        timeline.endTime,
+        ...timeline.entries.map((entry) => entry.timestamp),
+      ]),
+      ...input.tokenData.flatMap((session) =>
+        contributingSessionIds.has(session.sessionId)
+          ? session.entries.map((entry) => entry.timestamp)
+          : []
+      ),
+      ...input.toolData.flatMap((session) =>
+        contributingSessionIds.has(session.sessionId)
+          ? session.calls.map((call) => call.timestamp)
+          : []
+      ),
+      ...input.apiErrors
+        .filter((event) => contributingSessionIds.has(event.sessionId))
+        .map((event) => event.timestamp),
+    ]);
+    const stale = isAsOfStale(asOf, now, STALE_WEEKS * 7);
+    const historyLead = stale ? `As of ${asOf}, sessions` : 'Sessions';
 
     return {
       id: 'workflow.harmful-habit',
       category: 'workflow',
       severity,
       title: `${top.title} tracks with worse session outcomes`,
-      detail: `Sessions ${top.high.label} have a ${pct(
+      detail: `${historyLead} ${top.high.label} have a ${pct(
         top.high.goodRate
       )} good-outcome rate vs ${pct(top.low.goodRate)} for ${top.low.label} ones (${
         top.magnitude
@@ -97,6 +127,74 @@ export const detector: Detector = {
         ...hurting.slice(0, 3).map(factorRow),
         ...top.high.examples.map((e) => short(e.sessionId)),
       ],
+      provenance: {
+        observations: [
+          {
+            claim: `the selected harmful factor is ${top.title}`,
+            source:
+              'parse-timeline-success (analyzeHabitImpact over timelines, tokenData, toolData, and apiErrors)',
+            field: 'analyzeHabitImpact().factors[].key',
+            value: top.key,
+          },
+          {
+            claim:
+              `${top.high.sessionCount} ${top.high.label} session(s) recorded a ` +
+              `${pct(top.high.goodRate)} good-outcome rate`,
+            source: 'parse-timeline-success (analyzeHabitImpact)',
+            field:
+              'analyzeHabitImpact().factors[].high.{sessionCount,goodRate}',
+            value: `${top.high.sessionCount}/${top.high.goodRate}`,
+          },
+          {
+            claim:
+              `${top.low.sessionCount} ${top.low.label} session(s) recorded a ` +
+              `${pct(top.low.goodRate)} good-outcome rate`,
+            source: 'parse-timeline-success (analyzeHabitImpact)',
+            field:
+              'analyzeHabitImpact().factors[].low.{sessionCount,goodRate}',
+            value: `${top.low.sessionCount}/${top.low.goodRate}`,
+          },
+          {
+            claim:
+              `${report.totalSessions} session(s) supplied ` +
+              `${report.labelledCount} labelled and ${report.proxyCount} proxy outcomes`,
+            source: 'parse-timeline-success (analyzeHabitImpact)',
+            field:
+              'analyzeHabitImpact().{totalSessions,labelledCount,proxyCount}',
+            value:
+              `${report.totalSessions}/${report.labelledCount}/${report.proxyCount}`,
+          },
+          {
+            claim: `the displayed magnitude is ${top.magnitude}`,
+            source: 'parse-timeline-success (analyzeHabitImpact)',
+            field: 'analyzeHabitImpact().factors[].magnitude',
+            value: top.magnitude,
+          },
+          {
+            claim:
+              'the displayed harmful-factor rows record each factor key, both ' +
+              'side counts and rates, and the magnitude',
+            source: 'parse-timeline-success (analyzeHabitImpact)',
+            field:
+              'analyzeHabitImpact().factors[].{key,high.sessionCount,high.goodRate,low.sessionCount,low.goodRate,magnitude}',
+            value: JSON.stringify(
+              hurting.slice(0, 3).map((factor) => ({
+                key: factor.key,
+                highCount: factor.high.sessionCount,
+                highGoodRate: factor.high.goodRate,
+                lowCount: factor.low.sessionCount,
+                lowGoodRate: factor.low.goodRate,
+                magnitude: factor.magnitude,
+              }))
+            ),
+          },
+        ],
+        inference:
+          'The factor split and outcome-rate gap establish an association, not causation. ' +
+          'In this detector user labels are unavailable, so unlabeled outcomes use the ' +
+          'cost-and-cleanliness proxy; that proxy does not prove task completion or quality.',
+        ...(asOf ? { asOf, stale } : {}),
+      },
     };
   },
 };

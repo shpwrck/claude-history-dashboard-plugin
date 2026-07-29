@@ -75,10 +75,6 @@ export const PROVENANCE_EXEMPT: readonly string[] = [
   'security.model-deceit',
   'speed.model-latency',
   'speed.time-motion',
-  'workflow.harmful-habit',
-  'workflow.low-tool-effectiveness',
-  'workflow.plan-missing-verification',
-  'workflow.prompt-clarity',
   'workflow.redundant-reads',
   'workflow.repeated-commands',
   'workflow.rework-signature',
@@ -162,6 +158,8 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'workflow.correction-mining',
   'workflow.failed-workflow-runs',
   'workflow.file-churn',
+  // #3241 — acceptance explicitly requires a firing trigger fixture.
+  'workflow.prompt-clarity',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */

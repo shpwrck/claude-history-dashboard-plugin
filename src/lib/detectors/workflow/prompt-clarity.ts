@@ -1,7 +1,8 @@
 import type { Detector, PromptAnalysis } from '../types';
 import type { SessionTimeline } from '../../parse-timeline';
 import type { ApiErrorEvent } from '../../parse-errors';
-import { short } from '../shared';
+import { newestIsoDate, short, STALE_WEEKS } from '../shared';
+import { isAsOfStale } from '../provenance';
 
 const MIN_SESSIONS = 6;
 const MIN_BUCKET_SESSIONS = 2;
@@ -86,7 +87,7 @@ export const detector: Detector = {
   id: 'workflow.prompt-clarity',
   category: 'workflow',
   dataDeps: ['promptAnalysis', 'timelines', 'apiErrors'],
-  rule(input) {
+  rule(input, now) {
     const promptAnalysis = input.promptAnalysis ?? [];
     if (promptAnalysis.length === 0) return null;
 
@@ -138,6 +139,47 @@ export const detector: Detector = {
           `${short(sample.sessionId)}: ${sample.followUpTurns} follow-up turns, ` +
           `${sample.lowSpecificityTurns}/${sample.promptTurns} low-specificity prompts`
       );
+    const sampleIds = new Set(samples.map((sample) => sample.sessionId));
+    const contributingSessionIds = [...sampleIds].sort();
+    const promptRows = samples.map((sample) => ({
+      sessionId: sample.sessionId,
+      lowSpecificityTurnCount: sample.lowSpecificityTurns,
+      promptTurnCount: sample.promptTurns,
+    }));
+    const timelineRows = samples.map((sample) => {
+      const timeline = timelinesBySession.get(sample.sessionId);
+      return {
+        sessionId: sample.sessionId,
+        userTurns:
+          timeline?.entries.filter((entry) => entry.kind === 'user').length ?? 0,
+        followUpTurns: sample.followUpTurns,
+      };
+    });
+    const apiErrorRows = samples.map((sample) => ({
+      sessionId: sample.sessionId,
+      apiErrorCount: sample.apiErrorCount,
+    }));
+    // Date only the timestamped fields that feed the sample rows. A newer
+    // assistant/tool entry in the same timeline is unrelated to the user-turn
+    // count and must not make this historical relationship look fresh.
+    const asOf = newestIsoDate([
+      ...(input.timelines ?? []).flatMap((timeline) =>
+        sampleIds.has(timeline.sessionId)
+          ? timeline.entries
+              .filter((entry) => entry.kind === 'user')
+              .map((entry) => entry.timestamp)
+          : []
+      ),
+      ...input.apiErrors
+        .filter((event) => sampleIds.has(event.sessionId))
+        .map((event) => event.timestamp),
+    ]);
+    const stale = isAsOfStale(asOf, now, STALE_WEEKS * 7);
+    const historyLead = stale ? `As of ${asOf}, across` : 'Across';
+    const aggregateValue =
+      `${low.length}/${comparison.length}/` +
+      `${fmt(lowFollowUps)}/${fmt(comparisonFollowUps)}/` +
+      `${correlation.toFixed(2)}`;
 
     return {
       id: 'workflow.prompt-clarity',
@@ -145,7 +187,7 @@ export const detector: Detector = {
       severity: 'info',
       title: 'Prompt specificity tracks with follow-up loops',
       detail:
-        `Across ${samples.length} sessions, low-specificity prompts traveled with ` +
+        `${historyLead} ${samples.length} sessions, low-specificity prompts traveled with ` +
         `${fmt(lowFollowUps)} follow-up turns/session vs ${fmt(
           comparisonFollowUps
         )} for more specific prompts (r=${correlation.toFixed(2)}). ` +
@@ -161,6 +203,66 @@ export const detector: Detector = {
         )} follow-up turns`,
         ...examples,
       ],
+      provenance: {
+        observations: [
+          {
+            claim: `${samples.length} contributing session(s) were joined by session id`,
+            source:
+              'parse-prompt-analysis + parse-timeline + parse-errors',
+            field: 'promptAnalysis[].sessionId',
+            value: contributingSessionIds.join(','),
+          },
+          {
+            claim:
+              'each contributing prompt row records its low-specificity and total prompt counts',
+            source: 'parse-prompt-analysis',
+            field:
+              'promptAnalysis[].{sessionId,lowSpecificityTurnCount,promptTurnCount}',
+            value: JSON.stringify(promptRows),
+          },
+          {
+            claim:
+              'each contributing timeline row records its user-turn and derived follow-up counts',
+            source: 'parse-timeline',
+            field: 'timelines[].entries[].{kind,timestamp}',
+            value: JSON.stringify(timelineRows),
+          },
+          {
+            claim:
+              'each contributing session records its native/text API-error count',
+            source: 'parse-errors',
+            field: 'apiErrors[].{sessionId,timestamp}',
+            value: JSON.stringify(apiErrorRows),
+          },
+          {
+            claim:
+              `${low.length} low-specificity and ${comparison.length} comparison ` +
+              `session(s) produced means ${fmt(lowFollowUps)} and ` +
+              `${fmt(comparisonFollowUps)}, with Pearson r=${correlation.toFixed(2)}`,
+            source: 'workflow.prompt-clarity sample calculation',
+            field:
+              'samples[].{isLowSpecificity,followUpTurns,proxyScore}',
+            value: aggregateValue,
+          },
+          {
+            claim:
+              `the low-specificity split is ${LOW_SPECIFICITY_RATE}, minimum bucket ` +
+              `size is ${MIN_BUCKET_SESSIONS}, follow-up gap floor is ` +
+              `${MIN_FOLLOW_UP_GAP}, and correlation floor is ${MIN_CORRELATION}`,
+            source: 'workflow.prompt-clarity detector',
+            field:
+              'LOW_SPECIFICITY_RATE / MIN_BUCKET_SESSIONS / MIN_FOLLOW_UP_GAP / MIN_CORRELATION',
+            value:
+              `${LOW_SPECIFICITY_RATE}/${MIN_BUCKET_SESSIONS}/` +
+              `${MIN_FOLLOW_UP_GAP}/${MIN_CORRELATION}`,
+          },
+        ],
+        inference:
+          'The measured bucket means and Pearson correlation describe association, ' +
+          'not causation. Follow-up turns plus API-error counts are a friction proxy; ' +
+          'they do not establish that prompt specificity caused the extra work.',
+        ...(asOf ? { asOf, stale } : {}),
+      },
     };
   },
 };

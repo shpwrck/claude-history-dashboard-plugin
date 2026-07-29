@@ -4,6 +4,7 @@ import type { RecommendationInput } from '../types';
 import type { SessionTimeline } from '../../parse-timeline';
 import type { SessionTokenData } from '../../types';
 import type { ToolUsageData, ToolCall } from '../../parse-tools';
+import { validateRecommendationProvenance } from '../provenance';
 
 // Build a corpus where the "tool errors" habit is the only factor with enough
 // sessions on both sides: 3 cheap, error-free sessions vs 3 costly, all-error
@@ -16,20 +17,24 @@ import type { ToolUsageData, ToolCall } from '../../parse-tools';
 // and no repeated tool inputs, so the compaction / tool-repetition factors stay
 // suppressed and tool-errors is the unambiguous headline.
 
-const timeline = (sessionId: string): SessionTimeline =>
+const timeline = (sessionId: string, date: string): SessionTimeline =>
   ({
     sessionId,
-    startTime: '2026-01-01T00:00:00Z',
-    endTime: '2026-01-01T00:00:00Z',
+    startTime: `${date}T00:00:00Z`,
+    endTime: `${date}T00:00:00Z`,
     entries: [],
   }) as unknown as SessionTimeline;
 
-const tokens = (sessionId: string, webSearchRequests: number): SessionTokenData =>
+const tokens = (
+  sessionId: string,
+  webSearchRequests: number,
+  date: string
+): SessionTokenData =>
   ({
     sessionId,
     entries: [
       {
-        timestamp: 't',
+        timestamp: `${date}T00:00:00Z`,
         model: 'unknown',
         inputTokens: 0,
         outputTokens: 0,
@@ -45,10 +50,14 @@ const tokens = (sessionId: string, webSearchRequests: number): SessionTokenData 
 
 // Distinct commands per call (and per session) → tool-reuse rate stays 0, so the
 // tool-repetition factor never splits.
-const tools = (sessionId: string, isError: boolean): ToolUsageData => ({
+const tools = (
+  sessionId: string,
+  isError: boolean,
+  date: string
+): ToolUsageData => ({
   sessionId,
   calls: Array.from({ length: 4 }, (_, i): ToolCall => ({
-    timestamp: `2026-01-01T00:00:0${i}Z`,
+    timestamp: `${date}T00:00:0${i}Z`,
     toolName: 'Bash',
     input: { command: `cmd-${sessionId}-${i}` },
     toolUseId: `${sessionId}-${i}`,
@@ -57,19 +66,19 @@ const tools = (sessionId: string, isError: boolean): ToolUsageData => ({
   })),
 });
 
-function corpus(): RecommendationInput {
+function corpus(date = '2026-01-01'): RecommendationInput {
   const clean = ['c1', 'c2', 'c3'];
   const errored = ['e1', 'e2', 'e3'];
   return {
     tokenData: [
-      ...clean.map((id) => tokens(id, 0)),
-      ...errored.map((id) => tokens(id, 100)),
+      ...clean.map((id) => tokens(id, 0, date)),
+      ...errored.map((id) => tokens(id, 100, date)),
     ],
     toolData: [
-      ...clean.map((id) => tools(id, false)),
-      ...errored.map((id) => tools(id, true)),
+      ...clean.map((id) => tools(id, false, date)),
+      ...errored.map((id) => tools(id, true, date)),
     ],
-    timelines: [...clean, ...errored].map(timeline),
+    timelines: [...clean, ...errored].map((id) => timeline(id, date)),
     sessions: [],
     projects: [],
     permissionRows: [],
@@ -112,5 +121,70 @@ describe('workflow.harmful-habit (#549)', () => {
         0
       )
     ).toBeNull();
+  });
+
+  it('cites the factor split, observed rates, proxy boundary, and supporting date', () => {
+    const rec = detector.rule(
+      corpus('2026-06-09'),
+      Date.parse('2026-06-10T00:00:00Z')
+    )!;
+
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.provenance?.asOf).toBe('2026-06-09');
+    expect(rec.provenance?.stale).toBe(false);
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'analyzeHabitImpact().factors[].key',
+          value: 'tool-errors',
+        }),
+        expect.objectContaining({
+          field:
+            'analyzeHabitImpact().factors[].high.{sessionCount,goodRate}',
+          value: '3/0',
+        }),
+        expect.objectContaining({
+          field:
+            'analyzeHabitImpact().factors[].low.{sessionCount,goodRate}',
+          value: '3/1',
+        }),
+        expect.objectContaining({
+          field: 'analyzeHabitImpact().{totalSessions,labelledCount,proxyCount}',
+          value: '6/0/6',
+        }),
+      ])
+    );
+    expect(rec.provenance?.inference).toMatch(/association|caus/i);
+  });
+
+  it('demotes old history while preserving fresh wording', () => {
+    const stale = detector.rule(
+      corpus('2026-01-01'),
+      Date.parse('2026-06-10T00:00:00Z')
+    )!;
+    expect(stale.detail).toMatch(/^As of 2026-01-01,/);
+    expect(stale.provenance?.asOf).toBe('2026-01-01');
+    expect(stale.provenance?.stale).toBe(true);
+
+    const fresh = detector.rule(
+      corpus('2026-06-09'),
+      Date.parse('2026-06-10T00:00:00Z')
+    )!;
+    expect(fresh.detail).not.toMatch(/^As of /);
+    expect(fresh.provenance?.stale).toBe(false);
+  });
+
+  it('uses the newest contributing artifact but ignores unrelated sessions', () => {
+    const data = corpus('2026-06-01');
+    data.toolData[0].calls[0].timestamp = '2026-06-09T12:00:00Z';
+    data.toolData.push(
+      tools('not-in-timelines', false, '2026-06-10')
+    );
+
+    const rec = detector.rule(
+      data,
+      Date.parse('2026-06-11T00:00:00Z')
+    )!;
+    expect(rec.provenance?.asOf).toBe('2026-06-09');
   });
 });
