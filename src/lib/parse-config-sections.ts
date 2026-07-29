@@ -194,7 +194,7 @@ function extractReferences(text: string): ConfigReference[] {
   const seen = new Set<string>();
   const out: ConfigReference[] = [];
   const add = (kind: ConfigReferenceKind, target: string) => {
-    const key = `${kind} ${target}`;
+    const key = `${kind}\u0000${target}`;
     if (seen.has(key)) return;
     seen.add(key);
     out.push({ kind, target });

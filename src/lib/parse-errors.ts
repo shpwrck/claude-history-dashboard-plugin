@@ -448,7 +448,7 @@ export function detectErrorRetrySequences(
         if (firstLine.length > 0) label = firstLine;
       }
 
-      const key = `${cur.toolName} ${label}`;
+      const key = `${cur.toolName}\u0000${label}`;
       const entry = map.get(key) ?? { toolName: cur.toolName, count: 0 };
       entry.count += 1;
       map.set(key, entry);
@@ -457,7 +457,7 @@ export function detectErrorRetrySequences(
 
   return Array.from(map.entries())
     .map(([key, { toolName, count }]) => ({
-      label: key.slice(key.indexOf(' ') + 1),
+      label: key.slice(key.indexOf('\u0000') + 1),
       toolName,
       count,
     }))
