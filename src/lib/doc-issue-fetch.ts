@@ -19,14 +19,12 @@
  *
  * Issues: #2710 (epic #2256 — doc artifact hygiene)
  */
+import { readTextFileCappedSync as cappedRead } from './capped-read';
 import { createHash } from 'node:crypto';
 import {
-  closeSync,
   chmodSync,
   existsSync,
   mkdirSync,
-  openSync,
-  readSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -61,7 +59,6 @@ const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 const TOKEN_MAX_BYTES = 8_192;
 const TOKEN_MAX_CHARS = 512;
-const READ_CHUNK_BYTES = 65_536;
 /** Bound retry-throttle memory even if a doc graph cycles through many ref sets. */
 export const DOC_ISSUE_RETRY_IDENTITIES_MAX = 256;
 /** Bound same-process tombstones; retired cache files are also removed. */
@@ -97,23 +94,11 @@ export interface DocIssueFetchOptions {
 
 // ── Credential read (file-first, capped, trimmed, never leaked) ──────────────
 
+/** Bounded read of a doc-issue artifact; loop shared via capped-read (#3419). */
 function readTextFileCappedSync(path: string, maxBytes: number): string {
-  const fd = openSync(path, 'r');
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes + 1));
-  try {
-    while (true) {
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      bytes += bytesRead;
-      if (bytes > maxBytes) throw new Error(`doc-issue read exceeds ${maxBytes} byte limit`);
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
-    }
-  } finally {
-    closeSync(fd);
-  }
-  return Buffer.concat(chunks).toString('utf8');
+  return cappedRead(path, maxBytes, (limit) =>
+    new Error(`doc-issue read exceeds ${limit} byte limit`)
+  );
 }
 
 /**

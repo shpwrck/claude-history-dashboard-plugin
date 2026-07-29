@@ -6,14 +6,12 @@
  * content. The dashboard server calls this module from scripts/ingest.mjs; it is
  * not imported by the SPA bundle.
  */
+import { readTextFileCappedSync as cappedRead } from './capped-read';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
-  readSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -38,7 +36,6 @@ const DEFAULT_MAX_PULLS_PER_REPO = 100;
 const DEFAULT_MAX_TIMELINE_REQUESTS = 100;
 const DEFAULT_MAX_TIMELINE_EVENTS_PER_PR = 100;
 const DEFAULT_MAX_RECORDS = 5_000;
-const READ_CHUNK_BYTES = 65_536;
 
 export interface GitHubReviewRepo {
   owner: string;
@@ -548,23 +545,11 @@ export async function fetchGitHubReviewEvents(
   };
 }
 
+/** Bounded read of the review-events cache; loop shared via capped-read (#3419). */
 function readTextFileCappedSync(path: string, maxBytes: number): string {
-  const fd = openSync(path, 'r');
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes + 1));
-  try {
-    while (true) {
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      bytes += bytesRead;
-      if (bytes > maxBytes) throw new Error(`Review events cache exceeds ${maxBytes} byte limit`);
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
-    }
-  } finally {
-    closeSync(fd);
-  }
-  return Buffer.concat(chunks).toString('utf8');
+  return cappedRead(path, maxBytes, (limit) =>
+    new Error(`Review events cache exceeds ${limit} byte limit`)
+  );
 }
 
 function isReviewRequest(value: unknown): value is PullRequestReviewRequest {

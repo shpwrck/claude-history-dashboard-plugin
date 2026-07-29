@@ -7,12 +7,10 @@
 // original single-user behaviour; enterprise scoped ingest passes explicit paths
 // so tenant datasets do not read the server operator's ~/.claude.
 
+import { readTextFileCappedSync as cappedRead } from './capped-read';
 import {
-  closeSync,
   existsSync,
   lstatSync,
-  openSync,
-  readSync,
   statSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -65,7 +63,6 @@ interface LiveConfigPaths {
   configResourceMaxEntries: number;
 }
 
-const READ_CHUNK_BYTES = 65_536;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_HOST_ENV_NAMES = 10_000;
 const GLOBAL_SETTINGS_DISPLAY_PATH = '~/.claude/settings.json';
@@ -154,23 +151,10 @@ function configFileTooLargeError(maxBytes: number): ConfigFileCapError {
 }
 
 export function readTextFileCappedSync(path: string, maxBytes = CONFIG_FILE_MAX_BYTES): string {
+  // Clamping and the typed too-large error stay here (they are config-specific);
+  // the bounded read loop itself is shared (#3419).
   const limit = clampConfigFileMaxBytes(maxBytes);
-  const fd = openSync(path, 'r');
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, limit + 1));
-  try {
-    while (true) {
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      bytes += bytesRead;
-      if (bytes > limit) throw configFileTooLargeError(limit);
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
-    }
-  } finally {
-    closeSync(fd);
-  }
-  return Buffer.concat(chunks).toString('utf8');
+  return cappedRead(path, limit, () => configFileTooLargeError(limit));
 }
 
 function liveConfigPaths(opts: LiveConfigPathOptions = {}): LiveConfigPaths {
