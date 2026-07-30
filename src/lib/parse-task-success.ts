@@ -491,6 +491,56 @@ function corroborateSpan(
   };
 }
 
+/** A completed span with its finite endMs, kept in `sorted` order for indexing (#3156). */
+interface CompletedSpan {
+  endMs: number;
+  sortIndex: number;
+  span: TaskSuccessProxy;
+}
+
+/** First index `i` with `list[i].endMs >= value` (lower bound). */
+function lowerBoundByEnd(list: readonly CompletedSpan[], value: number): number {
+  let lo = 0;
+  let hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (list[mid].endMs < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * From one topic's completed spans (sorted by endMs asc, then sessionId,
+ * taskIndex) pick the span the old linear scan would (#3156): the one with the
+ * LATEST endMs that is strictly before `ts` and within RECURRENCE_WINDOW_MS of
+ * it, breaking ties toward the smallest (sessionId, taskIndex).
+ */
+function latestEligibleInTopic(
+  list: readonly CompletedSpan[],
+  ts: number
+): CompletedSpan | null {
+  const hi = lowerBoundByEnd(list, ts) - 1; // last index with endMs < ts
+  if (hi < 0) return null;
+  const maxEnd = list[hi].endMs;
+  if (ts - maxEnd > RECURRENCE_WINDOW_MS) return null;
+  // First index of the endMs === maxEnd block = smallest (sessionId, taskIndex)
+  // at that endMs, matching the old stable desc-endMs sort's tie-break.
+  return list[lowerBoundByEnd(list, maxEnd)];
+}
+
+/** First index `i` with `sortedAsc[i] > value` (upper bound). */
+function upperBoundNumber(sortedAsc: readonly number[], value: number): number {
+  let lo = 0;
+  let hi = sortedAsc.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sortedAsc[mid] > value) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
 export function applyRecurrence(
   spans: TaskSuccessProxy[],
   humanTurns: readonly HistoryEntry[] = []
@@ -505,7 +555,8 @@ export function applyRecurrence(
   const byKey = new Map(
     sorted.map((span) => [`${span.sessionId}\0${span.taskIndex}`, span])
   );
-  const allTopicTurns = realHumanTurns(humanTurns)
+  const realTurns = realHumanTurns(humanTurns);
+  const allTopicTurns = realTurns
     .map((entry): CorrectiveTurn | null => {
       const topics = new Set(extractRecurrenceTopics(entry.display));
       if (topics.size === 0 || !Number.isFinite(entry.timestamp)) return null;
@@ -526,7 +577,7 @@ export function applyRecurrence(
   // we could not extract a topic from is still proof we were watching at that
   // moment. Taking it from `allTopicTurns` would shorten the observed window
   // whenever the most recent activity happened not to name a file or symbol.
-  const observedUntilMs = realHumanTurns(humanTurns).reduce(
+  const observedUntilMs = realTurns.reduce(
     (latest, entry) =>
       Number.isFinite(entry.timestamp) && entry.timestamp > latest
         ? entry.timestamp
@@ -538,28 +589,50 @@ export function applyRecurrence(
   );
   const demotedKeys = new Set<string>();
 
+  // Index completed spans by recurrence topic once (#3156). Each per-topic list
+  // preserves `sorted` order (endMs asc, then sessionId, taskIndex), so a
+  // corrective turn selects its target by binary search per shared topic
+  // instead of filtering and sorting the whole span array every time — turning
+  // the old O(C·S·logS) demotion scan into O(S + C·logS).
+  const completedByTopic = new Map<string, CompletedSpan[]>();
+  for (const [sortIndex, span] of sorted.entries()) {
+    if (!completedLooking(span)) continue;
+    const endMs = finiteMs(span.endTime);
+    if (endMs == null) continue;
+    const entry: CompletedSpan = { endMs, sortIndex, span };
+    for (const topic of new Set(span.recurrenceTopics ?? [])) {
+      const list = completedByTopic.get(topic) ?? [];
+      list.push(entry);
+      completedByTopic.set(topic, list);
+    }
+  }
+
   for (const turn of correctiveTurns) {
-    const candidates = sorted
-      .filter((span) => {
-        const endMs = finiteMs(span.endTime);
-        return (
-          endMs != null &&
-          endMs < turn.timestamp &&
-          turn.timestamp - endMs <= RECURRENCE_WINDOW_MS &&
-          completedLooking(span) &&
-          hasSharedTopic(span, turn) != null
-        );
-      })
-      .sort((a, b) => (finiteMs(b.endTime) ?? 0) - (finiteMs(a.endTime) ?? 0));
-    const target = candidates[0];
+    // The same candidate the old `filter(...).sort(desc endMs)[0]` produced:
+    // across the turn's shared topics, the latest-ending completed span in
+    // window, ties broken toward the smallest (sessionId, taskIndex).
+    let target: CompletedSpan | null = null;
+    for (const topic of turn.topics) {
+      const list = completedByTopic.get(topic);
+      if (!list) continue;
+      const cand = latestEligibleInTopic(list, turn.timestamp);
+      if (!cand) continue;
+      if (
+        target == null ||
+        cand.endMs > target.endMs ||
+        (cand.endMs === target.endMs && cand.sortIndex < target.sortIndex)
+      ) {
+        target = cand;
+      }
+    }
     if (!target) continue;
-    if (target.verdict === 'accept') continue;
-    const topic = hasSharedTopic(target, turn);
+    if (target.span.verdict === 'accept') continue;
+    const topic = hasSharedTopic(target.span, turn);
     if (!topic) continue;
-    const key = `${target.sessionId}\0${target.taskIndex}`;
+    const key = `${target.span.sessionId}\0${target.span.taskIndex}`;
     byKey.set(
       key,
-      demoteSpan(target, topic, {
+      demoteSpan(target.span, topic, {
         sessionId: turn.sessionId,
         timestamp: turn.timestampIso,
         display: turn.display,
@@ -568,6 +641,34 @@ export function applyRecurrence(
     );
     demotedKeys.add(key);
   }
+
+  // Index topic-bearing turn timestamps by topic once (#3156). A span is
+  // corroborated only when NO later matching turn returned inside the window;
+  // the old code scanned every topic turn per span (O(S·T)), this
+  // binary-searches per topic (O(S·logT)). Only EXISTENCE matters — the old
+  // `.find` used its result solely as a boolean — so the check is exact.
+  const turnTimestampsByTopic = new Map<string, number[]>();
+  for (const turn of allTopicTurns) {
+    for (const topic of turn.topics) {
+      const arr = turnTimestampsByTopic.get(topic) ?? [];
+      arr.push(turn.timestamp);
+      turnTimestampsByTopic.set(topic, arr);
+    }
+  }
+  const hasReturningTurn = (
+    current: TaskSuccessProxy,
+    endMs: number
+  ): boolean => {
+    for (const topic of current.recurrenceTopics ?? []) {
+      const arr = turnTimestampsByTopic.get(topic);
+      if (!arr) continue;
+      const idx = upperBoundNumber(arr, endMs); // first timestamp strictly after endMs
+      if (idx < arr.length && arr[idx] - endMs <= RECURRENCE_WINDOW_MS) {
+        return true;
+      }
+    }
+    return false;
+  };
 
   for (const span of sorted) {
     const key = `${span.sessionId}\0${span.taskIndex}`;
@@ -583,13 +684,7 @@ export function applyRecurrence(
     }
     const endMs = finiteMs(current.endTime);
     if (endMs == null) continue;
-    const returningTurn = allTopicTurns.find(
-      (turn) =>
-        turn.timestamp > endMs &&
-        turn.timestamp - endMs <= RECURRENCE_WINDOW_MS &&
-        hasSharedTopic(current, turn) != null
-    );
-    if (returningTurn) continue;
+    if (hasReturningTurn(current, endMs)) continue;
     // Absence of a returning turn is only evidence once we have actually
     // WATCHED for the full recurrence window (#3155). `observedUntilMs` is the
     // last moment the supplied history covers; if the window has not closed

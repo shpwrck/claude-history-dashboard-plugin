@@ -355,3 +355,90 @@ describe('computeActivityRollups', () => {
     expect(month?.notableSessions[0]?.sessionId).toBe('s-29d');
   });
 });
+
+// Deterministic op-count discriminator for the nested-window recompute (#3174).
+// composeSessionSummary is the per-session work; `session.duration` is read
+// EXACTLY ONCE per compose and nowhere else in computeActivityRollups (the sort
+// and window filters read startTime/sessionId; the classifier reads
+// start/endTime), so counting `duration` reads counts compose invocations
+// deterministically — no wall-clock. The fix must compose each session once;
+// restoring the old per-window recompute makes the count 4× (once per nested
+// window a session lands in) and fails this test.
+describe('computeActivityRollups nested-window recompute (#3174)', () => {
+  function countDurationReads(sessions: Session[]): {
+    reads: number;
+    proxied: Session[];
+  } {
+    let reads = 0;
+    const proxied = sessions.map(
+      (s) =>
+        new Proxy(s, {
+          get(target, prop, receiver) {
+            if (prop === 'duration') reads += 1;
+            return Reflect.get(target, prop, receiver);
+          },
+        }) as Session
+    );
+    return {
+      get reads() {
+        return reads;
+      },
+      proxied,
+    };
+  }
+
+  it('composes each session summary once even when it spans all four windows', () => {
+    const N = 25;
+    // Every session starts within the last minute, so each falls into ALL four
+    // trailing windows (hour/day/week/month). The old code composed a summary
+    // and re-scanned tools once per (window × session) = 4 × N; the fix does it
+    // once per session = N.
+    const raw = Array.from({ length: N }, (_, i) =>
+      session({ sessionId: `s-${String(i).padStart(3, '0')}`, startTime: NOW - i * 1000 })
+    );
+    const counter = countDurationReads(raw);
+    const rollups = computeActivityRollups({ sessions: counter.proxied, nowMs: NOW });
+
+    // Sanity: all N sessions really are in every window.
+    expect(rollups.map((r) => r.sessionCount)).toEqual([N, N, N, N]);
+    // Discriminator: exactly one compose per session, not one per window.
+    expect(counter.reads).toBe(N);
+    expect(counter.reads).toBeLessThan(4 * N);
+  });
+
+  it('is output-identical whether or not the discriminator proxies are used', () => {
+    // A mixed corpus spanning different windows, with shared tool names and
+    // projects, so per-project rows, notable-session ordering, window totals and
+    // the narrative line all exercise the merge. The refactor must be a pure
+    // op-count reduction: same result, fewer reads.
+    const sessions = [
+      session({ sessionId: 's-hour', startTime: NOW - 10 * 60 * 1000, messageCount: 4 }),
+      session({ sessionId: 's-day', startTime: NOW - 5 * HOUR, messageCount: 2 }),
+      session({
+        sessionId: 's-week',
+        startTime: NOW - 3 * DAY,
+        project: '/work/docs',
+        projectShort: 'docs',
+        messageCount: 7,
+      }),
+      session({ sessionId: 's-month', startTime: NOW - 20 * DAY, messageCount: 1 }),
+    ];
+    const tokenData = [tokenRow('s-hour'), tokenRow('s-week')];
+    const toolData = [
+      toolRow('s-hour', [{ toolName: 'Read' }, { toolName: 'Bash' }, { toolName: 'Read' }]),
+      toolRow('s-day', [{ toolName: 'Bash' }]),
+      toolRow('s-week', [{ toolName: 'Edit', filePath: '/work/docs/x.md' }, { toolName: 'Read' }]),
+    ];
+    const plain = computeActivityRollups({ sessions, tokenData, toolData, nowMs: NOW });
+    const counter = countDurationReads(sessions);
+    const viaProxy = computeActivityRollups({
+      sessions: counter.proxied,
+      tokenData,
+      toolData,
+      nowMs: NOW,
+    });
+    expect(viaProxy).toEqual(plain);
+    // Determinism: recomputation yields a deep-equal result.
+    expect(computeActivityRollups({ sessions, tokenData, toolData, nowMs: NOW })).toEqual(plain);
+  });
+});

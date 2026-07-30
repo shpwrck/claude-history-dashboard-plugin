@@ -123,8 +123,87 @@ interface PricedEntry {
   targetCost: number;
 }
 
-interface TimestampedPricedEntry extends PricedEntry {
+export interface TimestampedPricedEntry extends PricedEntry {
   targetPriced: boolean;
+}
+
+/**
+ * Choose the billable-history split that maximizes realized (volume-normalized)
+ * model-pin savings, or null when none qualifies (#3137).
+ *
+ * This is the SOLE split-selection path — `deriveModelPinSavingsConfig`
+ * delegates to it — so the linear-time claim holds at the production boundary,
+ * not merely in a helper.
+ *
+ * The old form re-sliced, re-filtered and re-reduced the WHOLE history for
+ * every candidate boundary: O(n²) work and O(n) transient allocation per
+ * candidate, on top of the already-collected+sorted history. Here the per-entry
+ * sums are precomputed ONCE as prefix arrays, so each boundary is evaluated in
+ * O(1). Baseline sums are `prefix[index]`, accumulated left-to-right exactly as
+ * the old `reduce` over `entries.slice(0, index)`, so they are byte-identical.
+ * Comparison sums are `total − prefix[index]` (arithmetically the old `reduce`
+ * over `entries.slice(index)`); these intermediate figures only choose the
+ * winning index — `computeModelPinSavings` re-derives every EMITTED number from
+ * the chosen window directly, so no intermediate sum ever reaches the output.
+ */
+export function chooseModelPinSplit(
+  entries: readonly TimestampedPricedEntry[],
+  minBaselineEntries: number,
+  minComparisonEntries: number,
+  minComparisonTargetShare: number
+): number | null {
+  const n = entries.length;
+  if (n < minBaselineEntries + minComparisonEntries) return null;
+
+  const prefixActual = new Float64Array(n + 1);
+  const prefixTarget = new Float64Array(n + 1);
+  const prefixTargetPriced = new Int32Array(n + 1);
+  for (let i = 0; i < n; i += 1) {
+    prefixActual[i + 1] = prefixActual[i] + entries[i].actualCost;
+    prefixTarget[i + 1] = prefixTarget[i] + entries[i].targetCost;
+    prefixTargetPriced[i + 1] =
+      prefixTargetPriced[i] + (entries[i].targetPriced ? 1 : 0);
+  }
+  const totalActual = prefixActual[n];
+  const totalTarget = prefixTarget[n];
+  const totalTargetPriced = prefixTargetPriced[n];
+
+  let best: { index: number; realizedSavingsUsd: number } | null = null;
+  for (
+    let index = minBaselineEntries;
+    index <= n - minComparisonEntries;
+    index += 1
+  ) {
+    if (!entries[index].targetPriced) continue;
+    const comparisonCount = n - index;
+    const comparisonTargetShare =
+      (totalTargetPriced - prefixTargetPriced[index]) / comparisonCount;
+    if (comparisonTargetShare < minComparisonTargetShare) continue;
+
+    // Rank candidate boundaries by the SAME volume-normalized measure the
+    // realized figure uses (#3136). Ranking on raw premium totals favoured
+    // whichever split put more traffic in the baseline, which is a fact about
+    // where the split fell rather than about the model change it is meant to
+    // locate.
+    const baselineRatio = premiumRatioOf(
+      prefixActual[index],
+      prefixTarget[index]
+    );
+    const comparisonTarget = totalTarget - prefixTarget[index];
+    const comparisonRatio = premiumRatioOf(
+      totalActual - prefixActual[index],
+      comparisonTarget
+    );
+    const premiumRatioDelta = baselineRatio - comparisonRatio;
+    if (premiumRatioDelta <= 0) continue;
+    const realizedSavingsUsd = premiumRatioDelta * comparisonTarget;
+    if (realizedSavingsUsd <= 0) continue;
+    if (!best || realizedSavingsUsd > best.realizedSavingsUsd) {
+      best = { index, realizedSavingsUsd };
+    }
+  }
+
+  return best ? best.index : null;
 }
 
 /**
@@ -148,41 +227,15 @@ export function deriveModelPinSavingsConfig(
   );
   if (entries.length < minBaselineEntries + minComparisonEntries) return null;
 
-  let best: { index: number; realizedSavingsUsd: number } | null = null;
-  for (let index = minBaselineEntries; index <= entries.length - minComparisonEntries; index += 1) {
-    const boundary = entries[index];
-    if (!boundary.targetPriced) continue;
-    const baseline = entries.slice(0, index);
-    const comparison = entries.slice(index);
-    const comparisonTargetShare =
-      comparison.filter((entry) => entry.targetPriced).length / comparison.length;
-    if (comparisonTargetShare < minComparisonTargetShare) continue;
-
-    // Rank candidate boundaries by the SAME volume-normalized measure the
-    // realized figure uses (#3136). Ranking on raw premium totals favoured
-    // whichever split put more traffic in the baseline, which is a fact about
-    // where the split fell rather than about the model change it is meant to
-    // locate.
-    const baselineRatio = premiumRatioOf(
-      sumActual(baseline),
-      sumTarget(baseline)
-    );
-    const comparisonRatio = premiumRatioOf(
-      sumActual(comparison),
-      sumTarget(comparison)
-    );
-    const premiumRatioDelta = baselineRatio - comparisonRatio;
-    if (premiumRatioDelta <= 0) continue;
-    const realizedSavingsUsd = premiumRatioDelta * sumTarget(comparison);
-    if (realizedSavingsUsd <= 0) continue;
-    if (!best || realizedSavingsUsd > best.realizedSavingsUsd) {
-      best = { index, realizedSavingsUsd };
-    }
-  }
-
-  if (!best) return null;
-  const baseline = entries.slice(0, best.index);
-  const comparison = entries.slice(best.index);
+  const bestIndex = chooseModelPinSplit(
+    entries,
+    minBaselineEntries,
+    minComparisonEntries,
+    minComparisonTargetShare
+  );
+  if (bestIndex === null) return null;
+  const baseline = entries.slice(0, bestIndex);
+  const comparison = entries.slice(bestIndex);
   const config = {
     baseline: {
       start: new Date(baseline[0].timestampMs).toISOString(),
@@ -314,14 +367,6 @@ function collectTimestampedEntries(
   }
 
   return entries.sort((a, b) => a.timestampMs - b.timestampMs);
-}
-
-function sumActual(entries: PricedEntry[]): number {
-  return entries.reduce((sum, entry) => sum + entry.actualCost, 0);
-}
-
-function sumTarget(entries: PricedEntry[]): number {
-  return entries.reduce((sum, entry) => sum + entry.targetCost, 0);
 }
 
 function collectWindowEntries(

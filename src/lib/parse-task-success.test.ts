@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyRecurrence,
   classifyAgentClosingClaim,
   classifyHumanTaskVerdict,
   computeTaskSuccess,
   parseTaskSuccess,
+  type TaskSuccessProxy,
 } from './parse-task-success';
 import type { RuntimeEvents } from './parse-runtime-events';
+import type { HistoryEntry } from '../types';
 
 const line = (value: Record<string, unknown>) => JSON.stringify(value);
 
@@ -391,5 +394,124 @@ describe('recurrence corroboration requires an observed window (#3155)', () => {
     expect(rows[0].recurrence?.kind).toBe('corroborated');
     // The claim is bounded by when we stopped looking, not open-ended.
     expect(rows[0].recurrence?.observedUntil).toBe('2026-01-20T00:00:00.000Z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recurrence analysis is sub-quadratic in history size (#3156)
+// ---------------------------------------------------------------------------
+
+function completedSpan(i: number, endMs: number): TaskSuccessProxy {
+  return {
+    sessionId: `s-${String(i).padStart(4, '0')}`,
+    taskIndex: 0,
+    startTime: new Date(endMs - 60_000).toISOString(),
+    endTime: new Date(endMs).toISOString(),
+    wallClockMs: 60_000,
+    verdict: 'none',
+    agentClaim: 'completed',
+    confidence: 'low',
+    successScore: 0.9,
+    backedByMutation: true,
+    mutatingToolCount: 1,
+    toolCallCount: 1,
+    toolResultCount: 1,
+    toolErrorCount: 0,
+    toolErrorRate: 0,
+    errorPenalty: 0,
+    recurrenceTopics: ['#4242'],
+  };
+}
+
+function correctiveTurn(sessionId: string, ms: number): HistoryEntry {
+  return {
+    display: 'no, that is wrong #4242',
+    pastedContents: {},
+    timestamp: ms,
+    project: '/repo/app',
+    sessionId,
+  };
+}
+
+/** Count reads of `recurrenceTopics` — touched only by the two scan loops. */
+function countTopicReads(spans: TaskSuccessProxy[]): {
+  reads: number;
+  proxied: TaskSuccessProxy[];
+} {
+  let reads = 0;
+  const proxied = spans.map(
+    (s) =>
+      new Proxy(s, {
+        get(target, prop, receiver) {
+          if (prop === 'recurrenceTopics') reads += 1;
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as TaskSuccessProxy
+  );
+  return {
+    get reads() {
+      return reads;
+    },
+    proxied,
+  };
+}
+
+describe('applyRecurrence is sub-quadratic in history size (#3156)', () => {
+  const BASE = Date.parse('2026-05-01T00:00:00.000Z');
+
+  it('preserves the established localeCompare tie-break across shared topics', () => {
+    const endMs = BASE + 60_000;
+    const spans = [
+      {
+        ...completedSpan(0, endMs),
+        sessionId: 'a-session',
+        recurrenceTopics: ['#4242'],
+      },
+      {
+        ...completedSpan(1, endMs),
+        sessionId: 'Z-session',
+        recurrenceTopics: ['#4343'],
+      },
+    ];
+    const turn = {
+      ...correctiveTurn('human', endMs + 1000),
+      display: 'no, that is wrong #4242 #4343',
+    };
+
+    const out = applyRecurrence(spans, [turn]);
+    expect(
+      out.find((span) => span.recurrence?.kind === 'demoted')?.sessionId
+    ).toBe('a-session');
+  });
+
+  it('scans spans a near-linear number of times, not once per corrective turn', () => {
+    // S completed spans on one shared topic, plus C corrective turns all landing
+    // after every span and inside the recurrence window. The OLD demotion loop
+    // filtered + sorted the whole span array for EVERY corrective turn — O(C*S).
+    // `recurrenceTopics` is read only inside completedLooking/hasSharedTopic (the
+    // two scan loops), so counting its reads counts scan work deterministically.
+    const S = 120;
+    const C = 120;
+    const spans = Array.from({ length: S }, (_, i) => completedSpan(i, BASE + i * 1000));
+    const lastEnd = BASE + (S - 1) * 1000;
+    const turns = Array.from({ length: C }, (_, j) =>
+      correctiveTurn(`h-${j}`, lastEnd + 1000 + j * 1000)
+    );
+
+    const counter = countTopicReads(spans);
+    const out = applyRecurrence(counter.proxied, turns);
+
+    // Indexed form: near-linear in S; measured 718 reads at S=C=120. The old
+    // per-turn filter+sort over all spans was ~2*C*S ≈ 28,800, so a linear
+    // ceiling separates them cleanly.
+    expect(counter.reads).toBeLessThan(20 * S);
+    expect(counter.reads).toBeGreaterThan(0);
+
+    // Behaviour unchanged: every corrective turn targets the latest-ending
+    // eligible span, so exactly that one span is demoted and no other changes.
+    const demoted = out.filter((s) => s.recurrence?.kind === 'demoted');
+    expect(demoted).toHaveLength(1);
+    expect(demoted[0].sessionId).toBe(`s-${String(S - 1).padStart(4, '0')}`);
+    expect(demoted[0].verdict).toBe('correct');
   });
 });

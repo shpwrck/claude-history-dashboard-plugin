@@ -6,8 +6,10 @@ import {
   SYNTHETIC_MODEL,
 } from './pricing';
 import {
+  chooseModelPinSplit,
   computeModelPinSavings,
   deriveModelPinSavingsConfig,
+  type TimestampedPricedEntry,
 } from './model-pin-savings';
 
 const baseline = {
@@ -488,5 +490,119 @@ describe('realized savings isolate model choice from volume (#3136)', () => {
       n.premiumRatioDelta * n.appliedToTargetSpendUsd,
       9
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Split inference is linear in billable history size (#3137)
+// ---------------------------------------------------------------------------
+
+function pricedEntry(
+  i: number,
+  actualCost: number,
+  targetCost: number,
+  targetPriced: boolean
+): TimestampedPricedEntry {
+  return {
+    sessionId: `auto-${i}`,
+    model: 'claude-opus-4-8',
+    timestampMs: Date.parse('2026-05-01T00:00:00Z') + i * 60_000,
+    actualCost,
+    targetCost,
+    targetPriced,
+  };
+}
+
+/** Count reads of the cost fields the split scan touches, via per-entry Proxy. */
+function countCostReads(entries: TimestampedPricedEntry[]): {
+  reads: number;
+  proxied: TimestampedPricedEntry[];
+} {
+  let reads = 0;
+  const COST_FIELDS = new Set(['actualCost', 'targetCost', 'targetPriced']);
+  const proxied = entries.map(
+    (e) =>
+      new Proxy(e, {
+        get(target, prop, receiver) {
+          if (typeof prop === 'string' && COST_FIELDS.has(prop)) reads += 1;
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as TimestampedPricedEntry
+  );
+  return {
+    get reads() {
+      return reads;
+    },
+    proxied,
+  };
+}
+
+/** The pre-#3137 O(n²) split scan, kept in the test as the correctness oracle. */
+function bruteForceSplit(
+  entries: readonly TimestampedPricedEntry[],
+  minB: number,
+  minC: number,
+  minShare: number
+): number | null {
+  const ratio = (a: number, t: number) => (t > 0 ? Math.max(0, a - t) / t : 0);
+  const sum = (list: readonly TimestampedPricedEntry[], k: 'actualCost' | 'targetCost') =>
+    list.reduce((s, e) => s + e[k], 0);
+  let best: { index: number; realized: number } | null = null;
+  for (let index = minB; index <= entries.length - minC; index += 1) {
+    if (!entries[index].targetPriced) continue;
+    const baseline = entries.slice(0, index);
+    const comparison = entries.slice(index);
+    const share = comparison.filter((e) => e.targetPriced).length / comparison.length;
+    if (share < minShare) continue;
+    const delta =
+      ratio(sum(baseline, 'actualCost'), sum(baseline, 'targetCost')) -
+      ratio(sum(comparison, 'actualCost'), sum(comparison, 'targetCost'));
+    if (delta <= 0) continue;
+    const realized = delta * sum(comparison, 'targetCost');
+    if (realized <= 0) continue;
+    if (!best || realized > best.realized) best = { index, realized };
+  }
+  return best ? best.index : null;
+}
+
+describe('chooseModelPinSplit is linear in history size (#3137)', () => {
+  it('reads each entry a bounded number of times regardless of split count', () => {
+    // Every entry is target-priced, so every candidate boundary clears the
+    // early guards and — in the OLD implementation — re-sliced, re-filtered and
+    // re-reduced the whole history: O(n²) cost-field reads. The prefix-sum form
+    // reads each entry a constant number of times. We count reads of the cost
+    // fields the scan touches (op-count discriminator, not wall-clock).
+    const n = 300;
+    const entries = Array.from({ length: n }, (_, i) => pricedEntry(i, 1, 1, true));
+    const counter = countCostReads(entries);
+    chooseModelPinSplit(counter.proxied, 1, 1, 0.5);
+    // Prefix-sum form: ~4n reads (3-field build + one targetPriced per
+    // candidate); measured 1199 at n=300. The old re-slice/filter/reduce scan
+    // was O(n²) — ~180k here — so a linear ceiling separates them cleanly.
+    expect(counter.reads).toBeLessThan(8 * n);
+    expect(counter.reads).toBeGreaterThan(0);
+  });
+
+  it('selects the same boundary as the pre-#3137 O(n^2) scan', () => {
+    // Deterministic pseudo-random histories with a genuine premium drop, so the
+    // scan actually chooses a winner. Integer costs keep prefix arithmetic exact.
+    let seed = 12345;
+    const rnd = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    for (let trial = 0; trial < 20; trial += 1) {
+      const n = 40 + Math.floor(rnd() * 60);
+      const entries = Array.from({ length: n }, (_, i) => {
+        // Front-loaded premium: earlier entries more likely to overpay.
+        const premium = rnd() < (1 - i / n) * 0.8;
+        const targetCost = 1 + Math.floor(rnd() * 5);
+        const actualCost = premium ? targetCost + 1 + Math.floor(rnd() * 5) : targetCost;
+        return pricedEntry(i, actualCost, targetCost, actualCost <= targetCost + 1e-6);
+      });
+      expect(chooseModelPinSplit(entries, 1, 1, 0.5)).toBe(
+        bruteForceSplit(entries, 1, 1, 0.5)
+      );
+    }
   });
 });

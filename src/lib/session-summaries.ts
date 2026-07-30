@@ -258,6 +258,20 @@ function windowNarrative(
 }
 
 /**
+ * A session's summary + per-session tool-name counts, computed ONCE and reused
+ * by every trailing window it falls into (#3174). The windows are nested, so a
+ * recent session belongs to several of them; composing its summary and scanning
+ * its tool calls once per session — instead of once per (window × session) —
+ * removes the repeated recomputation without changing any window's output.
+ */
+interface PreparedSession {
+  session: Session;
+  summary: SessionSummary;
+  /** Per-session tool-name counts, in first-appearance order (see below). */
+  toolCounts: Map<string, number>;
+}
+
+/**
  * Compute the four trailing-window rollups from already-parsed data. Pure and
  * deterministic for a fixed `nowMs`; works identically on the server and SPA
  * datasets (no stats-cache dependency).
@@ -279,11 +293,38 @@ export function computeActivityRollups(
       (a, b) => b.startTime - a.startTime || byKey(a.sessionId, b.sessionId)
     );
 
+  // The windows are nested inside the widest (month) window, so a session
+  // outside it is in NO window; preparing only the sessions inside it keeps the
+  // work an upper bound of the old per-window total (#3174). Compose each
+  // session's summary and its per-session tool counts EXACTLY ONCE here, then
+  // fold the prepared rows into every window they belong to below.
+  const widestMs = ROLLUP_WINDOWS[ROLLUP_WINDOWS.length - 1].ms;
+  const widestStart = input.nowMs - widestMs;
+  const prepared: PreparedSession[] = ordered
+    .filter((s) => s.startTime >= widestStart && s.startTime <= input.nowMs)
+    .map((session) => {
+      const toolData = toolBySession.get(session.sessionId) ?? null;
+      const summary = composeSessionSummary({
+        session,
+        tokenData: tokenBySession.get(session.sessionId) ?? null,
+        toolData,
+      });
+      // Distinct tool-name counts in first-appearance-by-call order. Folding
+      // these into a window's map in `prepared` order reproduces exactly the
+      // insertion order the old per-window `for (const call of calls)` scan
+      // produced, so `topTools` (and every other derived list) is unchanged.
+      const toolCounts = new Map<string, number>();
+      for (const call of toolData?.calls ?? []) {
+        toolCounts.set(call.toolName, (toolCounts.get(call.toolName) ?? 0) + 1);
+      }
+      return { session, summary, toolCounts };
+    });
+
   return ROLLUP_WINDOWS.map((w) => {
     const startMs = input.nowMs - w.ms;
     const endMs = input.nowMs;
-    const inWindow = ordered.filter(
-      (s) => s.startTime >= startMs && s.startTime <= endMs
+    const inWindow = prepared.filter(
+      (p) => p.session.startTime >= startMs && p.session.startTime <= endMs
     );
 
     const byProject = new Map<string, ProjectRollup>();
@@ -293,12 +334,7 @@ export function computeActivityRollups(
     let toolCallCount = 0;
     let estimatedCost = 0;
 
-    const summaries = inWindow.map((session) => {
-      const summary = composeSessionSummary({
-        session,
-        tokenData: tokenBySession.get(session.sessionId) ?? null,
-        toolData: toolBySession.get(session.sessionId) ?? null,
-      });
+    const summaries = inWindow.map(({ session, summary, toolCounts: sessionTools }) => {
       messageCount += session.messageCount;
       toolCallCount += summary.toolCallCount;
       estimatedCost += summary.estimatedCost;
@@ -306,8 +342,8 @@ export function computeActivityRollups(
         summary.sessionType,
         (typeCounts.get(summary.sessionType) ?? 0) + 1
       );
-      for (const call of toolBySession.get(session.sessionId)?.calls ?? []) {
-        toolCounts.set(call.toolName, (toolCounts.get(call.toolName) ?? 0) + 1);
+      for (const [name, n] of sessionTools) {
+        toolCounts.set(name, (toolCounts.get(name) ?? 0) + n);
       }
       const key = session.project || '(unknown project)';
       const row = byProject.get(key) ?? {
