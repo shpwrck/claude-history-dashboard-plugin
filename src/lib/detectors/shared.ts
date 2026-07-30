@@ -66,6 +66,61 @@ export const MIN_ASSISTANT_TURNS = 50; // enough assistant turns to trust a beha
 export const HIGH_REFUSAL_RATE = 0.15; // ≥15% of turns concede/refuse → prompt-clarity friction
 export const RATE_LIMIT_STATUSES = new Set(['429', '529']);
 
+/**
+ * How much of a population a claim could actually be measured from.
+ *
+ * ## Why this exists (#3197/#3200, Round-9 review)
+ *
+ * A detector repeatedly "fixed" an unusable input — a saturated proxy, an
+ * undated inventory row — by DISCLOSING it in prose while still booking,
+ * certifying, or silently dropping it. Several separate findings were one
+ * defect:
+ *
+ *   **Disclosure is not exclusion**, and a bad row filtered away before the
+ *   claim is derived is indistinguishable, to a structured consumer, from a row
+ *   that never existed.
+ *
+ * So unusable rows are COUNTED rather than dropped, and the count travels with
+ * the usable total all the way to the emitted recommendation. That keeps three
+ * states structurally distinct instead of collapsing them into one silence:
+ * "measured N", "measured N and rejected M", and "rejected everything".
+ *
+ * The contract this enforces at the call site:
+ *  - a claim may only be derived from {@link EvidenceCoverage.usable};
+ *  - `excluded` must reach the consumer in provenance, not only in prose;
+ *  - an aggregate freshness assertion is NOT derivable when coverage is partial
+ *    (see {@link isPartialCoverage}) — computing it from the survivors reads as
+ *    covering everything;
+ *  - {@link isFullyExcluded} must not return `null`: "we rejected all of it" is
+ *    a finding, and an early return erases it.
+ */
+export interface EvidenceCoverage {
+  /** Rows whose measurement can actually support the claim. */
+  usable: number;
+  /** Rows rejected as capped / truncated / undated / unpriced. */
+  excluded: number;
+}
+
+/** Rows considered, usable or not. */
+export function coverageTotal(c: EvidenceCoverage): number {
+  return c.usable + c.excluded;
+}
+
+/**
+ * True when some rows were rejected, so an AGGREGATE assertion over the whole
+ * population (a single `asOf`, a "these N tools are idle" freshness) cannot
+ * honestly be derived — it would be computed from the survivors and read as
+ * covering everything.
+ */
+export function isPartialCoverage(c: EvidenceCoverage): boolean {
+  return c.excluded > 0;
+}
+
+/** True when rows were considered and every one was rejected. */
+export function isFullyExcluded(c: EvidenceCoverage): boolean {
+  return c.usable === 0 && c.excluded > 0;
+}
+
 /** First 8 chars of an id — the canonical short session id used in evidence rows. */
 export const short = (id: string) => id.slice(0, 8);
 
