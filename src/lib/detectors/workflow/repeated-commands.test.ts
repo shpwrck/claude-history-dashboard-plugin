@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './repeated-commands';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { ToolUsageData, ToolCall } from '../../parse-tools';
 
@@ -67,5 +68,37 @@ describe('workflow.repeated-commands (#1803)', () => {
       },
     ] as unknown as ToolUsageData[];
     expect(detector.rule(input({ toolData: sparse }), 0)).toBeNull();
+  });
+});
+
+// ── Provenance (#3242) ────────────────────────────────────────────────────
+
+describe('workflow.repeated-commands provenance (#3242)', () => {
+  it('emits provenance that passes the contract when it fires', () => {
+    const rec = detector.rule(input(), 0)!;
+    expect(rec.provenance).toBeDefined();
+    expect(rec.provenance!.observations.length).toBeGreaterThan(0);
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.claimClass).toBe('accounting');
+    expect(rec.proofTier).toBe('accounting');
+  });
+
+  it('cites the distinct-command count and the total run count', () => {
+    const rec = detector.rule(input(), 0)!;
+    const obs = rec.provenance!.observations;
+    // One distinct command ('npm run build') repeated in one session.
+    const distinct = obs.find((o) => o.field === 'repeatedCommands.length');
+    expect(distinct!.value).toBe(1);
+    // It ran 4× total across those sessions.
+    const total = obs.find((o) => o.field === 'sum(totalCount)');
+    expect(total!.value).toBe(4);
+  });
+
+  it('emits NO asOf — the aggregate carries no timestamp', () => {
+    // Dating an undated aggregate from an unrelated call would fabricate
+    // freshness, so omission is the honest result (a real `now` is passed).
+    const rec = detector.rule(input(), Date.parse('2026-09-01T00:00:00Z'))!;
+    expect(rec.provenance!.asOf).toBeUndefined();
+    expect(rec.provenance!.stale).toBeUndefined();
   });
 });

@@ -78,6 +78,18 @@ export interface AxisAggregate {
    */
   adherenceRegressionCount: number;
   /**
+   * Newest normalized record timestamp observed for this axis (ISO), or `null`
+   * when every contributing record was undated (#3246/#3248). Unlike
+   * {@link VariationAggregate.latestTs}, this folds over ALL of the axis's rows
+   * — not only the variation-identified subset — so it is the axis's true
+   * freshness anchor. The two shadow-axis detectors demote/suppress against it
+   * (`workflow.shadow-axis-wins`, `workflow.uncovered-shadow-axis`) so stale or
+   * undated ledger evidence never reads as a current standing default/discovery.
+   * Optional so existing typed literals compile; the parser always sets it
+   * (`null` when the axis had no dated record).
+   */
+  latestTs?: string | null;
+  /**
    * Per-finding sub-aggregate, populated ONLY for the `recs` axis (#579, ADR 0005 Tier 2).
    * Keyed by `record.recs.findingId`; undefined for every other axis. Mirrors the per-axis
    * verdict counters so a single finding can be evaluated in isolation ("finding F changed
@@ -594,6 +606,7 @@ function emptyAxis(axis: string): AxisAggregate {
     costDeltaCount: 0,
     adherenceRegressionSum: 0,
     adherenceRegressionCount: 0,
+    latestTs: null,
   };
 }
 
@@ -1196,6 +1209,14 @@ export function parseShadowCalls(
     const rawSource = classifyExperimentSource(rec);
     considerSourceAxisIdentity(sourceAxisSelection, { source: rawSource, axis });
     a.samples++;
+    // Fold the newest DATED record into the axis's freshness anchor (#3246/#3248).
+    // Every counted row contributes, not just the variation-identified ones, so
+    // an axis built entirely from variation-less rows is still dated when its
+    // records carry a timestamp.
+    const axisTs = normalizeExperimentTimestamp(rec.ts);
+    if (axisTs && (a.latestTs == null || Date.parse(axisTs) > Date.parse(a.latestTs))) {
+      a.latestTs = axisTs;
+    }
     if (mode === 'live') {
       a.live++;
       live++;

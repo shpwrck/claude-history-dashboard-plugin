@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './redundant-reads';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import type { ToolUsageData, ToolCall } from '../../parse-tools';
@@ -100,5 +101,34 @@ describe('workflow.redundant-reads (#951)', () => {
     // but with no priced scope there is no dollar claim to book.
     expect(rec?.id).toBe('workflow.redundant-reads');
     expect(rec?.reclaim).toBeUndefined();
+  });
+});
+
+// ── Provenance (#3242) ────────────────────────────────────────────────────
+
+describe('workflow.redundant-reads provenance (#3242)', () => {
+  it('emits provenance that passes the contract when it fires', () => {
+    const rec = detector.rule(input(), 0)!;
+    expect(rec.provenance).toBeDefined();
+    expect(rec.provenance!.observations.length).toBeGreaterThan(0);
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.claimClass).toBe('accounting');
+    expect(rec.proofTier).toBe('accounting');
+  });
+
+  it('cites the re-read pair count and the DIRECT waste-token estimate', () => {
+    const rec = detector.rule(input(), 0)!;
+    const obs = rec.provenance!.observations;
+    const pairs = obs.find((o) => o.field === 'redundantReads.length');
+    expect(pairs!.value).toBe(1); // one (session, file) pair re-read 4×
+    // Direct estimate = (4-1) × 4000 / 4 = 3000 tokens (mirrors the reclaim test).
+    const waste = obs.find((o) => o.field === 'sum(estimatedTokenWaste)');
+    expect(waste!.value).toBe(3000);
+  });
+
+  it('dates asOf from the newest observed re-Read, not from now', () => {
+    const rec = detector.rule(input(), Date.parse('2026-09-01T00:00:00Z'))!;
+    // The Read calls are timestamped 2026-01-01; `now` is 8 months later.
+    expect(rec.provenance!.asOf).toBe('2026-01-01');
   });
 });

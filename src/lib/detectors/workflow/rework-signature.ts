@@ -7,9 +7,9 @@
  * compiling unchanged.
  *
  * A high "rework signature" means many pre-edit snapshots packed into a tight
- * time window (high burstRate), indicating retry storms: the agent made many
- * file edits in rapid succession, each triggering a checkpoint, suggesting
- * unclear prompts, breaking changes, or trial-and-error work patterns.
+ * time window (high burstRate). It is a churn proxy, not a diagnosis: the
+ * aggregate does not identify whether the checkpoints came from trial-and-error
+ * work, an unclear prompt, or ordinary iterative editing.
  *
  * Signal derivation (pure from parse-file-history; never reads snapshot bodies):
  *   reworkScore  = churn * (1 + burstRate)   per session
@@ -20,7 +20,7 @@
  */
 
 import type { Detector } from '../types';
-import { short } from '../shared';
+import { short, newestEpochDate } from '../shared';
 
 const MIN_SESSIONS = 3;
 const MIN_REWORK_SCORE = 10;
@@ -44,25 +44,77 @@ export const detector: Detector = {
 
     const severity = top.burstRate >= 3 ? 'warning' : 'info';
 
+    // Anchored to the newest OBSERVED snapshot mtime across the shown sessions,
+    // never to `now`: file-history is only known to be this churny as of the
+    // last checkpoint recorded. An unreadable/absent mtime yields no `asOf`.
+    const asOf = newestEpochDate(top5.map((s) => s.lastMs));
+
     return {
       id: 'workflow.rework-signature',
       category: 'workflow',
       severity,
-      title: 'High file-snapshot churn signals retry storms',
+      claimClass: 'accounting',
+      proofTier: 'accounting',
+      title: 'File-snapshot churn concentrated in a short window',
       detail:
-        `Session ${short(top.sessionId)} has reworkScore ${top.reworkScore} ` +
-        `(${top.churn} pre-edit checkpoints, ${top.burstRate}/min burst rate). ` +
-        `High burst rates indicate rapid successive file edits — a retry-storm ` +
-        `pattern that wastes round-trips and signals unclear prompts or brittle edits.`,
+        `Session ${short(top.sessionId)} recorded reworkScore ${top.reworkScore} — ` +
+        `${top.churn} pre-edit file-history checkpoint(s) over ${top.spanMin}m ` +
+        `(${top.burstRate}/min). These are checkpoint counts from ~/.claude/file-history: ` +
+        `a high rate means many edits packed into a tight window.`,
       action:
-        'Review high-rework sessions: add clearer up-front specs or pre-edit hooks ' +
-        '(lint/typecheck) to catch errors before they cascade into repeated checkpoint cycles.',
+        'Review the highest-churn sessions. If the churn reflects trial-and-error, ' +
+        'clearer up-front specs or pre-edit lint/typecheck hooks can cut repeated ' +
+        'checkpoints; if it is ordinary iterative editing, no action is needed.',
       affected: top5.length,
       evidence: top5.map(
         (s) =>
           `${short(s.sessionId)}: score=${s.reworkScore}  churn=${s.churn}  burst=${s.burstRate}/min  span=${s.spanMin}m`
       ),
       view: 'files',
+      provenance: {
+        observations: [
+          {
+            claim: `${data.length} session(s) carried scored file-history aggregates`,
+            source: 'parse-file-history (fileHistory[])',
+            field: 'fileHistory.length',
+            value: data.length,
+          },
+          {
+            claim: `the highest observed reworkScore is ${top.reworkScore}`,
+            source: 'parse-file-history (fileHistory[])',
+            field: 'reworkScore',
+            value: top.reworkScore,
+          },
+          {
+            claim: `that session recorded ${top.churn} pre-edit snapshot checkpoint(s)`,
+            source: 'parse-file-history (fileHistory[])',
+            field: 'churn',
+            value: top.churn,
+          },
+          {
+            claim: `its snapshots were packed at ${top.burstRate} per minute`,
+            source: 'parse-file-history (fileHistory[])',
+            field: 'burstRate',
+            value: top.burstRate,
+          },
+          {
+            claim: `the same session's file-history window spans ${top.spanMin} minute(s)`,
+            source: 'parse-file-history (fileHistory[])',
+            field: 'spanMin',
+            value: top.spanMin,
+          },
+        ],
+        // reworkScore = churn × (1 + burstRate) ranks tight, churny sessions
+        // highest. It is a PROXY for retry-storm-style rework: the snapshot
+        // counts do NOT identify WHY the edits happened (an unclear prompt, a
+        // brittle edit, or normal iterative work all produce checkpoints), so no
+        // cause is claimed. burstRate >= 3 only raises the DISPLAY severity; it
+        // is not evidence of a specific cause.
+        inference:
+          'A high reworkScore concentrates many pre-edit checkpoints into a short window; ' +
+          'this proxies rework but does not identify its cause, which is not measured here.',
+        ...(asOf ? { asOf } : {}),
+      },
     };
   },
 };

@@ -34,13 +34,14 @@ const costLine = (
     shadow: { tokens: shadowTokens, costUsd: shadowUsd },
   });
 
-/** One ledger line. winner/tokens optional. */
+/** One ledger line. winner/tokens/ts optional. */
 const line = (
   axis: string,
   mode: 'live' | 'replay',
   winner: 'main' | 'shadow' | 'tie' | null,
   mainTokens?: number,
-  shadowTokens?: number
+  shadowTokens?: number,
+  ts?: string
 ): string =>
   JSON.stringify({
     mode,
@@ -48,7 +49,13 @@ const line = (
     judge: winner ? { winner } : undefined,
     main: mainTokens === undefined ? undefined : { tokens: mainTokens },
     shadow: shadowTokens === undefined ? undefined : { tokens: shadowTokens },
+    ...(ts === undefined ? {} : { ts }),
   });
+
+// A dated record + a `now` just after it, so the shadow-axis freshness gate
+// (#3246/#3248) reads the evidence as fresh rather than undated/stale.
+const FRESH_TS = '2026-06-09T00:00:00Z';
+const FRESH_NOW = Date.parse('2026-06-10T00:00:00Z');
 
 /** Empty-but-valid engine input with an optional shadowCalls aggregate. */
 const inputWith = (jsonl: string): RecommendationInput => ({
@@ -760,19 +767,19 @@ describe('workflow.shadow-axis-wins detector', () => {
   });
 
   it('recommends adopting an axis that wins ≥60% over enough samples, weighting live as warning', () => {
-    // 6 samples, 5 shadow wins (4 live), cheaper -> live-confirmed warning
+    // 6 samples, 5 shadow wins (4 live), cheaper, dated fresh -> live-confirmed warning
     const jsonl = [
-      line('model', 'live', 'shadow', 1000, 200),
-      line('model', 'live', 'shadow', 1000, 250),
-      line('model', 'live', 'shadow', 1000, 220),
-      line('model', 'live', 'shadow', 1000, 210),
-      line('model', 'replay', 'shadow', 900, 300),
-      line('model', 'live', 'main', 100, 600),
+      line('model', 'live', 'shadow', 1000, 200, FRESH_TS),
+      line('model', 'live', 'shadow', 1000, 250, FRESH_TS),
+      line('model', 'live', 'shadow', 1000, 220, FRESH_TS),
+      line('model', 'live', 'shadow', 1000, 210, FRESH_TS),
+      line('model', 'replay', 'shadow', 900, 300, FRESH_TS),
+      line('model', 'live', 'main', 100, 600, FRESH_TS),
     ].join('\n');
-    const rec = find(buildRecommendations(inputWith(jsonl)));
+    const rec = find(buildRecommendations(inputWith(jsonl), FRESH_NOW));
     expect(rec).toBeDefined();
     expect(rec!.category).toBe('workflow');
-    expect(rec!.severity).toBe('warning'); // ≥3 live shadow wins
+    expect(rec!.severity).toBe('warning'); // ≥3 live shadow wins, fresh evidence
     expect(rec!.title).toMatch(/cheaper model/i);
     expect(rec!.fix?.target).toBe('CLAUDE.md');
   });
@@ -790,15 +797,16 @@ describe('workflow.shadow-axis-wins detector', () => {
   });
 
   it('caps at info when evidence is replay-only (cold-start caveat)', () => {
+    // Dated fresh so info is due to replay-only (zero live wins), not staleness.
     const jsonl = [
-      line('skills', 'replay', 'shadow', 1000, 900),
-      line('skills', 'replay', 'shadow', 1000, 900),
-      line('skills', 'replay', 'shadow', 1000, 900),
-      line('skills', 'replay', 'shadow', 1000, 900),
-      line('skills', 'replay', 'shadow', 1000, 900),
-      line('skills', 'replay', 'main', 1000, 1100),
+      line('skills', 'replay', 'shadow', 1000, 900, FRESH_TS),
+      line('skills', 'replay', 'shadow', 1000, 900, FRESH_TS),
+      line('skills', 'replay', 'shadow', 1000, 900, FRESH_TS),
+      line('skills', 'replay', 'shadow', 1000, 900, FRESH_TS),
+      line('skills', 'replay', 'shadow', 1000, 900, FRESH_TS),
+      line('skills', 'replay', 'main', 1000, 1100, FRESH_TS),
     ].join('\n'); // 5/6 shadow wins but ZERO live -> info
-    const rec = find(buildRecommendations(inputWith(jsonl)));
+    const rec = find(buildRecommendations(inputWith(jsonl), FRESH_NOW));
     expect(rec).toBeDefined();
     expect(rec!.severity).toBe('info');
   });
@@ -807,14 +815,14 @@ describe('workflow.shadow-axis-wins detector', () => {
     // 6 samples, 5 shadow wins (live) — clears the bar, so the adopt-axis rec fires
     // with the AXIS_META['config-scoping'] label + adopt string, not the generic fallback.
     const jsonl = [
-      line('config-scoping', 'live', 'shadow', 1000, 400),
-      line('config-scoping', 'live', 'shadow', 1000, 420),
-      line('config-scoping', 'live', 'shadow', 1000, 380),
-      line('config-scoping', 'live', 'shadow', 1000, 410),
-      line('config-scoping', 'replay', 'shadow', 900, 350),
-      line('config-scoping', 'live', 'main', 800, 900),
+      line('config-scoping', 'live', 'shadow', 1000, 400, FRESH_TS),
+      line('config-scoping', 'live', 'shadow', 1000, 420, FRESH_TS),
+      line('config-scoping', 'live', 'shadow', 1000, 380, FRESH_TS),
+      line('config-scoping', 'live', 'shadow', 1000, 410, FRESH_TS),
+      line('config-scoping', 'replay', 'shadow', 900, 350, FRESH_TS),
+      line('config-scoping', 'live', 'main', 800, 900, FRESH_TS),
     ].join('\n');
-    const rec = find(buildRecommendations(inputWith(jsonl)));
+    const rec = find(buildRecommendations(inputWith(jsonl), FRESH_NOW));
     expect(rec).toBeDefined();
     expect(rec!.title).toMatch(/path-scoped \(atomized\) config/);
     // Not the generic `adopt the "config-scoping" variation` fallback — a concrete action.
@@ -884,11 +892,11 @@ describe('parseShadowCalls — config-scoping adherence-regression dimension (#1
 describe('workflow.uncovered-shadow-axis detector (#530 — discovery)', () => {
   const find = (recs: { id: string }[]) => recs.find((r) => r.id === 'workflow.uncovered-shadow-axis');
   const win = (axis: string) =>
-    [win1(axis), win1(axis), win1(axis), win1(axis), win1(axis), line(axis, 'live', 'main', 100, 500)].join('\n');
-  function win1(axis: string) { return line(axis, 'live', 'shadow', 1000, 200); }
+    [win1(axis), win1(axis), win1(axis), win1(axis), win1(axis), line(axis, 'live', 'main', 100, 500, FRESH_TS)].join('\n');
+  function win1(axis: string) { return line(axis, 'live', 'shadow', 1000, 200, FRESH_TS); }
 
-  it('proposes a new class when an UNCOVERED axis wins (skills)', () => {
-    const rec = find(buildRecommendations(inputWith(win('skills'))));
+  it('proposes a new class when an UNCOVERED axis wins (skills), dated fresh', () => {
+    const rec = find(buildRecommendations(inputWith(win('skills')), FRESH_NOW));
     expect(rec).toBeDefined();
     expect(rec!.category).toBe('workflow');
     expect(rec!.title).toMatch(/skills/);

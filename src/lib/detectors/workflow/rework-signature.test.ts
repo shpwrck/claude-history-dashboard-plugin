@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { detector } from './rework-signature';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { FileHistorySession } from '../../parse-file-history';
 
@@ -116,5 +117,47 @@ describe('workflow.rework-signature detector (#564)', () => {
   it('detector metadata is correct', () => {
     expect(detector.id).toBe('workflow.rework-signature');
     expect(detector.category).toBe('workflow');
+  });
+});
+
+// ── Provenance + causal-wording restriction (#3242) ────────────────────────
+
+describe('workflow.rework-signature provenance (#3242)', () => {
+  it('emits provenance that passes the contract when it fires', () => {
+    const rec = detector.rule(makeInput([storm, medium, calm]), 0)!;
+    expect(rec.provenance).toBeDefined();
+    expect(rec.provenance!.observations.length).toBeGreaterThan(0);
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.claimClass).toBe('accounting');
+    expect(rec.proofTier).toBe('accounting');
+  });
+
+  it('cites reworkScore, churn, burstRate, and spanMin as the measured operands', () => {
+    const rec = detector.rule(makeInput([storm, medium, calm]), 0)!;
+    const obs = rec.provenance!.observations;
+    expect(obs.find((o) => o.field === 'reworkScore')!.value).toBe(60);
+    expect(obs.find((o) => o.field === 'churn')!.value).toBe(12);
+    expect(obs.find((o) => o.field === 'burstRate')!.value).toBe(4);
+    expect(obs.find((o) => o.field === 'spanMin')!.value).toBe(storm.spanMin);
+  });
+
+  it('no longer asserts an unproven CAUSE (retry storms / unclear prompts)', () => {
+    // The finding: burst geometry is a proxy, not proof of a cause. The copy
+    // must restrict itself to the measured churn facts.
+    const rec = detector.rule(makeInput([storm, medium, calm]), 0)!;
+    const blob = `${rec.title} ${rec.detail} ${rec.action}`.toLowerCase();
+    expect(blob).not.toContain('retry storm');
+    expect(blob).not.toContain('unclear prompt');
+    expect(blob).not.toContain('brittle');
+    // The inference may NAME the proxy, but only as an explicitly-unproven one.
+    expect(rec.provenance!.inference).toMatch(/prox(y|ies)/i);
+  });
+
+  it('dates asOf from the newest snapshot mtime, not from now', () => {
+    const rec = detector.rule(makeInput([storm, medium, calm]), Date.parse('2030-01-01T00:00:00Z'))!;
+    // Newest lastMs across the shown sessions → a real calendar date, not 2030.
+    expect(rec.provenance!.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(rec.provenance!.asOf).not.toBe('2030-01-01');
+    expect(rec.provenance!.asOf).toBe(new Date(storm.lastMs).toISOString().slice(0, 10));
   });
 });

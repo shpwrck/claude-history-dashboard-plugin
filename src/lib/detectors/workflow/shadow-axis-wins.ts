@@ -1,6 +1,8 @@
 import type { AppliedMarkers, Detector, RecSeverity, Recommendation, RecProvenance } from '../types';
 import { avgTokenDelta, avgCostDelta, shadowCheaper, decidedForFinding, configScopingEvidence } from '../../parse-shadow-calls';
 import type { AxisAggregate, RecsFindingAggregate, VariationAggregate } from '../../parse-shadow-calls';
+import { newestIsoDate } from '../shared';
+import { isAsOfStale } from '../provenance';
 
 /**
  * Shadow-calls experiments (epic #513) run the same task two ways — your default (Main)
@@ -21,6 +23,25 @@ export const MIN_SAMPLES = 5; // per axis, before we trust a win rate
 export const MIN_DECIDED = 3; // need ≥3 NON-tie comparisons, not just 5 samples (#545)
 export const MIN_SHADOW_WIN_RATE = 0.6; // shadow wins ≥60% of decided experiments
 const MIN_LIVE_WINS_FOR_WARNING = 3; // live confirmation lifts info → warning
+/**
+ * Shadow evidence older than this reads as a lead, not a current standing
+ * default (#3246). Model tiers, pricing, and prompt behaviour shift within a
+ * few weeks, so a win recorded long ago no longer certifies today's default.
+ */
+export const SHADOW_STALE_DAYS = 45;
+
+/**
+ * Newest dated record observed for the axis, as ISO `YYYY-MM-DD` (#3246, #3248).
+ *
+ * Reads {@link AxisAggregate.latestTs}, which the parser folds over ALL of the
+ * axis's rows (not just the variation-identified ones), so it is the axis's true
+ * freshness anchor rather than a proxy. Returns `undefined` when every
+ * contributing record was undated — honest absence, since `provenance.asOf` is
+ * optional and a fabricated date would assert freshness the ledger lacks.
+ */
+export function axisAsOf(a: AxisAggregate): string | undefined {
+  return newestIsoDate([a.latestTs]);
+}
 
 // The CLAUDE.md marker signature for the adopt-winning-variation fix. Hoisted to
 // a module const so the detector can declare it statically (#1785) and the fix
@@ -87,14 +108,23 @@ export function clearsVariationThresholds(v: VariationAggregate): boolean {
 type Cand = { a: AxisAggregate; winRate: number; cheaper: boolean; costDelta: number | null; tokenDelta: number | null; score: number };
 
 /** The existing adopt-this-axis recommendation, built from the best non-recs candidate. */
-function adoptAxisRec(candidates: Cand[]): Recommendation {
+function adoptAxisRec(candidates: Cand[], now: number): Recommendation {
   candidates.sort((x, y) => y.score - x.score);
   const best = candidates[0];
   const a = best.a;
   const m = meta(a.axis);
 
+  // Freshness (#3246): date the axis from its own newest dated record. Undated
+  // OR stale evidence may NOT read as a current standing default — model
+  // tiers/pricing move — so it is demoted to a lead to confirm live.
+  const asOf = axisAsOf(a);
+  const stale = isAsOfStale(asOf, now, SHADOW_STALE_DAYS);
+  const dated = asOf !== undefined && !stale;
+
   const liveConfirmed = a.liveShadowWins >= MIN_LIVE_WINS_FOR_WARNING;
-  const severity: RecSeverity = liveConfirmed ? 'warning' : 'info';
+  // A lead (undated/stale) never rises above info: a warning-level standing
+  // default cannot rest on evidence that is not both dated and fresh.
+  const severity: RecSeverity = dated && liveConfirmed ? 'warning' : 'info';
 
   const pct = Math.round(best.winRate * 100);
   const evidenceMix = `${a.live} live + ${a.replay} replay`;
@@ -106,6 +136,12 @@ function adoptAxisRec(candidates: Cand[]): Recommendation {
   const trust = liveConfirmed
     ? `${a.liveShadowWins} of these were confirmed in live, in-the-loop runs`
     : `evidence is mostly from replay (cold-start caveat), so treat this as a lead to confirm live`;
+  // An explicit as-of note so undated/stale evidence cannot read as current.
+  const dateNote = asOf
+    ? stale
+      ? ` As of ${asOf} — older than ${SHADOW_STALE_DAYS} days, so this is a lead to confirm, not a current default.`
+      : ` As of ${asOf}.`
+    : ' This shadow evidence carries no readable date, so treat it as a lead to confirm, not a current default.';
 
   const other = candidates.slice(1, 3).map((c) => `${meta(c.a.axis).label} (${Math.round(c.winRate * 100)}% over ${c.a.samples})`);
 
@@ -115,13 +151,120 @@ function adoptAxisRec(candidates: Cand[]): Recommendation {
   // other axis. The cost row is the #726 realized-savings input.
   const configRows = a.axis === 'config-scoping' ? configScopingEvidence(a) : [];
 
+  // Structured provenance (#3246): each numeric claim cites the exact byAxis
+  // field behind it, so the win rate and averages are reproducible without
+  // re-deriving the detector. The paired cost/token SUM and COUNT are cited (not
+  // just the average) so a reader can recompute sum/count.
+  const deltaObs =
+    a.costDeltaCount > 0
+      ? [
+          {
+            claim: `paired cost delta (shadow−main) sums to $${a.costDeltaSum.toFixed(2)}`,
+            source: 'parse-shadow-calls (byAxis[])',
+            field: 'costDeltaSum',
+            value: a.costDeltaSum,
+          },
+          {
+            claim: `over ${a.costDeltaCount} run(s) with both costs known`,
+            source: 'parse-shadow-calls (byAxis[])',
+            field: 'costDeltaCount',
+            value: a.costDeltaCount,
+          },
+        ]
+      : a.tokenDeltaCount > 0
+        ? [
+            {
+              claim: `paired token delta (shadow−main) sums to ${Math.round(a.tokenDeltaSum)}`,
+              source: 'parse-shadow-calls (byAxis[])',
+              field: 'tokenDeltaSum',
+              value: a.tokenDeltaSum,
+            },
+            {
+              claim: `over ${a.tokenDeltaCount} run(s) with both token totals known`,
+              source: 'parse-shadow-calls (byAxis[])',
+              field: 'tokenDeltaCount',
+              value: a.tokenDeltaCount,
+            },
+          ]
+        : [];
+  const provenance: RecProvenance = {
+    observations: [
+      {
+        claim: `axis "${a.axis}" recorded ${a.samples} shadow experiment(s)`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'samples',
+        value: a.samples,
+      },
+      {
+        claim: `the variation won ${a.shadowWins} of them`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'shadowWins',
+        value: a.shadowWins,
+      },
+      {
+        claim: `the default (main) won ${a.mainWins}`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'mainWins',
+        value: a.mainWins,
+      },
+      {
+        claim: `${a.ties} comparison(s) tied`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'ties',
+        value: a.ties,
+      },
+      {
+        claim: `${decided(a)} comparison(s) were decided (shadow wins + main wins)`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'shadowWins + mainWins',
+        value: decided(a),
+      },
+      {
+        claim: `${a.liveShadowWins} of the shadow wins were live, in-the-loop runs`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'liveShadowWins',
+        value: a.liveShadowWins,
+      },
+      {
+        claim: `evidence mix included ${a.live} live experiment(s)`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'live',
+        value: a.live,
+      },
+      {
+        claim: `evidence mix included ${a.replay} replay experiment(s)`,
+        source: 'parse-shadow-calls (byAxis[])',
+        field: 'replay',
+        value: a.replay,
+      },
+      ...deltaObs,
+    ],
+    // The win rate is Main-vs-Shadow VERDICT counts (shadowWins / decided), not a
+    // controlled measurement of the axis's causal effect. It clears the evidence
+    // bar (≥MIN_SAMPLES samples, ≥MIN_DECIDED decided, ≥MIN_SHADOW_WIN_RATE win
+    // rate); adopting the axis is the recommendation, not a proven outcome.
+    inference: dated
+      ? `The variation cleared the evidence bar (>=${MIN_SAMPLES} samples, >=${MIN_DECIDED} decided, ` +
+        `>=${Math.round(MIN_SHADOW_WIN_RATE * 100)}% shadow-win rate) on dated, in-window evidence, so it is offered as a default to confirm.`
+      : `The variation cleared the evidence bar (>=${MIN_SAMPLES} samples, >=${MIN_DECIDED} decided, ` +
+        `>=${Math.round(MIN_SHADOW_WIN_RATE * 100)}% shadow-win rate), but the evidence is ` +
+        `${asOf ? `dated ${asOf} and older than ${SHADOW_STALE_DAYS} days` : 'undated'}, so it is a lead to confirm live, not a current standing default.`,
+    ...(asOf ? { asOf, stale } : {}),
+  };
+
   return {
     id: 'workflow.shadow-axis-wins',
     category: 'workflow',
     severity,
-    title: `Adopt ${m.label} — it out-performed your default in shadow tests`,
-    detail: `Across ${a.samples} shadow experiment(s) on the "${a.axis}" axis (${evidenceMix}), the variation won ${a.shadowWins}/${decided(a)} decided comparisons (${pct}%)${cheaperStr}. ${trust}.`,
-    action: `For this class of task, ${m.adopt}. Re-run a few live shadows to confirm before making it your standing default.`,
+    claimClass: 'causal',
+    proofTier: 'observational',
+    title: dated
+      ? `Adopt ${m.label} — it out-performed your default in shadow tests`
+      : `Shadow tests favoured ${m.label} — confirm live before adopting`,
+    detail: `Across ${a.samples} shadow experiment(s) on the "${a.axis}" axis (${evidenceMix}), the variation won ${a.shadowWins}/${decided(a)} decided comparisons (${pct}%)${cheaperStr}. ${trust}.${dateNote}`,
+    action: dated
+      ? `For this class of task, ${m.adopt}. Re-run a few live shadows to confirm before making it your standing default.`
+      : `Before adopting, run a few live shadows to confirm ${m.label} still wins for this class of task — this evidence is ${asOf ? `dated ${asOf} and stale` : 'undated'}, not a current standing default.`,
     affected: a.samples,
     view: 'recommendations',
     evidence: [
@@ -132,14 +275,24 @@ function adoptAxisRec(candidates: Cand[]): Recommendation {
       ...configRows,
       ...(other.length ? [`other promising axes: ${other.join(', ')}`] : []),
     ],
-    fix: {
-      target: 'CLAUDE.md',
-      fixKind: 'illustrative',
-      label: 'Adopt the winning variation',
-      note: `Shadow-calls evidence (epic #513). Add a standing note so this becomes the default for this kind of task; keep shadowing to catch regressions.`,
-      snippet: `## Default approach (from shadow-calls #513)\n\nFor this class of task, ${m.adopt} — shadow experiments on the "${a.axis}" axis won ${pct}% of ${a.samples} comparisons${best.cheaper ? ' at lower token cost' : ''}. Revisit if live shadows stop favouring it.`,
-      appliedMarkers: MARKERS_SHADOW_AXIS_WINS,
-    },
+    fix: dated
+      ? {
+          target: 'CLAUDE.md',
+          fixKind: 'illustrative',
+          label: 'Adopt the winning variation',
+          note: `Shadow-calls evidence (epic #513). Add a standing note so this becomes the default for this kind of task; keep shadowing to catch regressions.`,
+          snippet: `## Default approach (from shadow-calls #513)\n\nFor this class of task, ${m.adopt} — shadow experiments on the "${a.axis}" axis won ${pct}% of ${a.samples} comparisons${best.cheaper ? ' at lower token cost' : ''}. Revisit if live shadows stop favouring it.`,
+          appliedMarkers: MARKERS_SHADOW_AXIS_WINS,
+        }
+      : {
+          target: 'CLAUDE.md',
+          fixKind: 'illustrative',
+          label: 'Note a shadow lead to confirm',
+          note: `Shadow-calls evidence (epic #513), ${asOf ? `dated ${asOf} and older than ${SHADOW_STALE_DAYS} days` : 'undated'}. Re-run live shadows before adopting; do not make it a standing default on this evidence alone.`,
+          snippet: `## Shadow lead to confirm (from shadow-calls #513)\n\nShadow experiments on the "${a.axis}" axis favoured ${m.adopt} (${pct}% of ${a.samples} comparisons), but the evidence is ${asOf ? `dated ${asOf} and stale` : 'undated'}. Run a few live shadows to confirm before adopting it as a default.`,
+          appliedMarkers: MARKERS_SHADOW_AXIS_WINS,
+        },
+    provenance,
   };
 }
 
@@ -259,7 +412,7 @@ export const detector: Detector = {
   appliedMarkers: MARKERS_SHADOW_AXIS_WINS,
   category: 'workflow',
   dataDeps: ['shadowCalls'],
-  rule(input) {
+  rule(input, now) {
     const agg = input.shadowCalls;
     // `counted` (real rows) is the old `total` semantics; `total` now includes
     // synthetic/skipped lines and must NOT gate real-evidence detectors (#2149).
@@ -297,7 +450,7 @@ export const detector: Detector = {
       const score = a.shadowWins + a.liveShadowWins * 2 + (cheaper ? 2 : 0);
       candidates.push({ a, winRate, cheaper, costDelta, tokenDelta, score });
     }
-    const axisRec = candidates.length > 0 ? adoptAxisRec(candidates) : null;
+    const axisRec = candidates.length > 0 ? adoptAxisRec(candidates, now) : null;
 
     // Precedence: a DECIDED recs efficacy verdict is the headline signal for epic #573;
     // otherwise surface a non-recs adoption lead; otherwise the below-threshold recs

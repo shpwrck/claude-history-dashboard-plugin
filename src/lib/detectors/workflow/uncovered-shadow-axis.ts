@@ -1,7 +1,14 @@
-import type { Detector, RecCategory } from '../types';
+import type { Detector, RecCategory, RecProvenance } from '../types';
 import { avgCostDelta, avgTokenDelta } from '../../parse-shadow-calls';
 import type { AxisAggregate } from '../../parse-shadow-calls';
-import { MIN_SAMPLES, MIN_DECIDED, MIN_SHADOW_WIN_RATE } from './shadow-axis-wins';
+import {
+  MIN_SAMPLES,
+  MIN_DECIDED,
+  MIN_SHADOW_WIN_RATE,
+  SHADOW_STALE_DAYS,
+  axisAsOf,
+} from './shadow-axis-wins';
+import { isAsOfStale } from '../provenance';
 
 /**
  * Discovery: cross-reference shadow-calls wins against the existing rule catalog and
@@ -53,7 +60,7 @@ export const detector: Detector = {
   id: 'workflow.uncovered-shadow-axis',
   category: 'workflow',
   dataDeps: ['shadowCalls'],
-  rule(input) {
+  rule(input, now) {
     const agg = input.shadowCalls;
     // `counted` (real rows) is the old `total` semantics; `total` now includes
     // synthetic/skipped lines and must NOT gate real-evidence detectors (#2149).
@@ -80,15 +87,132 @@ export const detector: Detector = {
     const tokenDelta = avgTokenDelta(top);
 
     const axesList = uncovered.map((a) => a.axis).join(', ');
-    const title = `New recommendation class to add: "${top.axis}" wins in shadow tests but no rule covers it`;
+
+    // Freshness (#3248): date the winning axis from its own newest dated record.
+    // Undated OR stale evidence is historical ledger data, not a current
+    // discovery — so no copy-paste filing command is offered; the recommendation
+    // degrades to an explicit dated lead.
+    const asOf = axisAsOf(top);
+    const stale = isAsOfStale(asOf, now, SHADOW_STALE_DAYS);
+    const dated = asOf !== undefined && !stale;
+    const dateNote = asOf
+      ? stale
+        ? ` As of ${asOf} — older than ${SHADOW_STALE_DAYS} days, so this is a historical lead to confirm live, not a current discovery.`
+        : ` As of ${asOf}.`
+      : ' This shadow evidence carries no readable date, so treat it as a historical lead, not a current discovery.';
+
+    const title = dated
+      ? `New recommendation class to add: "${top.axis}" wins in shadow tests but no rule covers it`
+      : `Possible new recommendation class: "${top.axis}" won in shadow tests, but the evidence is ${asOf ? 'stale' : 'undated'}`;
     const issueBody =
       `Shadow-calls (#513) show the "${top.axis}" variation winning ${top.shadowWins}/${d} (${pct}%) over ${top.samples} experiments, ` +
       `but no detector encodes that pattern. Propose a dedicated detector \\\`${suggestedId}\\\`.`;
+
+    // Cite the exact byAxis operands (win/sample/live/replay + paired
+    // cost-or-token sum/count) so the percentage and the average are
+    // reproducible, and record the AXIS_COVERAGE lookup behind the catalog-gap
+    // claim (#3248).
+    const deltaObs =
+      top.costDeltaCount > 0
+        ? [
+            {
+              claim: `paired cost delta (shadow−main) sums to $${top.costDeltaSum.toFixed(2)}`,
+              source: 'parse-shadow-calls (byAxis[])',
+              field: 'costDeltaSum',
+              value: top.costDeltaSum,
+            },
+            {
+              claim: `over ${top.costDeltaCount} run(s) with both costs known`,
+              source: 'parse-shadow-calls (byAxis[])',
+              field: 'costDeltaCount',
+              value: top.costDeltaCount,
+            },
+          ]
+        : top.tokenDeltaCount > 0
+          ? [
+              {
+                claim: `paired token delta (shadow−main) sums to ${Math.round(top.tokenDeltaSum)}`,
+                source: 'parse-shadow-calls (byAxis[])',
+                field: 'tokenDeltaSum',
+                value: top.tokenDeltaSum,
+              },
+              {
+                claim: `over ${top.tokenDeltaCount} run(s) with both token totals known`,
+                source: 'parse-shadow-calls (byAxis[])',
+                field: 'tokenDeltaCount',
+                value: top.tokenDeltaCount,
+              },
+            ]
+          : [];
+    const provenance: RecProvenance = {
+      observations: [
+        {
+          claim: `axis "${top.axis}" recorded ${top.samples} shadow experiment(s)`,
+          source: 'parse-shadow-calls (byAxis[])',
+          field: 'samples',
+          value: top.samples,
+        },
+        {
+          claim: `the variation won ${top.shadowWins} of them`,
+          source: 'parse-shadow-calls (byAxis[])',
+          field: 'shadowWins',
+          value: top.shadowWins,
+        },
+        {
+          claim: `the default (main) won ${top.mainWins}`,
+          source: 'parse-shadow-calls (byAxis[])',
+          field: 'mainWins',
+          value: top.mainWins,
+        },
+        {
+          claim: `${d} comparison(s) were decided (shadow wins + main wins)`,
+          source: 'parse-shadow-calls (byAxis[])',
+          field: 'shadowWins + mainWins',
+          value: d,
+        },
+        {
+          claim: `evidence mix included ${top.live} live experiment(s)`,
+          source: 'parse-shadow-calls (byAxis[])',
+          field: 'live',
+          value: top.live,
+        },
+        {
+          claim: `evidence mix included ${top.replay} replay experiment(s)`,
+          source: 'parse-shadow-calls (byAxis[])',
+          field: 'replay',
+          value: top.replay,
+        },
+        ...deltaObs,
+        {
+          claim: `the catalog lists 0 detector(s) covering the "${top.axis}" axis`,
+          source: 'detectors/workflow/uncovered-shadow-axis (AXIS_COVERAGE)',
+          field: `AXIS_COVERAGE["${top.axis}"]`,
+          value: 0,
+        },
+      ],
+      // The win rate is Main-vs-Shadow VERDICT counts, not a controlled
+      // measurement of the axis's causal effect. AXIS_COVERAGE is a
+      // hand-maintained map of rule INTENT (it cannot be derived mechanically),
+      // so "no rule covers it" is only as accurate as that map. When the
+      // evidence is undated or stale, it is historical ledger data, so a
+      // copy-paste filing command is withheld and an explicit dated lead is
+      // surfaced instead.
+      inference:
+        `The "${top.axis}" axis cleared the win bar (>=${MIN_SAMPLES} samples, >=${MIN_DECIDED} decided, ` +
+        `>=${Math.round(MIN_SHADOW_WIN_RATE * 100)}% shadow-win rate) and AXIS_COVERAGE maps it to no covering detector, ` +
+        `so it is a new-rule candidate` +
+        (dated
+          ? '.'
+          : `, but on ${asOf ? 'stale' : 'undated'} evidence it is a lead to confirm live, not a current discovery.`),
+      ...(asOf ? { asOf, stale } : {}),
+    };
 
     return {
       id: 'workflow.uncovered-shadow-axis',
       category: 'workflow',
       severity: 'info',
+      claimClass: 'causal',
+      proofTier: 'observational',
       title,
       detail:
         `Shadow experiments favour the "${top.axis}" axis (${top.shadowWins}/${d} = ${pct}% over ${top.samples}), ` +
@@ -96,24 +220,36 @@ export const detector: Detector = {
         (costDelta !== null && costDelta < 0
           ? `, and it cost ~$${Math.abs(costDelta).toFixed(2)} less on average`
           : tokenDelta !== null && tokenDelta < 0 ? `, and it ran cheaper (~${Math.abs(Math.round(tokenDelta))} fewer tokens avg)` : '') +
-        `. That's a candidate for a new recommendation class. Uncovered axes with wins: ${axesList}.`,
-      action:
-        `Propose a dedicated detector (e.g. \`${suggestedId}\`) so this pattern becomes a permanent, ` +
-        `verifiable recommendation rather than living only in the ledger. File it as a backlog issue (per the engine-gap feedback loop).`,
+        `. That's a candidate for a new recommendation class. Uncovered axes with wins: ${axesList}.${dateNote}`,
+      action: dated
+        ? `Propose a dedicated detector (e.g. \`${suggestedId}\`) so this pattern becomes a permanent, ` +
+          `verifiable recommendation rather than living only in the ledger. File it as a backlog issue (per the engine-gap feedback loop).`
+        : `Before filing, re-run a few live shadows to confirm the "${top.axis}" axis still wins — this evidence is ` +
+          `${asOf ? `dated ${asOf} and stale` : 'undated'}, so it is a historical lead, not a current discovery. ` +
+          `If it still wins, propose a dedicated detector (e.g. \`${suggestedId}\`).`,
       affected: uncovered.length,
       view: 'recommendations',
       evidence: uncovered.map(
         (a) => `${a.axis}: shadow ${a.shadowWins}/${decided(a)} (${a.live}L+${a.replay}R), no covering rule → suggest ${SUGGESTED_CATEGORY[a.axis] ?? 'workflow'}.shadow-${a.axis}`
       ),
-      fix: {
-        target: 'command',
-        label: 'File a new-rule proposal',
-        note: 'Discovery proposal (epic #513 / ADR 0002). Dedup against open issues titled "[shadow-discovery]" before filing.',
-        snippet:
-          `gh issue create --repo shpwrck/claude-history-dashboard --label backlog --label enhancement \\\n` +
-          `  --title "[shadow-discovery] New detector for winning axis: ${top.axis}" \\\n` +
-          `  --body "${issueBody}"`,
-      },
+      // A copy-paste `gh issue create` filing command is offered ONLY on dated,
+      // in-window evidence. Stale/undated evidence emits no validated filing
+      // command (#3248) — the dated lead lives in `detail`/`action` above.
+      ...(dated
+        ? {
+            fix: {
+              target: 'command' as const,
+              fixKind: 'illustrative' as const,
+              label: 'File a new-rule proposal',
+              note: 'Discovery proposal (epic #513 / ADR 0002). Dedup against open issues titled "[shadow-discovery]" before filing.',
+              snippet:
+                `gh issue create --repo shpwrck/claude-history-dashboard --label backlog --label enhancement \\\n` +
+                `  --title "[shadow-discovery] New detector for winning axis: ${top.axis}" \\\n` +
+                `  --body "${issueBody}"`,
+            },
+          }
+        : {}),
+      provenance,
     };
   },
 };

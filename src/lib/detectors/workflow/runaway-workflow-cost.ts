@@ -1,8 +1,8 @@
 /**
  * runaway-workflow-cost — flags a Workflow-tool run whose total token spend is a
- * statistical outlier versus the user's other runs: a fan-out that burned far
- * more than its peers (often an unbounded loop or an over-wide parallel stage).
- * (#635, part of #632)
+ * statistical outlier versus the user's other runs. The token totals identify
+ * the outlier, not its cause; a high-spend run may also have produced a useful
+ * result. (#635, part of #632)
  *
  * Conservative by design: needs a baseline of runs to call an outlier, and an
  * absolute floor so a set of uniformly-tiny runs never trips it.
@@ -13,6 +13,7 @@
 import type { Detector } from '../types';
 import type { WorkflowRun } from '../../parse-workflows';
 import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
+import { newestEpochDate } from '../shared';
 
 // Need at least this many costed runs before a median is meaningful.
 const MIN_RUNS = 4;
@@ -85,18 +86,63 @@ export const detector: Detector = {
       };
     }
 
+    // Fold over totalTokens (the cited field) rather than reading outliers[0]:
+    // the list is sorted by totalTokens today, so the two agree, but taking the
+    // max explicitly means a later re-ranking cannot turn "largest outlier" into
+    // a false superlative (defect class 5).
+    const maxOutlierTokens = Math.max(...outliers.map((r) => r.totalTokens));
+    // Anchored to the newest OBSERVED outlier run's start, never to `now`:
+    // `WorkflowRun` records no end instant, so the start is the freshest datum;
+    // runs with a null/absent start contribute nothing rather than a fabricated
+    // date, and an all-undated corpus yields no `asOf`.
+    const asOf = newestEpochDate(outliers.map((r) => r.startTime));
+
     return {
       id: 'workflow.runaway-workflow-cost',
       category: 'workflow',
       severity: 'warning',
-      title: 'Workflow run with runaway fan-out cost',
-      detail: `${outliers.length} Workflow-tool run(s) burned more than ${OUTLIER_FACTOR}x the median run's token spend (median ${Math.round(med).toLocaleString()} tokens) — a sign of an unbounded loop or an over-wide parallel stage.`,
+      claimClass: 'accounting',
+      proofTier: 'accounting',
+      title: 'Workflow run is a token-spend outlier',
+      detail: `${outliers.length} Workflow-tool run(s) each spent more than ${OUTLIER_FACTOR}x the median run's token total (median ${Math.round(med).toLocaleString()} tokens).`,
       action:
         'Cap the fan-out (concurrency / max agents) or add a budget guard so a single run cannot dominate spend; review the outlier runs in the Workflows view.',
       ...(reclaim ? { reclaim } : {}),
       affected: outliers.length,
       view: 'workflows',
       evidence,
+      provenance: {
+        observations: [
+          {
+            claim: `${outliers.length} run(s) exceeded ${OUTLIER_FACTOR}x the median AND the ${ABS_FLOOR_TOKENS.toLocaleString()}-token floor`,
+            source: 'parse-workflows (workflows[])',
+            field: 'outliers.length',
+            value: outliers.length,
+          },
+          {
+            claim: `the median costed run spent ${Math.round(med)} token(s)`,
+            source: 'parse-workflows (workflows[])',
+            field: 'median(totalTokens)',
+            value: Math.round(med),
+          },
+          {
+            claim: `the largest outlier run spent ${maxOutlierTokens.toLocaleString()} token(s)`,
+            source: 'parse-workflows (workflows[])',
+            field: 'max(outliers[].totalTokens)',
+            value: maxOutlierTokens,
+          },
+        ],
+        // A run exceeding OUTLIER_FACTOR x median AND the absolute floor is a
+        // statistical token-spend outlier. That is a token-count fact, NOT a
+        // diagnosed cause: an unbounded loop or an over-wide parallel stage are
+        // possible explanations the counts do not prove, so none is asserted.
+        // No output usefulness is measured either — a high-spend run may have
+        // produced a good result.
+        inference:
+          'The flagged runs are token-spend outliers versus the user\'s own median run; ' +
+          'the cause of the excess spend is not measured and is not claimed.',
+        ...(asOf ? { asOf } : {}),
+      },
     };
   },
 };

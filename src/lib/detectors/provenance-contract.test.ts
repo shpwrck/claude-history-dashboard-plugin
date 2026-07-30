@@ -285,7 +285,7 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * unauditable recommendation, so growing it must be a deliberate edit rather
  * than the path of least resistance. Update this number DOWNWARD only.
  */
-const EXEMPT_AT_INVERSION = 27;
+const EXEMPT_AT_INVERSION = 22;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {
@@ -2178,6 +2178,161 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       now: Date.parse('2026-06-20T00:00:00.000Z'),
     };
   },
+
+  // ── workflow batch (#3242, #3246, #3248) ────────────────────────────────
+  //
+  // The datable ones observe 2026-06-09 and run at 2026-06-20, so the asOf
+  // guard below catches a clock-derived date. `repeated-commands` is undated on
+  // purpose (its aggregate carries no timestamp).
+
+  'workflow.redundant-reads': () => ({
+    // Four Reads of one file in one session, dated 2026-06-09: redundantReads
+    // flags the 3+ pair and parseFileReread's `lastRead` dates it.
+    input: baseInput({
+      toolData: [ctxReads('rr-1', 4, 4_000)],
+      tokenData: [ctxSession('rr-1', { inputTokens: 100_000 })],
+      liveConfig: liveConfig(),
+    }),
+    now: Date.parse('2026-06-20T00:00:00.000Z'),
+  }),
+
+  'workflow.repeated-commands': () => ({
+    input: baseInput({
+      toolData: [
+        {
+          sessionId: 'rc-cmd',
+          calls: Array.from({ length: 4 }, (_, i) => ({
+            timestamp: `2026-06-09T12:00:0${i}.000Z`,
+            toolName: 'Bash',
+            input: { command: 'npm run build' },
+            toolUseId: `rc-${i}`,
+            isError: false,
+            resultBytes: 100,
+          })),
+        },
+      ] as RecommendationInput['toolData'],
+      liveConfig: liveConfig(),
+    }),
+    now: Date.parse('2026-06-20T00:00:00.000Z'),
+  }),
+
+  'workflow.rework-signature': () => {
+    const mk = (sessionId: string, churn: number, burstRate: number) => ({
+      sessionId,
+      churn,
+      spanMin: 2,
+      burstRate,
+      reworkScore: +(churn * (1 + burstRate)).toFixed(1),
+      firstMs: Date.parse('2026-06-09T11:00:00.000Z'),
+      lastMs: Date.parse(CTX_TS),
+    });
+    return {
+      input: baseInput({
+        fileHistory: [mk('rw-storm', 12, 4), mk('rw-mid', 6, 1), mk('rw-calm', 2, 0.5)],
+      } as unknown as Partial<RecommendationInput>),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
+
+  'workflow.runaway-workflow-cost': () => {
+    const run = (runId: string, totalTokens: number): WorkflowRun => ({
+      runId,
+      workflowName: 'wf',
+      status: 'completed',
+      startTime: Date.parse(CTX_TS),
+      durationMs: 1,
+      agentCount: 4,
+      totalTokens,
+      totalToolCalls: 1,
+      defaultModel: null,
+      sessionId: 'rwc',
+      phases: [],
+      agents: [],
+    });
+    return {
+      input: baseInput({
+        workflows: [run('a', 50_000), run('b', 50_000), run('c', 60_000), run('d', 500_000)],
+      } as unknown as Partial<RecommendationInput>),
+      now: Date.parse('2026-06-20T00:00:00.000Z'),
+    };
+  },
+
+  'workflow.shadow-axis-wins': () => ({
+    // A non-recs, non-prompt axis clearing the win bar, dated fresh via the
+    // axis's own latestTs → the generic adopt-axis lead with cited provenance.
+    now: Date.parse('2026-06-20T00:00:00.000Z'),
+    input: baseInput({
+      shadowCalls: {
+        total: 6,
+        counted: 6,
+        synthetic: 0,
+        skipped: 0,
+        live: 4,
+        replay: 2,
+        byAxis: [
+          {
+            axis: 'reasoning',
+            samples: 6,
+            live: 4,
+            replay: 2,
+            shadowWins: 5,
+            mainWins: 1,
+            ties: 0,
+            liveShadowWins: 4,
+            tokenDeltaSum: -120,
+            tokenDeltaCount: 6,
+            costDeltaSum: -0.6,
+            costDeltaCount: 6,
+            adherenceRegressionSum: 0,
+            adherenceRegressionCount: 0,
+            latestTs: CTX_TS,
+          },
+        ],
+        bySourceAxis: [],
+        byVariation: [],
+        variationSkipped: 0,
+      } as unknown as RecommendationInput['shadowCalls'],
+    }),
+  }),
+
+  'workflow.uncovered-shadow-axis': () => ({
+    // An UNCOVERED axis (AXIS_COVERAGE['skills'] === []) clearing the win bar,
+    // dated fresh via the axis's own latestTs → the discovery lead with a filing
+    // command and cited provenance.
+    now: Date.parse('2026-06-20T00:00:00.000Z'),
+    input: baseInput({
+      shadowCalls: {
+        total: 6,
+        counted: 6,
+        synthetic: 0,
+        skipped: 0,
+        live: 4,
+        replay: 2,
+        byAxis: [
+          {
+            axis: 'skills',
+            samples: 6,
+            live: 4,
+            replay: 2,
+            shadowWins: 5,
+            mainWins: 1,
+            ties: 0,
+            liveShadowWins: 4,
+            tokenDeltaSum: -120,
+            tokenDeltaCount: 6,
+            costDeltaSum: -0.6,
+            costDeltaCount: 6,
+            adherenceRegressionSum: 0,
+            adherenceRegressionCount: 0,
+            latestTs: CTX_TS,
+          },
+        ],
+        bySourceAxis: [],
+        byVariation: [],
+        variationSkipped: 0,
+      } as unknown as RecommendationInput['shadowCalls'],
+    }),
+  }),
 };
 
 function runAllowlistedDetector(id: string): Recommendation {
@@ -2244,6 +2399,15 @@ describe('migrated context/activity detectors date claims from observed data', (
     'reliability.self-update-health',
     'reliability.tool-errors',
     'workflow.prompt-clarity',
+    // #3242 / #3246 / #3248 — the remaining workflow batch that CAN date.
+    // redundant-reads dates from the newest re-Read; rework-signature from the
+    // newest snapshot mtime; runaway from the newest outlier run start; the two
+    // shadow detectors from the axis's newest dated record across all rows.
+    'workflow.redundant-reads',
+    'workflow.rework-signature',
+    'workflow.runaway-workflow-cost',
+    'workflow.shadow-axis-wins',
+    'workflow.uncovered-shadow-axis',
   ])('%s anchors asOf to the newest observed datum, not today', (id) => {
     const rec = runAllowlistedDetector(id);
     expect(rec.provenance!.asOf).toBe(CTX_ASOF);
@@ -2265,6 +2429,15 @@ describe('migrated context/activity detectors date claims from observed data', (
     // this rate from. Omission is the honest result; a borrowed date would
     // assert a freshness this evidence does not have.
     const rec = runAllowlistedDetector('workflow.assistant-refusal-rate');
+    expect(rec.provenance!.asOf).toBeUndefined();
+    expect(rec.provenance!.stale).toBeUndefined();
+  });
+
+  it('workflow.repeated-commands emits no asOf (undated aggregate)', () => {
+    // `repeatedCommands` aggregates fingerprinted command strings and carries no
+    // per-command timestamp, so — like assistant-refusal-rate — dating it would
+    // borrow a freshness the aggregate does not have. Omission is honest.
+    const rec = runAllowlistedDetector('workflow.repeated-commands');
     expect(rec.provenance!.asOf).toBeUndefined();
     expect(rec.provenance!.stale).toBeUndefined();
   });

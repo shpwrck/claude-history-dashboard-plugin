@@ -18,10 +18,13 @@ export const detector: Detector = {
     if (claudeMdMarksApplied(input.liveConfig, MARKERS_REPEATED_COMMANDS)) return null;
     const repeats: RepeatedCommandStat[] = repeatedCommands(input.toolData);
     if (repeats.length === 0) return null;
+    const totalRuns = repeats.reduce((n, r) => n + r.totalCount, 0);
     return {
       id: 'workflow.repeated-commands',
       category: 'workflow',
       severity: 'info',
+      claimClass: 'accounting',
+      proofTier: 'accounting',
       title: 'Repeated commands are candidates for automation',
       detail: `${repeats.length} command(s) ran 3+ times within a session — repetitive manual steps that a hook, skill, or Makefile target could absorb.`,
       action: 'Wrap the most-repeated commands in a script or a SessionStart/PostToolUse hook.',
@@ -47,6 +50,32 @@ export const detector: Detector = {
           appliedMarkers: MARKERS_REPEATED_COMMANDS,
         };
       })(),
+      provenance: {
+        observations: [
+          {
+            claim: `${repeats.length} distinct command(s) ran 3+ times within a single session`,
+            source: 'parse-tools (repeatedCommands over toolData[].calls)',
+            field: 'repeatedCommands.length',
+            value: repeats.length,
+          },
+          {
+            claim: `those command(s) ran ${totalRuns} time(s) in total across the sessions that repeated them`,
+            source: 'parse-tools (repeatedCommands over toolData[].calls)',
+            field: 'sum(totalCount)',
+            value: totalRuns,
+          },
+        ],
+        // `repeatedCommands` aggregates identical (fingerprinted) Bash command
+        // strings and carries NO per-command timestamp, so there is no readable
+        // datum to date this from — a borrowed date (e.g. the newest Bash call
+        // anywhere) would assert a freshness the aggregate does not have, so
+        // `asOf` is omitted. Repetition is a candidate for automation; whether a
+        // given command SHOULD be wrapped (vs. legitimately re-run) is the
+        // recommendation, not a measured fact.
+        inference:
+          'Identical Bash command strings repeated 3+ times in a session are automation ' +
+          'candidates; no token or wall-clock cost is measured, and the aggregate is undated.',
+      },
     };
   },
 };

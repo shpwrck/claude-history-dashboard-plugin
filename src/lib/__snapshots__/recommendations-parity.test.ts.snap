@@ -585,6 +585,7 @@ Keep file work structured and permission-aware. Apply these examples; category n
     "action": "Pin frequently-needed files in CLAUDE.md or pass their contents once instead of re-reading.",
     "affected": 2,
     "category": "workflow",
+    "claimClass": "accounting",
     "detail": "2 (session, file) pair(s) re-Read the same file 3+ times. Each re-read re-pays the token cost.",
     "evidence": [
       "automate, missing.ts, 8×",
@@ -609,6 +610,24 @@ Load these files once into context, then reuse that copy instead of re-reading t
       "target": "CLAUDE.md",
     },
     "id": "workflow.redundant-reads",
+    "proofTier": "accounting",
+    "provenance": {
+      "inference": "Each re-Read of the same file re-pays that file's bytes as input tokens; the estimate is the measured re-read bytes, not a counterfactual about the cause of the re-reads.",
+      "observations": [
+        {
+          "claim": "2 (session, file) pair(s) Read the same file 3+ times within one session",
+          "field": "redundantReads.length",
+          "source": "parse-files (redundantReads over toolData[].calls)",
+          "value": 2,
+        },
+        {
+          "claim": "0 of those pair(s) coincided with a compaction in the same session",
+          "field": "filter(compactions > 0).length",
+          "source": "parse-files (redundantReads over toolData[].calls)",
+          "value": 0,
+        },
+      ],
+    },
     "severity": "info",
     "title": "Files re-read repeatedly within a session",
     "view": "files",
@@ -788,6 +807,7 @@ Load these files once into context, then reuse that copy instead of re-reading t
     "action": "Wrap the most-repeated commands in a script or a SessionStart/PostToolUse hook.",
     "affected": 1,
     "category": "workflow",
+    "claimClass": "accounting",
     "detail": "1 command(s) ran 3+ times within a session — repetitive manual steps that a hook, skill, or Makefile target could absorb.",
     "evidence": [
       "4×, npm run build",
@@ -811,6 +831,24 @@ These were run repeatedly — wrap them in a script (e.g. \`scripts/dev.sh\`) or
       "target": "CLAUDE.md",
     },
     "id": "workflow.repeated-commands",
+    "proofTier": "accounting",
+    "provenance": {
+      "inference": "Identical Bash command strings repeated 3+ times in a session are automation candidates; no token or wall-clock cost is measured, and the aggregate is undated.",
+      "observations": [
+        {
+          "claim": "1 distinct command(s) ran 3+ times within a single session",
+          "field": "repeatedCommands.length",
+          "source": "parse-tools (repeatedCommands over toolData[].calls)",
+          "value": 1,
+        },
+        {
+          "claim": "those command(s) ran 4 time(s) in total across the sessions that repeated them",
+          "field": "sum(totalCount)",
+          "source": "parse-tools (repeatedCommands over toolData[].calls)",
+          "value": 4,
+        },
+      ],
+    },
     "severity": "info",
     "title": "Repeated commands are candidates for automation",
     "view": "tools",

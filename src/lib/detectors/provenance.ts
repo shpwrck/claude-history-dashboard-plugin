@@ -75,12 +75,7 @@ export const PROVENANCE_EXEMPT: readonly string[] = [
   'security.model-deceit',
   'speed.model-latency',
   'speed.time-motion',
-  'workflow.redundant-reads',
-  'workflow.repeated-commands',
-  'workflow.rework-signature',
-  'workflow.runaway-workflow-cost',
   'workflow.tool-undo-rate',
-  'workflow.uncovered-shadow-axis',
   'workflow.unused-installed-commands',
   'workflow.unused-installed-plugins',
   'workflow.unused-installed-skills',
@@ -160,6 +155,14 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'workflow.file-churn',
   // #3241 — acceptance explicitly requires a firing trigger fixture.
   'workflow.prompt-clarity',
+  // #3242 — the remaining workflow provenance batch, each fixture-proven below.
+  'workflow.redundant-reads',
+  'workflow.repeated-commands',
+  'workflow.rework-signature',
+  'workflow.runaway-workflow-cost',
+  // #3246 — the generic adopt-axis path; #3248 — the uncovered-axis discovery.
+  'workflow.shadow-axis-wins',
+  'workflow.uncovered-shadow-axis',
 ];
 
 /** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */

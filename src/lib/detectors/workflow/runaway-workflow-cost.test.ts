@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './runaway-workflow-cost';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { WorkflowRun } from '../../parse-workflows';
 import type { SessionTokenData } from '../../../types';
@@ -124,5 +125,51 @@ describe('workflow.runaway-workflow-cost (#635)', () => {
     const result = runReclaimCascade([rec!.reclaim!], []);
     expect(result.total).toBe(0); // precondition rejects → books $0
     expect(result.booked[0].rejected).toBe(true);
+  });
+});
+
+// ── Provenance + causal-wording restriction (#3242) ────────────────────────
+
+describe('workflow.runaway-workflow-cost provenance (#3242)', () => {
+  const outlierRuns = [
+    run('a', 50_000), run('b', 50_000), run('c', 60_000), run('d', 500_000),
+  ];
+
+  it('emits provenance that passes the contract when it fires', () => {
+    const rec = detector.rule(input(outlierRuns), 0)!;
+    expect(rec.provenance).toBeDefined();
+    expect(rec.provenance!.observations.length).toBeGreaterThan(0);
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.claimClass).toBe('accounting');
+    expect(rec.proofTier).toBe('accounting');
+  });
+
+  it('cites the outlier count, the median, and the largest outlier', () => {
+    const rec = detector.rule(input(outlierRuns), 0)!;
+    const obs = rec.provenance!.observations;
+    // [50k,50k,60k,500k] → median 55k, one outlier (500k), max 500k.
+    expect(obs.find((o) => o.field === 'outliers.length')!.value).toBe(1);
+    expect(obs.find((o) => o.field === 'median(totalTokens)')!.value).toBe(55_000);
+    expect(obs.find((o) => o.field === 'max(outliers[].totalTokens)')!.value).toBe(500_000);
+  });
+
+  it('no longer asserts an unproven CAUSE (unbounded loop / over-wide fan-out)', () => {
+    const rec = detector.rule(input(outlierRuns), 0)!;
+    const blob = `${rec.title} ${rec.detail}`.toLowerCase();
+    expect(blob).not.toContain('unbounded loop');
+    expect(blob).not.toContain('over-wide parallel stage');
+    // It still names the measured fact: a token-spend outlier vs the median.
+    expect(blob).toContain('outlier');
+  });
+
+  it('dates asOf from the newest outlier run start, not from now', () => {
+    const dated = [
+      run('a', 50_000, { startTime: Date.parse('2026-06-01T00:00:00Z') }),
+      run('b', 50_000, { startTime: Date.parse('2026-06-01T00:00:00Z') }),
+      run('c', 60_000, { startTime: Date.parse('2026-06-01T00:00:00Z') }),
+      run('d', 500_000, { startTime: Date.parse('2026-06-09T00:00:00Z') }),
+    ];
+    const rec = detector.rule(input(dated), Date.parse('2026-12-31T00:00:00Z'))!;
+    expect(rec.provenance!.asOf).toBe('2026-06-09');
   });
 });

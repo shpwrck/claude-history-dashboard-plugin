@@ -1,6 +1,6 @@
 import type { Detector } from '../types';
 import type { AppliedMarkers } from '../types';
-import { claudeMdMarksApplied, short, basename } from '../shared';
+import { claudeMdMarksApplied, short, basename, newestIsoDate } from '../shared';
 import { redundantReads, type RedundantRead } from '../../parse-files';
 import { parseFileReread } from '../../parse-file-reread';
 import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
@@ -75,10 +75,19 @@ export const detector: Detector = {
       };
     }
 
+    // Anchored to the newest OBSERVED re-read, never to `now`: the re-read
+    // waste is only true as of the last time a file was seen re-Read.
+    // `parse-file-reread` records the bracketing `lastRead` timestamp per
+    // (session, file) repeat; an undated corpus yields no `asOf` rather than a
+    // fabricated one.
+    const asOf = newestIsoDate(reread.repeats.map((r) => r.lastRead));
+
     return {
       id: 'workflow.redundant-reads',
       category: 'workflow',
       severity: 'info',
+      claimClass: 'accounting',
+      proofTier: 'accounting',
       title: 'Files re-read repeatedly within a session',
       detail: `${reads.length} (session, file) pair(s) re-Read the same file 3+ times${
         withCompaction > 0 ? `, ${withCompaction} alongside compaction (eviction-driven)` : ''
@@ -103,6 +112,43 @@ export const detector: Detector = {
           appliedMarkers: MARKERS_REDUNDANT_READS,
         };
       })(),
+      provenance: {
+        observations: [
+          {
+            claim: `${reads.length} (session, file) pair(s) Read the same file 3+ times within one session`,
+            source: 'parse-files (redundantReads over toolData[].calls)',
+            field: 'redundantReads.length',
+            value: reads.length,
+          },
+          {
+            claim: `${withCompaction} of those pair(s) coincided with a compaction in the same session`,
+            source: 'parse-files (redundantReads over toolData[].calls)',
+            field: 'filter(compactions > 0).length',
+            value: withCompaction,
+          },
+          ...(directWasteTokens > 0
+            ? [
+                {
+                  claim: `the re-reads re-paid an estimated ${Math.round(directWasteTokens)} input token(s)`,
+                  source: 'parse-file-reread (parseFileReread over toolData[].calls)',
+                  field: 'sum(estimatedTokenWaste)',
+                  value: Math.round(directWasteTokens),
+                },
+              ]
+            : []),
+        ],
+        // The token figure is a DIRECT estimate — (reads-1) × avgBytesPerRead / 4
+        // — of tokens that would not have re-entered context had the file loaded
+        // once; it is booked against the in-scope input pool, not a modelled
+        // reprice. No claim is made about WHY the file was re-read (eviction,
+        // forgetfulness, or a legitimate re-check); only that each repeat re-paid
+        // its own bytes.
+        inference:
+          'Each re-Read of the same file re-pays that file\'s bytes as input tokens; ' +
+          'the estimate is the measured re-read bytes, not a counterfactual about ' +
+          'the cause of the re-reads.',
+        ...(asOf ? { asOf } : {}),
+      },
     };
   },
 };

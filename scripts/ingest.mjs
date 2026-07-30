@@ -2493,8 +2493,15 @@ export const PARSER_SIG_VERSION = 'v6';
 // issue refs), so a persisted v28 body must not be served as though it observed
 // that state. Flag-off stays on v28: the dataset shape is unchanged and the
 // local-first default retains its exact pre-feature signature/content hash.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 29;
-export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 28;
+// v30 (#3246/#3248): shadowCalls `byAxis[]` now carries a per-axis `latestTs`
+// (newest dated record for the axis), which the shadow-axis-wins /
+// uncovered-shadow-axis detectors demote/suppress against. The ledger content
+// can be unchanged while a persisted v29 body lacks `latestTs`, so turn over the
+// assembled-dataset cache. shadowCalls is local and present in BOTH paths, so
+// flag-off bumps in step (28 -> 29) — unlike the docIssueSnapshot feature, this
+// shape change is NOT gated by the opt-in.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 30;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 29;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
