@@ -4069,14 +4069,63 @@ export function assembleArtifacts() {
     const debugDir = sourceArtifactPath(source, 'debug');
     try {
       if (existsSync(debugDir)) {
-        debugLogs.push(
-          ...cachedArtifact(`debug:${source.id}`, debugDir, () =>
-            parseDebugDir(debugDir, {
-              maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
-              maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
-            })
-          )
-        );
+        // #3140: count what the bounded read refused. A directory whose logs
+        // were all dropped as oversized used to be indistinguishable from an
+        // empty one, so a silently-skipped corpus could not be reported.
+        //
+        // The count is cached WITH the metrics, not tallied around the cache.
+        // `cachedArtifact` skips the parse callback entirely on a hit, so a
+        // counter incremented inside it reads zero on every subsequent ingest
+        // and after any restart with a warm cache — the corpus would still be
+        // missing those files while the warning stayed silent, recreating the
+        // exact indistinguishable-from-empty condition this fixes.
+        //
+        // The cache key is namespaced (`debug-v2:`) because the cached VALUE
+        // shape changed from a bare array. The cache signature is derived from
+        // file mtime/size, so an unchanged directory would otherwise return a
+        // legacy array row and break the read.
+        //
+        // The key also carries BOTH budgets. The signature covers the directory
+        // contents but not the caps, so lowering a cap in the deployment config
+        // left the signature identical and served the previous run's skip and
+        // truncation counts — reporting a corpus as complete under a budget that
+        // had since started excluding files. A cap is an input to the result, so
+        // it belongs in the identity of the cached result.
+        const debugKey =
+          `debug-v2:${source.id}:${ARTIFACT_FILE_MAX_BYTES}:${ARTIFACT_DIR_MAX_ENTRIES}`;
+        const debugCached = cachedArtifact(debugKey, debugDir, () => {
+          let skipped = 0;
+          let dirTruncated = null;
+          const metrics = parseDebugDir(debugDir, {
+            maxFileBytes: ARTIFACT_FILE_MAX_BYTES,
+            maxEntries: ARTIFACT_DIR_MAX_ENTRIES,
+            onSkip: () => {
+              skipped++;
+            },
+            onDirectoryTruncated: (info) => {
+              dirTruncated = info;
+            },
+          });
+          return { metrics, skipped, dirTruncated };
+        });
+        debugLogs.push(...(debugCached?.metrics ?? []));
+        if (debugCached?.skipped > 0) {
+          console.warn(
+            `[ingest] debug: skipped ${debugCached.skipped} file(s) in ${debugDir} ` +
+              `(over the ${ARTIFACT_FILE_MAX_BYTES}-byte budget, symlinked, or unreadable)`
+          );
+        }
+        // Directory-level truncation hides files the per-file callback never
+        // sees at all, so it is reported separately rather than folded into the
+        // skip count.
+        if (debugCached?.dirTruncated) {
+          console.warn(
+            `[ingest] debug: ${debugDir} holds more than the ` +
+              `${debugCached.dirTruncated.cap}-entry scan cap; only ` +
+              `${debugCached.dirTruncated.scanned} entries were examined and the ` +
+              'rest were not read'
+          );
+        }
       }
     } catch { /* ignore */ }
   }

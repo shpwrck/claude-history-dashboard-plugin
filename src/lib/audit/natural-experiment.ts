@@ -72,13 +72,94 @@ export interface FitOptions {
    * honest heuristic, NOT a p-value. Default 2.
    */
   significanceThreshold: number;
+  /**
+   * Hard ceiling on modeled levels of the MODEL factor (#3114). See
+   * {@link DEFAULT_DESIGN_BUDGET} for why each ceiling is where it is.
+   */
+  maxModelLevels: number;
+  /** Hard ceiling on modeled levels of the TOOL factor (#3114). */
+  maxToolLevels: number;
+  /**
+   * Maximum rows admitted to a fit. Checked BEFORE the design matrix is built,
+   * so an oversized corpus is refused rather than allocated (#3114).
+   */
+  maxRows: number;
+  /** Maximum sample/level refinement passes before the design is refused (#3114). */
+  maxRefinementPasses: number;
 }
+
+/**
+ * The declared design budget (#3114).
+ *
+ * Before this existed, `k` (the design's column count) was bounded only by
+ * `minPerCell`: every level with three rows could add a column, so `k` grew with
+ * the corpus. That made `X'X` O(n*k^2), the `k`-by-`2k` augmented matrix O(k^2),
+ * and the Gauss-Jordan inversion O(k^3) — all unbounded on a server endpoint.
+ *
+ * The ceilings below make that blowup UNREPRESENTABLE rather than merely
+ * unlikely: levels are ranked by support and truncated, so `k` cannot exceed
+ * `1 + (maxModelLevels - 1) + (maxToolLevels - 1) + 1` no matter what the corpus
+ * contains.
+ *
+ * Why these numbers:
+ * - `maxModelLevels: 8` — the model factor is already coarse-bucketed by the
+ *   producer into at most five values (`opus`/`sonnet`/`haiku`/`other`/`unknown`),
+ *   so 8 is pure headroom and can never bind on real data.
+ * - `maxToolLevels: 32` — the tool factor is a RAW tool name, and MCP tool names
+ *   are arbitrary strings, so this is the factor that actually grows. 32 dummies
+ *   still needs a few hundred sessions to fit honestly, which is well past the
+ *   point where the extra levels carry signal.
+ * - `maxRows: 50_000` — bounds the one remaining allocation that scales with the
+ *   corpus (the n-by-k design matrix, ~18 MB at the k ceiling). Far above any
+ *   realistic local history, so it refuses runaway input without refusing a real
+ *   user.
+ * - `maxRefinementPasses: 64` — the level/sample refinement loop was bounded only
+ *   by `rows.length`. Real data converges in one or two passes.
+ */
+export const DEFAULT_DESIGN_BUDGET = {
+  maxModelLevels: 8,
+  maxToolLevels: 32,
+  maxRefinementPasses: 64,
+} as const;
+
+/** Maximum rows admitted to a fit before the design matrix is allocated. */
+export const DEFAULT_MAX_FIT_ROWS = 50_000;
 
 export const DEFAULT_FIT_OPTIONS: FitOptions = {
   minPerCell: 3,
   minSessions: 8,
   significanceThreshold: 2,
+  maxModelLevels: DEFAULT_DESIGN_BUDGET.maxModelLevels,
+  maxToolLevels: DEFAULT_DESIGN_BUDGET.maxToolLevels,
+  maxRows: DEFAULT_MAX_FIT_ROWS,
+  maxRefinementPasses: DEFAULT_DESIGN_BUDGET.maxRefinementPasses,
 };
+
+/** The per-factor level ceilings a design build runs under. */
+export interface DesignBudget {
+  maxModelLevels: number;
+  maxToolLevels: number;
+  maxRefinementPasses: number;
+}
+
+/**
+ * Resolve a budget value, falling back to the declared default on ANY invalid
+ * input (#3114).
+ *
+ * This is not defensive boilerplate — it is the difference between a budget and
+ * a decoration. `Math.max(1, Math.floor(NaN))` is `NaN`, and EVERY comparison
+ * against `NaN` is `false`, so a budget resolved that way silently stops
+ * refusing anything: `rows.length > NaN` is `false`, so an oversized corpus
+ * sails through a check that reports itself as enforced. That is precisely the
+ * failure that made the cold-ingest gate (#3076) and the repo-map payload gate
+ * (#3452) green-but-inert, and a budget that cannot say "no" is worse than none
+ * because it is documented as protection.
+ *
+ * So an unusable value NEVER widens the budget — it restores the default.
+ */
+function resolveBudget(value: number, fallback: number, min: number): number {
+  return Number.isFinite(value) && value >= min ? Math.floor(value) : fallback;
+}
 
 /** One fitted coefficient: a design-matrix column and its estimate. */
 export interface Coefficient {
@@ -104,9 +185,48 @@ export interface ReferenceLevel {
   level: string;
 }
 
+/**
+ * What the fit actually cost, and why it was refused when it was (#3114).
+ *
+ * The endpoint had no runtime probe at all: an oversized design was
+ * distinguishable from a cheap one only by how long the request hung. Every
+ * field here is reported whether the fit ran or was refused.
+ *
+ * `durationMs` is deliberately the ONLY non-deterministic field, and it is
+ * deliberately NOT propagated into the emitted finding's `evidenceRefs` — a
+ * recommendation is an auditable claim, so its evidence has to be reproducible.
+ * Wall-clock belongs in telemetry, not in a claim.
+ */
+export interface ExperimentDiagnostics {
+  /** Rows handed in, before any budget or level restriction. */
+  rowsIn: number;
+  /** Rows the fit actually ran over. 0 when it was refused before the design. */
+  rowsFitted: number;
+  /** Design terms `k`. 0 when no design matrix was allocated. */
+  terms: number;
+  /** Cells of the `k`-by-`2k` augmented matrix. 0 when it was never allocated. */
+  augmentedCells: number;
+  /** Sample/level refinement passes consumed. */
+  refinementPasses: number;
+  /** Distinct levels present in the input, per factor. */
+  modelLevelsSeen: number;
+  toolLevelsSeen: number;
+  /** Levels that survived support ranking and the budget, per factor. */
+  modelLevelsModeled: number;
+  toolLevelsModeled: number;
+  /** True when a budget ceiling actually truncated the modeled levels. */
+  levelsTruncated: boolean;
+  /** Wall-clock of the deterministic fit. Telemetry only — never evidence. */
+  durationMs: number;
+  /** Why the fit was refused, or `null` when it ran. */
+  rejectionReason: string | null;
+}
+
 /** A successful fit: the adjusted coefficient table plus context. */
 export interface FitResult {
   status: 'fit';
+  /** What the fit cost (#3114). */
+  diagnostics: ExperimentDiagnostics;
   /** Number of sessions the fit ran over (after dropping incomplete rows). */
   n: number;
   /** Coefficients, intercept first, then model dummies, tool dummies, difficulty. */
@@ -130,6 +250,8 @@ export interface InsufficientResult {
   n: number;
   /** Human-readable reason (too few sessions / no varying factor / singular). */
   reason: string;
+  /** What was measured before the refusal (#3114). */
+  diagnostics: ExperimentDiagnostics;
 }
 
 export type ExperimentResult = FitResult | InsufficientResult;
@@ -243,19 +365,64 @@ function levelCounts(values: string[]): Map<string, number> {
 interface FactorLevels {
   /** Levels with >= minPerCell rows, descending by count then name. */
   modeled: string[];
+  /** O(1) membership for {@link modeled} — the row filter runs per row per pass. */
+  modeledSet: Set<string>;
   /** Reference + dummy levels, or null when fewer than two levels qualify. */
   contrast: { reference: string; dummies: string[] } | null;
+  /** Distinct levels present in the input, before the budget truncated any. */
+  seen: number;
+  /** True when {@link maxLevels} actually removed a qualifying level. */
+  truncated: boolean;
 }
 
-function chooseLevels(values: string[], minPerCell: number): FactorLevels {
+/**
+ * Pick the levels of one factor, ranked by support and truncated to `maxLevels`.
+ *
+ * The ranking (count descending, then name ascending) was already the order this
+ * function produced; #3114 only makes it load-bearing by cutting the tail. That
+ * ordering is total and depends on nothing but the data, so the truncation is
+ * deterministic — the same corpus always yields the same modeled levels.
+ *
+ * Dropping a qualifying level is safe precisely because the caller already drops
+ * every row whose level is not modeled (the #3113 invariant): a truncated level
+ * leaves the sample entirely rather than sitting in it as unmodeled variation.
+ */
+function chooseLevels(
+  values: string[],
+  minPerCell: number,
+  maxLevels: number
+): FactorLevels {
   const counts = levelCounts(values);
-  const qualifying = [...counts.entries()]
+  const ranked = [...counts.entries()]
     .filter(([, c]) => c >= minPerCell)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([level]) => level);
-  if (qualifying.length < 2) return { modeled: qualifying, contrast: null };
+  // Resolved here too, even though every current caller already passes a
+  // resolved value. `Math.max(0, Math.floor(NaN))` is NaN and `ranked.length >
+  // NaN` is false, so an unresolved ceiling would silently truncate NOTHING —
+  // the same fail-open this budget exists to prevent. Making the function total
+  // means a future caller cannot reintroduce it by forgetting.
+  const limit = resolveBudget(maxLevels, DEFAULT_DESIGN_BUDGET.maxToolLevels, 1);
+  const qualifying = ranked.length > limit ? ranked.slice(0, limit) : ranked;
+  const truncated = qualifying.length < ranked.length;
+  const modeledSet = new Set(qualifying);
+  if (qualifying.length < 2) {
+    return {
+      modeled: qualifying,
+      modeledSet,
+      contrast: null,
+      seen: counts.size,
+      truncated,
+    };
+  }
   const [reference, ...dummies] = qualifying;
-  return { modeled: qualifying, contrast: { reference, dummies } };
+  return {
+    modeled: qualifying,
+    modeledSet,
+    contrast: { reference, dummies },
+    seen: counts.size,
+    truncated,
+  };
 }
 
 /** The built design matrix plus the legend needed to label coefficients. */
@@ -278,6 +445,28 @@ interface Design {
   /** Mean/std of difficulty used for standardization (for transparency). */
   difficultyMean: number;
   difficultyStd: number;
+  /** Level/pass accounting for the diagnostics record (#3114). */
+  budgetTrace: {
+    refinementPasses: number;
+    modelLevelsSeen: number;
+    toolLevelsSeen: number;
+    modelLevelsModeled: number;
+    toolLevelsModeled: number;
+    levelsTruncated: boolean;
+  };
+}
+
+/** A design build refusal, with the fixed-point work consumed before it stopped. */
+interface DesignBuildRefusal {
+  status: 'refinement-budget-exhausted' | 'no-contrast';
+  reason: string;
+  budgetTrace: Design['budgetTrace'];
+}
+
+function isDesignBuildRefusal(
+  result: Design | DesignBuildRefusal
+): result is DesignBuildRefusal {
+  return 'status' in result;
 }
 
 /**
@@ -299,43 +488,101 @@ interface Design {
  * the `minPerCell` floor. At the fixed point every modeled level provably clears
  * `minPerCell` IN THE RETAINED SAMPLE, which is the sample the fit reports on.
  *
- * Returns `null` when neither categorical factor has two qualifying levels (there
- * is nothing to contrast, so no experiment to run), or when a factor has no
- * qualifying level at all (nothing survives to hold it constant at) — the caller
- * turns that into an insufficient-data result.
+ * Returns a distinct refusal for every no-design outcome, including refinement
+ * budget exhaustion, no qualifying level, and a converged sample with no
+ * contrast. That lets the production caller preserve the passes and level trace
+ * instead of replacing real work with zero diagnostics. The public compatibility
+ * wrapper below still maps those structured refusals to `null`.
  */
-export function buildDesignMatrix(
+function buildDesignMatrixDetailed(
   rows: NaturalExperimentRow[],
-  minPerCell: number
-): Design | null {
+  minPerCell: number,
+  budget: DesignBudget = DEFAULT_DESIGN_BUDGET
+): Design | DesignBuildRefusal {
   // Refine sample and levels together to a fixed point. Each non-final pass
   // strictly shrinks the sample, so this terminates in at most `rows.length`
-  // passes; the bound is a defensive guard, not the expected exit.
+  // passes — but `rows.length` is not a BUDGET, it is just an upper bound that
+  // grows with the corpus. #3114 caps the passes explicitly; real data converges
+  // in one or two, so a run that needs more is degenerate and is refused.
+  const maxPasses = resolveBudget(
+    budget.maxRefinementPasses,
+    DEFAULT_DESIGN_BUDGET.maxRefinementPasses,
+    1
+  );
+  const maxModelLevels = resolveBudget(
+    budget.maxModelLevels,
+    DEFAULT_DESIGN_BUDGET.maxModelLevels,
+    1
+  );
+  const maxToolLevels = resolveBudget(
+    budget.maxToolLevels,
+    DEFAULT_DESIGN_BUDGET.maxToolLevels,
+    1
+  );
   let usedRows = rows;
-  let modelLevels = chooseLevels([], minPerCell);
+  let modelLevels = chooseLevels([], minPerCell, maxModelLevels);
   let toolLevels = modelLevels;
   let converged = false;
-  for (let pass = 0; pass <= rows.length; pass++) {
+  let refinementPasses = 0;
+  // Truncation is recorded STICKILY, and the "seen" counts come from the FIRST
+  // pass. Reading either off the converged state would under-report: once a
+  // truncated level's rows leave the sample, the final pass sees a corpus that
+  // already fits the budget and would report `truncated: false` — telling the
+  // reader nothing was excluded when in fact most of it was.
+  let levelsTruncated = false;
+  let modelLevelsSeen = 0;
+  let toolLevelsSeen = 0;
+  const currentBudgetTrace = (): Design['budgetTrace'] => ({
+    refinementPasses,
+    modelLevelsSeen,
+    toolLevelsSeen,
+    modelLevelsModeled: modelLevels.modeled.length,
+    toolLevelsModeled: toolLevels.modeled.length,
+    levelsTruncated,
+  });
+  const noContrastRefusal = (): DesignBuildRefusal => ({
+    status: 'no-contrast',
+    reason:
+      'No model or tool factor has at least two levels with ' +
+      `${minPerCell}+ sessions each, so there is no like-for-like contrast ` +
+      'to regress (every comparison would rest on a single thin cell).',
+    budgetTrace: currentBudgetTrace(),
+  });
+  for (let pass = 0; pass < maxPasses; pass++) {
+    refinementPasses = pass + 1;
     modelLevels = chooseLevels(
       usedRows.map((r) => r.model),
-      minPerCell
+      minPerCell,
+      maxModelLevels
     );
     toolLevels = chooseLevels(
       usedRows.map((r) => r.toolFactor),
-      minPerCell
+      minPerCell,
+      maxToolLevels
     );
+    if (pass === 0) {
+      modelLevelsSeen = modelLevels.seen;
+      toolLevelsSeen = toolLevels.seen;
+    }
+    levelsTruncated =
+      levelsTruncated || modelLevels.truncated || toolLevels.truncated;
     // Every level of a factor is thin -> no level to hold it constant at, and any
     // sample we could keep would be entirely unmodeled variation.
     if (modelLevels.modeled.length === 0 || toolLevels.modeled.length === 0) {
-      return null;
+      return noContrastRefusal();
     }
     // Keep only rows whose levels are all MODELED — for a contrasted factor that
     // means dummy-or-reference, for an uncontrasted one its single qualifying
     // level. Never keep heterogeneous levels of an omitted factor.
+    //
+    // Set membership, not `Array.includes`: this predicate runs once per row per
+    // pass, so a linear scan of the level list made the loop O(passes * n * k) —
+    // a cost the original finding did not name, and the one that bites first on a
+    // high-cardinality corpus.
     const retained = usedRows.filter(
       (r) =>
-        modelLevels.modeled.includes(r.model) &&
-        toolLevels.modeled.includes(r.toolFactor)
+        modelLevels.modeledSet.has(r.model) &&
+        toolLevels.modeledSet.has(r.toolFactor)
     );
     if (retained.length === usedRows.length) {
       // Nothing dropped this pass: the levels above were computed on exactly
@@ -343,16 +590,27 @@ export function buildDesignMatrix(
       converged = true;
       break;
     }
-    if (retained.length === 0) return null;
+    if (retained.length === 0) return noContrastRefusal();
     usedRows = retained;
   }
-  if (!converged) return null;
+  const budgetTrace = currentBudgetTrace();
+  if (!converged) {
+    return {
+      status: 'refinement-budget-exhausted',
+      reason:
+        `Refinement stopped at the declared ceiling of ${maxPasses} pass(es) ` +
+        'before the sample and modeled levels converged. No design matrix was allocated.',
+      budgetTrace,
+    };
+  }
 
   // Need at least one categorical factor that varies IN THE RETAINED SAMPLE;
   // otherwise the only regressor is difficulty and there's no model/tool
   // contrast to interpret. A factor can lose its contrast during refinement —
   // that is the point: its second level no longer clears the floor.
-  if (!modelLevels.contrast && !toolLevels.contrast) return null;
+  if (!modelLevels.contrast && !toolLevels.contrast) {
+    return noContrastRefusal();
+  }
 
   // Standardize difficulty (z-score). A degenerate (zero-variance) difficulty
   // column collapses to all-zeros, which the singularity guard handles — but we
@@ -423,7 +681,22 @@ export function buildDesignMatrix(
     usedRows,
     difficultyMean,
     difficultyStd,
+    budgetTrace,
   };
+}
+
+/**
+ * Public design-builder compatibility seam. Direct callers historically receive
+ * `null` for every refusal; the top-level fit uses the detailed result above so
+ * its auditable diagnostics can distinguish pass-budget exhaustion.
+ */
+export function buildDesignMatrix(
+  rows: NaturalExperimentRow[],
+  minPerCell: number,
+  budget: DesignBudget = DEFAULT_DESIGN_BUDGET
+): Design | null {
+  const result = buildDesignMatrixDetailed(rows, minPerCell, budget);
+  return isDesignBuildRefusal(result) ? null : result;
 }
 
 /**
@@ -435,7 +708,17 @@ export function buildDesignMatrix(
  */
 export function fitOls(
   design: Design,
-  significanceThreshold: number
+  significanceThreshold: number,
+  /**
+   * Clock start for `diagnostics.durationMs`. Defaults to "now" for a direct
+   * call, but `fitNaturalExperiment` passes ITS OWN start so the reported
+   * duration covers level refinement, row filtering, standardization and the
+   * n-by-k allocation too. Timing only the solve made the diagnostic
+   * systematically understate the endpoint's cost — and understate it MOST on
+   * exactly the large corpora the budget exists to bound, since the design
+   * build is the part that scales with n.
+   */
+  startedAt: number = Date.now()
 ): FitResult | null {
   const { X, y, terms, factors, levels, references, heldConstant } = design;
   const A = xtx(X);
@@ -480,6 +763,7 @@ export function fitOls(
   });
 
   const meanOutcome = y.reduce((a, v) => a + v, 0) / n;
+  const trace = design.budgetTrace;
   return {
     status: 'fit',
     n,
@@ -487,6 +771,69 @@ export function fitOls(
     references,
     heldConstant,
     meanOutcome,
+    diagnostics: {
+      rowsIn: n,
+      rowsFitted: n,
+      terms: k,
+      // `solveWithInverse` augments [A | I], so the matrix it materializes is
+      // k-by-2k. Reported as cells because that is the allocation the budget
+      // exists to bound.
+      augmentedCells: k * 2 * k,
+      refinementPasses: trace.refinementPasses,
+      modelLevelsSeen: trace.modelLevelsSeen,
+      toolLevelsSeen: trace.toolLevelsSeen,
+      modelLevelsModeled: trace.modelLevelsModeled,
+      toolLevelsModeled: trace.toolLevelsModeled,
+      levelsTruncated: trace.levelsTruncated,
+      durationMs: Date.now() - startedAt,
+      rejectionReason: null,
+    },
+  };
+}
+
+/** Design columns `k`, or 0 when the design has no rows. */
+function designTerms(design: Design): number {
+  return design.X[0]?.length ?? 0;
+}
+
+/**
+ * The cost a refusal ALREADY PAID once `buildDesignMatrix` returned (#3114).
+ *
+ * A refusal reached after the design was constructed has really allocated an
+ * n-by-k matrix. Letting `refusedDiagnostics` fall back to its zero defaults
+ * would emit `design-terms:0` as EVIDENCE on the insufficient-data finding —
+ * a false claim that no design was built, and one that hides precisely the
+ * cost these diagnostics exist to expose. `augmentedCells` is left to the
+ * caller because only the post-`fitOls` refusal actually allocated it.
+ */
+function allocatedByDesign(design: Design): Partial<ExperimentDiagnostics> {
+  return {
+    rowsFitted: design.usedRows.length,
+    terms: designTerms(design),
+  };
+}
+
+/** Diagnostics for a refusal that never reached a design matrix. */
+function refusedDiagnostics(
+  rowsIn: number,
+  reason: string,
+  startedAt: number,
+  partial: Partial<ExperimentDiagnostics> = {}
+): ExperimentDiagnostics {
+  return {
+    rowsIn,
+    rowsFitted: 0,
+    terms: 0,
+    augmentedCells: 0,
+    refinementPasses: 0,
+    modelLevelsSeen: 0,
+    toolLevelsSeen: 0,
+    modelLevelsModeled: 0,
+    toolLevelsModeled: 0,
+    levelsTruncated: false,
+    ...partial,
+    durationMs: Date.now() - startedAt,
+    rejectionReason: reason,
   };
 }
 
@@ -502,65 +849,112 @@ export function fitNaturalExperiment(
   options: FitOptions = DEFAULT_FIT_OPTIONS
 ): ExperimentResult {
   const { minPerCell, minSessions, significanceThreshold } = options;
+  const startedAt = Date.now();
   if (rows.length < minSessions) {
+    const reason =
+      `Only ${rows.length} session(s) with a usable outcome; need at least ` +
+      `${minSessions} before a multi-factor regression is meaningful.`;
     return {
       status: 'insufficient',
       n: rows.length,
-      reason:
-        `Only ${rows.length} session(s) with a usable outcome; need at least ` +
-        `${minSessions} before a multi-factor regression is meaningful.`,
+      reason,
+      diagnostics: refusedDiagnostics(rows.length, reason, startedAt),
     };
   }
 
-  const design = buildDesignMatrix(rows, minPerCell);
-  if (!design) {
+  // Refuse an oversized corpus BEFORE the n-by-k design matrix is allocated
+  // (#3114). This is the one allocation that scales with the corpus rather than
+  // with the (now bounded) term count, so the check has to come first — checking
+  // it after the build would report the cost only once it had been paid.
+  // Resolved, never raw: a NaN/negative ceiling must restore the default, not
+  // silently disable the refusal. `rows.length > NaN` is always false.
+  const maxRows = resolveBudget(options.maxRows, DEFAULT_MAX_FIT_ROWS, 1);
+  if (rows.length > maxRows) {
+    const reason =
+      `Refusing to fit ${rows.length} sessions: the endpoint's declared ceiling ` +
+      `is ${maxRows} rows, above which the design matrix allocation is not ` +
+      'bounded by the term budget. No design matrix was allocated.';
     return {
       status: 'insufficient',
       n: rows.length,
-      reason:
-        'No model or tool factor has at least two levels with ' +
-        `${minPerCell}+ sessions each, so there is no like-for-like contrast ` +
-        'to regress (every comparison would rest on a single thin cell).',
+      reason,
+      diagnostics: refusedDiagnostics(rows.length, reason, startedAt),
     };
   }
+
+  const designResult = buildDesignMatrixDetailed(rows, minPerCell, {
+    maxModelLevels: options.maxModelLevels,
+    maxToolLevels: options.maxToolLevels,
+    maxRefinementPasses: options.maxRefinementPasses,
+  });
+  if (isDesignBuildRefusal(designResult)) {
+    const { reason, budgetTrace } = designResult;
+    return {
+      status: 'insufficient',
+      n: rows.length,
+      reason,
+      diagnostics: refusedDiagnostics(rows.length, reason, startedAt, budgetTrace),
+    };
+  }
+  const design = designResult;
 
   // Holding an uncontrastable factor constant can drop rows (#3113); re-apply the
   // sample-size gate to what actually survived rather than to the raw input.
+  const trace = design.budgetTrace;
   if (design.usedRows.length < minSessions) {
+    const reason =
+      `Only ${design.usedRows.length} of ${rows.length} session(s) sit at a ` +
+      `model/tool level with ${minPerCell}+ sessions behind it; the rest were ` +
+      'excluded rather than left in the sample as unmodeled variation, which ' +
+      `leaves fewer than the ${minSessions} sessions a fit needs.`;
     return {
       status: 'insufficient',
       n: design.usedRows.length,
-      reason:
-        `Only ${design.usedRows.length} of ${rows.length} session(s) sit at a ` +
-        `model/tool level with ${minPerCell}+ sessions behind it; the rest were ` +
-        'excluded rather than left in the sample as unmodeled variation, which ' +
-        `leaves fewer than the ${minSessions} sessions a fit needs.`,
+      reason,
+      diagnostics: refusedDiagnostics(rows.length, reason, startedAt, {
+        ...trace,
+        ...allocatedByDesign(design),
+      }),
     };
   }
 
   // A design with as many (or more) columns than rows is saturated / rank-
   // deficient — refuse rather than overfit.
   if (design.X.length <= design.X[0].length) {
+    const reason =
+      `Design has ${design.X[0].length} terms but only ${design.X.length} ` +
+      'usable sessions — too few observations per parameter to fit honestly.';
     return {
       status: 'insufficient',
       n: design.usedRows.length,
-      reason:
-        `Design has ${design.X[0].length} terms but only ${design.X.length} ` +
-        'usable sessions — too few observations per parameter to fit honestly.',
+      reason,
+      diagnostics: refusedDiagnostics(rows.length, reason, startedAt, {
+        ...trace,
+        ...allocatedByDesign(design),
+      }),
     };
   }
 
-  const fit = fitOls(design, significanceThreshold);
+  const fit = fitOls(design, significanceThreshold, startedAt);
   if (!fit) {
+    const reason =
+      'The design matrix is singular (collinear factors), so no unique ' +
+      'coefficients exist; refusing a spurious fit.';
     return {
       status: 'insufficient',
       n: design.usedRows.length,
-      reason:
-        'The design matrix is singular (collinear factors), so no unique ' +
-        'coefficients exist; refusing a spurious fit.',
+      reason,
+      diagnostics: refusedDiagnostics(rows.length, reason, startedAt, {
+        ...trace,
+        ...allocatedByDesign(design),
+        // Unlike the two refusals above, `fitOls` ran before failing, so the
+        // k-by-2k augmented matrix WAS materialized. Reporting 0 here would
+        // understate the cost the caller actually paid.
+        augmentedCells: designTerms(design) * 2 * designTerms(design),
+      }),
     };
   }
-  return fit;
+  return { ...fit, diagnostics: { ...fit.diagnostics, rowsIn: rows.length } };
 }
 
 // --- Judge interpretation + finding emission --------------------------------
@@ -582,12 +976,20 @@ function renderTable(fit: FitResult): string {
     .join(', ');
   const lines = fit.coefficients.map(coefLine).join('\n');
   const held = heldConstantNote(fit);
+  // The judge must not read a truncated level set as the whole corpus (#3114).
+  const truncated = fit.diagnostics.levelsTruncated
+    ? `Only the best-supported levels were modeled (model ` +
+      `${fit.diagnostics.modelLevelsModeled}/${fit.diagnostics.modelLevelsSeen}, ` +
+      `tool ${fit.diagnostics.toolLevelsModeled}/${fit.diagnostics.toolLevelsSeen}); ` +
+      `sessions at the remaining levels were excluded from the sample.\n`
+    : '';
   return (
     `OLS of session outcome (1=good, 0=bad) on model + tool factors with ` +
     `standardized task-difficulty as a control covariate.\n` +
     `n=${fit.n} sessions; overall good-rate=${(fit.meanOutcome * 100).toFixed(0)}%.\n` +
     `Reference (baseline) levels: ${refs || 'none'}.\n` +
     (held ? `${held}\n` : '') +
+    truncated +
     `Coefficients (adjusted for difficulty):\n${lines}`
   );
 }
@@ -624,6 +1026,23 @@ function evidenceFor(fit: FitResult): string[] {
     refs.push(`held-constant:${h.factor}=${h.level}`);
   }
   refs.push(`sessions-fitted:${fit.n}`);
+  // Design cost, so a reader can see how big the fit actually was (#3114).
+  // DETERMINISTIC fields only — `durationMs` stays in diagnostics and out of
+  // evidence, because evidence backing an auditable claim must be reproducible.
+  refs.push(`design-terms:${fit.diagnostics.terms}`);
+  // Rows IN as well as rows fitted: level restriction can drop most of the
+  // corpus, and "fitted 96 sessions" alone reads as if 96 were all there was.
+  if (fit.diagnostics.rowsIn !== fit.diagnostics.rowsFitted) {
+    refs.push(`rows-in:${fit.diagnostics.rowsIn}`);
+  }
+  if (fit.diagnostics.levelsTruncated) {
+    // A truncated factor means the fit does NOT span every level in the data;
+    // that is a scope caveat, so it belongs in the evidence, not just telemetry.
+    refs.push(
+      `levels-truncated:model=${fit.diagnostics.modelLevelsModeled}/${fit.diagnostics.modelLevelsSeen}`,
+      `levels-truncated:tool=${fit.diagnostics.toolLevelsModeled}/${fit.diagnostics.toolLevelsSeen}`
+    );
+  }
   return refs;
 }
 
@@ -651,10 +1070,15 @@ export async function runNaturalExperimentAudit(
         summary:
           `Not enough comparable sessions to regress outcome on model/tool ` +
           `factors with a difficulty control: ${result.reason}`,
-        evidenceRefs: [`sessions:${result.n}`],
+        evidenceRefs: [
+          `sessions:${result.n}`,
+          `rows-in:${result.diagnostics.rowsIn}`,
+          `design-terms:${result.diagnostics.terms}`,
+          `augmented-cells:${result.diagnostics.augmentedCells}`,
+        ],
         judgeRationale:
-          'No fit was attempted — reporting insufficient data is more honest ' +
-          'than a coefficient table that rests on one or two sessions per cell.',
+          'No coefficient table was accepted — reporting the measured refusal ' +
+          'is more honest than presenting an under-supported or singular fit.',
         confidence: 'low',
       },
     ];
@@ -667,12 +1091,23 @@ export async function runNaturalExperimentAudit(
           .map((h) => `${h.factor}=${h.level}`)
           .join(' and ')} (no other level had enough sessions to contrast).`
       : '';
+  // A truncated level set means the sample is narrower than the corpus. Saying
+  // so is not optional: an adjusted effect presented as if it spanned every
+  // model/tool in the data would be a false scope claim (#3114).
+  const truncationNote = result.diagnostics.levelsTruncated
+    ? ` Only the best-supported ${result.diagnostics.modelLevelsModeled} model ` +
+      `and ${result.diagnostics.toolLevelsModeled} tool level(s) were modeled ` +
+      `(of ${result.diagnostics.modelLevelsSeen} and ` +
+      `${result.diagnostics.toolLevelsSeen} present); sessions at the remaining ` +
+      'levels are outside this fit.'
+    : '';
   const summary =
     `Natural-experiment regression over ${result.n} sessions: after ` +
     `controlling for task difficulty, ` +
     summarizeAdjustedEffects(result) +
     ' (see coefficient table).' +
-    scope;
+    scope +
+    truncationNote;
 
   // The judge call is the only network-touching step; isolate it so a transient
   // failure still yields the deterministic coefficient table (low confidence).

@@ -25,6 +25,7 @@ import {
   normalizeMaxEntries,
   resolveCap,
   readDirentsBoundedSync,
+  readDirentsBoundedDetailedSync,
   readFileInDirBoundedSync,
   readSubdirectoryNamesBoundedSync,
   remainingEntryCapacity,
@@ -89,6 +90,48 @@ describe('resolveCap / remainingEntryCapacity', () => {
   it('remainingEntryCapacity never goes negative', () => {
     expect(remainingEntryCapacity(10, 3)).toBe(7);
     expect(remainingEntryCapacity(10, 25)).toBe(0);
+  });
+});
+
+describe('readDirentsBoundedDetailedSync (#3140)', () => {
+  it('reports truncation when the cap cuts the scan short', () => {
+    const dir = freshDir('trunc');
+    for (let i = 0; i < 10; i += 1) writeFileSync(join(dir, `f${i}.json`), '{}');
+    const scan = readDirentsBoundedDetailedSync(dir, 4);
+    expect(scan.entries).toHaveLength(4);
+    expect(scan.truncated).toBe(true);
+  });
+
+  it('does NOT report truncation when the directory ends exactly at the cap', () => {
+    // The boundary a naive `entries.length === cap` check gets wrong: a
+    // directory that simply ends at the cap was not truncated. Probing one
+    // entry past the cap is what makes truncation a fact instead of a guess.
+    const dir = freshDir('exact');
+    for (let i = 0; i < 4; i += 1) writeFileSync(join(dir, `f${i}.json`), '{}');
+    const scan = readDirentsBoundedDetailedSync(dir, 4);
+    expect(scan.entries).toHaveLength(4);
+    expect(scan.truncated).toBe(false);
+  });
+
+  it('does not report truncation for an under-cap or missing directory', () => {
+    const dir = freshDir('under');
+    for (let i = 0; i < 2; i += 1) writeFileSync(join(dir, `f${i}.json`), '{}');
+    expect(readDirentsBoundedDetailedSync(dir, 50).truncated).toBe(false);
+    const missing = readDirentsBoundedDetailedSync(join(dir, 'nope'), 50);
+    expect(missing.entries).toHaveLength(0);
+    expect(missing.truncated).toBe(false);
+  });
+
+  it('agrees with readDirentsBoundedSync on the entries it returns', () => {
+    // The delegation contract: the bare helper must keep returning exactly what
+    // it returned before, since 11 production modules depend on it.
+    const dir = freshDir('delegate');
+    for (let i = 0; i < 10; i += 1) writeFileSync(join(dir, `f${i}.json`), '{}');
+    for (const cap of [0, 1, 4, 10, 100]) {
+      expect(readDirentsBoundedSync(dir, cap).map((e) => e.name)).toEqual(
+        readDirentsBoundedDetailedSync(dir, cap).entries.map((e) => e.name)
+      );
+    }
   });
 });
 

@@ -37,7 +37,7 @@ import {
   DEFAULT_ARTIFACT_MAX_ENTRIES,
   DEFAULT_ARTIFACT_MAX_FILE_BYTES,
   normalizeMaxEntries,
-  readDirentsBoundedSync,
+  readDirentsBoundedDetailedSync,
   readFileInDirBoundedSync,
   resolveCap,
 } from './bounded-fs';
@@ -84,6 +84,29 @@ export interface DebugSessionMetrics {
 export interface ParseDebugDirOptions {
   maxFileBytes?: number;
   maxEntries?: number;
+  /**
+   * Called once per candidate `.txt` file the bounded read refused (#3140).
+   *
+   * Budget enforcement without a counter is invisible: a debug directory that
+   * silently contributed nothing looked exactly like an empty one, so a corpus
+   * being dropped by the byte cap could not be told apart from a corpus that was
+   * not there. This is the observability half of the budget.
+   *
+   * HONEST SCOPE: `readFileInDirBoundedSync` collapses every refusal into
+   * `null`, so this fires for over-budget files, symlinked entries, and
+   * unreadable/partially-written files alike, and cannot attribute which. It is
+   * therefore an upper bound on budget skips, not an exact count of them.
+   */
+  onSkip?: (filename: string) => void;
+  /**
+   * Called when the DIRECTORY cap truncated the scan (#3140).
+   *
+   * Distinct from `onSkip`, which fires per refused file. A truncated scan never
+   * returns the omitted names at all, so no per-file callback can report them —
+   * potentially thousands of logs vanish with `onSkip` never firing once, and
+   * the corpus reads as complete. This is the signal for that case.
+   */
+  onDirectoryTruncated?: (info: { scanned: number; cap: number }) => void;
 }
 
 // ---- regex patterns --------------------------------------------------------
@@ -144,7 +167,18 @@ export function parseDebugLog(
   let fastModeLostCount = 0;
   let isSdkCli: boolean | undefined = undefined;
 
-  for (const line of text.split('\n')) {
+  // Walked with indexOf/slice rather than `text.split('\n')` (#3140). `split`
+  // allocates one string per line for the ENTIRE file and holds them all live at
+  // once, so a fully-read log was retained twice over: once as `text` and again
+  // as its exploded line array. This keeps exactly one line alive at a time.
+  // Semantics are identical to `split('\n')` — same segments, same order, and
+  // empty segments are skipped by the guard below exactly as before.
+  let cursor = 0;
+  while (cursor <= text.length) {
+    let lineEnd = text.indexOf('\n', cursor);
+    if (lineEnd === -1) lineEnd = text.length;
+    const line = text.slice(cursor, lineEnd);
+    cursor = lineEnd + 1;
     if (!line) continue;
 
     // Extract timestamp (ms since epoch).
@@ -235,7 +269,11 @@ export function parseDebugDir(
   opts: ParseDebugDirOptions = {}
 ): DebugSessionMetrics[] {
   const maxEntries = normalizeMaxEntries(opts.maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
-  const entries = readDirentsBoundedSync(dir, maxEntries).map((entry) => entry.name);
+  const scan = readDirentsBoundedDetailedSync(dir, maxEntries);
+  const entries = scan.entries.map((entry) => entry.name);
+  if (scan.truncated) {
+    opts.onDirectoryTruncated?.({ scanned: entries.length, cap: maxEntries });
+  }
   const maxFileBytes = resolveCap(opts.maxFileBytes, DEFAULT_ARTIFACT_MAX_FILE_BYTES);
 
   const results: DebugSessionMetrics[] = [];
@@ -244,7 +282,10 @@ export function parseDebugDir(
     const sessionId = basename(filename, '.txt');
     // Refuses symlinks and anything over the byte budget (#3378).
     const read = readFileInDirBoundedSync(dir, filename, maxFileBytes);
-    if (!read) continue;
+    if (!read) {
+      opts.onSkip?.(filename);
+      continue;
+    }
     results.push(parseDebugLog(read.text, sessionId));
   }
   return results;

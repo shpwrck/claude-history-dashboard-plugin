@@ -86,10 +86,29 @@ export function remainingEntryCapacity(maxEntries: number, used: number): number
   return Math.max(0, maxEntries - used);
 }
 
-export function readDirentsBoundedSync(
+/** A bounded directory scan, plus whether the cap cut it short. */
+export interface BoundedDirentsRead {
+  entries: Dirent[];
+  /**
+   * True when the directory held MORE entries than the cap admitted (#3140).
+   *
+   * Without this the cap is silent: "the directory ended at `limit` entries" and
+   * "the cap stopped the scan early" are the SAME observation, so a
+   * budget-truncated corpus is indistinguishable from a complete one. That is
+   * the per-file byte cap's reporting defect one level up — at the directory,
+   * where it can hide thousands of files at once rather than one.
+   */
+  truncated: boolean;
+}
+
+/**
+ * {@link readDirentsBoundedSync}, but reporting whether the cap truncated the
+ * scan, so a caller can tell a capped directory from a small one.
+ */
+export function readDirentsBoundedDetailedSync(
   dirPath: string,
   maxEntries: number
-): Dirent[] {
+): BoundedDirentsRead {
   // A non-finite cap falls back to the documented default rather than to zero.
   // `Math.max(0, Math.floor(NaN))` is NaN, and `length < NaN` is false, so a
   // bad cap would otherwise report the directory as EMPTY — an absent result
@@ -97,17 +116,24 @@ export function readDirentsBoundedSync(
   // Empty is the more dangerous failure here: unbounded is loud, silence is not.
   const limit = resolveCap(maxEntries, DEFAULT_ARTIFACT_MAX_ENTRIES);
   const entries: Dirent[] = [];
+  let truncated = false;
   let dir;
   try {
     dir = opendirSync(dirPath);
   } catch {
-    return entries;
+    return { entries, truncated };
   }
   try {
     while (entries.length < limit) {
       const ent = dir.readSync();
       if (!ent) break;
       entries.push(ent);
+    }
+    // Probe exactly ONE entry past the cap. Stopping at `limit` cannot by itself
+    // distinguish a directory that ended there from one that was cut off, and
+    // that difference is the entire point of reporting truncation.
+    if (entries.length === limit) {
+      truncated = dir.readSync() !== null;
     }
   } finally {
     try {
@@ -116,7 +142,14 @@ export function readDirentsBoundedSync(
       /* ignore close failures */
     }
   }
-  return entries;
+  return { entries, truncated };
+}
+
+export function readDirentsBoundedSync(
+  dirPath: string,
+  maxEntries: number
+): Dirent[] {
+  return readDirentsBoundedDetailedSync(dirPath, maxEntries).entries;
 }
 
 /**

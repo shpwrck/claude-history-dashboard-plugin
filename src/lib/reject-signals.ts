@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, open } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { REJECT_REASONS, type RejectReason } from './reject-reason';
 
@@ -42,6 +42,72 @@ export interface RejectSignalOptions {
 
 const MAX_ID_LEN = 160;
 export const REJECT_SIGNAL_LINE_MAX_BYTES = 16_384;
+
+/**
+ * Total bytes of the log a single read may pull into memory (#3167).
+ *
+ * `REJECT_SIGNAL_LINE_MAX_BYTES` bounds each LINE, which says nothing about the
+ * file: this log is append-only and never compacted, so its size is a function
+ * of how long the dashboard has been in use. A per-line cap on a 500 MB file
+ * still reads 500 MB.
+ *
+ * 1 MiB holds roughly ten thousand records — far more than any suppression or
+ * gold-set window needs — while making the read cost independent of the log's
+ * age. Because the log is append-only, the useful window is the TAIL, so an
+ * over-budget file is read from the end rather than truncated at the start:
+ * bounding the read by taking the OLDEST bytes would return exactly the records
+ * that no longer matter.
+ */
+export const REJECT_SIGNAL_READ_MAX_BYTES = 1_048_576;
+
+/**
+ * Records a single read may retain (#3167).
+ *
+ * The byte budget already bounds this transitively, but only via a "smallest
+ * possible record" argument that a future schema change would silently
+ * invalidate. An explicit record ceiling keeps the retained-memory bound true
+ * regardless of record size.
+ */
+export const REJECT_SIGNAL_MAX_RECORDS = 5_000;
+
+export interface ReadRejectSignalsOptions {
+  /** Override the total-byte budget for this read. */
+  maxBytes?: number;
+  /** Override the retained-record budget for this read. */
+  maxRecords?: number;
+  /**
+   * Called when a budget actually WINDOWED the result (#3167).
+   *
+   * Without this the bound is silent: a windowed read returns a short list that
+   * is indistinguishable from a genuinely short log, so a consumer computing
+   * suppression or a gold set over "every reject" would be reasoning about the
+   * newest 5,000 while believing it had them all. `totalBytes` is the file's
+   * real size, so the caller can see how much was left behind.
+   */
+  onTruncated?: (info: {
+    totalBytes: number;
+    bytesRead: number;
+    recordsReturned: number;
+    /** True when the RECORD ceiling dropped records inside the byte window. */
+    recordCapped: boolean;
+  }) => void;
+}
+
+/**
+ * Resolve a budget, falling back to the declared default on ANY invalid input.
+ *
+ * A budget derived with `Math.max(0, Math.floor(value))` becomes `NaN` for
+ * unusable input, and every comparison against `NaN` is `false` — so `size >
+ * NaN` would read the WHOLE file and `retained > NaN` would trim nothing, while
+ * the code still looked like it was enforcing a budget. That silent fail-open is
+ * the same defect that made two other gates in this repo green-but-inert
+ * (#3076, #3452). An unusable value restores the default; it never widens it.
+ */
+function resolveReadBudget(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
 
 function cleanString(value: unknown, maxLen: number): string | null {
   if (typeof value !== 'string') return null;
@@ -120,11 +186,29 @@ export async function appendRejectSignal(
  */
 export function parseRejectSignalLines(
   raw: string,
-  now: () => Date = () => new Date()
+  now: () => Date = () => new Date(),
+  maxRecords: number = REJECT_SIGNAL_MAX_RECORDS
 ): RejectSignal[] {
+  // Same fail-open hazard as the read budget: an unusable ceiling must restore
+  // the default, because `retained > NaN` is false and would trim nothing.
+  const limit = resolveReadBudget(maxRecords, REJECT_SIGNAL_MAX_RECORDS);
+  if (limit === 0) return [];
   const signals: RejectSignal[] = [];
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
+  // Rolling head index rather than `shift()`: keeping the LAST `limit` records
+  // with `shift()` would be O(records) per line. `head` advances instead, and the
+  // array is compacted only when the dead prefix has itself grown to `limit`, so
+  // retention peaks at 2*limit and the amortized cost stays O(1) per record.
+  let head = 0;
+
+  // Walked with indexOf/slice instead of `raw.split('\n')`. `split` materializes
+  // one string per line for the WHOLE input at once and holds them all live
+  // simultaneously; this keeps exactly one line alive at a time.
+  let cursor = 0;
+  while (cursor <= raw.length) {
+    let end = raw.indexOf('\n', cursor);
+    if (end === -1) end = raw.length;
+    const trimmed = raw.slice(cursor, end).trim();
+    cursor = end + 1;
     if (!trimmed) continue;
     if (Buffer.byteLength(trimmed, 'utf8') > REJECT_SIGNAL_LINE_MAX_BYTES) continue;
     let parsed: unknown;
@@ -134,24 +218,127 @@ export function parseRejectSignalLines(
       continue;
     }
     const record = sanitizeRejectSignal(parsed, now);
-    if (record) signals.push(record);
+    if (!record) continue;
+    signals.push(record);
+    if (signals.length - head > limit) {
+      head++;
+      if (head >= limit) {
+        signals.splice(0, head);
+        head = 0;
+      }
+    }
   }
-  return signals;
+  return head > 0 ? signals.slice(head) : signals;
+}
+
+/**
+ * {@link parseRejectSignalLines}, also reporting whether the record ceiling
+ * dropped anything — so a caller can tell a capped result from a short log.
+ */
+export function parseRejectSignalLinesDetailed(
+  raw: string,
+  now: () => Date = () => new Date(),
+  maxRecords: number = REJECT_SIGNAL_MAX_RECORDS
+): { signals: RejectSignal[]; recordCapped: boolean } {
+  const limit = resolveReadBudget(maxRecords, REJECT_SIGNAL_MAX_RECORDS);
+  // Parse with one extra slot: if the result overflows the real ceiling, the
+  // ceiling was binding. Counting this way needs no second pass over the text.
+  const probed = parseRejectSignalLines(raw, now, limit + 1);
+  const recordCapped = probed.length > limit;
+  return {
+    signals: recordCapped ? probed.slice(probed.length - limit) : probed,
+    recordCapped,
+  };
 }
 
 /**
  * Read the append-only reject-signal log. A missing/unreadable file is an empty
  * result (no throw), so a first-ever run does not error.
+ *
+ * Bounded on BOTH axes (#3167): at most `maxBytes` are pulled off disk and at
+ * most `maxRecords` are retained, so the cost of a read no longer scales with
+ * how long the log has been accumulating. A file within the byte budget is read
+ * whole and behaves exactly as before; only an over-budget file is windowed, and
+ * then to its TAIL, because an append-only log's newest records are the ones
+ * suppression and the gold set actually want.
  */
 export async function readRejectSignals(
   file: string,
-  now: () => Date = () => new Date()
+  now: () => Date = () => new Date(),
+  opts: ReadRejectSignalsOptions = {}
 ): Promise<RejectSignal[]> {
-  let raw: string;
+  const maxBytes = resolveReadBudget(opts.maxBytes, REJECT_SIGNAL_READ_MAX_BYTES);
+  const maxRecords = resolveReadBudget(opts.maxRecords, REJECT_SIGNAL_MAX_RECORDS);
+  let handle;
   try {
-    raw = await readFile(file, 'utf8');
+    handle = await open(file, 'r');
   } catch {
     return [];
   }
-  return parseRejectSignalLines(raw, now);
+  try {
+    const { size } = await handle.stat();
+    // Read only the tail window. `start > 0` means the file was over budget.
+    const start = size > maxBytes ? size - maxBytes : 0;
+    const length = size - start;
+    if (length <= 0) {
+      if (size > 0) {
+        opts.onTruncated?.({
+          totalBytes: size,
+          bytesRead: 0,
+          recordsReturned: 0,
+          recordCapped: false,
+        });
+      }
+      return [];
+    }
+    const buf = Buffer.allocUnsafe(length);
+    // Loop until the window is filled or EOF. A single `read` is NOT guaranteed
+    // to return everything asked for — short reads are permitted by the API and
+    // do occur on some filesystems. Trusting one call would parse only the OLDER
+    // prefix of the window and silently drop the NEWEST signals, which is the
+    // exact opposite of the tail semantics this function promises; worse, for an
+    // under-budget file `start` is 0, so nothing would report the loss and the
+    // short result would be indistinguishable from a complete one.
+    let bytesRead = 0;
+    while (bytesRead < length) {
+      const { bytesRead: got } = await handle.read(
+        buf,
+        bytesRead,
+        length - bytesRead,
+        start + bytesRead
+      );
+      if (got <= 0) break; // EOF — the file shrank since the stat.
+      bytesRead += got;
+    }
+    let raw = buf.toString('utf8', 0, bytesRead);
+    if (start > 0) {
+      // The window almost certainly opens mid-record. Drop everything before the
+      // first newline: that fragment is not a whole line, and a truncated UTF-8
+      // sequence at the seam dies with it rather than becoming a bogus record.
+      const firstNewline = raw.indexOf('\n');
+      raw = firstNewline === -1 ? '' : raw.slice(firstNewline + 1);
+    }
+    const { signals, recordCapped } = parseRejectSignalLinesDetailed(
+      raw,
+      now,
+      maxRecords
+    );
+    // EOF before the stat-sized window was filled is truncation too. This can
+    // happen when the append-only file is replaced or truncated concurrently;
+    // without the check an incomplete result (including an empty one) looks
+    // identical to a complete short log.
+    if (start > 0 || recordCapped || bytesRead < length) {
+      opts.onTruncated?.({
+        totalBytes: size,
+        bytesRead,
+        recordsReturned: signals.length,
+        recordCapped,
+      });
+    }
+    return signals;
+  } catch {
+    return [];
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }

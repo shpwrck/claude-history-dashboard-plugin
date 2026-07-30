@@ -240,6 +240,11 @@ describe('fitNaturalExperiment', () => {
     expect(result.status).toBe('insufficient');
     if (result.status !== 'insufficient') return;
     expect(result.reason).toMatch(/two levels/);
+    expect(result.diagnostics.refinementPasses).toBe(1);
+    expect(result.diagnostics.modelLevelsSeen).toBe(1);
+    expect(result.diagnostics.toolLevelsSeen).toBe(1);
+    expect(result.diagnostics.modelLevelsModeled).toBe(1);
+    expect(result.diagnostics.toolLevelsModeled).toBe(1);
   });
 
   it('honors minPerCell: a thin second level is not contrasted', () => {
@@ -378,6 +383,51 @@ describe('fitNaturalExperiment', () => {
     expect(result.reason).toMatch(/two levels/);
   });
 
+  it('reports refinement-budget exhaustion with the consumed trace', () => {
+    // The first pass drops the two thin-model rows. A second pass is then needed
+    // to discover that Bash no longer clears minPerCell, so a one-pass budget
+    // must report exhaustion rather than falsely claiming there was no contrast.
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < 9; i++) {
+      rows.push({
+        sessionId: `edit-${i}`,
+        outcome: (i % 2) as 0 | 1,
+        model: 'sonnet',
+        toolFactor: 'Edit',
+        difficulty: 1000 + i * 100,
+      });
+    }
+    rows.push({
+      sessionId: 'bash-sonnet',
+      outcome: 1,
+      model: 'sonnet',
+      toolFactor: 'Bash',
+      difficulty: 1500,
+    });
+    for (let i = 0; i < 2; i++) {
+      rows.push({
+        sessionId: `bash-haiku-${i}`,
+        outcome: 0,
+        model: 'haiku',
+        toolFactor: 'Bash',
+        difficulty: 1500,
+      });
+    }
+
+    const result = fitNaturalExperiment(rows, {
+      ...DEFAULT_FIT_OPTIONS,
+      maxRefinementPasses: 1,
+    });
+
+    expect(result.status).toBe('insufficient');
+    if (result.status !== 'insufficient') return;
+    expect(result.reason).toMatch(/refinement.*declared ceiling.*1/i);
+    expect(result.diagnostics.rejectionReason).toBe(result.reason);
+    expect(result.diagnostics.refinementPasses).toBe(1);
+    expect(result.diagnostics.modelLevelsSeen).toBe(2);
+    expect(result.diagnostics.toolLevelsSeen).toBe(2);
+  });
+
   it('keeps a contrast that still clears the floor after the restriction (#3392 P1)', () => {
     // Same shape, but Bash has 5 raw rows and keeps 3 after the 2 thin-model rows
     // leave — the floor is still met, so the fit proceeds. The recount must not
@@ -469,6 +519,31 @@ describe('fitNaturalExperiment', () => {
 });
 
 describe('runNaturalExperimentAudit', () => {
+  it('does not claim no fit was attempted after a singular solve', async () => {
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < 6; i++) {
+      rows.push({
+        sessionId: `o-${i}`,
+        outcome: (i % 2) as 0 | 1,
+        model: 'opus',
+        toolFactor: 'Bash',
+        difficulty: 1000 + i * 100,
+      });
+      rows.push({
+        sessionId: `s-${i}`,
+        outcome: (i % 2) as 0 | 1,
+        model: 'sonnet',
+        toolFactor: 'Edit',
+        difficulty: 5000 + i * 100,
+      });
+    }
+
+    const findings = await runNaturalExperimentAudit(rows, accept);
+    expect(findings[0].id).toBe('natural-experiment:insufficient-data');
+    expect(findings[0].evidenceRefs).not.toContain('augmented-cells:0');
+    expect(findings[0].judgeRationale).not.toMatch(/no fit was attempted/i);
+  });
+
   it('emits a finding carrying the coefficient table + judge interpretation', async () => {
     const rows = makeRows();
     let sawTable = '';
@@ -571,5 +646,282 @@ describe('runNaturalExperimentAudit', () => {
     // A finding still emits regardless of which levels are significant.
     const findings = await runNaturalExperimentAudit(rows, accept);
     expect(findings[0].summary).toMatch(/after controlling for task difficulty/);
+  });
+});
+
+/**
+ * Design-budget contract (#3114).
+ *
+ * The endpoint's cost is governed by `k`, the design's column count: `X'X` is
+ * O(n*k^2), the augmented `[A | I]` matrix is k-by-2k, and Gauss-Jordan inversion
+ * is O(k^3). Before the budget existed, `minPerCell` was the ONLY constraint on
+ * `k`, so every tool level with three sessions added a column and `k` grew with
+ * the corpus.
+ *
+ * These assertions are calibrated against MEASURED behaviour of the pre-budget
+ * implementation, so they can actually fail: on a 900-row/300-tool corpus it
+ * produced k=302 and a 182,408-cell augmented matrix (vs. the ceilings below),
+ * and on 3,000 rows/1,000 tools k=1,002, a 2,008,008-cell augmented matrix, and
+ * a 42-SECOND fit. A regression that removes the ceilings trips these.
+ */
+describe('#3114 design budget', () => {
+  /** Every tool level gets exactly `minPerCell` rows, so all of them qualify. */
+  function highCardinalityRows(n: number): NaturalExperimentRow[] {
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < n; i++) {
+      rows.push({
+        sessionId: `s${i}`,
+        outcome: i % 3 === 0 ? 1 : 0,
+        model: i % 2 === 0 ? 'opus' : 'sonnet',
+        toolFactor: `mcp__plugin_${Math.floor(i / 3)}__run`,
+        difficulty: 1000 + (i % 97) * 13,
+      });
+    }
+    return rows;
+  }
+
+  /** k can never exceed intercept + model dummies + tool dummies + difficulty. */
+  const K_CEILING =
+    1 +
+    (DEFAULT_FIT_OPTIONS.maxModelLevels - 1) +
+    (DEFAULT_FIT_OPTIONS.maxToolLevels - 1) +
+    1;
+
+  it('bounds design terms and the augmented matrix on a high-cardinality corpus', () => {
+    const result = fitNaturalExperiment(highCardinalityRows(900));
+    if (result.status !== 'fit') throw new Error('expected a fit');
+    // Pre-budget this was 302 terms / 182,408 augmented cells.
+    expect(result.coefficients.length).toBeLessThanOrEqual(K_CEILING);
+    expect(result.diagnostics.terms).toBe(result.coefficients.length);
+    expect(result.diagnostics.augmentedCells).toBeLessThanOrEqual(
+      K_CEILING * 2 * K_CEILING
+    );
+    expect(result.diagnostics.toolLevelsModeled).toBeLessThanOrEqual(
+      DEFAULT_FIT_OPTIONS.maxToolLevels
+    );
+  });
+
+  it('keeps k bounded as the corpus grows — k must not track session count', () => {
+    const small = fitNaturalExperiment(highCardinalityRows(900));
+    const large = fitNaturalExperiment(highCardinalityRows(2400));
+    if (small.status !== 'fit' || large.status !== 'fit') {
+      throw new Error('expected fits');
+    }
+    // The defect was that k grew linearly with n. Tripling the corpus (and the
+    // distinct tool count with it) must not grow the design at all.
+    expect(large.diagnostics.terms).toBe(small.diagnostics.terms);
+    expect(large.diagnostics.terms).toBeLessThanOrEqual(K_CEILING);
+  });
+
+  it('rejects an oversized corpus BEFORE allocating any matrix', () => {
+    const rows = highCardinalityRows(DEFAULT_FIT_OPTIONS.maxRows + 1);
+    const result = fitNaturalExperiment(rows);
+    expect(result.status).toBe('insufficient');
+    // The whole point of the row budget: nothing was allocated.
+    expect(result.diagnostics.augmentedCells).toBe(0);
+    expect(result.diagnostics.terms).toBe(0);
+    expect(result.diagnostics.rowsFitted).toBe(0);
+    expect(result.diagnostics.rejectionReason).toMatch(/declared ceiling/);
+    expect(result.diagnostics.rowsIn).toBe(rows.length);
+  });
+
+  it('exposes rows, terms, duration and rejection reason on both paths', () => {
+    const fitRes = fitNaturalExperiment(highCardinalityRows(900));
+    expect(fitRes.diagnostics.rowsIn).toBe(900);
+    expect(fitRes.diagnostics.rowsFitted).toBeGreaterThan(0);
+    expect(fitRes.diagnostics.terms).toBeGreaterThan(0);
+    expect(Number.isFinite(fitRes.diagnostics.durationMs)).toBe(true);
+    expect(fitRes.diagnostics.rejectionReason).toBeNull();
+
+    const rejected = fitNaturalExperiment([]);
+    expect(rejected.status).toBe('insufficient');
+    expect(typeof rejected.diagnostics.rejectionReason).toBe('string');
+    expect(Number.isFinite(rejected.diagnostics.durationMs)).toBe(true);
+  });
+
+  it('reports truncation from the INPUT cardinality, not the converged sample', () => {
+    const result = fitNaturalExperiment(highCardinalityRows(900));
+    if (result.status !== 'fit') throw new Error('expected a fit');
+    // 300 distinct tool levels went in; only the budgeted best-supported ones
+    // were modeled. Reading `seen` off the converged sample would report 32 and
+    // hide the exclusion entirely.
+    expect(result.diagnostics.toolLevelsSeen).toBe(300);
+    expect(result.diagnostics.levelsTruncated).toBe(true);
+  });
+
+  it('discloses a truncated level set in the emitted claim', async () => {
+    const findings = await runNaturalExperimentAudit(
+      highCardinalityRows(900),
+      accept
+    );
+    // An adjusted effect that silently covered 32 of 300 tool levels would be a
+    // false scope claim, so the exclusion has to reach the summary and evidence.
+    expect(findings[0].summary).toMatch(/best-supported/);
+    expect(findings[0].evidenceRefs.some((r) => r.startsWith('design-terms:'))).toBe(
+      true
+    );
+    expect(
+      findings[0].evidenceRefs.some((r) => r.startsWith('levels-truncated:tool='))
+    ).toBe(true);
+  });
+
+  it('keeps evidence reproducible — no wall-clock leaks into the claim', async () => {
+    const rows = highCardinalityRows(900);
+    const a = await runNaturalExperimentAudit(rows, accept);
+    const b = await runNaturalExperimentAudit(rows, accept);
+    // durationMs is telemetry, never evidence: two runs of the same corpus must
+    // produce byte-identical evidence.
+    expect(a[0].evidenceRefs).toEqual(b[0].evidenceRefs);
+    expect(a[0].summary).toBe(b[0].summary);
+  });
+
+  it('a malformed budget restores the default — it never disables the refusal', () => {
+    // The fail-open shape that made #3076 and #3452 green-but-inert: a budget
+    // resolved to NaN makes every comparison false, so the check reports itself
+    // as enforced while refusing nothing.
+    const rows = highCardinalityRows(900);
+    for (const bad of [NaN, -1, Infinity, undefined as unknown as number]) {
+      const result = fitNaturalExperiment(rows, {
+        ...DEFAULT_FIT_OPTIONS,
+        maxToolLevels: bad,
+      });
+      if (result.status !== 'fit') throw new Error('expected a fit');
+      expect(result.diagnostics.terms).toBeLessThanOrEqual(K_CEILING);
+    }
+    // Same for the row ceiling: an unusable value must still refuse an
+    // oversized corpus rather than wave it through.
+    const oversized = highCardinalityRows(DEFAULT_FIT_OPTIONS.maxRows + 1);
+    for (const bad of [NaN, -5, undefined as unknown as number]) {
+      const result = fitNaturalExperiment(oversized, {
+        ...DEFAULT_FIT_OPTIONS,
+        maxRows: bad,
+      });
+      expect(result.status).toBe('insufficient');
+      expect(result.diagnostics.augmentedCells).toBe(0);
+    }
+  });
+
+  it('refuses at exactly one over the ceiling and admits exactly at it', () => {
+    // A budget that is off by one at its own boundary is the "just-over
+    // threshold silently accepted" failure the gate exists to prevent.
+    const atCeiling = fitNaturalExperiment(
+      highCardinalityRows(120),
+      { ...DEFAULT_FIT_OPTIONS, maxRows: 120 }
+    );
+    // Exactly at the ceiling is ADMITTED: the fit ran, so there is no rejection.
+    expect(atCeiling.status).toBe('fit');
+    expect(atCeiling.diagnostics.rejectionReason).toBeNull();
+
+    const overCeiling = fitNaturalExperiment(
+      highCardinalityRows(121),
+      { ...DEFAULT_FIT_OPTIONS, maxRows: 120 }
+    );
+    expect(overCeiling.status).toBe('insufficient');
+    expect(overCeiling.diagnostics.rejectionReason).toMatch(/declared ceiling/);
+    expect(overCeiling.diagnostics.augmentedCells).toBe(0);
+  });
+
+  it('never reports "cannot evaluate" as within budget', () => {
+    // An empty or unfittable input must carry a rejection reason, never a
+    // silent zero-cost success.
+    for (const rows of [[], highCardinalityRows(3)]) {
+      const result = fitNaturalExperiment(rows);
+      expect(result.status).toBe('insufficient');
+      expect(result.diagnostics.rejectionReason).toBeTruthy();
+    }
+  });
+
+  it('reports the design it already allocated on a post-build refusal', () => {
+    // Codex review: a refusal reached AFTER buildDesignMatrix has really
+    // allocated an n-by-k matrix. Falling back to the zero defaults emitted
+    // `design-terms:0` as EVIDENCE — a false claim that no design was built,
+    // hiding the very cost these diagnostics exist to expose.
+    // 30 rows over 10 tool levels of 3: clears minSessions(8) on raw input, but
+    // level restriction leaves too few usable rows to fit.
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < 30; i++) {
+      rows.push({
+        sessionId: `s${i}`,
+        outcome: i % 2 === 0 ? 1 : 0,
+        model: i < 3 ? 'opus' : 'sonnet',
+        toolFactor: `t-${Math.floor(i / 3)}`,
+        difficulty: 100 + i,
+      });
+    }
+    const result = fitNaturalExperiment(rows, {
+      ...DEFAULT_FIT_OPTIONS,
+      minSessions: 25,
+      maxToolLevels: 2,
+    });
+    if (result.status !== 'insufficient') throw new Error('expected a refusal');
+    // A design WAS built, so terms/rowsFitted must reflect it, not report zero.
+    expect(result.diagnostics.terms).toBeGreaterThan(0);
+    expect(result.diagnostics.rowsFitted).toBeGreaterThan(0);
+    expect(result.diagnostics.rejectionReason).toBeTruthy();
+  });
+
+  it('never emits design-terms:0 evidence when a design was allocated', async () => {
+    const rows: NaturalExperimentRow[] = [];
+    for (let i = 0; i < 30; i++) {
+      rows.push({
+        sessionId: `s${i}`,
+        outcome: i % 2 === 0 ? 1 : 0,
+        model: i < 3 ? 'opus' : 'sonnet',
+        toolFactor: `t-${Math.floor(i / 3)}`,
+        difficulty: 100 + i,
+      });
+    }
+    const result = fitNaturalExperiment(rows, {
+      ...DEFAULT_FIT_OPTIONS,
+      minSessions: 25,
+      maxToolLevels: 2,
+    });
+    if (result.status !== 'insufficient') throw new Error('expected a refusal');
+    // The emitted claim must not contradict what actually happened.
+    const findings = await runNaturalExperimentAudit(rows, accept, {
+      ...DEFAULT_FIT_OPTIONS,
+      minSessions: 25,
+      maxToolLevels: 2,
+    });
+    expect(findings[0].evidenceRefs).not.toContain('design-terms:0');
+    expect(
+      findings[0].evidenceRefs.some((r) => r === `design-terms:${result.diagnostics.terms}`)
+    ).toBe(true);
+  });
+
+  it('times the WHOLE fit, including the design build', () => {
+    // Codex review: the clock used to start after buildDesignMatrix, so the
+    // reported duration omitted level refinement, row filtering, standardization
+    // and the n-by-k allocation — understating cost MOST on exactly the large
+    // corpora the budget exists to bound, since the design build is the part
+    // that scales with n.
+    const result = fitNaturalExperiment(highCardinalityRows(2400));
+    if (result.status !== 'fit') throw new Error('expected a fit');
+    // fitOls alone sees only 96 retained rows; the design build walks 2,400.
+    // A timer covering just the solve cannot see that work at all.
+    expect(result.diagnostics.durationMs).toBeGreaterThanOrEqual(0);
+    expect(Number.isFinite(result.diagnostics.durationMs)).toBe(true);
+    expect(result.diagnostics.rowsIn).toBe(2400);
+  });
+
+  it('discloses rows dropped by level restriction in the claim', async () => {
+    const findings = await runNaturalExperimentAudit(
+      highCardinalityRows(900),
+      accept
+    );
+    // "fitted 96 sessions" alone reads as if 96 were all there was.
+    expect(findings[0].evidenceRefs).toContain('rows-in:900');
+  });
+
+  it('leaves a realistic low-cardinality fit unchanged', () => {
+    // The budget must be inert on data that never approaches it: same
+    // coefficients, same n, nothing truncated.
+    const rows = makeRows();
+    const result = fitNaturalExperiment(rows, DEFAULT_FIT_OPTIONS);
+    if (result.status !== 'fit') throw new Error('expected a fit');
+    expect(result.diagnostics.levelsTruncated).toBe(false);
+    expect(result.diagnostics.rowsFitted).toBe(result.n);
+    expect(result.diagnostics.rowsIn).toBe(rows.length);
+    expect(result.diagnostics.terms).toBe(result.coefficients.length);
   });
 });

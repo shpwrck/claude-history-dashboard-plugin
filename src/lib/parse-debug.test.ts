@@ -472,3 +472,164 @@ describe('parseDebugDir — the debug directory is the boundary (#3378)', () => 
     ).toHaveLength(1);
   });
 });
+
+/**
+ * Ingestion budget observability + bounded line parsing (#3140).
+ *
+ * The byte and entry caps themselves landed with #3151/#3152/#3378, so what was
+ * still missing was (a) any way to SEE what the budget refused and (b) the
+ * whole-file line-array duplication: `parseDebugLog` split each fully-read file
+ * into one string per line and held them all live alongside the file text.
+ *
+ * Measured at `parseDebugDir` (the shape `scripts/ingest.mjs` calls) over 40
+ * files of 5,000 lines: the pre-fix path made 40 `split('\n')` calls allocating
+ * 200,000 line strings; the bounded path allocates none, with byte-identical
+ * output.
+ */
+describe('debug ingest budget observability (#3140)', () => {
+  function tmpDir(): string {
+    return mkdtempSync(join(tmpdir(), 'debug-budget-'));
+  }
+
+  it('reports each file the budget refused', () => {
+    const dir = tmpDir();
+    const ts = '2026-01-01T00:00:00.000Z';
+    writeFileSync(
+      join(dir, 'aaaaaaaa-0000-0000-0000-000000000001.txt'),
+      `${ts} [API REQUEST] /v1/messages\n${ts} Stream started - received first chunk\n`
+    );
+    writeFileSync(join(dir, 'big-1.txt'), 'x'.repeat(4096));
+    writeFileSync(join(dir, 'big-2.txt'), 'x'.repeat(4096));
+
+    const skipped: string[] = [];
+    const metrics = parseDebugDir(dir, {
+      maxFileBytes: 1024,
+      onSkip: (filename) => skipped.push(filename),
+    });
+
+    // The under-budget log still parses; both oversized ones are reported rather
+    // than vanishing into an empty result.
+    expect(metrics).toHaveLength(1);
+    expect(skipped.sort()).toEqual(['big-1.txt', 'big-2.txt']);
+  });
+
+  it('does not fire onSkip when nothing is refused', () => {
+    const dir = tmpDir();
+    const ts = '2026-01-01T00:00:00.000Z';
+    writeFileSync(
+      join(dir, 'aaaaaaaa-0000-0000-0000-000000000002.txt'),
+      `${ts} [API REQUEST] /v1/messages\n${ts} Stream started - received first chunk\n`
+    );
+    const skipped: string[] = [];
+    const metrics = parseDebugDir(dir, { onSkip: (f) => skipped.push(f) });
+    expect(metrics).toHaveLength(1);
+    expect(skipped).toEqual([]);
+  });
+
+  it('reports DIRECTORY-cap truncation, which no per-file callback can see', () => {
+    const dir = tmpDir();
+    const ts = '2026-01-01T00:00:00.000Z';
+    for (let i = 0; i < 6; i++) {
+      writeFileSync(
+        join(dir, `aaaaaaaa-0000-0000-0000-00000000000${i}.txt`),
+        `${ts} [API REQUEST] /v1/messages\n${ts} Stream started - received first chunk\n`
+      );
+    }
+    const skipped: string[] = [];
+    let truncation: { scanned: number; cap: number } | null = null;
+    const metrics = parseDebugDir(dir, {
+      maxEntries: 2,
+      onSkip: (f) => skipped.push(f),
+      onDirectoryTruncated: (info) => {
+        truncation = info;
+      },
+    });
+    // The omitted names are never returned, so onSkip cannot fire for them —
+    // without the truncation signal this looks like a complete 2-file corpus.
+    expect(metrics.length).toBeLessThanOrEqual(2);
+    expect(skipped).toEqual([]);
+    expect(truncation).not.toBeNull();
+    expect(truncation!.cap).toBe(2);
+    expect(truncation!.scanned).toBe(2);
+  });
+
+  it('does not report truncation when the directory fits the cap', () => {
+    const dir = tmpDir();
+    const ts = '2026-01-01T00:00:00.000Z';
+    for (let i = 0; i < 2; i++) {
+      writeFileSync(
+        join(dir, `bbbbbbbb-0000-0000-0000-00000000000${i}.txt`),
+        `${ts} [API REQUEST] /v1/messages\n${ts} Stream started - received first chunk\n`
+      );
+    }
+    let truncated = false;
+    // Exactly at the cap must NOT report truncation — the boundary case that a
+    // naive `length === cap` check gets wrong.
+    parseDebugDir(dir, {
+      maxEntries: 2,
+      onDirectoryTruncated: () => {
+        truncated = true;
+      },
+    });
+    expect(truncated).toBe(false);
+  });
+
+  it('never materializes a whole-file line array', () => {
+    const ts = (s: number) =>
+      new Date(Date.UTC(2026, 0, 1, 0, 0, s)).toISOString();
+    const lines: string[] = [];
+    for (let i = 0; i < 2000; i++) {
+      lines.push(
+        i % 2 === 0
+          ? `${ts(i)} [API REQUEST] /v1/messages`
+          : `${ts(i)} Stream started - received first chunk`
+      );
+    }
+    const text = lines.join('\n');
+
+    // Count real newline-splits performed by the parser. The pre-fix
+    // implementation allocated one string per line for the entire file.
+    const original = String.prototype.split;
+    let allocatedLineStrings = 0;
+    try {
+      (String.prototype as unknown as { split: unknown }).split = function (
+        this: string,
+        ...args: unknown[]
+      ) {
+        const out = (original as unknown as (...a: unknown[]) => string[]).apply(
+          this,
+          args
+        );
+        if (args[0] === '\n') allocatedLineStrings += out.length;
+        return out;
+      };
+      const metrics = parseDebugLog(text, 'session-1');
+      expect(metrics.ttfbSampleCount).toBe(1000);
+    } finally {
+      (String.prototype as unknown as { split: unknown }).split = original;
+    }
+    expect(allocatedLineStrings).toBe(0);
+  });
+
+  it('parses identically to a split-based walk', () => {
+    const ts = (s: number) =>
+      new Date(Date.UTC(2026, 0, 1, 0, 0, s)).toISOString();
+    // Trailing newline, a blank line, and a no-timestamp line: the segment cases
+    // where an indexOf walk could drift from split('\n').
+    const text =
+      `${ts(0)} [API REQUEST] /v1/messages source=sdk\n` +
+      `\n` +
+      `no timestamp here\n` +
+      `${ts(3)} Stream started - received first chunk\n` +
+      `${ts(4)} API error (attempt 7/11): boom\n` +
+      `${ts(5)} Slow first byte: no stream chunk 30.0s after request sent\n` +
+      `${ts(6)} Fast mode unavailable: not available in the Agent SDK\n`;
+    const metrics = parseDebugLog(text, 'session-2');
+    expect(metrics.ttfbSampleCount).toBe(1);
+    expect(metrics.ttfbMax).toBe(3000);
+    expect(metrics.maxRetryAttempt).toBe(7);
+    expect(metrics.slowFirstByteCount).toBe(1);
+    expect(metrics.fastModeLostCount).toBe(1);
+    expect(metrics.isSdkCli).toBe(true);
+  });
+});
