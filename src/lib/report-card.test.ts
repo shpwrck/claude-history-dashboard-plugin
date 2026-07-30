@@ -3,6 +3,10 @@ import { buildReportCard, buildReportCardSessionContext } from './report-card';
 import type { SessionRegistryEntry } from './parse-session-registry';
 import type { TelemetryEvent } from './parse-telemetry';
 import type { DebugSessionMetrics } from './parse-debug';
+import {
+  validateClaimProvenance,
+  type ClaimDerivation,
+} from './claim-provenance';
 
 const env = {
   node_version: 'v22.0.0',
@@ -196,6 +200,81 @@ describe('buildReportCard — blended verdict (#572)', () => {
     expect(p.ttfbSampleCount).toBe(5);
     expect(p.p90TtfbMs).toBe(7000);
     expect(p.fastModeLostCount).toBe(3);
+    expect(p.provenance.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: 'sessionContext',
+          record: 'sessionContext[0]',
+          field: 'entrypoint',
+          value: 'sdk-cli',
+        }),
+        expect.objectContaining({
+          source: 'parse-debug',
+          record: 'debugLogs[0]',
+          field: 'ttfbP90',
+          value: 7000,
+        }),
+      ])
+    );
+  });
+
+  it('locates merged transcript-context fields in their original rows', () => {
+    const context = [
+      { sessionId: 'split-source', project: '/repo/split-source' },
+      { sessionId: 'split-source', entrypoint: 'sdk-cli' },
+    ];
+    const card = buildReportCard(
+      [],
+      [],
+      [dbg('split-source', 7000)],
+      context
+    );
+    const provenance = card.projects[0].provenance;
+    expect(provenance.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: 'sessionContext',
+          record: 'sessionContext[0]',
+          field: 'project',
+          value: '/repo/split-source',
+        }),
+        expect.objectContaining({
+          source: 'sessionContext',
+          record: 'sessionContext[1]',
+          field: 'entrypoint',
+          value: 'sdk-cli',
+        }),
+      ])
+    );
+    expect(validateClaimProvenance(provenance)).toEqual([]);
+  });
+
+  it('records an absent recovered entrypoint before applying the unknown default', () => {
+    const context = [
+      { sessionId: 'unknown-entrypoint', project: '/repo/unknown-entrypoint' },
+    ];
+    const card = buildReportCard(
+      [],
+      [],
+      [dbg('unknown-entrypoint', 7000)],
+      context
+    );
+    const provenance = card.projects[0].provenance;
+    const absentEntrypoint = provenance.observations.find(
+      (row) =>
+        row.source === 'sessionContext' &&
+        row.record === 'sessionContext[0]' &&
+        row.field === 'entrypoint'
+    );
+    expect(absentEntrypoint).toBeDefined();
+    expect(absentEntrypoint).not.toHaveProperty('value');
+    expect(
+      provenance.derivations?.find(
+        (row) =>
+          row.id === 'context.unknown-entrypoint.normalizedEntrypoint'
+      )?.value
+    ).toBe('unknown');
+    expect(validateClaimProvenance(provenance)).toEqual([]);
   });
 
   it('counts a recovered session with both telemetry and debug as one reliability session', () => {
@@ -291,5 +370,106 @@ describe('buildReportCard — blended verdict (#572)', () => {
     expect(recovered.recoveredFromTranscript).toBe(true);
     expect(recovered.hasReliabilitySignal).toBe(true);
     expect(recovered.entrypoint).toBe('sdk-cli');
+  });
+
+  it('reconstructs KEEP, FLAG, and MOVE solely from row-addressed provenance (#3170)', () => {
+    const keepRegistry = ['k1', 'k2', 'k3', 'k4'].map((id) =>
+      sess('/repo/keep-proof', id, 'cli')
+    );
+    const flagRegistry = ['f1', 'f2', 'f3', 'f4'].map((id) =>
+      sess('/repo/flag-proof', id, 'cli')
+    );
+    const moveRegistry = ['m1', 'm2', 'm3', 'm4'].map((id) =>
+      sess('/repo/move-proof', id, 'sdk-cli')
+    );
+    const registry = [
+      ...keepRegistry,
+      ...flagRegistry,
+      ...moveRegistry,
+    ];
+    const telemetry = moveRegistry.flatMap((row) => [
+      tele(row.sessionId, 9, 30_000),
+      tele(row.sessionId, 2, 1_000),
+    ]);
+    const debug = [
+      ...keepRegistry.map((row) => dbg(row.sessionId, 800)),
+      ...flagRegistry.map((row) => dbg(row.sessionId, 6_000)),
+      ...moveRegistry.map((row) => dbg(row.sessionId, 13_000, 5)),
+    ];
+    const card = buildReportCard(registry, telemetry, debug);
+    const byVerdict = new Map(card.projects.map((project) => [project.verdict, project]));
+    expect([...byVerdict.keys()].sort()).toEqual(['FLAG', 'KEEP', 'MOVE']);
+
+    const rawBySource = {
+      'parse-session-registry': registry,
+      'parse-telemetry': telemetry,
+      'parse-debug': debug,
+    } as const;
+    const derive = (
+      project: (typeof card.projects)[number],
+      id: string
+    ): ClaimDerivation => {
+      const row = project.provenance.derivations?.find(
+        (candidate) => candidate.id === id
+      );
+      expect(row, `missing ${id} for ${project.cwd}`).toBeDefined();
+      return row!;
+    };
+
+    for (const project of card.projects) {
+      expect(validateClaimProvenance(project.provenance)).toEqual([]);
+
+      // Every observation resolves to the exact supplied parser row + field.
+      for (const observation of project.provenance.observations) {
+        expect(observation.record).toMatch(/^\w+\[\d+\]/);
+        const index = Number(observation.record!.match(/\[(\d+)\]/)![1]);
+        const rows =
+          rawBySource[observation.source as keyof typeof rawBySource];
+        expect(rows, observation.source).toBeDefined();
+        const raw = rows[index] as unknown as Record<string, unknown>;
+        expect(raw[observation.field!]).toEqual(observation.value);
+      }
+
+      const attribution = derive(project, 'attribution.bucket');
+      const sessionCount = Number(attribution.operands.sessionCount);
+      const dominantCount = Number(attribution.operands.dominantCount);
+      const attributionBucket =
+        sessionCount <= 2
+          ? 'low-signal'
+          : dominantCount / sessionCount >=
+              Number(attribution.operands.committedShareFloor)
+            ? 'committed'
+            : 'split';
+      expect(attribution.value).toBe(attributionBucket);
+
+      const contributions = [
+        'drag.retryContribution',
+        'drag.ttfbContribution',
+        'drag.wastedContribution',
+        'drag.fastModeContribution',
+      ].map((id) => Number(derive(project, id).value));
+      const dragScore = contributions.reduce((sum, value) => sum + value, 0);
+      expect(derive(project, 'drag.score').value).toBe(dragScore);
+
+      const dragBucket =
+        dragScore >= 45 ? 'HEAVY' : dragScore >= 20 ? 'DRAG' : 'OK';
+      expect(derive(project, 'drag.bucket').value).toBe(dragBucket);
+
+      const verdictOperands = derive(project, 'verdict').operands;
+      const verdict =
+        attributionBucket === 'low-signal'
+          ? 'MOVE'
+          : attributionBucket === 'split'
+            ? 'FLAG'
+            : Number(verdictOperands.sessionsWithSignal) === 0
+              ? 'FLAG'
+              : dragBucket === 'OK'
+                ? 'KEEP'
+                : dragBucket === 'DRAG'
+                  ? 'FLAG'
+                  : 'MOVE';
+      expect(derive(project, 'verdict').value).toBe(verdict);
+      expect(project.verdict).toBe(verdict);
+    }
   });
 });

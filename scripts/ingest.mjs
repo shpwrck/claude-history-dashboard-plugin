@@ -2124,6 +2124,16 @@ const LIVE_CONFIG_ENVIRONMENT_OBSERVATION = SCOPED_INGEST
   ? undefined
   : hostEnvironmentObservation(process.env);
 
+// One observation instant belongs to one ingested source snapshot. The full
+// dataset and the lighter recommendations dataset are often assembled
+// separately from the same contentHash; stamping each assembly with Date.now()
+// would make their shared liveConfig fields disagree and would make unchanged
+// source bytes produce different serialized claims. Initialize a safe fallback
+// for direct assembleDataset() callers, then advance it only when ingest()
+// observes a different source fingerprint.
+let datasetSnapshotContentHash = null;
+let datasetSnapshotCapturedAt = new Date(Date.now()).toISOString();
+
 /** Cheap current-state gate for the recommendations response cache (#2554). */
 export function stopHookConfigState() {
   return readStopHookConfigState({
@@ -3937,6 +3947,10 @@ export function ingest() {
     }
   }
   const contentHash = hash.digest('hex');
+  if (contentHash !== datasetSnapshotContentHash) {
+    datasetSnapshotContentHash = contentHash;
+    datasetSnapshotCapturedAt = new Date(Date.now()).toISOString();
+  }
   return {
     total: sessions.length,
     reparsed,
@@ -4405,6 +4419,7 @@ function assembleDatasetCore() {
     homeDir: CLAUDE_HOME,
     scoped: SCOPED_INGEST,
     projectRoots: liveConfigRoots,
+    now: () => new Date(datasetSnapshotCapturedAt),
     // Enterprise scoped ingest must not expose operator environment names to
     // tenant datasets. Single-user local mode observes names only.
     environment: LIVE_CONFIG_ENVIRONMENT_OBSERVATION,

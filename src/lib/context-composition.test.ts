@@ -45,7 +45,7 @@ describe('context-composition (#1926)', () => {
       const est = tokenizeConfigPrefix(null);
       expect(est.totalTokens).toBe(0);
       expect(est.caveat).toMatch(/lower bound/i);
-      expect(est.caveat).toMatch(/drift/i);
+      expect(est.caveat).toMatch(/No live config snapshot was supplied/i);
     });
 
     it('counts CLAUDE.md, resource descriptions, and settings; flags unsizable MCP', () => {
@@ -70,6 +70,46 @@ describe('context-composition (#1926)', () => {
       );
       expect(est.unsizableMcpServers).toBe(2);
       expect(est.caveat).toMatch(/2 MCP server/);
+    });
+
+    it('dates a supplied config snapshot and keeps historical composition bound to that snapshot (#3120)', () => {
+      const liveConfig = {
+        capturedAt: '2026-06-24T12:34:56.789Z',
+        claudeMd: {
+          global: 'A'.repeat(260),
+          perProject: {},
+        },
+        skills: [],
+        subagents: [],
+        commands: [],
+        mcpServers: [],
+        settings: {},
+      } as unknown as LiveConfig;
+      const snapshot = tokenizeConfigPrefix(liveConfig);
+      expect(snapshot.capturedAt).toBe('2026-06-24T12:34:56.789Z');
+      expect(snapshot.caveat).toMatch(/as of 2026-06-24/i);
+      expect(snapshot.provenance).toMatchObject({
+        capturedAt: '2026-06-24T12:34:56.789Z',
+        asOf: '2026-06-24',
+      });
+
+      const historical = session({
+        totalCacheReadTokens: 10_000,
+        messageCount: 2,
+      });
+      const beforeConfigChange = composeSession(historical, snapshot);
+
+      // The host's current config can change after capture. Historical output
+      // remains tied to the explicitly supplied snapshot until the caller
+      // deliberately supplies a newly captured one.
+      liveConfig.claudeMd.global = 'B'.repeat(2_600);
+      const afterConfigChange = composeSession(historical, snapshot);
+      expect(afterConfigChange.tokens.systemPrefix).toBe(
+        beforeConfigChange.tokens.systemPrefix
+      );
+      expect(afterConfigChange.provenance?.systemPrefix).toEqual(
+        snapshot.provenance
+      );
     });
   });
 

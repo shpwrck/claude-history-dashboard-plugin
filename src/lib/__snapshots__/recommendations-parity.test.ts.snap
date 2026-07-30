@@ -893,9 +893,9 @@ These were run repeatedly — wrap them in a script (e.g. \`scripts/dev.sh\`) or
     "action": "If these are done, archive them; if not, they may be stalled and worth a check-in.",
     "affected": 1,
     "category": "activity",
-    "detail": "1 project(s) with 3+ sessions have had no activity in over 4 weeks.",
+    "detail": "1 project(s) with 3+ sessions have had no activity in over 4 weeks as of 2023-11-14.",
     "evidence": [
-      "stale, last 42d ago",
+      "stale, last 42d ago as of 2023-11-14",
     ],
     "fix": {
       "label": "Auto-clean old transcripts",
@@ -932,6 +932,12 @@ These were run repeatedly — wrap them in a script (e.g. \`scripts/dev.sh\`) or
           "claim": "no cleanupPeriodDays is set, so nothing is ageing this history out on its own",
           "field": "settings.cleanupPeriodDays",
           "source": "~/.claude/settings.json",
+        },
+        {
+          "claim": "relative inactivity ages were evaluated as of 2023-11-14",
+          "field": "detector.rule(now)",
+          "source": "detector evaluation clock",
+          "value": "2023-11-14",
         },
       ],
     },

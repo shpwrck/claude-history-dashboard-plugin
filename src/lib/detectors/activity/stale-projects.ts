@@ -24,17 +24,27 @@ export const detector: Detector = {
     const asOf = isoDateFromMs(
       input.projects.reduce((max, p) => (p.lastSeen > max ? p.lastSeen : max), 0)
     );
+    const evaluatedAt = isoDateFromMs(now);
+    const evaluationSuffix = evaluatedAt ? ` as of ${evaluatedAt}` : '';
     return {
       id: 'activity.stale-projects',
       category: 'activity',
       severity: 'info',
       title: 'Projects have gone quiet',
-      detail: `${stale.length} project(s) with ${MIN_STALE_SESSIONS}+ sessions have had no activity in over ${STALE_WEEKS} weeks.`,
+      detail:
+        `${stale.length} project(s) with ${MIN_STALE_SESSIONS}+ sessions have ` +
+        `had no activity in over ${STALE_WEEKS} weeks${evaluationSuffix}.`,
       action: 'If these are done, archive them; if not, they may be stalled and worth a check-in.',
       affected: stale.length,
       evidence: stale
         .slice(0, 5)
-        .map((p) => `${p.projectShort}, last ${daysAgo(p.lastSeen, now)}d ago`),
+        .map(
+          (p) =>
+            `${p.projectShort}, last ${daysAgo(
+              p.lastSeen,
+              now
+            )}d ago${evaluationSuffix}`
+        ),
       view: 'activity',
       fix: {
         target: 'settings.json',
@@ -74,6 +84,17 @@ export const detector: Detector = {
             source: '~/.claude/settings.json',
             field: 'settings.cleanupPeriodDays',
           },
+          ...(evaluatedAt
+            ? [
+                {
+                  claim:
+                    `relative inactivity ages were evaluated as of ${evaluatedAt}`,
+                  source: 'detector evaluation clock',
+                  field: 'detector.rule(now)',
+                  value: evaluatedAt,
+                },
+              ]
+            : []),
         ],
         inference:
           'Quiet is not the same as finished. This measures the absence of recorded ' +

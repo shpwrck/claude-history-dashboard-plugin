@@ -32,6 +32,9 @@ import type {
 } from './parse-repo-map-join';
 
 const MAX_EVIDENCE_LINES = 4;
+const MAX_RECOMMENDATION_CONTEXT_CHARS = 10 * 1024;
+const MAX_PROVENANCE_OBSERVATIONS = 4;
+const MAX_PROVENANCE_DERIVATIONS = 4;
 
 /**
  * Default ceiling for the bounded repo-map slice injected into project/session
@@ -46,6 +49,17 @@ const APPROX_CHARS_PER_TOKEN = 4;
 function truncate(s: string, n: number): string {
   if (typeof s !== 'string') return '';
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
+function boundedClaimScalar<T extends string | number | boolean>(
+  value: T,
+  maxStringLength = 240
+): T {
+  return (
+    typeof value === 'string'
+      ? truncate(value, maxStringLength)
+      : value
+  ) as T;
 }
 
 function isoOrUndef(ts: number | undefined): string | undefined {
@@ -366,6 +380,140 @@ function buildProjectContext(p: ProjectPayload): unknown {
   };
 }
 
+function buildRecommendationContextRow(
+  r: Recommendation,
+  compact = false
+): Record<string, unknown> {
+  const lineLimit = compact ? 1 : MAX_EVIDENCE_LINES;
+  const observationLimit = compact ? 1 : MAX_PROVENANCE_OBSERVATIONS;
+  const derivationLimit = compact ? 1 : MAX_PROVENANCE_DERIVATIONS;
+  const savings = r.savingsAttribution;
+
+  return {
+    id: truncate(r.id, 160),
+    category: r.category,
+    severity: r.severity,
+    title: truncate(r.title, 200),
+    detail: truncate(r.detail, compact ? 200 : 320),
+    action: truncate(r.action, compact ? 160 : 240),
+    estSavingsUsd:
+      r.estSavingsUsd !== undefined
+        ? Number(r.estSavingsUsd.toFixed(2))
+        : undefined,
+    affected: r.affected,
+    evidence: r.evidence
+      ?.slice(0, lineLimit)
+      .map((line) => truncate(line, compact ? 160 : 240)),
+    evidenceRefs: r.evidenceRefs?.slice(0, lineLimit).map((ref) => ({
+      sessionId: truncate(ref.sessionId, 160),
+      entryIndex: ref.entryIndex,
+      timestamp: truncate(ref.timestamp, 64),
+      ...(ref.toolUseId
+        ? { toolUseId: truncate(ref.toolUseId, 160) }
+        : {}),
+      ...(ref.entryId ? { entryId: truncate(ref.entryId, 160) } : {}),
+    })),
+    provenance: r.provenance
+      ? {
+          observations: r.provenance.observations
+            .slice(0, observationLimit)
+            .map((observation) => ({
+              ...(observation.id
+                ? { id: truncate(observation.id, 120) }
+                : {}),
+              claim: truncate(observation.claim, compact ? 180 : 320),
+              source: truncate(observation.source, 160),
+              ...(observation.record
+                ? { record: truncate(observation.record, 160) }
+                : {}),
+              field: observation.field
+                ? truncate(observation.field, 240)
+                : undefined,
+              value:
+                observation.value === undefined
+                  ? undefined
+                  : boundedClaimScalar(observation.value),
+            })),
+          ...(r.provenance.derivations
+            ? {
+                derivations: r.provenance.derivations
+                  .slice(0, derivationLimit)
+                  .map((derivation) => ({
+                    id: truncate(derivation.id, 120),
+                    formula: truncate(
+                      derivation.formula,
+                      compact ? 180 : 320
+                    ),
+                    operands: Object.fromEntries(
+                      Object.entries(derivation.operands)
+                        .slice(0, compact ? 2 : 8)
+                        .map(([name, value]) => [
+                          truncate(name, 100),
+                          boundedClaimScalar(value, compact ? 120 : 240),
+                        ])
+                    ),
+                    value: boundedClaimScalar(derivation.value),
+                  })),
+              }
+            : {}),
+          ...(r.provenance.inference
+            ? {
+                inference: truncate(
+                  r.provenance.inference,
+                  compact ? 240 : 480
+                ),
+              }
+            : {}),
+          ...(r.provenance.capturedAt
+            ? { capturedAt: r.provenance.capturedAt }
+            : {}),
+          ...(r.provenance.asOf ? { asOf: r.provenance.asOf } : {}),
+          ...(r.provenance.stale !== undefined
+            ? { stale: r.provenance.stale }
+            : {}),
+        }
+      : undefined,
+    claimClass: r.claimClass,
+    proofTier: r.proofTier,
+    savingsAttribution: savings
+      ? {
+          interventionKey: truncate(savings.interventionKey, 160),
+          signatureId: truncate(savings.signatureId, 160),
+          tier: savings.tier,
+          predictedSavingsUsd: savings.predictedSavingsUsd,
+          realizedSavingsUsd: savings.realizedSavingsUsd,
+          confidence: savings.confidence,
+          ...(savings.window
+            ? {
+                window: {
+                  ...(savings.window.baseline
+                    ? {
+                        baseline: {
+                          start: truncate(savings.window.baseline.start, 64),
+                          end: truncate(savings.window.baseline.end, 64),
+                        },
+                      }
+                    : {}),
+                  ...(savings.window.comparison
+                    ? {
+                        comparison: {
+                          start: truncate(savings.window.comparison.start, 64),
+                          end: truncate(savings.window.comparison.end, 64),
+                        },
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          sampleSize: savings.sampleSize,
+          judgeAgreement: savings.judgeAgreement,
+          asOf: savings.asOf,
+          stale: savings.stale,
+        }
+      : undefined,
+  };
+}
+
 function buildRecommendationsContext(p: RecommendationsPayload): unknown {
   // Viewer-only (#2719): the findings are the server-computed result the user is
   // looking at — passed in pre-built, never recomputed here. No engine run, no
@@ -388,7 +536,7 @@ function buildRecommendationsContext(p: RecommendationsPayload): unknown {
     };
   }
 
-  return {
+  const summary = {
     view: 'recommendations',
     analysisStatus: p.analysisStatus ?? 'ready',
     totalRecommendations: recs.length,
@@ -400,19 +548,24 @@ function buildRecommendationsContext(p: RecommendationsPayload): unknown {
     totalEstimatedSavingsUsd: Number(
       recs.reduce((s, r) => s + (r.estSavingsUsd ?? 0), 0).toFixed(2)
     ),
-    recommendations: recs.slice(0, 20).map((r) => ({
-      id: r.id,
-      category: r.category,
-      severity: r.severity,
-      title: r.title,
-      detail: truncate(r.detail, 320),
-      action: truncate(r.action, 240),
-      estSavingsUsd: r.estSavingsUsd
-        ? Number(r.estSavingsUsd.toFixed(2))
-        : undefined,
-      affected: r.affected,
-    })),
   };
+  const recommendations: Record<string, unknown>[] = [];
+  for (const recommendation of recs.slice(0, 20)) {
+    let row = buildRecommendationContextRow(recommendation);
+    let candidate = { ...summary, recommendations: [...recommendations, row] };
+    if (
+      recommendations.length === 0 &&
+      JSON.stringify(candidate).length > MAX_RECOMMENDATION_CONTEXT_CHARS
+    ) {
+      row = buildRecommendationContextRow(recommendation, true);
+      candidate = { ...summary, recommendations: [row] };
+    }
+    if (JSON.stringify(candidate).length > MAX_RECOMMENDATION_CONTEXT_CHARS) {
+      break;
+    }
+    recommendations.push(row);
+  }
+  return { ...summary, recommendations };
 }
 
 function buildToolsContext(p: ToolsPayload): unknown {

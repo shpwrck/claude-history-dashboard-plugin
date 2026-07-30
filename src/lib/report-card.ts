@@ -35,6 +35,11 @@ import {
 } from './parse-telemetry';
 import { isUnattendedEntrypoint } from './parse-sessions';
 import type { DebugSessionMetrics } from './parse-debug';
+import type {
+  ClaimDerivation,
+  ClaimObservation,
+  ClaimProvenance,
+} from './claim-provenance';
 
 /** Reliability-drag bucket (additive score, then bucketed). */
 export type DragBucket = 'OK' | 'DRAG' | 'HEAVY';
@@ -137,6 +142,11 @@ export interface ReportCardProject {
   /** One-line, screenshot-and-argue explanation of the verdict. */
   verdictReason: string;
   /**
+   * Row-addressed observations plus executable attribution/drag/verdict
+   * derivations. This is the receipt for the KEEP/FLAG/MOVE claim.
+   */
+  provenance: ClaimProvenance;
+  /**
    * The sessions that contributed to this verdict, sorted signal-bearing first
    * then most-recent. Consumed by the view to drill each verdict to its runs
    * (#2477). Never null — a project always has at least one contributing row.
@@ -167,31 +177,55 @@ export interface ReportCard {
  * Compute the additive reliability-drag score for a project from its joined
  * telemetry + debug signals (#572 scoring). Returns the score and the bucket.
  */
-function scoreDrag(args: {
+interface DragScoreArgs {
   retryStormPct: number;
   maxAttempt: number;
   p90TtfbMs: number;
   wastedMs: number;
   fastModeLostCount: number;
   dominantEntrypoint: string;
-}): { score: number; bucket: DragBucket } {
-  let score = 0;
-  if (
-    args.retryStormPct >= RETRY_STORM_RATE_PCT ||
-    args.maxAttempt >= RETRY_STORM_MAX_ATTEMPT
-  ) {
-    score += 40;
-  }
-  if (args.p90TtfbMs >= TTFB_P90_HEAVY_MS) score += 25;
-  if (args.wastedMs >= DEAD_WALLCLOCK_MS) score += 15;
-  // Fast-mode-lost only counts as drag on an SDK-dominant project: those are
-  // the unattended runs paying a steady latency/cost tax for the lost fast path.
-  if (args.fastModeLostCount > 0 && isUnattendedEntrypoint(args.dominantEntrypoint)) {
-    score += 10;
-  }
+}
+
+interface DragContributions {
+  retry: number;
+  ttfb: number;
+  wasted: number;
+  fastMode: number;
+}
+
+function dragContributions(args: DragScoreArgs): DragContributions {
+  return {
+    retry:
+      args.retryStormPct >= RETRY_STORM_RATE_PCT ||
+      args.maxAttempt >= RETRY_STORM_MAX_ATTEMPT
+        ? 40
+        : 0,
+    ttfb: args.p90TtfbMs >= TTFB_P90_HEAVY_MS ? 25 : 0,
+    wasted: args.wastedMs >= DEAD_WALLCLOCK_MS ? 15 : 0,
+    // Fast-mode-lost only counts as drag on an SDK-dominant project: those are
+    // the unattended runs paying a steady latency/cost tax for the lost path.
+    fastMode:
+      args.fastModeLostCount > 0 &&
+      isUnattendedEntrypoint(args.dominantEntrypoint)
+        ? 10
+        : 0,
+  };
+}
+
+function scoreDrag(args: DragScoreArgs): {
+  score: number;
+  bucket: DragBucket;
+  contributions: DragContributions;
+} {
+  const contributions = dragContributions(args);
+  const score =
+    contributions.retry +
+    contributions.ttfb +
+    contributions.wasted +
+    contributions.fastMode;
   const bucket: DragBucket =
     score >= DRAG_HEAVY_MIN ? 'HEAVY' : score >= DRAG_DRAG_MIN ? 'DRAG' : 'OK';
-  return { score, bucket };
+  return { score, bucket, contributions };
 }
 
 /**
@@ -230,6 +264,296 @@ function blend(
     };
   }
   return { verdict: 'MOVE', reason: 'This CLI is actively expensive here (heavy reliability drag).' };
+}
+
+interface IndexedTelemetryRow {
+  index: number;
+  row: TelemetryEvent;
+}
+
+interface IndexedDebugRow {
+  index: number;
+  row: DebugSessionMetrics;
+}
+
+interface ReportCardProvenanceSources {
+  registryIndexByEntry: Map<SessionRegistryEntry, number>;
+  contextProjectIndexBySession: Map<string, number>;
+  contextEntrypointIndexBySession: Map<string, number>;
+  contextRows: ReportCardSessionContext[];
+  telemetryBySession: Map<string, IndexedTelemetryRow[]>;
+  debugBySession: Map<string, IndexedDebugRow>;
+}
+
+function sourceObservation(
+  id: string,
+  claim: string,
+  source: string,
+  record: string,
+  field: string,
+  value: string | number | boolean
+): ClaimObservation {
+  return { id, claim, source, record, field, value };
+}
+
+function buildProjectProvenance(
+  project: ProjectAttribution,
+  sources: ReportCardProvenanceSources,
+  metrics: {
+    stormEvents: number;
+    totalEvents: number;
+    retryStormPct: number;
+    maxAttempt: number;
+    p90TtfbMs: number;
+    wastedMs: number;
+    fastModeLostCount: number;
+    sessionsWithSignal: number;
+    dragScore: number;
+    dragBucket: DragBucket;
+    dragContributions: DragContributions;
+    verdict: ReportCardVerdict;
+    verdictReason: string;
+  }
+): ClaimProvenance {
+  const observations: ClaimObservation[] = [];
+  const contextDerivations: ClaimDerivation[] = [];
+  const reliabilitySessions = new Set<string>();
+
+  for (const entry of project.rawEntries) {
+    const registryIndex = sources.registryIndexByEntry.get(entry);
+    if (registryIndex !== undefined) {
+      const record = `sessionRegistry[${registryIndex}]`;
+      observations.push(
+        sourceObservation(
+          `registry.${registryIndex}.cwd`,
+          `session ${entry.sessionId} was grouped under ${entry.cwd}`,
+          'parse-session-registry',
+          record,
+          'cwd',
+          entry.cwd
+        ),
+        sourceObservation(
+          `registry.${registryIndex}.entrypoint`,
+          `session ${entry.sessionId} used entrypoint ${entry.entrypoint}`,
+          'parse-session-registry',
+          record,
+          'entrypoint',
+          entry.entrypoint
+        )
+      );
+    } else {
+      const projectIndex = sources.contextProjectIndexBySession.get(
+        entry.sessionId
+      );
+      if (projectIndex !== undefined) {
+        const context = sources.contextRows[projectIndex];
+        const contextProject =
+          usableProject(context.cwd) || usableProject(context.project) || '';
+        const projectField = usableProject(context.cwd) ? 'cwd' : 'project';
+        observations.push(
+          sourceObservation(
+            `context.${projectIndex}.${projectField}`,
+            `recovered session ${entry.sessionId} was grouped under ${contextProject}`,
+            'sessionContext',
+            `sessionContext[${projectIndex}]`,
+            projectField,
+            contextProject
+          )
+        );
+      }
+
+      const entrypointIndex = sources.contextEntrypointIndexBySession.get(
+        entry.sessionId
+      );
+      if (entrypointIndex !== undefined) {
+        const context = sources.contextRows[entrypointIndex];
+        const observedEntrypoint = context.entrypoint ?? '';
+        observations.push(
+          sourceObservation(
+            `context.${entrypointIndex}.entrypoint`,
+            `recovered session ${entry.sessionId} used entrypoint ${entry.entrypoint}`,
+            'sessionContext',
+            `sessionContext[${entrypointIndex}]`,
+            'entrypoint',
+            observedEntrypoint
+          )
+        );
+        contextDerivations.push({
+          id: `context.${entry.sessionId}.normalizedEntrypoint`,
+          formula: 'entrypoint || "unknown"',
+          operands: { entrypoint: observedEntrypoint },
+          value: entry.entrypoint,
+        });
+      } else if (projectIndex !== undefined) {
+        observations.push({
+          id: `context.${projectIndex}.entrypoint`,
+          claim: `recovered session ${entry.sessionId} had no recorded entrypoint`,
+          source: 'sessionContext',
+          record: `sessionContext[${projectIndex}]`,
+          field: 'entrypoint',
+        });
+        contextDerivations.push({
+          id: `context.${entry.sessionId}.normalizedEntrypoint`,
+          formula: 'entrypointPresent ? entrypoint : "unknown"',
+          operands: { entrypointPresent: false },
+          value: entry.entrypoint,
+        });
+      }
+    }
+
+    if (reliabilitySessions.has(entry.sessionId)) continue;
+    reliabilitySessions.add(entry.sessionId);
+    for (const { index, row } of
+      sources.telemetryBySession.get(entry.sessionId) ?? []) {
+      const record = `telemetry[${index}]`;
+      observations.push(
+        sourceObservation(
+          `telemetry.${index}.attempt`,
+          `telemetry row ${index} recorded retry attempt ${row.attempt}`,
+          'parse-telemetry',
+          record,
+          'attempt',
+          row.attempt
+        ),
+        sourceObservation(
+          `telemetry.${index}.elapsed_ms`,
+          `telemetry row ${index} recorded ${row.elapsed_ms}ms elapsed`,
+          'parse-telemetry',
+          record,
+          'elapsed_ms',
+          row.elapsed_ms
+        )
+      );
+    }
+    const debug = sources.debugBySession.get(entry.sessionId);
+    if (debug) {
+      const { index, row } = debug;
+      const record = `debugLogs[${index}]`;
+      for (const [field, value] of [
+        ['maxRetryAttempt', row.maxRetryAttempt],
+        ['ttfbP90', row.ttfbP90],
+        ['ttfbSampleCount', row.ttfbSampleCount],
+        ['fastModeLostCount', row.fastModeLostCount],
+      ] as const) {
+        observations.push(
+          sourceObservation(
+            `debug.${index}.${field}`,
+            `debug row ${index} recorded ${field} = ${value}`,
+            'parse-debug',
+            record,
+            field,
+            value
+          )
+        );
+      }
+    }
+  }
+
+  const dominantCount = project.entrypointMatrix[0]?.count ?? 0;
+  const derivations: ClaimDerivation[] = [
+    ...contextDerivations,
+    {
+      id: 'attribution.bucket',
+      formula:
+        'sessionCount <= 2 ? low-signal : dominantCount / sessionCount >= committedShareFloor ? committed : split',
+      operands: {
+        sessionCount: project.sessionCount,
+        dominantCount,
+        committedShareFloor: 0.7,
+      },
+      value: project.attributionBucket,
+    },
+    {
+      id: 'reliability.retryStormPct',
+      formula: 'totalEvents > 0 ? round(100 * stormEvents / totalEvents) : 0',
+      operands: {
+        stormEvents: metrics.stormEvents,
+        totalEvents: metrics.totalEvents,
+      },
+      value: metrics.retryStormPct,
+    },
+    {
+      id: 'drag.retryContribution',
+      formula:
+        'retryStormPct >= retryStormRateFloor || maxAttempt >= maxAttemptFloor ? 40 : 0',
+      operands: {
+        retryStormPct: metrics.retryStormPct,
+        retryStormRateFloor: RETRY_STORM_RATE_PCT,
+        maxAttempt: metrics.maxAttempt,
+        maxAttemptFloor: RETRY_STORM_MAX_ATTEMPT,
+      },
+      value: metrics.dragContributions.retry,
+    },
+    {
+      id: 'drag.ttfbContribution',
+      formula: 'p90TtfbMs >= ttfbFloorMs ? 25 : 0',
+      operands: {
+        p90TtfbMs: metrics.p90TtfbMs,
+        ttfbFloorMs: TTFB_P90_HEAVY_MS,
+      },
+      value: metrics.dragContributions.ttfb,
+    },
+    {
+      id: 'drag.wastedContribution',
+      formula: 'wastedMs >= wastedFloorMs ? 15 : 0',
+      operands: {
+        wastedMs: metrics.wastedMs,
+        wastedFloorMs: DEAD_WALLCLOCK_MS,
+      },
+      value: metrics.dragContributions.wasted,
+    },
+    {
+      id: 'drag.fastModeContribution',
+      formula: 'fastModeLostCount > 0 && unattendedDominant ? 10 : 0',
+      operands: {
+        fastModeLostCount: metrics.fastModeLostCount,
+        unattendedDominant: isUnattendedEntrypoint(
+          project.dominantEntrypoint
+        ),
+      },
+      value: metrics.dragContributions.fastMode,
+    },
+    {
+      id: 'drag.score',
+      formula:
+        'retryContribution + ttfbContribution + wastedContribution + fastModeContribution',
+      operands: {
+        retryContribution: metrics.dragContributions.retry,
+        ttfbContribution: metrics.dragContributions.ttfb,
+        wastedContribution: metrics.dragContributions.wasted,
+        fastModeContribution: metrics.dragContributions.fastMode,
+      },
+      value: metrics.dragScore,
+    },
+    {
+      id: 'drag.bucket',
+      formula:
+        'dragScore >= heavyFloor ? HEAVY : dragScore >= dragFloor ? DRAG : OK',
+      operands: {
+        dragScore: metrics.dragScore,
+        heavyFloor: DRAG_HEAVY_MIN,
+        dragFloor: DRAG_DRAG_MIN,
+      },
+      value: metrics.dragBucket,
+    },
+    {
+      id: 'verdict',
+      formula:
+        'blend(attributionBucket, dragBucket, sessionsWithSignal)',
+      operands: {
+        attributionBucket: project.attributionBucket,
+        dragBucket: metrics.dragBucket,
+        sessionsWithSignal: metrics.sessionsWithSignal,
+      },
+      value: metrics.verdict,
+    },
+  ];
+
+  return {
+    observations,
+    derivations,
+    inference: metrics.verdictReason,
+  };
 }
 
 function normalizeContext(
@@ -303,15 +627,54 @@ export function buildReportCard(
   sessionContext?: ReportCardSessionContext[] | null | undefined
 ): ReportCard {
   const registry = sessionRegistry ?? [];
-  const reliability = analyzeReliability(telemetry ?? []);
+  const telemetryRows = telemetry ?? [];
+  const debugRows = debugLogs ?? [];
+  const contextRows = sessionContext ?? [];
+  const reliability = analyzeReliability(telemetryRows);
 
   const relBySession = new Map<string, SessionReliability>();
   for (const s of reliability.bySession) relBySession.set(s.session_id, s);
   const debugBySession = new Map<string, DebugSessionMetrics>();
-  for (const d of debugLogs ?? []) debugBySession.set(d.sessionId, d);
+  const indexedDebugBySession = new Map<string, IndexedDebugRow>();
+  debugRows.forEach((row, index) => {
+    debugBySession.set(row.sessionId, row);
+    indexedDebugBySession.set(row.sessionId, { row, index });
+  });
+  const telemetryBySession = new Map<string, IndexedTelemetryRow[]>();
+  telemetryRows.forEach((row, index) => {
+    const bucket = telemetryBySession.get(row.session_id) ?? [];
+    bucket.push({ row, index });
+    telemetryBySession.set(row.session_id, bucket);
+  });
+  const registryIndexByEntry = new Map<SessionRegistryEntry, number>();
+  registry.forEach((entry, index) => registryIndexByEntry.set(entry, index));
+  const contextProjectIndexBySession = new Map<string, number>();
+  const contextEntrypointIndexBySession = new Map<string, number>();
+  contextRows.forEach((row, index) => {
+    if (
+      !contextProjectIndexBySession.has(row.sessionId) &&
+      (usableProject(row.cwd) || usableProject(row.project))
+    ) {
+      contextProjectIndexBySession.set(row.sessionId, index);
+    }
+    if (
+      !contextEntrypointIndexBySession.has(row.sessionId) &&
+      row.entrypoint !== undefined
+    ) {
+      contextEntrypointIndexBySession.set(row.sessionId, index);
+    }
+  });
+  const provenanceSources: ReportCardProvenanceSources = {
+    registryIndexByEntry,
+    contextProjectIndexBySession,
+    contextEntrypointIndexBySession,
+    contextRows,
+    telemetryBySession,
+    debugBySession: indexedDebugBySession,
+  };
 
   const registrySessionIds = new Set(registry.map((entry) => entry.sessionId));
-  const contextBySession = normalizeContext(sessionContext);
+  const contextBySession = normalizeContext(contextRows);
   const recoveredSessionIds = new Set<string>();
   const attributionEntries = [...registry];
   const reliabilitySessionIds = new Set<string>([
@@ -394,7 +757,11 @@ export function buildReportCard(
     const retryStormPct =
       totalEvents > 0 ? Math.round((100 * stormEvents) / totalEvents) : 0;
 
-    const { score: dragScore, bucket: dragBucket } = scoreDrag({
+    const {
+      score: dragScore,
+      bucket: dragBucket,
+      contributions: dragContributionRows,
+    } = scoreDrag({
       retryStormPct,
       maxAttempt,
       p90TtfbMs,
@@ -407,6 +774,21 @@ export function buildReportCard(
       dragBucket,
       sessionsWithSignal
     );
+    const provenance = buildProjectProvenance(p, provenanceSources, {
+      stormEvents,
+      totalEvents,
+      retryStormPct,
+      maxAttempt,
+      p90TtfbMs,
+      wastedMs,
+      fastModeLostCount,
+      sessionsWithSignal,
+      dragScore,
+      dragBucket,
+      dragContributions: dragContributionRows,
+      verdict,
+      verdictReason: reason,
+    });
 
     return {
       cwd: p.cwd,
@@ -434,6 +816,7 @@ export function buildReportCard(
       dragBucket,
       verdict,
       verdictReason: reason,
+      provenance,
       contributingSessions,
     };
   });

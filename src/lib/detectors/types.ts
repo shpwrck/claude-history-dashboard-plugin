@@ -64,6 +64,10 @@ import type { DocsMapArtifact } from '../parse-docs-map';
 import type { DocIssueSnapshot } from '../doc-issue-snapshot';
 import type { DocHygieneArtifact } from '../doc-hygiene-artifact';
 import type { EvidenceRef } from '../evidence';
+import type {
+  ClaimObservation,
+  ClaimProvenance,
+} from '../claim-provenance';
 // RecCategory and SavingsAttributionTier are defined in a dependency-free leaf
 // (#1582) so the parsers this module pulls types from (reclaim,
 // parse-external-guidance, parse-config-attribution via parse-repo-map-join) can
@@ -185,74 +189,12 @@ export interface RecFix {
 }
 
 /**
- * One directly-observed fact behind a recommendation, traceable to the
- * artifact it was read from. The keystone of the auditability contract
- * (#1049): a reader must be able to reproduce the count without
- * reverse-engineering the detector. This is the "observation" half of the
- * observation / inference / fix split — `claim` states ONLY what was measured,
- * never the conclusion drawn from it (that belongs in {@link RecProvenance.inference}).
+ * Recommendation names for the repository-wide claim-provenance contract.
+ * The aliases preserve the detector API while keeping one shared shape for
+ * detector and non-detector claim surfaces (#3105/#3166/#3170/#3171).
  */
-export interface RecObservation {
-  /**
-   * The measured fact, phrased without inference, e.g.
-   * "18 of 18 team inbox assignments are unread". No "should", no "because".
-   */
-  claim: string;
-  /**
-   * The `~/.claude/` artifact or `parse-*` source this was read from, e.g.
-   * `'stats-cache.json'`, `'parse-tools'`, `'~/.claude.json'`. Stable enough
-   * that an auditor knows where to look.
-   */
-  source: string;
-  /**
-   * The specific parsed field / path within {@link source} when one applies,
-   * e.g. `'lastComputedDate'`, `'toolData[].calls[].isError'`. Optional for
-   * sources that are a single scalar.
-   */
-  field?: string;
-  /**
-   * The reproducible value behind {@link claim} — the raw count/number/string
-   * an auditor would recompute. Optional only when the claim is itself the
-   * value.
-   */
-  value?: string | number;
-}
-
-/**
- * Structured provenance for a recommendation (#1049, epic #866 keystone).
- *
- * Splits a finding into the three things an auditor must be able to separate:
- * what was *observed* (each citing its artifact), what was *inferred* from
- * those observations, and — via {@link Recommendation.fix} — what is *proposed*.
- * Additive and OPTIONAL, exactly like {@link RecommendationSavingsAttribution}
- * and {@link Recommendation.reclaim}: detectors migrate onto it one at a time
- * (the sibling slices #1101–#1105), and the provenance contract test only
- * enforces shape where it is present plus an explicit opt-in allowlist, so the
- * not-yet-migrated detectors compile and behave unchanged.
- */
-export interface RecProvenance {
-  /** The directly-observed facts, each traceable to its artifact/field. */
-  observations: RecObservation[];
-  /**
-   * The inferential step from observations to the recommendation — the "so
-   * what". Kept distinct from the observations so a false inference over true
-   * data is visible as such.
-   */
-  inference?: string;
-  /**
-   * As-of date (ISO `YYYY-MM-DD`) of the underlying data when it derives from a
-   * timestamped artifact (e.g. `stats-cache.json`'s `lastComputedDate`). Drives
-   * the stale-input demotion in #1102: present-tense wording is only honest
-   * when this is fresh.
-   */
-  asOf?: string;
-  /**
-   * True when {@link asOf} is older than the detector's freshness threshold, so
-   * downstream rendering can demote present-tense wording to "as of <date>" or
-   * suppress (#1102). Detectors that cannot tell leave it undefined.
-   */
-  stale?: boolean;
-}
+export type RecObservation = ClaimObservation;
+export type RecProvenance = ClaimProvenance;
 
 export type SavingsAttributionConfidence = 'low' | 'medium' | 'high';
 

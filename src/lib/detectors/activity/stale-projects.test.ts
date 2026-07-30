@@ -152,6 +152,26 @@ describe('activity.stale-projects detector', () => {
       expect(rec.provenance!.asOf).not.toBe(new Date(NOW).toISOString().slice(0, 10));
     });
 
+    it('anchors relative inactivity to the fixed evaluation date (#3105)', () => {
+      const rec = fire([
+        makeProject({
+          projectShort: 'quietest',
+          lastSeen: NOW - 42 * DAY,
+        }),
+      ]);
+      expect(rec.evidence?.[0]).toContain(
+        'last 42d ago as of 2026-06-01'
+      );
+      expect(rec.detail).toContain('as of 2026-06-01');
+      expect(rec.provenance!.observations).toContainEqual(
+        expect.objectContaining({
+          source: 'detector evaluation clock',
+          field: 'detector.rule(now)',
+          value: '2026-06-01',
+        })
+      );
+    });
+
     it('reproduces the count from the cited field — mutating lastSeen moves it', () => {
       const cited = (lastSeen: number) =>
         detector.rule(

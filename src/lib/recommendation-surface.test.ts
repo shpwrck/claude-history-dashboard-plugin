@@ -115,6 +115,120 @@ describe('parseRecommendationResult', () => {
       ).toThrow('Invalid recommendation analysis response');
     }
   });
+
+  it('validates every recommendation and coverage member before calling the envelope ready (#3166)', () => {
+    const recommendation = {
+      id: 'reliability.tool-errors',
+      category: 'reliability',
+      severity: 'warning',
+      title: 'Tools with high error rates',
+      detail: '2 of 5 Edit calls recorded an error outcome.',
+      action: 'Inspect the failing calls.',
+      affected: 2,
+      estSavingsUsd: 1.25,
+      evidence: ['Edit: 40% of 5'],
+      provenance: {
+        observations: [
+          {
+            claim: '2 of 5 Edit calls recorded an error outcome',
+            source: 'parse-tools',
+            field: 'toolData[].calls[].isError',
+            value: 2,
+          },
+        ],
+        inference: 'The observed error rate warrants investigation.',
+        asOf: '2026-07-30',
+      },
+      claimClass: 'accounting',
+      proofTier: 'auditable',
+    };
+    const coverage = { domain: 'success-rate', status: 'PROVE' };
+    const envelope = {
+      recommendations: [recommendation],
+      domainCoverage: [coverage],
+    };
+
+    expect(parseRecommendationResult(envelope)).toEqual(envelope);
+
+    const malformedMembers = [
+      { recommendations: [null], domainCoverage: [coverage] },
+      { recommendations: ['claim'], domainCoverage: [coverage] },
+      {
+        recommendations: [{ id: 'partial' }],
+        domainCoverage: [coverage],
+      },
+      {
+        recommendations: [{ ...recommendation, affected: Number.NaN }],
+        domainCoverage: [coverage],
+      },
+      {
+        recommendations: [{ ...recommendation, affected: -1 }],
+        domainCoverage: [coverage],
+      },
+      {
+        recommendations: [
+          {
+            ...recommendation,
+            evidenceRefs: [{ sessionId: 's', entryIndex: -1 }],
+          },
+        ],
+        domainCoverage: [coverage],
+      },
+      {
+        recommendations: [
+          {
+            ...recommendation,
+            evidenceRefs: [
+              {
+                sessionId: 's',
+                entryIndex: 1,
+                timestamp: '2026-02-30T00:00:00.000Z',
+              },
+            ],
+          },
+        ],
+        domainCoverage: [coverage],
+      },
+      {
+        recommendations: [
+          {
+            ...recommendation,
+            provenance: {
+              ...recommendation.provenance,
+              observations: [
+                {
+                  ...recommendation.provenance.observations[0],
+                  value: Number.POSITIVE_INFINITY,
+                },
+              ],
+            },
+          },
+        ],
+        domainCoverage: [coverage],
+      },
+      {
+        recommendations: [
+          {
+            ...recommendation,
+            provenance: undefined,
+          },
+        ],
+        domainCoverage: [coverage],
+      },
+      { recommendations: [recommendation], domainCoverage: [null] },
+      { recommendations: [recommendation], domainCoverage: [7] },
+      {
+        recommendations: [recommendation],
+        domainCoverage: [{ domain: 'cost', status: 'UNKNOWN' }],
+      },
+    ];
+
+    for (const malformed of malformedMembers) {
+      expect(() => parseRecommendationResult(malformed)).toThrow(
+        'Invalid recommendation analysis response'
+      );
+    }
+  });
 });
 
 // ── Viewer-only engine boundary (#2719) — source-contract proof, no build ──────

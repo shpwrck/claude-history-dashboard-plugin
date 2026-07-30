@@ -5,18 +5,23 @@
  * separate what was *observed* (each fact citing its artifact), what was
  * *inferred*, and what is *proposed* (the `fix`), and must reproduce the count
  * without reverse-engineering the detector. {@link RecProvenance} carries that
- * structure; this module is its single source of validation truth so the
- * detectors, the contract test, and CI all judge it the same way.
+ * structure; the repository-wide validator now lives in
+ * `../claim-provenance` so detector and non-detector claims are judged by the
+ * same contract. This module owns detector coverage/exemptions and re-exports
+ * the shared validation entry points under their established names.
  *
  * Deliberately dependency-light (imports only the leaf types) so it can sit
  * anywhere in the detector import graph without a cycle.
  */
 import type {
-  RecProvenance,
-  RecObservation,
   Recommendation,
   RecommendationSavingsAttribution,
 } from './types';
+import {
+  isClaimCalendarDate,
+  validateClaimObservation,
+  validateClaimProvenance,
+} from '../claim-provenance';
 
 /**
  * Rec ids that have NOT yet adopted the provenance contract — the debt
@@ -165,40 +170,7 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'workflow.uncovered-shadow-axis',
 ];
 
-/** ISO `YYYY-MM-DD`. Intentionally strict so a timestamp or garbage is rejected. */
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-/**
- * True when `v` is a real Gregorian calendar date written `YYYY-MM-DD` (#3204).
- *
- * The shape regex alone accepts impossible dates — `2026-99-99` and
- * `2026-02-30` are both four-two-two digits — and an `asOf` that never happened
- * cannot anchor a claim in time. Parsing is not enough on its own either:
- * `Date.parse('2026-02-30T00:00:00.000Z')` does NOT fail, it rolls over to
- * March 2. So the check is a ROUND TRIP — parse it, format it back, and require
- * the same string. A rolled-over date fails because it comes back different.
- *
- * Consequently `2026-02-29` is rejected (2026 is not a leap year) while
- * `2024-02-29` is accepted, matching the calendar rather than the digit shape.
- */
-function isCalendarDate(v: string): boolean {
-  if (!ISO_DATE.test(v)) return false;
-  const ms = Date.parse(`${v}T00:00:00.000Z`);
-  if (!Number.isFinite(ms)) return false;
-  return new Date(ms).toISOString().slice(0, 10) === v;
-}
-
-/**
- * A claim that states a figure must carry the scalar it was computed from.
- *
- * Any digit makes a claim quantitative — "18 of 18 assignments unread" asserts
- * a number a reader must be able to reproduce without re-deriving the detector,
- * which is the whole point of the contract. A claim with no digit is
- * qualitative and has no figure to cite.
- */
-const CLAIM_STATES_A_FIGURE = /\d/;
 
 /**
  * True when an ISO `YYYY-MM-DD` `asOf` date is older than `thresholdDays`
@@ -218,7 +190,7 @@ export function isAsOfStale(
   // Same readability rule the validator applies (#3204) — an impossible date is
   // no more demotable than a malformed one, and two derivations of "is this
   // date readable" would drift.
-  if (asOf === undefined || !isCalendarDate(asOf)) return false;
+  if (asOf === undefined || !isClaimCalendarDate(asOf)) return false;
   const asOfMs = Date.parse(asOf);
   if (!Number.isFinite(asOfMs)) return false;
   return now - asOfMs > thresholdDays * DAY_MS;
@@ -261,100 +233,9 @@ export function demoteStaleAttribution(
   return demoted;
 }
 
-function isNonEmptyString(v: unknown): v is string {
-  return typeof v === 'string' && v.trim().length > 0;
-}
-
-/**
- * Validate a single observation. Returns a list of human-readable errors
- * (empty ⇒ valid).
- *
- * An observation must state a non-empty `claim`, cite a non-empty `source`, and
- * name the `field` within that source (#3204) — a citation a reader cannot
- * follow to a specific field is not reproducible, which is the failure the
- * contract exists to prevent.
- *
- * `value` is required only when the `claim` states a figure. This boundary is
- * measured, not assumed: at the time the rule landed, all 114 observations the
- * catalog emitted already carried `field` (so requiring it cost nothing), and
- * 107 carried `value`. Of the 7 that did not, 6 are qualitative and would have
- * had to invent a scalar to satisfy a blanket "always require value" rule:
- *
- *   "a Stop hook is currently configured"                        (existence)
- *   "current settings.json could not be read"                    (absence)
- *   "only git/gh (repo-resolving) ops are counted"               (scope note)
- *
- * Forcing a number onto those would trade a real auditability gain for
- * fabricated precision, so the rule keys on whether the claim actually asserts
- * a figure. The 7th DID state figures with nothing to check them against —
- * `workflow.shadow-prompt`'s "current 0 / stale 0 / revoked 0 / unknown 6"
- * proof-status breakdown — and was the one genuine defect this rule caught; it
- * now cites the tuple. That is the whole migration cost.
- */
-export function validateRecObservation(obs: RecObservation, idx = 0): string[] {
-  const errs: string[] = [];
-  const at = `observations[${idx}]`;
-  if (!isNonEmptyString(obs?.claim)) errs.push(`${at}.claim must be a non-empty string`);
-  if (!isNonEmptyString(obs?.source)) errs.push(`${at}.source must cite a non-empty artifact/parser`);
-  if (!isNonEmptyString(obs?.field)) {
-    errs.push(
-      `${at}.field must name the field within ${JSON.stringify(obs?.source ?? '(no source)')} ` +
-        `that this claim was read from — a source-only citation cannot be located`
-    );
-  }
-  if (
-    obs?.value !== undefined &&
-    !(typeof obs.value === 'string' || (typeof obs.value === 'number' && Number.isFinite(obs.value)))
-  ) {
-    errs.push(`${at}.value, when present, must be a string or a finite number`);
-  }
-  if (
-    obs?.value === undefined &&
-    isNonEmptyString(obs?.claim) &&
-    CLAIM_STATES_A_FIGURE.test(obs.claim)
-  ) {
-    errs.push(
-      `${at}.claim states a figure (${JSON.stringify(obs.claim)}) so it must carry the ` +
-        `scalar \`value\` it was computed from — otherwise the number cannot be ` +
-        `reproduced without re-deriving the detector`
-    );
-  }
-  return errs;
-}
-
-/**
- * Validate a {@link RecProvenance} block. Returns a list of human-readable
- * errors (empty ⇒ valid). Rules:
- *  - `observations` is a non-empty array, each valid per {@link validateRecObservation};
- *  - `inference`, when present, is a non-empty string (kept distinct from observations);
- *  - `asOf`, when present, is an ISO `YYYY-MM-DD` date;
- *  - `stale`, when present, is a boolean, and may only be `true` alongside an `asOf`.
- */
-export function validateRecProvenance(p: RecProvenance): string[] {
-  const errs: string[] = [];
-  if (!p || typeof p !== 'object') return ['provenance must be an object'];
-  if (!Array.isArray(p.observations) || p.observations.length === 0) {
-    errs.push('provenance.observations must be a non-empty array');
-  } else {
-    p.observations.forEach((o, i) => errs.push(...validateRecObservation(o, i)));
-  }
-  if (p.inference !== undefined && !isNonEmptyString(p.inference)) {
-    errs.push('provenance.inference, when present, must be a non-empty string');
-  }
-  if (p.asOf !== undefined && !isCalendarDate(p.asOf)) {
-    errs.push(
-      `provenance.asOf, when present, must be a real ISO YYYY-MM-DD calendar date ` +
-        `(got ${JSON.stringify(p.asOf)})`
-    );
-  }
-  if (p.stale !== undefined && typeof p.stale !== 'boolean') {
-    errs.push('provenance.stale, when present, must be a boolean');
-  }
-  if (p.stale === true && p.asOf === undefined) {
-    errs.push('provenance.stale=true requires an asOf date to demote wording against');
-  }
-  return errs;
-}
+/** Detector API aliases for the repository-wide claim-provenance validator. */
+export const validateRecObservation = validateClaimObservation;
+export const validateRecProvenance = validateClaimProvenance;
 
 /**
  * Validate a recommendation against the provenance contract (#3205).

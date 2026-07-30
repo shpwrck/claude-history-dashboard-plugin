@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseIsoInstantMs } from './iso-instant';
+import { isCanonicalIsoInstant, parseIsoInstantMs } from './iso-instant';
 
 describe('parseIsoInstantMs', () => {
   it('rejects out-of-range clock and offset fields before Date.parse can normalize them', () => {
@@ -15,5 +15,16 @@ describe('parseIsoInstantMs', () => {
     expect(parseIsoInstantMs('2026-06-09T23:59:59+14:00')).toBe(
       Date.parse('2026-06-09T23:59:59+14:00')
     );
+  });
+});
+
+describe('isCanonicalIsoInstant', () => {
+  it('accepts only the exact UTC millisecond wire form', () => {
+    expect(isCanonicalIsoInstant('2026-06-09T23:59:59.000Z')).toBe(true);
+
+    expect(isCanonicalIsoInstant('2026-06-09T23:59:59Z')).toBe(false);
+    expect(isCanonicalIsoInstant('2026-06-09T19:59:59.000-04:00')).toBe(false);
+    expect(isCanonicalIsoInstant('2026-06-09')).toBe(false);
+    expect(isCanonicalIsoInstant('2026-02-30T00:00:00.000Z')).toBe(false);
   });
 });

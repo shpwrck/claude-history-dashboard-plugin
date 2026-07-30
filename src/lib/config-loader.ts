@@ -1168,9 +1168,9 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
     settings,
     environment: effectiveSettingsEnvironment,
   } = readLiveSettings(paths);
-  const hookPathsCheckedAt = (opts.now?.() ?? new Date(Date.now())).toISOString();
+  const capturedAt = (opts.now?.() ?? new Date(Date.now())).toISOString();
   // #2500/#2553: capture each hook command's conservative referenced-path state.
-  annotateHookReferencedPaths(settings, paths.homeDir, undefined, hookPathsCheckedAt);
+  annotateHookReferencedPaths(settings, paths.homeDir, undefined, capturedAt);
   // Validate BOTH raw files before mergeLiveSettings projects their effective
   // subset. Local syntax/type/unknown/rule/interpolation failures matter even
   // when settings.json exists, and every finding retains its owning source.
@@ -1198,7 +1198,7 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
   // #2500: project-scoped hooks resolve `$CLAUDE_PROJECT_DIR` against their root.
   const projectSettings = readProjectSettings(projectRoots, paths.configFileMaxBytes);
   for (const [root, ps] of Object.entries(projectSettings)) {
-    annotateHookReferencedPaths(ps, paths.homeDir, root, hookPathsCheckedAt);
+    annotateHookReferencedPaths(ps, paths.homeDir, root, capturedAt);
   }
   const skills = [
     ...listResources(
@@ -1218,6 +1218,7 @@ export function assembleLiveConfig(opts: LiveConfigPathOptions = {}) {
   // #2500: flag SKILL.md references to bundled resources no longer on disk.
   annotateSkillDanglingRefs(skills, paths.configFileMaxBytes);
   return {
+    capturedAt,
     settings,
     settingsHealth,
     claudeMd: {

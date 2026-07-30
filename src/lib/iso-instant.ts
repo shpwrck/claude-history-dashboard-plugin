@@ -76,3 +76,18 @@ export function parseIsoInstantMs(ts: string | null | undefined): number | undef
   if (new Date(dayMs).toISOString().slice(0, 10) !== m[1]) return undefined;
   return ms;
 }
+
+/**
+ * True only for the canonical wire form produced by `Date#toISOString`.
+ *
+ * `parseIsoInstantMs` deliberately accepts equivalent ISO offsets and date-only
+ * values for ingest. Snapshot identities and wire expiries are stricter: one
+ * instant has one byte representation so receipts compare without timezone or
+ * formatting ambiguity.
+ */
+export function isCanonicalIsoInstant(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const epochMs = parseIsoInstantMs(value);
+  if (epochMs === undefined) return false;
+  return new Date(epochMs).toISOString() === value;
+}

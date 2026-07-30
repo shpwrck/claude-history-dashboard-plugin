@@ -30,10 +30,14 @@
  *     tool/MCP schemas) is NOT logged per turn. The `input_schema` of every tool
  *     is ABSENT from transcripts. We reconstruct a LOWER BOUND from the CURRENT
  *     ingested config (CLAUDE.md/AGENTS.md text + skill/agent/command
- *     descriptions + settings) with a DRIFT CAVEAT, applied once per turn (it is
- *     re-sent every turn). The un-sizable remainder falls into the residual.
+ *     descriptions + settings) from a DATED INGEST SNAPSHOT with a drift
+ *     caveat, applied once per turn (it is re-sent every turn). This is not a
+ *     contemporaneous record of historical turns. The un-sizable remainder
+ *     falls into the residual.
  */
 import type { LiveConfig, SessionTokenData, TokenEntry } from '../types';
+import type { ClaimProvenance } from './claim-provenance';
+import { isCanonicalIsoInstant } from './iso-instant';
 import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
 import { estimateTokens } from './thinking-tokens';
 
@@ -70,10 +74,16 @@ export interface ContextComposition {
   billedInputTokens: number;
   /** Billed output tokens. */
   billedOutputTokens: number;
+  /** Dated source identity for the reconstructed system-prefix claim. */
+  provenance?: {
+    systemPrefix: ClaimProvenance;
+  };
 }
 
 /** Config-derived static-prefix estimate, with its explicit fidelity caveat. */
 export interface ConfigPrefixEstimate {
+  /** Snapshot identity when the mutable config was captured at ingest. */
+  capturedAt?: string;
   /** Per-turn reconstructed prefix tokens (a LOWER BOUND). */
   totalTokens: number;
   breakdown: {
@@ -88,6 +98,8 @@ export interface ConfigPrefixEstimate {
   unsizableMcpServers: number;
   /** Human-readable drift + low-fidelity caveat for the UI to surface verbatim. */
   caveat: string;
+  /** Reproducible snapshot identity and token-floor derivation. */
+  provenance: ClaimProvenance;
 }
 
 /** The per-session fields the composition reads (subset of SessionTokenData). */
@@ -114,8 +126,8 @@ const emptyBuckets = (): ContextBuckets => ({
 });
 
 /**
- * Reconstruct the per-turn static-prefix token floor from the CURRENT ingested
- * config.
+ * Reconstruct the per-turn static-prefix token floor from an ingested config
+ * snapshot.
  *
  * This is a deliberate LOWER BOUND: tool/MCP `input_schema` and the harness
  * system prompt are not available locally, so they are NOT counted here (they
@@ -126,19 +138,61 @@ const emptyBuckets = (): ContextBuckets => ({
 export function tokenizeConfigPrefix(
   liveConfig: Pick<
     LiveConfig,
-    'claudeMd' | 'skills' | 'subagents' | 'commands' | 'mcpServers' | 'settings'
+    | 'capturedAt'
+    | 'claudeMd'
+    | 'skills'
+    | 'subagents'
+    | 'commands'
+    | 'mcpServers'
+    | 'settings'
   > | null | undefined
 ): ConfigPrefixEstimate {
+  const capturedAt = isCanonicalIsoInstant(liveConfig?.capturedAt)
+    ? liveConfig.capturedAt
+    : undefined;
+  const asOf = capturedAt?.slice(0, 10);
+  const snapshotCaveat = !liveConfig
+    ? 'No live config snapshot was supplied, so no system-prefix tokens are attributed.'
+    : capturedAt
+      ? `Reconstructed from the live config snapshot as of ${asOf} ` +
+        `(${capturedAt}), not a contemporaneous record of what historical turns sent.`
+      : 'Reconstructed from CURRENT config with no snapshot timestamp, not what ' +
+        'historical turns sent (drift).';
   const baseCaveat =
-    'Reconstructed from CURRENT config, not what was sent per turn (drift). ' +
-    'A lower bound: tool/MCP schemas and the harness system prompt are not ' +
-    'available locally and are not counted here — they fall into the residual.';
+    `${snapshotCaveat} A lower bound: tool/MCP schemas and the harness system ` +
+    'prompt are not available locally and are not counted here — they fall ' +
+    'into the residual.';
   if (!liveConfig) {
+    const provenance: ClaimProvenance = {
+      observations: [
+        {
+          claim: 'no live config snapshot was supplied',
+          source: 'config-loader',
+          field: 'liveConfig',
+          value: false,
+        },
+      ],
+      derivations: [
+        {
+          id: 'config-prefix.totalTokens',
+          formula: 'instructions + resourceDescriptions + settings',
+          operands: {
+            instructions: 0,
+            resourceDescriptions: 0,
+            settings: 0,
+          },
+          value: 0,
+        },
+      ],
+      inference:
+        'Without a config snapshot, no system-prefix tokens are attributed.',
+    };
     return {
       totalTokens: 0,
       breakdown: { instructions: 0, resourceDescriptions: 0, settings: 0 },
       unsizableMcpServers: 0,
       caveat: baseCaveat,
+      provenance,
     };
   }
 
@@ -167,16 +221,49 @@ export function tokenizeConfigPrefix(
   }
 
   const unsizableMcpServers = (liveConfig.mcpServers ?? []).length;
+  const totalTokens = instructions + resourceDescriptions + settings;
   const caveat =
     unsizableMcpServers > 0
       ? `${baseCaveat} ${unsizableMcpServers} MCP server(s) configured whose tool schemas could not be sized.`
       : baseCaveat;
+  const provenance: ClaimProvenance = {
+    observations: [
+      capturedAt
+        ? {
+            claim: `the mutable live config was captured at ${capturedAt}`,
+            source: 'config-loader (assembleLiveConfig)',
+            record: capturedAt,
+            field: 'liveConfig.capturedAt',
+            value: capturedAt,
+          }
+        : {
+            claim: 'the live config has no capture timestamp',
+            source: 'config-loader (assembleLiveConfig)',
+            field: 'liveConfig.capturedAt',
+            value: false,
+          },
+    ],
+    derivations: [
+      {
+        id: 'config-prefix.totalTokens',
+        formula: 'instructions + resourceDescriptions + settings',
+        operands: { instructions, resourceDescriptions, settings },
+        value: totalTokens,
+      },
+    ],
+    inference:
+      'The tokenized config is a lower-bound snapshot estimate, not proof of ' +
+      'the prefix sent on any historical turn.',
+    ...(capturedAt ? { capturedAt, asOf } : {}),
+  };
 
   return {
-    totalTokens: instructions + resourceDescriptions + settings,
+    ...(capturedAt ? { capturedAt } : {}),
+    totalTokens,
     breakdown: { instructions, resourceDescriptions, settings },
     unsizableMcpServers,
     caveat,
+    provenance,
   };
 }
 
@@ -207,8 +294,10 @@ function entryCostSplit(entry: TokenEntry): { input: number; output: number } {
  */
 export function composeSession(
   session: ComposableSession,
-  prefixTokens: number
+  prefix: number | ConfigPrefixEstimate
 ): ContextComposition {
+  const prefixTokens =
+    typeof prefix === 'number' ? prefix : prefix.totalTokens;
   const billedInputTokens =
     session.totalInputTokens + session.totalCacheCreationTokens + session.totalCacheReadTokens;
   const billedOutputTokens = session.totalOutputTokens;
@@ -266,7 +355,15 @@ export function composeSession(
     unattributedResidual: inShare(unattributedResidual),
   };
 
-  return { tokens, cost, billedInputTokens, billedOutputTokens };
+  return {
+    tokens,
+    cost,
+    billedInputTokens,
+    billedOutputTokens,
+    ...(typeof prefix === 'number'
+      ? {}
+      : { provenance: { systemPrefix: prefix.provenance } }),
+  };
 }
 
 const addInto = (acc: ContextBuckets, b: ContextBuckets) => {
@@ -281,20 +378,28 @@ const addInto = (acc: ContextBuckets, b: ContextBuckets) => {
 /** Compose an aggregate across many sessions. */
 export function composeAggregate(
   sessions: ReadonlyArray<ComposableSession>,
-  prefixTokens: number
+  prefix: number | ConfigPrefixEstimate
 ): ContextComposition {
   const tokens = emptyBuckets();
   const cost = emptyBuckets();
   let billedInputTokens = 0;
   let billedOutputTokens = 0;
   for (const session of sessions) {
-    const c = composeSession(session, prefixTokens);
+    const c = composeSession(session, prefix);
     addInto(tokens, c.tokens);
     addInto(cost, c.cost);
     billedInputTokens += c.billedInputTokens;
     billedOutputTokens += c.billedOutputTokens;
   }
-  return { tokens, cost, billedInputTokens, billedOutputTokens };
+  return {
+    tokens,
+    cost,
+    billedInputTokens,
+    billedOutputTokens,
+    ...(typeof prefix === 'number'
+      ? {}
+      : { provenance: { systemPrefix: prefix.provenance } }),
+  };
 }
 
 /** Sum of all six token buckets — equals `billedInput + billedOutput` (anchored). */

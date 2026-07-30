@@ -303,6 +303,126 @@ describe('buildContext recommendations (viewer-only, #2719)', () => {
     expect((out.recommendations as unknown[]).length).toBe(2);
   });
 
+  it('preserves bounded evidence, provenance, proof posture, and attribution (#3116)', () => {
+    const evidence = ['session-1: Edit failed twice'];
+    const evidenceRefs = [
+      {
+        sessionId: 'session-1',
+        entryIndex: 4,
+        entryId: 'record-1:0',
+        timestamp: '2026-07-30T12:00:00.000Z',
+        toolUseId: 'tool-1',
+      },
+    ];
+    const provenance = {
+      observations: [
+        {
+          claim: '2 Edit calls recorded an error outcome',
+          source: 'parse-tools',
+          record: 'session-1',
+          field: 'toolData[].calls[].isError',
+          value: 2,
+        },
+      ],
+      inference: 'The observed errors warrant inspection.',
+      asOf: '2026-07-30',
+    };
+    const savingsAttribution = {
+      interventionKey: 'reliability.tool-errors',
+      signatureId: 'edit-errors',
+      tier: 'tier-0-estimate',
+      predictedSavingsUsd: 1.25,
+      sampleSize: 2,
+      asOf: '2026-07-30',
+    } as const;
+    const recommendation = {
+      id: 'reliability.tool-errors',
+      category: 'reliability',
+      severity: 'warning',
+      title: 'Tools with high error rates',
+      detail: 'Two Edit calls failed.',
+      action: 'Inspect the failing calls.',
+      evidence,
+      evidenceRefs,
+      provenance,
+      claimClass: 'accounting',
+      proofTier: 'auditable',
+      savingsAttribution,
+    } as unknown as Recommendation;
+
+    const out = buildContext({
+      view: 'recommendations',
+      data: { recommendations: [recommendation] },
+    }) as {
+      recommendations: Array<Record<string, unknown>>;
+    };
+
+    expect(out.recommendations[0]).toMatchObject({
+      evidence,
+      evidenceRefs,
+      provenance,
+      claimClass: 'accounting',
+      proofTier: 'auditable',
+      savingsAttribution,
+    });
+  });
+
+  it('keeps the complete recommendation projection under the context ceiling', () => {
+    const huge = 'x'.repeat(5_000);
+    const recommendation = {
+      id: 'reliability.bounded-receipt',
+      category: 'reliability',
+      severity: 'warning',
+      title: huge,
+      detail: huge,
+      action: huge,
+      evidence: Array.from({ length: 20 }, () => huge),
+      evidenceRefs: Array.from({ length: 20 }, (_, entryIndex) => ({
+        sessionId: huge,
+        entryIndex,
+        timestamp: '2026-07-30T12:00:00.000Z',
+        toolUseId: huge,
+      })),
+      provenance: {
+        observations: Array.from({ length: 20 }, (_, index) => ({
+          id: `${index}-${huge}`,
+          claim: huge,
+          source: huge,
+          record: huge,
+          field: huge,
+          value: huge,
+        })),
+        derivations: Array.from({ length: 20 }, (_, index) => ({
+          id: `${index}-${huge}`,
+          formula: huge,
+          operands: Object.fromEntries(
+            Array.from({ length: 20 }, (__, operand) => [
+              `${operand}-${huge}`,
+              huge,
+            ])
+          ),
+          value: huge,
+        })),
+        inference: huge,
+        asOf: '2026-07-30',
+      },
+      claimClass: 'accounting',
+      proofTier: 'auditable',
+    } as unknown as Recommendation;
+    const out = buildContext({
+      view: 'recommendations',
+      data: {
+        recommendations: Array.from({ length: 20 }, (_, index) => ({
+          ...recommendation,
+          id: `reliability.bounded-receipt-${index}`,
+        })),
+      },
+    }) as { recommendations: Array<Record<string, unknown>> };
+
+    expect(out.recommendations.length).toBeGreaterThan(0);
+    expect(JSON.stringify(out).length).toBeLessThanOrEqual(10 * 1024);
+  });
+
   it('renders an empty context for an empty ready result', () => {
     const out = buildContext({
       view: 'recommendations',

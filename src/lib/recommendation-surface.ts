@@ -16,6 +16,11 @@ import type { DashboardFilter, RouteFilter } from './routing';
 import type { Recommendation, RecSeverity } from './detectors/types';
 import type { DomainCoverage, DomainCoverageStatus } from './coverage-types';
 import type { RecommendationResult as EngineRecommendationResult } from './recommendations';
+import {
+  isClaimCanonicalInstant,
+  isClaimProvenance,
+} from './claim-provenance';
+import { parseIsoInstantMs } from './iso-instant';
 
 export type {
   Recommendation,
@@ -67,29 +72,153 @@ export type RecommendationSurfaceResponse =
  * consumer's `?? []` fallback into a false clean result.
  */
 export function parseRecommendationResult(value: unknown): RecommendationResult {
-  const record = value as Record<string, unknown>;
+  const record = asRecord(value);
   if (
-    typeof value !== 'object' ||
-    value === null ||
+    record === null ||
     Array.isArray(value) ||
     !Array.isArray(record.recommendations) ||
     !Array.isArray(record.domainCoverage) ||
-    ('validThrough' in record && !isCanonicalIsoInstant(record.validThrough))
+    !record.recommendations.every(isRecommendation) ||
+    !record.domainCoverage.every(isDomainCoverage) ||
+    ('validThrough' in record &&
+      !isClaimCanonicalInstant(record.validThrough))
   ) {
     throw new Error('Invalid recommendation analysis response');
   }
   return value as RecommendationResult;
 }
 
-function isCanonicalIsoInstant(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  const epochMs = Date.parse(value);
-  if (!Number.isFinite(epochMs)) return false;
-  try {
-    return new Date(epochMs).toISOString() === value;
-  } catch {
-    return false;
-  }
+const RECOMMENDATION_CATEGORIES = new Set([
+  'cost',
+  'context',
+  'workflow',
+  'safety',
+  'security',
+  'reliability',
+  'speed',
+  'activity',
+  'maintenance',
+]);
+const RECOMMENDATION_SEVERITIES = new Set(['critical', 'warning', 'info']);
+const CLAIM_CLASSES = new Set(['accounting', 'causal']);
+const PROOF_TIERS = new Set([
+  'auditable',
+  'accounting',
+  'observational',
+  'causal-proof',
+]);
+const ACTION_DOMAINS = new Set([
+  'home',
+  'safety',
+  'cost',
+  'success-rate',
+  'speed',
+  'context-health',
+  'workflow-hygiene',
+  'discovery',
+  'raw',
+]);
+const COVERAGE_STATUSES = new Set(['PROVE', 'INFER', 'CANNOT_SEE']);
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isOptionalNonNegativeNumber(
+  record: Record<string, unknown>,
+  field: string,
+  integer = false
+): boolean {
+  const value = record[field];
+  return (
+    !(field in record) ||
+    (typeof value === 'number' &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      (!integer || Number.isInteger(value)))
+  );
+}
+
+function isOptionalStringArray(
+  record: Record<string, unknown>,
+  field: string
+): boolean {
+  return (
+    !(field in record) ||
+    (Array.isArray(record[field]) &&
+      (record[field] as unknown[]).every(isNonEmptyString))
+  );
+}
+
+function isEvidenceRef(value: unknown): boolean {
+  const record = asRecord(value);
+  return (
+    record !== null &&
+    isNonEmptyString(record.sessionId) &&
+    typeof record.entryIndex === 'number' &&
+    Number.isInteger(record.entryIndex) &&
+    record.entryIndex >= 0 &&
+    isNonEmptyString(record.timestamp) &&
+    parseIsoInstantMs(record.timestamp) !== undefined &&
+    (!('toolUseId' in record) || isNonEmptyString(record.toolUseId)) &&
+    (!('entryId' in record) || isNonEmptyString(record.entryId))
+  );
+}
+
+function isOptionalEvidenceRefs(record: Record<string, unknown>): boolean {
+  return (
+    !('evidenceRefs' in record) ||
+    (Array.isArray(record.evidenceRefs) &&
+      record.evidenceRefs.every(isEvidenceRef))
+  );
+}
+
+function isRecommendation(value: unknown): boolean {
+  const record = asRecord(value);
+  if (record === null) return false;
+  return (
+    isNonEmptyString(record.id) &&
+    typeof record.category === 'string' &&
+    RECOMMENDATION_CATEGORIES.has(record.category) &&
+    typeof record.severity === 'string' &&
+    RECOMMENDATION_SEVERITIES.has(record.severity) &&
+    isNonEmptyString(record.title) &&
+    isNonEmptyString(record.detail) &&
+    isNonEmptyString(record.action) &&
+    isOptionalNonNegativeNumber(record, 'affected', true) &&
+    isOptionalNonNegativeNumber(record, 'estSavingsUsd') &&
+    isOptionalNonNegativeNumber(record, 'estTimeReclaimedMin') &&
+    isOptionalNonNegativeNumber(record, 'premiseUsdPerMo') &&
+    isOptionalStringArray(record, 'evidence') &&
+    isOptionalEvidenceRefs(record) &&
+    ('claimClass' in record
+      ? typeof record.claimClass === 'string' &&
+        CLAIM_CLASSES.has(record.claimClass)
+      : true) &&
+    ('proofTier' in record
+      ? typeof record.proofTier === 'string' &&
+        PROOF_TIERS.has(record.proofTier)
+      : true) &&
+    isClaimProvenance(record.provenance)
+  );
+}
+
+function isDomainCoverage(value: unknown): boolean {
+  const record = asRecord(value);
+  if (record === null) return false;
+  return (
+    typeof record.domain === 'string' &&
+    ACTION_DOMAINS.has(record.domain) &&
+    typeof record.status === 'string' &&
+    COVERAGE_STATUSES.has(record.status) &&
+    (!('staleNote' in record) || isNonEmptyString(record.staleNote))
+  );
 }
 
 // Only these four RouteFilter keys are valid params on the `reclaim-compass`

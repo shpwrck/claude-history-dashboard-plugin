@@ -676,6 +676,12 @@ export interface SettingsHealth {
 }
 
 export interface LiveConfig {
+  /**
+   * Canonical ISO instant when this mutable config surface was assembled.
+   * Historical estimates must carry this snapshot identity rather than imply
+   * the current files were the exact config sent on an earlier turn.
+   */
+  capturedAt?: string;
   /** Merged global + local settings.json. Same shape #166 shipped. */
   settings: LiveSettings;
   /**

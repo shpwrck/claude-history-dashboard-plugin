@@ -3,7 +3,13 @@ import type { SessionTokenData, TokenEntry } from '../types';
 import type { ToolUsageData, ToolCall } from './parse-tools';
 import type { ApiErrorEvent } from './parse-errors';
 import type { TelemetryEnvFingerprint, TelemetryEvent } from './parse-telemetry';
-import { buildReviewQueue, type ReviewQueueInput } from './review-queue';
+import type { SessionTimeline } from './parse-timeline';
+import {
+  buildReviewQueue,
+  type ReviewQueueInput,
+  type ReviewQueueSignal,
+} from './review-queue';
+import { validateClaimProvenance } from './claim-provenance';
 
 const EMPTY_INPUT: ReviewQueueInput = {
   tokenData: [],
@@ -235,5 +241,158 @@ describe('buildReviewQueue', () => {
     });
     expect(queue[0].reason).toContain('Over window');
   });
-});
 
+  it('emits row-addressed, score-reproducible provenance for every signal path (#3171)', () => {
+    const expensive = tokenData('expensive', [
+      tokenEntry({ inputTokens: 1_000_000, outputTokens: 50_000 }),
+    ]);
+    const retryInput: ReviewQueueInput = {
+      ...EMPTY_INPUT,
+      tokenData: [
+        expensive,
+        ...['cheap-a', 'cheap-b', 'cheap-c'].map((id) =>
+          tokenData(id, [tokenEntry({ inputTokens: 1_000 })])
+        ),
+      ],
+      toolData: [
+        toolData('expensive', [
+          toolCall('Edit', true, 1),
+          toolCall('Edit', true, 2),
+          toolCall('Edit', true, 3),
+          toolCall('Edit', false, 4),
+        ]),
+      ],
+      apiErrors: [
+        apiError('expensive', 2),
+        apiError('expensive', 3),
+        apiError('expensive', 4),
+      ],
+      debugLogs: [
+        {
+          sessionId: 'expensive',
+          ttfbP50: 1_500,
+          ttfbP90: 7_500,
+          ttfbMax: 8_000,
+          ttfbSampleCount: 5,
+          maxRetryAttempt: 5,
+          slowFirstByteCount: 2,
+          fastModeLostCount: 0,
+        },
+      ],
+      telemetry: [
+        telemetryEvent('expensive', 4),
+        telemetryEvent('expensive', 5),
+      ],
+    };
+    const contextInput: ReviewQueueInput = {
+      ...EMPTY_INPUT,
+      tokenData: [
+        tokenData(
+          'context-proof',
+          [
+            tokenEntry({
+              model: '<synthetic>',
+              inputTokens: 210_000,
+              cacheCreationTokens: 20_000,
+            }),
+          ],
+          {
+            totalCacheCreationTokens: 20_000,
+            compactionEvents: [
+              {
+                timestamp: '2026-06-01T00:10:00.000Z',
+                beforeContext: 210_000,
+                afterContext: 80_000,
+                reductionPercent: 62,
+              },
+            ],
+          }
+        ),
+      ],
+    };
+    const timeline = (sessionId: string): SessionTimeline => ({
+      sessionId,
+      startTime: '2026-06-01T00:00:00.000Z',
+      endTime: '2026-06-01T00:10:00.000Z',
+      entries: [
+        {
+          timestamp: '2026-06-01T00:00:00.000Z',
+          kind: 'user',
+          summary: 'work',
+        },
+      ],
+    });
+    const outcomeInput: ReviewQueueInput = {
+      ...EMPTY_INPUT,
+      timelines: [timeline('bad-outcome'), timeline('good-outcome')],
+      tokenData: [
+        tokenData(
+          'bad-outcome',
+          [tokenEntry({ inputTokens: 1_000_000 })],
+          {
+            compactionEvents: [
+              {
+                timestamp: '2026-06-01T00:05:00.000Z',
+                beforeContext: 1_000,
+                afterContext: 500,
+                reductionPercent: 50,
+              },
+            ],
+          }
+        ),
+        tokenData('good-outcome', [tokenEntry({ inputTokens: 1_000 })]),
+      ],
+      toolData: [
+        toolData('bad-outcome', [toolCall('Read', true, 1)]),
+        toolData('good-outcome', [toolCall('Read', false, 1)]),
+      ],
+    };
+
+    const signals = [
+      ...buildReviewQueue(retryInput).flatMap((item) => item.signals),
+      ...buildReviewQueue(contextInput).flatMap((item) => item.signals),
+      ...buildReviewQueue(outcomeInput).flatMap((item) => item.signals),
+    ];
+    const sources = new Set(
+      signals.flatMap((signal) =>
+        signal.provenance.observations.map((observation) => observation.source)
+      )
+    );
+    for (const expected of [
+      'parse-sessions',
+      'parse-tools',
+      'parse-errors',
+      'parse-debug',
+      'parse-telemetry',
+      'context-health',
+      'parse-timeline-success',
+    ]) {
+      expect(sources.has(expected), `missing ${expected}`).toBe(true);
+    }
+
+    const assertSignalReceipt = (signal: ReviewQueueSignal) => {
+      expect(validateClaimProvenance(signal.provenance)).toEqual([]);
+      expect(
+        signal.provenance.observations.every(
+          (observation) =>
+            Boolean(observation.source) &&
+            Boolean(observation.record) &&
+            Boolean(observation.field) &&
+            observation.value !== undefined
+        )
+      ).toBe(true);
+      const score = signal.provenance.derivations?.find(
+        (derivation) => derivation.id === 'review-queue.score'
+      );
+      expect(score).toBeDefined();
+      expect(score!.formula).toBe('sum(score components)');
+      const reproduced = Object.values(score!.operands).reduce(
+        (sum, component) => sum + Number(component),
+        0
+      );
+      expect(reproduced).toBeCloseTo(signal.score, 10);
+      expect(score!.value).toBe(signal.score);
+    };
+    signals.forEach(assertSignalReceipt);
+  });
+});

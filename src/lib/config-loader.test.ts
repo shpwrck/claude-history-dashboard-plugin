@@ -15,6 +15,17 @@ import { detector as skillHookIntegrityDetector } from './detectors/maintenance/
 import type { RecommendationInput } from './detectors/types';
 
 describe('assembleLiveConfig', () => {
+  it('stamps the mutable config snapshot with the supplied canonical capture instant', () => {
+    const capturedAt = new Date('2026-07-30T12:34:56.789Z');
+    const liveConfig = assembleLiveConfig({
+      claudeDir,
+      homeDir: root,
+      now: () => capturedAt,
+    });
+
+    expect(liveConfig.capturedAt).toBe(capturedAt.toISOString());
+  });
+
   it('passes the explicit names-only host environment observation to settings validation', () => {
     writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
       hooks: { Stop: [{ command: '${AVAILABLE} ${MISSING}' }] },
