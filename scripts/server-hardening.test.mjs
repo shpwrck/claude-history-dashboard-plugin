@@ -105,6 +105,53 @@ async function spawnServerExpectExit(env, timeoutMs = 10_000) {
   };
 }
 
+async function spawnServerExpectResponse(env, path, timeoutMs = 10_000) {
+  let stdout = '';
+  let stderr = '';
+  const proc = spawn(process.execPath, ['--import', REGISTER, SERVER], {
+    cwd: PROJECT_DIR,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  proc.stdout.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
+  proc.stderr.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+
+  const deadline = Date.now() + timeoutMs;
+  let response = null;
+  let requestError = null;
+  try {
+    while (Date.now() < deadline && proc.exitCode === null) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${env.PORT}${path}`);
+        response = {
+          status: res.status,
+          authenticate: res.headers.get('www-authenticate'),
+          body: await res.text(),
+        };
+        break;
+      } catch (error) {
+        requestError = error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+  } finally {
+    if (proc.exitCode === null) {
+      proc.kill();
+      await new Promise((resolve) => proc.once('close', resolve));
+    }
+  }
+
+  return {
+    response,
+    requestError,
+    output: [stdout, stderr].filter(Boolean).join('\n'),
+  };
+}
+
 await withServerDirs('server-hardening-port', async ({ env }) => {
   const result = await spawnServerExpectExit({ ...env, PORT: '0' });
   check(
@@ -159,9 +206,11 @@ await withServerDirs('server-hardening-bind', async ({ env }) => {
     refused.output.slice(-2000)
   );
 
-  // The DASHBOARD_ALLOW_INSECURE_BIND override lets it boot (does NOT exit at
-  // startup) — also proves the guard doesn't break a normal boot.
-  const overridden = await spawnServerExpectExit(
+  // #3295: there is NO override that disarms the guard. The legacy
+  // DASHBOARD_ALLOW_INSECURE_BIND=1 knob is inert — an unauthenticated
+  // beyond-loopback bind stays unrepresentable, so the server still refuses to
+  // start rather than serving ~/.claude to the LAN with no auth.
+  const legacyOverride = await spawnServerExpectExit(
     {
       ...env,
       PORT: '5994',
@@ -171,13 +220,53 @@ await withServerDirs('server-hardening-bind', async ({ env }) => {
     5000
   );
   check(
-    'exposed bind with override boots instead of failing closed',
-    overridden.timedOut === true,
-    overridden.output.slice(-2000)
+    'legacy insecure-bind override no longer starts an unauthenticated LAN bind',
+    !legacyOverride.timedOut && legacyOverride.code !== 0,
+    legacyOverride.output.slice(-2000)
+  );
+
+  // Auth is the gate: with DASHBOARD_USER/DASHBOARD_PASS configured the same
+  // beyond-loopback bind boots, but a request without those credentials gets a
+  // Basic challenge before any live-history route can run (acceptance #1/#2).
+  const authed = await spawnServerExpectResponse(
+    {
+      ...env,
+      PORT: '5995',
+      DASHBOARD_BIND_HOST: '0.0.0.0',
+      DASHBOARD_USER: 'ops',
+      DASHBOARD_PASS: 'strong-lan-secret',
+    },
+    '/sessions-manifest.json',
+    5000
+  );
+  check(
+    'exposed bind with auth configured boots',
+    authed.response !== null,
+    authed.output.slice(-2000)
+  );
+  check(
+    'unauthenticated LAN request receives a Basic auth challenge',
+    authed.response?.status === 401 &&
+      /^Basic\b/.test(authed.response.authenticate || ''),
+    `${authed.response?.status ?? authed.requestError}; ${authed.output.slice(-1000)}`
+  );
+  check(
+    'unauthenticated LAN request cannot retrieve live-history data',
+    authed.response?.status === 401 &&
+      !authed.response.body.includes('"sessions"'),
+    authed.response?.body.slice(0, 1000)
   );
 });
 
 const serverSource = await readFile(join(SCRIPTS_DIR, 'server.mjs'), 'utf8');
+const deploymentRunbook = await readFile(
+  join(PROJECT_DIR, 'docs/runbooks/chd-deploy-master/README.md'),
+  'utf8'
+);
+check(
+  'live deployment recovery no longer tells operators to inspect insecure-flag propagation',
+  !deploymentRunbook.includes('insecure-flag propagation')
+);
 const recommendationBuildInitializers = [
   ...serverSource.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*=\s*\{([^{}]*\bsourceSig\b[^{}]*\bpromise\b[^{}]*)\};/g),
 ];

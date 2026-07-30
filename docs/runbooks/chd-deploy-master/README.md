@@ -34,21 +34,24 @@ healthy is what makes the injected `[recs]` findings reflect the latest engine.
   MUST run with `HOME=/home/jskrzypek` so the bind path does not nest to
   `${HOME}/.claude` (a stray HOME yields a 0-session dashboard).
 - **Bind posture (env-controlled):** `BIND_HOST` selects the host interface
-  (`127.0.0.1` loopback default, `0.0.0.0` for LAN); `DASHBOARD_ALLOW_INSECURE_BIND`
-  is the override for the #2064 guard that otherwise refuses an unauthenticated
-  beyond-loopback bind. Both are exported in `~/.bashrc` for a deliberate
-  trusted-network LAN demo. As of this writing the instance is on **loopback**.
+  (`127.0.0.1` loopback default, `0.0.0.0` for LAN). The #2064 guard in
+  `scripts/server.mjs` refuses to start on an unauthenticated beyond-loopback
+  bind, and since #3295 there is **no override** — a LAN bind must configure auth
+  (see Credentials/access). Canonical posture is **loopback**; the instance is on
+  loopback as of this writing.
 - **Credentials/access:** the loopback run needs **no secrets** — reach it at
-  `http://127.0.0.1:5173`. For LAN exposure the safer path is HTTP Basic auth via
-  `DASHBOARD_USER`/`DASHBOARD_PASS` (locations: shell env / `~/.bashrc`; not
-  currently set — the LAN demo instead uses `DASHBOARD_ALLOW_INSECURE_BIND=1`).
-  Never copy any of these values into this file. The `chdref` alias definition
-  itself lives in `~/.bashrc`.
+  `http://127.0.0.1:5173`. LAN exposure REQUIRES HTTP Basic auth via
+  `DASHBOARD_USER`/`DASHBOARD_PASS` (locations: shell env / `~/.bashrc`) plus TLS
+  terminated at a trusted reverse proxy, so the documented LAN URL is `https://…`;
+  without the credentials the server fails closed at boot. Never copy any of these
+  values into this file. Remove any leftover `DASHBOARD_ALLOW_INSECURE_BIND` export
+  from `~/.bashrc` — it is inert and the guard-disarming LAN mode is prohibited
+  (see Decisions). The `chdref` alias definition itself lives in `~/.bashrc`.
 
 ### Template map
 
 - docker-compose.yml + docker-compose.local.yml (main checkout) -> running container `chd-deploy-master_app_1` (compose project `chd-deploy-master`)
-- ~/.bashrc `chdref` alias + `BIND_HOST` / `DASHBOARD_ALLOW_INSECURE_BIND` exports -> the refresh command and the container's bind posture
+- ~/.bashrc `chdref` alias + `BIND_HOST` (+ `DASHBOARD_USER`/`DASHBOARD_PASS` for a LAN bind) exports -> the refresh command and the container's bind posture
 - docker-compose.yml's reviewed `ghcr.io/shpwrck/claude-history-dashboard:latest@sha256:...` default -> the immutable published artifact the next recreate selects
 - .github/workflows/docker-publish.yml's `:latest` / `:sha-<short>` outputs -> discovery candidates whose resolved digest must land through a reviewed pin update before deployment
 - host ~/.claude -> bind-mounted into the container as the live data source
@@ -63,8 +66,11 @@ healthy is what makes the injected `[recs]` findings reflect the latest engine.
   && HOME=/home/jskrzypek podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate )
 ```
 
-Prereq for LAN: `BIND_HOST=0.0.0.0` and `DASHBOARD_ALLOW_INSECURE_BIND=1` present
-in the shell env (they are exported from `~/.bashrc`). Loopback needs neither.
+Prereq for LAN: `BIND_HOST=0.0.0.0` **and** `DASHBOARD_USER`/`DASHBOARD_PASS` set
+in the shell env (exported from `~/.bashrc`), fronted by the TLS reverse proxy in
+`docker-compose.tls.yml` (Caddy, publishes 443) so the documented URL is
+`https://…`. Without the credentials the guard fails the boot closed. Loopback
+needs none of these.
 This is the published-image **pull** path (no `--build`), so the instance tracks
 the reviewed digest committed in the checkout. It deliberately does **not**
 follow later `:latest` retags. To advance it, wait for `docker-publish.yml`,
@@ -82,7 +88,7 @@ HOME=/home/jskrzypek BIND_HOST=127.0.0.1 podman compose -p chd-deploy-master -f 
 
 - **Health:** `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5173/api/dashboard-status` → `200`.
 - **Confirm the intended build is live:** `podman inspect chd-deploy-master_app_1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^GIT_SHA='` should equal the reviewed commit recorded next to the Compose digest pin; `/api/recommendations.json` should return a JSON array.
-- **Crash-loop `Refusing to start … reachable UNAUTHENTICATED`:** the container is bound `0.0.0.0` but `DASHBOARD_ALLOW_INSECURE_BIND=1` did not reach compose interpolation. Fix: recreate on loopback (agent-safe command above), or re-run `chdref` in a shell that has the `~/.bashrc` exports. Read logs with `podman logs --tail 25 chd-deploy-master_app_1`.
+- **Crash-loop `Refusing to start … reachable UNAUTHENTICATED`:** the container is bound `0.0.0.0` with no `DASHBOARD_USER`/`DASHBOARD_PASS` in the compose env — the #2064 guard is fail-closed and there is no override (#3295). Fix: recreate on loopback (agent-safe command above), or set `DASHBOARD_USER`/`DASHBOARD_PASS` (behind TLS) and re-run `chdref`. Read logs with `podman logs --tail 25 chd-deploy-master_app_1`.
 - **`Address already in use` for host TCP 5173:** the compose ran under the wrong project name (e.g. the default `claude-history-dashboard` from the checkout dir), so it tried a second stack while the standing container still held the port. Always pass `-p chd-deploy-master`, which recreates in place.
 - **Rollback:** resolve a known-good `:sha-<short>` candidate to its reviewed
   digest, set `CHD_APP_IMAGE=ghcr.io/shpwrck/claude-history-dashboard@sha256:<digest>`
@@ -103,17 +109,17 @@ HOME=/home/jskrzypek BIND_HOST=127.0.0.1 podman compose -p chd-deploy-master -f 
 - **`-p chd-deploy-master` is load-bearing** — the default compose project name
   derived from the checkout directory is different, so an unprefixed `up` spins a
   second stack that collides on port 5173 instead of recreating this one.
-- **LAN exposure is deliberate but guard-gated.** `0.0.0.0` +
-  `DASHBOARD_ALLOW_INSECURE_BIND=1` (both exported in `~/.bashrc`) is an opt-in
-  trusted-network demo; the #2064 guard in `scripts/server.mjs` refuses an
-  unauthenticated beyond-loopback bind otherwise. Rejected safer alternative kept
-  on the table: Basic auth via `DASHBOARD_USER`/`DASHBOARD_PASS`.
-- **Agents must not disarm the guard.** Passing `DASHBOARD_ALLOW_INSECURE_BIND=1`
-  + `0.0.0.0` inline from an agent is denied by the Claude Code auto-mode safety
-  classifier (guard-disarming / expose-local-services) unless the user named the
-  flag in-task — the `~/.bashrc` export does not count as in-task consent. The
-  agent-safe posture is loopback; restoring LAN reachability is the user's
-  `chdref` call.
+- **LAN exposure requires auth; the insecure override is removed (#3295).** A
+  beyond-loopback bind (`BIND_HOST=0.0.0.0`) MUST set `DASHBOARD_USER`/
+  `DASHBOARD_PASS` and sit behind a TLS-terminating reverse proxy; the #2064 guard
+  in `scripts/server.mjs` fails the boot closed otherwise, with no override. The
+  former `DASHBOARD_ALLOW_INSECURE_BIND=1` unauthenticated LAN mode is prohibited
+  legacy and no longer functions — the flag is inert. Remove any leftover export
+  from `~/.bashrc`.
+- **The agent-safe posture is loopback.** Restoring LAN reachability is the user's
+  `chdref` call with credentials configured; an agent binding `0.0.0.0` inline is
+  still denied by the Claude Code auto-mode safety classifier, and an
+  unauthenticated LAN bind can no longer start regardless.
 
 ### How to drive it
 
@@ -124,7 +130,7 @@ baked revision and registry digest, then land that digest in the Compose pin;
 (3) **as the user**, run `chdref` to pull + recreate with the LAN posture, or
 run the agent-safe loopback command above if you are an agent; (4) verify `200`
 on `/api/dashboard-status` and that `GIT_SHA` matches the pin's reviewed
-commit; (5) if it crash-loops, check `BIND_HOST` / insecure-flag propagation
+commit; (5) if it crash-loops, check `BIND_HOST` and credential propagation
 per Verify and recover. To change the exposure posture, edit the `~/.bashrc`
-exports (or add `DASHBOARD_USER`/`DASHBOARD_PASS`) and re-run `chdref` once —
-do not hand-edit the container.
+exports (including `DASHBOARD_USER`/`DASHBOARD_PASS` for LAN access) and re-run
+`chdref` once — do not hand-edit the container.
