@@ -36,12 +36,63 @@
 //             metadata is not executing it. It is a recurrence guard for the
 //             fetch-and-run idiom, NOT a proof that no other path reaches
 //             unreviewed code.
+//   STAMP   — every container image in the ARC scale-set values, and the
+//             BuildConfig output tag that produces it, names either a digest or a
+//             VERSION-STAMPED tag (`v<YYYY>-<MM>-<DD>-<commit>`); AND a stamped
+//             image is one this repo actually BUILDS, in the repository the
+//             BuildConfig publishes to; AND producer and consumers all name the
+//             SAME stamp. All three halves are load-bearing, because each covers
+//             a state the others report as success: two well-formed stamps that
+//             disagree split the pool across stale tooling; a stamp on a
+//             repository nothing here builds (`ghcr.io/attacker/chd-ci-runner`)
+//             redirects privileged runners while looking perfectly valid; and a
+//             stamp with no producer can only ever be checked against itself.
+//             See #3340 below for why this rung is weaker than PIN, and what it
+//             does still buy.
 //
-// SCOPE: .github/workflows/, .github/actions/, and deploy/arc/runner-image/.
-// That last directory is included deliberately — #3306 was fixed by deleting the
-// workflow-side gh installer and relying on the baked runner image, so the image
-// build is where that responsibility LANDED. Leaving it unscanned would let the
-// same defect reappear one layer down and call itself fixed.
+// #3340 — WHY THE RUNNER POOL GETS A WEAKER RULE THAN EVERYTHING ELSE
+//
+//   The four scale-set values files all ran `chd-ci-runner:latest`. That tag is
+//   the BuildConfig's own output target, so EVERY `oc start-build` silently
+//   replaced the code executed by pods that run as root, carry a privileged
+//   Docker sidecar, and receive workflow credentials — with no reviewed diff
+//   anywhere. That is the defect.
+//
+//   The finding asked for `@sha256:` digests, and that is NOT implementable at
+//   this seam: `chd-ci-runner` is an OpenShift ImageStream in each cluster's OWN
+//   internal registry, so its digest is produced at build time and DIFFERS
+//   between hub and spoke. One committed digest cannot be correct for both, and a
+//   placeholder breaks CI. So the digest rung is unavailable, not skipped.
+//
+//   A version-stamped tag is the next rung down, and the honest claim for it is
+//   narrow: it is NOT immutable — someone with push access can still move it. What
+//   it removes is the AUTOMATIC mover. `:latest` was reassigned by any rebuild,
+//   incidentally and invisibly; `v2026-07-29-87858e92` is only reassigned by
+//   someone deliberately re-pointing that exact name. Rebuilding from a changed
+//   recipe now requires editing the stamp in this repo, which makes the runner
+//   image change a REVIEWED diff — which is the property #3340 actually lost.
+//
+//   Stated plainly so nobody later mistakes this for digest pinning: this rung
+//   buys review, not immutability.
+//
+//   WHAT THE STAMP RULE DOES NOT CLAIM: it checks the image references that are
+//   PRESENT. If a container's `image:` line were deleted outright, the
+//   gha-runner-scale-set chart substitutes its own default
+//   (`ghcr.io/actions/actions-runner:latest`) — the same defect, reached by
+//   absence rather than by a bad value, and this scanner would see nothing to
+//   flag. Closing that needs a structural read of the containers list, not a line
+//   scan; no YAML parser is on this gate's dependency path today. Tracked
+//   separately rather than approximated with an indentation heuristic that would
+//   misfire on valid files.
+//
+// SCOPE: .github/workflows/, .github/actions/, deploy/arc/runner-image/, and the
+// deploy/arc ARC scale-set values (flat = spoke, hub/ = hub).
+// The runner-image directory is included deliberately — #3306 was fixed by
+// deleting the workflow-side gh installer and relying on the baked runner image,
+// so the image build is where that responsibility LANDED. The scale-set values
+// are included for the mirror-image reason: they are where the built image is
+// finally SELECTED, and a gate that checked only how the image is built would
+// miss a pod pointed at a mutable tag.
 //
 // There is deliberately no exception list. An unpinnable dependency is a design
 // decision that should be argued in review, not silenced by an entry here.
@@ -74,11 +125,159 @@ const PINNED_DOCKER_RE = /^docker:\/\/\S+@sha256:[0-9a-f]{64}$/;
 const FETCH_EXEC_RE =
   /\b(?:curl|wget)\b[^|;&\n]*\|\s*(?:sudo\s+)?(?:tar|sh|bash|zsh|dash|ksh|python3?|node|ruby|perl|unzip|gunzip|zcat|openssl)\b/;
 
-/** A container base image pinned to a manifest digest. */
-const IMAGE_DIGEST_RE = /@sha256:[0-9a-f]{64}/;
+/**
+ * A container base image pinned to a manifest digest.
+ *
+ * END-ANCHORED deliberately. Unanchored, `image@sha256:<64 hex>:latest` matches,
+ * so a malformed reference that no registry can resolve would be accepted as
+ * "digest-pinned" and skip every further check — the gate reporting success for
+ * a reference that would leave pods in ImagePullBackOff. A digest must consume
+ * the WHOLE reference to count as one.
+ */
+const IMAGE_DIGEST_RE = /@sha256:[0-9a-f]{64}$/;
 
 /** A registry image reference: has a dotted registry host before the first `/`. */
 const REGISTRY_REF_RE = /^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?\/\S+$/i;
+
+/**
+ * A version-stamped tag: `v<YYYY>-<MM>-<DD>-<7..40 hex>` — the ISO date of the
+ * build and the commit whose recipe produced it, e.g. `v2026-07-29-87858e92`.
+ *
+ * This is an ALLOWLIST on purpose. Rejecting a denylist of known-mutable names
+ * (`latest`, `main`, `stable`, ...) would keep passing the next mutable name
+ * somebody invents, and would pass a bare untagged reference — which Docker
+ * resolves to `:latest`, the exact defect, spelled invisibly. Requiring a shape
+ * that a moving tag cannot accidentally have makes the mistake unrepresentable
+ * rather than merely discouraged.
+ */
+const STAMPED_TAG_RE = /^v\d{4}-\d{2}-\d{2}-[0-9a-f]{7,40}$/;
+
+/**
+ * An `image:` key in a Helm values file, with whatever follows it on the line.
+ *
+ * The capture is deliberately `\S*` (possibly EMPTY) rather than `\S+`. YAML lets
+ * a scalar sit on the following line, so `image:` alone is a legal way to write a
+ * reference this line scanner cannot see — which would be a one-newline bypass of
+ * the whole rule. Matching the empty case lets it be reported rather than
+ * skipped. Requiring `(?:^|\s)` before the key keeps sibling keys that merely END
+ * in `image` (`runnerImage:`, `dindImage:`) from matching.
+ */
+const VALUES_IMAGE_RE = /(?:^|\s)image:\s*(.*?)\s*$/;
+
+/**
+ * YAML spellings this line scanner cannot resolve to a single image reference.
+ *
+ * The capture above is `.*?` rather than `\S*` for the same reason the empty
+ * case is reported: with `\S*`, a value the regex could not consume produced NO
+ * match at all, so the line was skipped in silence. `image: !!str foo:latest` is
+ * valid YAML, resolves to a mutable tag, and slipped through exactly that way —
+ * verified before this was written, not assumed.
+ *
+ * Anything that is not a bare or simply-quoted scalar is therefore REPORTED
+ * rather than skipped. A tag, anchor, alias or block indicator has no business
+ * in a runner image reference, so refusing to guess costs nothing real and keeps
+ * "cannot parse" from reading as "verified".
+ */
+export function unparseableImageValue(value) {
+  if (/\s/.test(value)) {
+    return `\`${value}\` is not a single image reference, so it cannot be checked here`;
+  }
+  if (/^[!&*|>]/.test(value)) {
+    return `\`${value}\` uses a YAML tag, anchor or block indicator this gate does not resolve`;
+  }
+  return null;
+}
+
+/**
+ * An OpenShift ImageStreamTag reference (`<stream>:<tag>`) in a bare YAML
+ * `name:`. Registry references are handled separately by REGISTRY_REF_RE; a
+ * `name:` with no colon is an ordinary Kubernetes object name, not an image.
+ */
+const IMAGE_STREAM_TAG_RE = /^[a-z0-9][a-z0-9._-]*:[A-Za-z0-9][\w.-]*$/;
+
+/**
+ * The tag of an image reference, or null when it carries none.
+ *
+ * Split at the LAST `/` first: a registry host may carry a port
+ * (`...svc:5000/arc-runners/chd-ci-runner:latest`), and that colon must not be
+ * mistaken for the tag separator.
+ */
+export function imageRefTag(ref) {
+  const lastSlash = ref.lastIndexOf('/');
+  const nameAndTag = lastSlash === -1 ? ref : ref.slice(lastSlash + 1);
+  const colon = nameAndTag.indexOf(':');
+  return colon === -1 ? null : nameAndTag.slice(colon + 1);
+}
+
+/**
+ * Strip one layer of YAML quoting.
+ *
+ * `name: "chd-ci-runner:latest"` is valid YAML and means exactly the same thing
+ * as the bare form, but a raw `\S+` capture keeps the quotes, so every pattern
+ * below fails to match and the reference slips through unchecked. Quoting must
+ * not be a way to opt out of the gate.
+ */
+export function unquote(value) {
+  return value.replace(/^['"]|['"]$/g, '');
+}
+
+/**
+ * The image NAME of a reference — the last path segment, minus any tag or
+ * digest. `.../arc-runners/chd-ci-runner:v2026-07-29-87858e92` and the
+ * BuildConfig's own `chd-ci-runner:latest` both yield `chd-ci-runner`, which is
+ * what lets the producer and its consumers be recognised as the same image
+ * across files that spell it at different lengths.
+ */
+export function imageRefName(ref) {
+  const lastSlash = ref.lastIndexOf('/');
+  const nameAndTag = lastSlash === -1 ? ref : ref.slice(lastSlash + 1);
+  const at = nameAndTag.indexOf('@');
+  const base = at === -1 ? nameAndTag : nameAndTag.slice(0, at);
+  const colon = base.indexOf(':');
+  return colon === -1 ? base : base.slice(0, colon);
+}
+
+/**
+ * The full repository of a reference — everything except the tag or digest.
+ *
+ * The basename alone is NOT an identity. `ghcr.io/attacker/chd-ci-runner` and
+ * the in-cluster `.../arc-runners/chd-ci-runner` share a basename, so matching
+ * producers to consumers on the last path segment would let a values file keep a
+ * perfectly valid stamp while redirecting the pool to a repository this cluster
+ * never builds — a gate-approved swap of the image that privileged, credential-
+ * bearing runners execute. Identity has to be the whole repository.
+ */
+export function imageRefRepository(ref) {
+  const at = ref.indexOf('@');
+  const base = at === -1 ? ref : ref.slice(0, at);
+  const lastSlash = base.lastIndexOf('/');
+  const nameAndTag = lastSlash === -1 ? base : base.slice(lastSlash + 1);
+  const colon = nameAndTag.indexOf(':');
+  const name = colon === -1 ? nameAndTag : nameAndTag.slice(0, colon);
+  return lastSlash === -1 ? name : `${base.slice(0, lastSlash)}/${name}`;
+}
+
+/**
+ * The one namespace the in-cluster BuildConfig publishes into, on both clusters.
+ *
+ * Pinned as a constant on purpose: it is a deployment invariant, and if it ever
+ * legitimately changes, this gate SHOULD fail until the change is reviewed here.
+ */
+const INTERNAL_REGISTRY_NAMESPACE =
+  'image-registry.openshift-image-registry.svc:5000/arc-runners';
+
+/** Is this image reference immutable (digest) or at least review-gated (stamp)? */
+export function imageRefProblem(ref) {
+  if (IMAGE_DIGEST_RE.test(ref)) return null; // strongest rung; always acceptable
+  const tag = imageRefTag(ref);
+  if (tag === null) {
+    return `\`${ref}\` names no tag, so it resolves to the mutable \`:latest\``;
+  }
+  if (!STAMPED_TAG_RE.test(tag)) {
+    return `\`${ref}\` uses the mutable tag \`${tag}\``;
+  }
+  return null;
+}
 
 /** Workflow and composite-action definitions — everything CI will execute. */
 export function listWorkflowFiles(root = REPO_ROOT) {
@@ -121,6 +320,238 @@ export function listRunnerImageFiles(root = REPO_ROOT) {
     if (entry.isFile()) found.push(join(directory, entry.name));
   }
   return found.sort();
+}
+
+/**
+ * The ARC scale-set values — where the built runner image is finally SELECTED.
+ *
+ * Flat `deploy/arc/*.yaml` are the spoke installs and `deploy/arc/hub/*.yaml`
+ * mirror them on the hub. `runner-image/` is deliberately excluded: it is scanned
+ * by listRunnerImageFiles with the stricter base-image rules.
+ *
+ * Enumerated by DIRECTORY rather than by a list of the four known filenames, so a
+ * fifth scale set added later is scanned the day it lands instead of the day
+ * somebody remembers to add it here.
+ */
+export function listRunnerPoolFiles(root = REPO_ROOT) {
+  const found = [];
+  const isYaml = (name) => name.endsWith('.yml') || name.endsWith('.yaml');
+  for (const directory of [join(root, 'deploy', 'arc'), join(root, 'deploy', 'arc', 'hub')]) {
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue; // directory absent in this checkout
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && isYaml(entry.name)) found.push(join(directory, entry.name));
+    }
+  }
+  return found.sort();
+}
+
+/**
+ * Scale-set values: every container image must be digest-pinned or
+ * version-stamped (#3340).
+ */
+export function poolViolationsIn(source) {
+  const problems = [];
+  for (const { number, text } of logicalLines(source)) {
+    const imageMatch = VALUES_IMAGE_RE.exec(text);
+    if (!imageMatch) continue;
+    const raw = imageMatch[1];
+    const ref = unquote(raw);
+    if (ref === '') {
+      // Fail closed: the reference is legal YAML on the next line, but this
+      // scanner cannot see it, and "cannot verify" must not read as "verified".
+      problems.push({
+        line: number,
+        rule: 'STAMP',
+        detail: 'the `image:` value is not on the same line, so it cannot be checked here',
+      });
+      continue;
+    }
+    const unparseable = unparseableImageValue(ref);
+    if (unparseable) {
+      problems.push({ line: number, rule: 'STAMP', detail: unparseable });
+      continue;
+    }
+    const detail = imageRefProblem(ref);
+    if (detail) problems.push({ line: number, rule: 'STAMP', detail });
+  }
+  return problems;
+}
+
+/**
+ * Every non-digest image reference in a values file, with its line.
+ *
+ * Digest-pinned references are skipped: a digest already names exact bytes, so
+ * there is no stamp for it to agree with.
+ */
+export function poolImageRefsIn(source) {
+  const refs = [];
+  for (const { number, text } of logicalLines(source)) {
+    const match = VALUES_IMAGE_RE.exec(text);
+    if (!match || match[1] === '') continue;
+    const ref = unquote(match[1]);
+    // Reported by poolViolationsIn; never counted as a verified consumer.
+    if (ref === '' || unparseableImageValue(ref)) continue;
+    if (IMAGE_DIGEST_RE.test(ref)) continue;
+    refs.push({
+      line: number,
+      ref,
+      name: imageRefName(ref),
+      repository: imageRefRepository(ref),
+      tag: imageRefTag(ref),
+    });
+  }
+  return refs;
+}
+
+/**
+ * The BuildConfig OUTPUT ImageStreamTag — the tag this cluster build actually
+ * produces, and therefore the one every consumer has to be naming.
+ */
+export function producerTagsIn(source) {
+  const produced = [];
+  const stack = [];
+  let blockScalarIndent = null;
+  const lines = source.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    if (raw.trim() === '') continue;
+    const indent = raw.length - raw.trimStart().length;
+
+    // The BuildConfig inlines the whole Dockerfile under `dockerfile: |`. Its
+    // contents are DATA, not structure, so they must not move the path stack.
+    if (blockScalarIndent !== null) {
+      if (indent > blockScalarIndent) continue;
+      blockScalarIndent = null;
+    }
+
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('#')) continue;
+
+    // Plain `key:` mappings only. A `- name:` list entry is not on this path,
+    // and treating it as one is how an input gets mistaken for the output.
+    const keyMatch = /^([A-Za-z0-9_.-]+):(?:\s+(.*))?$/.exec(trimmed);
+    if (!keyMatch) continue;
+    const [, key, rest] = keyMatch;
+
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    stack.push({ indent, key });
+
+    const rawValue = (rest ?? '').replace(/\s+#.*$/, '').trim();
+    if (rawValue === '' || /^[|>]/.test(rawValue)) {
+      if (/^[|>]/.test(rawValue)) blockScalarIndent = indent;
+      continue;
+    }
+    if (key !== 'name') continue;
+
+    // ONLY `spec.output.to.name` is the tag this build publishes. A context-free
+    // `name:` match also swallows `spec.strategy.dockerStrategy.from.name` and
+    // any trigger's `from.name` — inputs, not outputs. If one of those carried
+    // the consumers' old stamp it would be recorded as a producer, and the
+    // first-match anchor would then agree with the stale consumers and report
+    // no violation while the build no longer produces the consumed tag.
+    if (!stack.map((entry) => entry.key).join('.').endsWith('output.to.name')) continue;
+
+    const value = unquote(rawValue);
+    if (REGISTRY_REF_RE.test(value) || !IMAGE_STREAM_TAG_RE.test(value)) continue;
+    produced.push({ line: index + 1, name: imageRefName(value), tag: imageRefTag(value) });
+  }
+  return produced;
+}
+
+/**
+ * Cross-file rule: producer and consumers must name ONE shared stamp (#3340).
+ *
+ * Checking each reference in isolation is not enough, and the gap is not
+ * theoretical: bumping the BuildConfig to a new stamp while leaving one runner
+ * or init container on the old one produces two individually well-formed
+ * references, so a per-line rule passes both. The cluster outcome is a pool
+ * split across stale tooling, or a pod pointed at a tag that was never built —
+ * ImagePullBackOff. deploy/arc/README.md tells operators the gate catches a
+ * missed update, so the gate has to actually catch it.
+ *
+ * The producer is the anchor when one exists, because its tag is the one that
+ * will exist in the registry. With no producer in the tree, consumers must at
+ * least agree with each other.
+ */
+export function crossFileStampOffenders(producers, consumers) {
+  const offenders = [];
+  const names = new Set(consumers.map((consumer) => consumer.name));
+  for (const name of names) {
+    const group = consumers.filter((consumer) => consumer.name === name);
+    const matching = producers.filter((candidate) => candidate.name === name);
+    const producer = matching[0];
+
+    // Ambiguous producers: two build outputs for one image naming different
+    // tags. Picking the first would make the anchor depend on file order, so
+    // whichever one the consumers happened to match would report success.
+    if (new Set(matching.map((candidate) => candidate.tag)).size > 1) {
+      for (const consumer of group) {
+        offenders.push({
+          file: consumer.file,
+          line: consumer.line,
+          rule: 'STAMP',
+          detail:
+            `\`${name}\` has more than one build output tag ` +
+            `(${matching.map((candidate) => `\`${candidate.tag}\``).join(', ')}), so there is no ` +
+            'single stamp to verify against',
+        });
+      }
+      continue;
+    }
+
+    // No local producer means nothing in this repo builds the image, so a stamp
+    // asserts nothing and there is no tag to agree with. Anchoring on the first
+    // consumer instead would only prove the consumers agree with each other —
+    // success reported for a state the rule claims to reject. An image this repo
+    // does not build has the digest rung available and must use it.
+    if (!producer) {
+      for (const consumer of group) {
+        offenders.push({
+          file: consumer.file,
+          line: consumer.line,
+          rule: 'STAMP',
+          detail:
+            `no BuildConfig in this repo produces \`${name}\`, so its stamp cannot be ` +
+            'verified against anything. Pin an externally built image by digest instead',
+        });
+      }
+      continue;
+    }
+
+    const expected = `${INTERNAL_REGISTRY_NAMESPACE}/${name}`;
+    for (const consumer of group) {
+      if (consumer.repository !== expected) {
+        offenders.push({
+          file: consumer.file,
+          line: consumer.line,
+          rule: 'STAMP',
+          detail:
+            `\`${consumer.repository}\` is not the repository the BuildConfig publishes to ` +
+            `(\`${expected}\`). A matching basename and a valid stamp do not make it the same ` +
+            'image',
+        });
+        continue;
+      }
+      if (consumer.tag !== producer.tag) {
+        offenders.push({
+          file: consumer.file,
+          line: consumer.line,
+          rule: 'STAMP',
+          detail:
+            `\`${name}:${consumer.tag}\` does not match the build output tag in ` +
+            `${producer.file} (\`${producer.tag}\`). Producer and every consumer must name ` +
+            'one shared stamp',
+        });
+      }
+    }
+  }
+  return offenders;
 }
 
 /**
@@ -201,21 +632,42 @@ export function imageViolationsIn(source) {
   const problems = [];
   for (const { number, text } of logicalLines(source)) {
     const fromMatch = /(?:^|\s)FROM\s+(\S+)/.exec(text);
-    if (fromMatch && fromMatch[1] !== 'scratch' && !IMAGE_DIGEST_RE.test(fromMatch[1])) {
+    const fromValue = fromMatch ? unquote(fromMatch[1]) : null;
+    if (fromValue && fromValue !== 'scratch' && !IMAGE_DIGEST_RE.test(fromValue)) {
       problems.push({
         line: number,
         rule: 'PIN',
-        detail: `base image \`${fromMatch[1]}\` is not pinned to an image digest`,
+        detail: `base image \`${fromValue}\` is not pinned to an image digest`,
       });
     }
 
     // OpenShift BuildConfig names its base image in `from: { name: ... }`.
     const nameMatch = /^\s*name:\s*(\S+)\s*$/.exec(text);
-    if (nameMatch && REGISTRY_REF_RE.test(nameMatch[1]) && !IMAGE_DIGEST_RE.test(nameMatch[1])) {
+    const nameValue = nameMatch ? unquote(nameMatch[1]) : null;
+    if (nameValue && REGISTRY_REF_RE.test(nameValue) && !IMAGE_DIGEST_RE.test(nameValue)) {
       problems.push({
         line: number,
         rule: 'PIN',
-        detail: `image reference \`${nameMatch[1]}\` is not pinned to an image digest`,
+        detail: `image reference \`${nameValue}\` is not pinned to an image digest`,
+      });
+    }
+
+    // ...and its OUTPUT in `output: { to: { name: <stream>:<tag> } }`. This is
+    // the other half of #3340 and the reason fixing only the scale-set values
+    // would relocate the bug rather than close it: the values may not point at a
+    // stamped tag that nothing produces, and a BuildConfig still writing
+    // `:latest` keeps a mutable tag alive for anything that later reaches for it.
+    if (
+      nameValue &&
+      !REGISTRY_REF_RE.test(nameValue) &&
+      IMAGE_STREAM_TAG_RE.test(nameValue) &&
+      !STAMPED_TAG_RE.test(imageRefTag(nameValue) ?? '')
+    ) {
+      problems.push({
+        line: number,
+        rule: 'STAMP',
+        detail:
+          `local ImageStream reference \`${nameValue}\` names a mutable tag`,
       });
     }
 
@@ -228,6 +680,52 @@ export function imageViolationsIn(source) {
     }
   }
   return problems;
+}
+
+/**
+ * Self-check: the gate must be able to SEE what it claims to check.
+ *
+ * Both directory walkers swallow a missing directory and return an empty list,
+ * which is right for a reusable scanner but dangerous for a control: with no
+ * files found there is nothing to report, so the gate prints success and exits 0
+ * having verified nothing. The cross-file rule degrades the same way one step
+ * further in — with no producer found, the anchor silently falls back to the
+ * first consumer, so the "producer and consumers agree" claim becomes "the
+ * consumers agree with themselves".
+ *
+ * Both are the green-but-inert failure this gate exists to prevent elsewhere, so
+ * the real-repo entry point asserts its own inputs are present. Kept out of
+ * scanRepository, which is deliberately reusable against synthetic roots that
+ * hold only the files a given test cares about.
+ */
+export function inertnessReasons(root = REPO_ROOT) {
+  const reasons = [];
+  if (listWorkflowFiles(root).length === 0) {
+    reasons.push('no workflow or composite-action files were found under .github/');
+  }
+  if (listRunnerImageFiles(root).length === 0) {
+    reasons.push('no runner-image build files were found under deploy/arc/runner-image/');
+  }
+  const poolFiles = listRunnerPoolFiles(root);
+  if (poolFiles.length === 0) {
+    reasons.push('no ARC scale-set values files were found under deploy/arc/');
+    return reasons;
+  }
+
+  const producers = listRunnerImageFiles(root).flatMap((absolute) =>
+    producerTagsIn(readFileSync(absolute, 'utf8'))
+  );
+  const consumers = poolFiles.flatMap((absolute) => poolImageRefsIn(readFileSync(absolute, 'utf8')));
+  const anchored = consumers.some((consumer) =>
+    producers.some((producer) => producer.name === consumer.name)
+  );
+  if (!anchored) {
+    reasons.push(
+      'no scale-set image matched a BuildConfig output tag, so the producer-to-consumer ' +
+        'stamp check had nothing to anchor on and verified nothing'
+    );
+  }
+  return reasons;
 }
 
 export function scanRepository(root = REPO_ROOT) {
@@ -244,6 +742,30 @@ export function scanRepository(root = REPO_ROOT) {
       offenders.push({ file, ...problem });
     }
   }
+  for (const absolute of listRunnerPoolFiles(root)) {
+    const file = relative(root, absolute).split(sep).join('/');
+    for (const problem of poolViolationsIn(readFileSync(absolute, 'utf8'))) {
+      offenders.push({ file, ...problem });
+    }
+  }
+
+  // Cross-file: one shared stamp across producer and every consumer (#3340).
+  const producers = [];
+  for (const absolute of listRunnerImageFiles(root)) {
+    const file = relative(root, absolute).split(sep).join('/');
+    for (const produced of producerTagsIn(readFileSync(absolute, 'utf8'))) {
+      producers.push({ file, ...produced });
+    }
+  }
+  const consumers = [];
+  for (const absolute of listRunnerPoolFiles(root)) {
+    const file = relative(root, absolute).split(sep).join('/');
+    for (const consumed of poolImageRefsIn(readFileSync(absolute, 'utf8'))) {
+      consumers.push({ file, ...consumed });
+    }
+  }
+  offenders.push(...crossFileStampOffenders(producers, consumers));
+
   return offenders;
 }
 
@@ -259,9 +781,30 @@ const REMEDY = {
     'image (deploy/arc/runner-image/) and fail closed when it is absent, as .github/actions/require-gh ' +
     'does. If a download is truly unavoidable, pin an exact version, download to a file, verify a ' +
     'committed SHA-256 with `sha256sum -c`, and only then extract (#3306).',
+  STAMP:
+    'Use a version-stamped tag `v<YYYY>-<MM>-<DD>-<hex>`, deriving the hex from the RECIPE CONTENT ' +
+    'and NOT from the commit that introduces the bump — a commit cannot contain its own SHA, so ' +
+    'that is not an instruction anyone can follow. Compute it with `sha256sum ' +
+    'deploy/arc/runner-image/Dockerfile | cut -c1-8`, prefixed by the UTC date, e.g. ' +
+    '`image-registry.openshift-image-registry.svc:5000/arc-runners/chd-ci-runner:v2026-07-30-11fcdc8c`. ' +
+    'A digest would be stronger but is not available here: chd-ci-runner is an ImageStream in each ' +
+    "cluster's own internal registry, so its digest differs hub vs spoke and no single committed " +
+    'value is correct for both. Bump the stamp in deploy/arc/runner-image/buildconfig.yaml AND in ' +
+    'every scale-set values file in the same reviewed change, then rebuild and `helm upgrade` — see ' +
+    'deploy/arc/README.md "Rebuilding the runner image" (#3340).',
 };
 
 function main() {
+  // Fail closed if the gate cannot see its own inputs — a control that verified
+  // nothing must not report success.
+  const inert = inertnessReasons();
+  for (const reason of inert) {
+    console.error(`::error::[INERT] ${reason}. The gate cannot pass without checking something.`);
+  }
+  if (inert.length) {
+    process.exit(1);
+  }
+
   const offenders = scanRepository();
   for (const { file, line, rule, detail } of offenders) {
     console.error(`::error file=${file},line=${line}::[${rule}] ${detail}. ${REMEDY[rule]}`);
@@ -269,10 +812,12 @@ function main() {
   if (offenders.length) {
     process.exit(1);
   }
-  const scanned = listWorkflowFiles().length + listRunnerImageFiles().length;
+  const scanned =
+    listWorkflowFiles().length + listRunnerImageFiles().length + listRunnerPoolFiles().length;
   console.log(
-    `Action pins OK: ${scanned} workflow/action/runner-image file(s) — every external \`uses:\` and ` +
-      'base image is pinned to an immutable ref, and no step pipes a download into an interpreter.'
+    `Action pins OK: ${scanned} workflow/action/runner-image/scale-set file(s) — every external ` +
+      '`uses:` and base image is pinned to an immutable ref, every runner-pool image is ' +
+      'digest-pinned or version-stamped, and no step pipes a download into an interpreter.'
   );
 }
 
