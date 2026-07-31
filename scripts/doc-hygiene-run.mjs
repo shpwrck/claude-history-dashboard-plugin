@@ -17,17 +17,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { atomicWriteFileExclusiveSync } from "./lib/safe-write.mjs";
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
@@ -855,17 +854,14 @@ export function runDocHygiene({
 
 export function writeDocHygieneArtifact(path, artifact) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp-${process.pid}`;
-  try {
-    writeFileSync(temporary, `${JSON.stringify(artifact, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    renameSync(temporary, path);
-    chmodSync(path, 0o600);
-  } catch (error) {
-    rmSync(temporary, { force: true });
-    throw error;
-  }
+  // #3080: publish through an UNPREDICTABLE, exclusively-created temp file so a
+  // symlink pre-seeded at the formerly-predictable `<path>.tmp-<pid>` cannot be
+  // followed, and set the 0600 mode on the descriptor (fchmod) rather than with
+  // a second path-based chmod that could race a swapped-in link.
+  atomicWriteFileExclusiveSync(path, `${JSON.stringify(artifact, null, 2)}\n`, {
+    mode: 0o600,
+    finalMode: 0o600,
+  });
 }
 
 async function defaultOutputPath(root, artifactKey) {

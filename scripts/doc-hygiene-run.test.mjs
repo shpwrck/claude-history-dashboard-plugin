@@ -6,6 +6,8 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,6 +20,7 @@ import {
   normalizeLycheeJson,
   runDocHygiene,
   trackedMarkdownFiles,
+  writeDocHygieneArtifact,
 } from "./doc-hygiene-run.mjs";
 import {
   AGENTS_LINT_CHECK,
@@ -955,6 +958,33 @@ describe("tracked Markdown enumeration with exotic pathnames (#3081)", () => {
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("doc-hygiene artifact write hardening (#3080)", () => {
+  it("ignores a symlink pre-seeded at the predictable temp path, publishes via a fresh exclusive temp, and leaves mode 0600", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doc-hygiene-artifact-"));
+    const outside = mkdtempSync(join(tmpdir(), "doc-hygiene-outside-"));
+    const sentinel = join(outside, "sentinel.txt");
+    writeFileSync(sentinel, "original");
+    const path = join(dir, "doc-hygiene.json");
+    // The FORMERLY predictable temp path, pre-seeded as a symlink to the
+    // sentinel. Before #3080 this was written through and would have clobbered
+    // the sentinel.
+    symlinkSync(sentinel, `${path}.tmp-${process.pid}`);
+    try {
+      const artifact = { schemaVersion: 1, hello: "world" };
+      writeDocHygieneArtifact(path, artifact);
+      // The pre-seeded temp symlink was not followed: the sentinel is intact.
+      assert.equal(readFileSync(sentinel, "utf8"), "original");
+      // The artifact is still published, with the real content …
+      assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), artifact);
+      // … through a separately created temp file, at mode 0600.
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });

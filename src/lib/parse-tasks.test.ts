@@ -564,4 +564,30 @@ describe('parseTasksDir — the tasks directory is the boundary (#3378)', () => 
     // An explicit larger cap still wins, in both directions.
     expect(parseTasksDir(dir, { maxFileBytes: huge.length + 10 })).toHaveLength(1);
   });
+
+  // #3157: the combined escape — a symlinked SESSION dir AND a symlinked task
+  // file, both pointing outside the task root — yields no records from either,
+  // while ordinary in-root files still parse.
+  it('refuses both a symlinked session dir and a symlinked task file, still parsing in-root files (#3157)', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'tasks-3157-outside-'));
+    // A foreign session directory and a foreign task file, both outside root.
+    mkdirSync(join(outside, 'foreign-session'));
+    writeFileSync(join(outside, 'foreign-session', '1.json'), taskFile('pending'));
+    writeFileSync(join(outside, 'stolen.json'), taskFile('in_progress'));
+
+    const dir = mkdtempSync(join(tmpdir(), 'tasks-3157-root-'));
+    // (1) a symlinked SESSION directory pointing outside the root
+    symlinkSync(join(outside, 'foreign-session'), join(dir, 'sess-linked'));
+    // (2) a real session dir with a symlinked .json pointing outside …
+    const realSession = join(dir, 'sess-real');
+    mkdirSync(realSession);
+    symlinkSync(join(outside, 'stolen.json'), join(realSession, 'a.json'));
+    // … alongside an ordinary in-root file that MUST still parse.
+    writeFileSync(join(realSession, 'b.json'), taskFile('completed'));
+
+    const records = parseTasksDir(dir);
+    // Neither escape yields a record; only the in-root file does.
+    expect(records.map((r) => r.status)).toEqual(['completed']);
+    expect(records.map((r) => r.sessionId)).toEqual(['sess-real']);
+  });
 });

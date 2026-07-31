@@ -28,9 +28,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  atomicWriteFileExclusiveSync,
+  ensureContainedDirSync,
+} from './lib/safe-write.mjs';
 
 export const DOC_GIT_TIMES_SCHEMA_VERSION = 1;
 export const DOC_GIT_TIMES_RELPATH = 'data/doc-git-times.json';
@@ -225,22 +229,32 @@ export function buildManifest(root, { maxFiles = DOC_GIT_TIMES_MAX_FILES } = {})
   };
 }
 
-/** Atomic write: the output path never holds a torn/partial manifest, and a
- *  failed write never strands the temp file. */
-export function writeManifest(outFile, manifest) {
-  mkdirSync(dirname(outFile), { recursive: true });
-  const tmp = `${outFile}.tmp-${process.pid}`;
-  try {
-    writeFileSync(tmp, `${JSON.stringify(manifest, null, 2)}\n`);
-    renameSync(tmp, outFile);
-  } catch (error) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      /* best-effort cleanup — the original error is what matters */
-    }
-    throw error;
-  }
+/**
+ * Atomic write: the output path never holds a torn/partial manifest, and a
+ * failed write never strands the temp file.
+ *
+ * Containment (#3079): the output directory must resolve to a real directory
+ * beneath `root` with no symlinked component, so a `..`/absolute `--out` or a
+ * repo-controlled `data -> /elsewhere` symlink is refused before any write. The
+ * temp file is created with `wx` (exclusive), so a symlink pre-seeded at the
+ * predictable `<out>.tmp-<pid>` path fails the open rather than redirecting the
+ * write through the link. `root` is optional only for backward compatibility;
+ * `main` always supplies the validated repository toplevel.
+ */
+export function writeManifest(outFile, manifest, { root } = {}) {
+  const destDir =
+    root !== undefined
+      ? ensureContainedDirSync(dirname(outFile), root)
+      : dirname(outFile);
+  const finalPath = join(destDir, basename(outFile));
+  atomicWriteFileExclusiveSync(
+    finalPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    // Preserve the producer's historical file mode (umask-subject default) and
+    // keep the predictable temp name so a pre-seeded symlink there is provably
+    // refused (EEXIST) instead of followed.
+    { mode: 0o666, tempPath: `${finalPath}.tmp-${process.pid}` }
+  );
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -272,7 +286,7 @@ export function main(argv = process.argv.slice(2)) {
   const outFile = out ? resolve(out) : join(root, DOC_GIT_TIMES_RELPATH);
   try {
     const manifest = buildManifest(root, { maxFiles });
-    writeManifest(outFile, manifest);
+    writeManifest(outFile, manifest, { root });
     console.log(
       `doc-git-times: wrote ${Object.keys(manifest.files).length} doc time(s) ` +
         `at ${manifest.sourceCommit.slice(0, 12)} -> ${outFile}`

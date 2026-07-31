@@ -3492,6 +3492,47 @@ async function realpathOrNull(pathname) {
   }
 }
 
+// Resolve `name` directly beneath the already-real `realParent`, creating it if
+// absent, refusing a symlinked (or non-directory) component, and requiring the
+// canonical result stay under `realRoot`. Returns the real directory path, or
+// null when the path escapes containment (#3102). `realParent`/`realRoot` must
+// already be realpath'd, and `name` a single validated path segment.
+async function ensureContainedChildDir(realParent, name, realRoot) {
+  const candidate = join(realParent, name);
+  try {
+    await mkdir(candidate);
+  } catch (err) {
+    if (err?.code !== 'EEXIST') return null;
+  }
+  let st;
+  try {
+    st = await lstat(candidate);
+  } catch {
+    return null;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return null;
+  const real = await realpathOrNull(candidate);
+  if (!real || !pathInside(realRoot, real)) return null;
+  return real;
+}
+
+// Write `data` to `dir/name` through an O_NOFOLLOW descriptor with restrictive
+// perms, so a symlinked FILE at that path is refused (ELOOP) rather than
+// followed outside the ingest root (#3102). `dir` must already be a
+// verified-real, contained directory.
+async function writeContainedFileNoFollow(dir, name, data) {
+  const fh = await open(
+    join(dir, name),
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    await fh.writeFile(data);
+  } finally {
+    await fh.close();
+  }
+}
+
 function realpathSyncOrNull(pathname) {
   try {
     return realpathSync(pathname);
@@ -5680,8 +5721,18 @@ async function handleIngestArtifacts(req, res, sourceId) {
   }
   const realIngest = await realpathOrNull(PROBAITIO_INGEST_DIR);
   if (!realIngest) return sendJson(res, 500, { ok: false, error: 'ingest dir unavailable' });
-  const metaRoot = join(PROBAITIO_INGEST_DIR, '.sources', sourceId);
-  await mkdir(metaRoot, { recursive: true });
+  // #3102: resolve the out-of-band metadata dirs beneath the REAL ingest root,
+  // refusing a symlinked `.sources` or `.sources/<sourceId>` up front so the
+  // authenticated `_source.json`/`.signatures.json` writes below can never be
+  // redirected outside PROBAITIO_INGEST_DIR. `sourceId` is already validated by
+  // safeSourceId(), so it is a single safe path segment.
+  const realSourcesDir = await ensureContainedChildDir(realIngest, '.sources', realIngest);
+  const metaRoot = realSourcesDir
+    ? await ensureContainedChildDir(realSourcesDir, sourceId, realIngest)
+    : null;
+  if (!metaRoot) {
+    return sendJson(res, 400, { ok: false, error: 'ingest metadata dir escapes root' });
+  }
 
   // Per-source single-writer ledger: relPath -> last signature; a re-shipped artifact is skipped.
   const ledgerPath = join(metaRoot, '.signatures.json');
@@ -5757,15 +5808,19 @@ async function handleIngestArtifacts(req, res, sourceId) {
   // Provenance: stamp member/displayName/repo so the dashboard can attribute aggregated sessions.
   if (body?.meta && typeof body.meta === 'object') {
     try {
-      await writeFile(join(metaRoot, '_source.json'), JSON.stringify({ sourceId, ...body.meta }));
+      await writeContainedFileNoFollow(
+        metaRoot,
+        '_source.json',
+        JSON.stringify({ sourceId, ...body.meta })
+      );
     } catch {
-      /* best-effort provenance */
+      /* best-effort provenance (a symlinked target is refused, not followed) */
     }
   }
   try {
-    await writeFile(ledgerPath, JSON.stringify(ledger));
+    await writeContainedFileNoFollow(metaRoot, '.signatures.json', JSON.stringify(ledger));
   } catch {
-    /* ledger persistence is best-effort; a lost ledger just re-writes identical content next time */
+    /* ledger persistence is best-effort; a symlinked target is refused, not followed */
   }
   return sendJson(res, 200, { ok: true, sourceId, written, skipped, refused });
 }

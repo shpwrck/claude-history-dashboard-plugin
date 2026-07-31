@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathToFileURL } from 'node:url';
+import { main } from './doc-git-times-generate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'doc-git-times-generate.mjs');
@@ -212,6 +213,82 @@ describe('doc-git-times producer (#2707)', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(linkDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Output containment + symlink/temp hardening (#3079)
+// ---------------------------------------------------------------------------
+//
+// main() is exercised in-process so the predictable temp name `<out>.tmp-<pid>`
+// resolves to THIS process's pid and can be pre-seeded as a symlink. Each
+// containment failure must return a nonzero exit code and leave every external
+// target byte-identical, while a normal in-repo output still succeeds.
+describe('doc-git-times output containment (#3079)', () => {
+  test('rejects an --out that escapes the repo root via .. and never touches the external target', () => {
+    const root = fullHistoryRepo();
+    const evil = join(dirname(root), 'doc-git-times-evil.json');
+    writeFileSync(evil, 'original');
+    try {
+      const status = main(['--root', root, '--out', join(root, '..', 'doc-git-times-evil.json')]);
+      assert.notEqual(status, 0);
+      assert.equal(readFileSync(evil, 'utf8'), 'original');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(evil, { force: true });
+    }
+  });
+
+  test('rejects a symlinked default output parent (data -> outside) and leaves it untouched', () => {
+    const root = fullHistoryRepo();
+    const outside = mkdtempSync(join(tmpdir(), 'doc-git-times-out-'));
+    const sentinel = join(outside, 'sentinel.txt');
+    writeFileSync(sentinel, 'original');
+    symlinkSync(outside, join(root, 'data'));
+    try {
+      const status = main(['--root', root]);
+      assert.notEqual(status, 0);
+      // Nothing written into the external dir, and the sentinel is intact.
+      assert.equal(existsSync(join(outside, 'doc-git-times.json')), false);
+      assert.equal(readFileSync(sentinel, 'utf8'), 'original');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses a symlink pre-seeded at the predictable temp path (no follow, no publish)', () => {
+    const root = fullHistoryRepo();
+    const outside = mkdtempSync(join(tmpdir(), 'doc-git-times-tmp-'));
+    const sentinel = join(outside, 'sentinel.txt');
+    writeFileSync(sentinel, 'original');
+    const outFile = join(root, 'data', 'doc-git-times.json');
+    mkdirSync(dirname(outFile), { recursive: true });
+    symlinkSync(sentinel, `${outFile}.tmp-${process.pid}`);
+    try {
+      const status = main(['--root', root]);
+      assert.notEqual(status, 0);
+      assert.equal(readFileSync(sentinel, 'utf8'), 'original');
+      assert.equal(existsSync(outFile), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a normal in-repo output still succeeds', () => {
+    const root = fullHistoryRepo();
+    try {
+      const status = main(['--root', root]);
+      assert.equal(status, 0);
+      const outFile = join(root, 'data', 'doc-git-times.json');
+      assert.equal(existsSync(outFile), true);
+      const manifest = JSON.parse(readFileSync(outFile, 'utf8'));
+      assert.equal(manifest.schemaVersion, 1);
+      assert.equal(manifest.complete, true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -303,6 +303,53 @@ try {
         `expected projects/evil.jsonl in refused, got ${JSON.stringify(symlinkBody.refused)}`
       );
       assert.equal(await readFile(outsideTarget, 'utf8'), 'original');
+    });
+
+    // #3102: a symlinked out-of-band metadata dir (.sources/<sourceId> -> outside)
+    // must be refused up front — an otherwise-valid authenticated batch is
+    // rejected and neither _source.json nor .signatures.json is authored outside
+    // the ingest root.
+    const metaEscapeTarget = join(distDir, 'meta-escape-target');
+    await mkdir(metaEscapeTarget, { recursive: true });
+    await mkdir(join(ingestDir, '.sources'), { recursive: true });
+    await symlink(metaEscapeTarget, join(ingestDir, '.sources', 'remote-escape'));
+    const metaEscapePost = await fetch(`${base}/api/ingest/remote-escape/artifacts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${INGEST_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        meta: { displayName: 'Escape' },
+        artifacts: [
+          {
+            relPath: 'projects/escape-project/escape-session.jsonl',
+            signature: 'sig-escape',
+            content: 'escape\n',
+          },
+        ],
+      }),
+    });
+    const metaEscapeBody = await metaEscapePost.json();
+    await check('symlinked .sources/<id> metadata dir is refused, not followed', async () => {
+      assert.equal(metaEscapePost.status, 400);
+      assert.equal(metaEscapeBody.ok, false);
+      assert.match(String(metaEscapeBody.error || ''), /escapes root/);
+      // No metadata authored into the external target.
+      assert.deepEqual(await readdir(metaEscapeTarget), []);
+    });
+
+    // The contained happy path still authored real metadata inside the ingest
+    // root (proving the containment did not break normal writes).
+    await check('normal metadata writes still succeed in a real contained dir', async () => {
+      const ledger = JSON.parse(
+        await readFile(join(ingestDir, '.sources', 'remote-a', '.signatures.json'), 'utf8')
+      );
+      assert.equal(typeof ledger, 'object');
+      assert.equal(
+        ledger['projects/remote-project/remote-session.jsonl'],
+        remoteSignature
+      );
     });
   }
 } finally {
