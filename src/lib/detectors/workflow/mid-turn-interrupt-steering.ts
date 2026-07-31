@@ -1,8 +1,9 @@
 import type { Detector, Recommendation, RecObservation } from '../types';
 import type { SessionTimeline, TimelineEntry } from '../../parse-timeline';
 import type { SessionTokenData, TokenEntry } from '../../../types';
-import { fmtUsd } from '../shared';
+import { fmtUsd, newestIsoDate, STALE_WEEKS } from '../shared';
 import { buildWindowSumIndex, sumInWindow, type WindowSumIndex } from '../shared';
+import { isAsOfStale } from '../provenance';
 import { getModelPricing } from '../../pricing';
 
 /**
@@ -35,6 +36,14 @@ import { getModelPricing } from '../../pricing';
 /** Noise floor — never fire on one or two stray interrupts. */
 const MIN_INTERRUPTS = 3;
 const MAX_EVIDENCE = 5;
+
+/**
+ * Interrupt history whose newest contributing sentinel is older than this
+ * demotes to "As of <date>" wording (#3237, the generic #1102 stale-input
+ * rule; same 4-week window as #3194). A steering-friction signal from months
+ * ago describes how the human used to steer, not how they steer now.
+ */
+const STALE_AFTER_DAYS = STALE_WEEKS * 7;
 
 interface Interrupt {
   sessionId: string;
@@ -163,7 +172,7 @@ export const detector: Detector = {
   id: 'workflow.mid-turn-interrupt-steering',
   category: 'workflow',
   dataDeps: ['timelines', 'tokenData'],
-  rule(input): Recommendation | null {
+  rule(input, now): Recommendation | null {
     const timelines = input.timelines;
     if (!timelines || timelines.length === 0) return null;
 
@@ -189,6 +198,12 @@ export const detector: Detector = {
     const perSessionStr = perSession.toFixed(2);
 
     const dollars = totalWastedUsd > 0 ? ` (~${fmtUsd(totalWastedUsd)})` : '';
+
+    // #3237: anchor the rollup to the newest contributing interrupt (derived
+    // from the DATA, never `now`) and demote sufficiently old history to
+    // dated wording instead of an undated present-tense claim.
+    const asOf = newestIsoDate(interrupts.map((i) => i.interruptTs));
+    const stale = isAsOfStale(asOf, now, STALE_AFTER_DAYS);
 
     const evidence = [...interrupts]
       .sort((a, b) => b.wastedOutputTokens - a.wastedOutputTokens)
@@ -220,6 +235,7 @@ export const detector: Detector = {
       severity: 'info',
       title: 'Mid-turn interrupts discard billed in-flight work',
       detail:
+        (stale ? `As of ${asOf}, ` : '') +
         `${interrupts.length} mid-turn interrupt(s) across ${sessions} session(s) (~${perSessionStr}/session across all ${timelines.length}) cut the assistant off mid-response (literal "[Request interrupted by user]" sentinel), discarding ~${Math.round(
           totalWastedTokens
         ).toLocaleString()} already-billed in-flight output tokens${dollars}. ` +
@@ -234,6 +250,7 @@ export const detector: Detector = {
         observations,
         inference:
           'A user interrupt arriving mid-response orphans the turn: the output tokens the assistant already emitted that turn were billed but thrown away when the human steered elsewhere. Counted only when the assistant was actively producing (cadence gate), priced at each message\'s own model, and never booked as a cost-census reclaim — the honest unit is interrupts/session, with the small discarded dollars as a secondary diagnostic.',
+        ...(asOf !== undefined ? { asOf, stale } : {}),
       },
     };
   },

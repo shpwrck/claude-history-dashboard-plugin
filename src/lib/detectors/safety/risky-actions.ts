@@ -1,10 +1,21 @@
 import type { Detector, RecSeverity } from '../types';
-import { short } from '../shared';
+import { newestIsoDate, short, STALE_WEEKS } from '../shared';
+import { isAsOfStale } from '../provenance';
+import { parseIsoInstantMs } from '../../iso-instant';
 import {
   detectRiskyActions,
   type RiskyAction,
   type RiskyActionCategory,
 } from '../../parse-permissions';
+
+/**
+ * Risky-action history whose newest contributing call is older than this
+ * demotes to "As of <date>" wording + a re-check instruction (#3225, the
+ * generic #1102 stale-input rule; same 4-week window as #3194). The date is
+ * derived only when EVERY matched call carries a readable timestamp — partial
+ * coverage must not fabricate an aggregate freshness claim (#3197/#3200).
+ */
+const STALE_AFTER_DAYS = STALE_WEEKS * 7;
 
 const CATEGORY_LABEL: Record<RiskyActionCategory, string> = {
   deploy: 'deploy',
@@ -54,11 +65,22 @@ export const detector: Detector = {
   id: 'safety.risky-actions',
   category: 'safety',
   dataDeps: ['toolData', 'timelines'],
-  rule(input) {
+  rule(input, now) {
     const actions = detectRiskyActions(input.toolData, input.timelines);
     if (actions.length === 0) return null;
 
     const sessions = new Set(actions.map((action) => action.sessionId)).size;
+
+    // #3225: derive the newest plausible action date only under FULL timestamp
+    // coverage; otherwise the finding stays explicitly undated rather than
+    // presenting a date computed from a subset as covering everything.
+    const fullyDated = actions.every(
+      (action) => parseIsoInstantMs(action.timestamp) !== undefined
+    );
+    const asOf = fullyDated
+      ? newestIsoDate(actions.map((action) => action.timestamp))
+      : undefined;
+    const stale = isAsOfStale(asOf, now, STALE_AFTER_DAYS);
 
     // Rank critical-severity actions ahead of routine ones BEFORE slicing the
     // top-5 evidence (#2010). `detectRiskyActions` returns actions in
@@ -83,10 +105,11 @@ export const detector: Detector = {
     // review-worthy count (#2010).
     const reviewWorthy = actions.filter(isCritical);
     const routine = actions.filter((action) => !isCritical(action));
-    const detail =
+    const baseDetail =
       reviewWorthy.length > 0 && routine.length > 0
         ? `${reviewWorthy.length} review-worthy action(s) (${categorySummary(reviewWorthy)}) + ${routine.length} routine publication(s) across ${sessions} session(s).`
         : `${actions.length} high-impact action(s) across ${sessions} session(s): ${categorySummary(actions)}.`;
+    const detail = stale ? `As of ${asOf}, ${baseDetail}` : baseDetail;
 
     return {
       id: 'safety.risky-actions',
@@ -94,8 +117,9 @@ export const detector: Detector = {
       severity: severityFor(actions),
       title: 'High-impact actions need review',
       detail,
-      action:
-        'Review the cited tool calls before treating the session as low-risk; add ask/deny policy around recurring high-impact actions.',
+      action: stale
+        ? `Re-check whether these high-impact actions still recur before acting — the newest cited call is dated ${asOf}. Then review the cited tool calls before treating the session as low-risk, and add ask/deny policy around recurring high-impact actions.`
+        : 'Review the cited tool calls before treating the session as low-risk; add ask/deny policy around recurring high-impact actions.',
       affected: actions.length,
       evidence: topActions.map(evidenceRow),
       ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}),
@@ -110,7 +134,11 @@ export const detector: Detector = {
           },
         ],
         inference:
-          'Deploys, production config changes, database mutations, and secret-sensitive commands are review-worthy even when they are not destructive shell patterns.',
+          'Deploys, production config changes, database mutations, and secret-sensitive commands are review-worthy even when they are not destructive shell patterns.' +
+          (fullyDated
+            ? ''
+            : ' Timestamp coverage across the matched calls is incomplete, so this finding is intentionally undated rather than dated from a subset.'),
+        ...(asOf !== undefined ? { asOf, stale } : {}),
       },
     };
   },

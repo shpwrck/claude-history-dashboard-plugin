@@ -64,6 +64,28 @@ describe('workflow.unused-installed-plugins (#1660)', () => {
     );
   });
 
+  // ── Bounded-window wording (#3249) ───────────────────────────────────────
+  it('bounds the claim to the observed interval when history is shorter than 30 days', () => {
+    const rec = detector.rule(input(['plugin-a', 'plugin-b']), 1_780_100_000_000)!;
+    const asOf = new Date(1_780_000_000_000).toISOString().slice(0, 10);
+    expect(rec.title).toBe('Installed plugins unused in the available history');
+    expect(rec.title).not.toContain('last 30 days');
+    expect(rec.detail).not.toContain('last 30 days');
+    expect(rec.detail).toContain('day(s) of retained coverage');
+    expect(rec.detail).toContain(`as of ${asOf}`);
+  });
+
+  it('keeps the 30-day wording when the retained history covers the window', () => {
+    const full = input(['plugin-a', 'plugin-b']);
+    full.sessions = [
+      { sessionId: 's-old', startTime: 1_780_100_000_000 - 31 * 24 * 60 * 60 * 1000 },
+      { sessionId: 's1', startTime: 1_780_000_000_000 },
+    ] as unknown as RecommendationInput['sessions'];
+    const rec = detector.rule(full, 1_780_100_000_000)!;
+    expect(rec.title).toBe('Installed plugins unused in the last 30 days');
+    expect(rec.detail).toContain('invocations in the last 30 days');
+  });
+
   it('stays silent when bundled plugin artifacts were used in the window', () => {
     const rec = detector.rule(
       input(['plugin-a'], { 'plugin-a-skill': { invocations: 1 } }),

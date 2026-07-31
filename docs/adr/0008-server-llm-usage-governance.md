@@ -40,8 +40,17 @@ multi-tenant phase slots in without re-cutting the model.
   explicitly-configured **Console API key** (never the subscription credential), it is **opt-in**,
   it is **registered**, it is **cost-capped**, and the content passed the **egress scrub**.
 - **BYO — user-initiated, user's own key (governed by neither).** Ask Claude's browser call uses
-  the user's own key from `localStorage`, client-side, never touching the server. It is enumerated
-  in the registry for completeness but is exempt from the server chokepoint.
+  the user's own key, client-side, never touching the server. It is enumerated in the registry for
+  completeness but is exempt from the server chokepoint. Being exempt from the *server* chokepoint
+  does not exempt it from client-side custody rules (#3281): the raw key MUST NOT be persisted in
+  `localStorage` or any other durable script-readable store. Custody is memory-only or
+  session-bounded — the implementation (`src/lib/api-key.ts`, #2063) holds it in `sessionStorage`
+  (tab-scoped, gone when the tab closes, not shared across tabs), matching the enterprise auth
+  token's custody, and destroys any durable copy a pre-#2063 build left behind by migrating it out
+  of `localStorage` on first read. Because any script running in the origin during the session can
+  still read a session-bounded key, the served dashboard MUST carry a restrictive
+  `Content-Security-Policy` that admits no untrusted script execution — the server sets one
+  (`dashboardContentSecurityPolicy()` in `scripts/server.mjs`).
 
 **Free / automatic / local paths stay local** — the recs engine, the parsers, the
 Ask-Claude-impersonation ban, and **ADR 0005's recs Adoption Card**. ADR 0005's

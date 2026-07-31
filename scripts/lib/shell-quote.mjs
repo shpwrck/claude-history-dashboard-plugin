@@ -29,3 +29,13 @@ export function isInertShellWord(value) {
 export function shellQuoteMinimal(value) {
   return isInertShellWord(value) ? value : shellQuote(value);
 }
+
+/** See src/lib/shell-quote.ts — path quoting that preserves `~/` home semantics (#3254). */
+export function shellQuotePathWithHome(path) {
+  if (path === '~' || (path.startsWith('~/') && isInertShellWord(path.slice(1)))) {
+    return path;
+  }
+  return path.startsWith('~/')
+    ? `"$HOME"${shellQuote(path.slice(1))}`
+    : shellQuoteMinimal(path);
+}

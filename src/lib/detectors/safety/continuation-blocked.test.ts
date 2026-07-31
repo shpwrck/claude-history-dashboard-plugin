@@ -71,6 +71,28 @@ describe('safety.continuation-blocked', () => {
     expect(detector.rule(input(), 0)).toBeNull();
   });
 
+  // ── Freshness demotion (#3219, the #1102 stale-input rule) ───────────────
+  it('demotes sufficiently old blocked history to dated wording + a re-check action', () => {
+    // Fixture events are dated 2026-06-12; well past the 4-week window.
+    const NOW = Date.parse('2026-08-01T00:00:00.000Z');
+    const rec = detector.rule(input([runtime('sess-a', [true, true])]), NOW)!;
+    expect(rec.detail.startsWith('As of 2026-06-12,')).toBe(true);
+    expect(rec.detail).not.toContain('may be catching');
+    expect(rec.action).toContain('Re-check current stop-hook behavior');
+    expect(rec.action).toContain('2026-06-12');
+    expect(rec.provenance?.asOf).toBe('2026-06-12');
+    expect(rec.provenance?.stale).toBe(true);
+  });
+
+  it('keeps fresh blocked events dated but not stale', () => {
+    const NOW = Date.parse('2026-06-13T00:00:00.000Z');
+    const rec = detector.rule(input([runtime('sess-a', [true, true])]), NOW)!;
+    expect(rec.detail.startsWith('As of')).toBe(false);
+    expect(rec.action).not.toContain('Re-check current stop-hook behavior');
+    expect(rec.provenance?.asOf).toBe('2026-06-12');
+    expect(rec.provenance?.stale).toBe(false);
+  });
+
   it('summarizes contributing sessions in descending blocked-count order', () => {
     expect(
       blockedContinuationSessions([

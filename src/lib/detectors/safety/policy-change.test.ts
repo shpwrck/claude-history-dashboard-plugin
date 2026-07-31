@@ -168,4 +168,34 @@ describe('safety.policy-change (#1799)', () => {
   it('stays quiet without backup drift data', () => {
     expect(recFor([])).toBeNull();
   });
+
+  // ── Freshness demotion (#3222, the #1102 stale-input rule) ───────────────
+  const trustFlip = (timestamp: number): DriftEvent => ({
+    kind: 'trust-flip',
+    project: PROJECT,
+    from: false,
+    to: true,
+    timestamp,
+    severity: 'warning',
+  });
+
+  it('demotes old drift to dated as-of wording with a verify-current-policy action', () => {
+    // now is Date.UTC(2026, 0, 1); this transition is ~a year older.
+    const rec = recFor([trustFlip(Date.UTC(2025, 0, 15))])!;
+    expect(rec.detail.startsWith('As of 2025-01-15,')).toBe(true);
+    expect(rec.detail).toContain('verify the live policy');
+    expect(rec.detail).not.toContain('current risk-increasing');
+    expect(rec.action).toContain('Verify the current trust state');
+    expect(rec.action).toContain('2025-01-15');
+    expect(rec.provenance?.asOf).toBe('2025-01-15');
+    expect(rec.provenance?.stale).toBe(true);
+  });
+
+  it('keeps recent drift dated but not stale', () => {
+    const rec = recFor([trustFlip(Date.UTC(2025, 11, 30))])!;
+    expect(rec.detail).toContain('current risk-increasing');
+    expect(rec.detail.startsWith('As of')).toBe(false);
+    expect(rec.provenance?.asOf).toBe('2025-12-30');
+    expect(rec.provenance?.stale).toBe(false);
+  });
 });

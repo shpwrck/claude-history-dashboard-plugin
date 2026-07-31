@@ -100,7 +100,7 @@ test('the twin exports exactly the same surface as the leaf', () => {
   assert.deepEqual(exported(mjs), exported(ts));
 });
 
-for (const name of ['shellQuote', 'isInertShellWord', 'shellQuoteMinimal']) {
+for (const name of ['shellQuote', 'isInertShellWord', 'shellQuoteMinimal', 'shellQuotePathWithHome']) {
   test(`${name} is byte-identical across both implementations`, () => {
     assert.equal(typeof ts[name], 'function', `${name} missing from the .ts leaf`);
     assert.equal(typeof mjs[name], 'function', `${name} missing from the .mjs twin`);

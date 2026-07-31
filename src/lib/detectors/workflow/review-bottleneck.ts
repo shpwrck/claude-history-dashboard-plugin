@@ -12,12 +12,23 @@ import {
   normalizeContributorAlias,
   type ContributorAliasResolver,
 } from '../../organization-identity';
+import { isAsOfStale } from '../provenance';
 
 export const STALE_REVIEW_HOURS = 48;
 export const MIN_STALE_REVIEW_REQUESTS = 3;
 export const MIN_STALE_REQUESTS_PER_REVIEWER = 2;
 export const WARNING_STALE_REQUESTS_PER_REVIEWER = 4;
 export const WARNING_OLDEST_REVIEW_HOURS = 120;
+
+/**
+ * Dataset freshness window (#3244, the generic #1102 stale-input rule): a
+ * `reviewEvents` aggregate is a synchronized SNAPSHOT of an operational queue,
+ * so once `generatedAt` is more than a week old the queue has almost certainly
+ * moved — the claim is demoted to "As of <date>" historical wording (with
+ * `provenance.stale`) instead of asserting a live bottleneck. A snapshot with
+ * no readable `generatedAt` cannot be judged and keeps the existing wording.
+ */
+export const SNAPSHOT_STALE_AFTER_DAYS = 7;
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -176,6 +187,8 @@ export const detector: Detector = {
     const source = dataset?.source?.trim() || 'reviewEvents';
     const generatedAtMs = parseTimeMs(dataset?.generatedAt);
     const asOf = asIsoDate(generatedAtMs);
+    // #3244: an outdated snapshot must not read as the current queue.
+    const snapshotStale = isAsOfStale(asOf, now, SNAPSHOT_STALE_AFTER_DAYS);
     const evidence = [
       `${top.reviewer}: ${top.requests.length}/${stale.length} stale pending review request(s), oldest ${formatAge(oldestAgeMs)}${reviewerAliases(top)}`,
       ...rankedReviewers.slice(1, 4).map((bucket) => {
@@ -193,12 +206,17 @@ export const detector: Detector = {
       id: 'workflow.review-bottleneck',
       category: 'workflow',
       severity,
-      title: `PR review queue is bottlenecked on ${top.reviewer}`,
-      detail:
-        `${top.reviewer} has ${top.requests.length} stale pending PR review request(s) older than ` +
-        `${STALE_REVIEW_HOURS}h. Across the source, ${stale.length} of ${pending.length} pending request(s) are stale.`,
-      action:
-        'Reassign or pair on the oldest reviews, then add a reviewer rotation or escalation rule before stale requests pile up behind one person.',
+      title: snapshotStale
+        ? `As of ${asOf}, the PR review queue was bottlenecked on ${top.reviewer}`
+        : `PR review queue is bottlenecked on ${top.reviewer}`,
+      detail: snapshotStale
+        ? `As of ${asOf} (review-events snapshot date), ${top.reviewer} had ${top.requests.length} stale pending PR review request(s) older than ` +
+          `${STALE_REVIEW_HOURS}h; ${stale.length} of ${pending.length} pending request(s) were stale. The snapshot is outdated, so the queue has likely moved since.`
+        : `${top.reviewer} has ${top.requests.length} stale pending PR review request(s) older than ` +
+          `${STALE_REVIEW_HOURS}h. Across the source, ${stale.length} of ${pending.length} pending request(s) are stale.`,
+      action: snapshotStale
+        ? `Re-sync the review-events dataset first — this snapshot is dated ${asOf}. If the pile-up persists, reassign or pair on the oldest reviews and add a reviewer rotation or escalation rule.`
+        : 'Reassign or pair on the oldest reviews, then add a reviewer rotation or escalation rule before stale requests pile up behind one person.',
       affected: top.requests.length,
       evidence,
       provenance: {
@@ -232,9 +250,10 @@ export const detector: Detector = {
               ]
             : []),
         ],
-        inference:
-          `${top.reviewer}'s stale review queue is at least ${MIN_STALE_REQUESTS_PER_REVIEWER} requests and the oldest pending request has waited ${formatAge(oldestAgeMs)}, so review handoff latency is concentrated on one reviewer.`,
-        ...(asOf ? { asOf } : {}),
+        inference: snapshotStale
+          ? `${top.reviewer}'s stale review queue was at least ${MIN_STALE_REQUESTS_PER_REVIEWER} requests in the ${asOf} snapshot, but the snapshot is older than ${SNAPSHOT_STALE_AFTER_DAYS} day(s), so the finding is demoted to a dated historical claim rather than a live bottleneck.`
+          : `${top.reviewer}'s stale review queue is at least ${MIN_STALE_REQUESTS_PER_REVIEWER} requests and the oldest pending request has waited ${formatAge(oldestAgeMs)}, so review handoff latency is concentrated on one reviewer.`,
+        ...(asOf ? { asOf, stale: snapshotStale } : {}),
       },
     };
   },

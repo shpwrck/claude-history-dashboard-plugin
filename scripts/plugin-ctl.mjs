@@ -24,8 +24,16 @@
 
 import { createServer as createNetServer } from 'node:net';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { openSync, closeSync, realpathSync, constants as fsConstants } from 'node:fs';
-import { spawn } from 'node:child_process';
+import {
+  openSync,
+  closeSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  constants as fsConstants,
+} from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -74,6 +82,10 @@ function logFile() {
   return join(cacheDir(), 'plugin-ctl.log');
 }
 
+function identityFile() {
+  return join(cacheDir(), 'plugin-ctl.identity.json');
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -100,6 +112,186 @@ export async function readPort() {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Launch-identity binding (#3095)
+// ---------------------------------------------------------------------------
+// A bare PID in a user-writable state file is not proof of ownership: after an
+// unclean exit the number can be reused by an unrelated process (or the file
+// can simply be edited), and a later `stop` would SIGTERM/SIGKILL whatever
+// process group holds that number today. So `start` records, alongside the
+// PID, (a) an immutable start-identity signature of the process it actually
+// spawned and (b) a random launch nonce placed in the child's environment,
+// and `stop` refuses to signal anything whose current identity does not match
+// the recorded one. Same-user tampering with the state file is not a privilege
+// boundary (that user can already signal processes directly); the point is
+// that stale or replaced state can never redirect our signals.
+
+/**
+ * Immutable start-identity signature of a live process, or null when it cannot
+ * be read (process gone, or no readable identity source on this platform).
+ * The signature combines the kernel's process start time — which a PID reuse
+ * cannot preserve — with a digest of the process's argv, so it is stable for
+ * the lifetime of one process incarnation and different for any other.
+ */
+export function processIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      // comm (field 2) may contain spaces/parens; fields after the LAST ')'
+      // start at field 3, so starttime (field 22) is index 19 there.
+      const rparen = stat.lastIndexOf(')');
+      if (rparen === -1) return null;
+      const fields = stat.slice(rparen + 2).split(' ');
+      const starttime = fields[19];
+      if (!starttime || !/^[0-9]+$/.test(starttime)) return null;
+      const argvDigest = createHash('sha256')
+        .update(readFileSync(`/proc/${pid}/cmdline`))
+        .digest('hex');
+      return `linux:${starttime}:${argvDigest}`;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === 'win32') {
+    try {
+      const out = spawnSync(
+        'powershell.exe',
+        ['-NoProfile', '-Command', `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`],
+        { encoding: 'utf8', windowsHide: true }
+      );
+      const ticks = out.status === 0 ? out.stdout.trim() : '';
+      return /^[0-9]+$/.test(ticks) ? `win32:${ticks}` : null;
+    } catch {
+      return null;
+    }
+  }
+  // Other POSIX (macOS, BSDs): ps start time + command line.
+  try {
+    const lstart = spawnSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+    });
+    const started = lstart.status === 0 ? lstart.stdout.trim() : '';
+    if (!started) return null;
+    const cmd = spawnSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+    });
+    const argvDigest = createHash('sha256')
+      .update(cmd.status === 0 ? cmd.stdout.trim() : '')
+      .digest('hex');
+    return `posix:${started}:${argvDigest}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether any live member of process group `pgid` carries our launch nonce in
+ * its environment. Used when the group leader is gone but descendants remain:
+ * the leader's identity can no longer be read, but every descendant inherited
+ * `CHD_LAUNCH_NONCE` from the spawn, and /proc/<pid>/environ is readable only
+ * by the owning user — a protected channel a group-id reuse cannot forge.
+ * Returns true/false on Linux, null where group membership cannot be checked.
+ */
+export function groupContainsNonce(pgid, nonce) {
+  if (process.platform !== 'linux') return null;
+  if (!Number.isInteger(pgid) || pgid <= 1) return null;
+  if (typeof nonce !== 'string' || nonce.length === 0) return null;
+  try {
+    const needle = `CHD_LAUNCH_NONCE=${nonce}`;
+    for (const entry of readdirSync('/proc')) {
+      if (!/^[0-9]+$/.test(entry)) continue;
+      try {
+        const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+        const rparen = stat.lastIndexOf(')');
+        if (rparen === -1) continue;
+        const fields = stat.slice(rparen + 2).split(' ');
+        // fields[2] is pgrp (field 5 overall).
+        if (parseInt(fields[2], 10) !== pgid) continue;
+        const environ = readFileSync(`/proc/${entry}/environ`, 'utf8');
+        if (environ.split('\0').includes(needle)) return true;
+      } catch {
+        // Raced exit or another user's process — not verifiable, skip it.
+      }
+    }
+    return false;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the launch-identity record written by `start`. Returns
+ * `{ pid, nonce, identity }` or null when absent/malformed — a bare legacy
+ * PID file with no identity record is deliberately NOT trusted for signaling.
+ */
+export async function readIdentity() {
+  try {
+    const parsed = JSON.parse(await readFile(identityFile(), 'utf8'));
+    if (parsed === null || typeof parsed !== 'object') return null;
+    const { pid, nonce, identity } = parsed;
+    if (!Number.isInteger(pid) || pid <= 1) return null;
+    if (typeof nonce !== 'string' || nonce.length < 8) return null;
+    if (identity !== null && typeof identity !== 'string') return null;
+    return { pid, nonce, identity };
+  } catch {
+    return null;
+  }
+}
+
+/** Remove every state file `start` writes (pid, port, identity). */
+async function removeStateFiles() {
+  await rm(pidFile(), { force: true });
+  await rm(portFile(), { force: true });
+  await rm(identityFile(), { force: true });
+}
+
+/**
+ * Decide whether the recorded launch identity authorizes signaling `pid`'s
+ * managed target (#3095). Pure decision logic — exported so the verify/refuse
+ * behaviour stays testable by IMPORT on every Node version (spawning the real
+ * CLI trips the Node >= 24 preflight). Returns `{ verified: true }` or
+ * `{ verified: false, refusal }`.
+ */
+export function verifyStopTarget(pid, stored) {
+  if (stored === null || stored.pid !== pid) {
+    return {
+      verified: false,
+      refusal:
+        'the state files carry no launch identity for this pid (legacy or tampered state)',
+    };
+  }
+  if (isRunning(pid)) {
+    const current = processIdentity(pid);
+    if (stored.identity !== null && current === stored.identity) {
+      return { verified: true };
+    }
+    if (stored.identity === null && current === null) {
+      // Platform where start identity is unreadable end to end: there is
+      // nothing to compare, and refusing forever would make stop useless
+      // there. The nonce/identity path covers every platform we launch on.
+      return { verified: true };
+    }
+    return {
+      verified: false,
+      refusal: `pid ${pid} is not the dashboard this supervisor launched (identity mismatch — pid reuse or modified state)`,
+    };
+  }
+  // Leader gone, descendants remain: verify a group member still carries
+  // our launch nonce before signaling the whole group.
+  const member = groupContainsNonce(pid, stored.nonce);
+  if (member === true) {
+    return { verified: true };
+  }
+  return {
+    verified: false,
+    refusal:
+      member === false
+        ? `no member of process group ${pid} carries this launch's nonce (group-id reuse or modified state)`
+        : `process group ${pid} cannot be identity-checked on this platform`,
+  };
 }
 
 /**
@@ -184,30 +376,46 @@ async function cmdStart() {
   // Check for an already-running instance.
   const existingPid = await readPid();
   if (existingPid !== null && isRunning(existingPid)) {
-    const port = await readPort();
-    const host = process.env.HOST || '127.0.0.1';
-    const url = `http://${host}:${port}`;
-    process.stdout.write(`Dashboard already running (pid ${existingPid})\n`);
-    process.stdout.write(`  ${url}\n`);
-    return;
-  }
-
-  // A detached descendant can outlive the server leader on POSIX. Keep the
-  // group id in the state file so `stop` can still reap it instead of silently
-  // abandoning that group and starting a second server.
-  if (existingPid !== null && isManagedTargetRunning(existingPid)) {
+    // #3095: a live process holding that number is only "already running"
+    // when it is provably the one we launched. On a verified identity
+    // MISMATCH the number was reused by an unrelated process — never signal
+    // it, just drop the stale state and boot fresh. Legacy state with no
+    // identity record (or a platform where identity is unreadable end to
+    // end) keeps the conservative already-running answer: start sends no
+    // signal, so assuming "running" is the safe direction here.
+    const stored = await readIdentity();
+    const current = processIdentity(existingPid);
+    const mismatch =
+      stored === null
+        ? false
+        : stored.pid !== existingPid ||
+          (stored.identity === null ? current !== null : current !== stored.identity);
+    if (!mismatch) {
+      const port = await readPort();
+      const host = process.env.HOST || '127.0.0.1';
+      const url = `http://${host}:${port}`;
+      process.stdout.write(`Dashboard already running (pid ${existingPid})\n`);
+      process.stdout.write(`  ${url}\n`);
+      return;
+    }
+    process.stdout.write(
+      `plugin-ctl: pid ${existingPid} is no longer the dashboard this supervisor launched ` +
+        `(pid reuse); discarding stale state.\n`
+    );
+    await removeStateFiles();
+  } else if (existingPid !== null && isManagedTargetRunning(existingPid)) {
+    // A detached descendant can outlive the server leader on POSIX. Keep the
+    // group id in the state file so `stop` can still reap it instead of
+    // silently abandoning that group and starting a second server.
     process.stderr.write(
       `plugin-ctl: dashboard pid ${existingPid} exited but its process group is still active.\n` +
         `  Run \`node scripts/plugin-ctl.mjs stop\` before starting again.\n`
     );
     process.exitCode = 1;
     return;
-  }
-
-  // Clean up stale state files from a dead process.
-  if (existingPid !== null) {
-    await rm(pidFile(), { force: true });
-    await rm(portFile(), { force: true });
+  } else if (existingPid !== null) {
+    // Clean up stale state files from a dead process.
+    await removeStateFiles();
   }
 
   const host = process.env.HOST || '127.0.0.1';
@@ -217,6 +425,11 @@ async function cmdStart() {
 
   const serverScript = join(PROJECT_DIR, 'scripts', 'server.mjs');
   const registerScript = join(PROJECT_DIR, 'scripts', 'register-ts.mjs');
+
+  // Random launch nonce (#3095): inherited by every descendant of this spawn,
+  // it lets `stop` verify group membership through /proc/<pid>/environ (a
+  // channel only the owning user can read) when the leader is already gone.
+  const nonce = randomUUID();
 
   const child = spawn(
     process.execPath,
@@ -231,6 +444,7 @@ async function cmdStart() {
         PORT: String(port),
         // Ensure the cache dir is forwarded so the child respects it too.
         CHD_CACHE_DIR: cacheDir(),
+        CHD_LAUNCH_NONCE: nonce,
       },
       cwd: PROJECT_DIR,
     }
@@ -253,7 +467,16 @@ async function cmdStart() {
 
   child.unref();
 
-  // Write state files before printing so callers can race-read them.
+  // Write state files before printing so callers can race-read them. The
+  // identity record lands FIRST so a pid file never exists without the
+  // identity `stop` requires before it will signal anything (#3095). The
+  // signature is captured from the child we just spawned — at this instant the
+  // number provably names our process, so the recorded identity is authentic.
+  await writeFile(
+    identityFile(),
+    JSON.stringify({ pid: child.pid, nonce, identity: processIdentity(child.pid) }),
+    'utf8'
+  );
   await writeFile(pidFile(), String(child.pid), 'utf8');
   await writeFile(portFile(), String(port), 'utf8');
 
@@ -271,8 +494,23 @@ async function cmdStop() {
   }
   if (!isManagedTargetRunning(pid)) {
     process.stdout.write(`Dashboard (pid ${pid}) is already gone.\n`);
-    await rm(pidFile(), { force: true });
-    await rm(portFile(), { force: true });
+    await removeStateFiles();
+    return;
+  }
+
+  // #3095: something live answers to that number — prove it is the process
+  // (group) we launched before sending any signal. A stale or edited state
+  // file must never redirect SIGTERM/SIGKILL at an unrelated process group.
+  const verdict = verifyStopTarget(pid, await readIdentity());
+
+  if (!verdict.verified) {
+    await removeStateFiles();
+    process.stderr.write(
+      `plugin-ctl: refusing to signal pid/group ${pid}: ${verdict.refusal}.\n` +
+        `  Removed the stale state without sending any signal. If a dashboard is\n` +
+        `  really running, locate it with your process tools and stop it manually.\n`
+    );
+    process.exitCode = 1;
     return;
   }
 
@@ -304,8 +542,7 @@ async function cmdStop() {
     }
   }
 
-  await rm(pidFile(), { force: true });
-  await rm(portFile(), { force: true });
+  await removeStateFiles();
   process.stdout.write(`Dashboard stopped (pid ${pid}).\n`);
 }
 
@@ -323,8 +560,7 @@ async function cmdStatus() {
       return;
     }
     process.stdout.write(`stopped (pid ${pid} not found; stale pid file)\n`);
-    await rm(pidFile(), { force: true });
-    await rm(portFile(), { force: true });
+    await removeStateFiles();
     return;
   }
   const port = await readPort();

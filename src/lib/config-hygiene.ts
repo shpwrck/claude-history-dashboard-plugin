@@ -231,8 +231,14 @@ function resourceScope(resource: { scope?: string; projectPath?: string }): Hygi
  * findings at all *before* reaching this call when `sessions` is empty:
  * zero retained sessions is zero observation, not evidence for "unused", so
  * no hedge can make an unused claim honest in that case.
+ *
+ * Exported (#3249) so the `workflow.unused-installed-*` wording helper
+ * (`detectors/workflow/unused-installed-window.ts`) states the OBSERVED
+ * duration from the exact same derivation that decided the hedge — a second
+ * hand-rolled span computation is the pair-that-drifts defect the audit keeps
+ * finding.
  */
-function effectiveDataWindowDays(
+export function effectiveDataWindowDays(
   sessions: HygieneInput['sessions'],
   now: number
 ): number {
@@ -472,17 +478,12 @@ function computeProjectObservations(
   windowStart: number,
   now: number
 ): Map<string, HygieneHedge | undefined> {
-  const oldestByProject = new Map<string, number>();
+  const oldestByProject = oldestValidStartByProject(sessions, now);
   const observedInWindow = new Set<string>();
   for (const s of sessions) {
     if (!s.project) continue;
     if (s.startTime > now) continue;
-    const key = projectObservationKey(s.project);
-    if (s.startTime >= windowStart) observedInWindow.add(key);
-    if (s.startTime > 0) {
-      const oldest = oldestByProject.get(key);
-      if (oldest == null || s.startTime < oldest) oldestByProject.set(key, s.startTime);
-    }
+    if (s.startTime >= windowStart) observedInWindow.add(projectObservationKey(s.project));
   }
   const out = new Map<string, HygieneHedge | undefined>();
   for (const project of observedInWindow) {
@@ -491,6 +492,58 @@ function computeProjectObservations(
     out.set(project, days < ACTIVE_WINDOW_DAYS ? 'window-shorter-than-threshold' : undefined);
   }
   return out;
+}
+
+/**
+ * Oldest VALID (positive, not future-dated) session start per canonical
+ * project identity — the single primitive behind both the per-project
+ * guard/hedge map ({@link computeProjectObservations}) and the per-scope
+ * span export below, so the two derivations can never disagree
+ * (#3249 / PR #3530 review).
+ */
+function oldestValidStartByProject(
+  sessions: HygieneInput['sessions'],
+  now: number
+): Map<string, number> {
+  const oldestByProject = new Map<string, number>();
+  for (const s of sessions) {
+    if (!s.project) continue;
+    if (s.startTime > now) continue;
+    if (s.startTime <= 0) continue;
+    const key = projectObservationKey(s.project);
+    const oldest = oldestByProject.get(key);
+    if (oldest == null || s.startTime < oldest) oldestByProject.set(key, s.startTime);
+  }
+  return oldestByProject;
+}
+
+/**
+ * Observed retained-session span, in days, for ONE hygiene scope — the exact
+ * span that finding's hedge was decided from: global scope →
+ * {@link effectiveDataWindowDays} over every session; project scope → that
+ * project's OWN span, using the same canonical-identity grouping and validity
+ * rules as {@link computeProjectObservations}. Returns `null` when the scope
+ * has no measurable observation (no sessions, or none valid for the project).
+ *
+ * Exported for the `workflow.unused-installed-*` wording helper
+ * (`detectors/workflow/unused-installed-window.ts`): a PROJECT-scoped finding
+ * carries its project's own hedge, so quoting the GLOBAL span next to it can
+ * emit an internally false claim ("~200 day(s) … shorter than the 30-day
+ * threshold") on a mixed corpus (PR #3530 review).
+ */
+export function observedWindowDaysForScope(
+  scope: HygieneScope,
+  sessions: HygieneInput['sessions'],
+  now: number
+): number | null {
+  if (scope.kind === 'global') {
+    const days = effectiveDataWindowDays(sessions, now);
+    return Number.isFinite(days) ? days : null;
+  }
+  const oldest = oldestValidStartByProject(sessions, now).get(
+    projectObservationKey(scope.project)
+  );
+  return oldest == null ? null : Math.max(0, (now - oldest) / DAY_MS);
 }
 
 /**

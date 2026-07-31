@@ -106,6 +106,6 @@ Spend controls:
 - the end user provides the browser-held API key
 
 Required controls:
-- key stored only in browser localStorage
+- key held only in browser sessionStorage (session-bounded, tab-scoped); never localStorage or another durable script-readable store (#3281)
 - enterprise capability can disable Ask Claude/browser egress
 - browser CSP must opt in to Anthropic egress in enterprise mode

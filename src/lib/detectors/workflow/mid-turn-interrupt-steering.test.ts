@@ -157,6 +157,31 @@ describe('workflow.mid-turn-interrupt-steering — fires', () => {
   });
 });
 
+describe('workflow.mid-turn-interrupt-steering — freshness (#3237)', () => {
+  it('demotes old interrupt history to detail beginning "As of <date>," with stale provenance', () => {
+    // Fixture interrupts land on 2026-06-10; `now` is well past the 4-week window.
+    const NOW = Date.parse('2026-08-01T00:00:00.000Z');
+    const a = interrupted('aaaaaaaa');
+    const b = interrupted('bbbbbbbb');
+    const c = interrupted('cccccccc');
+    const rec = detector.rule(input([a.tl, b.tl, c.tl], [a.td, b.td, c.td]), NOW)!;
+    expect(rec.detail.startsWith('As of 2026-06-10,')).toBe(true);
+    expect(rec.provenance?.asOf).toBe('2026-06-10');
+    expect(rec.provenance?.stale).toBe(true);
+  });
+
+  it('keeps fresh interrupt history dated but not stale, without the prefix', () => {
+    const NOW = Date.parse('2026-06-11T00:00:00.000Z');
+    const a = interrupted('aaaaaaaa');
+    const b = interrupted('bbbbbbbb');
+    const c = interrupted('cccccccc');
+    const rec = detector.rule(input([a.tl, b.tl, c.tl], [a.td, b.td, c.td]), NOW)!;
+    expect(rec.detail.startsWith('As of')).toBe(false);
+    expect(rec.provenance?.asOf).toBe('2026-06-10');
+    expect(rec.provenance?.stale).toBe(false);
+  });
+});
+
 describe('workflow.mid-turn-interrupt-steering — cadence', () => {
   it('does NOT flag a normal user message following a tool_result (no sentinel)', () => {
     // Clean cadence: prompt → assistant → tool_use → tool_result → real prompt.

@@ -78,3 +78,25 @@ export function isInertShellWord(value: string): boolean {
 export function shellQuoteMinimal(value: string): string {
   return isInertShellWord(value) ? value : shellQuote(value);
 }
+
+/**
+ * Format a filesystem PATH as one shell-safe argv element while preserving
+ * home-directory semantics (#3254). {@link isInertShellWord} deliberately
+ * treats `~` as non-inert because tilde-expansion changes the word — but for a
+ * path in a copyable command that expansion is the point:
+ * `~/.claude/settings.json` must keep meaning the user's home after pasting.
+ *
+ * So: a bare `~`, or a `~/` path whose remainder is provably inert, passes
+ * through unquoted (expansion preserved, nothing for a shell to misparse). A
+ * hostile `~/` path keeps its home meaning via a double-quoted `"$HOME"`
+ * splice concatenated onto the single-quoted remainder — still exactly one
+ * word to the shell. Everything else follows {@link shellQuoteMinimal}.
+ */
+export function shellQuotePathWithHome(path: string): string {
+  if (path === '~' || (path.startsWith('~/') && isInertShellWord(path.slice(1)))) {
+    return path;
+  }
+  return path.startsWith('~/')
+    ? `"$HOME"${shellQuote(path.slice(1))}`
+    : shellQuoteMinimal(path);
+}

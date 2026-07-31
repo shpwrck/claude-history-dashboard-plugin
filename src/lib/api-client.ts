@@ -416,17 +416,66 @@ function rememberEnterpriseSessionForCache(session: EnterpriseSession): void {
 }
 
 /**
+ * Same-origin guard for the shared request primitive (#3108). serverFetch
+ * attaches the enterprise bearer token by default, and `credentials:
+ * 'same-origin'` constrains only AMBIENT credentials (cookies) — it does not
+ * suppress an explicitly-set Authorization header, which would ride along to
+ * whatever absolute URL a caller passed. Every dashboard endpoint is
+ * same-origin by construction, so a cross-origin target is never legitimate
+ * here; it is refused before `fetch` runs, token or no token.
+ *
+ * Returns the refusal message, or `null` when the target is acceptable. In a
+ * non-browser context (no `location`) there is no origin to compare against:
+ * relative inputs pass through (they cannot name a foreign origin) and any
+ * absolute URL is refused outright.
+ *
+ * Scope note: only the INITIAL target is checked here. A same-origin request
+ * that the server redirects cross-origin is covered by the platform instead —
+ * the Fetch standard's HTTP-redirect fetch deletes the Authorization header
+ * when the redirect target is not same-origin with the request's origin.
+ */
+function crossOriginViolation(input: RequestInfo | URL): string | null {
+  const raw =
+    typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const base = typeof location !== 'undefined' ? location.href : undefined;
+  let resolved: URL | null;
+  try {
+    resolved = new URL(raw, base);
+  } catch {
+    resolved = null;
+  }
+  if (resolved === null) {
+    return base === undefined
+      ? null // relative path outside a browser — no foreign origin to leak to
+      : `serverFetch: unparseable request URL ${JSON.stringify(raw)}`;
+  }
+  if (base === undefined) {
+    return `serverFetch: refusing absolute URL ${resolved.href} outside a browser context — the dashboard API is same-origin only (#3108)`;
+  }
+  if (resolved.origin !== location.origin) {
+    return `serverFetch: refusing cross-origin request to ${resolved.origin} — the dashboard API is same-origin only (#3108)`;
+  }
+  return null;
+}
+
+/**
  * The shared request primitive every backend call goes through — exported so
  * satellite seam modules (lazy-chunk clients like `@shadow-experiments-client`)
  * delegate here instead of re-implementing auth/header/failure behavior. This
  * keeps api-client the single owner of HOW requests are made even when a URL
  * literal lives in a lazy seam for shell-budget reasons (ADR 0016, #2371).
+ * Cross-origin targets are rejected before dispatch (#3108); see
+ * {@link crossOriginViolation}.
  */
 export function serverFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
   token: string | null = getEnterpriseAuthToken()
 ): Promise<Response> {
+  const violation = crossOriginViolation(input);
+  if (violation !== null) {
+    return Promise.reject(new Error(violation));
+  }
   const headers = new Headers(init.headers);
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);

@@ -609,4 +609,39 @@ describe('safety.risky-actions (#1309)', () => {
       expect(shownIds.has(ref.toolUseId)).toBe(true);
     }
   });
+
+  // ── Freshness demotion (#3225, the #1102 stale-input rule) ───────────────
+  it('demotes old action history to dated wording + a re-check instruction', () => {
+    const NOW = Date.parse('2026-08-01T00:00:00.000Z'); // fixtures dated 2026-06-12
+    const calls = [bash('secret-1', 'echo "$ANTHROPIC_API_KEY"', 1)];
+    const rec = detector.rule(input(calls), NOW)!;
+    expect(rec.detail.startsWith('As of 2026-06-12,')).toBe(true);
+    expect(rec.action).toContain('Re-check whether these high-impact actions still recur');
+    expect(rec.action).toContain('2026-06-12');
+    expect(rec.provenance?.asOf).toBe('2026-06-12');
+    expect(rec.provenance?.stale).toBe(true);
+  });
+
+  it('keeps fresh, fully-dated actions dated but not stale', () => {
+    const NOW = Date.parse('2026-06-13T00:00:00.000Z');
+    const calls = [bash('secret-1', 'echo "$ANTHROPIC_API_KEY"', 1)];
+    const rec = detector.rule(input(calls), NOW)!;
+    expect(rec.detail.startsWith('As of')).toBe(false);
+    expect(rec.provenance?.asOf).toBe('2026-06-12');
+    expect(rec.provenance?.stale).toBe(false);
+  });
+
+  it('does not fabricate a date when timestamp coverage is incomplete', () => {
+    const NOW = Date.parse('2026-08-01T00:00:00.000Z');
+    const calls = [
+      bash('secret-1', 'echo "$ANTHROPIC_API_KEY"', 1),
+      { ...bash('secret-2', 'printf "%s" "$GITHUB_TOKEN"', 2), timestamp: 'not-a-date' },
+    ];
+    const rec = detector.rule(input(calls), NOW)!;
+    // One unreadable timestamp poisons the aggregate date: explicitly undated.
+    expect(rec.detail.startsWith('As of')).toBe(false);
+    expect(rec.provenance?.asOf).toBeUndefined();
+    expect(rec.provenance?.stale).toBeUndefined();
+    expect(rec.provenance?.inference).toContain('intentionally undated');
+  });
 });

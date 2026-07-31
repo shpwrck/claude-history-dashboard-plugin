@@ -9,6 +9,7 @@ import type { OrganizationIdentityDataset } from '../../organization-identity';
 import {
   detector,
   MIN_STALE_REVIEW_REQUESTS,
+  SNAPSHOT_STALE_AFTER_DAYS,
   STALE_REVIEW_HOURS,
 } from './review-bottleneck';
 
@@ -102,6 +103,51 @@ describe('workflow.review-bottleneck (#1123)', () => {
     };
 
     expect(detector.rule(input(reviewEvents), NOW)).toBeNull();
+  });
+
+  // ── Snapshot freshness demotion (#3244, the #1102 stale-input rule) ──────
+  it('demotes an outdated snapshot to an "As of <date>" historical claim with stale provenance', () => {
+    const generatedAt = new Date(
+      NOW - (SNAPSHOT_STALE_AFTER_DAYS + 3) * 24 * 60 * 60 * 1000
+    ); // 2026-05-31, outside the 7-day window
+    const reviewEvents: OrganizationReviewEventsDataset = {
+      source: 'github-review-sync',
+      generatedAt: generatedAt.toISOString(),
+      reviewRequests: [
+        reviewRequest({ reviewerId: 'alice', reviewerDisplayName: 'Alice', pullRequestNumber: 1, requestedAt: requestedHoursAgo(72) }),
+        reviewRequest({ reviewerId: 'alice', reviewerDisplayName: 'Alice', pullRequestNumber: 2, requestedAt: requestedHoursAgo(60) }),
+        reviewRequest({ reviewerId: 'alice', reviewerDisplayName: 'Alice', pullRequestNumber: 3, requestedAt: requestedHoursAgo(55) }),
+      ],
+    };
+
+    const rec = detector.rule(input(reviewEvents), NOW)!;
+    const asOf = generatedAt.toISOString().slice(0, 10);
+
+    expect(rec.title).toBe(`As of ${asOf}, the PR review queue was bottlenecked on Alice`);
+    expect(rec.title).not.toContain('is bottlenecked');
+    expect(rec.detail.startsWith(`As of ${asOf}`)).toBe(true);
+    expect(rec.detail).not.toContain('has 3 stale pending');
+    expect(rec.action).toContain('Re-sync the review-events dataset');
+    expect(rec.provenance?.asOf).toBe(asOf);
+    expect(rec.provenance?.stale).toBe(true);
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+  });
+
+  it('keeps current-tense wording and stale=false for a fresh snapshot', () => {
+    const reviewEvents: OrganizationReviewEventsDataset = {
+      source: 'github-review-sync',
+      generatedAt: new Date(NOW).toISOString(),
+      reviewRequests: [
+        reviewRequest({ reviewerId: 'alice', reviewerDisplayName: 'Alice', pullRequestNumber: 1, requestedAt: requestedHoursAgo(72) }),
+        reviewRequest({ reviewerId: 'alice', reviewerDisplayName: 'Alice', pullRequestNumber: 2, requestedAt: requestedHoursAgo(60) }),
+        reviewRequest({ reviewerId: 'alice', reviewerDisplayName: 'Alice', pullRequestNumber: 3, requestedAt: requestedHoursAgo(55) }),
+      ],
+    };
+
+    const rec = detector.rule(input(reviewEvents), NOW)!;
+    expect(rec.title).toContain('is bottlenecked on Alice');
+    expect(rec.detail).toContain('has 3 stale pending PR review request');
+    expect(rec.provenance?.stale).toBe(false);
   });
 
   it('groups explicit username aliases into one durable contributor', () => {

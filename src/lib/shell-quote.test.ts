@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { shellQuote, isInertShellWord, shellQuoteMinimal } from './shell-quote';
+import {
+  shellQuote,
+  isInertShellWord,
+  shellQuoteMinimal,
+  shellQuotePathWithHome,
+} from './shell-quote';
 
 /**
  * Every value below is INERT DATA. The round-trip harness never invokes a
@@ -142,6 +147,70 @@ describe('shellQuoteMinimal', () => {
       const { count, first } = argvThroughSh(shellQuoteMinimal(value));
       expect(count).toBe('1');
       expect(first).toBe(value);
+    }
+  );
+});
+
+describe('shellQuotePathWithHome (#3254)', () => {
+  /** Same inert-data harness, with HOME pinned so `~`/"$HOME" resolve predictably. */
+  function argvThroughShWithHome(quoted: string): { count: string; first: string } {
+    const script = `set -- ${quoted}\nprintf '%s\\n' "$#"\nprintf '%s' "$1"`;
+    const out = execFileSync('/bin/sh', ['-c', script], {
+      encoding: 'utf8',
+      env: { HOME: '/home/shelltest', PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    });
+    const newline = out.indexOf('\n');
+    return { count: out.slice(0, newline), first: out.slice(newline + 1) };
+  }
+
+  it('leaves an inert ~/ path unquoted so tilde expansion still works', () => {
+    expect(shellQuotePathWithHome('~/.claude/settings.json')).toBe(
+      '~/.claude/settings.json'
+    );
+    expect(shellQuotePathWithHome('~')).toBe('~');
+    const { count, first } = argvThroughShWithHome(
+      shellQuotePathWithHome('~/.claude/settings.json')
+    );
+    expect(count).toBe('1');
+    expect(first).toBe('/home/shelltest/.claude/settings.json');
+  });
+
+  it('maps a hostile ~/ path to a "$HOME" splice plus the quoted remainder', () => {
+    const hostile = "~/.claude/dir name/it's;$(echo INJECTED)/settings.json";
+    expect(shellQuotePathWithHome(hostile)).toBe(
+      `"$HOME"'/.claude/dir name/it'\\''s;$(echo INJECTED)/settings.json'`
+    );
+    const { count, first } = argvThroughShWithHome(shellQuotePathWithHome(hostile));
+    expect(count).toBe('1');
+    expect(first).toBe(
+      "/home/shelltest/.claude/dir name/it's;$(echo INJECTED)/settings.json"
+    );
+  });
+
+  it('follows shellQuoteMinimal for non-home paths', () => {
+    expect(shellQuotePathWithHome('/etc/claude/settings.json')).toBe(
+      '/etc/claude/settings.json'
+    );
+    expect(shellQuotePathWithHome('/tmp/two words.json')).toBe(
+      "'/tmp/two words.json'"
+    );
+    expect(shellQuotePathWithHome('')).toBe("''");
+  });
+
+  it.each(HOSTILE_VALUES)(
+    'shellQuotePathWithHome(%j) survives /bin/sh as exactly one argv element',
+    (value) => {
+      const { count, first } = argvThroughShWithHome(shellQuotePathWithHome(value));
+      expect(count).toBe('1');
+      // A `~`-led value may legitimately come back home-expanded; everything
+      // else must round-trip byte-identical.
+      if (value === '~') {
+        expect(first).toBe('/home/shelltest');
+      } else if (value.startsWith('~/')) {
+        expect(first).toBe(`/home/shelltest${value.slice(1)}`);
+      } else {
+        expect(first).toBe(value);
+      }
     }
   );
 });
