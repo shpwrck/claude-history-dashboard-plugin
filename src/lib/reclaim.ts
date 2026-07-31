@@ -444,6 +444,45 @@ function resolveRows(
 }
 
 /**
+ * Reject a counterfactual whose numeric inputs are out of contract BEFORE it can
+ * mutate any residual (#3165). The cascade's invariants — a non-negative residual
+ * and finite, non-negative booked savings — assume well-formed inputs; a
+ * malformed value silently violated them:
+ *
+ *  - a negative `directUsd` "reclaim" ran `row.server -= negative`, INCREASING
+ *    the residual and booking a negative marginal;
+ *  - a non-finite `directUsd` sailed past the `> available` comparison and drove
+ *    the drain arithmetic to NaN;
+ *  - a NaN / out-of-[0,1] `scaleTokens` fraction produced a NaN cell cost that
+ *    passed every `<= EPS` / `> before` guard (all false for NaN), committing NaN
+ *    into `billFinal` and `total`.
+ *
+ * Returns a human-readable defect string when the claim must be rejected, or
+ * `null` when its numeric inputs are safe to apply. `reprice`/`convertRate`
+ * carry no free numeric input here (model/pool ids), so they are always clean.
+ */
+function counterfactualDefect(cf: ReclaimCounterfactual): string | null {
+  if (cf.kind === 'directUsd') {
+    if (!Number.isFinite(cf.usd) || cf.usd < 0) {
+      return `directUsd must be a finite non-negative dollar amount (got ${cf.usd})`;
+    }
+    return null;
+  }
+  if (cf.kind === 'scaleTokens') {
+    for (const [pool, frac] of Object.entries(cf.poolDeltaFrac)) {
+      // An absent pool key is treated as 0 downstream — only reject SUPPLIED
+      // fractions that are non-finite or outside the deletable [0,1] range.
+      if (frac == null) continue;
+      if (!Number.isFinite(frac) || frac < 0 || frac > 1) {
+        return `scaleTokens fraction for ${pool} must be finite within [0,1] (got ${frac})`;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
  * Run the guarded-marginal cascade over `claims` against the actual `tokenData`.
  *
  * Claims are applied in ascending `orderKey` (ties broken by `leverId` for
@@ -517,6 +556,15 @@ export function runReclaimCascade(
 
   for (const claim of ordered) {
     const cf = claim.counterfactual;
+
+    // Reject malformed numeric inputs before any mutation (#3165): a negative or
+    // non-finite directUsd, or an out-of-[0,1]/non-finite scaleTokens fraction,
+    // would otherwise book a negative/NaN marginal and poison billFinal + total.
+    const defect = counterfactualDefect(cf);
+    if (defect) {
+      booked.push(reject(claim, defect));
+      continue;
+    }
 
     if (cf.kind === 'flag-only') {
       // Evidence-only sentinel: books $0 and mutates no residual. It still feeds

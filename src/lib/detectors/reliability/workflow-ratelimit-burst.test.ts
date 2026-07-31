@@ -232,8 +232,63 @@ describe('reliability.workflow-ratelimit-burst — small burst (warning)', () =>
     );
     expect(tokenObs?.value).toBe(50_000);
     expect(tokenObs?.claim).toContain('at least ~50k known tokens');
-    expect(tokenObs?.claim).toContain('2 failed agent token count(s) were absent');
+    expect(tokenObs?.claim).toContain(
+      '2 failed agent token count(s) were unavailable or invalid'
+    );
   });
+
+  it('rejects a negative failed-agent token count as unavailable/invalid, never summed (#3218)', () => {
+    // The baseline parser admits finite negatives; a −20k row must not subtract
+    // from the known total nor let the accounting be reported as complete.
+    const negative = run({
+      runId: 'wf_negative_tokens',
+      agents: [
+        rateLimited(0, { tokens: 50_000 }),
+        rateLimited(1, { tokens: -20_000 }),
+        rateLimited(2, { tokens: 20_000 }),
+        ok(3),
+      ],
+    });
+    const rec = detector.rule(input([negative]), 0)!;
+
+    // 50k + 20k = 70k known (the −20k row is excluded, not subtracted).
+    expect(rec.evidence![0]).toContain('at least ~70k known tokens spent');
+    expect(rec.evidence![0]).toContain('1 failed agent token count(s) unknown');
+    expect(rec.detail).toContain('at least ~70k known failed-agent tokens');
+
+    const tokenObs = rec.provenance!.observations.find((o) =>
+      o.field?.includes('agents[].tokens')
+    );
+    expect(tokenObs?.value).toBe(70_000);
+    expect(tokenObs?.claim).toContain('at least ~70k known tokens');
+    expect(tokenObs?.claim).toContain(
+      '1 failed agent token count(s) were unavailable or invalid'
+    );
+    // Never described as a complete count.
+    expect(tokenObs?.claim).not.toContain('complete failed-agent token counts');
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'treats a non-finite failed-agent token count (%s) as unavailable/invalid (#3218)',
+    (bad) => {
+      const r = run({
+        runId: 'wf_nonfinite_tokens',
+        agents: [
+          rateLimited(0, { tokens: 30_000 }),
+          rateLimited(1, { tokens: bad }),
+          rateLimited(2, { tokens: 30_000 }),
+          ok(3),
+        ],
+      });
+      const rec = detector.rule(input([r]), 0)!;
+      expect(rec.evidence![0]).toContain('at least ~60k known tokens spent');
+      expect(rec.evidence![0]).toContain('1 failed agent token count(s) unknown');
+      const tokenObs = rec.provenance!.observations.find((o) =>
+        o.field?.includes('agents[].tokens')
+      );
+      expect(tokenObs?.value).toBe(60_000);
+    }
+  );
 });
 
 // ── Catastrophic burst → critical ──────────────────────────────────────────

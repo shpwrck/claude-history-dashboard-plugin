@@ -324,10 +324,31 @@ interface Burst {
   failures: number;
   totalAgents: number;
   start: ValidRunStart | null;
-  /** Sum of known token counts on the failed agents. */
+  /** Sum of the failed agents' token counts that were finite and non-negative. */
   knownFailedTokens: number;
-  /** Failed agents whose token count was absent from the manifest. */
+  /**
+   * Failed agents whose token count was unusable — absent from the manifest, or
+   * present but not a finite, non-negative safe number (#3218). The baseline
+   * parser rejects non-finite tokens but ADMITS finite negatives, so a −20k
+   * artifact reaches this detector; counting it as unknown keeps it out of the
+   * known sum and stops the accounting from being reported as complete.
+   */
   unknownTokenFailures: number;
+}
+
+/**
+ * A failed agent's token count is trustworthy only when it is a finite,
+ * non-negative safe number. Anything else (null/undefined, NaN/±Infinity, a
+ * negative artifact, or a value past the safe-integer ceiling) is treated as an
+ * unavailable/invalid count — never summed into `knownFailedTokens` (#3218).
+ */
+function acceptedFailedTokens(tokens: number | null | undefined): tokens is number {
+  return (
+    typeof tokens === 'number' &&
+    Number.isFinite(tokens) &&
+    tokens >= 0 &&
+    tokens <= Number.MAX_SAFE_INTEGER
+  );
 }
 
 function normalizedAgentCount(run: WorkflowRun, failures: number): number {
@@ -346,8 +367,11 @@ function findBurst(run: WorkflowRun, now: number): Burst | null {
     failures: failed.length,
     totalAgents: normalizedAgentCount(run, failed.length),
     start: validatedRunStart(run, now),
-    knownFailedTokens: failed.reduce((sum, a) => sum + (a.tokens ?? 0), 0),
-    unknownTokenFailures: failed.filter((a) => a.tokens == null).length,
+    knownFailedTokens: failed.reduce(
+      (sum, a) => (acceptedFailedTokens(a.tokens) ? sum + a.tokens : sum),
+      0
+    ),
+    unknownTokenFailures: failed.filter((a) => !acceptedFailedTokens(a.tokens)).length,
   };
 }
 
@@ -449,7 +473,7 @@ export const detector: Detector = {
     if (knownFailedTokens > 0) {
       const completeness = unknownTokenFailures > 0
         ? `at least ~${fmtTokens(knownFailedTokens)} known tokens; ` +
-          `${unknownTokenFailures} failed agent token count(s) were absent`
+          `${unknownTokenFailures} failed agent token count(s) were unavailable or invalid`
         : `~${fmtTokens(knownFailedTokens)} tokens with complete failed-agent token counts`;
       observations.push({
         claim:

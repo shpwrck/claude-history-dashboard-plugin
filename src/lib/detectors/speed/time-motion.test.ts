@@ -58,9 +58,29 @@ describe('speed.time-motion (#596)', () => {
     const attribution = attributeWallClock(input);
     expect(attribution.modelWorkingMs).toBe(0);
     expect(attribution.idleMs).toBe(16 * minute);
-    expect(attribution.serialToolMs).toBe(24 * minute);
+    // #3229: the 24m of summed serial gaps exceed the 20m of active runtime, so
+    // the attributed serial bucket is CAPPED at active runtime (20m); the 4m
+    // overrun is held as diagnostic evidence, never attributed.
+    expect(attribution.serialToolMs).toBe(20 * minute);
+    expect(attribution.unattributedSerialMs).toBe(4 * minute);
     expect(attribution.serialPairs).toBe(3);
     expect(attribution.dominant).toBe('serial tools');
+
+    // The attributed buckets must PARTITION the measured runtime, never exceed
+    // it: model-working + idle + serial === the 36m of valid runtime turns.
+    const attributedTotal =
+      attribution.modelWorkingMs + attribution.idleMs + attribution.serialToolMs;
+    const validRuntimeTurnMs = 12 * minute + 16 * minute + 8 * minute; // all turns valid (>0)
+    expect(attributedTotal).toBe(36 * minute);
+    expect(attributedTotal).toBeLessThanOrEqual(validRuntimeTurnMs);
+    // Every bucket is non-negative.
+    for (const ms of [
+      attribution.modelWorkingMs,
+      attribution.idleMs,
+      attribution.serialToolMs,
+    ]) {
+      expect(ms).toBeGreaterThanOrEqual(0);
+    }
 
     const rec = detector.rule(input, 0);
     expect(rec?.id).toBe('speed.time-motion');
@@ -68,6 +88,10 @@ describe('speed.time-motion (#596)', () => {
     expect(rec?.detail).toContain('model-working turns');
     expect(rec?.detail).toContain('idle/AFK');
     expect(rec?.detail).toContain('serial Read latency');
+    // The overrun is surfaced as diagnostic-only, not folded into the total.
+    expect(rec?.detail).toContain('4.0m of serial gap time overran');
+    expect(rec?.detail).toContain('diagnostic evidence only');
+    expect(rec?.detail).toContain('Attributed 36.0m of measured wall-clock');
     expect(rec?.detail).toContain('TTFT and read-time-vs-AFK are out of scope');
     expect(rec?.detail).toContain('15.0m idle split is a heuristic boundary');
     expect(rec?.action).toContain('Batch independent Read/Grep/Glob/LS');

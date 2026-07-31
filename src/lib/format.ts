@@ -45,6 +45,28 @@ export function formatClock(timestamp: string): string {
 }
 
 /**
+ * Render the elapsed time between two ISO timestamps as a compact `s`/`m`/`h`
+ * string (`45.0s`, `3.0m`, `2.0h`).
+ *
+ * Returns the unavailable marker `—` for unparseable input OR for a NEGATIVE
+ * span — an `endIso` that precedes `startIso` is an impossible duration, so it
+ * must not be printed as e.g. `-1.0s` in a session Duration statistic (#3271).
+ */
+export function formatDurationBetween(startIso: string, endIso: string): string {
+  const a = new Date(startIso).getTime();
+  const b = new Date(endIso).getTime();
+  if (isNaN(a) || isNaN(b)) return '—';
+  const diffMs = b - a;
+  if (diffMs < 0) return '—';
+  const s = diffMs / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(1)}m`;
+  const h = m / 60;
+  return `${h.toFixed(1)}h`;
+}
+
+/**
  * Truncate a string to `max` characters with a MIDDLE ellipsis, so both the
  * start and end stay legible (`compound-engi…reviewer`, `~/proj…dashboard`).
  * Returns the input unchanged when it already fits.

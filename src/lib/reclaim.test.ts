@@ -209,6 +209,106 @@ describe('runReclaimCascade — guarded-marginal identity', () => {
     expect(rejects.join(' ')).toMatch(/exceeds server-fee residual/);
   });
 
+  // ── Malformed numeric counterfactuals (#3165) ─────────────────────────────
+  describe('rejects malformed numeric counterfactuals without mutation (#3165)', () => {
+    const key = scopeKeyOf('s1', 'claude-opus-4-7');
+    // Assert every dollar the cascade exposes stays finite and non-negative.
+    const assertClean = (r: ReturnType<typeof runReclaimCascade>): void => {
+      for (const v of [r.billOriginal, r.billFinal, r.total]) {
+        expect(Number.isFinite(v)).toBe(true);
+        expect(v).toBeGreaterThanOrEqual(0);
+      }
+      for (const b of r.booked) {
+        expect(Number.isFinite(b.marginalUsd)).toBe(true);
+        expect(b.marginalUsd).toBeGreaterThanOrEqual(0);
+      }
+      for (const v of Object.values(r.byCategory)) {
+        expect(Number.isFinite(v as number)).toBe(true);
+        expect(v as number).toBeGreaterThanOrEqual(0);
+      }
+    };
+
+    it.each([
+      ['negative', -1],
+      ['NaN', Number.NaN],
+      ['+Infinity', Number.POSITIVE_INFINITY],
+      ['-Infinity', Number.NEGATIVE_INFINITY],
+    ])('rejects a %s directUsd, leaving the $1 residual untouched', (_label, usd) => {
+      // 100 web searches @ $0.01 = $1 server residual.
+      const td = [session('s1', 'claude-opus-4-7', [entry({ webSearchRequests: 100 })])];
+      const rejects: string[] = [];
+      const r = runReclaimCascade(
+        [
+          claim({
+            leverId: 'cost.web-search-spend',
+            orderKey: 60,
+            ownedPools: [],
+            scopeKeys: [key],
+            counterfactual: { kind: 'directUsd', usd },
+          }),
+        ],
+        td,
+        (m) => rejects.push(m)
+      );
+      expect(r.booked[0].rejected).toBe(true);
+      expect(r.total).toBeCloseTo(0, 9);
+      // Residual is NOT increased by a negative reclaim — billFinal stays at the
+      // original $1 server fee.
+      expect(r.billFinal).toBeCloseTo(r.billOriginal, 9);
+      expect(rejects.join(' ')).toMatch(/directUsd must be a finite non-negative/);
+      assertClean(r);
+    });
+
+    it.each([
+      ['negative', -0.5],
+      ['greater than one', 2],
+      ['NaN', Number.NaN],
+      ['+Infinity', Number.POSITIVE_INFINITY],
+    ])('rejects a %s scaleTokens fraction, committing no NaN/negative cost', (_label, frac) => {
+      // 1M output tokens on Opus ($25/MTok).
+      const td = [session('s1', 'claude-opus-4-7', [entry({ outputTokens: 1_000_000 })])];
+      const rejects: string[] = [];
+      const r = runReclaimCascade(
+        [
+          claim({
+            leverId: 'cost.trim',
+            orderKey: 40,
+            ownedPools: ['output'],
+            scopeKeys: [key],
+            counterfactual: { kind: 'scaleTokens', poolDeltaFrac: { output: frac } },
+          }),
+        ],
+        td,
+        (m) => rejects.push(m)
+      );
+      expect(r.booked[0].rejected).toBe(true);
+      expect(r.total).toBeCloseTo(0, 9);
+      expect(r.billFinal).toBeCloseTo(r.billOriginal, 9);
+      expect(rejects.join(' ')).toMatch(/scaleTokens fraction for output must be finite within \[0,1\]/);
+      assertClean(r);
+    });
+
+    it('still books a well-formed scaleTokens fraction alongside the guard', () => {
+      // Sanity: the guard does not reject a legitimate in-range fraction.
+      const td = [session('s1', 'claude-opus-4-7', [entry({ outputTokens: 1_000_000 })])];
+      const r = runReclaimCascade(
+        [
+          claim({
+            leverId: 'cost.trim',
+            orderKey: 40,
+            ownedPools: ['output'],
+            scopeKeys: [key],
+            counterfactual: { kind: 'scaleTokens', poolDeltaFrac: { output: 0.5 } },
+          }),
+        ],
+        td
+      );
+      expect(r.booked[0].rejected).toBe(false);
+      expect(r.total).toBeCloseTo(12.5, 9);
+      assertClean(r);
+    });
+  });
+
   it('rejects a claim whose scopeKey resolves to no priced entry-group', () => {
     const td = [session('s1', 'claude-opus-4-7', [entry({ inputTokens: 1_000_000 })])];
     const rejects: string[] = [];

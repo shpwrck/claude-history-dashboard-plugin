@@ -50,6 +50,14 @@ interface WallClockAttribution {
   idleTurns: number;
   awaySummaries: number;
   serialToolMs: number;
+  /**
+   * Serial-gap time that could NOT be attributed inside measured active runtime
+   * (#3229) — gaps whose summed duration overran their session's active turns.
+   * Kept as separate diagnostic evidence rather than folded into the attributed
+   * `serialToolMs` bucket, so the three buckets always partition (never exceed)
+   * the runtime the transcript actually measured.
+   */
+  unattributedSerialMs: number;
   serialPairs: number;
   serialMedianMs: number;
   serialTopTool: string | null;
@@ -177,15 +185,30 @@ export function attributeWallClock(
   collectRuntimeBuckets(input.runtimeEvents, sessions);
   collectTimelineBuckets(input.timelines, sessions);
 
-  const rows = [...sessions.values()].map((s) => ({
-    ...s,
-    modelWorkingMs: Math.max(0, s.activeTurnMs - s.serialToolMs),
-  }));
+  // Serial tool gaps are timestamped WITHIN a session's active turns, so they
+  // are a SUBSET of active runtime, never additive to it. Summing independent
+  // gaps once let `serialToolMs` exceed active runtime, so the three buckets
+  // reported MORE wall-clock than the session actually ran (#3229). Cap the
+  // attributed serial bucket at active runtime and carve model-working from the
+  // remainder, so `modelWorkingMs + serialToolMs === activeTurnMs` (a
+  // non-overlapping partition). Any overrun is retained only as diagnostic
+  // `unattributedSerialMs`, never attributed — we do not claim those excess gaps
+  // are independent serial waits without an independence signal.
+  const rows = [...sessions.values()].map((s) => {
+    const attributedSerialMs = Math.min(s.serialToolMs, s.activeTurnMs);
+    return {
+      ...s,
+      serialToolMs: attributedSerialMs,
+      unattributedSerialMs: s.serialToolMs - attributedSerialMs,
+      modelWorkingMs: s.activeTurnMs - attributedSerialMs,
+    };
+  });
 
   const allSerialDurations = rows.flatMap((s) => s.serialDurations);
   const modelWorkingMs = rows.reduce((sum, s) => sum + s.modelWorkingMs, 0);
   const idleMs = rows.reduce((sum, s) => sum + s.idleMs, 0);
   const serialToolMs = rows.reduce((sum, s) => sum + s.serialToolMs, 0);
+  const unattributedSerialMs = rows.reduce((sum, s) => sum + s.unattributedSerialMs, 0);
 
   const buckets: Array<{ key: BucketKey; ms: number }> = [
     { key: 'model-working', ms: modelWorkingMs },
@@ -201,6 +224,7 @@ export function attributeWallClock(
     idleTurns: rows.reduce((sum, s) => sum + s.idleTurns, 0),
     awaySummaries: rows.reduce((sum, s) => sum + s.awaySummaries, 0),
     serialToolMs,
+    unattributedSerialMs,
     serialPairs: rows.reduce((sum, s) => sum + s.serialPairs, 0),
     serialMedianMs: median(allSerialDurations),
     serialTopTool: topTool(rows),
@@ -270,6 +294,13 @@ export const detector: Detector = {
       attribution.serialTopTool === null ? 'read-like tool' : attribution.serialTopTool;
     const totalMs =
       attribution.modelWorkingMs + attribution.idleMs + attribution.serialToolMs;
+    // #3229: serial gap time that overran active runtime is diagnostic only —
+    // called out separately so the attributed total never claims more
+    // wall-clock than the transcript measured.
+    const overrunNote =
+      attribution.unattributedSerialMs > 0
+        ? `A further ${fmtDuration(attribution.unattributedSerialMs)} of serial gap time overran the measured active runtime and is held as diagnostic evidence only, not attributed — those gaps overlap active turns, so they are not proven independent waits. `
+        : '';
 
     return {
       id: 'speed.time-motion',
@@ -283,6 +314,7 @@ export const detector: Detector = {
         `${attribution.idleTurns} idle turn(s), ${attribution.awaySummaries} away_summary marker(s)), and ` +
         `${fmtDuration(attribution.serialToolMs)} serial ${serialTool} latency (` +
         `${attribution.serialPairs} adjacent use->result gap(s), median ${fmtDuration(attribution.serialMedianMs)}). ` +
+        overrunNote +
         `Dominant stall: ${attribution.dominant}. TTFT and read-time-vs-AFK are out of scope: ` +
         `transcripts do not expose TTFT, sparse server debug logs are the only TTFT source, ` +
         `and the ${fmtDuration(IDLE_TURN_THRESHOLD_MS)} idle split is a heuristic boundary.`,

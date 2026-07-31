@@ -1,5 +1,46 @@
 import { describe, expect, it } from 'vitest';
-import { formatMetric, formatTokens, truncateMiddle, truncateTick } from './format';
+import {
+  formatDurationBetween,
+  formatMetric,
+  formatTokens,
+  truncateMiddle,
+  truncateTick,
+} from './format';
+
+describe('formatDurationBetween (#3271)', () => {
+  it('marks a reversed-timestamp span as unavailable rather than negative', () => {
+    // endIso precedes startIso by 1s → impossible duration, not "-1.0s".
+    expect(
+      formatDurationBetween('2026-01-01T00:00:01Z', '2026-01-01T00:00:00Z')
+    ).toBe('—');
+  });
+
+  it('marks unparseable timestamps as unavailable', () => {
+    expect(formatDurationBetween('not-a-date', '2026-01-01T00:00:00Z')).toBe('—');
+    expect(formatDurationBetween('2026-01-01T00:00:00Z', 'not-a-date')).toBe('—');
+  });
+
+  it('renders a zero-length span as 0.0s', () => {
+    expect(
+      formatDurationBetween('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+    ).toBe('0.0s');
+  });
+
+  it('retains sub-second, second, minute, and hour formatting for valid spans', () => {
+    expect(
+      formatDurationBetween('2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.500Z')
+    ).toBe('0.5s');
+    expect(
+      formatDurationBetween('2026-01-01T00:00:00Z', '2026-01-01T00:00:45Z')
+    ).toBe('45.0s');
+    expect(
+      formatDurationBetween('2026-01-01T00:00:00Z', '2026-01-01T00:03:00Z')
+    ).toBe('3.0m');
+    expect(
+      formatDurationBetween('2026-01-01T00:00:00Z', '2026-01-01T02:00:00Z')
+    ).toBe('2.0h');
+  });
+});
 
 describe('truncateMiddle (#457)', () => {
   it('returns the input unchanged when it already fits', () => {
