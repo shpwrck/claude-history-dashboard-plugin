@@ -19,6 +19,7 @@ import {
   streamAdoptionReceipts,
   type AdoptionReceiptOptions,
 } from './adoption-receipts';
+import { acquireAdoptionSpoolRotationLock } from './adoption-spool-lock';
 
 // Server-side drain for the recs adoption-receipt SPOOL (#581).
 //
@@ -69,6 +70,12 @@ export interface AdoptionSpoolDrainOptions extends AdoptionReceiptOptions {
    * callers omit it; throwing leaves the private snapshot available to retry.
    */
   onPhase?: (phase: AdoptionSpoolDrainPhase) => void | Promise<void>;
+  /**
+   * Test seam: overrides the drain-side rotation-lock acquisition budget
+   * (default `ADOPTION_SPOOL_ROTATION_LOCK_DRAIN_BUDGET_MS`, 2000 ms).
+   * Production callers omit it.
+   */
+  rotationLockBudgetMs?: number;
 }
 
 /**
@@ -392,20 +399,32 @@ async function serializeDrain<T>(
 // Killswitch: when shadow-calls is OFF the drain writes NOTHING and leaves both
 // the live spool and any recovery snapshots untouched.
 //
-// RESIDUAL (documented, not fixed here — #3106 follow-up). Rotation is a
-// consumer-side move, so it cannot quiesce the producer: a hook that opened the
-// live spool for append BEFORE the rename holds a descriptor on the rotated
-// inode and may write to it at any later time. This drain chases such a tail
-// (it re-reads a snapshot that grew and refuses to unlink one whose bytes it
-// has not all consumed), which narrows the loss window to a write landing
-// between the final size check and the unlink — but it cannot close it.
-// Closing it requires the PRODUCER to cooperate (a lock the drain honours, or a
-// spool DIRECTORY where each receipt is renamed in atomically), and the
-// producer lives in `~/.claude`, outside this repo.
+// ROTATION LOCK (protocol v1 — #3402 drain half; producer half #3369 /
+// shpwrck/agent-skills#22). Rotation is guarded by a sibling
+// `<spool>.rotation-lock` file taken with open 'wx' (see
+// `./adoption-spool-lock`, whose constants are a cross-repo contract). The
+// drain holds the lock across rotation ONLY — the rename + recreate inside
+// `rotateLiveSpool`, never snapshot draining or receipt processing — so a
+// producer's wait stays in the milliseconds. A protocol-abiding producer holds
+// the same lock across its own open+append, so its append can no longer land on
+// the retired inode between its open and write: while the drain rotates the
+// producer waits, and after release its append opens the RECREATED live spool.
+// If the drain cannot acquire the lock within its 2000 ms budget it SKIPS
+// rotation for this cycle — existing snapshots are still recovered and drained,
+// and the live spool simply waits for the next pass. Deferred drain is safe; an
+// unlocked rotation is not. Lock failures never throw out of the drain.
+// docs/recs-adoption-receipts.md carries the full contract prose.
 //
-// Cross-process drains are likewise NOT serialized: `serializeDrain` is an
-// in-process mutex. Two server processes sharing one cache dir can rotate and
-// drain concurrently.
+// REMAINING residuals (documented, not fixed here):
+// - A NON-protocol producer (a legacy hook, or a protocol producer that fell
+//   back to a bare append after its 250 ms lock budget expired — degraded mode)
+//   can still write through a descriptor opened before rotation. The bounded
+//   snapshot tail passes remain as the belt for that case, and its loss window
+//   between the final size check and the unlink still exists.
+// - Cross-process DRAINS are still not serialized end-to-end: `serializeDrain`
+//   is an in-process mutex and the rotation lock covers only the rotation
+//   window, so two server processes sharing one cache dir can still drain the
+//   same snapshot concurrently.
 export async function drainAdoptionSpool(
   spoolFile: string,
   receiptsFile: string,
@@ -430,7 +449,21 @@ export async function drainAdoptionSpool(
       // Recover older private snapshots before rotating the current live file.
       // A repeatedly failing recovery therefore cannot accumulate or reorder
       // progressively newer snapshots.
-      const rotated = await rotateLiveSpool(spoolFile);
+      //
+      // Rotation itself runs under the cross-process rotation lock (protocol
+      // v1); a missed lock skips rotation for this cycle rather than risking a
+      // producer append landing on the retired inode.
+      const lock = await acquireAdoptionSpoolRotationLock(spoolFile, {
+        role: 'drain',
+        budgetMs: opts.rotationLockBudgetMs,
+      });
+      if (!lock) return { drained, skipped };
+      let rotated: AdoptionSpoolSnapshot | null = null;
+      try {
+        rotated = await rotateLiveSpool(spoolFile);
+      } finally {
+        await lock.release();
+      }
       if (rotated) {
         const outcome = await drainSnapshot(rotated, receiptsFile, opts, false);
         drained += outcome.result.drained;

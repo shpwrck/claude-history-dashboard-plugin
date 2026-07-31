@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   appendFile,
+  lstat,
   mkdir,
   mkdtemp,
   open,
@@ -8,11 +9,17 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { drainAdoptionSpool, drainAdoptionSpoolQuiet } from './adoption-spool';
+import {
+  ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+  adoptionSpoolRotationLockPath,
+} from './adoption-spool-lock';
 import {
   ADOPTION_RECEIPT_LINE_MAX_BYTES,
   readAdoptionReceipts,
@@ -637,5 +644,97 @@ describe('drainAdoptionSpool', () => {
     expect(result).toEqual({ drained: 0, skipped: 0 });
     expect(phases).toEqual([]);
     expect(await readFile(spool, 'utf8')).toBe('');
+  });
+
+  // #3402 (e): rotation runs only under the cross-process rotation lock. When
+  // another process holds a FRESH lock past the drain's budget, the drain skips
+  // rotation for this cycle without error — the live spool stays untouched and
+  // queued — while pre-existing snapshots are still recovered and drained.
+  it('skips rotation but still recovers snapshots when the rotation lock is unavailable', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const receipts = join(dir, 'adoption-receipts.jsonl');
+    const liveBody = surfacedLine('still-live', ['cost.cache']);
+    await writeFile(spool, liveBody, 'utf8');
+    const liveInode = (await stat(spool)).ino;
+
+    // A snapshot left behind by an earlier interrupted drain.
+    await writeFile(
+      join(dir, `.adoption-spool.jsonl.drain-${randomUUID()}.snapshot`),
+      surfacedLine('recovered', ['context.reread']),
+      'utf8'
+    );
+
+    // A rival process holds a fresh lock for longer than the drain's budget.
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    const rivalLock = `${JSON.stringify({
+      schemaVersion: '1',
+      kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+      role: 'producer',
+      pid: 99999,
+      token: randomUUID(),
+      createdAt: now().toISOString(),
+    })}\n`;
+    await writeFile(lockPath, rivalLock, 'utf8');
+
+    const result = await drainAdoptionSpool(spool, receipts, {
+      now,
+      env: {},
+      shadowCallsDir: join(dir, 'sc'),
+      rotationLockBudgetMs: 150,
+    });
+
+    // Snapshot recovery still happened; rotation was skipped without error.
+    expect(result).toEqual({ drained: 1, skipped: 0 });
+    expect(
+      surfacedHashes((await readAdoptionReceipts(receipts, now)).receipts)
+    ).toEqual(['recovered']);
+    expect((await stat(spool)).ino).toBe(liveInode);
+    expect(await readFile(spool, 'utf8')).toBe(liveBody);
+    expect(
+      (await readdir(dir)).filter((name) => name.endsWith('.snapshot'))
+    ).toEqual([]);
+    // The rival's lock is not ours: never unlinked, never rewritten.
+    expect(await readFile(lockPath, 'utf8')).toBe(rivalLock);
+
+    // Once the rival releases, the next drain rotates and drains the live line.
+    await rm(lockPath);
+    expect(
+      await drainAdoptionSpool(spool, receipts, {
+        now,
+        env: {},
+        shadowCallsDir: join(dir, 'sc'),
+      })
+    ).toEqual({ drained: 1, skipped: 0 });
+    expect(
+      surfacedHashes((await readAdoptionReceipts(receipts, now)).receipts)
+    ).toEqual(['recovered', 'still-live']);
+  });
+
+  it('skips rotation gracefully when a symlink squats on the rotation-lock path', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const receipts = join(dir, 'adoption-receipts.jsonl');
+    const liveBody = surfacedLine('still-live', ['cost.cache']);
+    await writeFile(spool, liveBody, 'utf8');
+    const victim = join(dir, 'victim');
+    await writeFile(victim, 'victim-bytes', 'utf8');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    await symlink(victim, lockPath);
+
+    const result = await drainAdoptionSpool(spool, receipts, {
+      now,
+      env: {},
+      shadowCallsDir: join(dir, 'sc'),
+    });
+
+    // No rotation, no error, nothing followed or unlinked through the symlink.
+    expect(result).toEqual({ drained: 0, skipped: 0 });
+    expect(await readFile(spool, 'utf8')).toBe(liveBody);
+    expect(await readFile(victim, 'utf8')).toBe('victim-bytes');
+    expect((await lstat(lockPath)).isSymbolicLink()).toBe(true);
+    expect(
+      (await readdir(dir)).filter((name) => name.endsWith('.snapshot'))
+    ).toEqual([]);
   });
 });

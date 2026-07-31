@@ -47,16 +47,64 @@ already landed, no loss of what did not. Canonical readers ignore the frame
 rather than treating it as a receipt or as corrupt input, and the receipt writer
 rejects it, so it cannot be forged through the API.
 
-**Known residual.** Rotation is a consumer-side move and cannot quiesce the
-producer: a hook that opened the live spool for append *before* the rename holds
-a descriptor on the rotated inode and may write to it later. The drain chases
-such a tail (it re-reads a snapshot that grew and refuses to unlink one whose
-bytes it has not all consumed), which narrows the loss window to a write landing
-between the final size check and the unlink — but cannot close it. Closing it
-requires the producer to cooperate (a lock the drain honours, or a spool
-*directory* into which each receipt is renamed atomically), and the producer
-lives in `~/.claude`, outside this repo. Cross-process drains are likewise not
-serialized; `serializeDrain` is an in-process mutex.
+## Spool rotation lock — cross-process protocol v1 (#3402, #3369)
+
+Rotation is a consumer-side move and cannot by itself quiesce the producer: a
+hook that opened the live spool for append *before* the rename holds a
+descriptor on the rotated inode, so its later write lands in the retired
+snapshot — possibly after the drain's EOF scan, where it would be deleted.
+Protocol v1 closes that window with a cooperative lock both sides honour. The
+drain half lives in `src/lib/adoption-spool-lock.ts` (this repo, #3402); the
+producer half is the recs SessionStart hook in `shpwrck/agent-skills`
+(shpwrck/agent-skills#22, tracked here as #3369). **This section is the
+cross-repo contract** — both implementations copy these constants exactly.
+
+- **Lock path.** `<resolved spool path> + '.rotation-lock'` — a sibling file.
+  Spool path resolution is unchanged: `ADOPTION_SPOOL_PATH` env if set, else
+  `join(CHD_CACHE_DIR default ~/.claude/.cache/chd, 'adoption-spool.jsonl')`.
+- **Acquire.** Open with flag `'wx'`, mode `0o600`; write one single-line JSON
+  payload:
+
+  ```json
+  {"schemaVersion":"1","kind":"ChdAdoptionSpoolRotationLock","role":"drain","pid":12345,"token":"<randomUUID>","createdAt":"<ISO8601>"}
+  ```
+
+  The producer writes `"role":"producer"`.
+- **On EEXIST.** `lstat` the lock path: missing → retry; a symlink or anything
+  that is not a regular file → acquisition **fails permanently** (hostile
+  squatting — never follow it, never unlink it). Otherwise stale check: an
+  `mtimeMs` older than **10000 ms** is reclaimed by `rename(lockPath, lockPath +
+  '.stale-' + pid + '-' + randomUUID())` then unlinking the renamed path
+  (rename-**first**, so two concurrent reclaimers cannot both win; ENOENT races
+  at either step are tolerated), then retry.
+- **Backoff / budgets.** ~5 ms between attempts. Drain-side total acquisition
+  budget: **2000 ms**. Producer-side budget: **250 ms**.
+- **Release.** Read and parse the lock file; unlink **only** if its `token`
+  matches the one this holder wrote (a stale reclaim may have replaced the lock
+  with a rival holder's). Always in `finally`; ENOENT tolerated.
+- **Hold windows.** The drain holds the lock across rotation ONLY — the rename +
+  recreate inside `rotateLiveSpool`, never snapshot draining or receipt
+  processing — so producer waits stay in the milliseconds. The producer holds it
+  across its open+append, so a post-rotation append by a protocol-abiding
+  producer can only reach the recreated live spool.
+- **Drain fail-safe.** If the lock cannot be acquired within budget, the drain
+  SKIPS rotation for that cycle (existing snapshots are still recovered and
+  drained). Deferred drain is safe; an unlocked rotation is not. Lock failures
+  never throw out of the drain; `drainAdoptionSpoolQuiet` semantics are kept.
+- **Producer fallback (degraded mode).** When the producer's 250 ms budget
+  expires it MAY fall back to a bare append rather than dropping the receipt.
+  Such writes have the pre-lock exposure below.
+- **Killswitch.** The `SHADOW_CALLS_OFF` / `OFF`-sentinel early-return runs
+  before any lock activity on both sides.
+
+**Remaining residuals.** A non-protocol producer — a legacy hook, or a protocol
+producer in degraded mode — can still write through a pre-rotation descriptor;
+the drain's bounded snapshot tail passes (it re-reads a snapshot that grew and
+refuses to unlink one whose bytes it has not all consumed) remain as the belt
+for that case, narrowing but not closing its loss window. Cross-process drains
+are likewise not serialized end-to-end: `serializeDrain` is an in-process mutex
+and the rotation lock covers only the rotation window, so two server processes
+sharing one cache dir can still drain the same snapshot concurrently.
 
 ## Read path & the Adoption Scorecard (#577)
 

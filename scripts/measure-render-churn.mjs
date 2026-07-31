@@ -10,13 +10,21 @@
 //     total longtask duration during that window is captured.
 //
 // Usage:
-//   npm run build:spa          # build the SPA with sample data first
+//   npm run build:sample       # emits dist/sample-data.zip — `build:spa` does
+//                              # NOT: vite.config.ts applies sampleDataPlugin()
+//                              # only under `--mode sample` (ADR 0014)
 //   node scripts/measure-render-churn.mjs [--port 4476]
 //   node scripts/measure-render-churn.mjs --sweep [--json]   # warm-nav settle sweep (#2395)
 //   node scripts/measure-render-churn.mjs --help
 //
 // The script starts `vite preview` on --port (default 4476), waits for it,
 // runs measurements, then kills the preview server and prints a summary.
+// The default target FAILS CLOSED on an unverified port (#3396, mirroring
+// #3091/#3394 in measure-isolated-views.mjs): whether the port was already
+// occupied or the preview was just spawned, the responder must verify — via
+// verifyTarget() — as THIS dashboard's SPA preview serving the sample corpus
+// before anything is measured. An explicit --base target is exempt: it is a
+// user assertion (e.g. a live server with no sample corpus), not an assumption.
 // With --json in --sweep mode, all human/progress output goes to stderr so
 // stdout is pure JSON (`… --sweep --json | jq`).
 
@@ -27,6 +35,10 @@ import { readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as ts from 'typescript';
+
+// Side-effect-free import: measure-isolated-views.mjs guards its own main() on
+// direct invocation, so pulling its verifier in runs nothing.
+import { verifyTarget } from './measure-isolated-views.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_PORT = 4476;
@@ -149,11 +161,19 @@ async function isPortFree(port) {
   });
 }
 
-// Start vite preview and wait until it's accepting connections
+// Start vite preview and wait until it's accepting connections. Occupancy is
+// not identity (#3396): an occupied port used to be taken as proof that "a
+// preview server is running", so whatever answered — an unrelated static
+// server, another Vite app — was measured under this benchmark's name. Now the
+// responder must verify as THIS SPA preview serving the sample corpus, and a
+// verification failure throws so no measurement can run.
 async function startPreview(port) {
   if (!(await isPortFree(port))) {
-    console.log(`  port ${port} already in use — assuming a preview server is running`);
-    return null;
+    const provenance = await verifyTarget(port);
+    console.log(
+      `  port ${port} already serves this SPA preview (build ${provenance.build}); reusing it`
+    );
+    return { proc: null, provenance };
   }
   const proc = spawn(
     'node',
@@ -166,15 +186,27 @@ async function startPreview(port) {
     const free = await isPortFree(port);
     if (!free) break;
   }
-  return proc;
+  // The preview we just spawned must verify too — it may be serving a
+  // sample-corpus-less `build:spa` dist, which renders the empty upload-first
+  // UI (see the usage block above).
+  try {
+    const provenance = await verifyTarget(port);
+    return { proc, provenance };
+  } catch (err) {
+    proc.kill();
+    throw err;
+  }
 }
 
 async function resolveTarget(opts) {
   if (opts.base) {
-    return { baseUrl: normalizeBase(opts.base), previewProc: null };
+    // Deliberately UNVERIFIED: an explicit user-supplied target is an
+    // assertion, not an assumption — the sweep's live-server mode points at
+    // real servers that carry no /sample-data.zip corpus.
+    return { baseUrl: normalizeBase(opts.base), previewProc: null, provenance: null };
   }
-  const previewProc = await startPreview(opts.port);
-  return { baseUrl: `http://127.0.0.1:${opts.port}`, previewProc };
+  const { proc, provenance } = await startPreview(opts.port);
+  return { baseUrl: `http://127.0.0.1:${opts.port}`, previewProc: proc, provenance };
 }
 
 // Views to measure: nav label -> URL hash/path.
@@ -816,7 +848,15 @@ function printSweepTable(results, times, say = (line = '') => console.log(line))
   }
 }
 
-async function runSweep(page, baseUrl, opts) {
+// The Target line states only what was established: verified provenance (build
+// + corpus identifiers read from the responder) on the preview path, or the
+// bare URL for a user-asserted --base target (provenance === null).
+function targetLine(baseUrl, provenance) {
+  if (!provenance) return `Target: ${baseUrl}`;
+  return `Target: ${baseUrl} (verified build ${provenance.build}; corpus ${provenance.corpus.id})`;
+}
+
+async function runSweep(page, baseUrl, opts, provenance) {
   // With --json, stdout must be pure JSON (so `... --json | jq` works), so route
   // every progress/log/table line to stderr and reserve stdout for the JSON.
   const logStream = opts.json ? process.stderr : process.stdout;
@@ -843,7 +883,7 @@ async function runSweep(page, baseUrl, opts) {
   }
 
   say('# Render-churn warm-navigation settle sweep (issue #2395)\n');
-  say(`Target: ${baseUrl}`);
+  say(targetLine(baseUrl, provenance));
   say(
     `Routes: ${routes.length} (${routes.filter((r) => r.source === 'sidebar').length} sidebar, ${routes.filter((r) => r.source === 'absorbed').length} absorbed)`
   );
@@ -926,9 +966,12 @@ function fmtNavMs(navMs) {
   return navMs === null || navMs === undefined ? 'unknown' : String(Math.round(navMs));
 }
 
-async function runLegacy(page, baseUrl) {
+async function runLegacy(page, baseUrl, provenance) {
   console.log('# Render-churn measurement (issue #666)\n');
-  console.log(`Target: ${baseUrl} (SPA with sample corpus, 18 sessions)`);
+  // No hard-coded "(SPA with sample corpus, 18 sessions)" claim: print the
+  // identifiers actually verified on the responder, or just the URL for a
+  // user-asserted --base target.
+  console.log(targetLine(baseUrl, provenance));
   console.log('');
 
   const results = [];
@@ -979,9 +1022,12 @@ async function runLegacy(page, baseUrl) {
     console.log('\n=> Layout thrash is NOT measurable at a budget-worthy level on this dataset.');
   }
 
-  // Emit machine-readable JSON for the finding doc
+  // Emit machine-readable JSON for the finding doc. Like the Target line, the
+  // dataset field carries verified identifiers, not an assumed session count.
   const out = {
-    dataset: '18-session sample corpus (build-corpus.mjs seed 0x5eed1234)',
+    dataset: provenance
+      ? `verified sample corpus (${provenance.corpus.id}; build ${provenance.build})`
+      : `UNVERIFIED --base target ${baseUrl}`,
     timestamp: new Date().toISOString(),
     results,
     summary: {
@@ -1016,7 +1062,7 @@ function printHelp() {
   console.log(`measure-render-churn — render-churn / warm-nav-settle measurement harness
 
 Usage:
-  npm run build:spa
+  npm run build:sample     (build:spa does NOT emit the sample corpus)
   node scripts/measure-render-churn.mjs [options]
 
 Options:
@@ -1041,7 +1087,10 @@ Options:
 Notes:
   Routes whose required capability the target lacks (e.g. 'liveServer' views on
   the default SPA/preview target) are reported with status REDIRECTED because
-  the app funnels them to 'home'; their metrics do not reflect the named route.`);
+  the app funnels them to 'home'; their metrics do not reflect the named route.
+  The default preview target FAILS CLOSED (#3396): the responder — reused or
+  freshly spawned — must verify as this SPA preview serving the sample corpus,
+  or the run refuses to measure. --base targets are exempt (user assertion).`);
 }
 
 async function main() {
@@ -1051,17 +1100,33 @@ async function main() {
     return;
   }
 
+  // Verify the target BEFORE launching anything else. A failure here is a
+  // refusal, not a warning (#3396, same contract as measure-isolated-views): a
+  // benchmark that cannot establish what it measured must not publish a
+  // measurement. startPreview already reaps a preview it spawned but could not
+  // verify, so there is nothing to tear down on this path.
+  let target;
+  try {
+    target = await resolveTarget(opts);
+  } catch (err) {
+    process.stderr.write(
+      `measure-render-churn: refusing to measure port ${opts.port} — ${err.message}\n` +
+        'The responder could not be verified as this SPA preview, so numbers ' +
+        'collected from it would not be this benchmark.\n'
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   // Declare handles up front so the finally block can tear down whatever got
-  // created, even if setup (resolveTarget → spawns preview, browser launch,
-  // context/page/addInitScript) throws partway through. Leaking the preview
-  // server here is what makes the next run silently measure a stale bundle via
-  // the "port already in use" path.
-  let previewProc = null;
+  // created, even if setup (browser launch, context/page/addInitScript) throws
+  // partway through. Leaking the preview server here is what makes the next
+  // run reuse it via the "port already serves this SPA preview" path — now at
+  // least under its verified (possibly stale) build id instead of blindly.
+  let previewProc = target.previewProc;
   let browser = null;
   try {
-    const target = await resolveTarget(opts);
-    previewProc = target.previewProc;
-    const { baseUrl } = target;
+    const { baseUrl, provenance } = target;
 
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
@@ -1073,9 +1138,9 @@ async function main() {
     await page.addInitScript(INJECT_SCRIPT);
 
     if (opts.sweep) {
-      await runSweep(page, baseUrl, opts);
+      await runSweep(page, baseUrl, opts, provenance);
     } else {
-      await runLegacy(page, baseUrl);
+      await runLegacy(page, baseUrl, provenance);
     }
   } finally {
     if (browser) {

@@ -1,14 +1,21 @@
 // Unit tests for the network-free route-catalog extraction in
-// measure-render-churn.mjs (#2395). The measurement path itself needs a live
+// measure-render-churn.mjs (#2395), plus the end-to-end refusal contract for
+// unverified targets (#3396). The measurement path itself needs a live
 // preview server + a headless browser and is run on demand (see the script
-// header); these tests pin only the pure `extractRouteCatalog()` parser, so a
-// silent coverage regression (a nav-prefs.ts shape change that drops routes)
-// fails here instead of shrinking the sweep unnoticed. Run:
+// header); the parser tests pin the pure `extractRouteCatalog()` shape, and
+// the refusal test proves an occupied-by-something-else port exits nonzero
+// BEFORE any measurement starts. Run:
 //   node --test scripts/measure-render-churn.test.mjs
 //   (npm run test:render-churn)
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 import {
   extractRouteCatalog,
@@ -185,4 +192,47 @@ test('measureView: changing the settling delay does not change navMs', async () 
 
 test('the legacy settling delay is still the documented 2s default', () => {
   assert.equal(LEGACY_SETTLE_MS, 2000);
+});
+
+// The end-to-end contract (#3396, mirroring #3091/#3394 in
+// measure-isolated-views): an unrelated server on the requested port must make
+// the script exit nonzero BEFORE any measurement starts — occupancy is not
+// identity.
+test('the script exits nonzero when an unrelated server occupies the port', async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('unrelated static server');
+  });
+  const port = await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+  });
+  try {
+    const result = await new Promise((resolve) => {
+      const child = spawn(
+        process.execPath,
+        ['scripts/measure-render-churn.mjs', '--port', String(port)],
+        { cwd: PROJECT_DIR, stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (c) => (stdout += c));
+      child.stderr.on('data', (c) => (stderr += c));
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.notEqual(
+      result.code,
+      0,
+      `expected a nonzero exit, got ${result.code}\n${result.stdout}`
+    );
+    assert.match(result.stderr, /refusing to measure port/);
+    // Nothing was measured, so no target/measurement output may exist.
+    assert.equal(
+      /Target:|# Render-churn/.test(result.stdout),
+      false,
+      `measurements ran against an unverified responder:\n${result.stdout}`
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
