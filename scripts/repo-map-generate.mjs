@@ -20,6 +20,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { envNumber, EnvNumberError } from './lib/env-number.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const {
@@ -118,17 +119,39 @@ const root = resolve(process.argv[2] ?? process.cwd());
 const force = process.argv.includes('--force');
 const gitSha = gitShaOf(root);
 
+/** Strict, fail-closed env override parsing (#3477). The old shape here —
+ *  `Number(process.env.X) || DEFAULT` — silently discarded the operator's
+ *  stated intent: `Number('12g')` is `NaN`, and `NaN || DEFAULT` is `DEFAULT`,
+ *  so `REPO_MAP_MAX_BYTES=12g` shipped a 1 MiB artifact with no warning (and
+ *  `0` / negatives were swallowed the same way). That is the fourth instance of
+ *  the fail-open-parse class #3076 removed from the cold-ingest bench, and it
+ *  made the producer DISAGREE with the gate, which parses the same override
+ *  fail-closed (PR #3476). Both now converge on the shared #3076 parser: a set
+ *  but unusable value exits non-zero instead of measuring/shipping something
+ *  other than what was asked for. */
+function envIntOrDie(name, fallback) {
+  try {
+    return envNumber(name, { fallback, min: 1, integer: true });
+  } catch (err) {
+    if (err instanceof EnvNumberError) {
+      console.error(`repo-map: ${err.message}`);
+      process.exit(2);
+    }
+    throw err;
+  }
+}
+
 // A generous budget for the persisted text fragment; the full structured index
 // (`map.files`) is unbudgeted, and prompt consumers (#891) re-render at their own
 // budget. Override with REPO_MAP_TOKEN_BUDGET.
-const tokenBudget = Number(process.env.REPO_MAP_TOKEN_BUDGET) || 8000;
+const tokenBudget = envIntOrDie('REPO_MAP_TOKEN_BUDGET', 8000);
 // Discovery caps. REPO_MAP_MAX_FILES bounds retained source files;
 // REPO_MAP_MAX_DIR_ENTRIES bounds directory entries inspected before parsing.
-const maxFiles = Number(process.env.REPO_MAP_MAX_FILES) || undefined;
-const maxDirEntries = Number(process.env.REPO_MAP_MAX_DIR_ENTRIES) || undefined;
+const maxFiles = envIntOrDie('REPO_MAP_MAX_FILES', undefined);
+const maxDirEntries = envIntOrDie('REPO_MAP_MAX_DIR_ENTRIES', undefined);
 // Hard ceiling on the persisted artifact's serialized size, override with
 // REPO_MAP_MAX_BYTES; bounds the dataset payload one root contributes (#893).
-const maxBytes = Number(process.env.REPO_MAP_MAX_BYTES) || DEFAULT_MAX_PERSISTED_BYTES;
+const maxBytes = envIntOrDie('REPO_MAP_MAX_BYTES', DEFAULT_MAX_PERSISTED_BYTES);
 // Disposable, host-only parse cache. Keep it OUTSIDE the runtime artifact tree:
 // repo-map artifact discovery treats every top-level JSON file there as a
 // consumer artifact. XDG/REPO_MAP_FILE_CACHE_DIR also make the cache location
@@ -142,9 +165,10 @@ const cacheBase = process.env.REPO_MAP_FILE_CACHE_DIR
       'claude-history-dashboard',
       'repo-map'
     );
-const fileCacheMaxBytes =
-  Number(process.env.REPO_MAP_FILE_CACHE_MAX_BYTES) ||
-  DEFAULT_REPO_MAP_FILE_CACHE_MAX_BYTES;
+const fileCacheMaxBytes = envIntOrDie(
+  'REPO_MAP_FILE_CACHE_MAX_BYTES',
+  DEFAULT_REPO_MAP_FILE_CACHE_MAX_BYTES
+);
 
 const outDir = join(homedir(), '.claude', 'usage-data', 'repo-map');
 mkdirSync(outDir, { recursive: true });
