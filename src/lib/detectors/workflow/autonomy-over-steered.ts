@@ -119,6 +119,55 @@ function fmtPct(value: number): string {
  * positive ⇒ same-direction (suppress), with `null` when there is too little
  * paired data to judge.
  */
+/**
+ * Count unordered pairs tied on a key (Σ t(t−1)/2 over equal-value groups).
+ * Numeric keys use SameValueZero (so −0 groups with 0), matching the original
+ * `d === 0` skip; the composite (both-tied) key is a `\0`-joined string.
+ */
+function tiedPairCount(values: Array<number | string>): number {
+  const counts = new Map<number | string, number>();
+  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+  let sum = 0;
+  for (const c of counts.values()) sum += (c * (c - 1)) / 2;
+  return sum;
+}
+
+/**
+ * Merge-sort inversion count: unordered pairs i&lt;j with `arr[i] > arr[j]`
+ * (STRICT). Equal values are never counted as inversions, so score ties drop out.
+ */
+function countStrictInversions(arr: number[]): number {
+  const n = arr.length;
+  if (n < 2) return 0;
+  const buf = arr.slice();
+  const tmp = new Array<number>(n);
+  let inv = 0;
+  const sort = (lo: number, hi: number): void => {
+    if (hi - lo < 2) return;
+    const mid = (lo + hi) >> 1;
+    sort(lo, mid);
+    sort(mid, hi);
+    let i = lo;
+    let j = mid;
+    let k = lo;
+    while (i < mid && j < hi) {
+      if (buf[i] <= buf[j]) {
+        tmp[k++] = buf[i++];
+      } else {
+        // buf[i] > buf[j]: buf[j] is strictly smaller than every remaining
+        // left-half element, so each contributes one inversion.
+        inv += mid - i;
+        tmp[k++] = buf[j++];
+      }
+    }
+    while (i < mid) tmp[k++] = buf[i++];
+    while (j < hi) tmp[k++] = buf[j++];
+    for (let t = lo; t < hi; t += 1) buf[t] = tmp[t];
+  };
+  sort(0, n);
+  return inv;
+}
+
 export function divergenceAutonomyConcordance(
   steeringRows: TaskSteering[],
   successByTask: Map<string, TaskSuccessProxy>
@@ -134,23 +183,29 @@ export function divergenceAutonomyConcordance(
 
   if (pairs.length < MIN_MONOTONE_SPANS) return null;
 
-  let concordant = 0;
-  let discordant = 0;
-  for (let i = 0; i < pairs.length; i += 1) {
-    for (let j = i + 1; j < pairs.length; j += 1) {
-      const dDiv = pairs[i].divergence - pairs[j].divergence;
-      const dScore = pairs[i].score - pairs[j].score;
-      if (dDiv === 0 || dScore === 0) continue;
-      // Concordant = same direction (higher divergence, higher score) — that is
-      // the WRONG direction for our thesis. Discordant = inverse — the right one.
-      if (Math.sign(dDiv) === Math.sign(dScore)) concordant += 1;
-      else discordant += 1;
-    }
-  }
-  const total = concordant + discordant;
-  if (total === 0) return null;
+  // Goodman–Kruskal gamma in O(n log n) (#3233). The old n(n−1)/2 pairwise scan
+  // is exactly: (# concordant − # discordant) / (# comparable), where a pair is
+  // COMPARABLE only when it ties in NEITHER dimension (the `dDiv === 0 ||
+  // dScore === 0` skips). Sorting by divergence (ties broken by score ascending
+  // so no equal-divergence pair is miscounted) turns "# discordant" into the
+  // score-inversion count, and the comparable total follows by inclusion–
+  // exclusion on the tie counts. The returned fraction is unchanged for finite
+  // inputs; only the cost drops from quadratic to n log n.
+  const n = pairs.length;
+  const totalPairs = (n * (n - 1)) / 2;
+  const tiedDivergence = tiedPairCount(pairs.map((p) => p.divergence));
+  const tiedScore = tiedPairCount(pairs.map((p) => p.score));
+  const tiedBoth = tiedPairCount(pairs.map((p) => `${p.divergence}\0${p.score}`));
+  const comparable = totalPairs - tiedDivergence - tiedScore + tiedBoth;
+  if (comparable === 0) return null;
+
+  const sorted = [...pairs].sort(
+    (a, b) => a.divergence - b.divergence || a.score - b.score
+  );
+  const discordant = countStrictInversions(sorted.map((p) => p.score));
+  const concordant = comparable - discordant;
   // Positive ⇒ same-direction dominates (bad); negative ⇒ inverse dominates.
-  return (concordant - discordant) / total;
+  return (concordant - discordant) / comparable;
 }
 
 export const detector: Detector = {

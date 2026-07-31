@@ -551,6 +551,46 @@ function candidateIsProvenBeforeLatestMutation(
   );
 }
 
+/**
+ * Bucket cross-session transitions by `project + '\0' + key` (#3251).
+ *
+ * `collectPreSignals` resolves, for every session's every final leave-behind
+ * state, the transitions in the SAME project that carry the SAME transition
+ * key. Doing that as `crossSessionTransitions.filter(...)` inside the finalStates
+ * loop is O(F × T) full-array scans per detector evaluation. This builds the
+ * lookup once so each final state reads only its own bucket. `project === null`
+ * transitions can never match the loop's `transition.project === project`
+ * (project is non-null there), so they are dropped from the index. Insertion
+ * order within a bucket preserves the original array order, so the downstream
+ * first-write-wins per-session dedup is unaffected.
+ */
+export function indexTransitionsByProjectKey(
+  transitions: CrossSessionTransition[]
+): Map<string, CrossSessionTransition[]> {
+  const index = new Map<string, CrossSessionTransition[]>();
+  for (const transition of transitions) {
+    if (transition.project == null) continue;
+    const key = `${transition.project}\0${transition.key}`;
+    const bucket = index.get(key);
+    if (bucket) bucket.push(transition);
+    else index.set(key, [transition]);
+  }
+  return index;
+}
+
+/** Bucket cross-session invalidation barriers by project (#3251), preserving order. */
+export function indexBarriersByProject(
+  barriers: CrossSessionInvalidationBarrier[]
+): Map<string, CrossSessionInvalidationBarrier[]> {
+  const index = new Map<string, CrossSessionInvalidationBarrier[]>();
+  for (const barrier of barriers) {
+    const bucket = index.get(barrier.project);
+    if (bucket) bucket.push(barrier);
+    else index.set(barrier.project, [barrier]);
+  }
+  return index;
+}
+
 function collectPreSignals(
   toolData: ToolUsageData[],
   projects: Map<string, string>,
@@ -709,6 +749,14 @@ function collectPreSignals(
   }
 
   const signals: PreSignal[] = [];
+  // #3251: built lazily on first project-scoped resolution so a corpus with no
+  // project-bearing final state pays nothing (the #3481 non-querying path).
+  let transitionsByProjectKey:
+    | Map<string, CrossSessionTransition[]>
+    | undefined;
+  let barriersByProject:
+    | Map<string, CrossSessionInvalidationBarrier[]>
+    | undefined;
   for (const [sessionId, mutations] of mutationsBySession) {
     const latestMutationOrder = Math.max(...mutations.map((mutation) => mutation.order));
     const project = projects.get(sessionId);
@@ -718,37 +766,38 @@ function collectPreSignals(
     const leaveBehindDecisions: LeaveBehindDecision[] = [];
     const structuralCandidatePaths: string[] = [];
     for (const [key, state] of finalStates) {
-      const laterTransitions =
-        project
-          ? [
-              ...crossSessionTransitions.filter(
-                (transition) =>
-                  transition.sessionId !== sessionId &&
-                  transition.project === project &&
-                  transition.key === key
-              ),
-              ...crossSessionInvalidationBarriers
-                .filter(
-                  (barrier) =>
-                    barrier.sessionId !== sessionId &&
-                    barrier.project === project
-                )
-                .map(
-                  (barrier): CrossSessionTransition => ({
-                    ...barrier,
-                    key,
-                    path: state.path,
-                    pathField:
-                      barrier.ambiguityReason ===
-                      'truncated-command-analysis'
-                        ? 'commandAnalysisTruncated'
-                        : 'leaveBehindMutationPaths',
-                    status: 'ambiguous',
-                    ambiguityReason: barrier.ambiguityReason,
-                  })
-                ),
-            ]
-          : [];
+      let laterTransitions: CrossSessionTransition[] = [];
+      if (project) {
+        transitionsByProjectKey ??= indexTransitionsByProjectKey(
+          crossSessionTransitions
+        );
+        barriersByProject ??= indexBarriersByProject(
+          crossSessionInvalidationBarriers
+        );
+        const transitionBucket =
+          transitionsByProjectKey.get(`${project}\0${key}`) ?? [];
+        const barrierBucket = barriersByProject.get(project) ?? [];
+        laterTransitions = [
+          ...transitionBucket.filter(
+            (transition) => transition.sessionId !== sessionId
+          ),
+          ...barrierBucket
+            .filter((barrier) => barrier.sessionId !== sessionId)
+            .map(
+              (barrier): CrossSessionTransition => ({
+                ...barrier,
+                key,
+                path: state.path,
+                pathField:
+                  barrier.ambiguityReason === 'truncated-command-analysis'
+                    ? 'commandAnalysisTruncated'
+                    : 'leaveBehindMutationPaths',
+                status: 'ambiguous',
+                ambiguityReason: barrier.ambiguityReason,
+              })
+            ),
+        ];
+      }
       const potentiallyFinalTransitions = [
         ...(state.transition ? [state.transition] : []),
         ...laterTransitions,

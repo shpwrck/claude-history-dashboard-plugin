@@ -56,6 +56,32 @@ export function buildSessionProjectIndex(
   return index;
 }
 
+/**
+ * A LAZY session -> project resolver for the `src/components` route filters
+ * (#3468 — the four sites #3172/#3467 deliberately left for their own PR).
+ *
+ * Every call resolves in O(1) from {@link buildSessionProjectIndex}, but the
+ * index is built AT MOST ONCE and only on the FIRST call — so a filter that
+ * never needs attribution (no `project` key, or every row carrying its own
+ * `row.project ??` project) pays NOTHING. That non-querying path is exactly the
+ * eager-index anti-pattern #3481 warns about: guarding on "is a `project` key
+ * present" still charges O(sessions) when every row short-circuits, so we defer
+ * the whole build to genuine first use instead.
+ *
+ * Preserves the index's FIRST-WRITE-WINS semantics (see
+ * {@link buildSessionProjectIndex}), so a duplicated session id keeps resolving
+ * to the earliest entry exactly as the old `sessions.find(...)` did.
+ */
+export function makeLazySessionProjectResolver(
+  sessions: Session[] | undefined
+): (sessionId: string) => string | undefined {
+  let index: Map<string, string | undefined> | undefined;
+  return (sessionId: string) => {
+    index ??= buildSessionProjectIndex(sessions);
+    return index.get(sessionId);
+  };
+}
+
 export function filterToolDataByRoute(
   rows: ToolUsageData[],
   sessions: Session[] | undefined,

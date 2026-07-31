@@ -104,7 +104,7 @@ const MARKERS: AppliedMarkers = {
   bodyPhrases: ['resume the prior session instead of re-explaining the task'],
 };
 
-interface OpenerRecord {
+export interface OpenerRecord {
   sessionId: string;
   project: string;
   projectShort: string;
@@ -234,7 +234,7 @@ function buildRecords(
 }
 
 /** Union-find over one project's records; edges are within-window near-duplicates. */
-function clusterProject(records: OpenerRecord[]): Cluster[] {
+export function clusterProject(records: OpenerRecord[]): Cluster[] {
   const parent = records.map((_, i) => i);
   const find = (i: number): number => {
     let r = i;
@@ -250,21 +250,60 @@ function clusterProject(records: OpenerRecord[]): Cluster[] {
     parent[find(i)] = find(j);
   };
 
-  const pairsByRoot = new Map<number, RetypePair[]>();
-  for (let i = 0; i < records.length; i += 1) {
-    for (let j = i + 1; j < records.length; j += 1) {
-      if (Math.abs(records[i].tsMs - records[j].tsMs) > WINDOW_MS) continue;
+  // #3245: the old loop enumerated all n(n−1)/2 pairs and only SKIPPED the
+  // Jaccard for out-of-window pairs — the enumeration itself stayed quadratic.
+  // Sort record indices by timestamp and sweep a forward 7-day window per
+  // anchor, so pairs beyond the window are never enumerated at all (`break`,
+  // not `continue`). On sparse real histories that is near-linear; a dense
+  // burst inside one window is inherently O(pairs-in-window) for any algorithm.
+  // Qualifying edges are then replayed in the original (min-index, max-index)
+  // order, so the union sequence, component roots, per-anchor pair lists, and
+  // evidence ordering are byte-identical to the all-pairs loop.
+  const order = records
+    .map((_, i) => i)
+    .sort((a, b) => records[a].tsMs - records[b].tsMs);
+  const edges: Array<{
+    lo: number;
+    hi: number;
+    similarity: number;
+    daysApart: number;
+  }> = [];
+  for (let p = 0; p < order.length; p += 1) {
+    const i = order[p];
+    for (let q = p + 1; q < order.length; q += 1) {
+      const j = order[q];
+      // order is tsMs-ascending, so once the gap exceeds the window every later
+      // record is further still — stop scanning this anchor.
+      if (records[j].tsMs - records[i].tsMs > WINDOW_MS) break;
       const similarity = jaccard(records[i].shingles, records[j].shingles);
       if (similarity < SIMILARITY_FLOOR) continue;
-      union(i, j);
-      const daysApart = Math.round(Math.abs(records[i].tsMs - records[j].tsMs) / DAY_MS);
-      // Stash the pair under its first endpoint index; the loop below re-keys it
-      // to the final component root once all unions have settled.
-      const pair: RetypePair = { a: records[i], b: records[j], similarity, daysApart };
-      const list = pairsByRoot.get(i) ?? [];
-      list.push(pair);
-      pairsByRoot.set(i, list);
+      const lo = Math.min(i, j);
+      const hi = Math.max(i, j);
+      const daysApart = Math.round(
+        Math.abs(records[i].tsMs - records[j].tsMs) / DAY_MS
+      );
+      edges.push({ lo, hi, similarity, daysApart });
     }
+  }
+  // Original nested loop visited qualifying pairs in (i asc, j asc) = (lo asc,
+  // hi asc) order; replay in that exact order so pairsByRoot keys, per-anchor
+  // pair lists, and Map insertion order are identical.
+  edges.sort((x, y) => x.lo - y.lo || x.hi - y.hi);
+
+  const pairsByRoot = new Map<number, RetypePair[]>();
+  for (const edge of edges) {
+    union(edge.lo, edge.hi);
+    // Stash the pair under its first endpoint index; the loop below re-keys it
+    // to the final component root once all unions have settled.
+    const pair: RetypePair = {
+      a: records[edge.lo],
+      b: records[edge.hi],
+      similarity: edge.similarity,
+      daysApart: edge.daysApart,
+    };
+    const list = pairsByRoot.get(edge.lo) ?? [];
+    list.push(pair);
+    pairsByRoot.set(edge.lo, list);
   }
 
   const byRoot = new Map<number, Cluster>();

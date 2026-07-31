@@ -3,6 +3,7 @@ import {
   buildSessionProjectIndex,
   filterApiErrorsByRoute,
   filterToolDataByRoute,
+  makeLazySessionProjectResolver,
   sessionProject,
 } from './route-filtering';
 import type { Session } from '../types';
@@ -220,5 +221,48 @@ describe('the session-project index answers exactly what Array.find did (#3172)'
     expect(filterApiErrorsByRoute(rows, awkward, { date: '2026-01-02' })).toEqual(
       []
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3468 — the LAZY resolver shared by the four `src/components` route-filter
+// sites. It must build the session index at most once, only on genuine first
+// use, and preserve `buildSessionProjectIndex`'s first-write-wins semantics.
+// ---------------------------------------------------------------------------
+describe('makeLazySessionProjectResolver builds its index lazily and once (#3468)', () => {
+  it('does no session work until the first lookup, then exactly one pass', () => {
+    const counter = { visits: 0 };
+    const { sessions } = fixture(100);
+    const resolve = makeLazySessionProjectResolver(
+      countingSessions(sessions, counter)
+    );
+
+    // Constructed but never queried yet — the #3481 non-querying path pays zero.
+    expect(counter.visits).toBe(0);
+
+    expect(resolve('s0')).toBe('/proj-0');
+    const afterFirst = counter.visits;
+    // One pass over the sessions to build the index, then O(1) lookups.
+    expect(afterFirst).toBeLessThanOrEqual(100);
+    for (let i = 0; i < 100; i += 1) resolve(`s${i}`);
+    expect(counter.visits).toBe(afterFirst);
+  });
+
+  it('is first-write-wins for duplicated ids, exactly like sessions.find()', () => {
+    const dups: Session[] = [
+      session('dup', '/first-wins'),
+      session('dup', '/last-would-be-wrong'),
+      { sessionId: 'no-project' } as unknown as Session,
+    ];
+    const resolve = makeLazySessionProjectResolver(dups);
+    for (const id of ['dup', 'no-project', 'absent']) {
+      expect(resolve(id)).toBe(sessionProject(id, dups));
+    }
+    expect(resolve('dup')).toBe('/first-wins');
+  });
+
+  it('never builds an index for an undefined session list', () => {
+    const resolve = makeLazySessionProjectResolver(undefined);
+    expect(resolve('anything')).toBeUndefined();
   });
 });

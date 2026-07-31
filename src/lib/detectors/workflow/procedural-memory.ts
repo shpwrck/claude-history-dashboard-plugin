@@ -398,7 +398,7 @@ function sessionRuns(session: ToolUsageData): StepEvent[][] {
   return runs;
 }
 
-interface Procedure {
+export interface Procedure {
   key: string;
   /** The project all this procedure's sessions belong to (a unique sentinel per
    *  session when unresolved, so unresolved sessions can never cross-merge). */
@@ -596,6 +596,61 @@ function isSubsetOf(a: Set<string>, b: Set<string>): boolean {
 }
 
 /**
+ * Keep only MAXIMAL qualifying procedures (#3240).
+ *
+ * A candidate `p` is suppressed only when a STRICTLY-LONGER qualifying `q`
+ * CONTAINS its group-key sequence contiguously AND subsumes its sessions (see
+ * finding #5). The old code ran that predicate as `qualifying.filter(p =>
+ * !qualifying.some(q => …))` — an all-pairs O(C²) scan over the full candidate
+ * list on every detector evaluation, unbounded in the number of qualifying
+ * windows a long recurring run produces.
+ *
+ * Here each candidate is indexed under every PROPER contiguous sub-block of its
+ * group keys (at most O(L²) blocks, L ≤ {@link MAX_SEQUENCE_LEN}), keyed by
+ * `project + block identity`. Because any `q` that contains `p` contiguously and
+ * is strictly longer must have registered `p`'s exact group-key sequence as one
+ * of its proper sub-blocks, `p`'s only possible supersequences are
+ * `supersByBlock.get(blockKey(p))` — a small bounded set instead of all C
+ * candidates. The predicate applied to that set is byte-identical to the
+ * original (same `isContiguousSubsequence` + `isSubsetOf` guards), so the
+ * surfaced maximal set is unchanged; only the candidate enumeration shrinks from
+ * quadratic to O(C·L² + matches).
+ */
+export function selectMaximalProcedures(qualifying: Procedure[]): Procedure[] {
+  const blockKey = (project: string, groupKeys: string[]): string =>
+    `${project}${KEY_SEP}${groupKeys.join(KEY_SEP)}`;
+
+  const supersByBlock = new Map<string, Procedure[]>();
+  for (const q of qualifying) {
+    const gk = q.groupKeys;
+    const seenBlocks = new Set<string>(); // register each q at most once per block
+    for (let start = 0; start < gk.length; start += 1) {
+      for (let end = start + 1; end <= gk.length; end += 1) {
+        if (end - start >= gk.length) continue; // PROPER sub-block only (shorter than q)
+        const key = blockKey(q.project, gk.slice(start, end));
+        if (seenBlocks.has(key)) continue;
+        seenBlocks.add(key);
+        const bucket = supersByBlock.get(key);
+        if (bucket) bucket.push(q);
+        else supersByBlock.set(key, [q]);
+      }
+    }
+  }
+
+  return qualifying.filter((p) => {
+    const supers = supersByBlock.get(blockKey(p.project, p.groupKeys));
+    if (!supers) return true;
+    return !supers.some(
+      (q) =>
+        q !== p &&
+        q.groupKeys.length > p.groupKeys.length &&
+        isContiguousSubsequence(p.groupKeys, q.groupKeys) &&
+        isSubsetOf(p.sessions, q.sessions)
+    );
+  });
+}
+
+/**
  * Enumerate every contiguous window (length {@link MIN_SEQUENCE_LEN}..
  * {@link MAX_SEQUENCE_LEN}) across all sessions' Bash runs, keyed by its
  * (PROJECT + match-key sequence), tracking the DISTINCT sessions it appears in,
@@ -702,16 +757,7 @@ export const detector: Detector = {
     // on the session SETS (not mere containment) keeps a HIGH-support subprocedure
     // that recurs in strictly more sessions than a rare supersequence — the round-3
     // regression dropped it in favour of the longer, lower-support flow.
-    const maximal = qualifying.filter(
-      (p) =>
-        !qualifying.some(
-          (q) =>
-            q !== p &&
-            q.groupKeys.length > p.groupKeys.length &&
-            isContiguousSubsequence(p.groupKeys, q.groupKeys) &&
-            isSubsetOf(p.sessions, q.sessions)
-        )
-    );
+    const maximal = selectMaximalProcedures(qualifying);
 
     const candidates = maximal.sort(
       (a, b) =>
