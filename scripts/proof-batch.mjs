@@ -38,6 +38,10 @@ import { tmpdir, homedir } from 'node:os';
 import { isAbsolute, join, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runProofGate } from './proof-gate-sandbox.mjs';
+import {
+  createWorkerOutputCollector,
+  PROOF_WORKER_STDOUT_MAX_BYTES,
+} from './proof-worker-output.mjs';
 
 // --- TS-source imports (this repo's src/lib is loaded via the register-ts hook).
 import {
@@ -190,32 +194,13 @@ function buildPrompt(instruction) {
   return `You are working in a small standalone code repository. Complete this task:\n\n${instruction}\n\nMake the minimal change needed. Do not explain; just edit the files.\n`;
 }
 
-/**
- * Adherence proxy (#2083, threat #1): count the agent's tool_use blocks that
- * REFERENCE a stable file this session — Read(file_path), Bash(command), Grep,
- * etc. that mention a stable path. A treatment arm that actually honors the
- * injected reference should touch the stable file FEWER times than control,
- * which re-discovers it cold each session. Separates "mechanism doesn't help"
- * from "agent ignored the recommendation". Counts tool INVOCATIONS, not bytes.
- */
-function countStableReads(stdout, stablePaths) {
-  if (!stablePaths || stablePaths.length === 0) return 0;
-  let count = 0;
-  for (const raw of stdout.split('\n')) {
-    const line = raw.trim();
-    if (!line) continue;
-    let obj;
-    try { obj = JSON.parse(line); } catch { continue; }
-    const content = obj?.message?.content ?? obj?.content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (!b || b.type !== 'tool_use') continue;
-      const s = JSON.stringify(b.input ?? {});
-      if (stablePaths.some((p) => p && s.includes(p))) count++;
-    }
-  }
-  return count;
-}
+// Adherence proxy (#2083, threat #1): tool_use blocks that REFERENCE a stable
+// file this session — Read(file_path), Bash(command), Grep, etc. that mention a
+// stable path. A treatment arm that honors the injected reference should touch
+// the stable file FEWER times than control, which re-discovers it cold. This is
+// counted incrementally inside createWorkerOutputCollector (proof-worker-output.mjs)
+// as the NDJSON stream is parsed, so stdout is walked ONCE rather than
+// re-split at close (#3098). Counts tool INVOCATIONS, not bytes.
 
 /** Spawn one jailed worker; resolve with its parsed JSON result (or an error marker). */
 function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
@@ -237,10 +222,22 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => (stdout += d));
-    child.stderr.on('data', (d) => (stderr += d));
+    // Incremental, bounded collector (#3098): parses the NDJSON stream as it
+    // arrives, retaining only the last result + adherence counter + a bounded
+    // stderr tail, and flags over-budget so a runaway worker is terminated
+    // rather than buffered whole.
+    const collector = createWorkerOutputCollector({ stablePaths });
+    child.stdout.on('data', (d) => {
+      collector.pushStdout(d);
+      if (collector.isOverBudget()) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    });
+    child.stderr.on('data', (d) => collector.pushStderr(d));
     child.on('error', (err) => {
       resolveRun({
         ok: false,
@@ -257,39 +254,21 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
     });
     child.on('close', (code) => {
       const wallMs = Date.now() - started;
-      let cj = null;
-      let selectedResultText = null;
       // The jailed worker runs with `--output-format stream-json --verbose`
       // (set by the shadow-calls buildWorkerLaunch), so stdout is NDJSON: many
-      // JSON lines, the LAST of which is the `{"type":"result", total_cost_usd,
-      // usage, ...}` summary the cost/token extractors read. Walk lines from the
-      // end and take the last parseable object, preferring the result line.
-      const lines = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const obj = JSON.parse(lines[i]);
-          if (obj && typeof obj === 'object') {
-            cj = obj;
-            selectedResultText = lines[i];
-            if (obj.type === 'result') break;
-          }
-        } catch {
-          /* not a JSON line (verbose preamble, etc.) */
-        }
-      }
-      // Fallback for a single-object `--output-format json` build.
-      if (!cj) {
-        try {
-          selectedResultText = stdout.trim();
-          cj = JSON.parse(selectedResultText);
-        } catch { /* give up */ }
-      }
-      if (!cj) {
+      // JSON lines, the LAST `{"type":"result", total_cost_usd, usage, ...}` of
+      // which is the summary the cost/token extractors read. The collector
+      // parsed that incrementally; finalize() returns the chosen result object,
+      // the adherence counter, and whether the output budget was exceeded.
+      const final = collector.finalize();
+      if (final.overBudget) {
         resolveRun({
           ok: false,
           unresolved: true,
-          reason: `worker produced no parseable JSON (exit ${code})`,
-          stderr: stderr.slice(-400),
+          reason:
+            `worker exceeded the ${PROOF_WORKER_STDOUT_MAX_BYTES}-byte stdout ` +
+            `budget and was terminated (exit ${code})`,
+          stderr: collector.stderrTail().slice(-400),
           wallMs,
           tempHome,
           startedAt,
@@ -300,7 +279,23 @@ function runWorker({ worktree, prompt, model, maxBudgetUsd, stablePaths }) {
         });
         return;
       }
-      const stableReads = countStableReads(stdout, stablePaths);
+      const { cj, selectedResultText, stableReads } = final;
+      if (!cj) {
+        resolveRun({
+          ok: false,
+          unresolved: true,
+          reason: `worker produced no parseable JSON (exit ${code})`,
+          stderr: collector.stderrTail().slice(-400),
+          wallMs,
+          tempHome,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          exitCode: typeof code === 'number' ? code : null,
+          resultDigest: null,
+          resultType: null,
+        });
+        return;
+      }
       resolveRun({
         ok: true,
         cj,

@@ -1170,6 +1170,32 @@ function brotliAsync(buf, quality) {
   return brotliCompressAsync(buf, brotliParams(buf, quality));
 }
 
+// Above this many uncompressed bytes, a DYNAMIC (not-precompressed) body is
+// compressed through the async zlib path so the brotli/gzip CPU runs on the
+// libuv threadpool instead of the request thread (#3103). Below it, a live body
+// is small enough that a sync compress is cheaper than the async hop's overhead
+// and does not meaningfully stall the loop. 64 KiB: a live-session/manifest
+// JSON blob or a small raw file stays sync; a near-limit history/merged-session
+// body (up to tens of MiB) no longer blocks the event loop while it compresses.
+// The precompressed dataset path is untouched by this — it never compresses at
+// request time at all.
+const SENDBODY_ASYNC_COMPRESS_BYTES = parseNonNegativeIntEnv(
+  'DASHBOARD_SENDBODY_ASYNC_COMPRESS_BYTES',
+  65_536
+);
+
+// Compress `buf` for `encoding`, using the ASYNC (off-loop) path once the body
+// is large enough to be worth moving off the request thread (#3103), and the
+// cheap SYNC path for small live bodies. Encoding is already negotiated to
+// 'br' | 'gzip'.
+async function compressBodyForResponse(buf, encoding, quality) {
+  const big = buf.length >= SENDBODY_ASYNC_COMPRESS_BYTES;
+  if (encoding === 'br') {
+    return big ? await brotliAsync(buf, quality) : brotli(buf, quality);
+  }
+  return big ? await gzipAsync(buf, { level: 6 }) : gzipSync(buf, { level: 6 });
+}
+
 // Send a (possibly large) body, compressing with brotli/gzip when the client
 // asks for it. `headers` are applied first so callers can set Content-Type etc.
 // Always sets Vary: Accept-Encoding so caches key on the negotiated encoding.
@@ -1177,19 +1203,41 @@ function brotliAsync(buf, quality) {
 // `quality` controls per-request brotli effort (default 5, a cheap level for
 // arbitrary live bodies). `precompressed` lets callers hand in already-built
 // {br, gz} buffers (e.g. the cached dataset) so we never recompress.
-function sendBody(req, res, body, { etag, quality = 5, precompressed } = {}) {
+//
+// Async (#3103): compressing a large dynamic body synchronously blocked the
+// event loop for the whole brotli/gzip pass — a near-limit history or merged
+// raw-session body could stall every other in-flight request for hundreds of
+// ms. Large dynamic bodies now compress off-loop; the precompressed path stays
+// a plain buffer hand-off. Compression never rejects the response: a failed
+// compress falls back to sending the body uncompressed (always valid) rather
+// than a mislabeled or truncated one, so no caller needs to await or catch.
+async function sendBody(req, res, body, { etag, quality = 5, precompressed } = {}) {
   appendVary(res, 'Accept-Encoding');
   if (etag) res.setHeader('ETag', etag);
   const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
   const encoding = negotiateEncoding(req);
   let out = buf;
-  if (encoding === 'br') {
-    res.setHeader('Content-Encoding', 'br');
-    out = precompressed?.br ?? brotli(buf, quality);
-  } else if (encoding === 'gzip') {
-    res.setHeader('Content-Encoding', 'gzip');
-    out = precompressed?.gz ?? gzipSync(buf, { level: 6 });
+  let contentEncoding = null;
+  if (encoding === 'br' || encoding === 'gzip') {
+    const pre = encoding === 'br' ? precompressed?.br : precompressed?.gz;
+    if (pre) {
+      out = pre;
+      contentEncoding = encoding;
+    } else {
+      try {
+        out = await compressBodyForResponse(buf, encoding, quality);
+        contentEncoding = encoding;
+      } catch {
+        // Serve uncompressed on a compress failure — correctness over ratio.
+        out = buf;
+        contentEncoding = null;
+      }
+    }
   }
+  // Headers are set AFTER the (possibly awaited) compression so a Content-Encoding
+  // is never announced for a body that ended up uncompressed. Nothing has written
+  // to the response yet, so late setHeader is safe.
+  if (contentEncoding) res.setHeader('Content-Encoding', contentEncoding);
   res.setHeader('Content-Length', out.length);
   if (req.method === 'HEAD') {
     res.end();

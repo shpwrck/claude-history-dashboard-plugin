@@ -12,6 +12,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import type { SessionTokenData } from '../types';
 import { parseSessionJsonl } from './parse-sessions';
 import { parseToolUsage, type ToolUsageData } from './parse-tools';
+import { parseJsonl, type RawSessionEntry } from './parse-utils';
 import { detectRetryGroups } from './parse-errors';
 import { parseFileReread } from './parse-file-reread';
 import { IDLE_TURN_THRESHOLD_MS } from './parse-runtime-events';
@@ -41,6 +42,38 @@ export const LIVE_SESSION_MAX_BYTES = Math.max(
   )
 );
 
+// Explicit live-poll budgets at the MAX transcript size (#3130). A poll reads at
+// most LIVE_SESSION_MAX_BYTES (64 MiB) and now parses that text EXACTLY ONCE —
+// the memoized parseJsonl pass is shared across liveness, token, and tool
+// derivation, so the peak working set is one decoded string plus one parsed
+// line array, not several independent full parses. These are the documented
+// ceilings the probe in live-session.test.ts asserts against; they are guidance
+// (a benchmark guard), not runtime-enforced limits.
+//
+// Latency: a single JSON.parse pass over 64 MiB of JSONL plus the token/tool
+// derivation is well under a second on commodity hardware; 3 s is a generous
+// CI-stable ceiling that a regression to multi-pass parsing would blow.
+export const LIVE_SESSION_POLL_LATENCY_BUDGET_MS = 3_000;
+// Peak transient memory: the decoded transcript (<= maxBytes) plus one parsed
+// line array plus the derived views. ~5x maxBytes is ample headroom for a single
+// shared parse; a per-derivation re-parse would multiply this.
+export const LIVE_SESSION_POLL_PEAK_MEMORY_BUDGET_BYTES = 5 * LIVE_SESSION_MAX_BYTES;
+
+/**
+ * Optional per-poll instrumentation (#3130). When supplied, `liveSession`
+ * reports how much transcript it materialized this poll. The single-parse
+ * guarantee (merged text is JSON-parsed ONCE, shared across liveness/token/tool)
+ * is a structural property of routing every derivation through the memoized
+ * `parseJsonl`; the probe in live-session.test.ts pins it with a `JSON.parse`
+ * spy rather than a self-reported count.
+ */
+export interface LivePollInstrumentation {
+  /** Bytes of merged transcript text materialized this poll. */
+  mergedBytes: number;
+  /** Lines in the merged transcript. */
+  mergedLines: number;
+}
+
 // The session-discovery shape this module operates on. Mirrors what
 // listSessions() in ingest.mjs produces: one entry per top-level transcript,
 // with the absolute file paths the file-based helpers below read.
@@ -69,6 +102,8 @@ export interface LiveSessionResult {
 
 export interface LiveSessionOptions {
   maxBytes?: number;
+  /** Optional per-poll instrumentation sink (#3130); see {@link LivePollInstrumentation}. */
+  instrument?: (info: LivePollInstrumentation) => void;
 }
 
 type LiveSessionCapError = Error & { code?: string; maxBytes?: number };
@@ -142,18 +177,12 @@ function textBlocksToString(content: unknown): string {
 }
 
 // Newest timestamp across every line of a transcript, in epoch-ms. 0 when the
-// file has no parseable timestamp. Cheap line scan; only the candidate active
-// file is fully scanned (we pick the candidate by file mtime first).
-function newestEventMs(text: string): number {
+// file has no parseable timestamp. Consumes the SHARED parsed line array
+// (parseJsonl, memoized) rather than re-splitting and re-parsing the text, so
+// liveness reuses the exact pass the token/tool derivations run over (#3130).
+function newestEventMs(entries: RawSessionEntry[]): number {
   let newest = 0;
-  for (const line of text.split('\n')) {
-    if (!line) continue;
-    let o: { timestamp?: unknown };
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  for (const o of entries) {
     if (typeof o.timestamp !== 'string') continue;
     const t = Date.parse(o.timestamp);
     if (isFinite(t) && t > newest) newest = t;
@@ -165,22 +194,16 @@ function newestEventMs(text: string): number {
 // tool_result-only turn or a meta/sidechain line). Mirrors deriveEntries()'s
 // notion of a user turn so "time since last user turn" lines up with what the
 // Sessions view treats as user input. 0 when none found.
-function lastUserTurnMs(text: string): number {
+function lastUserTurnMs(entries: RawSessionEntry[]): number {
   let last = 0;
-  for (const line of text.split('\n')) {
-    if (!line) continue;
-    let o: {
+  for (const raw of entries) {
+    const o = raw as {
       type?: unknown;
       isMeta?: unknown;
       isSidechain?: unknown;
       message?: { role?: unknown; content?: unknown };
       timestamp?: unknown;
     };
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
     if (o.type !== 'user' || o.isMeta || o.isSidechain || !o.message) continue;
     if (o.message.role && o.message.role !== 'user') continue;
     const txt = textBlocksToString(o.message.content).trim();
@@ -319,16 +342,30 @@ export function liveSession(
   const { top, merged } = readTranscriptTexts(candidate, maxBytes);
   if (!merged) return { active: false };
 
+  // ONE parse pass over the merged transcript, shared across liveness, tokens,
+  // and tools (#3130). parseJsonl memoizes by text, so the explicit call here
+  // populates the cache and the parseSessionJsonl / parseToolUsage passes below
+  // reuse it instead of each re-splitting and re-parsing 64 MiB. newestEventMs
+  // consumes the parsed array directly rather than doing its own JSON.parse loop.
+  const mergedEntries = parseJsonl(merged);
+  if (options.instrument) {
+    options.instrument({
+      mergedBytes: Buffer.byteLength(merged, 'utf8'),
+      mergedLines: mergedEntries.length,
+    });
+  }
+
   // Liveness is decided on the transcript's newest EVENT timestamp, not file
   // mtime (an mtime can move without a new event, e.g. a touch). < 15 min old ==
   // active, reusing the IDLE_TURN_THRESHOLD_MS notion from #74.
-  const newestMs = newestEventMs(merged);
+  const newestMs = newestEventMs(mergedEntries);
   if (newestMs === 0 || now - newestMs >= IDLE_TURN_THRESHOLD_MS) {
     return { active: false };
   }
 
   // Token/model facts come from the same parser the dataset uses, over the
-  // merged transcript so subagent burn is counted.
+  // merged transcript so subagent burn is counted. It reuses the shared
+  // parseJsonl pass above (cache hit).
   const name = `${candidate.sessionId}.jsonl`;
   const token = parseSessionJsonl(merged, name);
   if (!token) return { active: false };
@@ -337,6 +374,7 @@ export function liveSession(
   // over the merged transcript, then the #139 detectors over its recent tail.
   // Live polls read only error/retry patterns; skip the edit-churn derivation
   // so an active transcript's Edit bodies aren't split on every poll (#2507).
+  // Also a parseJsonl cache hit — no re-parse.
   const tool = parseToolUsage(merged, name, { editFormatChurn: false });
   const { retryStorm, rereadLoop } = detectLivePatterns(tool);
 
@@ -358,7 +396,9 @@ export function liveSession(
 
   // "Time since last user turn" stays on the top-level file only: subagent
   // "user" lines are task prompts, not the human's input (mirrors deriveEntries).
-  const lastUserMs = lastUserTurnMs(top);
+  // parseJsonl memoizes, so when top === merged (no subagents) this is a cache
+  // hit; otherwise it is a single parse of the smaller top-level file.
+  const lastUserMs = lastUserTurnMs(parseJsonl(top));
   const msSinceLastUserTurn =
     lastUserMs > 0 ? Math.max(0, now - lastUserMs) : null;
 

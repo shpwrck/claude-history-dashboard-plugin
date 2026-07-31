@@ -19,6 +19,9 @@ const {
   formatGuidanceReport,
   htmlToText,
   ingestGuidance,
+  readResponseTextCapped,
+  GUIDANCE_PAGE_MAX_BYTES,
+  GUIDANCE_PAGE_TOO_LARGE_CODE,
   STALE_AFTER_DAYS,
 } = await import('./ingest-guidance.mjs');
 const { extractUsageLimitFacts } = await import(
@@ -59,6 +62,88 @@ function fakeFetch(routes) {
 }
 
 const page = (html) => ({ body: html, headers: { etag: '"v1"' } });
+
+// A minimal Response double exposing a ReadableStream-like `body` that yields
+// `text` in fixed chunks, plus optional headers. `pulled()` reports how many
+// bytes were actually read, so a test can prove an oversized body aborts EARLY
+// rather than being materialized in full (#3088).
+function streamResponse(text, { headers = {}, chunkSize = 8 } = {}) {
+  const bytes = Buffer.from(text, 'utf8');
+  let offset = 0;
+  let pulled = 0;
+  let cancelled = false;
+  const response = {
+    headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+    text: async () => text,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (cancelled || offset >= bytes.length) return { done: true };
+            const end = Math.min(offset + chunkSize, bytes.length);
+            const value = Uint8Array.prototype.slice.call(bytes, offset, end);
+            offset = end;
+            pulled += value.byteLength;
+            return { done: false, value };
+          },
+          async cancel() {
+            cancelled = true;
+          },
+        };
+      },
+    },
+  };
+  return { response, pulled: () => pulled };
+}
+
+test('readResponseTextCapped rejects an over-Content-Length page before reading a byte (#3088)', async () => {
+  const { response, pulled } = streamResponse('x'.repeat(100), {
+    headers: { 'content-length': String(GUIDANCE_PAGE_MAX_BYTES + 1) },
+  });
+  await assert.rejects(
+    () => readResponseTextCapped(response, GUIDANCE_PAGE_MAX_BYTES, PRIMARY),
+    (err) => err.code === GUIDANCE_PAGE_TOO_LARGE_CODE
+  );
+  // The up-front declared-size check fires before the body stream is touched.
+  assert.equal(pulled(), 0);
+});
+
+test('readResponseTextCapped aborts a streamed body once it passes the cap, without reading it all (#3088)', async () => {
+  const cap = 16;
+  // 200 bytes in 8-byte chunks; the cap is passed after the 3rd chunk (24 > 16).
+  const { response, pulled } = streamResponse('a'.repeat(200), { chunkSize: 8 });
+  await assert.rejects(
+    () => readResponseTextCapped(response, cap, PRIMARY),
+    (err) => err.code === GUIDANCE_PAGE_TOO_LARGE_CODE
+  );
+  // Aborted early: only enough chunks to cross the cap were pulled, never all 200.
+  assert.ok(pulled() <= cap + 8, `pulled ${pulled()} bytes, expected <= ${cap + 8}`);
+  assert.ok(pulled() < 200);
+});
+
+test('readResponseTextCapped accepts a body exactly at the limit (#3088 boundary)', async () => {
+  const cap = 32;
+  const exact = 'b'.repeat(cap);
+  const { response } = streamResponse(exact, { chunkSize: 8 });
+  const out = await readResponseTextCapped(response, cap, PRIMARY);
+  assert.equal(out, exact);
+});
+
+test('buildSnapshot rejects with the stable size-limit error when a page is over budget (#3088)', async () => {
+  const now = new Date('2026-06-12T00:00:00Z');
+  const fetchImpl = async (url) => {
+    // Declare a Content-Length past the real default budget; buildSnapshot must
+    // reject rather than ingest the page.
+    const { response } = streamResponse('<h1>huge</h1>', {
+      headers: { 'content-length': String(GUIDANCE_PAGE_MAX_BYTES + 1) },
+    });
+    return { ...response, ok: true, status: 200, url };
+  };
+  await assert.rejects(
+    () => buildSnapshot(article, null, now, fetchImpl),
+    (err) => err.code === GUIDANCE_PAGE_TOO_LARGE_CODE
+  );
+});
 
 test('htmlToText decodes entities safely', () => {
   // &amp;lt; is the ESCAPED text "&lt;" — it must NOT double-decode into "<".

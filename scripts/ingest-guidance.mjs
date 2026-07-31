@@ -42,6 +42,88 @@ const SNAPSHOT_DIR = join(ROOT, 'data', 'external-guidance');
 // right place" — informational only, never fails the run.
 export const STALE_AFTER_DAYS = 45;
 
+// Ceiling on a single fetched guidance page (#3088). These are HTML support
+// articles — tens of KiB of prose — so 5 MiB is orders of magnitude of headroom
+// for a real page while refusing to pull an accidentally- or maliciously-huge
+// response into memory and hand it to htmlToText. Overridable for tests and
+// operators via DASHBOARD_GUIDANCE_PAGE_MAX_BYTES.
+export const GUIDANCE_PAGE_MAX_BYTES = (() => {
+  const raw = process.env.DASHBOARD_GUIDANCE_PAGE_MAX_BYTES;
+  const parsed = raw == null || raw === '' ? NaN : Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5 * 1024 * 1024;
+})();
+
+/** Stable code on the error thrown when a page exceeds its byte budget. */
+export const GUIDANCE_PAGE_TOO_LARGE_CODE = 'ERR_GUIDANCE_PAGE_TOO_LARGE';
+
+function guidancePageTooLargeError(url, maxBytes, observed) {
+  const err = new Error(
+    `Guidance page exceeds the ${maxBytes}-byte limit: ${url}` +
+      (observed != null ? ` (declared ${observed} bytes)` : '')
+  );
+  err.code = GUIDANCE_PAGE_TOO_LARGE_CODE;
+  err.maxBytes = maxBytes;
+  return err;
+}
+
+/**
+ * Read a fetch Response body as UTF-8 text, refusing to buffer more than
+ * `maxBytes` (#3088).
+ *
+ * `response.text()` reads to EOF, so a huge or hostile page was slurped whole
+ * before anyone could object. This instead:
+ *   1. rejects up front when a declared Content-Length already exceeds the
+ *      budget — no body byte is read at all;
+ *   2. streams `response.body` chunk-by-chunk, aborting (and cancelling the
+ *      stream) the moment the running total passes the budget, so an oversized
+ *      body is never fully materialized;
+ *   3. falls back to `response.text()` only when no readable stream is present
+ *      (minimal/test doubles), still enforcing the cap on the decoded length as
+ *      a backstop.
+ *
+ * @throws an error with code {@link GUIDANCE_PAGE_TOO_LARGE_CODE} when the body
+ *         is over budget.
+ */
+export async function readResponseTextCapped(response, maxBytes, url) {
+  const declaredRaw = response.headers?.get?.('content-length');
+  const declared = declaredRaw == null ? NaN : Number(declaredRaw);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw guidancePageTooLargeError(url, maxBytes, declared);
+  }
+
+  const body = response.body;
+  if (body && typeof body.getReader === 'function') {
+    const reader = body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength ?? value.length ?? 0;
+      if (total > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* best-effort abort */
+        }
+        throw guidancePageTooLargeError(url, maxBytes);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+
+  // No stream available (a minimal Response double). Enforce the cap on the
+  // decoded text so the budget still holds, even though this path cannot abort
+  // mid-transfer.
+  const text = await response.text();
+  if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+    throw guidancePageTooLargeError(url, maxBytes);
+  }
+  return text;
+}
+
 function sha256(text) {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
 }
@@ -159,7 +241,7 @@ async function fetchPage(article, url, existingPage, now, fetchImpl) {
     assertAllowedUrl(article.source, response.url, `redirect target of ${url}`);
   }
 
-  const html = await response.text();
+  const html = await readResponseTextCapped(response, GUIDANCE_PAGE_MAX_BYTES, url);
   const content = htmlToText(html);
   const contentHash = sha256(content);
   const etag = response.headers.get('etag') ?? undefined;

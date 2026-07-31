@@ -145,4 +145,55 @@ describe('buildUploadDataset (#1069)', () => {
     expect(summary.usableFiles).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(messages)).not.toContain(SECRET_MARKER);
   });
+
+  // #3177: the retained decoded text is bounded by an admitted-byte budget.
+  describe('admitted decoded-byte budget (#3177)', () => {
+    // A corpus of several session transcripts, each a chunky body.
+    const bigBody = (marker: string) =>
+      Array.from({ length: 20 }, (_, i) =>
+        JSON.stringify({ type: 'summary', note: `${marker}-${i}-${'x'.repeat(200)}` })
+      ).join('\n') + '\n';
+    const corpus = (): UploadInput[] => [
+      looseInput('history.jsonl', 'history.jsonl', '{"display":"hi","project":"/x"}\n'),
+      looseInput('s1.jsonl', 'projects/demo/s1.jsonl', bigBody('s1')),
+      looseInput('s2.jsonl', 'projects/demo/s2.jsonl', bigBody('s2')),
+      looseInput('s3.jsonl', 'projects/demo/s3.jsonl', bigBody('s3')),
+      looseInput('s4.jsonl', 'projects/demo/s4.jsonl', bigBody('s4')),
+    ];
+
+    async function runWith(inputs: UploadInput[], admittedByteBudget?: number) {
+      const messages: UploadPipelineMessage[] = [];
+      const summary = await buildUploadDataset(
+        inputs,
+        (m) => messages.push(m),
+        { nowMs: 1_700_000_000_000, ...(admittedByteBudget != null ? { admittedByteBudget } : {}) }
+      );
+      return { messages, summary, results: messages.filter((m) => m.type !== 'status') };
+    }
+
+    it('retains no more decoded text than the budget and reports truncation', async () => {
+      const budget = 1_500; // well below the ~4 x 4KB corpus
+      const { summary, messages } = await runWith(corpus(), budget);
+      expect(summary.truncated).toBe(true);
+      expect(summary.droppedFiles).toBeGreaterThan(0);
+      // The hard guarantee: retained decoded text never exceeded the budget.
+      expect(summary.admittedTextLength).toBeLessThanOrEqual(budget);
+      // The over-budget condition is surfaced, not silent.
+      const statuses = messages
+        .filter((m): m is { type: 'status'; message: string } => m.type === 'status')
+        .map((m) => m.message);
+      expect(statuses.some((s) => /budget/.test(s))).toBe(true);
+    });
+
+    it('is byte-identical to the un-budgeted run for an in-budget corpus', async () => {
+      const baseline = await runWith(corpus()); // default (1 GiB) budget
+      const generous = await runWith(corpus(), 10_000_000); // still in-budget
+      expect(baseline.summary.truncated).toBe(false);
+      expect(baseline.summary.droppedFiles).toBe(0);
+      expect(generous.summary.truncated).toBe(false);
+      // Same parsed results (compare non-status messages) and same usable count.
+      expect(JSON.stringify(generous.results)).toEqual(JSON.stringify(baseline.results));
+      expect(generous.summary.usableFiles).toBe(baseline.summary.usableFiles);
+    });
+  });
 });

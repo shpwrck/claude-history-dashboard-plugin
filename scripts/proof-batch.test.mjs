@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 
 import { shellQuote } from './lib/shell-quote.mjs';
+import { createWorkerOutputCollector } from './proof-worker-output.mjs';
 import {
   PROOF_GATE_SANDBOX_CONTRACT,
   buildProofGateArgv,
@@ -295,4 +296,82 @@ sandboxTest('existing deterministic node gates still run successfully', async ()
     exitCode: 0,
     expected: 0,
   });
+});
+
+// -------------------------------------------------------- #3098 output budgets
+// createWorkerOutputCollector: incremental NDJSON parse, bounded retention, an
+// over-budget stop, and a bounded stderr tail — the memory-safe replacement for
+// runWorker's old "append everything then re-split" handling.
+
+function ndjson(...objs) {
+  return objs.map((o) => JSON.stringify(o)).join('\n') + '\n';
+}
+
+test('#3098 collector parses NDJSON incrementally and yields the same cost + stable-read values', () => {
+  const stablePath = '/tree/STABLE.md';
+  const collector = createWorkerOutputCollector({ stablePaths: [stablePath] });
+  const stream = ndjson(
+    { type: 'system', subtype: 'init' },
+    {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', name: 'Read', input: { file_path: stablePath } }],
+      },
+    },
+    {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', name: 'Bash', input: { command: `cat ${stablePath}` } }],
+      },
+    },
+    { type: 'result', subtype: 'success', total_cost_usd: 0.0123, usage: { input_tokens: 10 } }
+  );
+  // Feed it in awkward 7-byte slices to prove chunk boundaries are handled.
+  for (let i = 0; i < stream.length; i += 7) {
+    collector.pushStdout(stream.slice(i, i + 7));
+  }
+  const final = collector.finalize();
+  assert.equal(final.overBudget, false);
+  assert.equal(final.cj.type, 'result');
+  assert.equal(final.cj.total_cost_usd, 0.0123);
+  // Two tool_use blocks referenced the stable path.
+  assert.equal(final.stableReads, 2);
+});
+
+test('#3098 collector keeps memory bounded and returns unresolved past the output budget', () => {
+  const budget = 4096;
+  const collector = createWorkerOutputCollector({ stdoutBudgetBytes: budget });
+  // Emit far more than the budget as valid NDJSON lines.
+  const bigLine = JSON.stringify({ type: 'assistant', pad: 'x'.repeat(500) }) + '\n';
+  let emitted = 0;
+  for (let i = 0; i < 1000 && !collector.isOverBudget(); i++) {
+    collector.pushStdout(bigLine);
+    emitted += bigLine.length;
+  }
+  assert.ok(collector.isOverBudget(), 'budget should trip');
+  assert.ok(emitted > budget, 'we fed more than the budget');
+  // Retained memory never tracked the full emitted volume.
+  assert.ok(
+    collector.retainedStdoutBytes() <= budget,
+    `retained ${collector.retainedStdoutBytes()} > budget ${budget}`
+  );
+  assert.deepEqual(collector.finalize(), { overBudget: true });
+});
+
+test('#3098 collector bounds the stderr tail', () => {
+  const tail = 256;
+  const collector = createWorkerOutputCollector({ stderrTailBytes: tail });
+  for (let i = 0; i < 100; i++) collector.pushStderr('E'.repeat(100));
+  assert.ok(collector.stderrTail().length <= tail);
+  assert.ok(collector.stderrTail().endsWith('E'));
+});
+
+test('#3098 collector falls back to a single-object json build', () => {
+  const collector = createWorkerOutputCollector({ stablePaths: [] });
+  // No trailing newline; whole stdout is one object (--output-format json).
+  collector.pushStdout(JSON.stringify({ type: 'result', total_cost_usd: 0.5 }));
+  const final = collector.finalize();
+  assert.equal(final.overBudget, false);
+  assert.equal(final.cj.type, 'result');
+  assert.equal(final.cj.total_cost_usd, 0.5);
 });

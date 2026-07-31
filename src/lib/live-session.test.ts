@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { liveSession, type LiveSessionInput } from './live-session'
+import {
+  liveSession,
+  LIVE_SESSION_POLL_LATENCY_BUDGET_MS,
+  type LiveSessionInput,
+  type LivePollInstrumentation,
+} from './live-session'
 import { IDLE_TURN_THRESHOLD_MS } from './parse-runtime-events'
 
 // Golden coverage for the extracted Live Session compute (#627 slice 2).
@@ -124,5 +129,101 @@ describe('liveSession', () => {
     expect(out.active).toBe(true)
     expect(out.sessionId).toBe('sess-huge-subagent')
     expect(out.contextTokens).toBe(105)
+  })
+})
+
+// #3130: a poll parses the merged transcript ONCE (shared across liveness,
+// token, and tool derivation) and stays within documented latency budgets even
+// at a large transcript size.
+describe('liveSession poll budgets (#3130)', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chd-live-budget-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const seed = (sessionId: string, lines: string[]): LiveSessionInput => {
+    const topPath = join(dir, `${sessionId}.jsonl`)
+    writeFileSync(topPath, lines.join('\n'))
+    return { sessionId, project: 'proj-x', topPath, subPaths: [] }
+  }
+
+  it('reports instrumentation for the materialized merged transcript', () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0)
+    const recent = new Date(now - 60_000).toISOString()
+    const lines = [
+      userTurn(new Date(now - 120_000).toISOString()),
+      assistant(recent),
+    ]
+    const input = seed('sess-instr', lines)
+    let info: LivePollInstrumentation | null = null
+    const out = liveSession([input], now, { instrument: (i) => (info = i) })
+
+    expect(out.active).toBe(true)
+    expect(info).not.toBeNull()
+    const seen = info as unknown as LivePollInstrumentation
+    expect(seen.mergedLines).toBe(2)
+    expect(seen.mergedBytes).toBe(Buffer.byteLength(lines.join('\n'), 'utf8'))
+  })
+
+  it('JSON-parses the merged transcript ONCE, not once per derivation', () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0)
+    // Many assistant lines (object messages, so parseMessage never re-JSON.parses
+    // a string) plus a recent event and a typed user turn. Unique content keeps
+    // parseJsonl's memo cache from short-circuiting the parse we are counting.
+    const lineCount = 600
+    const lines: string[] = [userTurn(new Date(now - 120_000).toISOString(), 'kick off #3130')]
+    for (let i = 0; i < lineCount; i++) {
+      const ts = new Date(now - 90_000 + i).toISOString()
+      lines.push(assistant(ts, { input_tokens: 10 + i, output_tokens: i }, `a-3130-${i}`))
+    }
+    lines.push(assistant(new Date(now - 30_000).toISOString(), { input_tokens: 5 }, 'a-3130-final'))
+    const input = seed('sess-oneparse', lines)
+
+    const spy = vi.spyOn(JSON, 'parse')
+    const out = liveSession([input], now)
+    const parseCalls = spy.mock.calls.length
+    spy.mockRestore()
+    expect(out.active).toBe(true)
+    // A single shared pass parses ~one JSON object per transcript line. The old
+    // path re-parsed the whole transcript inside newestEventMs AND parseJsonl, so
+    // it cost ~2x the line count. Well under 1.5x proves the pass is shared.
+    expect(parseCalls).toBeLessThan(lines.length * 1.5)
+  })
+
+  it('stays within the live-poll latency budget for a large transcript', () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0)
+    // Build a large (~24 MiB) transcript approaching the read cap. The budget is
+    // documented at the 64 MiB max; a representative large corpus keeps the probe
+    // fast and CI-stable while still catching a regression to multi-pass parsing.
+    const targetBytes = 24 * 1024 * 1024
+    const lines: string[] = [userTurn(new Date(now - 120_000).toISOString())]
+    let bytes = 0
+    let i = 0
+    while (bytes < targetBytes) {
+      const ts = new Date(now - 90_000 + i).toISOString()
+      const line = assistant(
+        ts,
+        { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
+        `big-${i}`
+      )
+      lines.push(line)
+      bytes += line.length + 1
+      i++
+    }
+    lines.push(assistant(new Date(now - 30_000).toISOString()))
+    const input = seed('sess-big', lines)
+
+    const started = performance.now()
+    const out = liveSession([input], now)
+    const elapsed = performance.now() - started
+
+    expect(out.active).toBe(true)
+    expect(elapsed).toBeLessThan(LIVE_SESSION_POLL_LATENCY_BUDGET_MS)
+    // The poll returns a bounded result, never the transcript itself.
+    expect(JSON.stringify(out).length).toBeLessThan(2_048)
   })
 })

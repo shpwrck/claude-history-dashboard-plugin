@@ -94,7 +94,29 @@ export interface BuildUploadDatasetOptions {
    * full ingest re-deriving Sessions rows or scanning for artifacts.
    */
   parseOnly?: boolean;
+  /**
+   * Ceiling on total DECODED text retained in `loaded` (#3177). Once admitting
+   * the next body would cross it, further bodies are dropped instead of grown
+   * without bound. Defaults to {@link DEFAULT_UPLOAD_ADMITTED_BYTE_BUDGET}.
+   */
+  admittedByteBudget?: number;
 }
+
+/**
+ * Default ceiling on total DECODED text retained in memory across one upload
+ * (#3177). The pipeline appended every decoded loose-file and archive body to a
+ * single long-lived `loaded` array and held the whole corpus reachable through
+ * every aggregation + parser pass — a large ~/.claude bundle is ~634 MB of
+ * admitted text. This bounds the RETAINED decoded text: once admitting the next
+ * body would cross the budget, further bodies are dropped (with a status note
+ * and a `truncated` summary flag) rather than grown without limit. An in-budget
+ * corpus is admitted in full, so its parsed results are byte-identical. 1 GiB
+ * clears the largest real bundle while refusing a runaway or hostile one.
+ *
+ * Measured in string length (UTF-16 code units), which tracks a JS string's
+ * in-memory footprint closely and avoids re-encoding each body just to size it.
+ */
+export const DEFAULT_UPLOAD_ADMITTED_BYTE_BUDGET = 1024 * 1024 * 1024;
 
 export interface UploadDatasetSummary {
   /**
@@ -103,6 +125,16 @@ export interface UploadDatasetSummary {
    * > 0 and shows "no usable files" otherwise — matching the old dispatch test.
    */
   usableFiles: number;
+  /**
+   * Total decoded text length RETAINED in `loaded` (#3177), bounded by the
+   * budget. Optional so pre-#3177 summary literals (e.g. test mocks) stay valid;
+   * `buildUploadDataset` always populates it.
+   */
+  admittedTextLength?: number;
+  /** True when the byte budget dropped at least one decoded body (#3177). */
+  truncated?: boolean;
+  /** How many decoded bodies were dropped to keep within the budget (#3177). */
+  droppedFiles?: number;
 }
 
 const READ_BATCH_SIZE = 50;
@@ -124,12 +156,38 @@ export async function buildUploadDataset(
   const nonZipInputs = inputs.filter((input) => !isZipPath(input.name));
   const loaded: LoadedFile[] = [];
 
+  // #3177: bound the total DECODED text kept reachable in `loaded`. Metadata-only
+  // entries carry no body (text ''), so they never count and are always kept.
+  const admittedByteBudget =
+    typeof opts.admittedByteBudget === 'number' && opts.admittedByteBudget >= 0
+      ? Math.floor(opts.admittedByteBudget)
+      : DEFAULT_UPLOAD_ADMITTED_BYTE_BUDGET;
+  let admittedTextLength = 0;
+  let truncated = false;
+  let droppedFiles = 0;
+
+  // Admit one decoded file into `loaded` if its body fits the retained-text
+  // budget; otherwise drop it (and remember that we did). Returns whether it was
+  // kept. A body over budget is never retained, so the long-lived working set
+  // cannot exceed the budget plus the single body currently under test.
+  function admit(file: LoadedFile): boolean {
+    const size = file.metadataOnly ? 0 : file.text.length;
+    if (size > 0 && admittedTextLength + size > admittedByteBudget) {
+      truncated = true;
+      droppedFiles++;
+      return false;
+    }
+    admittedTextLength += size;
+    loaded.push(file);
+    return true;
+  }
+
   // Metadata-only files (file-history snapshots): keep structure, never read the
   // body — mirrors FileUpload's old metadata branch.
   for (const input of nonZipInputs) {
     const path = input.relativePath || input.name;
     if (!isMetadataOnlyPath(path)) continue;
-    loaded.push({
+    admit({
       name: input.name,
       text: '',
       project: extractProjectName(path),
@@ -165,7 +223,7 @@ export async function buildUploadDataset(
         }
       })
     );
-    for (const result of batchResults) if (result) loaded.push(result);
+    for (const result of batchResults) if (result) admit(result);
     if (readableInputs.length > 0) {
       post({
         type: 'status',
@@ -182,7 +240,7 @@ export async function buildUploadDataset(
     try {
       post({ type: 'status', message: `Extracting ${input.name}...` });
       const fromZip = await unzipBundleFromFile(input.blob);
-      for (const file of fromZip) loaded.push(file);
+      for (const file of fromZip) admit(file);
       post({ type: 'status', message: `Extracted ${fromZip.length} file(s) from ${input.name}` });
     } catch (err) {
       post({
@@ -239,6 +297,17 @@ export async function buildUploadDataset(
     auxCount = loaded.filter((file) => !file.name.endsWith('.jsonl')).length;
   }
 
+  // #3177: surface a truncation so a silently-incomplete over-budget upload is
+  // explainable, mirroring the per-file read-error trace above.
+  if (truncated) {
+    post({
+      type: 'status',
+      message:
+        `Upload exceeded the ${admittedByteBudget}-char in-memory budget; ` +
+        `${droppedFiles} file body/bodies were not retained.`,
+    });
+  }
+
   const usableFiles = (historyFile ? 1 : 0) + sessionFiles.length + auxCount;
-  return { usableFiles };
+  return { usableFiles, admittedTextLength, truncated, droppedFiles };
 }
