@@ -861,6 +861,8 @@ paths:
         admits as `session-data` are written (config + secret paths are refused,
         ADR 0009). Idempotent per artifact `signature`. Requires ingest auth
         (`passesIngestAuth`); returns `503` when ingest is not configured.
+      security:
+        - ingestBearer: []
       parameters:
         - $ref: '#/components/parameters/SourceId'
         - name: Content-Encoding
@@ -890,6 +892,8 @@ paths:
                 $ref: '#/components/schemas/IngestArtifactsResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '405':
@@ -1143,6 +1147,15 @@ components:
       type: http
       scheme: bearer
       description: Enterprise Bearer token (only when enterprise auth is configured). A session cookie is an accepted alternative.
+    ingestBearer:
+      type: http
+      scheme: bearer
+      description: |
+        Shared push-ingest Bearer token (`Authorization: Bearer <token>`), verified
+        by `passesIngestAuth` on `POST /api/ingest/{sourceId}/artifacts` (#1563).
+        Deliberately distinct from `csrfToken`: cross-origin shippers present this
+        dedicated credential rather than a same-origin CSRF token, and a failed or
+        missing token yields `401`.
     basicAuth:
       type: http
       scheme: basic

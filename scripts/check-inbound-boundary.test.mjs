@@ -13,7 +13,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findFetchReferences, findInboundViolations } from './check-inbound-boundary.mjs';
+import {
+  findFetchReferences,
+  findConstructorPrimitives,
+  findInboundViolations,
+} from './check-inbound-boundary.mjs';
 
 test('flags raw network calls outside the allowlist; ignores owners, comments, tests (#2081)', () => {
   const root = mkdtempSync(join(tmpdir(), 'inbound-boundary-'));
@@ -123,6 +127,69 @@ test('violations from the AST pass surface with file/line through the tree scan 
     assert.deepEqual(
       violations.map((v) => `${v.file}:${v.line}`),
       ['lib/sneaky.ts:2'],
+      `unexpected violations: ${JSON.stringify(violations)}`
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// —— #3071: non-fetch constructors are AST-detected, so a multiline `new` that
+//    split the constructor onto the next physical line no longer slips through ——
+
+const ctorFlagged = (code) => findConstructorPrimitives('x.ts', code).length > 0;
+
+test('flags multiline new EventSource/WebSocket/XMLHttpRequest + navigator.sendBeacon (#3071)', () => {
+  // The exact evasion the line-regex missed: `new` and the constructor on
+  // separate physical lines. All three constructors, plus the same-line forms.
+  assert.ok(ctorFlagged('const s = new\n  EventSource("/api/live");'), 'multiline new EventSource');
+  assert.ok(ctorFlagged('const w = new\n  WebSocket("wss://x");'), 'multiline new WebSocket');
+  assert.ok(ctorFlagged('const r = new\n  XMLHttpRequest();'), 'multiline new XMLHttpRequest');
+  assert.ok(ctorFlagged('const s = new EventSource("/api/live");'), 'same-line new EventSource');
+  assert.ok(ctorFlagged('const w = new WebSocket("wss://x");'), 'same-line new WebSocket');
+  assert.ok(ctorFlagged('const r = new XMLHttpRequest();'), 'same-line new XMLHttpRequest');
+  assert.ok(ctorFlagged('new globalThis.WebSocket("wss://x");'), 'global-receiver constructor');
+  assert.ok(ctorFlagged('navigator.sendBeacon("/api/beacon", body);'), 'navigator.sendBeacon call');
+  assert.ok(ctorFlagged('const b = navigator.sendBeacon;'), 'navigator.sendBeacon alias');
+  assert.ok(ctorFlagged("navigator['sendBeacon']('/api/beacon', body);"), "navigator['sendBeacon'] indexing");
+  // navigator reached through a global receiver — the old substring regex caught
+  // these; the AST scan must too (mirrors the constructor receiver rule).
+  assert.ok(ctorFlagged('window.navigator.sendBeacon("/api/beacon", body);'), 'window.navigator.sendBeacon');
+  assert.ok(ctorFlagged('globalThis.navigator.sendBeacon("/api/beacon", body);'), 'globalThis.navigator.sendBeacon');
+  assert.ok(ctorFlagged('self.navigator.sendBeacon("/api/beacon", body);'), 'self.navigator.sendBeacon');
+});
+
+test('ignores constructor names in comments, strings, types, and non-global members (#3071)', () => {
+  assert.ok(!ctorFlagged('// const s = new EventSource("/api/live");\nexport const a = 1;'), 'comment');
+  assert.ok(!ctorFlagged('const s = "use new EventSource for live updates";'), 'string prose');
+  assert.ok(!ctorFlagged('const t = `open a new WebSocket to ${host}`;'), 'template prose');
+  assert.ok(!ctorFlagged('let es: EventSource | null = null;'), 'type annotation, no construction');
+  assert.ok(!ctorFlagged('function f(): WebSocket { return g(); }'), 'return type reference');
+  assert.ok(!ctorFlagged('const c = new sdk.WebSocket("x");'), 'constructor on a non-global receiver');
+  assert.ok(!ctorFlagged('client.sendBeacon(data);'), 'sendBeacon on a non-navigator receiver');
+  assert.ok(!ctorFlagged('sdk.navigator.sendBeacon(data);'), 'navigator on a non-global receiver');
+});
+
+test('multiline constructor violations surface with file/line through the tree scan (#3071)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'inbound-boundary-multiline-'));
+  const src = join(root, 'src');
+  mkdirSync(join(src, 'lib'), { recursive: true });
+  // A non-owner splitting `new` from the constructor across lines — the exact
+  // shape the old regex passed clean. The constructor sits on line 2.
+  writeFileSync(
+    join(src, 'lib', 'live.ts'),
+    'export const s = new\n  EventSource("/api/live");\n'
+  );
+  // A comment-only mention in another non-owner must stay clean.
+  writeFileSync(
+    join(src, 'lib', 'note.ts'),
+    '// historically we used new EventSource here; now routed via api-client\nexport const n = 1;\n'
+  );
+  try {
+    const violations = findInboundViolations(src, []);
+    assert.deepEqual(
+      violations.map((v) => `${v.file}:${v.line}`),
+      ['lib/live.ts:1'],
       `unexpected violations: ${JSON.stringify(violations)}`
     );
   } finally {

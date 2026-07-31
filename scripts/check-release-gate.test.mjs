@@ -43,6 +43,7 @@ const cases = [
   ['v0.2', { milestone: 'v0.2', patch: null, isPatch: false }],
   ['0.2', { milestone: 'v0.2', patch: null, isPatch: false }],
   ['0.2.0', { milestone: 'v0.2', patch: 0, isPatch: false }],
+  ['v0.2.1', { milestone: 'v0.2', patch: 1, isPatch: true }],
   ['v0.1.0', { milestone: 'v0.1', patch: 0, isPatch: false }],
   ['0.1.1', { milestone: 'v0.1', patch: 1, isPatch: true }],
   ['v0.1.1', { milestone: 'v0.1', patch: 1, isPatch: true }],
@@ -67,6 +68,40 @@ try {
   console.error('  FAIL "nope" should have thrown');
 } catch {
   console.log('  ok  "nope" throws');
+}
+
+// #3074: the version parser is END-anchored, so a target with trailing garbage
+// or a non-numeric suffix is REJECTED (throws) rather than prefix-matched and
+// waved through the patch exemption. `v0.2.1junk` previously classified as
+// patch 1 and exited 0 before any milestone-gate inspection.
+const rejects = ['v0.2.1junk', 'v0.2.1.0', 'v0.2-beta', '0.1.2.3', 'v0.2rc1'];
+for (const input of rejects) {
+  try {
+    classifyTarget(input);
+    failures += 1;
+    console.error(`  FAIL ${input} should be rejected by the anchored parser`);
+  } catch {
+    console.log(`  ok  ${input} rejected`);
+  }
+}
+
+// The malformed target must exit non-zero AT classification — before the patch
+// exemption that main() would otherwise reach. Parsing fails first, so this
+// needs no gh boundary.
+{
+  const bad = spawnSync(
+    process.execPath,
+    [new URL('./check-release-gate.mjs', import.meta.url).pathname, 'v0.2.1junk'],
+    { encoding: 'utf8', env: { ...process.env } },
+  );
+  try {
+    assert.equal(bad.status, 1, 'malformed target exits non-zero');
+    assert.match(bad.stderr, /Cannot parse a milestone/, 'fails at classification, not the gate');
+    console.log('  ok  malformed version target exits non-zero before the patch exemption');
+  } catch (err) {
+    failures += 1;
+    console.error(`  FAIL malformed-target CLI: ${err.message}`);
+  }
 }
 
 // Security gate (third standing epic) is expected only from v0.3 onward (#698).

@@ -200,3 +200,88 @@ test('the live repo tree passes the gate (no drift on master)', async () => {
   assert.deepEqual(d.staleKnownGaps, [], `stale known-gap entries: ${d.staleKnownGaps}`);
   assert.deepEqual(d.uncoveredPrefixes, [], `uncovered prefix guards: ${d.uncoveredPrefixes}`);
 });
+
+// —— #3284: the machine-readable security contract for the push-ingest write ——
+//
+// POST /api/ingest/{sourceId}/artifacts enforces a dedicated ingest Bearer token
+// at runtime (`passesIngestAuth`), but the spec had no operation `security` and
+// no ingest scheme, so with the empty top-level `security` OpenAPI tooling read
+// this write endpoint as UNAUTHENTICATED and could not discover/supply the
+// credential. This asserts the operation now declares a nonempty security
+// requirement referencing a DEFINED ingest Bearer scheme and documents a 401.
+
+/** Indentation of a line (spaces before first non-space); Infinity for blank. */
+function indentOf(line) {
+  if (!line.trim()) return Infinity;
+  return line.length - line.trimStart().length;
+}
+
+/**
+ * Body lines of the block introduced by the first line at `indent` whose trimmed
+ * text matches `keyRe`: every following line more-indented than that key (blank
+ * lines retained, verbatim indentation preserved). `null` when no such key.
+ */
+function blockUnder(lines, keyRe, indent) {
+  const start = lines.findIndex(
+    (l) => indentOf(l) === indent && keyRe.test(l.trim())
+  );
+  if (start === -1) return null;
+  const body = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const ind = indentOf(lines[i]);
+    if (ind === Infinity) {
+      body.push(lines[i]);
+      continue;
+    }
+    if (ind <= indent) break;
+    body.push(lines[i]);
+  }
+  return body;
+}
+
+test('POST /api/ingest/{sourceId}/artifacts declares a defined ingest Bearer scheme + 401 (#3284)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { join } = await import('node:path');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const lines = readFileSync(join(root, 'docs/openapi/openapi.yaml'), 'utf8').split('\n');
+
+  const pathBlock = blockUnder(lines, /^\/api\/ingest\/\{sourceId\}\/artifacts:$/, 2);
+  assert.ok(pathBlock, 'ingest path is present in the spec');
+  const opBlock = blockUnder(pathBlock, /^post:$/, 4);
+  assert.ok(opBlock, 'ingest POST operation is present');
+
+  // A NONEMPTY operation-level security requirement, and the scheme names it cites.
+  const securityBlock = blockUnder(opBlock, /^security:$/, 6);
+  assert.ok(securityBlock && securityBlock.length, 'ingest POST has a security requirement');
+  const schemeNames = securityBlock
+    .map((l) => l.trim().match(/^-\s*([A-Za-z0-9_]+)\s*:/)?.[1])
+    .filter(Boolean);
+  assert.ok(
+    schemeNames.length,
+    `security requirement references at least one scheme: ${JSON.stringify(securityBlock)}`
+  );
+
+  // A documented 401 authentication-failure response.
+  const responsesBlock = blockUnder(opBlock, /^responses:$/, 6);
+  assert.ok(responsesBlock, 'ingest POST has a responses block');
+  assert.ok(
+    responsesBlock.some((l) => /^'401':/.test(l.trim())),
+    'ingest POST documents a 401 authentication-failure response'
+  );
+
+  // Every cited scheme is DEFINED under components.securitySchemes, is an HTTP
+  // Bearer scheme, and is NOT the CSRF token (cross-origin shippers use a
+  // dedicated ingest credential).
+  const schemesBlock = blockUnder(lines, /^securitySchemes:$/, 2);
+  assert.ok(schemesBlock, 'components.securitySchemes is present');
+  for (const name of schemeNames) {
+    assert.notEqual(name, 'csrfToken', 'ingest auth is a dedicated credential, not the CSRF token');
+    const def = blockUnder(schemesBlock, new RegExp(`^${name}:$`), 4);
+    assert.ok(def, `security scheme "${name}" is defined in components.securitySchemes`);
+    const isBearer =
+      def.some((l) => /^type:\s*http$/.test(l.trim())) &&
+      def.some((l) => /^scheme:\s*bearer$/.test(l.trim()));
+    assert.ok(isBearer, `ingest scheme "${name}" is an HTTP Bearer scheme`);
+  }
+});

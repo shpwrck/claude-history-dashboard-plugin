@@ -52,7 +52,11 @@ function gh(args) {
 //   0.1.1 / v0.1.1  -> { milestone: 'v0.1', patch: 1,    isPatch: true  }
 export function classifyTarget(arg) {
   const raw = String(arg).trim().replace(/^v/i, '');
-  const m = raw.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+  // End-anchored: the ENTIRE normalized argument must be a supported version.
+  // Without the `$`, a prefix-only match accepted `v0.2.1junk` as patch 1 and
+  // main() exited 0 through the patch exemption BEFORE inspecting the milestone
+  // gates — a malformed target could bypass the standing release checks (#3074).
+  const m = raw.match(/^(\d+)\.(\d+)(?:\.(\d+))?$/);
   if (!m) {
     throw new Error(`Cannot parse a milestone from "${arg}". Pass a version like v0.2 / 0.2 / 0.2.0.`);
   }

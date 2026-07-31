@@ -55,11 +55,12 @@ export const NETWORK_OWNERS = [
   'lib/doc-issue-fetch.ts', // #2710 server-only opt-in GitHub GraphQL doc-issue snapshot — env-gated, SSRF-fixed host, credential never serialized; never imported by the SPA bundle
 ];
 
-// Non-fetch primitives keep the tight line-regex: real call sites write `new
-// EventSource(` etc.; prose never does, and comment lines are skipped anyway.
-// (`fetch` moved to the AST scan below — #2963.)
-const PRIMITIVE =
-  /\bnew\s+(?:EventSource|WebSocket|XMLHttpRequest)\b|\bnavigator\.sendBeacon\b/;
+// The non-fetch network constructors that open a direct connection outside the
+// api-client chokepoint. Detected from the AST (#3071), same as `fetch`: the
+// old line-regex matched `new` and the constructor name independently on each
+// physical line, so a multiline `new\nEventSource('/api/live')` never put both
+// tokens in one regex input and slipped through the gate entirely.
+const NETWORK_CONSTRUCTORS = new Set(['EventSource', 'WebSocket', 'XMLHttpRequest']);
 
 const GLOBAL_RECEIVERS = new Set(['globalThis', 'window', 'self', 'global']);
 
@@ -148,10 +149,100 @@ export function findFetchReferences(fileName, text) {
 }
 
 /**
+ * AST scan of one source file for the non-fetch network primitives (#3071):
+ * `new EventSource(...)`, `new WebSocket(...)`, `new XMLHttpRequest(...)`, and
+ * `navigator.sendBeacon(...)`. Replaces the old physical-line regex, which put
+ * `new` and the constructor name on separate regex inputs and so missed a
+ * multiline `new\nEventSource('/api/live')`. The parser sees the NewExpression
+ * regardless of line breaks, and comment/string prose produces no matching
+ * nodes so it stays free. Returns `{ line, text }[]` (1-based lines).
+ */
+export function findConstructorPrimitives(fileName, text) {
+  const kind = fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
+  const lines = text.split('\n');
+  const hits = [];
+
+  const report = (node) => {
+    const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+    hits.push({ line: line + 1, text: (lines[line] ?? '').trim() });
+  };
+
+  // A `new` target resolves to a network constructor when it is a bare
+  // identifier (`EventSource`) or a property on a global receiver
+  // (`globalThis.WebSocket`, however parenthesized). A constructor named on a
+  // NON-global receiver (`sdk.WebSocket`) is that object's API, not the browser
+  // primitive, and stays free — mirroring the fetch scan's receiver rule.
+  const isNetworkConstructor = (expr) => {
+    const e = unwrapParens(expr);
+    if (ts.isIdentifier(e)) return NETWORK_CONSTRUCTORS.has(e.text);
+    if (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.name)) {
+      const recv = unwrapParens(e.expression);
+      return (
+        NETWORK_CONSTRUCTORS.has(e.name.text) &&
+        ts.isIdentifier(recv) &&
+        GLOBAL_RECEIVERS.has(recv.text)
+      );
+    }
+    return false;
+  };
+
+  // `navigator.sendBeacon` / `navigator['sendBeacon']` on the global navigator
+  // receiver — a value-position reference (call or alias), reported like fetch.
+  const isNavigatorSendBeacon = (node) => {
+    // The receiver is the global `navigator` when it is the bare identifier, or
+    // `navigator` reached through a global receiver (`window.navigator`,
+    // `globalThis.navigator`, `self.navigator`) — mirroring the constructor
+    // receiver rule so both halves of the gate accept the same qualified globals
+    // the old `\bnavigator\.sendBeacon\b` substring regex caught (#3071).
+    const onNavigator = (recvExpr) => {
+      const recv = unwrapParens(recvExpr);
+      if (ts.isIdentifier(recv)) return recv.text === 'navigator';
+      if (ts.isPropertyAccessExpression(recv) && ts.isIdentifier(recv.name)) {
+        const base = unwrapParens(recv.expression);
+        return (
+          recv.name.text === 'navigator' &&
+          ts.isIdentifier(base) &&
+          GLOBAL_RECEIVERS.has(base.text)
+        );
+      }
+      return false;
+    };
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === 'sendBeacon'
+    ) {
+      return onNavigator(node.expression);
+    }
+    if (
+      ts.isElementAccessExpression(node) &&
+      (ts.isStringLiteral(node.argumentExpression) ||
+        ts.isNoSubstitutionTemplateLiteral(node.argumentExpression)) &&
+      node.argumentExpression.text === 'sendBeacon'
+    ) {
+      return onNavigator(node.expression);
+    }
+    return false;
+  };
+
+  const visit = (node) => {
+    if (ts.isNewExpression(node) && isNetworkConstructor(node.expression)) {
+      report(node);
+    } else if (isNavigatorSendBeacon(node)) {
+      report(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
+/**
  * Scan a src tree for raw network primitives outside the owner allowlist.
- * Returns `{ file, line, text }[]` (empty when clean). Skips `*.test.ts(x)`;
- * comment/string prose is free (comments are skipped line-wise for the regex
- * pass and produce no AST identifiers for the fetch pass).
+ * Returns `{ file, line, text }[]` (empty when clean). Skips `*.test.ts(x)`.
+ * Both passes are AST-based (#2963 fetch, #3071 constructors/beacon), so
+ * comment/string prose is free — it produces no matching nodes.
  */
 export function findInboundViolations(srcDir, owners = NETWORK_OWNERS) {
   const allow = new Set(owners);
@@ -171,24 +262,10 @@ export function findInboundViolations(srcDir, owners = NETWORK_OWNERS) {
       if (allow.has(rel)) continue;
 
       const text = readFileSync(full, 'utf8');
-      const lines = text.split('\n');
-      lines.forEach((line, i) => {
-        const trimmed = line.trim();
-        // Skip whole comment lines (line, block, JSDoc continuation).
-        if (
-          trimmed.startsWith('//') ||
-          trimmed.startsWith('*') ||
-          trimmed.startsWith('/*')
-        ) {
-          return;
-        }
-        const code = line.replace(/\/\/.*$/, ''); // drop a trailing line comment
-        if (PRIMITIVE.test(code)) {
-          violations.push({ file: rel, line: i + 1, text: line.trim() });
-        }
-      });
-
       for (const hit of findFetchReferences(rel, text)) {
+        violations.push({ file: rel, line: hit.line, text: hit.text });
+      }
+      for (const hit of findConstructorPrimitives(rel, text)) {
         violations.push({ file: rel, line: hit.line, text: hit.text });
       }
     }
