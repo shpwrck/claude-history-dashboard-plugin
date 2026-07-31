@@ -136,6 +136,96 @@ These budgets apply at the 18-session sample corpus scale. Re-measure after
 #623's ResizeObserver extraction to confirm no regression; re-measure the
 Sessions view after any virtualization work is landed.
 
+> **Historical note (2026-07-30):** the "Current" column above is the
+> 2026-06-05 pre-fix record. See the re-measurement addendum below for the
+> post-#714/#3287/#3288 numbers; the budget targets are unchanged.
+
+---
+
+## Re-measurement addendum — 2026-07-30 (#3287, #3288, #3278; round-10 of #1930)
+
+Measured on the `perf/1930-r10-render` worktree at `37f61e75` + this branch's
+fixes, same harnesses (`scripts/measure-isolated-views.mjs`, 3 fresh contexts
+per view, medians) plus the new large-history benchmark
+(`scripts/measure-sessions-scale.mjs`, described below).
+
+### Sessions
+
+The #714 windowing had already replaced the per-date-group nested tables with
+ONE flat windowed `<Table>` (~90x win vs this document's original record —
+the 2026-07-26 audit filing restated the stale record; see #3287's re-scope
+comment). The residual found there: one spacer `<tr>` PER windowed-out row
+still gave the browser a box to lay out per historical row — 311 ms
+resize-storm longtask at 300 rendered rows, 670 ms at 1000, vs the <=100 ms
+budget.
+
+#3287 coalesces each contiguous run of off-window rows into ONE spacer `<tr>`
+(height = 44 px x run length) and maps intersections on the tall spacer back
+to row indices from the observer entry's geometry (`useRowWindow.observeSpacer`).
+#3278 fixes the observer rebuild (rowCount/rootMargin change) losing every
+mounted sentinel: the element registry now survives rebuilds and the
+replacement observer re-observes it — without this, every `Load more` click
+(a rowCount change) froze the window.
+
+`scripts/measure-sessions-scale.mjs` results (scaled clone corpora served via
+route interception over the verified sample preview; full pagination through
+`Load more`; row-composition asserted; quiescence-gated resize storm):
+
+| sessions | rendered `<tr>` (median)   | resize LT median (pre-fix, 37f61e75) | resize LT median (post-fix) | <=100 ms budget |
+|----------|----------------------------|--------------------------------------|-----------------------------|-----------------|
+| 18       | 13 full + 1 spacer         | 0 ms                                 | 0 ms                        | MET             |
+| 300      | 27 full + 2 spacers        | 311 ms                               | 104 ms                      | 4 ms over — see note |
+| 1000     | 26 full + 2 spacers        | 670 ms                               | 104 ms                      | 4 ms over — see note |
+
+The acceptance's growth clause is now demonstrably met: 3.3x the rows costs
+1.0x the time (flat), where the pre-fix curve grew 311 -> 670 ms. The DOM is
+bounded: ~27 `<tr>` at every scale (was 305 and 1005).
+
+**On the ~104 ms residual (as measured in the recorded run):** in that run it
+was scale-independent (the same at 300 and 1000) and scroll-position-
+independent (a control run with the storm at scroll-top measured 102 ms), and
+attributable to two ~52 ms tasks — barely over the 50 ms longtask floor —
+from the app shell's 400 px<->1280 px breakpoint re-renders, which at the
+18-session state sit just under the floor and count as 0. Longtask medians
+this close to the 50 ms quantization floor are noisy across machines and
+runs (repeat runs on the same host have ranged roughly 0-216 ms at the same
+scale, flipping the <=100 ms verdict either way), so treat the table above as
+one recorded run's evidence for the load-bearing claims — the DOM bound and
+the flat growth curve, both of which reproduce — not as exact per-run
+milliseconds. Further reduction of the residual is app-shell work outside
+the Sessions table's scope.
+
+### Tokens
+
+The chart stack had already moved to the in-repo SVG `LightweightCharts`
+(the "3 simultaneous Victory/Recharts instances" this document measured are
+gone), which alone brought initial load under budget. #3288 additionally
+defers the two below-fold chart surfaces ("Tokens by Session (Top 20)" and
+the "Model Distribution" donut) behind an intersection-triggered
+`<LazyMount>` (`src/components/hooks/LazyMount.tsx`): they render a
+height-reserving placeholder until first scrolled near the viewport, then
+stay mounted.
+
+| Metric                        | 2026-06-05 record | 37f61e75 baseline (today) | post-fix | budget    |
+|-------------------------------|-------------------|---------------------------|----------|-----------|
+| Tokens initial-load LT median | 367 ms            | 156 ms                    | 177 ms   | <= 200 ms — MET |
+| Tokens resize-storm LT median | 223 ms            | 377 ms                    | 382 ms   | unchanged (within run noise) |
+
+Initial-load runs post-fix: 309 / 172 / 177 ms (the first run of every view
+carries ~2x cold-start warmup; the median absorbs it). Resize-storm cost is
+unchanged: the storm never scrolls, so the deferred surfaces are not mounted
+during it either way — the remaining resize cost is the visible spend chart
+plus app shell. Browser-verified behavior: both surfaces are
+`data-lazy-mount="pending"` at first paint and mount permanently on first
+scroll-into-view.
+
+### Sessions (default view, isolated harness)
+
+Unchanged and at floor post-fix: 180 ms initial load, 0 ms resize. Note the
+isolated harness measures the DEFAULT view state, which the global 24h time
+filter restricts to the most recent sample sessions; the scale benchmark
+above widens to All and paginates fully.
+
 ### What #623 (ResizeObserver extraction) achieves
 
 #623 removes the code-duplication maintenance debt. It does not change the
@@ -158,6 +248,10 @@ node scripts/measure-render-churn.mjs
 
 # Or the isolated-per-view version (3 fresh contexts per view, port 4477):
 node scripts/measure-isolated-views.mjs
+
+# Sessions at large-history scale (#3287): scaled clone corpora, full
+# pagination, resize storm per scale (port 4489):
+node scripts/measure-sessions-scale.mjs --scales 18,300,1000
 ```
 
 Both scripts exit cleanly and kill the preview server they started. Pipe output
