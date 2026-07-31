@@ -10,7 +10,9 @@ import { tmpdir } from 'node:os';
 
 import {
   ENTERPRISE_READINESS_CHECKS,
+  assertSpaBoundary,
   findSpaBoundaryOffenders,
+  inspectSpaBoundary,
   renderCheckList,
 } from './enterprise-readiness-gate.mjs';
 
@@ -104,6 +106,58 @@ check('SPA boundary scanner accepts clean emitted files', () => {
     );
 
     assert.deepEqual(findSpaBoundaryOffenders(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('a missing emitted bundle is a loud SKIP, never a silent pass (#3478)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
+  try {
+    // No dist/ at all: the scanner used to `continue` past both targets and
+    // report zero offenders — indistinguishable from a genuinely clean bundle.
+    const { offenders, missing } = inspectSpaBoundary(root);
+    assert.deepEqual(offenders, []);
+    assert.deepEqual(missing, ['dist/index.html', 'dist/assets']);
+
+    const outcome = assertSpaBoundary(root);
+    assert.equal(outcome.status, 'skipped');
+    assert.match(outcome.reason, /NOTHING was inspected/);
+    assert.match(outcome.reason, /build:spa/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('--require-emitted-bundle turns a missing bundle into a hard failure', () => {
+  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
+  try {
+    assert.throws(
+      () => assertSpaBoundary(root, { requireEmittedBundle: true }),
+      /inspected nothing/
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('assertSpaBoundary reports a real inspection as passed, and offenders still throw', () => {
+  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
+  try {
+    mkdirSync(join(root, 'dist', 'assets'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'index.html'), '<main></main>');
+    writeFileSync(join(root, 'dist', 'assets', 'index-test.js'), 'console.log("clean");\n');
+    assert.deepEqual(assertSpaBoundary(root), { status: 'passed' });
+    assert.deepEqual(
+      assertSpaBoundary(root, { requireEmittedBundle: true }),
+      { status: 'passed' }
+    );
+
+    writeFileSync(
+      join(root, 'dist', 'assets', 'index-test.js'),
+      'fetch("/api/dataset.json");\n'
+    );
+    assert.throws(() => assertSpaBoundary(root), /server-touching strings/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

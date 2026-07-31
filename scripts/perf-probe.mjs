@@ -66,26 +66,51 @@ export function round1(n) {
   return Math.round(n * 10) / 10;
 }
 
-// Compare a measurements object against a budget object, returning the list of
-// breaches. Shapes:
+// Compare a measurements object against a budget object. Shapes:
 //   measurements.endpoints[path] = { p50, p95, ... }
 //   measurements.dataset = { uncompressedBytes, compressedBytes, firstHitMs }
 //   budget.endpoints[path] = { warmP50MaxMs?, warmP95MaxMs? }
 //   budget.dataset = { uncompressedMaxBytes?, compressedMaxBytes?, coldBuildMaxMs? }
-// Only metrics that are present on BOTH sides are checked, so a partial budget
-// (or a partial measurement) never throws — it just checks fewer things.
+//
+// Fail-closed contract (#3478): an ABSENT budget key means "not budgeted" and
+// is simply unchecked (a whole section may legitimately be absent — the caller
+// is responsible for failing when NOTHING was checked; see checkedCount). But
+// anything the budget actually NAMES must be verifiable:
+//   - a budget limit that is set but not a finite number is a `problem`
+//     (a typo'd ceiling must not silently disable its check), and
+//   - a budgeted metric with no finite measurement is a `problem`
+//     (a budgeted-but-never-measured endpoint used to be silently skipped —
+//     rename an endpoint in the budget and its gate evaporated).
+// Returns { ok, breaches, problems, checkedCount } where checkedCount is the
+// number of limits actually verified against a real measurement.
 export function evaluateBudget(measurements, budget) {
   const breaches = [];
+  const problems = [];
+  let checkedCount = 0;
   const over = (metric, value, limit) => {
-    if (Number.isFinite(limit) && Number.isFinite(value) && value > limit) {
-      breaches.push({ metric, value: round1(value), limit });
+    if (limit === undefined) return; // not budgeted — nothing to check
+    if (!Number.isFinite(limit)) {
+      problems.push({
+        metric,
+        reason: `budget limit ${JSON.stringify(limit)} is not a finite number — this check is disabled by a typo, not satisfied`,
+      });
+      return;
     }
+    if (!Number.isFinite(value)) {
+      problems.push({
+        metric,
+        reason: 'budgeted but never measured — nothing verified this limit',
+      });
+      return;
+    }
+    checkedCount += 1;
+    if (value > limit) breaches.push({ metric, value: round1(value), limit });
   };
 
   const endpointBudgets = (budget && budget.endpoints) || {};
   for (const [path, limits] of Object.entries(endpointBudgets)) {
-    const m = measurements && measurements.endpoints && measurements.endpoints[path];
-    if (!m) continue;
+    const m =
+      (measurements && measurements.endpoints && measurements.endpoints[path]) || {};
     over(`${path} p50`, m.p50, limits.warmP50MaxMs);
     over(`${path} p95`, m.p95, limits.warmP95MaxMs);
   }
@@ -96,7 +121,12 @@ export function evaluateBudget(measurements, budget) {
   over('dataset compressed bytes', dm.compressedBytes, db.compressedMaxBytes);
   over('dataset cold-build ms', dm.firstHitMs, db.coldBuildMaxMs);
 
-  return { ok: breaches.length === 0, breaches };
+  return {
+    ok: breaches.length === 0 && problems.length === 0,
+    breaches,
+    problems,
+    checkedCount,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -214,16 +244,25 @@ function parseArgs(argv) {
     else if (arg.startsWith('--base=')) opts.base = arg.slice('--base='.length);
     else if (arg === '--budget') opts.budgetPath = resolve(next());
     else if (arg.startsWith('--budget=')) opts.budgetPath = resolve(arg.slice('--budget='.length));
-    else if (arg === '--warm') opts.warmSamples = Number.parseInt(next(), 10);
-    else if (arg.startsWith('--warm=')) opts.warmSamples = Number.parseInt(arg.slice('--warm='.length), 10);
-    else if (arg === '--json') opts.json = true;
+    else if (arg === '--warm' || arg.startsWith('--warm=')) {
+      const raw = arg === '--warm' ? next() : arg.slice('--warm='.length);
+      opts.warmSamples = Number(raw);
+      // #3478: `--warm bogus` used to be silently rewritten to 5 — the run
+      // reported sample counts the operator never asked for. Set-but-unusable
+      // input is an error, exactly like the env-number contract (#3076).
+      if (!Number.isInteger(opts.warmSamples) || opts.warmSamples < 1) {
+        console.error(
+          `perf-probe: --warm must be a positive integer, got ${JSON.stringify(raw)}`
+        );
+        process.exit(2);
+      }
+    } else if (arg === '--json') opts.json = true;
     else if (arg === '--enforce') opts.enforce = true;
     else {
       console.error(`perf-probe: unknown argument ${arg}`);
       process.exit(2);
     }
   }
-  if (!Number.isInteger(opts.warmSamples) || opts.warmSamples < 1) opts.warmSamples = 5;
   return opts;
 }
 
@@ -283,13 +322,27 @@ async function main() {
     console.error(`perf-probe: --enforce given but no readable budget at ${opts.budgetPath}`);
     process.exit(2);
   }
-  const { ok, breaches } = evaluateBudget(result, budget);
-  if (!ok) {
+  const { breaches, problems, checkedCount } = evaluateBudget(result, budget);
+  if (problems.length > 0) {
+    console.error('\nperf-probe: budget problems (config/coverage — nothing verified these):');
+    for (const p of problems) console.error(`  - ${p.metric}: ${p.reason}`);
+  }
+  if (breaches.length > 0) {
     console.error('\nperf-probe: budget breaches:');
     for (const b of breaches) console.error(`  - ${b.metric}: ${b.value} > ${b.limit}`);
-    process.exit(1);
   }
-  console.log('\nperf-probe: all metrics within budget.');
+  if (breaches.length > 0) process.exit(1);
+  if (problems.length > 0) process.exit(2);
+  // #3478 inertness rule: absent budget sections may stay unchecked, but an
+  // --enforce run that verified ZERO budgets is a gate that gates nothing.
+  if (checkedCount === 0) {
+    console.error(
+      `perf-probe: --enforce verified 0 budgets against ${opts.budgetPath} — ` +
+        'the budget file names nothing this probe measures, so this run enforced NOTHING.'
+    );
+    process.exit(2);
+  }
+  console.log(`\nperf-probe: all metrics within budget (${checkedCount} budget checks verified).`);
 }
 
 // Run only as a CLI; importing for tests must not start a probe.

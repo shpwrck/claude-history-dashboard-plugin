@@ -10,7 +10,8 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +19,14 @@ import { percentile, round1, evaluateBudget, probe } from './perf-probe.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PERF_PROBE_PATH = join(PROJECT_DIR, 'scripts', 'perf-probe.mjs');
+
+/** Write a throwaway budget file; caller rms its parent dir. */
+function writeTmpBudget(budget) {
+  const dir = mkdtempSync(join(tmpdir(), 'perf-probe-budget-'));
+  const path = join(dir, 'budget.json');
+  writeFileSync(path, JSON.stringify(budget, null, 2));
+  return path;
+}
 
 async function withTestServer(handler, run) {
   const server = createServer(handler);
@@ -212,20 +221,67 @@ test('evaluateBudget: reports each breach (latency + bytes + cold build)', () =>
   assert.equal(p95.limit, 2000);
 });
 
-test('evaluateBudget: only checks metrics present on BOTH sides (no throw on partial)', () => {
-  // Measurement missing an endpoint the budget names, and a budget missing keys
-  // the measurement has — neither should throw nor produce a phantom breach.
+test('evaluateBudget: a budgeted-but-unmeasured metric is a PROBLEM, never a silent skip (#3478)', () => {
+  // This inverts what an earlier version of this test ENSHRINED ("only checks
+  // metrics present on BOTH sides"): under that contract, renaming an endpoint
+  // in the budget — or dropping its measurement — silently evaporated its
+  // gate. Anything the budget NAMES must be verified or flagged.
   const measurements = { endpoints: { '/api/digest': { p50: 100 } }, dataset: {} };
   const budget = {
     endpoints: {
-      '/api/digest': { warmP95MaxMs: 50 }, // p95 absent from measurement -> skipped
-      '/api/sessions': { warmP50MaxMs: 1 }, // endpoint absent from measurement -> skipped
+      '/api/digest': { warmP95MaxMs: 50 }, // p95 absent from measurement -> problem
+      '/api/sessions': { warmP50MaxMs: 1 }, // endpoint absent from measurement -> problem
     },
-    dataset: { uncompressedMaxBytes: 1 }, // bytes absent from measurement -> skipped
+    dataset: { uncompressedMaxBytes: 1 }, // bytes absent from measurement -> problem
   };
-  const { ok, breaches } = evaluateBudget(measurements, budget);
+  const { ok, breaches, problems, checkedCount } = evaluateBudget(measurements, budget);
+  assert.equal(ok, false);
+  assert.deepEqual(breaches, []);
+  assert.deepEqual(problems.map((p) => p.metric).sort(), [
+    '/api/digest p95',
+    '/api/sessions p50',
+    'dataset uncompressed bytes',
+  ]);
+  for (const p of problems) assert.match(p.reason, /never measured/);
+  assert.equal(checkedCount, 0);
+});
+
+test('evaluateBudget: a set-but-non-finite limit is a PROBLEM, not a disabled check (#3478)', () => {
+  const measurements = {
+    endpoints: { '/api/digest': { p50: 100, p95: 200 } },
+    dataset: {},
+  };
+  const budget = {
+    endpoints: {
+      // A typo'd ceiling ("500ms", null) used to make Number.isFinite(limit)
+      // false and the check silently vanish.
+      '/api/digest': { warmP50MaxMs: '500ms', warmP95MaxMs: null },
+    },
+  };
+  const { ok, problems, checkedCount } = evaluateBudget(measurements, budget);
+  assert.equal(ok, false);
+  assert.equal(problems.length, 2);
+  for (const p of problems) assert.match(p.reason, /not a finite number/);
+  assert.equal(checkedCount, 0);
+});
+
+test('evaluateBudget: an ABSENT budget key stays unchecked without a problem, and checkedCount reports coverage', () => {
+  // Absent means "not budgeted" — allowed. The CLI's inertness rule is what
+  // fails an --enforce run whose checkedCount is zero.
+  const measurements = {
+    endpoints: { '/api/digest': { p50: 100, p95: 200 } },
+    dataset: { uncompressedBytes: 1000, compressedBytes: 100, firstHitMs: 500 },
+  };
+  const budget = { endpoints: { '/api/digest': { warmP50MaxMs: 1000 } } };
+  const { ok, breaches, problems, checkedCount } = evaluateBudget(measurements, budget);
   assert.equal(ok, true);
   assert.deepEqual(breaches, []);
+  assert.deepEqual(problems, []);
+  assert.equal(checkedCount, 1);
+
+  const empty = evaluateBudget(measurements, {});
+  assert.equal(empty.ok, true);
+  assert.equal(empty.checkedCount, 0);
 });
 
 test('shipped perf-probe-budget.json parses and matches the evaluator shape', () => {
@@ -238,10 +294,97 @@ test('shipped perf-probe-budget.json parses and matches the evaluator shape', ()
   }
   assert.ok(Number.isFinite(budget.dataset.uncompressedMaxBytes));
   assert.ok(Number.isFinite(budget.dataset.compressedMaxBytes));
-  // A real measurement under these generous pre-fix ceilings must pass.
+  // A real FULL measurement under these generous pre-fix ceilings must pass —
+  // covering every endpoint the budget names, since a budgeted-but-unmeasured
+  // endpoint is now a problem (#3478), not a silent skip.
   const underBudget = {
-    endpoints: { '/api/dataset.json': { p50: 100, p95: 200 } },
+    endpoints: Object.fromEntries(
+      Object.keys(budget.endpoints).map((path) => [path, { p50: 100, p95: 200 }])
+    ),
     dataset: { uncompressedBytes: 1000, compressedBytes: 100, firstHitMs: 500 },
   };
-  assert.equal(evaluateBudget(underBudget, budget).ok, true);
+  const verdict = evaluateBudget(underBudget, budget);
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.problems, []);
+  assert.ok(verdict.checkedCount >= Object.keys(budget.endpoints).length * 2);
+});
+
+test('CLI --enforce exits 1 on a REAL budget breach (spawn-level, #3478)', async () => {
+  await withTestServer((_request, response) => {
+    response.writeHead(200);
+    response.end('{}');
+  }, async (base) => {
+    // Every endpoint measured, one ceiling impossibly tight: any real latency
+    // breaches a 0.000001 ms p50 cap.
+    const budgetPath = writeTmpBudget({
+      endpoints: {
+        '/api/dataset.json': { warmP50MaxMs: 0.000001, warmP95MaxMs: 100000 },
+        '/api/recommendations.json': { warmP50MaxMs: 100000, warmP95MaxMs: 100000 },
+        '/api/digest': { warmP50MaxMs: 100000, warmP95MaxMs: 100000 },
+        '/api/sessions': { warmP50MaxMs: 100000, warmP95MaxMs: 100000 },
+      },
+      dataset: { uncompressedMaxBytes: 100000, compressedMaxBytes: 100000, coldBuildMaxMs: 100000 },
+    });
+    try {
+      const result = await runProbeCli(['--base', base, '--warm=1', '--enforce', '--budget', budgetPath]);
+      assert.equal(result.code, 1, result.stderr);
+      assert.match(result.stderr, /budget breaches/);
+      assert.match(result.stderr, /\/api\/dataset\.json p50/);
+      assert.doesNotMatch(result.stdout, /all metrics within budget/);
+    } finally {
+      rmSync(dirname(budgetPath), { recursive: true, force: true });
+    }
+  });
+});
+
+test('CLI --enforce fails an INERT budget that verifies zero checks (spawn-level, #3478)', async () => {
+  await withTestServer((_request, response) => {
+    response.writeHead(200);
+    response.end('{}');
+  }, async (base) => {
+    const budgetPath = writeTmpBudget({});
+    try {
+      const result = await runProbeCli(['--base', base, '--warm=1', '--enforce', '--budget', budgetPath]);
+      assert.equal(result.code, 2, result.stderr);
+      assert.match(result.stderr, /verified 0 budgets/);
+      assert.match(result.stderr, /enforced NOTHING/);
+      assert.doesNotMatch(result.stdout, /all metrics within budget/);
+    } finally {
+      rmSync(dirname(budgetPath), { recursive: true, force: true });
+    }
+  });
+});
+
+test('CLI --enforce passes a real budget and reports how many checks it verified (spawn-level)', async () => {
+  await withTestServer((_request, response) => {
+    response.writeHead(200);
+    response.end('{}');
+  }, async (base) => {
+    const budgetPath = writeTmpBudget({
+      endpoints: {
+        '/api/dataset.json': { warmP50MaxMs: 100000, warmP95MaxMs: 100000 },
+        '/api/recommendations.json': { warmP50MaxMs: 100000, warmP95MaxMs: 100000 },
+        '/api/digest': { warmP50MaxMs: 100000, warmP95MaxMs: 100000 },
+        '/api/sessions': { warmP50MaxMs: 100000, warmP95MaxMs: 100000 },
+      },
+      dataset: { uncompressedMaxBytes: 100000, compressedMaxBytes: 100000, coldBuildMaxMs: 100000 },
+    });
+    try {
+      const result = await runProbeCli(['--base', base, '--warm=1', '--enforce', '--budget', budgetPath]);
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /all metrics within budget \(11 budget checks verified\)/);
+    } finally {
+      rmSync(dirname(budgetPath), { recursive: true, force: true });
+    }
+  });
+});
+
+test('CLI rejects a bogus --warm loudly instead of silently running 5 samples (#3478)', async () => {
+  const result = await runProbeCli(['--warm', 'bogus', '--enforce']);
+  assert.equal(result.code, 2, result.stderr);
+  assert.match(result.stderr, /--warm must be a positive integer, got "bogus"/);
+
+  const zero = await runProbeCli(['--warm=0']);
+  assert.equal(zero.code, 2, zero.stderr);
+  assert.match(zero.stderr, /--warm must be a positive integer/);
 });

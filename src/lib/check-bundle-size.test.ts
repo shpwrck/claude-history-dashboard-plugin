@@ -200,6 +200,30 @@ describe('evaluateStructuredBudget (#1852 Phase C / ADR 0016)', () => {
     expect(evaluateStructuredBudget(files, sizeOf, noRouteDefault).ok).toBe(false);
   });
 
+  it('an ABSENT/renamed shell block is a loud config failure, never a disabled gate (#3478)', () => {
+    // The old `flavorBudget.shell || { chunks: [], maxBytes: Infinity }`
+    // default meant deleting (or typo-renaming) the whole shell block silently
+    // turned the frozen first-paint cap OFF — the maxBytes guard never fired
+    // because the placeholder carried one. Missing block == missing cap: fail.
+    const { files, sizeOf } = fixtureFor('server');
+    const noShellBlock = { ...budget.server };
+    delete noShellBlock.shell;
+    const missing = evaluateStructuredBudget(files, sizeOf, noShellBlock);
+    expect(missing.ok).toBe(false);
+    expect(missing.failures.some((f: string) => f.includes('shell block is required'))).toBe(true);
+
+    const renamed = { ...noShellBlock, shel: budget.server.shell };
+    expect(evaluateStructuredBudget(files, sizeOf, renamed).ok).toBe(false);
+
+    // Same class for the whole defaults block: absent means the unbudgeted
+    // route default is gone, which must fail rather than default to Infinity.
+    const noDefaultsBlock = { ...budget.server };
+    delete noDefaultsBlock.defaults;
+    const noDefaults = evaluateStructuredBudget(files, sizeOf, noDefaultsBlock);
+    expect(noDefaults.ok).toBe(false);
+    expect(noDefaults.failures.some((f: string) => f.includes('defaults.routeMaxBytes'))).toBe(true);
+  });
+
   it('a chunk in two classes is a config error (deterministic membership)', () => {
     const { files, sizeOf } = fixtureFor('server');
     const dup = {

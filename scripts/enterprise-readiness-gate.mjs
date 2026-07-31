@@ -107,15 +107,23 @@ export const ENTERPRISE_READINESS_CHECKS = [
   },
 ];
 
-export function findSpaBoundaryOffenders(root) {
+// #3478: report what was actually LOOKED AT, not just what was found. The
+// old scanner silently `continue`d past a missing dist/index.html or
+// dist/assets, so with no emitted bundle at all the sub-check "passed" having
+// inspected nothing. Missing targets are now first-class output.
+export function inspectSpaBoundary(root) {
   const targets = [
     join(root, 'dist', 'index.html'),
     join(root, 'dist', 'assets'),
   ];
   const offenders = [];
+  const missing = [];
 
   for (const target of targets) {
-    if (!existsSync(target)) continue;
+    if (!existsSync(target)) {
+      missing.push(relative(root, target));
+      continue;
+    }
     for (const file of textFiles(target)) {
       const lines = readFileSync(file, 'utf8').split(/\r?\n/);
       for (let index = 0; index < lines.length; index += 1) {
@@ -126,11 +134,29 @@ export function findSpaBoundaryOffenders(root) {
     }
   }
 
-  return offenders;
+  return { offenders, missing };
 }
 
-function assertSpaBoundary(root) {
-  const offenders = findSpaBoundaryOffenders(root);
+export function findSpaBoundaryOffenders(root) {
+  return inspectSpaBoundary(root).offenders;
+}
+
+// Returns { status: 'passed' } after a real inspection, { status: 'skipped',
+// reason } when there was nothing to inspect (unless --require-emitted-bundle
+// makes that a hard failure), and throws on offenders.
+export function assertSpaBoundary(root, { requireEmittedBundle = false } = {}) {
+  const { offenders, missing } = inspectSpaBoundary(root);
+  if (missing.length > 0) {
+    const reason =
+      `emitted bundle not found (missing: ${missing.join(', ')}) — ` +
+      'NOTHING was inspected; run "npm run build:spa" first';
+    if (requireEmittedBundle) {
+      throw new Error(
+        `SPA boundary sub-check inspected nothing: ${reason} (--require-emitted-bundle)`
+      );
+    }
+    return { status: 'skipped', reason };
+  }
   if (offenders.length > 0) {
     throw new Error(
       [
@@ -139,6 +165,7 @@ function assertSpaBoundary(root) {
       ].join('\n')
     );
   }
+  return { status: 'passed' };
 }
 
 function* textFiles(path) {
@@ -171,13 +198,17 @@ function repoRoot() {
   }).trim();
 }
 
-function runCommand(check, root, verbose) {
+function runCommand(check, root, verbose, opts = {}) {
   const started = Date.now();
 
   if (check.run) {
     try {
-      check.run(root);
-      return elapsed(started);
+      const outcome = check.run(root, opts);
+      return {
+        duration: elapsed(started),
+        status: outcome && outcome.status === 'skipped' ? 'skipped' : 'passed',
+        reason: outcome && outcome.reason,
+      };
     } catch (err) {
       throw new CheckFailure(check, elapsed(started), '', err.message);
     }
@@ -201,7 +232,7 @@ function runCommand(check, root, verbose) {
     );
   }
 
-  return duration;
+  return { duration, status: 'passed' };
 }
 
 class CheckFailure extends Error {
@@ -236,10 +267,13 @@ export function renderCheckList(checks = ENTERPRISE_READINESS_CHECKS) {
 
 function usage() {
   return [
-    'Usage: node scripts/enterprise-readiness-gate.mjs [--list] [--verbose]',
+    'Usage: node scripts/enterprise-readiness-gate.mjs [--list] [--verbose] [--require-emitted-bundle]',
     '',
-    '--list     Print the checks without running them.',
-    '--verbose  Stream each sub-check output instead of printing only failures.',
+    '--list                    Print the checks without running them.',
+    '--verbose                 Stream each sub-check output instead of printing only failures.',
+    '--require-emitted-bundle  Hard-fail any sub-check that would otherwise be',
+    '                          SKIPPED because the emitted dist/ bundle is absent',
+    '                          (default: skips are reported loudly but do not fail).',
   ].join('\n');
 }
 
@@ -258,13 +292,24 @@ function main() {
 
   const root = repoRoot();
   const verbose = args.has('--verbose');
+  const opts = { requireEmittedBundle: args.has('--require-emitted-bundle') };
   console.log('');
   console.log('Running checks...');
 
+  let passed = 0;
+  const skipped = [];
   for (const check of ENTERPRISE_READINESS_CHECKS) {
     try {
-      const duration = runCommand(check, root, verbose);
-      console.log(`✓ ${check.name} (${duration}s)`);
+      const outcome = runCommand(check, root, verbose, opts);
+      if (outcome.status === 'skipped') {
+        // #3478: a skip must be LOUD and visibly distinct from a pass — this
+        // sub-check inspected nothing, so it proved nothing.
+        skipped.push({ name: check.name, reason: outcome.reason });
+        console.log(`! ${check.name} SKIPPED (${outcome.duration}s) — ${outcome.reason}`);
+      } else {
+        passed += 1;
+        console.log(`✓ ${check.name} (${outcome.duration}s)`);
+      }
     } catch (err) {
       if (err instanceof CheckFailure) {
         console.error(`✗ ${err.check.name} (${err.duration}s)`);
@@ -282,10 +327,25 @@ function main() {
   }
 
   console.log('');
-  console.log('PASS enterprise readiness gate');
-  console.log(
-    'Attach this receipt to the security release-gate issue or CTO-demo handoff.'
-  );
+  if (skipped.length === 0) {
+    console.log(`PASS enterprise readiness gate — all ${passed} sub-checks passed`);
+    console.log(
+      'Attach this receipt to the security release-gate issue or CTO-demo handoff.'
+    );
+  } else {
+    // "Passed" and "not inspected" are different claims; a receipt with skips
+    // is NOT a full receipt and says so.
+    console.log(
+      `PASS enterprise readiness gate — ${passed} passed, ${skipped.length} SKIPPED (not inspected):`
+    );
+    for (const s of skipped) {
+      console.log(`  ! ${s.name}: ${s.reason}`);
+    }
+    console.log(
+      'A skipped sub-check verified nothing. This is NOT a full receipt — re-run ' +
+        'with --require-emitted-bundle to make missing inputs a hard failure.'
+    );
+  }
 }
 
 const invokedDirectly =

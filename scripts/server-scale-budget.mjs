@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { buildSampleCorpus } from './sample-data/build-corpus.mjs';
+import { envNumber, EnvNumberError } from './lib/env-number.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIB = join(PROJECT_DIR, 'src', 'lib');
@@ -32,6 +33,11 @@ const BUDGET_KEYS = [
   'projects',
   'users',
   'teams',
+  // #3478: assembleSamples was documented (with a dated rationale) in
+  // server-scale-budget.json but never listed here, so readBudgetFile filtered
+  // it out and a hard-coded `?? 3` fallback silently governed instead — dead
+  // config that looked live. It is a real budget key now.
+  'assembleSamples',
   'serverBootBudgetMs',
   'serverDatasetLoadBudgetMs',
   'coldIngestBudgetMs',
@@ -106,13 +112,20 @@ function readBudgetFile(filePath) {
 
 const args = parseArgs(process.argv.slice(2));
 const DEFAULTS = readBudgetFile(args.budgetPath);
-const SAMPLE_CORPUS = buildSampleCorpus();
 
+// #3478: fail-closed env parsing via the canonical helper (#3076). The old
+// implementation parseInt'd and silently FELL BACK on anything unusable, so
+// `DASHBOARD_SCALE_SESSIONS=abc` (or `=0`) quietly benchmarked the default
+// corpus and `=12g` quietly benchmarked one 100x smaller than asked — across
+// all 14 budgets. Unset/empty still means the documented default; anything the
+// operator actually SET must parse, or the run dies loudly before measuring.
 function intEnv(name, fallback, min = 1) {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed >= min ? parsed : fallback;
+  try {
+    return envNumber(name, { fallback, min, integer: true });
+  } catch (error) {
+    if (error instanceof EnvNumberError) configError(error.message);
+    throw error;
+  }
 }
 
 const cfg = {
@@ -134,10 +147,11 @@ const cfg = {
     DEFAULTS.coldIngestBudgetMs
   ),
   // How many timing samples to take of assembleDataset; the BEST is asserted.
-  // 1 restores the old single-sample behaviour.
+  // 1 restores the old single-sample behaviour. The default comes from the
+  // budget file's own assembleSamples key (now in BUDGET_KEYS, #3478).
   assembleSamples: intEnv(
     'DASHBOARD_SCALE_ASSEMBLE_SAMPLES',
-    DEFAULTS.assembleSamples ?? 3
+    DEFAULTS.assembleSamples
   ),
   assembleBudgetMs: intEnv(
     'DASHBOARD_SCALE_ASSEMBLE_BUDGET_MS',
@@ -164,6 +178,10 @@ const cfg = {
     DEFAULTS.rssGrowthBudgetBytes
   ),
 };
+
+// Built AFTER the config is validated, so a bad budget file or env var dies
+// instantly instead of first synthesizing a corpus it will never use.
+const SAMPLE_CORPUS = buildSampleCorpus();
 
 function timestamp(sessionIndex, turnIndex, offsetMs = 0) {
   const base = Date.UTC(2026, 0, 1, 0, 0, 0);

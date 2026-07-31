@@ -42,6 +42,18 @@ try {
   process.exit(2);
 }
 
+// #3478: an EMPTY-but-present dist used to print "ok ... (0 browser assets
+// scanned)" and exit 0 — a pass that inspected nothing. Zero scanned assets
+// means the gate verified nothing, which is the same config failure as a
+// missing dist: exit 2 so a broken/misdirected build cannot green this gate.
+if (files.length === 0) {
+  console.error(
+    `check-engine-absent: ${distDir} contains no browser assets (.js/.mjs/.cjs/.html) — ` +
+      `0 files scanned, so this gate verified NOTHING. Did the build emit into ${distDir}?`
+  );
+  process.exit(2);
+}
+
 const hits = files.filter((f) => readFileSync(f, 'utf8').includes(MARKER));
 if (hits.length > 0) {
   console.error(

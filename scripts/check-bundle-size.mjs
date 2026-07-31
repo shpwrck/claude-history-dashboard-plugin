@@ -171,19 +171,30 @@ export function evaluateStructuredBudget(files, sizeOf, flavorBudget) {
   const withoutComments = (obj) =>
     Object.fromEntries(Object.entries(obj || {}).filter(([k]) => !k.startsWith('//')));
 
-  const shell = flavorBudget.shell || { chunks: [], maxBytes: Infinity };
+  // Fail LOUD on a malformed budget rather than fail-open (#3478). An absent
+  // or renamed `shell` block used to default to `{ chunks: [], maxBytes:
+  // Infinity }`, which silently DISABLED the frozen shell cap — the
+  // shell.maxBytes guard below never fired because the placeholder carried a
+  // maxBytes. A budget whose shell block is missing is a config failure, same
+  // as a missing cap inside it.
+  const shellConfigured =
+    flavorBudget.shell != null && typeof flavorBudget.shell === 'object';
+  if (!shellConfigured) {
+    failures.push('budget config error: the shell block is required (an absent/renamed shell block would disable the frozen shell gate entirely)');
+  }
+  const shell = shellConfigured ? flavorBudget.shell : { chunks: [] };
   const vendorChunks = withoutComments(flavorBudget.vendor && flavorBudget.vendor.chunks);
   const routes = withoutComments(flavorBudget.routes);
   const defaults = flavorBudget.defaults || {};
+  // Not a fail-open hole: when defaults.routeMaxBytes is absent the guard
+  // below records a hard failure, so this Infinity only shapes the report rows
+  // of an already-failed run (same for the shell.maxBytes ?? Infinity below).
   const routeDefault = defaults.routeMaxBytes ?? Infinity;
 
   const shellNames = new Set(shell.chunks || []);
   const vendorNames = new Set(Object.keys(vendorChunks));
 
-  // Fail LOUD on a malformed budget rather than fail-open. The `?? Infinity`
-  // fallbacks below would silently disable a gate if a required key were dropped
-  // or mistyped during a re-baseline; these checks turn that into a hard error.
-  if (shell.maxBytes == null) {
+  if (shellConfigured && shell.maxBytes == null) {
     failures.push('budget config error: shell.maxBytes is required (a missing cap would disable the shell gate)');
   }
   if (defaults.routeMaxBytes == null) {
@@ -218,7 +229,7 @@ export function evaluateStructuredBudget(files, sizeOf, flavorBudget) {
   if (!shellOk) {
     failures.push(`shell ${fmtBytes(shellActual)} exceeds FROZEN budget ${fmtBytes(shellMax)} — new code landed in the eager first-paint graph; lazy-load it or evict it (do NOT raise the shell cap without an ADR)`);
   }
-  rows.push({ cls: 'shell', name: shell.chunks.join('+') || 'shell', actual: shellActual, max: shellMax, ok: shellOk });
+  rows.push({ cls: 'shell', name: (shell.chunks || []).join('+') || 'shell', actual: shellActual, max: shellMax, ok: shellOk });
 
   // ── vendor (FROZEN, per-chunk) ──────────────────────────────────────────
   // A missing vendor chunk is a WARNING, not a failure: several vendor chunks

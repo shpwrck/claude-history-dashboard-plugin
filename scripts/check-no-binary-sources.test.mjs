@@ -17,6 +17,9 @@ import {
   SCANNED_ROOTS,
   TEXT_EXTENSIONS,
 } from './check-no-binary-sources.mjs';
+import { runGate, PROJECT_DIR } from './lib/gate-harness.mjs';
+
+const GATE = join(PROJECT_DIR, 'scripts', 'check-no-binary-sources.mjs');
 
 const NUL = String.fromCharCode(0);
 
@@ -119,10 +122,55 @@ test('does not follow symlinks', () => {
   }
 });
 
-test('a missing scanned root is not a failure', () => {
+test('a MISSING configured scan root is a loud failure, never a silent green (#3478)', () => {
+  // This inverts the behavior an earlier version of this suite ENSHRINED
+  // ("a missing scanned root is not a failure"): if src/ were renamed or the
+  // gate run from the wrong directory, it scanned zero files and passed — a
+  // green NUL-gate that had verified nothing.
   withFixtureRoot({ 'src/a.ts': 'export const a = 1;\n' }, (root) => {
-    assert.deepEqual(scanForBinarySources(root, ['src', 'scripts']), []);
+    assert.throws(
+      () => scanForBinarySources(root, ['src', 'scripts']),
+      /configured scan root "scripts" not found/
+    );
   });
+});
+
+test('CLI: a fixture root containing a raw NUL must exit 1 (the gate can fail)', () => {
+  withFixtureRoot(
+    {
+      'src/lib/keys.ts': `const key = \`\${a}${NUL}\${b}\`;\n`,
+      'scripts/ok.mjs': 'export const fine = true;\n',
+    },
+    (root) => {
+      const r = runGate(GATE, [root]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /src\/lib\/keys\.ts/);
+      assert.match(r.out, /NUL byte/);
+    }
+  );
+});
+
+test('CLI: a missing configured root exits 2 (misconfigured, inspected nothing)', () => {
+  withFixtureRoot({ 'src/a.ts': 'export const a = 1;\n' }, (root) => {
+    const r = runGate(GATE, [root]);
+    assert.equal(r.code, 2, r.out);
+    assert.match(r.out, /configured scan root "scripts" not found/);
+    assert.doesNotMatch(r.out, /every source file is diffable/);
+  });
+});
+
+test('CLI: a clean fixture tree with both roots present exits 0', () => {
+  withFixtureRoot(
+    {
+      'src/a.ts': 'export const a = 1;\n',
+      'scripts/b.mjs': 'export const b = 2;\n',
+    },
+    (root) => {
+      const r = runGate(GATE, [root]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /every source file is diffable/);
+    }
+  );
 });
 
 test('the real repository is clean', () => {

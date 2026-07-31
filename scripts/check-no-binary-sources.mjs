@@ -32,8 +32,8 @@
 // that can represent NUL (as here), `git diff --numstat` (binary shows as
 // `-\t-`), or `git grep -I`.
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { realpathSync } from 'node:fs';
 
@@ -74,12 +74,7 @@ const SKIP_DIRECTORIES = new Set([
 ]);
 
 function listFiles(directory, accumulated = []) {
-  let entries;
-  try {
-    entries = readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return accumulated; // a scanned root that does not exist is not a failure
-  }
+  const entries = readdirSync(directory, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (SKIP_DIRECTORIES.has(entry.name) || entry.name.startsWith('.')) continue;
@@ -101,11 +96,33 @@ export function nulCount(buffer) {
   return count;
 }
 
-/** Every scanned file holding at least one NUL byte, with its count and first offset. */
+/**
+ * Every scanned file holding at least one NUL byte, with its count and first
+ * offset. Throws when a CONFIGURED root does not exist (#3478): a renamed or
+ * moved src/ used to be silently skipped, producing a green NUL-gate that had
+ * scanned nothing — absence of the tree is a config failure, not cleanliness.
+ */
 export function scanForBinarySources(root = REPO_ROOT, roots = SCANNED_ROOTS) {
   const offenders = [];
   for (const scanned of roots) {
-    for (const absolute of listFiles(join(root, scanned))) {
+    const directory = join(root, scanned);
+    let stat;
+    try {
+      stat = statSync(directory);
+    } catch {
+      throw new Error(
+        `configured scan root "${scanned}" not found at ${directory} — the gate would ` +
+          `verify NOTHING there. A renamed/moved source root must update SCANNED_ROOTS ` +
+          `in scripts/check-no-binary-sources.mjs, not silently green the gate.`
+      );
+    }
+    if (!stat.isDirectory()) {
+      throw new Error(
+        `configured scan root "${scanned}" at ${directory} is not a directory — ` +
+          `update SCANNED_ROOTS in scripts/check-no-binary-sources.mjs.`
+      );
+    }
+    for (const absolute of listFiles(directory)) {
       const buffer = readFileSync(absolute);
       const count = nulCount(buffer);
       if (count === 0) continue;
@@ -120,7 +137,18 @@ export function scanForBinarySources(root = REPO_ROOT, roots = SCANNED_ROOTS) {
 }
 
 function main() {
-  const offenders = scanForBinarySources();
+  // Optional root override (default: this repo) so the gate's own tests can
+  // point the real CLI at a fixture tree and assert its exit codes (#3478).
+  const rootArg = process.argv[2];
+  let offenders;
+  try {
+    offenders = scanForBinarySources(rootArg ? resolve(rootArg) : REPO_ROOT);
+  } catch (err) {
+    // A missing/invalid configured root: the gate verified nothing. Exit 2 to
+    // distinguish "misconfigured, inspected nothing" from "found NULs" (1).
+    console.error(`::error::${err.message}`);
+    process.exit(2);
+  }
   for (const { file, nuls, firstByteOffset } of offenders) {
     console.error(
       `::error file=${file}::${file} contains ${nuls} NUL byte(s) (first at offset ` +

@@ -16,15 +16,13 @@
 // requiring a 1 MiB corpus.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
-const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+import { runGate as runGateScript, PROJECT_DIR } from './lib/gate-harness.mjs';
+
 const GATE = join(PROJECT_DIR, 'scripts', 'repo-map-gate.mjs');
-const REGISTER_TS = join(PROJECT_DIR, 'scripts', 'register-ts.mjs');
 
 /** A throwaway source root big enough to serialize past a small ceiling. */
 function makeRoot(fileCount = 24) {
@@ -66,12 +64,12 @@ function writeBudget(root, over = {}) {
 }
 
 function runGate(root, budgetPath, extra = [], env = {}) {
-  const r = spawnSync(
-    process.execPath,
-    ['--import', REGISTER_TS, GATE, '--root', root, '--budget', budgetPath, ...extra],
-    { cwd: PROJECT_DIR, encoding: 'utf8', env: { ...process.env, ...env } }
-  );
-  return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+  // The shared gate-test harness (#3478) owns the spawn shape; this wrapper
+  // only fixes the gate script + its --root/--budget plumbing.
+  return runGateScript(GATE, ['--root', root, '--budget', budgetPath, ...extra], {
+    env,
+    registerTs: true,
+  });
 }
 
 test('gate FAILS when the natural serialization exceeds its payload budget', () => {
