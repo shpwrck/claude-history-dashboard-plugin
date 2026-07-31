@@ -1374,9 +1374,12 @@ describe('cloud-capture local/sync hardening (#1426)', () => {
       expect(stopCommands).toHaveLength(1);
       expect(stopCommands[0]).toBe(wrapper);
       // The installer-shaped SessionEnd registration is still replaced/pinned.
+      // A custom (non-$HOME) claude-dir is embedded SINGLE-quoted (#3345): the
+      // path is data, so a directory name containing shell metacharacters cannot
+      // execute when the registration is evaluated.
       const endCommands = captureCommands(settings, 'SessionEnd');
       expect(endCommands).toHaveLength(1);
-      expect(endCommands[0]).toBe(`[ -f "${claudeDir}/hooks/publish-claude.sh" ] || exit 0; bash "${claudeDir}/hooks/publish-claude.sh"`);
+      expect(endCommands[0]).toBe(`[ -f '${claudeDir}/hooks/publish-claude.sh' ] || exit 0; bash '${claudeDir}/hooks/publish-claude.sh'`);
       // The hook script file itself was still refreshed.
       expect(existsSync(join(claudeDir, 'hooks/publish-claude.sh'))).toBe(true);
     });

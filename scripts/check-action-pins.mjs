@@ -38,7 +38,9 @@
 //             unreviewed code.
 //   STAMP   — every container image in the ARC scale-set values, and the
 //             BuildConfig output tag that produces it, names either a digest or a
-//             VERSION-STAMPED tag (`v<YYYY>-<MM>-<DD>-<commit>`); AND a stamped
+//             VERSION-STAMPED tag (`v<YYYY>-<MM>-<DD>-<hex>`, the hex derived from
+//             the recipe's CONTENT — never from a commit, which cannot contain
+//             its own SHA and would not survive a squash); AND a stamped
 //             image is one this repo actually BUILDS, in the repository the
 //             BuildConfig publishes to; AND producer and consumers all name the
 //             SAME stamp. All three halves are load-bearing, because each covers
@@ -75,15 +77,15 @@
 //   Stated plainly so nobody later mistakes this for digest pinning: this rung
 //   buys review, not immutability.
 //
-//   WHAT THE STAMP RULE DOES NOT CLAIM: it checks the image references that are
-//   PRESENT. If a container's `image:` line were deleted outright, the
-//   gha-runner-scale-set chart substitutes its own default
-//   (`ghcr.io/actions/actions-runner:latest`) — the same defect, reached by
-//   absence rather than by a bad value, and this scanner would see nothing to
-//   flag. Closing that needs a structural read of the containers list, not a line
-//   scan; no YAML parser is on this gate's dependency path today. Tracked
-//   separately rather than approximated with an indentation heuristic that would
-//   misfire on valid files.
+//   THE ABSENT-`image:` CASE IS ALSO COVERED (#3493): the per-line rules above
+//   check the references that are PRESENT, but if a container's `image:` line
+//   were deleted outright, the gha-runner-scale-set chart substitutes its own
+//   default (`ghcr.io/actions/actions-runner:latest`) — the same defect reached
+//   by absence rather than by a bad value. `containerImageAbsences` closes that
+//   with a structural read of the `template.spec.containers`/`initContainers`
+//   lists: every entry must DECLARE an image. It is a minimal indentation reader
+//   over the four known-shape values files (no block scalars there), so no YAML
+//   parser is added to this gate's node-builtin-only path.
 //
 // SCOPE: .github/workflows/, .github/actions/, deploy/arc/runner-image/, and the
 // deploy/arc ARC scale-set values (flat = spoke, hub/ = hub).
@@ -141,7 +143,12 @@ const REGISTRY_REF_RE = /^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?\/\S+$/i;
 
 /**
  * A version-stamped tag: `v<YYYY>-<MM>-<DD>-<7..40 hex>` — the ISO date of the
- * build and the commit whose recipe produced it, e.g. `v2026-07-29-87858e92`.
+ * build and a hash of the recipe's CONTENT (`sha256sum
+ * deploy/arc/runner-image/Dockerfile | cut -c1-8`), NOT a commit: a commit
+ * cannot contain its own SHA and the value must survive a squash. The in-force
+ * `v2026-07-29-87858e92` predates that rule and its hex is a commit (a
+ * grandfathered VALUE, not a definition); the grammar accepts any 7..40 hex, so
+ * both spellings are valid and the next real re-stamp moves to the content hash.
  *
  * This is an ALLOWLIST on purpose. Rejecting a denylist of known-mutable names
  * (`latest`, `main`, `stable`, ...) would keep passing the next mutable name
@@ -380,6 +387,109 @@ export function poolViolationsIn(source) {
     if (detail) problems.push({ line: number, rule: 'STAMP', detail });
   }
   return problems;
+}
+
+/**
+ * Every container and initContainer under a `template.spec` must DECLARE an
+ * `image:` (#3493).
+ *
+ * `poolViolationsIn` above is a line scanner: it can only judge the image
+ * references that are PRESENT, so a container whose `image:` line is deleted
+ * outright has nothing for it to flag. That case is not benign — the
+ * gha-runner-scale-set chart substitutes its own default,
+ * `ghcr.io/actions/actions-runner:latest`, for any container that omits
+ * `template.spec.containers[].image`. So an ABSENT line reintroduces the #3340
+ * defect (a mutable upstream tag on a privileged, credential-bearing runner)
+ * reached by absence rather than by a bad value, and the line scan stays green.
+ *
+ * The four scale-set values files are known-shape Helm values with no block
+ * scalars in the container region, so a minimal indentation reader is enough —
+ * no YAML parser is added to this gate's node-builtin-only path (the constraint
+ * #3493 sets, so a gate that cries wolf on valid files never gets disabled).
+ * Returns the STARTING line of any container list item that declares no image.
+ */
+const CONTAINER_KEYS = new Set(['containers', 'initContainers']);
+
+export function containerImageAbsences(source) {
+  const problems = [];
+  const lines = source.split(/\r?\n/);
+  const indentOf = (s) => s.length - s.trimStart().length;
+
+  // A lightweight indentation path of plain `key:` mappings, so a `containers:`
+  // key is only acted on when it sits at `template.spec.containers` (not, say,
+  // some unrelated `containers:` elsewhere in a values file).
+  const stack = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i];
+    if (raw.trim() === '' || raw.trim().startsWith('#')) continue;
+    const indent = indentOf(raw);
+    const trimmed = raw.trim();
+    // List items (`- ...`) do not move the mapping path; they are handled by
+    // the sequence scan below.
+    const keyMatch = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(trimmed);
+    if (!keyMatch) continue;
+    const [, key, rest] = keyMatch;
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    stack.push({ indent, key });
+    if (!CONTAINER_KEYS.has(key) || rest.trim() !== '') continue;
+    const path = stack.map((e) => e.key).join('.');
+    if (!path.endsWith(`template.spec.${key}`)) continue;
+    collectSequenceImageAbsences(lines, i + 1, indent, key, problems);
+  }
+  return problems;
+}
+
+/**
+ * Scan the block sequence that follows a `containers:`/`initContainers:` key at
+ * `keyIndent`, appending a problem for every list item that declares no `image:`
+ * at the item's own key indentation. Markers nested deeper than the item level
+ * (an `env:`/`args:` sub-sequence) are data, not new container entries.
+ */
+function collectSequenceImageAbsences(lines, start, keyIndent, containerKind, problems) {
+  const indentOf = (s) => s.length - s.trimStart().length;
+  let markerIndent = null;
+  let itemStartLine = null;
+  let itemKeyIndent = null;
+  let itemHasImage = false;
+
+  const flush = () => {
+    if (itemStartLine !== null && !itemHasImage) {
+      problems.push({
+        line: itemStartLine,
+        rule: 'STAMP',
+        detail:
+          `a \`${containerKind}\` entry declares no \`image:\`, so the gha-runner-scale-set ` +
+          'chart substitutes its mutable `ghcr.io/actions/actions-runner:latest` default',
+      });
+    }
+  };
+
+  for (let i = start; i < lines.length; i += 1) {
+    const raw = lines[i];
+    if (raw.trim() === '' || raw.trim().startsWith('#')) continue;
+    const indent = indentOf(raw);
+    if (indent <= keyIndent) break; // dedent out of the sequence (sibling key)
+    const trimmed = raw.trim();
+    const isMarker = trimmed === '-' || /^-\s/.test(trimmed);
+
+    if (isMarker && (markerIndent === null || indent === markerIndent)) {
+      if (markerIndent === null) markerIndent = indent;
+      flush(); // close the previous item
+      itemStartLine = i + 1;
+      itemKeyIndent = indent + 2; // past the `- `
+      itemHasImage = false;
+      const afterDash = trimmed.replace(/^-\s*/, '');
+      const inlineKey = /^([A-Za-z0-9_.-]+):/.exec(afterDash);
+      if (inlineKey && inlineKey[1] === 'image') itemHasImage = true;
+      continue;
+    }
+    // A direct key of the current item (not a nested sub-map/sequence).
+    if (itemStartLine !== null && indent === itemKeyIndent) {
+      const k = /^([A-Za-z0-9_.-]+):/.exec(trimmed);
+      if (k && k[1] === 'image') itemHasImage = true;
+    }
+  }
+  flush();
 }
 
 /**
@@ -744,7 +854,14 @@ export function scanRepository(root = REPO_ROOT) {
   }
   for (const absolute of listRunnerPoolFiles(root)) {
     const file = relative(root, absolute).split(sep).join('/');
-    for (const problem of poolViolationsIn(readFileSync(absolute, 'utf8'))) {
+    const source = readFileSync(absolute, 'utf8');
+    for (const problem of poolViolationsIn(source)) {
+      offenders.push({ file, ...problem });
+    }
+    // #3493: a container whose `image:` line is absent takes the chart default
+    // (`:latest`) — the line scan above cannot see a missing line, so check the
+    // container list structurally.
+    for (const problem of containerImageAbsences(source)) {
       offenders.push({ file, ...problem });
     }
   }

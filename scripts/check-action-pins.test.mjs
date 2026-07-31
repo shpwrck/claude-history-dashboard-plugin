@@ -17,6 +17,7 @@ import {
   poolImageRefsIn,
   producerTagsIn,
   crossFileStampOffenders,
+  containerImageAbsences,
   imageRefTag,
   imageRefName,
   imageRefRepository,
@@ -311,6 +312,107 @@ test('STAMP: the BuildConfig OUTPUT tag is checked, not only the base image', ()
   assert.deepEqual(imageViolationsIn('  name: chd-ci-runner\n'), []);
   assert.deepEqual(imageViolationsIn('  name: arc-gha-rs-controller\n'), []);
   assert.deepEqual(imageViolationsIn('  name: arc-runners\n'), []);
+});
+
+// --- #3493: a DELETED image: line takes the chart's :latest default ----------
+
+test('#3493 STAMP: a container entry with NO image: line is caught structurally', () => {
+  const source = [
+    'template:',
+    '  spec:',
+    '    containers:',
+    '      - name: runner',
+    '        command: ["/home/runner/run.sh"]',
+    '',
+  ].join('\n');
+  const problems = containerImageAbsences(source);
+  assert.deepEqual(problems.map((p) => p.rule), ['STAMP']);
+  assert.equal(problems[0].line, 4, 'reports the container list item, not the whole file');
+  assert.match(problems[0].detail, /`containers` entry declares no `image:`/);
+});
+
+test('#3493 STAMP: a container WITH an image (inline or on a key line) is not flagged', () => {
+  const keyLine = [
+    'template:',
+    '  spec:',
+    '    containers:',
+    '      - name: runner',
+    `        image: ${LATEST_REF}:${STAMP}`,
+    '',
+  ].join('\n');
+  assert.deepEqual(containerImageAbsences(keyLine), []);
+
+  const inline = [
+    'template:',
+    '  spec:',
+    '    containers:',
+    `      - image: ${LATEST_REF}:${STAMP}`,
+    '        command: ["/home/runner/run.sh"]',
+    '',
+  ].join('\n');
+  assert.deepEqual(containerImageAbsences(inline), []);
+});
+
+test('#3493 STAMP: initContainers are checked too, and a nested env/args block is not a new entry', () => {
+  const source = [
+    'template:',
+    '  spec:',
+    '    initContainers:',
+    '      - name: init-dind-externals',
+    '        command: ["cp", "-r", "/x/.", "/y/"]', // no image -> defect
+    '    containers:',
+    '      - name: runner',
+    `        image: ${LATEST_REF}:${STAMP}`,
+    '        env:',
+    '          - name: DOCKER_HOST',
+    '            value: unix:///run/docker/docker.sock',
+    '      - name: dind',
+    `        image: docker@sha256:${'0'.repeat(64)}`,
+    '        args:',
+    '          - dockerd',
+    '',
+  ].join('\n');
+  const problems = containerImageAbsences(source);
+  assert.deepEqual(problems.map((p) => p.rule), ['STAMP']);
+  assert.match(problems[0].detail, /`initContainers` entry declares no `image:`/);
+  // The runner's nested `- name: DOCKER_HOST` env entry and the dind `args`
+  // list must NOT be mistaken for image-less container entries.
+});
+
+test('#3493 STAMP: the four real values files declare every container image', () => {
+  for (const absolute of listRunnerPoolFiles()) {
+    assert.deepEqual(
+      containerImageAbsences(readFileSync(absolute, 'utf8')),
+      [],
+      `${absolute} must declare an image for every container/initContainer`
+    );
+  }
+});
+
+test('#3493 STAMP: a values file with a deleted image line trips the whole-repo scan', () => {
+  const root = mkdtempSync(join(tmpdir(), 'action-pins-absent-'));
+  try {
+    mkdirSync(join(root, 'deploy', 'arc'), { recursive: true });
+    // A producer so the cross-file check is anchored, isolating the absence.
+    mkdirSync(join(root, 'deploy', 'arc', 'runner-image'), { recursive: true });
+    writeFileSync(
+      join(root, 'deploy', 'arc', 'runner-image', 'buildconfig.yaml'),
+      ['  output:', '    to:', `      name: chd-ci-runner:${STAMP}`, ''].join('\n')
+    );
+    writeFileSync(
+      join(root, 'deploy', 'arc', 'runner-scale-set-values.yaml'),
+      ['template:', '  spec:', '    containers:', '      - name: runner', '        command: ["/x"]', ''].join(
+        '\n'
+      )
+    );
+    const offenders = scanRepository(root);
+    assert.ok(
+      offenders.some((o) => /declares no `image:`/.test(o.detail)),
+      'a container with no image must fail the scan'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('all four scale-set values files are actually in the scanned set', () => {
