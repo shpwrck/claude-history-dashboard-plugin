@@ -1,5 +1,7 @@
-import type { Detector } from '../types';
-import { fmtUsd, short } from '../shared';
+import type { Detector, RecommendationInput } from '../types';
+import type { ClaimDerivation } from '../../claim-provenance';
+import { fmtUsd, newestTokenDataDate, short, STALE_WEEKS } from '../shared';
+import { isAsOfStale } from '../provenance';
 import { resolveModelPricing } from '../../pricing';
 import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
 
@@ -42,13 +44,17 @@ const RECOVERABLE_FRACTION = 0.5;
 // Don't surface a finding worth less than this.
 const MIN_SAVINGS_USD = 0.25;
 
+/** Thinking evidence older than this demotes to "as of <date>" (#3194). */
+const STALE_AFTER_DAYS = STALE_WEEKS * 7;
+
 export const detector: Detector = {
   id: 'cost.disproportionate-thinking',
   category: 'cost',
   dataDeps: ['tokenData'],
-  rule(input) {
+  rule(input, now) {
     const scopeKeys = new Set<string>();
     const flagged: { sessionId: string; think: number; visible: number; share: number }[] = [];
+    const flaggedData: RecommendationInput['tokenData'] = [];
     let savingsUsd = 0;
 
     for (const d of input.tokenData) {
@@ -76,6 +82,7 @@ export const detector: Detector = {
         visible,
         share: d.totalOutputTokens > 0 ? think / d.totalOutputTokens : 0,
       });
+      flaggedData.push(d);
     }
 
     if (flagged.length === 0 || savingsUsd < MIN_SAVINGS_USD || scopeKeys.size === 0) {
@@ -118,13 +125,51 @@ export const detector: Detector = {
     const top = flagged[0];
     const topSharePct = Math.round(top.share * 100);
 
+    const recoverableTokens = totalThink * RECOVERABLE_FRACTION;
+    // #3516 review: the mean rate is DERIVED from the booked dollars, not read
+    // from pricing.ts — back-solving it and then "deriving" savings from it was
+    // circular (the identity held even if savingsUsd were wrong). savingsUsd is
+    // now an observation naming its per-entry formula; the implied mean is
+    // published in the honest direction (savings → mean) as a convenience.
+    const impliedMeanOutputUsdPerMTok = savingsUsd / (recoverableTokens / 1_000_000);
+
+    // Dated from the newest OBSERVED entry among the flagged sessions (never
+    // `now`); no readable timestamps → no asOf (#3194).
+    const asOf = newestTokenDataDate(flaggedData);
+    const stale = isAsOfStale(asOf, now, STALE_AFTER_DAYS);
+    const datePrefix = stale ? `As of ${asOf} (dated evidence): ` : '';
+
+    // Typed explicitly: the operand keys differ per derivation, and the
+    // heterogeneous array literal otherwise union-widens against
+    // Record<string, ClaimScalar> under exactOptionalPropertyTypes.
+    const derivations: ClaimDerivation[] = [
+      {
+        id: 'recoverable-thinking-tokens',
+        formula: 'totalThinkingTokens * RECOVERABLE_FRACTION',
+        operands: {
+          totalThinkingTokens: totalThink,
+          recoverableFraction: RECOVERABLE_FRACTION,
+        },
+        value: recoverableTokens,
+      },
+      {
+        id: 'implied-mean-output-rate',
+        formula: 'estSavingsUsd / (recoverableThinkingTokens / 1e6)',
+        operands: {
+          estSavingsUsd: savingsUsd,
+          recoverableThinkingTokens: recoverableTokens,
+        },
+        value: impliedMeanOutputUsdPerMTok,
+      },
+    ];
+
     return {
       id: 'cost.disproportionate-thinking',
       category: 'cost',
       severity: 'info',
       title: 'Reasoning effort looks oversized for the work done',
       detail:
-        `${flagged.length} session(s) spent more on reasoning ("thinking") than on visible output — ` +
+        `${datePrefix}${flagged.length} session(s) spent more on reasoning ("thinking") than on visible output — ` +
         `e.g. ${short(top.sessionId)} reconstructs ~${top.think.toLocaleString()} thinking tokens ` +
         `(~${topSharePct}% of its output) against only ~${top.visible.toLocaleString()} visible tokens. ` +
         `Lowering reasoning effort on this mechanical work could recover ~${fmtUsd(savingsUsd)}. ` +
@@ -141,6 +186,47 @@ export const detector: Detector = {
             `${short(f.sessionId)}: ~${f.think.toLocaleString()} thinking vs ~${f.visible.toLocaleString()} visible tokens`
         ),
       view: 'cost',
+      // Auditability contract (#1049/#3194): the reconstructed token counts are
+      // the observations; the dollar figure is a named derivation over scalars;
+      // the recoverable fraction is declared an assumption in the inference.
+      provenance: {
+        observations: [
+          {
+            claim: `${flagged.length} session(s) clear every flag gate (>= ${MIN_THINKING_TOKENS.toLocaleString()} thinking tokens, >= ${MIN_VISIBLE_TOKENS.toLocaleString()} visible tokens, thinking/visible ratio >= ${MIN_OVERTHINK_RATIO})`,
+            source: 'parse-sessions',
+            field: 'tokenData[] (sessions passing the thinking/visible gates)',
+            value: flagged.length,
+          },
+          {
+            claim: `the flagged sessions reconstruct ~${totalThink.toLocaleString()} thinking tokens in total`,
+            source: 'parse-sessions',
+            field: 'tokenData[].totalThinkingTokens / totalOutputTokens',
+            value: totalThink,
+          },
+          {
+            claim: `the flagged session with the largest thinking reconstruction rebuilds ~${top.think.toLocaleString()} thinking tokens (~${topSharePct}% of its billed output) against ~${top.visible.toLocaleString()} visible tokens`,
+            source: 'parse-sessions',
+            record: short(top.sessionId),
+            field: 'tokenData[].totalThinkingTokens / totalOutputTokens',
+            value: top.think,
+          },
+          {
+            claim: `the recoverable thinking prices to ~${fmtUsd(savingsUsd)} when each flagged session's entries are priced at their own model's output rate`,
+            source: 'pricing.ts',
+            field: 'sum(entries[].thinkingTokens x RECOVERABLE_FRACTION / 1e6 x resolveModelPricing(entry.model).pricing.output)',
+            value: savingsUsd,
+          },
+        ],
+        derivations,
+        inference:
+          `Thinking tokens are a reconstructed residual (billed output minus visible ` +
+          `text and tool_use args — the API never separates them), so the counts are ` +
+          `estimates and treated as lower bounds. That a session which "thought" ` +
+          `>= ${MIN_OVERTHINK_RATIO}x more than it produced over-reasoned is the detector's ` +
+          `proxy inference, and RECOVERABLE_FRACTION=${RECOVERABLE_FRACTION} is an assumption ` +
+          `(lowering effort cannot eliminate all thinking), not a measurement.`,
+        ...(asOf !== undefined ? { asOf, stale } : {}),
+      },
     };
   },
 };

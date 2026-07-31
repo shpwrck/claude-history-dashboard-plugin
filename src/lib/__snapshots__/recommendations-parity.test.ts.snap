@@ -553,7 +553,7 @@ Keep file work structured and permission-aware. Apply these examples; category n
     "action": "Review these sessions for runaway context or repeated work that could be scoped down or split.",
     "affected": 3,
     "category": "cost",
-    "detail": "The top 3 sessions account for 99% of total estimated spend ($111.00 of $112.00).",
+    "detail": "The top 3 sessions account for 99% of estimated priced spend ($111.00 of $112.00; 1 unknown-model session(s) excluded as unpriced).",
     "evidence": [
       "automate, $100.00, Bash",
       "reader, $10.00, Read",
@@ -577,6 +577,47 @@ Keep file work structured and permission-aware. Apply these examples; category n
       "target": "CLAUDE.md",
     },
     "id": "cost.expensive-sessions",
+    "provenance": {
+      "derivations": [
+        {
+          "formula": "top3CostUsd / pricedTotalCostUsd",
+          "id": "top3-share-of-spend",
+          "operands": {
+            "pricedTotalCostUsd": 112,
+            "top3CostUsd": 111,
+          },
+          "value": 0.9910714285714286,
+        },
+      ],
+      "inference": "Concentration is the whole claim: a quarter or more of estimated spend in three sessions is worth a review for runaway context or repeated work. How much of that observed spend was recoverable waste is an unmeasured counterfactual, so no savings figure is booked (#3196).",
+      "observations": [
+        {
+          "claim": "the 3 most expensive sessions have a combined estimated cost of ~$111.00",
+          "field": "tokenData[].entries (token counts x pricing-registry rates, estimateCost)",
+          "source": "cost-attribution (topExpensiveSessions)",
+          "value": 111,
+        },
+        {
+          "claim": "estimated priced spend across 5 parsed sessions is ~$112.00",
+          "field": "tokenData[].entries (token counts x pricing-registry rates, estimateCost)",
+          "source": "parse-sessions",
+          "value": 112,
+        },
+        {
+          "claim": "1 session(s) carry unrecognized-model spend that estimateCost zero-prices, so their real spend is excluded from every total and share here",
+          "field": "count(tokenData[] where hasUnknownModel)",
+          "source": "parse-sessions",
+          "value": 1,
+        },
+        {
+          "claim": "the single most expensive session cost ~$100.00",
+          "field": "estimatedCost",
+          "record": "automate",
+          "source": "cost-attribution (topExpensiveSessions)",
+          "value": 100,
+        },
+      ],
+    },
     "severity": "info",
     "title": "Spend is concentrated in a few sessions",
     "view": "cost",
@@ -775,19 +816,35 @@ Load these files once into context, then reuse that copy instead of re-reading t
     "view": "cost",
   },
   {
-    "action": "Treat those sessions’ cost figures as approximate; add the model to the pricing table for accuracy.",
+    "action": "Treat those sessions’ cost figures as lower bounds; add the model to the pricing registry (or pin a known model) for accuracy.",
     "affected": 1,
     "category": "cost",
-    "detail": "1 session(s) used a model string not in the pricing table and fell back to Sonnet-tier rates.",
+    "detail": "1 session(s) used a model string not in the pricing registry; that spend is zero-priced and excluded from cost estimates, so those sessions' cost figures are understated.",
     "fix": {
       "label": "Pin a known model",
-      "note": "Set an explicit model in settings.json so future sessions are priced from a known rate instead of the Sonnet-tier fallback used for the 1 guessed session(s).",
+      "note": "Set an explicit model in settings.json so future sessions are priced from a known rate instead of being excluded as unpriced like the 1 affected session(s).",
       "snippet": "{
   "model": "claude-sonnet-5"
 }",
       "target": "settings.json",
     },
     "id": "cost.unknown-model",
+    "provenance": {
+      "inference": "Because unknown-model spend is excluded rather than estimated, the affected sessions' cost figures are lower bounds — a data-quality nudge, not a reclaim; nothing is booked. Pinning a known model (or registering the model string) makes future sessions priceable.",
+      "observations": [
+        {
+          "claim": "1 of 5 parsed sessions carry hasUnknownModel=true (at least one entry whose model string resolveModelPricing does not recognise)",
+          "field": "tokenData[].hasUnknownModel",
+          "source": "parse-sessions",
+          "value": 1,
+        },
+        {
+          "claim": "an unrecognised model is zero-priced and its spend is excluded from cost estimates rather than priced under a default tier",
+          "field": "resolveModelPricing (isUnknownModel -> ZERO_PRICING)",
+          "source": "pricing.ts",
+        },
+      ],
+    },
     "reclaim": {
       "category": "cost",
       "counterfactual": {
@@ -800,7 +857,7 @@ Load these files once into context, then reuse that copy instead of re-reading t
       "scopeKeys": [],
     },
     "severity": "info",
-    "title": "Some cost estimates are guesses",
+    "title": "Some cost estimates are incomplete",
     "view": "tokens",
   },
   {

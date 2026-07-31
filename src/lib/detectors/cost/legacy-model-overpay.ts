@@ -1,5 +1,6 @@
 import type { Detector } from '../types';
-import { fmtUsd, short, isModelPinned } from '../shared';
+import { fmtUsd, newestIsoDate, short, isModelPinned, STALE_WEEKS } from '../shared';
+import { isAsOfStale } from '../provenance';
 import { getModelPricing } from '../../pricing';
 import { CURRENT_MODEL_IDS } from '../../model-registry';
 import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
@@ -18,6 +19,9 @@ const CURRENT_REF = getModelPricing(CURRENT_OPUS_MODEL);
 const RATE_DELTA = LEGACY_REF.input - CURRENT_REF.input; // $/MTok input saved
 const MIN_DELTA_USD = 0.5;
 
+/** Legacy-spend evidence older than this demotes to "as of <date>" (#3194). */
+const STALE_AFTER_DAYS = STALE_WEEKS * 7;
+
 /**
  * Flag spend that ran on legacy-priced Opus where current Opus is the same
  * capability tier at ~1/3 the input price. Self-suppresses once any non-legacy
@@ -27,7 +31,7 @@ export const detector: Detector = {
   id: 'cost.legacy-model-overpay',
   category: 'cost',
   dataDeps: ['tokenData', 'liveConfig'],
-  rule(input) {
+  rule(input, now) {
     const settingsModel = input.liveConfig?.settings?.model;
     if (
       isModelPinned(input.liveConfig?.settings) &&
@@ -40,6 +44,7 @@ export const detector: Detector = {
     let inputTokens = 0;
     const sessions = new Set<string>();
     const scopeKeys = new Set<string>();
+    const legacyTimestamps: (string | undefined)[] = [];
     for (const d of input.tokenData) {
       for (const e of d.entries) {
         if (getModelPricing(e.model) !== LEGACY_REF) continue;
@@ -49,10 +54,16 @@ export const detector: Detector = {
           inputTokens += e.inputTokens;
           sessions.add(d.sessionId);
           scopeKeys.add(scopeKeyOf(d.sessionId, e.model || 'unknown'));
+          legacyTimestamps.push(e.timestamp);
         }
       }
     }
     if (delta < MIN_DELTA_USD) return null;
+    // Dated from the newest OBSERVED legacy-priced entry (never `now`); no
+    // readable timestamps → no asOf (#3194).
+    const asOf = newestIsoDate(legacyTimestamps);
+    const stale = isAsOfStale(asOf, now, STALE_AFTER_DAYS);
+    const datePrefix = stale ? `As of ${asOf} (dated evidence): ` : '';
     // Reclaim claim: reprice the legacy-Opus INPUT pool onto current Opus
     // ($15→$5/MTok). `reprice` touches only the `input` pool of the legacy scopes,
     // so the booked marginal equals (inputTokens/1M)·($15−$5) — the same delta.
@@ -70,7 +81,7 @@ export const detector: Detector = {
       category: 'cost',
       severity: delta >= 1 ? 'warning' : 'info',
       title: 'Switch off legacy-priced Opus to current Opus',
-      detail: `${fmtUsd(delta)} of spend ran on claude-opus-4-1-* (legacy $15/MTok input) across ${sessions.size} session(s); the same capability tier on current Opus is $5/MTok — a ~67% overpay on those turns.`,
+      detail: `${datePrefix}${fmtUsd(delta)} of spend ran on claude-opus-4-1-* (legacy $${LEGACY_REF.input}/MTok input) across ${sessions.size} session(s); the same capability tier on current Opus is $${CURRENT_REF.input}/MTok — a ~${Math.round((RATE_DELTA / LEGACY_REF.input) * 100)}% overpay on those turns.`,
       action:
         `Update the pinned model string (settings.json or the SDK caller) from claude-opus-4-1-* to ${CURRENT_OPUS_MODEL} or newer.`,
       estSavingsUsd: delta,
@@ -78,6 +89,55 @@ export const detector: Detector = {
       affected: sessions.size,
       evidence: [...sessions].slice(0, 5).map((s) => short(s)),
       view: 'cost',
+      // Auditability contract (#1049/#3194): the token volume and both registry
+      // rates are the observations; the overpay is a named derivation over them.
+      provenance: {
+        observations: [
+          {
+            claim: `${inputTokens.toLocaleString()} input tokens ran on entries whose model prices at the legacy-Opus tier`,
+            source: 'parse-sessions',
+            field: 'tokenData[].entries[].inputTokens (where getModelPricing(entries[].model) is the legacy-Opus tier)',
+            value: inputTokens,
+          },
+          {
+            claim: `${sessions.size} session(s) carry legacy-priced Opus entries`,
+            source: 'parse-sessions',
+            field: 'tokenData[].sessionId (where an entry prices at the legacy-Opus tier)',
+            value: sessions.size,
+          },
+          {
+            claim: `legacy-priced Opus (claude-opus-4-1-*) bills input at $${LEGACY_REF.input}/MTok`,
+            source: 'pricing.ts',
+            field: "MODEL_PRICING['claude-opus-4-1-20250414'].input",
+            value: LEGACY_REF.input,
+          },
+          {
+            claim: `current Opus (${CURRENT_OPUS_MODEL}) bills input at $${CURRENT_REF.input}/MTok`,
+            source: 'pricing.ts',
+            field: `MODEL_PRICING['${CURRENT_OPUS_MODEL}'].input`,
+            value: CURRENT_REF.input,
+          },
+        ],
+        derivations: [
+          {
+            id: 'input-overpay-usd',
+            formula: '(legacyInputTokens / 1e6) * (legacyInputUsdPerMTok - currentInputUsdPerMTok)',
+            operands: {
+              legacyInputTokens: inputTokens,
+              legacyInputUsdPerMTok: LEGACY_REF.input,
+              currentInputUsdPerMTok: CURRENT_REF.input,
+            },
+            value: delta,
+          },
+        ],
+        inference:
+          'Current Opus is the same capability tier at a lower input rate, so ' +
+          'repricing ONLY the legacy entries’ input tokens onto it is a rate-delta ' +
+          'claim over the same token volume — not an estimate of behavioural change. ' +
+          'Legacy entries are identified by pricing-object identity, never a ' +
+          'model-name regex.',
+        ...(asOf !== undefined ? { asOf, stale } : {}),
+      },
       fix: {
         target: 'settings.json',
         label: 'Pin current Opus',

@@ -127,30 +127,84 @@ function detectorSourceFiles(): string[] {
   return out;
 }
 
-function sourceContainsNonPortableFixRegion(src: string): boolean {
+/** The `fix:`-delimited regions of a detector source, in order. */
+function fixRegions(src: string): string[] {
   const starts = Array.from(src.matchAll(/\bfix\s*:/g), (m) => m.index ?? 0);
-  for (let idx = 0; idx < starts.length; idx += 1) {
-    const start = starts[idx];
-    const next = starts[idx + 1];
-    const segment = src.slice(start, next);
-    if (NON_PORTABLE_SNIPPET_PATTERNS.some((p) => p.pattern.test(segment))) {
-      return true;
-    }
-  }
-  return false;
+  return starts.map((start, idx) => src.slice(start, starts[idx + 1]));
 }
 
+/**
+ * True when at least one fix region embeds a non-portable reference WITHOUT
+ * declaring `fixKind: 'manual' | 'illustrative'` in that SAME region (#3202).
+ *
+ * The exemption must be region-scoped: the old gate searched the whole file
+ * for a non-validated fixKind, so a source shipping one correctly-marked
+ * manual fix silently exempted a DIFFERENT default-validated fix carrying a
+ * host path / custom CLI / slash command — exactly the copy-paste-unsafe
+ * publication the gate exists to prevent.
+ */
+function hasUndeclaredNonPortableFixRegion(src: string): boolean {
+  return fixRegions(src).some(
+    (region) =>
+      NON_PORTABLE_SNIPPET_PATTERNS.some((p) => p.pattern.test(region)) &&
+      !/fixKind:\s*'(manual|illustrative)'/.test(region)
+  );
+}
+
+describe('per-fix-region exemption scoping (#3202)', () => {
+  // Negative control: TWO fixes in one source — a correctly-marked manual fix
+  // followed by a default-validated fix whose snippet embeds `claude-team`.
+  const manualFix = [
+    "fix: {",
+    "  target: 'CLAUDE.md',",
+    "  label: 'Apply by hand',",
+    "  fixKind: 'manual',",
+    "  snippet: 'claude-team redispatch --team x',",
+    "},",
+  ].join('\n');
+  const validatedUnsafeFix = [
+    "fix: {",
+    "  target: 'CLAUDE.md',",
+    "  label: 'Paste this',",
+    "  snippet: 'claude-team redispatch --only-unread',",
+    "},",
+  ].join('\n');
+
+  it('reports a default-validated non-portable fix even when another fix in the file is marked manual', () => {
+    // The whole-file regex would find the first fix's `fixKind: 'manual'` and
+    // wave the second, unsafe fix through.
+    expect(hasUndeclaredNonPortableFixRegion(`${manualFix}\n${validatedUnsafeFix}`)).toBe(true);
+  });
+
+  it('passes once that second fix is also marked manual', () => {
+    const flipped = validatedUnsafeFix.replace(
+      "  label: 'Paste this',",
+      "  label: 'Paste this',\n  fixKind: 'manual',"
+    );
+    expect(hasUndeclaredNonPortableFixRegion(`${manualFix}\n${flipped}`)).toBe(false);
+  });
+
+  it('passes a clean validated fix alongside a manual one', () => {
+    const cleanValidated = "fix: {\n  snippet: '{ \"permissions\": { \"allow\": [] } }',\n},";
+    expect(hasUndeclaredNonPortableFixRegion(`${manualFix}\n${cleanValidated}`)).toBe(false);
+  });
+
+  it('still reports a lone default-validated non-portable fix', () => {
+    expect(hasUndeclaredNonPortableFixRegion(validatedUnsafeFix)).toBe(true);
+  });
+});
+
 describe('detector fix-snippet portability gate (#1101)', () => {
-  it('every detector embedding a non-portable reference marks its fix non-validated', () => {
+  it('every detector embedding a non-portable reference marks that fix non-validated in the same region (#3202)', () => {
     const offenders: string[] = [];
     for (const file of detectorSourceFiles()) {
       const src = readFileSync(file, 'utf8');
-      const hasNonPortable = sourceContainsNonPortableFixRegion(src);
-      if (!hasNonPortable) continue;
-      // The file ships a non-portable reference - it must declare the fix as
-      // manual/illustrative so the UI never presents it as copy-paste-safe.
-      const declaresNonValidated = /fixKind:\s*'(manual|illustrative)'/.test(src);
-      if (!declaresNonValidated) offenders.push(file.replace(REPO_ROOT + '/', ''));
+      // Each fix region shipping a non-portable reference must itself declare
+      // manual/illustrative so the UI never presents it as copy-paste-safe —
+      // a declaration on a DIFFERENT fix in the same file does not count.
+      if (hasUndeclaredNonPortableFixRegion(src)) {
+        offenders.push(file.replace(REPO_ROOT + '/', ''));
+      }
     }
     expect(offenders, `validated fix snippets with non-portable references: ${offenders.join(', ')}`).toEqual([]);
   });

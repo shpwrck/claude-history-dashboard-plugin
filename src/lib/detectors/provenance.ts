@@ -65,13 +65,6 @@ import {
 export const PROVENANCE_EXEMPT: readonly string[] = [
   'context.over-scoped-config-section',
   'cost.cache-1h-waste',
-  'cost.disproportionate-thinking',
-  'cost.expensive-agent-type',
-  'cost.expensive-sessions',
-  'cost.legacy-model-overpay',
-  'cost.priority-tier-spend',
-  'cost.unknown-model',
-  'cost.web-search-spend',
   'reliability.hook-prevented-continuation',
   'reliability.mcp-needs-auth',
   'reliability.overload-reretry',
@@ -168,6 +161,14 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   // #3246 — the generic adopt-axis path; #3248 — the uncovered-axis discovery.
   'workflow.shadow-axis-wins',
   'workflow.uncovered-shadow-axis',
+  // #3194/#3201/#3508 — the round-10 cost provenance batch, each fixture-proven.
+  'cost.disproportionate-thinking',
+  'cost.expensive-agent-type',
+  'cost.expensive-sessions',
+  'cost.legacy-model-overpay',
+  'cost.priority-tier-spend',
+  'cost.unknown-model',
+  'cost.web-search-spend',
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000;

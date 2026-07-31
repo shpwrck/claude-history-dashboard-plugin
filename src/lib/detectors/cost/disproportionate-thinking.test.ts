@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './disproportionate-thinking';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData, TokenEntry } from '../../../types';
 
@@ -163,5 +164,80 @@ describe('cost.disproportionate-thinking — membership is linear (#3198)', () =
     expect(rec?.estSavingsUsd).toBeCloseTo(3.0, 5);
     // totalThink 240k * 0.5 = 120k over totalOutput 300k = 0.4
     expect(rec?.reclaim?.counterfactual.poolDeltaFrac?.output).toBeCloseTo(0.4, 5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3194 — structured provenance: every numeric claim is reproducible.
+// ---------------------------------------------------------------------------
+
+describe('cost.disproportionate-thinking provenance (#3194)', () => {
+  it('passes the repository provenance validator', () => {
+    const rec = detector.rule(input([session('s1', 100_000, 80_000)]), 0)!;
+    expect(rec.provenance).toBeDefined();
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+  });
+
+  it('cites the reconstructed-thinking fields and the pricing registry', () => {
+    const rec = detector.rule(input([session('s1', 100_000, 80_000)]), 0)!;
+    const sources = rec.provenance!.observations.map((o) => o.source);
+    expect(sources).toContain('parse-sessions');
+    expect(sources).toContain('pricing.ts');
+    const totals = rec.provenance!.observations.find(
+      (o) => o.field === 'tokenData[].totalThinkingTokens / totalOutputTokens' && !o.record
+    );
+    expect(totals?.value).toBe(80_000);
+  });
+
+  it('reproduces estSavingsUsd from the named derivation operands', () => {
+    const rec = detector.rule(
+      input([session('s1', 100_000, 80_000), session('s2', 200_000, 160_000)]),
+      0
+    )!;
+    const byId = new Map(rec.provenance!.derivations!.map((d) => [d.id, d]));
+    const recoverable = byId.get('recoverable-thinking-tokens')!;
+    expect(
+      (recoverable.operands.totalThinkingTokens as number) *
+        (recoverable.operands.recoverableFraction as number)
+    ).toBeCloseTo(recoverable.value as number, 10);
+    // #3516 review: savingsUsd is an observation (per-entry accumulation with
+    // its formula named), not a derivation back-solved through a fake mean.
+    const savingsObs = rec.provenance!.observations.find((o) =>
+      /resolveModelPricing/.test(o.field ?? '')
+    );
+    expect(savingsObs, 'savings accumulation is not in provenance').toBeDefined();
+    expect(savingsObs!.value).toBeCloseTo(rec.estSavingsUsd!, 10);
+    // The implied mean is derived FROM the savings — the honest direction —
+    // and must reproduce from its own operands.
+    const mean = byId.get('implied-mean-output-rate')!;
+    expect(
+      (mean.operands.estSavingsUsd as number) /
+        ((mean.operands.recoverableThinkingTokens as number) / 1e6)
+    ).toBeCloseTo(mean.value as number, 10);
+    expect(mean.operands.estSavingsUsd).toBeCloseTo(rec.estSavingsUsd!, 10);
+  });
+
+  it('declares the estimate/assumption caveats in the inference', () => {
+    const rec = detector.rule(input([session('s1', 100_000, 80_000)]), 0)!;
+    expect(rec.provenance!.inference).toMatch(/reconstructed residual/i);
+    expect(rec.provenance!.inference).toMatch(/assumption/i);
+  });
+
+  it('dates from the newest observed entry, never the run clock', () => {
+    // Fixture entries observe 2026-01-01; running "now" must not move the date.
+    const rec = detector.rule(
+      input([session('s1', 100_000, 80_000)]),
+      Date.parse('2026-01-05T00:00:00.000Z')
+    )!;
+    expect(rec.provenance!.asOf).toBe('2026-01-01');
+    expect(rec.provenance!.stale).toBe(false);
+
+    const stale = detector.rule(
+      input([session('s1', 100_000, 80_000)]),
+      Date.parse('2026-06-01T00:00:00.000Z')
+    )!;
+    expect(stale.provenance!.stale).toBe(true);
+    expect(stale.detail).toMatch(/^As of 2026-01-01/);
+    expect(validateRecommendationProvenance(stale)).toEqual([]);
   });
 });

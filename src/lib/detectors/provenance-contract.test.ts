@@ -284,8 +284,11 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * untouched while an ADDITION fails — the list is the only way to emit an
  * unauditable recommendation, so growing it must be a deliberate edit rather
  * than the path of least resistance. Update this number DOWNWARD only.
+ *
+ * 22 at the inversion; 15 after the round-10 cost batch (#3194/#3201) migrated
+ * the seven cost.* ids off the register.
  */
-const EXEMPT_AT_INVERSION = 22;
+const EXEMPT_AT_INVERSION = 15;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {
@@ -2333,6 +2336,197 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       } as unknown as RecommendationInput['shadowCalls'],
     }),
   }),
+
+  // ── #3194/#3201/#3508 — the round-10 cost provenance batch ────────────────
+  // Every fixture observes CTX_TS (2026-06-09) and runs at 2026-06-10, so the
+  // asOf anchor test below can tell an observed date from a now-derived one.
+
+  'cost.priority-tier-spend': () => ({
+    // Three sessions on the priority tier — the count-only intent check.
+    input: baseInput({
+      tokenData: ['pt-1', 'pt-2', 'pt-3'].map((id) => ({
+        ...(ctxSession(id) as unknown as Record<string, unknown>),
+        serviceTier: 'priority',
+      })) as unknown as RecommendationInput['tokenData'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+
+  'cost.unknown-model': () => ({
+    // One session whose model string the pricing registry does not recognise;
+    // no pinned model, so the fix is not self-suppressed.
+    input: baseInput({
+      tokenData: [
+        {
+          ...(ctxSession('um-1') as unknown as Record<string, unknown>),
+          hasUnknownModel: true,
+        },
+      ] as unknown as RecommendationInput['tokenData'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+
+  'cost.web-search-spend': () => {
+    // 100 searches x $0.01 = $1.00 against a small token cost → clears both the
+    // $0.50 floor and the 10% share gate.
+    const session = ctxSession('ws-1') as unknown as {
+      entries: { webSearchRequests: number }[];
+    };
+    session.entries[0].webSearchRequests = 100;
+    return {
+      input: baseInput({
+        tokenData: [session] as unknown as RecommendationInput['tokenData'],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'cost.disproportionate-thinking': () => ({
+    // 250K reconstructed thinking against 50K visible output (ratio 5) — well
+    // past every hardened gate, with a priced model so savings clear the floor.
+    input: baseInput({
+      tokenData: [
+        {
+          sessionId: 'dt-1',
+          totalOutputTokens: 300_000,
+          totalThinkingTokens: 250_000,
+          entries: [
+            {
+              timestamp: CTX_TS,
+              model: 'claude-sonnet-4-6',
+              inputTokens: 0,
+              outputTokens: 300_000,
+              thinkingTokens: 250_000,
+              cacheCreationTokens: 0,
+              cacheCreation1hTokens: 0,
+              cacheReadTokens: 0,
+              webSearchRequests: 0,
+              webFetchRequests: 0,
+            },
+          ],
+          compactionEvents: [],
+        },
+      ] as unknown as RecommendationInput['tokenData'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+
+  'cost.expensive-agent-type': () => {
+    // Five researcher runs whose attributed share of an Opus session's cost
+    // averages well over $0.10/run; Haiku is not pinned.
+    const taskCall = (i: number) => ({
+      timestamp: `2026-06-09T11:00:0${i}.000Z`,
+      toolName: 'Task',
+      input: { subagent_type: 'researcher' },
+      toolUseId: `eat-${i}`,
+      isError: null,
+      resultBytes: 0,
+    });
+    return {
+      input: baseInput({
+        toolData: [
+          { sessionId: 'eat-1', calls: Array.from({ length: 5 }, (_, i) => taskCall(i)) },
+        ] as unknown as RecommendationInput['toolData'],
+        attribution: [
+          {
+            sessionId: 'eat-1',
+            agents: { researcher: { invocations: 5, outputTokens: 100_000 } },
+            skills: {},
+            mcpServers: {},
+            mcpTools: {},
+          },
+        ] as unknown as RecommendationInput['attribution'],
+        tokenData: [
+          {
+            sessionId: 'eat-1',
+            totalOutputTokens: 100_000,
+            entries: [
+              {
+                timestamp: CTX_TS,
+                model: 'claude-opus-4-7',
+                inputTokens: 200_000,
+                outputTokens: 100_000,
+                cacheCreationTokens: 0,
+                cacheCreation1hTokens: 0,
+                cacheReadTokens: 0,
+                webSearchRequests: 0,
+                webFetchRequests: 0,
+              },
+            ],
+            compactionEvents: [],
+          },
+        ] as unknown as RecommendationInput['tokenData'],
+        agentSettings: [],
+        runtimeEvents: [],
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'cost.expensive-sessions': () => {
+    // Three dominant sessions plus a cheap tail: concentration over the 25%
+    // share floor, across the >= 5 session minimum.
+    const spend = (id: string, outputTokens: number) => ({
+      sessionId: id,
+      totalOutputTokens: outputTokens,
+      entries: [
+        {
+          timestamp: CTX_TS,
+          model: 'claude-opus-4-7',
+          inputTokens: 0,
+          outputTokens,
+          cacheCreationTokens: 0,
+          cacheCreation1hTokens: 0,
+          cacheReadTokens: 0,
+          webSearchRequests: 0,
+          webFetchRequests: 0,
+        },
+      ],
+      compactionEvents: [],
+    });
+    return {
+      input: baseInput({
+        tokenData: [
+          spend('es-big-1', 400_000),
+          spend('es-big-2', 300_000),
+          spend('es-big-3', 300_000),
+          spend('es-small-1', 1_000),
+          spend('es-small-2', 1_000),
+          spend('es-small-3', 1_000),
+        ] as unknown as RecommendationInput['tokenData'],
+        liveConfig: liveConfig(),
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'cost.legacy-model-overpay': () => ({
+    // 1M input tokens on legacy-priced Opus — $10 of rate-delta overpay, well
+    // past the $0.50 floor; no non-legacy pin, so not self-suppressed.
+    input: baseInput({
+      tokenData: [
+        {
+          sessionId: 'lmo-1',
+          entries: [
+            {
+              timestamp: CTX_TS,
+              model: 'claude-opus-4-1-20250414',
+              inputTokens: 1_000_000,
+              outputTokens: 0,
+              cacheCreationTokens: 0,
+              cacheCreation1hTokens: 0,
+              cacheReadTokens: 0,
+              webSearchRequests: 0,
+              webFetchRequests: 0,
+            },
+          ],
+          compactionEvents: [],
+        },
+      ] as unknown as RecommendationInput['tokenData'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
 };
 
 function runAllowlistedDetector(id: string): Recommendation {
@@ -2420,6 +2614,24 @@ describe('migrated context/activity detectors date claims from observed data', (
     'workflow.abandoned-tasks',
     'workflow.blocked-task-pileup',
   ])('%s dates from the newest task-file mtime, not the run date', (id) => {
+    const rec = runAllowlistedDetector(id);
+    expect(rec.provenance!.asOf).toBe(CTX_ASOF);
+  });
+
+  it.each([
+    // #3194/#3201 — the round-10 cost batch: every fixture observes CTX_TS
+    // (2026-06-09) and runs at 2026-06-10, so a now-derived date is off by a
+    // day. priority-tier/unknown-model/web-search/thinking/sessions date from
+    // token entries; expensive-agent-type from its newest Task spawn call;
+    // legacy-model-overpay from its newest legacy-priced entry.
+    'cost.disproportionate-thinking',
+    'cost.expensive-agent-type',
+    'cost.expensive-sessions',
+    'cost.legacy-model-overpay',
+    'cost.priority-tier-spend',
+    'cost.unknown-model',
+    'cost.web-search-spend',
+  ])('%s anchors asOf to the newest observed datum, not today', (id) => {
     const rec = runAllowlistedDetector(id);
     expect(rec.provenance!.asOf).toBe(CTX_ASOF);
   });

@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { detector } from './expensive-sessions';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import type { ToolUsageData } from '../../parse-tools';
@@ -53,7 +54,7 @@ describe('cost.expensive-sessions (#3196)', () => {
   it('reports the concentration it actually measures', () => {
     const rec = detector.rule(input(concentrated), 0);
     expect(rec?.id).toBe('cost.expensive-sessions');
-    expect(rec?.detail).toMatch(/top 3 sessions account for \d+% of total estimated spend/);
+    expect(rec?.detail).toMatch(/top 3 sessions account for \d+% of estimated priced spend/);
     expect(rec?.affected).toBe(3);
     expect(rec?.evidence?.length).toBe(3);
   });
@@ -71,5 +72,47 @@ describe('cost.expensive-sessions (#3196)', () => {
     // (8 would be 37.5% and still concentrated — the detector is right there.)
     const even = Array.from({ length: 16 }, (_, i) => session(`s${i}`, 100_000));
     expect(detector.rule(input(even), 0)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3194 — structured provenance: the concentration claim is reproducible.
+// ---------------------------------------------------------------------------
+
+describe('cost.expensive-sessions provenance (#3194)', () => {
+  it('passes the repository provenance validator', () => {
+    const rec = detector.rule(input(concentrated), 0)!;
+    expect(rec.provenance).toBeDefined();
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+  });
+
+  it('cites both cost observations and reproduces the share derivation', () => {
+    const rec = detector.rule(input(concentrated), 0)!;
+    const bySource = new Map(rec.provenance!.observations.map((o) => [o.claim, o]));
+    const values = rec.provenance!.observations.map((o) => o.value);
+    // top3Cost and totalCost are both present as scalars…
+    const share = rec.provenance!.derivations!.find((d) => d.id === 'top3-share-of-spend')!;
+    expect(values).toContain(share.operands.top3CostUsd);
+    expect(values).toContain(share.operands.pricedTotalCostUsd);
+    // …and the derivation reproduces the rendered percentage.
+    expect(
+      (share.operands.top3CostUsd as number) / (share.operands.pricedTotalCostUsd as number)
+    ).toBeCloseTo(share.value as number, 10);
+    expect(rec.detail).toContain(`${((share.value as number) * 100).toFixed(0)}%`);
+    expect(bySource.size).toBe(rec.provenance!.observations.length);
+  });
+
+  it('keeps the unmeasured-counterfactual stance in the inference (#3196)', () => {
+    const rec = detector.rule(input(concentrated), 0)!;
+    expect(rec.estSavingsUsd).toBeUndefined();
+    expect(rec.provenance!.inference).toMatch(/unmeasured\s+counterfactual/i);
+    expect(rec.provenance!.inference).toMatch(/no savings/i);
+  });
+
+  it('omits asOf when entry timestamps are unreadable (honest absence)', () => {
+    // The shared fixture's entries carry timestamp 't', which cannot date a claim.
+    const rec = detector.rule(input(concentrated), 0)!;
+    expect(rec.provenance!.asOf).toBeUndefined();
+    expect(rec.provenance!.stale).toBeUndefined();
   });
 });
