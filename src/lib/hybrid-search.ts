@@ -144,11 +144,86 @@ function tokenize(text: string): string[] {
     .filter((token) => token.length > 1 && !STOP_WORDS.has(token));
 }
 
-function entryText(entry: HistoryEntry): string {
-  const pasted = Object.values(entry.pastedContents ?? {})
-    .map((p) => p.content ?? '')
-    .join('\n');
-  return [entry.title ?? '', entry.display ?? '', pasted].filter(Boolean).join('\n');
+function entryText(entry: HistoryEntry, cap: number): string {
+  // Accumulate up to `cap` chars without ever concatenating an oversized
+  // piece whole — slicing each piece to the remaining room is what keeps the
+  // MAX_INDEXED_TEXT_CHARS "transient allocations" promise true for
+  // multi-megabyte pasted attachments.
+  const parts: string[] = [];
+  let len = 0;
+  const push = (s: string | undefined | null) => {
+    if (!s || len >= cap) return;
+    const room = cap - len;
+    const piece = s.length > room ? s.slice(0, room) : s;
+    parts.push(piece);
+    len += piece.length + 1; // +1 for the join separator
+  };
+  push(entry.title);
+  push(entry.display);
+  for (const p of Object.values(entry.pastedContents ?? {})) push(p.content);
+  return parts.join('\n');
+}
+
+/**
+ * Documented per-entry cap on indexed text (#3129). entryText concatenates the
+ * title, display text, and every pasted attachment; pasted content can be
+ * arbitrarily large, and every indexed character is scanned per query. 16 KiB
+ * of text is far beyond a realistic typed prompt while bounding both the
+ * per-query scan cost and the transient allocations for any single entry.
+ * Matches that occur only beyond the cap inside oversized pasted content are
+ * intentionally not found.
+ */
+export const MAX_INDEXED_TEXT_CHARS = 16_384;
+
+/** One searchable entry with its precomputed (and lazily memoized) index data. */
+export interface IndexedSearchEntry {
+  entry: HistoryEntry;
+  /** Original-case text capped at MAX_INDEXED_TEXT_CHARS (snippet source). */
+  text: string;
+  /** Lowercased capped text for the lexical scan — computed once per dataset. */
+  lowerText: string;
+  /**
+   * Semantic vector, computed lazily on the first semantic query and memoized
+   * for the lifetime of the index (the fts-only path never pays for it).
+   */
+  vector: Map<string, number> | null;
+  /** Position in the searchable ordering — the stable ranking tie-break. */
+  index: number;
+}
+
+// One search index per entries array (#3129), keyed by array identity: the
+// client passes a useMemo'd array that only changes when the dataset does, and
+// the server passes the entries of a dataset object cached per contentHash —
+// both reuse the index across queries and rebuild only on a genuinely new
+// dataset. WeakMap keeps dropped datasets collectable.
+const searchIndexCache = new WeakMap<
+  readonly HistoryEntry[],
+  IndexedSearchEntry[]
+>();
+
+/**
+ * Build — or fetch the cached — per-dataset search index. Exported so tests
+ * can prove cache identity and the per-entry text bound directly.
+ */
+export function getSearchIndex(
+  entries: readonly HistoryEntry[]
+): IndexedSearchEntry[] {
+  const cached = searchIndexCache.get(entries);
+  if (cached) return cached;
+  const built: IndexedSearchEntry[] = [];
+  for (const entry of entries) {
+    if (entry.display === 'init' || entry.display === 'exit') continue;
+    const text = entryText(entry, MAX_INDEXED_TEXT_CHARS);
+    built.push({
+      entry,
+      text,
+      lowerText: text.toLowerCase(),
+      vector: null,
+      index: built.length,
+    });
+  }
+  searchIndexCache.set(entries, built);
+  return built;
 }
 
 function addWeight(vector: Map<string, number>, key: string, weight: number) {
@@ -176,14 +251,18 @@ function cosineSimilarity(a: Map<string, number>, b: Map<string, number>): numbe
   return dot / Math.sqrt(aNorm * bNorm);
 }
 
-function lexicalScore(text: string, query: string): number {
-  const lowerText = text.toLowerCase();
-  const lowerQuery = query.trim().toLowerCase();
+function lexicalScore(
+  lowerText: string,
+  lowerQuery: string,
+  queryTokens: readonly string[]
+): number {
   if (!lowerQuery) return 0;
   const exact = lowerText.includes(lowerQuery) ? 0.75 : 0;
-  const queryTokens = tokenize(lowerQuery);
   if (queryTokens.length === 0) return exact;
-  const overlap = queryTokens.filter((token) => lowerText.includes(token)).length;
+  let overlap = 0;
+  for (const token of queryTokens) {
+    if (lowerText.includes(token)) overlap += 1;
+  }
   return Math.min(1, exact + overlap / queryTokens.length);
 }
 
@@ -207,6 +286,37 @@ function matchType(lexical: number, semantic: number): SearchMatchType {
   return 'full-text';
 }
 
+interface ScoredMatch {
+  indexed: IndexedSearchEntry;
+  score: number;
+  lexicalScore: number;
+  semanticScore: number;
+}
+
+/** Score-descending, then index-ascending — the original sort's comparator. */
+function ranksBefore(a: ScoredMatch, b: ScoredMatch): boolean {
+  if (a.score !== b.score) return a.score > b.score;
+  return a.indexed.index < b.indexed.index;
+}
+
+/**
+ * Insert a match into a bounded top-K list (#3129). Keeps at most `k` matches
+ * ordered by {@link ranksBefore}, so the full match set is never materialized
+ * or sorted; a match that cannot rank is rejected with one comparison.
+ */
+function insertTopK(top: ScoredMatch[], match: ScoredMatch, k: number): void {
+  if (top.length >= k && !ranksBefore(match, top[top.length - 1])) return;
+  let lo = 0;
+  let hi = top.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranksBefore(match, top[mid])) hi = mid;
+    else lo = mid + 1;
+  }
+  top.splice(lo, 0, match);
+  if (top.length > k) top.pop();
+}
+
 export function hybridSearchEntries(
   entries: readonly HistoryEntry[],
   query: string,
@@ -217,41 +327,45 @@ export function hybridSearchEntries(
 
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? DEFAULT_LIMIT)));
   const semanticEnabled = options.semanticEnabled ?? true;
-  const queryVector = semanticEnabled ? embedSearchText(trimmed) : new Map<string, number>();
+  const queryVector = semanticEnabled ? embedSearchText(trimmed) : null;
+  const lowerQuery = trimmed.toLowerCase();
+  const queryTokens = tokenize(lowerQuery);
 
-  return entries
-    .filter((entry) => entry.display !== 'init' && entry.display !== 'exit')
-    .filter((entry) => !options.project || entry.project === options.project)
-    .map((entry, index) => {
-      const text = entryText(entry);
-      const lexical = lexicalScore(text, trimmed);
-      const semantic = semanticEnabled
-        ? cosineSimilarity(queryVector, embedSearchText(text))
-        : 0;
-      const score = lexical * 0.68 + semantic * 0.32;
-      return {
-        entry,
-        score,
+  // #3129: per-query work is one pass over the cached index — no per-query
+  // text concatenation, lowercasing, tokenizing, or full-result sort.
+  const index = getSearchIndex(entries);
+  const top: ScoredMatch[] = [];
+  for (const indexed of index) {
+    if (options.project && indexed.entry.project !== options.project) continue;
+    const lexical = lexicalScore(indexed.lowerText, lowerQuery, queryTokens);
+    let semantic = 0;
+    if (queryVector) {
+      indexed.vector ??= embedSearchText(indexed.text);
+      semantic = cosineSimilarity(queryVector, indexed.vector);
+    }
+    const matched = queryVector
+      ? lexical > 0 || semantic >= SEMANTIC_THRESHOLD
+      : lexical > 0;
+    if (!matched) continue;
+    insertTopK(
+      top,
+      {
+        indexed,
+        score: lexical * 0.68 + semantic * 0.32,
         lexicalScore: lexical,
         semanticScore: semantic,
-        matchType: matchType(lexical, semantic),
-        snippet: snippetFor(text, trimmed),
-        index,
-      };
-    })
-    .filter((result) =>
-      semanticEnabled
-        ? result.lexicalScore > 0 || result.semanticScore >= SEMANTIC_THRESHOLD
-        : result.lexicalScore > 0
-    )
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .slice(0, limit)
-    .map((result) => ({
-      entry: result.entry,
-      score: result.score,
-      lexicalScore: result.lexicalScore,
-      semanticScore: result.semanticScore,
-      matchType: result.matchType,
-      snippet: result.snippet,
-    }));
+      },
+      limit
+    );
+  }
+
+  // Snippets are built only for the returned top K, not for every match.
+  return top.map((match) => ({
+    entry: match.indexed.entry,
+    score: match.score,
+    lexicalScore: match.lexicalScore,
+    semanticScore: match.semanticScore,
+    matchType: matchType(match.lexicalScore, match.semanticScore),
+    snippet: snippetFor(match.indexed.text, trimmed),
+  }));
 }
