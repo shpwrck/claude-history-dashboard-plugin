@@ -41,8 +41,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      30,
-      'enabled datasets include the shadowCalls byAxis.latestTs schema (#3246/#3248)'
+      31,
+      'enabled datasets include the timelines summaryRawLen schema (#3511)'
     );
     // Pin the FLAG-OFF (local-first default) schema version as a LITERAL so a
     // regression that lowers it — e.g. back to v28 — fails here (#2955). The
@@ -52,8 +52,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION,
-      29,
-      'flag-off advances to v29 because local shadowCalls now carries byAxis.latestTs (#3246/#3248)'
+      30,
+      'flag-off advances to v30 because local timelines now carry summaryRawLen (#3511)'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -65,7 +65,7 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       key,
       `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'flag-off uses the exact v29 cache key for the local shadowCalls shape'
+      'flag-off uses the exact v30 cache key for the local timelines summaryRawLen shape'
     );
     // The immediately-preceding v28 key needs no dedicated notEqual: the literal
     // equal(FLAG_OFF, 29) pin above fixes the flag-off version exactly, so any
@@ -133,7 +133,7 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       enabledKey,
       `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'an enabled snapshot turns over persisted v29 flag-off datasets'
+      'an enabled snapshot turns over persisted v30 flag-off datasets'
     );
     assert.notEqual(ingest.sourceSignature(), flagOffSourceSignature);
     assert.notEqual(ingest.ingest().contentHash, flagOffContentHash);

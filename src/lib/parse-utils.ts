@@ -170,3 +170,15 @@ export function summarize(text: string, max: number = MAX_SUMMARY): string {
   const flat = text.replace(/\r?\n/g, ' ').trim();
   return flat.length > max ? flat.slice(0, max) : flat;
 }
+
+/**
+ * The flattened, trimmed length of `text` — the length {@link summarize} sees
+ * BEFORE it clips to `max` (#3511). Uses the identical newline-collapse + trim
+ * normalization, so `summaryFlatLen(t) >= summarize(t).length` always, with
+ * equality exactly when no truncation happened. Callers persist this as
+ * `TimelineEntry.summaryRawLen` so a long prompt is not mis-measured as its
+ * clipped 200-char stub when classifying turn complexity.
+ */
+export function summaryFlatLen(text: string): number {
+  return text.replace(/\r?\n/g, ' ').trim().length;
+}

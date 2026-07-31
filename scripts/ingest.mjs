@@ -2510,8 +2510,16 @@ export const PARSER_SIG_VERSION = 'v6';
 // assembled-dataset cache. shadowCalls is local and present in BOTH paths, so
 // flag-off bumps in step (28 -> 29) — unlike the docIssueSnapshot feature, this
 // shape change is NOT gated by the opt-in.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 30;
-export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 29;
+// v31 (#3511): slimmed `timelines` user entries now carry the sparse
+// `summaryRawLen` (true pre-clip prompt length), paired with the
+// SESSION_BLOB_OUTPUT 'timeline-summary-rawlen-v21' bump that reparses
+// timeline_json. The source transcripts are unchanged, so without this bump a
+// persisted v30 dataset body assembled from v20 rows could be served during
+// stale-while-revalidate startup and the routing detector would keep reading the
+// saturated 200-char length. `timelines` is local and present in BOTH paths, so
+// flag-off bumps in step (29 -> 30); this shape change is NOT gated by the opt-in.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 31;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 30;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

@@ -126,6 +126,17 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       and the bump is therefore deliberate, not fence-forced. Without it a
 //       cached row would serve entries with the old positional ids, which
 //       resolve confidently to the WRONG entry once records shift.
+//   'timeline-summary-rawlen-v21' (#3511): user timeline_json entries now carry a
+//       sparse `summaryRawLen` — the TRUE pre-clip length of a prompt that was
+//       truncated past MAX_SUMMARY (200), which parse-model-recommendation reads
+//       so a long complex prompt is no longer mis-measured as a 200-char stub and
+//       mis-routed to a cheaper model. Like v20 this is a CONTENT-shape change
+//       inside timeline_json (no column added/removed/renamed), so the forward
+//       fence does not force it — the bump is deliberate. Without it a cached row
+//       would keep serving entries with no true length and the trivial-turn gate
+//       would stay saturated. The paired DATASET_ASSEMBLY_SCHEMA_VERSION bump in
+//       scripts/ingest.mjs turns over the downstream dataset body assembled from
+//       these rows.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));

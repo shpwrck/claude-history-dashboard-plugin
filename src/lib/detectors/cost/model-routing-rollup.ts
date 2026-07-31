@@ -42,6 +42,42 @@ const MIN_MONTHLY_USD = 1;
 /** At or above this monthly projection the finding is a warning, else info. */
 const WARN_MONTHLY_USD = 10;
 
+/**
+ * The provenance inference for a routing recommendation (#3199).
+ *
+ * A footprint match (prompt/tool/edit/output size fits a cheaper capability
+ * tier) is NECESSARY but NOT SUFFICIENT for a safe route: it shows a turn COULD
+ * fit a cheaper model, never that the cheaper model would have produced
+ * equal-quality output. So without structured quality-result evidence — a
+ * replay/evaluation receipt, the kind `cost.model-eval-routing-gap` reads from
+ * `~/.claude/model-evals/results` — this stays a LOW-CONFIDENCE candidate and the
+ * `$X/mo` figure is a CEILING, not a guaranteed saving.
+ *
+ * Stronger, act-now wording is permitted ONLY when that structured
+ * quality-result provenance is present (`hasQualityProvenance`). This detector
+ * is the pure footprint heuristic, so it always passes `false`; the boolean is a
+ * seam for a future caller that genuinely carries quality receipts.
+ */
+export function routingInference(hasQualityProvenance: boolean): string {
+  if (hasQualityProvenance) {
+    return (
+      'Turns whose footprint fits a cheaper capability tier AND whose model/task ' +
+      'class carries structured quality-result evidence (a replay/evaluation ' +
+      'receipt) can be routed there; the summed per-turn delta, extrapolated over ' +
+      'the observed span, is the recoverable monthly spend.'
+    );
+  }
+  return (
+    'Turns whose prompt/tool/edit/output footprint fits a cheaper capability tier ' +
+    'are LOW-CONFIDENCE routing CANDIDATES only: the footprint match shows a turn ' +
+    'could fit a cheaper model, not that the cheaper model would hold output ' +
+    'quality. Routing is not proven safe here — it requires a replay/evaluation ' +
+    'that measures output quality on the cheaper model. The summed per-turn delta, ' +
+    'extrapolated over the observed span, is a CEILING on recoverable monthly ' +
+    'spend, not a guaranteed saving.'
+  );
+}
+
 export const detector: Detector = {
   id: 'cost.model-routing-rollup',
   category: 'cost',
@@ -107,10 +143,10 @@ export const detector: Detector = {
             value: Math.round(monthly * 100) / 100,
           },
         ],
-        inference:
-          'Turns whose prompt/tool/edit/output footprint fits a cheaper capability tier ' +
-          'can be routed there without quality loss; the summed per-turn delta, ' +
-          'extrapolated over the observed span, is the recoverable monthly spend.',
+        // Footprint-only heuristic: no structured quality-result provenance is
+        // available here, so the wording is always the low-confidence candidate
+        // form — never a "without quality loss" guarantee (#3199).
+        inference: routingInference(false),
       },
     };
   },

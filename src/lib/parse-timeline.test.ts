@@ -53,6 +53,56 @@ describe('parseSessionTimeline', () => {
     })
   })
 
+  it('records the true pre-clip length as summaryRawLen when a user prompt is truncated (#3511)', () => {
+    const longPrompt = 'x'.repeat(5000)
+    const text = line({ type: 'user', timestamp: '2026-01-01', message: { content: longPrompt } })
+    const tl = parseSessionTimeline(text, 's.jsonl')!
+    const entry = tl.entries[0]
+    // summary is clipped to MAX_SUMMARY (200); summaryLen measures the clip...
+    expect(entry.summary).toHaveLength(200)
+    expect(entry.summaryLen).toBe(200)
+    // ...while summaryRawLen preserves the TRUE 5000-char length.
+    expect(entry.summaryRawLen).toBe(5000)
+  })
+
+  it('omits summaryRawLen when a user prompt is not truncated (sparse-by-design, #3511)', () => {
+    const text = line({ type: 'user', timestamp: '2026-01-01', message: { content: 'short prompt' } })
+    const entry = parseSessionTimeline(text, 's.jsonl')!.entries[0]
+    expect(entry.summaryLen).toBe('short prompt'.length)
+    expect(entry.summaryRawLen).toBeUndefined()
+    expect('summaryRawLen' in entry).toBe(false)
+  })
+
+  it('measures summaryRawLen on the flattened text, matching summarize normalization (#3511)', () => {
+    // Newlines collapse to single spaces and the string is trimmed before the
+    // length is taken — the same normalization summarize() applies.
+    const content = `  ${'a\nb '.repeat(80)}  ` // > 200 chars once flattened; leading/trailing space trimmed
+    const flattened = content.replace(/\r?\n/g, ' ').trim()
+    const text = line({ type: 'user', timestamp: '2026-01-01', message: { content } })
+    const entry = parseSessionTimeline(text, 's.jsonl')!.entries[0]
+    expect(entry.summaryRawLen).toBe(flattened.length)
+  })
+
+  it('keeps summaryRawLen on user entries through slimming, drops it elsewhere (#3511)', () => {
+    const longUser = 'u'.repeat(5000)
+    const longAssistant = 'a'.repeat(5000)
+    const text = [
+      line({ type: 'user', timestamp: '2026-01-01', message: { content: longUser } }),
+      line({ type: 'assistant', timestamp: '2026-01-02', message: { content: [{ type: 'text', text: longAssistant }] } }),
+    ].join('\n')
+    const parsed = parseSessionTimeline(text, 's.jsonl')!
+    // Assistant text is truncated too, but it is a non-user entry: only user
+    // callsites thread rawText, so the assistant entry never carries summaryRawLen.
+    const assistant = parsed.entries.find((e) => e.kind === 'assistant')!
+    expect(assistant.summaryRawLen).toBeUndefined()
+
+    const slim = slimSessionTimeline(parsed)
+    const slimUser = slim.entries.find((e) => e.kind === 'user')!
+    const slimAssistant = slim.entries.find((e) => e.kind === 'assistant')!
+    expect(slimUser.summaryRawLen).toBe(5000) // survives on the user entry
+    expect('summaryRawLen' in slimAssistant).toBe(false) // pruned on non-user
+  })
+
   it('emits assistant text, thinking, and tool_use entries', () => {
     const text = line({
       type: 'assistant',

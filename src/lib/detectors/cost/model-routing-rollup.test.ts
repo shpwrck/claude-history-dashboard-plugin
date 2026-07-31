@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detector } from './model-routing-rollup';
+import { detector, routingInference } from './model-routing-rollup';
 import { buildRecommendations, totalEstimatedSavings } from '../../recommendations';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData, TokenEntry } from '../../../types';
@@ -112,5 +112,40 @@ describe('cost.model-routing-rollup (#1165)', () => {
   it('stays quiet on a sparse downgradable set (below the floor)', () => {
     const { tokenData, timeline } = trivialFixture('s1', 3);
     expect(detector.rule(input({ tokenData: [tokenData], timelines: [timeline] }), 0)).toBeNull();
+  });
+
+  // ── #3199: no "without quality loss" guarantee on footprint-only evidence ──
+  it('describes routing as a low-confidence candidate requiring validation, with NO quality guarantee (#3199)', () => {
+    const { tokenData, timeline } = trivialFixture('s1', 24);
+    const rec = detector.rule(input({ tokenData: [tokenData], timelines: [timeline] }), 0)!;
+    const inference = rec.provenance!.inference!;
+    // The removed guarantee must be gone…
+    expect(inference).not.toMatch(/without quality loss/i);
+    // …and the dollar figure explicitly hedged as a ceiling, not a guarantee.
+    expect(inference).toMatch(/not a guaranteed saving/i);
+    // …and replaced with an explicit low-confidence + quality-validation caveat.
+    expect(inference).toMatch(/candidate/i);
+    expect(inference).toMatch(/replay|evaluat/i);
+    expect(inference).toMatch(/quality/i);
+    expect(inference).toMatch(/ceiling/i);
+  });
+
+  it('permits stronger wording ONLY when structured quality-result provenance is present (#3199)', () => {
+    const footprintOnly = routingInference(false);
+    const withQuality = routingInference(true);
+    // Footprint-only: hedged, requires a quality check, no guarantee.
+    expect(footprintOnly).toMatch(/not proven safe|requires a replay\/evaluation/i);
+    expect(footprintOnly).not.toMatch(/without quality loss/i);
+    // With structured quality provenance: the stronger form is allowed and drops
+    // the "not proven safe … requires a replay/evaluation" hedge.
+    expect(withQuality).not.toMatch(/not proven safe/i);
+    expect(withQuality).toMatch(/structured quality-result evidence/i);
+    // The two forms are genuinely different wording, not the same string.
+    expect(withQuality).not.toBe(footprintOnly);
+    // The footprint detector itself never carries quality provenance, so its
+    // emitted inference is exactly the footprint-only form.
+    const { tokenData, timeline } = trivialFixture('s1', 24);
+    const rec = detector.rule(input({ tokenData: [tokenData], timelines: [timeline] }), 0)!;
+    expect(rec.provenance!.inference).toBe(footprintOnly);
   });
 });

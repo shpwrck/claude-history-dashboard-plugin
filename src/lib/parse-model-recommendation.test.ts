@@ -10,6 +10,7 @@ import {
 import type { SessionTokenData, TokenEntry } from '../types'
 import type { ToolUsageData, ToolCall } from './parse-tools'
 import type { SessionTimeline, TimelineEntry } from './parse-timeline'
+import { parseSessionTimeline } from './parse-timeline'
 import type { SessionAttribution } from './parse-agents'
 
 // ── Fixture builders ────────────────────────────────────────────────
@@ -177,6 +178,56 @@ describe('computeModelRecommendations — bucket classification', () => {
     const turn = computeModelRecommendations([tok], [], [tl], [])[0].turns[0]
     expect(turn.features.turnLengthChars).toBe(500)
     expect(turn.bucket).toBe('moderate')
+  })
+
+  it('buckets a 5,000-char prompt ABOVE trivial through the REAL parser, not its clipped 200-char stub (#3511)', () => {
+    // Regression for the summaryLen-after-truncation bug: a long, otherwise
+    // tool-free/low-output turn must NOT be mistaken for a trivial one. Built
+    // through parseSessionTimeline (NOT a hand-set summaryLen) so the fix is
+    // proven end-to-end: the parser now records summaryRawLen and the
+    // recommender reads it.
+    const t0 = nextTs()
+    const longPrompt = 'x'.repeat(5000)
+    const transcript = JSON.stringify({
+      type: 'user',
+      timestamp: t0,
+      message: { content: longPrompt },
+    })
+    const tl = parseSessionTimeline(transcript, 's-long.jsonl')!
+    // The parser exposes the TRUE length even though the summary is clipped to 200.
+    expect(tl.entries[0].summary).toHaveLength(200)
+    expect(tl.entries[0].summaryRawLen).toBe(5000)
+
+    // Everything else about the turn is trivial-shaped (no tools, tiny output),
+    // so ONLY the true prompt length keeps it out of the trivial bucket.
+    const tok = tokenData('s-long', 'claude-opus-4-8', [
+      tokenEntry({ timestamp: t0, outputTokens: 10 }),
+    ])
+    const turn = computeModelRecommendations([tok], [], [tl], [])[0].turns[0]
+    expect(turn.features.turnLengthChars).toBe(5000)
+    // 5000 >= MODERATE_PROMPT_CHARS (2000) → complex; crucially NOT trivial, so
+    // it is never recommended for Haiku on prompt length alone.
+    expect(turn.bucket).toBe('complex')
+    expect(turn.recommendedModel).not.toBe(REC_HAIKU)
+  })
+
+  it('would MISCLASSIFY the same long turn as trivial if length were read post-clip (guards the #3511 fix)', () => {
+    // Contrast case proving the fix is load-bearing: a slim/legacy entry that
+    // carries ONLY the clipped summaryLen (200, no summaryRawLen) still reads as
+    // trivial. The parser path above avoids exactly this by emitting summaryRawLen.
+    const t0 = nextTs()
+    const legacyEntry: TimelineEntry = {
+      timestamp: t0,
+      kind: 'user',
+      summaryLen: 200, // the saturated, post-clip value the old parser produced
+    }
+    const tl = timeline('s-legacy', [legacyEntry])
+    const tok = tokenData('s-legacy', 'claude-opus-4-8', [
+      tokenEntry({ timestamp: t0, outputTokens: 10 }),
+    ])
+    const turn = computeModelRecommendations([tok], [], [tl], [])[0].turns[0]
+    expect(turn.features.turnLengthChars).toBe(200)
+    expect(turn.bucket).toBe('trivial')
   })
 
   it('classifies 5 tools / 3 file edits / short prompt as moderate → Sonnet', () => {

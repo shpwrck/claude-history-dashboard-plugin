@@ -1,0 +1,1 @@
+import{t as e}from"./claim-provenance-CtKfTmcV.js";var t=1440*60*1e3;function n(n,r,i){if(n===void 0||!e(n))return!1;let a=Date.parse(n);return Number.isFinite(a)?r-a>i*t:!1}export{n as t};

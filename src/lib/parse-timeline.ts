@@ -1,4 +1,4 @@
-import { parseJsonl, parseMessage, summarize, type RawSessionEntry } from './parse-utils';
+import { parseJsonl, parseMessage, summarize, summaryFlatLen, type RawSessionEntry } from './parse-utils';
 import type { SessionDimensions } from '../types';
 
 /**
@@ -100,6 +100,17 @@ export interface TimelineEntry {
   kind: EntryKind;
   summary?: string; // one-line, already truncated to ~200 chars; stripped from bulk timelines
   summaryLen?: number;
+  /**
+   * The TRUE pre-clip length of the source text, set only when the `summary`
+   * above was actually truncated (raw length > `summaryLen`); omitted otherwise
+   * (#3511). `summaryLen` measures the CLIPPED `summary`, so it saturates at
+   * `MAX_SUMMARY` (200) — a 200-char and a 200,000-char prompt look identical.
+   * Turn-complexity classification (parse-model-recommendation) reads this first
+   * so a long prompt is never mistaken for a trivial one. Sparse by design (only
+   * present when it differs from `summaryLen`) to keep the bulk payload small;
+   * kept only on `user` entries by `slimSessionTimeline`, matching `summaryLen`.
+   */
+  summaryRawLen?: number;
   hasCode?: boolean;
   isQuestion?: boolean;
   toolName?: string; // when kind === 'tool_use'
@@ -192,9 +203,17 @@ export interface SessionTimeline extends SessionDimensions {
   slim?: boolean;
 }
 
-function summarySignals(summary: string): Pick<TimelineEntry, 'summaryLen' | 'hasCode' | 'isQuestion'> {
+function summarySignals(
+  summary: string,
+  rawLen?: number
+): Pick<TimelineEntry, 'summaryLen' | 'summaryRawLen' | 'hasCode' | 'isQuestion'> {
+  const summaryLen = summary.length;
   return {
-    summaryLen: summary.length,
+    summaryLen,
+    // Only record the true pre-clip length when the summary was actually
+    // truncated — a clipped-only entry reads its length back from `summaryLen`
+    // (#3511). Sparse to keep the bulk timeline payload small.
+    ...(typeof rawLen === 'number' && rawLen > summaryLen ? { summaryRawLen: rawLen } : {}),
     hasCode: summary.includes('```'),
     isQuestion: summary.trimEnd().endsWith('?'),
   };
@@ -214,11 +233,20 @@ function withSummarySignals(entry: TimelineEntry): TimelineEntry {
 }
 
 function timelineEntry(
-  entry: Omit<TimelineEntry, 'summaryLen' | 'hasCode' | 'isQuestion'> & {
+  entry: Omit<TimelineEntry, 'summaryLen' | 'summaryRawLen' | 'hasCode' | 'isQuestion'> & {
     summary: string;
+    /**
+     * The ORIGINAL text before `summarize()` clipped it, when the caller has it
+     * (real user prompts). Used only to record the true pre-clip length as
+     * `summaryRawLen` (#3511); never stored on the entry itself. Omit it and the
+     * entry behaves exactly as before (no `summaryRawLen`).
+     */
+    rawText?: string;
   }
 ): TimelineEntry {
-  return { ...entry, ...summarySignals(entry.summary) };
+  const { rawText, ...rest } = entry;
+  const rawLen = rawText !== undefined ? summaryFlatLen(rawText) : undefined;
+  return { ...rest, ...summarySignals(entry.summary, rawLen) };
 }
 
 function firstPromptPreview(entries: TimelineEntry[]): string | undefined {
@@ -254,8 +282,9 @@ export function timelineEntryId(
  * `kind === 'user'` entries (conversation-patterns.ts, session-overview.ts,
  * session-scorecard.ts, parse-model-recommendation.ts — all filter on the user
  * kind first). So we:
- *   - keep `summaryLen` only on `user` entries (its only readers; absent elsewhere
- *     reads back as 0 via the `?? summary?.length ?? 0` fallback on stripped bulk);
+ *   - keep `summaryLen` (and the sparse `summaryRawLen`, #3511) only on `user`
+ *     entries (their only readers; absent elsewhere reads back as 0 via the
+ *     `?? summary?.length ?? 0` fallback on stripped bulk);
  *   - keep `hasCode`/`isQuestion` only on `user` entries AND only when `true`
  *     (their `e.hasCode ?? containsCodeBlock(summary)` fallbacks recompute false on
  *     the stripped bulk summary, so an omitted flag is read back as false —
@@ -269,12 +298,13 @@ export function slimSessionTimeline(timeline: SessionTimeline): SessionTimeline 
     const rest = { ...filled };
     delete rest.summary;
     if (rest.kind === 'user') {
-      // user entries: keep summaryLen; demote the booleans to sparse-true.
+      // user entries: keep summaryLen/summaryRawLen; demote the booleans to sparse-true.
       if (!rest.hasCode) delete rest.hasCode;
       if (!rest.isQuestion) delete rest.isQuestion;
     } else {
       // non-user entries: no bulk reader consults the derived signals.
       delete rest.summaryLen;
+      delete rest.summaryRawLen;
       delete rest.hasCode;
       delete rest.isQuestion;
     }
@@ -585,6 +615,7 @@ export function parseSessionTimeline(
           timestamp,
           kind: 'user',
           summary: summarize(msg.content),
+          rawText: msg.content,
           ...(isInterruptSentinel(msg.content) ? { interrupted: true } : {}),
           ...(isRediscoveryText(msg.content) ? { rediscovery: true } : {}),
         }));
@@ -606,6 +637,7 @@ export function parseSessionTimeline(
               timestamp,
               kind: 'user',
               summary: summarize(block.text ?? ''),
+              rawText: block.text ?? '',
               ...(isInterruptSentinel(block.text) ? { interrupted: true } : {}),
               ...(isRediscoveryText(block.text) ? { rediscovery: true } : {}),
             }));

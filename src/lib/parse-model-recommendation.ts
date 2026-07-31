@@ -220,7 +220,13 @@ function sliceTimeline(timeline: SessionTimeline): TurnSlice[] {
     lastTs = entry.timestamp || lastTs;
 
     if (entry.kind === 'user') {
-      const promptChars = entry.summaryLen ?? entry.summary?.length ?? 0;
+      // Prefer the TRUE pre-clip length (#3511): `summaryLen` saturates at
+      // MAX_SUMMARY (200) because it measures the already-clipped summary, so
+      // without `summaryRawLen` a long complex prompt would look 200 chars and
+      // slip under TRIVIAL_PROMPT_CHARS. Fall back to `summaryLen` (present when
+      // no truncation happened) then the raw summary length.
+      const promptChars =
+        entry.summaryRawLen ?? entry.summaryLen ?? entry.summary?.length ?? 0;
       const promptSummary =
         entry.summary ?? (slices.length === 0 ? timeline.firstPromptPreview ?? '' : '');
       // Multi-block user messages can produce several adjacent `user` entries;
