@@ -14,8 +14,8 @@ hook reads (`http://127.0.0.1:5173/api/recommendations.json`), so keeping it
 current and healthy is what makes the injected `[recs]` findings reflect the
 latest engine.
 
-> **Box migration (2026-08-03).** The instance moved to a new machine: user
-> `jskrzype`, `HOME=/home/jskrzype`, host uid **104177** (not 1000), SELinux
+> **Box migration (2026-08-03).** The instance moved to a new machine: the
+> current host account uses `$HOME`, host uid **104177** (not 1000), SELinux
 > **Enforcing**, checkout at `~/workdir/claude-history-dashboard`,
 > podman-compose 1.5.0. Container and compose-project names changed to the
 > defaults derived from that checkout dir (`claude-history-dashboard[_app_1]`);
@@ -152,7 +152,7 @@ to the pin.)
   recreate ran without the box override — re-run with all three `-f` files.
 - **Mount source ends in `.claude}`:** expected (the shim). Verify
   `readlink ~/.local/share/chd/claude-dir-shim/.claude}` →
-  `/home/jskrzype/.claude`.
+  `$HOME/.claude`.
 - **`manifest unknown` / `denied` from ghcr.io:** almost certainly token
   scope, not a dead pin — re-run the login above; the user grants
   `read:packages` via `gh auth refresh` if missing (#3581).
