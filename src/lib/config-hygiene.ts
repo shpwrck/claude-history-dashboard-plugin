@@ -461,17 +461,17 @@ function usagesForProject(usages: SessionUsage[], project: string): SessionUsage
  * in-window session yet get hedged (or not) using a completely different
  * project's coverage.
  *
- * Two upper-bound rules keep this honest:
+ * Two identity/timestamp rules keep this honest:
  *  - Sessions are grouped by canonical project identity, not raw string
  *    equality, so `/repo/a/` and `/repo/a` (or a Windows drive-letter/UNC
  *    case/separator variant) contribute to the same project's guard and
  *    coverage instead of silently splitting into two.
- *  - A session timestamped after `now` (clock skew, or malformed imported
- *    data) is excluded entirely — from both the in-window guard and the
- *    coverage span — mirroring the upper bound `computeActivityRollups`
- *    (`session-summaries.ts`) already applies. Without this, a project with
- *    no valid current-or-historical session could still pass the guard on
- *    a bogus future timestamp.
+ *  - A non-finite, non-positive, or post-`now` session timestamp (clock skew,
+ *    or malformed imported data) is excluded entirely — from both the
+ *    in-window guard and the coverage span — mirroring the validity guard
+ *    that other freshness derivations already apply. Without this, a project
+ *    with no valid current-or-historical session could still pass the guard or
+ *    lose its short-window hedge to an unrenderable oldest timestamp.
  */
 function computeProjectObservations(
   sessions: HygieneInput['sessions'],
@@ -482,7 +482,8 @@ function computeProjectObservations(
   const observedInWindow = new Set<string>();
   for (const s of sessions) {
     if (!s.project) continue;
-    if (s.startTime > now) continue;
+    if (!Number.isFinite(s.startTime)) continue;
+    if (s.startTime <= 0 || s.startTime > now) continue;
     if (s.startTime >= windowStart) observedInWindow.add(projectObservationKey(s.project));
   }
   const out = new Map<string, HygieneHedge | undefined>();
@@ -495,7 +496,7 @@ function computeProjectObservations(
 }
 
 /**
- * Oldest VALID (positive, not future-dated) session start per canonical
+ * Oldest VALID (finite, positive, not future-dated) session start per canonical
  * project identity — the single primitive behind both the per-project
  * guard/hedge map ({@link computeProjectObservations}) and the per-scope
  * span export below, so the two derivations can never disagree
@@ -508,8 +509,8 @@ function oldestValidStartByProject(
   const oldestByProject = new Map<string, number>();
   for (const s of sessions) {
     if (!s.project) continue;
-    if (s.startTime > now) continue;
-    if (s.startTime <= 0) continue;
+    if (!Number.isFinite(s.startTime)) continue;
+    if (s.startTime <= 0 || s.startTime > now) continue;
     const key = projectObservationKey(s.project);
     const oldest = oldestByProject.get(key);
     if (oldest == null || s.startTime < oldest) oldestByProject.set(key, s.startTime);

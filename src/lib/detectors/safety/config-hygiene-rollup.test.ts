@@ -111,6 +111,46 @@ describe('safety.config-hygiene-rollup (#1164)', () => {
     expect(rec.provenance?.stale).toBe(true);
   });
 
+  it('keeps project evidence bounded when a malformed NaN start precedes valid recent coverage', () => {
+    const rec = detector.rule(
+      input({
+        sessions: [
+          { sessionId: 's-malformed', project: '/repo/new', startTime: Number.NaN },
+          { sessionId: 's-valid', project: '/repo/new', startTime: NOW - 2 * DAY_MS },
+        ] as unknown as RecommendationInput['sessions'],
+        liveConfig: liveConfig({
+          mcpServers: [
+            {
+              id: 'project-server-a',
+              scope: 'project',
+              sourcePath: '/repo/new/.mcp.json',
+              enabledByProjects: ['/repo/new'],
+            },
+            {
+              id: 'project-server-b',
+              scope: 'project',
+              sourcePath: '/repo/new/.mcp.json',
+              enabledByProjects: ['/repo/new'],
+            },
+          ],
+        }),
+      }),
+      NOW,
+    )!;
+
+    expect(rec.title).toContain('unused in the available history');
+    expect(rec.title).not.toContain('last 30 days');
+    expect(rec.detail).toContain('~2 day(s) of retained coverage');
+    expect(rec.detail).toContain('as of 2026-05-30');
+    expect(rec.evidence?.some((row) => row.startsWith('mcpServer project-server-a '))).toBe(
+      true
+    );
+    expect(rec.provenance?.asOf).toBe('2026-05-30');
+    expect(rec.provenance?.stale).toBe(true);
+    expect(rec.fix?.target).toBe('command');
+    expect(rec.fix?.snippet).toContain('project-server-a');
+  });
+
   it('uses the least-observed hedged scope and newest contributing observation in a mixed rollup', () => {
     const rec = detector.rule(
       input({

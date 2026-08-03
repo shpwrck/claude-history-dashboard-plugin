@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { computeConfigHygiene } from './config-hygiene';
+import {
+  computeConfigHygiene,
+  observedWindowDaysForScope,
+} from './config-hygiene';
 import type { LiveConfig } from '../types';
 import type { SessionAttribution } from './parse-agents';
 
@@ -495,6 +498,82 @@ describe('computeConfigHygiene project-scoped MCP servers (#3119)', () => {
     });
   });
 
+  it('ignores NaN when deriving a project hedge from a valid recent session', () => {
+    const sessions = [
+      { sessionId: 's-malformed', project: '/repo/a', startTime: Number.NaN },
+      { sessionId: 's-recent', project: '/repo/a', startTime: now - 2 * DAY_MS },
+    ];
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [],
+      sessions,
+      now,
+    });
+
+    expect(findings).toMatchObject([
+      {
+        id: 'mcpServer.unused:db@/repo/a',
+        hedge: 'window-shorter-than-threshold',
+      },
+    ]);
+    expect(
+      observedWindowDaysForScope(
+        { kind: 'project', project: '/repo/a' },
+        sessions,
+        now
+      )
+    ).toBe(2);
+  });
+
+  it('does not let a non-finite-only project corpus qualify as observed', () => {
+    const sessions = [
+      { sessionId: 's-nan', project: '/repo/a', startTime: Number.NaN },
+      {
+        sessionId: 's-positive-infinity',
+        project: '/repo/a',
+        startTime: Number.POSITIVE_INFINITY,
+      },
+      {
+        sessionId: 's-negative-infinity',
+        project: '/repo/a',
+        startTime: Number.NEGATIVE_INFINITY,
+      },
+    ];
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        mcpServers: [
+          {
+            id: 'db',
+            scope: 'project',
+            sourcePath: '/home/u/.claude.json',
+            enabledByProjects: ['/repo/a'],
+          },
+        ],
+      }),
+      attribution: [],
+      sessions,
+      now,
+    });
+
+    expect(findings).toEqual([]);
+    expect(
+      observedWindowDaysForScope(
+        { kind: 'project', project: '/repo/a' },
+        sessions,
+        now
+      )
+    ).toBeNull();
+  });
+
   it('matches usage by canonical project identity, not raw string spelling — a session under a differently-spelled but equivalent project root still counts as usage', () => {
     const findings = computeConfigHygiene({
       liveConfig: liveConfig({
@@ -527,7 +606,7 @@ describe('computeConfigHygiene project-scoped MCP servers (#3119)', () => {
     expect(findings).toEqual([]);
   });
 
-  it('does not treat a future-timestamped session as in-window observation (clock skew / malformed data)', () => {
+  it('does not treat infinity or a future timestamp as in-window observation', () => {
     const findings = computeConfigHygiene({
       liveConfig: liveConfig({
         mcpServers: [
@@ -545,12 +624,35 @@ describe('computeConfigHygiene project-scoped MCP servers (#3119)', () => {
       // historical observation of /repo/a at all. A lower-bound-only window
       // check would still admit it (a future timestamp is >= windowStart).
       sessions: [
+        {
+          sessionId: 's-infinity',
+          project: '/repo/a',
+          startTime: Number.POSITIVE_INFINITY,
+        },
         { sessionId: 's-future', project: '/repo/a', startTime: now + 60 * 60 * 1000 },
       ],
       now,
     });
 
     expect(findings).toEqual([]);
+    expect(
+      observedWindowDaysForScope(
+        { kind: 'project', project: '/repo/a' },
+        [
+          {
+            sessionId: 's-infinity',
+            project: '/repo/a',
+            startTime: Number.POSITIVE_INFINITY,
+          },
+          {
+            sessionId: 's-future',
+            project: '/repo/a',
+            startTime: now + 60 * 60 * 1000,
+          },
+        ],
+        now
+      )
+    ).toBeNull();
   });
 });
 
