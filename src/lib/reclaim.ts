@@ -47,7 +47,7 @@
 import type { RecCategory } from './detectors/rec-enums';
 import type { Recommendation } from './detectors/types';
 import type { SessionTokenData, TokenEntry } from '../types';
-import { getModelPricing } from './pricing';
+import { getModelPricing, serverToolCost } from './pricing';
 
 /** The five priced token sub-pools `entryCostAtModel` sums. */
 export type PoolId =
@@ -360,13 +360,6 @@ function poolTokens(entry: TokenEntry, pool: PoolId): number {
   }
 }
 
-/** Server-tool flat fee for one entry (web_search; web_fetch is $0 today). */
-function serverFee(entry: TokenEntry): number {
-  // Imported lazily-free: keep the constant local to avoid a pricing re-import
-  // surface beyond what entryCostAtModel already pulls in.
-  return entry.webSearchRequests * 0.01 + entry.webFetchRequests * 0;
-}
-
 /**
  * Build the priced residual matrix from the actual token usage.
  *
@@ -403,7 +396,7 @@ function buildResidualMatrix(tokenData: SessionTokenData[]): Map<string, ScopeRe
       for (const pool of POOL_IDS) {
         row.tokens[pool] += poolTokens(entry, pool);
       }
-      row.server += serverFee(entry);
+      row.server += serverToolCost(entry);
     }
   }
   return matrix;
@@ -502,12 +495,21 @@ function counterfactualDefect(cf: ReclaimCounterfactual): string | null {
  *
  * `onReject` receives a one-line diagnostic for each rejected cell/claim; it
  * defaults to `console.warn` so a malformed claim is *visible*, not swallowed.
- * Tests pass a collector instead.
+ * Tests pass a collector instead. `onDirectUsdAllocation` is optional reporting
+ * instrumentation: it exposes the exact accepted per-scope drains from this
+ * authoritative cascade without changing the booked result (#3545).
  */
+export type DirectUsdAllocationObserver = (
+  claimIndex: number,
+  scopeKey: string,
+  usd: number
+) => void;
+
 export function runReclaimCascade(
   claims: ReclaimClaim[],
   tokenData: SessionTokenData[],
-  onReject: (msg: string) => void = (m) => console.warn(`[reclaim] ${m}`)
+  onReject: (msg: string) => void = (m) => console.warn(`[reclaim] ${m}`),
+  onDirectUsdAllocation?: DirectUsdAllocationObserver
 ): ReclaimCascadeResult {
   const matrix = buildResidualMatrix(tokenData);
   const billOriginal = billOf(matrix);
@@ -530,12 +532,16 @@ export function runReclaimCascade(
   // intra-cause tiebreaker; `leverId` breaks remaining ties for determinism. The
   // total is order-INVARIANT, so this only sets each lever's attribution split —
   // labels never move a dollar.
-  const ordered = [...claims].sort(
-    (a, b) =>
-      causeRank(a.cause) - causeRank(b.cause) ||
-      a.orderKey - b.orderKey ||
-      a.leverId.localeCompare(b.leverId)
-  );
+  // perf-index-contract: reclaim-cascade-order always-consumed: every cascade traverses the complete ordered list to produce its booked result
+  const ordered = claims
+    .map((claim, inputIndex) => ({ claim, inputIndex }))
+    .sort(
+      (a, b) =>
+        causeRank(a.claim.cause) - causeRank(b.claim.cause) ||
+        a.claim.orderKey - b.claim.orderKey ||
+        a.claim.leverId.localeCompare(b.claim.leverId) ||
+        a.inputIndex - b.inputIndex
+    );
 
   const booked: BookedClaim[] = [];
   const byCategory: Partial<Record<RecCategory, number>> = {};
@@ -554,7 +560,7 @@ export function runReclaimCascade(
     };
   };
 
-  for (const claim of ordered) {
+  for (const { claim, inputIndex } of ordered) {
     const cf = claim.counterfactual;
 
     // Reject malformed numeric inputs before any mutation (#3165): a negative or
@@ -609,6 +615,13 @@ export function runReclaimCascade(
         row.server -= take;
         remaining -= take;
         marginal += take;
+        if (take > EPS) {
+          onDirectUsdAllocation?.(
+            inputIndex,
+            scopeKeyOf(row.sessionId, row.model),
+            take
+          );
+        }
         if (remaining <= EPS) break;
       }
     } else {

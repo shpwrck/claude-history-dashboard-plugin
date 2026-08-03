@@ -29,6 +29,7 @@ import type { Detector, RecommendationInput } from '../types';
 import type { HygieneFinding } from '../../config-hygiene';
 import { computeConfigHygiene } from '../../config-hygiene';
 import { buildConfigRemovalSnippetBlock } from '../../config-hygiene-actions';
+import { unusedWindowWording } from '../workflow/unused-installed-window';
 
 /** Families WITHOUT an existing detector — the only ones this rollup may emit,
  *  so it can never overlap workflow.unused-installed-{skills,subagents,commands}. */
@@ -46,10 +47,6 @@ function scopeLabel(scope: HygieneFinding['scope']): string {
   return scope.kind === 'global' ? 'global' : `project ${scope.project}`;
 }
 
-function isoDate(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}
-
 export const detector: Detector = {
   id: 'safety.config-hygiene-rollup',
   category: 'safety',
@@ -57,14 +54,15 @@ export const detector: Detector = {
   rule(input: RecommendationInput, now: number) {
     if (!input.liveConfig) return null;
 
+    const sessions = input.sessions.map((s) => ({
+      sessionId: s.sessionId,
+      startTime: s.startTime,
+      project: s.project,
+    }));
     const unused = computeConfigHygiene({
       liveConfig: input.liveConfig,
       attribution: input.attribution ?? [],
-      sessions: input.sessions.map((s) => ({
-        sessionId: s.sessionId,
-        startTime: s.startTime,
-        project: s.project,
-      })),
+      sessions,
       now,
     }).filter((f) => UNCOVERED_FAMILIES.has(f.resourceType) && f.windowCount === 0);
 
@@ -72,8 +70,7 @@ export const detector: Detector = {
 
     const mcp = unused.filter((f) => f.resourceType === 'mcpServer');
     const plugins = unused.filter((f) => f.resourceType === 'plugin');
-    const hedged = unused.some((f) => f.hedge === 'window-shorter-than-threshold');
-    const asOf = isoDate(now);
+    const window = unusedWindowWording(unused, sessions, now);
 
     const parts: string[] = [];
     if (mcp.length) parts.push(`${mcp.length} MCP server(s)`);
@@ -81,18 +78,15 @@ export const detector: Detector = {
 
     const detail =
       `${unused.length} configured resource(s) — ${parts.join(', ')} — recorded no ` +
-      `invocations in the last 30 days. Unused MCP servers and plugins still load at ` +
+      `invocations ${window.detailWindow}. Unused MCP servers and plugins still load at ` +
       `startup, add to the tool list (and its token cost), and widen the config / ` +
-      `attack surface.` +
-      (hedged
-        ? ` As of ${asOf} the available history is shorter than 30 days, so treat this as provisional.`
-        : '');
+      `attack surface.`;
 
     return {
       id: 'safety.config-hygiene-rollup',
       category: 'safety',
       severity: unused.length >= WARN_UNUSED ? 'warning' : 'info',
-      title: 'Unused MCP servers / plugins — prune config',
+      title: `MCP servers / plugins unused ${window.titleWindow} — prune config`,
       detail,
       action:
         'Remove or disable the MCP servers and plugins you are not using — drop the ' +
@@ -114,7 +108,9 @@ export const detector: Detector = {
       provenance: {
         observations: [
           {
-            claim: `${unused.length} configured mcpServer/plugin resource(s) had zero invocations in the 30-day window`,
+            claim:
+              `${unused.length} configured mcpServer/plugin resource(s) had zero invocations ` +
+              window.detailWindow,
             source: 'config-hygiene',
             field: 'computeConfigHygiene() -> HygieneFinding{resourceType in [mcpServer,plugin], windowCount: 0}',
             value: unused.length,
@@ -125,8 +121,8 @@ export const detector: Detector = {
           'they cost startup time and tool-list tokens and widen the attack surface ' +
           'with no offsetting use. (Skills/subagents/commands are covered by the ' +
           'workflow.unused-installed-* detectors and excluded here to avoid double-count.)',
-        asOf,
-        stale: hedged ? true : undefined,
+        ...(window.asOf ? { asOf: window.asOf } : {}),
+        stale: window.hedged && window.asOf ? true : undefined,
       },
     };
   },

@@ -30,7 +30,7 @@ import type { SessionTimeline } from './parse-timeline';
 import type { SessionAttribution } from './parse-agents';
 import {
   resolveModelPricing,
-  SERVER_TOOL_PRICING,
+  serverToolCost,
   type ModelPricing,
   type ModelPricingResult,
 } from './pricing';
@@ -142,8 +142,7 @@ function entryCostAt(entry: TokenEntry, pricing: ModelPricing): number {
     (cache5m / 1_000_000) * pricing.cacheWrite5m +
     (cache1h / 1_000_000) * pricing.cacheWrite1h +
     (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-    entry.webSearchRequests * SERVER_TOOL_PRICING.webSearchRequest +
-    entry.webFetchRequests * SERVER_TOOL_PRICING.webFetchRequest
+    serverToolCost(entry)
   );
 }
 

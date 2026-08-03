@@ -38,7 +38,7 @@
 import type { LiveConfig, SessionTokenData, TokenEntry } from '../types';
 import type { ClaimProvenance } from './claim-provenance';
 import { isCanonicalIsoInstant } from './iso-instant';
-import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
+import { resolveModelPricing, serverToolCost } from './pricing';
 import { estimateTokens } from './thinking-tokens';
 
 /** The six named buckets a token bill decomposes into. */
@@ -277,8 +277,7 @@ function entryCostSplit(entry: TokenEntry): { input: number; output: number } {
     (cache5m / 1_000_000) * pricing.cacheWrite5m +
     (cache1h / 1_000_000) * pricing.cacheWrite1h +
     (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-    entry.webSearchRequests * SERVER_TOOL_PRICING.webSearchRequest +
-    entry.webFetchRequests * SERVER_TOOL_PRICING.webFetchRequest;
+    serverToolCost(entry);
   const output = (entry.outputTokens / 1_000_000) * pricing.output;
   return { input, output };
 }

@@ -25,17 +25,22 @@
  * "~200 day(s) … shorter than the 30-day threshold" claim. The quoted figure
  * is therefore the MINIMUM contributing hedged span, floored so it can never
  * round up to the threshold it is asserted to be under.
- * `safety.config-hygiene-rollup` carries its own (earlier, #1164) hedge
- * wording; this helper standardizes the four workflow detectors named by the
- * audit finding.
+ * `safety.config-hygiene-rollup` also reuses this derivation (#3531), so every
+ * recommendation projected from config hygiene phrases and dates the same
+ * evidence window from one canonical helper.
  */
 import type { HygieneFinding, HygieneInput } from '../../config-hygiene';
-import { observedWindowDaysForScope } from '../../config-hygiene';
+import {
+  newestObservedStartForScopes,
+  observedWindowDaysForScope,
+} from '../../config-hygiene';
 import { newestEpochDate } from '../shared';
 
 export interface UnusedWindowWording {
   /** True when the retained history is shorter than the findings' window. */
   hedged: boolean;
+  /** Newest retained observation supporting any contributing finding scope. */
+  asOf?: string;
   /** Window phrase for titles: "in the last 30 days" or "in the available history". */
   titleWindow: string;
   /**
@@ -61,12 +66,19 @@ export function unusedWindowWording(
   now: number
 ): UnusedWindowWording {
   const windowDays = unused[0]?.windowDays ?? 30;
+  const asOf = newestEpochDate([
+    newestObservedStartForScopes(
+      unused.map((finding) => finding.scope),
+      sessions,
+      now
+    ),
+  ]);
   const hedgedFindings = unused.filter(
     (f) => f.hedge === 'window-shorter-than-threshold'
   );
   if (hedgedFindings.length === 0) {
     const full = `in the last ${windowDays} days`;
-    return { hedged: false, titleWindow: full, detailWindow: full };
+    return { hedged: false, asOf, titleWindow: full, detailWindow: full };
   }
   // Minimum span across the DISTINCT scopes that carried a hedge — each hedge
   // was decided from its own scope's coverage, so that is the only span the
@@ -90,7 +102,6 @@ export function unusedWindowWording(
     minSpan !== null && minSpan < windowDays
       ? Math.max(1, Math.floor(minSpan))
       : null;
-  const asOf = newestEpochDate(sessions.map((s) => s.startTime));
   const asOfClause = asOf ? ` as of ${asOf}` : '';
   const qualifier =
     days !== null
@@ -98,6 +109,7 @@ export function unusedWindowWording(
       : `retained coverage${asOfClause} shorter than the ${windowDays}-day threshold in at least one contributing scope`;
   return {
     hedged: true,
+    asOf,
     titleWindow: 'in the available history',
     detailWindow: `in the available history (${qualifier})`,
   };

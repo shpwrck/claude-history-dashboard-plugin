@@ -4,6 +4,7 @@ import {
   type ReclaimTrendlineWorkload,
 } from './reclaim-trendline';
 import { scopeKeyOf, type ReclaimClaim } from './reclaim';
+import { serverToolCost } from './pricing';
 import type { Recommendation } from './detectors/types';
 import type { SessionTokenData, TokenEntry } from '../types';
 
@@ -146,6 +147,103 @@ describe('buildReclaimTrendline', () => {
     expect(out.points[0].reclaim).toBeCloseTo(0.01, 9);
     expect(out.points[0].afterReclaim).toBeCloseTo(0.01, 9);
     expect(out.totalReclaim).toBeCloseTo(0.01, 9);
+  });
+
+  it('allocates a whole-window directUsd reclaim across every contributing week', () => {
+    const model = 'claude-opus-4-7';
+    const scopeA = scopeKeyOf('scope-a', model);
+    const scopeB = scopeKeyOf('scope-b', model);
+    const td = [
+      session('scope-a', model, [
+        entry({ timestamp: '2026-01-06T09:00:00.000Z', webSearchRequests: 1 }),
+        entry({ timestamp: '2026-01-13T09:00:00.000Z', webSearchRequests: 1 }),
+      ]),
+      session('scope-b', model, [
+        entry({ timestamp: '2026-01-06T10:00:00.000Z', webSearchRequests: 1 }),
+        entry({ timestamp: '2026-01-13T10:00:00.000Z', webSearchRequests: 1 }),
+      ]),
+    ];
+    const recs = [
+      rec(
+        'cost.flat-reclaim',
+        claim({
+          leverId: 'cost.flat-reclaim',
+          orderKey: 10,
+          scopeKeys: [scopeA, scopeB],
+          counterfactual: { kind: 'directUsd', usd: 0.03 },
+        })
+      ),
+    ];
+    const rejects: string[] = [];
+
+    const out = buildReclaimTrendline(recs, td, (message) => rejects.push(message));
+
+    expect(out.points).toHaveLength(2);
+    expect(out.points.every((point) => point.reclaim > 0)).toBe(true);
+    expect(out.points.reduce((sum, point) => sum + point.reclaim, 0)).toBeCloseTo(
+      out.totalReclaim,
+      9
+    );
+    expect(out.totalReclaim).toBeCloseTo(0.03, 9);
+    expect(rejects.filter((message) => message.includes('exceeds server-fee residual'))).toEqual(
+      []
+    );
+  });
+
+  it('weights directUsd weekly allocation by each scope\'s observed server fees', () => {
+    const model = 'claude-opus-4-7';
+    const scopeA = scopeKeyOf('scope-a', model);
+    const scopeB = scopeKeyOf('scope-b', model);
+    const td = [
+      session('scope-a', model, [
+        entry({ timestamp: '2026-01-06T09:00:00.000Z', webSearchRequests: 1 }),
+        entry({ timestamp: '2026-01-13T09:00:00.000Z', webSearchRequests: 3 }),
+      ]),
+      session('scope-b', model, [
+        entry({ timestamp: '2026-01-06T10:00:00.000Z', webSearchRequests: 6 }),
+        entry({ timestamp: '2026-01-13T10:00:00.000Z', webSearchRequests: 2 }),
+      ]),
+    ];
+    const recs = [
+      rec(
+        'cost.weighted-flat-reclaim',
+        claim({
+          leverId: 'cost.weighted-flat-reclaim',
+          orderKey: 10,
+          // Window-wide order drains all $0.04 from A, then $0.02 from B.
+          scopeKeys: [scopeA, scopeB],
+          counterfactual: { kind: 'directUsd', usd: 0.06 },
+        })
+      ),
+    ];
+    const rejects: string[] = [];
+
+    const out = buildReclaimTrendline(recs, td, (message) => rejects.push(message));
+    const canonicalServerUsd = td
+      .flatMap((data) => data.entries)
+      .reduce((sum, tokenEntry) => sum + serverToolCost(tokenEntry), 0);
+
+    // A's $0.04 allocation splits $0.01/$0.03. B's $0.02 allocation splits
+    // 6:2 ($0.015/$0.005), so the two weekly marginals are $0.025/$0.035.
+    expect(out.points.map((point) => point.reclaim)).toEqual([
+      expect.closeTo(0.025, 9),
+      expect.closeTo(0.035, 9),
+    ]);
+    expect(out.points.reduce((sum, point) => sum + point.reclaim, 0)).toBeCloseTo(
+      out.totalReclaim,
+      9
+    );
+    // Whole-window matrix pricing and weekly slice pricing share the same
+    // authoritative entry-fee helper, so a pricing-table change cannot make
+    // the allocation weights drift from the residual they partition.
+    expect(out.gauge.totalBill).toBeCloseTo(canonicalServerUsd, 9);
+    expect(out.points.reduce((sum, point) => sum + point.baseline, 0)).toBeCloseTo(
+      canonicalServerUsd,
+      9
+    );
+    expect(rejects.filter((message) => message.includes('exceeds server-fee residual'))).toEqual(
+      []
+    );
   });
 
   it('computes an INDEPENDENT coverage gauge that is never multiplied into the trendline', () => {

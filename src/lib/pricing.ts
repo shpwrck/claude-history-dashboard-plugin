@@ -39,16 +39,34 @@ export { MODEL_PRICING, type ModelPricing } from './model-registry';
  * These are charged in addition to the token cost of the content the tool
  * pulls into context. See pricing notes above for sourcing.
  */
+const WEB_SEARCH_REQUEST_USD = 0.01;
+const WEB_FETCH_REQUEST_USD = 0;
+
 export const SERVER_TOOL_PRICING = {
   /** $10 / 1,000 web searches (VERIFIED 2026-05-26). */
-  webSearchRequest: 0.01,
+  webSearchRequest: WEB_SEARCH_REQUEST_USD,
   /**
    * Web fetch has no per-request fee as of 2026-05-26 (VERIFIED — billed
    * only through token cost). Placeholder kept at 0; update here if Anthropic
    * introduces a per-request charge.
    */
-  webFetchRequest: 0,
+  webFetchRequest: WEB_FETCH_REQUEST_USD,
 } as const;
+
+/**
+ * Canonical flat server-tool fee for one token entry. Keeping this next to the
+ * rate table gives every cost surface — session totals, model scenarios, the
+ * reclaim residual matrix, and weekly allocation weights — one arithmetic
+ * seam when server-tool pricing changes (#3545).
+ */
+export function serverToolCost(
+  entry: Pick<TokenEntry, 'webSearchRequests' | 'webFetchRequests'>
+): number {
+  return (
+    entry.webSearchRequests * WEB_SEARCH_REQUEST_USD +
+    entry.webFetchRequests * WEB_FETCH_REQUEST_USD
+  );
+}
 
 /**
  * Zero-cost pricing tier — used for synthetic / non-billable entries and for

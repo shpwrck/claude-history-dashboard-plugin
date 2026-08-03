@@ -90,7 +90,9 @@ describe('safety.config-hygiene-rollup (#1164)', () => {
   it('carries auditable provenance citing config-hygiene', () => {
     const rec = detector.rule(input(), NOW)!;
     expect(rec.provenance?.observations[0].source).toBe('config-hygiene');
-    expect(rec.provenance?.asOf).toBe('2026-06-01');
+    // Freshness is anchored to the newest retained observation, not the wall
+    // clock passed to the detector.
+    expect(rec.provenance?.asOf).toBe('2026-05-31');
     expect(rec.provenance?.stale).toBeUndefined(); // wide window → not stale
   });
 
@@ -99,7 +101,58 @@ describe('safety.config-hygiene-rollup (#1164)', () => {
       input({ sessions: [{ sessionId: 's1', startTime: NOW - 2 * DAY_MS }] as unknown as RecommendationInput['sessions'] }),
       NOW,
     )!;
-    expect(rec.detail).toMatch(/provisional/i);
+    expect(rec.title).toContain('unused in the available history');
+    expect(rec.title).not.toContain('last 30 days');
+    expect(rec.detail).toContain('invocations in the available history');
+    expect(rec.detail).toContain('~2 day(s) of retained coverage');
+    expect(rec.detail).toContain('as of 2026-05-30');
+    expect(rec.detail).not.toContain('last 30 days');
+    expect(rec.provenance?.asOf).toBe('2026-05-30');
+    expect(rec.provenance?.stale).toBe(true);
+  });
+
+  it('uses the least-observed hedged scope and newest contributing observation in a mixed rollup', () => {
+    const rec = detector.rule(
+      input({
+        sessions: [
+          { sessionId: 's-old', project: '/repo/other', startTime: NOW - 40 * DAY_MS },
+          { sessionId: 's-thin', project: '/repo/new', startTime: NOW - 2 * DAY_MS },
+          { sessionId: 's-latest', project: '/repo/other', startTime: NOW - 1 * DAY_MS },
+        ] as unknown as RecommendationInput['sessions'],
+        liveConfig: liveConfig({
+          mcpServers: [
+            {
+              id: 'project-server-a',
+              scope: 'project',
+              sourcePath: '/repo/new/.mcp.json',
+              enabledByProjects: ['/repo/new'],
+            },
+            {
+              id: 'project-server-b',
+              scope: 'project',
+              sourcePath: '/repo/new/.mcp.json',
+              enabledByProjects: ['/repo/new'],
+            },
+          ],
+          plugins: [
+            {
+              id: 'global-plugin',
+              scope: 'global',
+              sourcePath: '/home/u/.claude/plugins/installed_plugins.json',
+              installPath: '/home/u/.claude/plugins/global-plugin',
+              bundled: { skills: ['global-plugin-skill'], agents: [] },
+            },
+          ],
+        }),
+      }),
+      NOW
+    )!;
+
+    expect(rec.affected).toBe(3);
+    expect(rec.detail).toContain('~2 day(s) of retained coverage');
+    expect(rec.detail).not.toContain('~40');
+    expect(rec.detail).toContain('as of 2026-05-31');
+    expect(rec.provenance?.asOf).toBe('2026-05-31');
     expect(rec.provenance?.stale).toBe(true);
   });
 

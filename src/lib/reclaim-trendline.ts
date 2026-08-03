@@ -40,6 +40,7 @@ import {
 import type { RecCategory } from './detectors/types';
 import type { Recommendation } from './detectors/types';
 import type { SessionTokenData, TokenEntry } from '../types';
+import { serverToolCost } from './pricing';
 
 /** One ISO-week point on the reclaim trendline. */
 export interface ReclaimWeekPoint {
@@ -164,22 +165,43 @@ function entryWeek(entry: TokenEntry): string | null {
 interface ReclaimWeekSlice {
   tokenData: SessionTokenData[];
   scopeKeys: Set<string>;
+  /** Original flat server fees in this week, keyed by cascade scope. */
+  serverUsdByScope: Record<string, number>;
 }
 
-function sliceByWeek(tokenData: SessionTokenData[]): Map<string, ReclaimWeekSlice> {
+interface ReclaimWeekPartition {
+  weeks: Map<string, ReclaimWeekSlice>;
+  /** Whole-window original flat fees, accumulated in the same entry pass. */
+  serverUsdByScope: Record<string, number>;
+}
+
+function sliceByWeek(tokenData: SessionTokenData[]): ReclaimWeekPartition {
   // perf-index-contract: reclaim-week-buckets always-consumed: every slice call enumerates all buckets into the returned weekly map
   const byWeek = new Map<
     string,
-    { sessions: Map<string, SessionTokenData>; scopeKeys: Set<string> }
+    {
+      sessions: Map<string, SessionTokenData>;
+      scopeKeys: Set<string>;
+      serverUsdByScope: Record<string, number>;
+    }
   >();
+  const windowServerUsdByScope: Record<string, number> = Object.create(null);
   for (const d of tokenData) {
     for (const entry of d.entries) {
+      const scopeKey = scopeKeyOf(d.sessionId, entry.model || 'unknown');
+      const serverUsd = serverToolCost(entry);
+      windowServerUsdByScope[scopeKey] =
+        (windowServerUsdByScope[scopeKey] ?? 0) + serverUsd;
       const week = entryWeek(entry);
       if (!week) continue;
       let weekly = byWeek.get(week);
       if (!weekly) {
         // perf-index-contract: reclaim-week-members always-consumed: construction is guarded by a dated entry that immediately queries and populates both indexes
-        weekly = { sessions: new Map(), scopeKeys: new Set() };
+        weekly = {
+          sessions: new Map(),
+          scopeKeys: new Set(),
+          serverUsdByScope: Object.create(null),
+        };
         byWeek.set(week, weekly);
       }
       let slice = weekly.sessions.get(d.sessionId);
@@ -190,7 +212,9 @@ function sliceByWeek(tokenData: SessionTokenData[]): Map<string, ReclaimWeekSlic
         weekly.sessions.set(d.sessionId, slice);
       }
       slice.entries.push(entry);
-      weekly.scopeKeys.add(scopeKeyOf(d.sessionId, entry.model || 'unknown'));
+      weekly.scopeKeys.add(scopeKey);
+      weekly.serverUsdByScope[scopeKey] =
+        (weekly.serverUsdByScope[scopeKey] ?? 0) + serverUsd;
     }
   }
   // perf-index-contract: reclaim-week-output always-consumed: the sole caller always enumerates this returned map and reads its size
@@ -199,9 +223,10 @@ function sliceByWeek(tokenData: SessionTokenData[]): Map<string, ReclaimWeekSlic
     out.set(week, {
       tokenData: [...weekly.sessions.values()],
       scopeKeys: weekly.scopeKeys,
+      serverUsdByScope: weekly.serverUsdByScope,
     });
   }
-  return out;
+  return { weeks: out, serverUsdByScope: windowServerUsdByScope };
 }
 
 /** Index each claim once by the concrete matrix rows it can address. */
@@ -227,11 +252,13 @@ function claimIndexesByScope(claims: ReclaimClaim[]): Map<string, number[]> {
 function claimsForWeek(
   claims: ReclaimClaim[],
   indexesByScope: Map<string, number[]>,
-  scopeKeys: Set<string>
+  slice: ReclaimWeekSlice,
+  windowServerUsdByScope: Record<string, number>,
+  directUsdByClaimAndScope: readonly Record<string, number>[]
 ): ReclaimClaim[] {
   // perf-index-contract: reclaim-applicable-claims always-consumed: every weekly call spreads the complete candidate set into deterministic claim order
   const applicableClaimIndexes = new Set<number>();
-  for (const scopeKey of scopeKeys) {
+  for (const scopeKey of slice.scopeKeys) {
     for (const claimIndex of indexesByScope.get(scopeKey) ?? []) {
       applicableClaimIndexes.add(claimIndex);
     }
@@ -239,16 +266,40 @@ function claimsForWeek(
   // perf-index-contract: reclaim-applicable-order always-consumed: every weekly call immediately maps the complete sorted candidate list into cascade claims
   return [...applicableClaimIndexes]
     .sort((a, b) => a - b)
-    .map((claimIndex) => ({
-      ...claims[claimIndex],
+    .map((claimIndex) => {
+      const claim = claims[claimIndex];
       // resolveRows preserves claim scope order, which is observable for
       // sequential directUsd drains. Intersect in that same original order;
       // never inherit the weekly token-data Set's insertion order.
       // perf-index-contract: reclaim-claim-scope-order always-consumed: every applicable claim immediately filters its complete de-duplicated scope order against the week
-      scopeKeys: [...new Set(claims[claimIndex].scopeKeys)].filter((scopeKey) =>
-        scopeKeys.has(scopeKey)
-      ),
-    }));
+      const scopeKeys = [...new Set(claim.scopeKeys)].filter((scopeKey) =>
+        slice.scopeKeys.has(scopeKey)
+      );
+      if (claim.counterfactual.kind !== 'directUsd') {
+        return { ...claim, scopeKeys };
+      }
+
+      // A directUsd claim is a WHOLE-window amount. The authoritative cascade
+      // above records exactly how much it drained from each scope after every
+      // earlier claim. Allocate each accepted scope drain across its weeks in
+      // proportion to that scope's observed flat fees. Because every claim on
+      // a scope uses the same fee weights, weekly allocations sum to the exact
+      // whole-window marginal and cannot overdraw a week's server residual.
+      let usd = 0;
+      for (const scopeKey of scopeKeys) {
+        const allocated = directUsdByClaimAndScope[claimIndex]?.[scopeKey] ?? 0;
+        const windowServerUsd = windowServerUsdByScope[scopeKey] ?? 0;
+        const weeklyServerUsd = slice.serverUsdByScope[scopeKey] ?? 0;
+        if (allocated > 0 && windowServerUsd > 0 && weeklyServerUsd > 0) {
+          usd += allocated * (weeklyServerUsd / windowServerUsd);
+        }
+      }
+      return {
+        ...claim,
+        scopeKeys,
+        counterfactual: { kind: 'directUsd' as const, usd },
+      };
+    });
 }
 
 /**
@@ -284,8 +335,19 @@ export function buildReclaimTrendline(
   };
 
   // Window-wide cascade → the independent coverage gauge + per-lever marginal.
+  const directUsdByClaimAndScope: Record<string, number>[] = claims.map(() =>
+    Object.create(null)
+  );
   const whole = rollupCascade(
-    runReclaimCascade(claims, tokenData, collectWindowRejection)
+    runReclaimCascade(
+      claims,
+      tokenData,
+      collectWindowRejection,
+      (claimIndex, scopeKey, usd) => {
+        const allocations = directUsdByClaimAndScope[claimIndex];
+        allocations[scopeKey] = (allocations[scopeKey] ?? 0) + usd;
+      }
+    )
   );
   const gauge = coverageGauge(whole.coverageUnion);
   const byCategory = categoryCoverageBreakdown(
@@ -298,7 +360,8 @@ export function buildReclaimTrendline(
   const rejections = [...rejectionsByKey.values()];
 
   // Per-week cascade → the two trendline series.
-  const weeks = sliceByWeek(tokenData);
+  const { weeks, serverUsdByScope: windowServerUsdByScope } =
+    sliceByWeek(tokenData);
   let claimIndexBuilds = 0;
   let indexesByScope: Map<string, number[]> | undefined;
   let weeklyClaimInputs = 0;
@@ -313,7 +376,9 @@ export function buildReclaimTrendline(
       const weeklyClaims = claimsForWeek(
         claims,
         indexesByScope,
-        slice.scopeKeys
+        slice,
+        windowServerUsdByScope,
+        directUsdByClaimAndScope
       );
       weeklyClaimInputs += weeklyClaims.length;
       weeklyScopeKeys += slice.scopeKeys.size;

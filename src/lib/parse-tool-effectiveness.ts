@@ -78,7 +78,16 @@ function normalizeFilePathForComparison(filePath: string): string {
 }
 
 function undoTargetsFile(call: ToolCall, filePath: string): boolean {
-  if (call.toolName !== 'Bash' || !Array.isArray(call.commandUndoFilePaths)) {
+  // Exact parser-owned path evidence proves only what the command attempted.
+  // A recorded tool error proves that attempt did not complete, so it cannot
+  // support the stronger downstream claim that the preceding edit was undone.
+  // `null` remains eligible for legacy caches/transcripts where no explicit
+  // failure was recorded (#3546).
+  if (
+    call.toolName !== 'Bash' ||
+    call.isError === true ||
+    !Array.isArray(call.commandUndoFilePaths)
+  ) {
     return false;
   }
   const target = normalizeFilePathForComparison(filePath);

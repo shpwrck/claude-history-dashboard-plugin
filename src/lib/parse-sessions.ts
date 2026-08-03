@@ -1,6 +1,6 @@
 import type { SessionTokenData, TokenEntry, CompactionEvent } from '../types';
 import { shortenProject } from './parse-history';
-import { resolveModelPricing, SERVER_TOOL_PRICING } from './pricing';
+import { resolveModelPricing, serverToolCost } from './pricing';
 import { parseJsonl, parseMessage, summarize, type ContentBlock } from './parse-utils';
 import { resultContentSize } from './parse-tools';
 import {
@@ -504,8 +504,7 @@ export function estimateEntryCost(entry: TokenEntry): number {
     (cache5m / 1_000_000) * pricing.cacheWrite5m +
     (cache1h / 1_000_000) * pricing.cacheWrite1h +
     (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-    entry.webSearchRequests * SERVER_TOOL_PRICING.webSearchRequest +
-    entry.webFetchRequests * SERVER_TOOL_PRICING.webFetchRequest
+    serverToolCost(entry)
   );
 }
 

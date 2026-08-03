@@ -547,6 +547,39 @@ export function observedWindowDaysForScope(
 }
 
 /**
+ * Newest valid retained-session observation contributing to ANY supplied
+ * hygiene scope. A global finding is supported by the whole session corpus;
+ * otherwise only sessions matching one of the project scopes contribute.
+ * Project comparison uses the same canonical identity primitive as the
+ * observation guard and span derivation above, so freshness cannot drift from
+ * the scopes that actually produced the findings (#3531).
+ */
+export function newestObservedStartForScopes(
+  scopes: readonly HygieneScope[],
+  sessions: HygieneInput['sessions'],
+  now: number
+): number | null {
+  const includesGlobal = scopes.some((scope) => scope.kind === 'global');
+  let newest: number | null = null;
+  for (const session of sessions) {
+    if (!Number.isFinite(session.startTime)) continue;
+    if (session.startTime <= 0 || session.startTime > now) continue;
+    const project = session.project;
+    const contributes =
+      includesGlobal ||
+      (project != null &&
+        scopes.some(
+          (scope) =>
+            scope.kind === 'project' &&
+            sameProjectIdentity(project, scope.project)
+        ));
+    if (!contributes) continue;
+    if (newest === null || session.startTime > newest) newest = session.startTime;
+  }
+  return newest;
+}
+
+/**
  * A plugin counts as "used" when *any* of its bundled artifacts (skills /
  * agents we can attribute today; commands deferred) fires inside the window.
  * Plugins without an enumerable bundle (`bundled` undefined or empty) are

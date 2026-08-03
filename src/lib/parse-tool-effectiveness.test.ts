@@ -72,6 +72,33 @@ describe('computeToolEffectiveness', () => {
     expect(r.effectivenessScore).toBeCloseTo(0.5)
   })
 
+  it('requires successful result evidence before counting a same-path git undo', () => {
+    const effectivenessFor = (isError: boolean | undefined) => {
+      const data = [
+        session('s', [
+          tc('Edit', { ts: at(0), input: { file_path: '/a.ts' } }),
+          tc('Bash', {
+            ts: at(1),
+            input: { command: 'git restore -- /a.ts' },
+            isError,
+            undoFilePaths: ['/a.ts'],
+          }),
+        ]),
+      ]
+      return row(computeToolEffectiveness(data, [], []), 'Edit')
+    }
+
+    const failed = effectivenessFor(true)
+    expect(failed.immediatelyFollowedByUndo).toBe(0)
+    expect(failed.effectivenessScore).toBeCloseTo(2 / 3)
+
+    // Legacy/null result evidence is not a recorded failure and keeps the
+    // established successful-undo behavior.
+    const legacySuccess = effectivenessFor(undefined)
+    expect(legacySuccess.immediatelyFollowedByUndo).toBe(1)
+    expect(legacySuccess.effectivenessScore).toBeCloseTo(0.5)
+  })
+
   it('does not attribute a git undo that targets a different file', () => {
     const data = [
       session('s', [

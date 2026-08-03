@@ -8,6 +8,8 @@ const edit = (i: number, file: string): ToolCall =>
   ({ timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`, toolName: 'Edit', input: { file_path: file }, toolUseId: `e${i}`, isError: null, resultBytes: 0 });
 const restore = (i: number, file: string): ToolCall =>
   ({ timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`, toolName: 'Bash', input: { command: `git restore -- ${file}` }, toolUseId: `b${i}`, isError: null, resultBytes: 0, commandUndoFilePaths: [file] });
+const failedRestore = (i: number, file: string): ToolCall =>
+  ({ ...restore(i, file), isError: true });
 
 // 10 edits on distinct files; the first two are immediately followed by a git restore.
 const calls: ToolCall[] = [];
@@ -30,6 +32,24 @@ describe('workflow.tool-undo-rate (#422)', () => {
   });
   it('self-suppresses when a PreToolUse Edit hook exists', () => {
     expect(detector.rule(input(true), 0)).toBeNull();
+  });
+
+  it('does not fire from a corpus whose only matching restore commands failed', () => {
+    const failedCalls: ToolCall[] = [];
+    let timestamp = 0;
+    failedCalls.push(edit(timestamp++, 'f0'), failedRestore(timestamp++, 'f0'));
+    failedCalls.push(edit(timestamp++, 'f1'), failedRestore(timestamp++, 'f1'));
+    for (let i = 2; i < 10; i++) failedCalls.push(edit(timestamp++, `f${i}`));
+
+    expect(
+      detector.rule(
+        {
+          ...input(),
+          toolData: [{ sessionId: 'failed-only', calls: failedCalls }],
+        },
+        Date.parse('2026-01-02T00:00:00Z')
+      )
+    ).toBeNull();
   });
 
   it('cites both rollback-rate operands and their division', () => {
