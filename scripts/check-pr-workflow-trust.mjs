@@ -16,7 +16,7 @@ const ARC_RUNNERS = new Set([
   'arc-dind-hub',
 ]);
 // perf-index-contract: pr-workflow-canonical-membership always-consumed: every repository audit queries and inventories the complete canonical workflow membership
-const CANONICAL_HOSTED_PR_WORKFLOWS = new Set([
+const CANONICAL_TARGET_ARC_WORKFLOWS = new Set([
   'agent-cross-review.yml',
   'browser-compat.yml',
   'ci.yml',
@@ -25,8 +25,8 @@ const CANONICAL_HOSTED_PR_WORKFLOWS = new Set([
   'server-scale.yml',
   'test.yml',
 ]);
-// perf-index-contract: pr-workflow-temp-membership always-consumed: every repository audit queries and inventories the complete temporary workflow membership
-const TEMP_TARGET_ARC_WORKFLOWS = new Set([
+// perf-index-contract: pr-workflow-retired-temp-membership always-consumed: every workflow scan rejects any retired Stage B bootstrap filename
+const RETIRED_TEMP_TARGET_WORKFLOWS = new Set([
   'stage-b-target-agent-cross-review.yml',
   'stage-b-target-browser-compat.yml',
   'stage-b-target-ci.yml',
@@ -37,7 +37,6 @@ const TEMP_TARGET_ARC_WORKFLOWS = new Set([
 ]);
 const MILESTONE_GUARD_WORKFLOW = 'milestone-guard.yml';
 const MERGE_RESOLVER_WORKFLOW = 'pr-merge-sha.yml';
-const TEMP_CHECK_NAME_PREFIX = 'TEMP ARC ';
 const HEAD_REPOSITORY_EXPRESSION =
   '${{ github.event.pull_request.head.repo.full_name }}';
 const TRUSTED_EXPRESSION = "needs.authorize.outputs.trusted == 'true'";
@@ -157,9 +156,15 @@ export function prWorkflowTrustReasons(root) {
     const jobs = workflow?.jobs ?? {};
     const arcJobs = Object.values(jobs).some(usesArc);
     const dynamicRunnerJobs = Object.values(jobs).some(usesDynamicRunner);
-    const canonicalHostedWorkflow =
-      CANONICAL_HOSTED_PR_WORKFLOWS.has(entry.name);
-    const temporaryTargetWorkflow = TEMP_TARGET_ARC_WORKFLOWS.has(entry.name);
+    const canonicalTargetWorkflow =
+      CANONICAL_TARGET_ARC_WORKFLOWS.has(entry.name);
+    const retiredTemporaryWorkflow =
+      RETIRED_TEMP_TARGET_WORKFLOWS.has(entry.name);
+    if (retiredTemporaryWorkflow) {
+      reasons.push(
+        `${entry.name}: retired Stage B bootstrap workflow must be removed after cutover`
+      );
+    }
     if (triggers.includes('pull_request')) {
       for (const [jobName, job] of Object.entries(jobs)) {
         if (!usesApprovedHostedRunner(job)) {
@@ -180,19 +185,28 @@ export function prWorkflowTrustReasons(root) {
         `${entry.name}: pull_request dynamic runs-on selection cannot prove a hosted runner; use the trust ceiling`
       );
     }
-    if (canonicalHostedWorkflow) {
+    if (canonicalTargetWorkflow) {
       if (
         triggers.length !== 1 ||
-        !triggers.includes('pull_request')
+        !triggers.includes('pull_request_target')
       ) {
         reasons.push(
-          `${entry.name}: canonical hosted workflow must retain only pull_request during Stage B`
+          `${entry.name}: canonical workflow must retain only pull_request_target after cutover`
+        );
+      }
+      if (!arcJobs) {
+        reasons.push(
+          `${entry.name}: canonical workflow must retain ARC execution after cutover`
         );
       }
       for (const [jobName, job] of Object.entries(jobs)) {
-        if (job?.['runs-on'] !== 'ubuntu-latest') {
+        if (
+          jobName !== 'authorize' &&
+          jobName !== 'resolve-merge' &&
+          !usesArc(job)
+        ) {
           reasons.push(
-            `${entry.name}: canonical job ${jobName} must remain on the GitHub-hosted ubuntu-latest runner during Stage B`
+            `${entry.name}: canonical job ${jobName} must use an approved ARC scale set after cutover`
           );
         }
       }
@@ -215,47 +229,10 @@ export function prWorkflowTrustReasons(root) {
       }
     }
     const protectedPrWorkflow =
-      temporaryTargetWorkflow ||
-      (triggers.includes('pull_request_target') &&
-        entry.name !== MILESTONE_GUARD_WORKFLOW);
+      triggers.includes('pull_request_target') &&
+      entry.name !== MILESTONE_GUARD_WORKFLOW;
     if (protectedPrWorkflow) {
       protectedWorkflowCount += 1;
-      if (!triggers.includes('pull_request_target')) {
-        reasons.push(
-          `${entry.name}: protected workflow must use pull_request_target`
-        );
-      }
-      if (
-        temporaryTargetWorkflow &&
-        (triggers.length !== 1 ||
-          !triggers.includes('pull_request_target'))
-      ) {
-        reasons.push(
-          `${entry.name}: temporary target workflow must use only pull_request_target`
-        );
-      }
-      if (temporaryTargetWorkflow && !arcJobs) {
-        reasons.push(
-          `${entry.name}: temporary target workflow must retain an ARC job`
-        );
-      }
-      if (
-        temporaryTargetWorkflow &&
-        !String(workflow?.name ?? '').startsWith(TEMP_CHECK_NAME_PREFIX)
-      ) {
-        reasons.push(
-          `${entry.name}: temporary workflow name must start with ${TEMP_CHECK_NAME_PREFIX.trim()}`
-        );
-      }
-      if (temporaryTargetWorkflow) {
-        for (const [jobName, job] of Object.entries(jobs)) {
-          if (!String(job?.name ?? '').startsWith(TEMP_CHECK_NAME_PREFIX)) {
-            reasons.push(
-              `${entry.name}: job ${jobName} name must start with ${TEMP_CHECK_NAME_PREFIX.trim()}`
-            );
-          }
-        }
-      }
       if (workflow?.concurrency?.group !== PR_CONCURRENCY_GROUP) {
         reasons.push(
           `${entry.name}: concurrency group must use github.event.pull_request.number`
@@ -359,7 +336,7 @@ export function prWorkflowTrustReasons(root) {
           }
         }
       }
-      if (entry.name === 'stage-b-target-test.yml') {
+      if (entry.name === 'test.yml') {
         const proof = jobs['gate-2702-sandbox-proof'];
         const proofPermissions = proof?.permissions;
         if (
@@ -369,7 +346,7 @@ export function prWorkflowTrustReasons(root) {
           proofPermissions.contents !== 'read'
         ) {
           reasons.push(
-            'stage-b-target-test.yml: sandbox proof must use arc-dind with only contents: read permission'
+            'test.yml: sandbox proof must use arc-dind with only contents: read permission'
           );
         }
         const proofSteps = proof?.steps ?? [];
@@ -380,12 +357,12 @@ export function prWorkflowTrustReasons(root) {
           commandStep?.env?.CHD_REQUIRE_GATE_2702_SANDBOX_PROBE !== '1'
         ) {
           reasons.push(
-            'stage-b-target-test.yml: sandbox proof must set CHD_REQUIRE_GATE_2702_SANDBOX_PROBE=1'
+            'test.yml: sandbox proof must set CHD_REQUIRE_GATE_2702_SANDBOX_PROBE=1'
           );
         }
         if (commandStep?.run?.trim() !== SANDBOX_PROOF_COMMAND) {
           reasons.push(
-            'stage-b-target-test.yml: sandbox proof must use the exact hostile-canary --test-name-pattern command'
+            'test.yml: sandbox proof must use the exact hostile-canary --test-name-pattern command'
           );
         }
         if (
@@ -393,7 +370,7 @@ export function prWorkflowTrustReasons(root) {
           proofSteps.some((step) => step?.['continue-on-error'] !== undefined)
         ) {
           reasons.push(
-            'stage-b-target-test.yml: sandbox proof must not use continue-on-error'
+            'test.yml: sandbox proof must not use continue-on-error'
           );
         }
         const proofCheckout = proofSteps.find((step) =>
@@ -401,7 +378,7 @@ export function prWorkflowTrustReasons(root) {
         );
         if (proofCheckout?.with?.ref !== MERGE_SHA_EXPRESSION) {
           reasons.push(
-            'stage-b-target-test.yml: sandbox proof checkout must use needs.resolve-merge.outputs.merge-sha'
+            'test.yml: sandbox proof checkout must use needs.resolve-merge.outputs.merge-sha'
           );
         }
       }
@@ -638,14 +615,9 @@ export function prWorkflowTrustReasons(root) {
     }
   }
   if (repositoryFixture) {
-    for (const workflowName of CANONICAL_HOSTED_PR_WORKFLOWS) {
+    for (const workflowName of CANONICAL_TARGET_ARC_WORKFLOWS) {
       if (!workflows.has(workflowName)) {
-        reasons.push(`missing canonical hosted workflow ${workflowName}`);
-      }
-    }
-    for (const workflowName of TEMP_TARGET_ARC_WORKFLOWS) {
-      if (!workflows.has(workflowName)) {
-        reasons.push(`missing temporary target workflow ${workflowName}`);
+        reasons.push(`missing canonical target workflow ${workflowName}`);
       }
     }
     if (!workflows.has(MILESTONE_GUARD_WORKFLOW)) {
@@ -667,7 +639,7 @@ function main() {
     process.exit(1);
   }
   console.log(
-    `PR workflow trust check passed: ${CANONICAL_HOSTED_PR_WORKFLOWS.size} hosted workflows remain active and ${TEMP_TARGET_ARC_WORKFLOWS.size} temporary target workflows are base-controlled and fork-gated.`
+    `PR workflow trust check passed: ${CANONICAL_TARGET_ARC_WORKFLOWS.size} canonical target workflows are base-controlled, ARC-backed, and fork-gated.`
   );
 }
 

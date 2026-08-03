@@ -22,7 +22,7 @@ function withWorkflowFixture(workflows, run) {
   }
 }
 
-test('the live Stage B repository preserves hosted checks and the temporary ARC trust ceiling', () => {
+test('the live Stage C repository keeps canonical ARC checks behind the target trust ceiling', () => {
   assert.deepEqual(prWorkflowTrustReasons(REPO_ROOT), []);
 });
 
@@ -728,16 +728,30 @@ test('forks cannot schedule a hosted secret-bearing job beside the ARC graph', (
   );
 });
 
-test('an inventoried temporary target workflow cannot evade the gate by moving off ARC', () => {
+test('every executable job in a canonical target workflow must stay on an approved ARC scale set', () => {
   withWorkflowFixture(
     {
-      'stage-b-target-ci.yml': [
-        'name: TEMP ARC Lint and build',
+      'ci.yml': [
+        'name: Lint and build',
         'on:',
         '  pull_request_target:',
+        'concurrency:',
+        '  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}',
         'permissions: {}',
         'jobs:',
-        '  bypass:',
+        '  authorize:',
+        '    permissions: {}',
+        '    uses: ./.github/workflows/pr-trust.yml',
+        '    with:',
+        '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
+        '  arc:',
+        '    needs: authorize',
+        "    if: needs.authorize.outputs.trusted == 'true' && github.event.pull_request.merge_commit_sha != null",
+        '    runs-on: arc-runner-set',
+        '    steps:',
+        '      - run: npm test',
+        '  hosted-bypass:',
+        '    needs: arc',
         '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
@@ -747,22 +761,22 @@ test('an inventoried temporary target workflow cannot evade the gate by moving o
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /stage-b-target-ci\.yml.*authorize.*pr-trust\.yml/i
+        /ci\.yml.*hosted-bypass.*approved ARC/i
       );
     }
   );
 });
 
-test('canonical hosted workflows cannot be converted early or regain ARC', () => {
+test('canonical workflows cannot regress to pull_request or GitHub-hosted execution after cutover', () => {
   withWorkflowFixture(
     {
       'ci.yml': [
         'name: Lint and build',
         'on:',
-        '  pull_request_target:',
+        '  pull_request:',
         'jobs:',
         '  lint:',
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -770,8 +784,8 @@ test('canonical hosted workflows cannot be converted early or regain ARC', () =>
     },
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
-      assert.match(reasons, /ci\.yml.*canonical.*pull_request/i);
-      assert.match(reasons, /ci\.yml.*canonical.*GitHub-hosted/i);
+      assert.match(reasons, /ci\.yml.*canonical.*pull_request_target/i);
+      assert.match(reasons, /ci\.yml.*canonical.*ARC/i);
     }
   );
 });
@@ -800,26 +814,22 @@ test('milestone guard remains permanently hosted', () => {
   );
 });
 
-test('temporary workflows and jobs use distinct Stage B ARC check names', () => {
+test('retired Stage B workflow filenames fail closed after cutover', () => {
   withWorkflowFixture(
     {
       'stage-b-target-ci.yml': [
-        'name: Lint and build',
+        'name: TEMP ARC Lint and build (Stage B)',
         'on:',
         '  pull_request_target:',
-        'jobs:',
-        '  lint:',
-        '    name: lint',
-        '    runs-on: ubuntu-latest',
-        '    steps:',
-        '      - run: npm test',
+        'jobs: {}',
         '',
       ].join('\n'),
     },
     (root) => {
-      const reasons = prWorkflowTrustReasons(root).join('\n');
-      assert.match(reasons, /stage-b-target-ci\.yml.*workflow name.*TEMP ARC/i);
-      assert.match(reasons, /stage-b-target-ci\.yml.*job lint.*TEMP ARC/i);
+      assert.match(
+        prWorkflowTrustReasons(root).join('\n'),
+        /stage-b-target-ci\.yml.*retired.*remove/i
+      );
     }
   );
 });
@@ -835,7 +845,7 @@ test('the repository cannot delete a protected workflow from the inventory', () 
       writeFileSync(join(root, 'package.json'), '{}\n');
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /missing temporary target workflow stage-b-target-agent-cross-review\.yml/i
+        /missing canonical target workflow agent-cross-review\.yml/i
       );
     }
   );
@@ -853,11 +863,11 @@ test('malformed workflow YAML fails closed as a reported reason', () => {
   );
 });
 
-test('the sandbox proof job must require namespaces and run only the hostile-canary test', () => {
+test('the canonical sandbox proof job must require namespaces and run only the hostile-canary test', () => {
   withWorkflowFixture(
     {
-      'stage-b-target-test.yml': [
-        'name: TEMP ARC Unit tests',
+      'test.yml': [
+        'name: Unit tests',
         'on:',
         '  pull_request_target:',
         'concurrency:',
@@ -882,8 +892,8 @@ test('the sandbox proof job must require namespaces and run only the hostile-can
     },
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
-      assert.match(reasons, /stage-b-target-test\.yml.*sandbox proof.*CHD_REQUIRE_GATE_2702_SANDBOX_PROBE/i);
-      assert.match(reasons, /stage-b-target-test\.yml.*sandbox proof.*test-name-pattern/i);
+      assert.match(reasons, /test\.yml.*sandbox proof.*CHD_REQUIRE_GATE_2702_SANDBOX_PROBE/i);
+      assert.match(reasons, /test\.yml.*sandbox proof.*test-name-pattern/i);
     }
   );
 });
