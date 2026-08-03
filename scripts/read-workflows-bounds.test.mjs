@@ -30,6 +30,54 @@ function workflowFixture() {
   return { root, projectsRoot: join(root, 'projects') };
 }
 
+function sparseWorkflowFixture(sessionCount = 12) {
+  const root = join(tmpdir(), `chd-workflow-discovery-${randomUUID()}`);
+  const projectsRoot = join(root, 'projects');
+  for (let index = 0; index < sessionCount; index += 1) {
+    const workflows = join(
+      projectsRoot,
+      'proj-a',
+      `sess-${String(index).padStart(3, '0')}`,
+      'workflows'
+    );
+    mkdirSync(workflows, { recursive: true });
+    writeFileSync(
+      join(workflows, `wf_${index}.json`),
+      JSON.stringify({
+        runId: `wf-${index}`,
+        workflowName: 'Sparse fixture',
+        status: 'completed',
+        startTime: 1767225600000 + index,
+      })
+    );
+  }
+  return { root, projectsRoot };
+}
+
+test('readWorkflows readers share one injected discovery budget across sparse nested directories (#3100)', async () => {
+  const fx = sparseWorkflowFixture();
+  try {
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    const options = { discoveryMaxEntries: 3 };
+
+    for (const [label, result] of [
+      ['async', await workflows.readWorkflows(fx.projectsRoot, options)],
+      ['sync', workflows.readWorkflowsSync(fx.projectsRoot, options)],
+    ]) {
+      assert.equal(result.runs.length, 0, `${label}: must stop before workflow dirs`);
+      assert.equal(result.truncated, true, `${label}: exhausted discovery is truncated`);
+      assert.equal(result.limits.maxDiscoveryEntries, 3);
+      assert.deepEqual(
+        result.discovery,
+        { entriesExamined: 3, directoriesOpened: 2 },
+        `${label}: work, not only retained runs, stays within the injected budget`
+      );
+    }
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
 function projectedWorkflowFixture() {
   const root = join(tmpdir(), `chd-workflow-projection-${randomUUID()}`);
   const workflows = join(root, 'projects', 'proj-a', 'sess-a', 'workflows');

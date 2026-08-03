@@ -44,6 +44,13 @@ export const WORKFLOW_RUN_MAX_ENTRIES = Math.max(
     parseNonNegativeIntEnv('DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES', 50_000)
   )
 );
+export const WORKFLOW_DISCOVERY_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_WORKFLOW_DISCOVERY_MAX_ENTRIES', 50_000)
+  )
+);
 export const WORKFLOW_PHASE_MAX_ENTRIES = Math.max(
   1,
   Math.min(
@@ -180,49 +187,74 @@ const byStartDesc = (a, b) => {
   return bt - at;
 };
 
-function workflowLimits() {
+function workflowLimits(maxDiscoveryEntries = WORKFLOW_DISCOVERY_MAX_ENTRIES) {
   return {
     manifestMaxBytes: WORKFLOW_MANIFEST_MAX_BYTES,
     maxRuns: WORKFLOW_RUN_MAX_ENTRIES,
+    maxDiscoveryEntries,
     maxPhasesPerRun: WORKFLOW_PHASE_MAX_ENTRIES,
     maxProgressEntriesPerRun: WORKFLOW_PROGRESS_MAX_ENTRIES,
     fieldMaxChars: WORKFLOW_FIELD_MAX_CHARS,
   };
 }
 
-function workflowResult(runs, skippedManifests, truncated) {
-  runs.sort(byStartDesc);
+function discoverySnapshot(discovery) {
   return {
-    runs,
-    limits: workflowLimits(),
-    skippedManifests,
-    truncated,
+    entriesExamined: discovery.entriesExamined,
+    directoriesOpened: discovery.directoriesOpened,
   };
 }
 
-function workflowDiscoveryEntryLimit() {
-  return WORKFLOW_RUN_MAX_ENTRIES + 1;
+function workflowResult(runs, skippedManifests, truncated, discovery) {
+  runs.sort(byStartDesc);
+  return {
+    runs,
+    limits: workflowLimits(discovery.limit),
+    discovery: discoverySnapshot(discovery),
+    skippedManifests,
+    truncated: truncated || discovery.exhausted,
+  };
 }
 
-async function readDirentsBounded(dirPath, maxEntries = workflowDiscoveryEntryLimit()) {
+function createDiscoveryBudget(requested) {
+  const limit =
+    Number.isInteger(requested) && requested > 0
+      ? Math.min(requested, 1_000_000)
+      : WORKFLOW_DISCOVERY_MAX_ENTRIES;
+  return {
+    limit,
+    remaining: limit,
+    entriesExamined: 0,
+    directoriesOpened: 0,
+    exhausted: false,
+  };
+}
+
+async function readDirentsBounded(dirPath, discovery) {
   const entries = [];
+  if (discovery.remaining <= 0) {
+    discovery.exhausted = true;
+    return { entries, missing: false, truncated: true };
+  }
   let dir;
   try {
     dir = await opendir(dirPath);
   } catch {
     return { entries, missing: true, truncated: false };
   }
-  let checked = 0;
+  discovery.directoriesOpened += 1;
   let truncated = false;
   try {
     for (;;) {
-      const ent = await dir.read();
-      if (!ent) break;
-      if (checked >= maxEntries) {
+      if (discovery.remaining <= 0) {
+        discovery.exhausted = true;
         truncated = true;
         break;
       }
-      checked += 1;
+      const ent = await dir.read();
+      if (!ent) break;
+      discovery.remaining -= 1;
+      discovery.entriesExamined += 1;
       entries.push(ent);
     }
   } finally {
@@ -235,25 +267,31 @@ async function readDirentsBounded(dirPath, maxEntries = workflowDiscoveryEntryLi
   return { entries, missing: false, truncated };
 }
 
-function readDirentsBoundedSync(dirPath, maxEntries = workflowDiscoveryEntryLimit()) {
+function readDirentsBoundedSync(dirPath, discovery) {
   const entries = [];
+  if (discovery.remaining <= 0) {
+    discovery.exhausted = true;
+    return { entries, missing: false, truncated: true };
+  }
   let dir;
   try {
     dir = opendirSync(dirPath);
   } catch {
     return { entries, missing: true, truncated: false };
   }
-  let checked = 0;
+  discovery.directoriesOpened += 1;
   let truncated = false;
   try {
     for (;;) {
-      const ent = dir.readSync();
-      if (!ent) break;
-      if (checked >= maxEntries) {
+      if (discovery.remaining <= 0) {
+        discovery.exhausted = true;
         truncated = true;
         break;
       }
-      checked += 1;
+      const ent = dir.readSync();
+      if (!ent) break;
+      discovery.remaining -= 1;
+      discovery.entriesExamined += 1;
       entries.push(ent);
     }
   } finally {
@@ -341,35 +379,26 @@ function readWorkflowManifestSync(realFull) {
 }
 
 /** Async walk for the server's /api/workflows route. */
-export async function readWorkflows(projectsRoot) {
+export async function readWorkflows(projectsRoot, options = {}) {
   const runs = [];
   let skippedManifests = 0;
   let truncated = false;
-  const projectRead = await readDirentsBounded(projectsRoot);
+  const discovery = createDiscoveryBudget(options.discoveryMaxEntries);
+  const projectRead = await readDirentsBounded(projectsRoot, discovery);
   if (projectRead.missing) {
-    return {
-      runs: [],
-      limits: workflowLimits(),
-      skippedManifests,
-      truncated,
-    };
+    return workflowResult([], skippedManifests, truncated, discovery);
   }
   if (projectRead.truncated) truncated = true;
   const realProjectsRoot = await realpathOrNull(projectsRoot);
   if (!realProjectsRoot) {
-    return {
-      runs: [],
-      limits: workflowLimits(),
-      skippedManifests,
-      truncated,
-    };
+    return workflowResult([], skippedManifests, truncated, discovery);
   }
   for (const proj of projectRead.entries) {
     if (!proj.isDirectory()) continue;
     const projPath = join(projectsRoot, proj.name);
     const realProjPath = await realpathOrNull(projPath);
     if (!realProjPath || !pathInside(realProjectsRoot, realProjPath)) continue;
-    const sessionRead = await readDirentsBounded(projPath);
+    const sessionRead = await readDirentsBounded(projPath, discovery);
     if (sessionRead.missing) continue;
     if (sessionRead.truncated) truncated = true;
     for (const sess of sessionRead.entries) {
@@ -378,7 +407,7 @@ export async function readWorkflows(projectsRoot) {
       if (!existsSync(wfDir)) continue;
       const realWfDir = await realpathOrNull(wfDir);
       if (!realWfDir || !pathInside(realProjPath, realWfDir)) continue;
-      const wfRead = await readDirentsBounded(wfDir);
+      const wfRead = await readDirentsBounded(wfDir, discovery);
       if (wfRead.missing) continue;
       if (wfRead.truncated) truncated = true;
       const wfFiles = wfRead.entries
@@ -395,7 +424,7 @@ export async function readWorkflows(projectsRoot) {
             runs.push(run);
             if (runs.length >= WORKFLOW_RUN_MAX_ENTRIES) {
               truncated = true;
-              return workflowResult(runs, skippedManifests, truncated);
+              return workflowResult(runs, skippedManifests, truncated, discovery);
             }
           }
         } catch (err) {
@@ -405,39 +434,30 @@ export async function readWorkflows(projectsRoot) {
       }
     }
   }
-  return workflowResult(runs, skippedManifests, truncated);
+  return workflowResult(runs, skippedManifests, truncated, discovery);
 }
 
 /** Synchronous mirror for the ingest pipeline's `assembleDataset()` (#661). */
-export function readWorkflowsSync(projectsRoot) {
+export function readWorkflowsSync(projectsRoot, options = {}) {
   const runs = [];
   let skippedManifests = 0;
   let truncated = false;
-  const projectRead = readDirentsBoundedSync(projectsRoot);
+  const discovery = createDiscoveryBudget(options.discoveryMaxEntries);
+  const projectRead = readDirentsBoundedSync(projectsRoot, discovery);
   if (projectRead.missing) {
-    return {
-      runs: [],
-      limits: workflowLimits(),
-      skippedManifests,
-      truncated,
-    };
+    return workflowResult([], skippedManifests, truncated, discovery);
   }
   if (projectRead.truncated) truncated = true;
   const realProjectsRoot = realpathOrNullSync(projectsRoot);
   if (!realProjectsRoot) {
-    return {
-      runs: [],
-      limits: workflowLimits(),
-      skippedManifests,
-      truncated,
-    };
+    return workflowResult([], skippedManifests, truncated, discovery);
   }
   for (const proj of projectRead.entries) {
     if (!proj.isDirectory()) continue;
     const projPath = join(projectsRoot, proj.name);
     const realProjPath = realpathOrNullSync(projPath);
     if (!realProjPath || !pathInside(realProjectsRoot, realProjPath)) continue;
-    const sessionRead = readDirentsBoundedSync(projPath);
+    const sessionRead = readDirentsBoundedSync(projPath, discovery);
     if (sessionRead.missing) continue;
     if (sessionRead.truncated) truncated = true;
     for (const sess of sessionRead.entries) {
@@ -446,7 +466,7 @@ export function readWorkflowsSync(projectsRoot) {
       if (!existsSync(wfDir)) continue;
       const realWfDir = realpathOrNullSync(wfDir);
       if (!realWfDir || !pathInside(realProjPath, realWfDir)) continue;
-      const wfRead = readDirentsBoundedSync(wfDir);
+      const wfRead = readDirentsBoundedSync(wfDir, discovery);
       if (wfRead.missing) continue;
       if (wfRead.truncated) truncated = true;
       const wfFiles = wfRead.entries
@@ -463,7 +483,7 @@ export function readWorkflowsSync(projectsRoot) {
             runs.push(run);
             if (runs.length >= WORKFLOW_RUN_MAX_ENTRIES) {
               truncated = true;
-              return workflowResult(runs, skippedManifests, truncated);
+              return workflowResult(runs, skippedManifests, truncated, discovery);
             }
           }
         } catch (err) {
@@ -473,5 +493,5 @@ export function readWorkflowsSync(projectsRoot) {
       }
     }
   }
-  return workflowResult(runs, skippedManifests, truncated);
+  return workflowResult(runs, skippedManifests, truncated, discovery);
 }

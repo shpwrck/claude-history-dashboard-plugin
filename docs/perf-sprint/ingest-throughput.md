@@ -115,6 +115,48 @@ domain.
 
 ---
 
+## Bounded filesystem discovery (#3100, #3261)
+
+Two ingest-adjacent paths now carry explicit global work budgets rather than
+only capping the arrays they return:
+
+- Workflow discovery examines at most 50,000 directory entries across the
+  projects, sessions, and workflow-manifest levels. The limit is configurable
+  with `DASHBOARD_WORKFLOW_DISCOVERY_MAX_ENTRIES`; the public async and sync
+  results expose `limits.maxDiscoveryEntries`,
+  `discovery.entriesExamined`, `discovery.directoriesOpened`, and `truncated`.
+- Loose drag-and-drop directory upload examines at most 100,000 entries, admits
+  at most 50,000 usable files, and sends at most 100 progress callbacks. It
+  consumes `readEntries()` batches incrementally. Crossing either discovery
+  budget raises a user-visible error before reading the refused file instead of
+  silently returning a partial upload.
+
+The sparse/deep/over-limit contracts and exact operation counts are covered by:
+
+```
+npm run test:read-workflows-bounds
+npx vitest run src/lib/upload-directory.test.ts src/components/FileUpload.test.ts
+```
+
+The 10,000-file upload measurement is reproducible with:
+
+```
+npm run bench:directory-upload
+```
+
+Measured 2026-08-02 on Node 24.13.1 / Linux 5.15 WSL2:
+
+| Files | Entries examined | File reads | Progress callbacks | Elapsed |
+|---:|---:|---:|---:|---:|
+| 10,000 | 10,001 | 10,000 | 100 | 85.2 ms |
+
+Elapsed time is reported for comparison, not asserted: host timing is too noisy
+for a stable CI threshold. The exact entry, file-read, and callback counts are
+the deterministic gate and prevent a fast-looking benchmark from hiding
+unbounded traversal work.
+
+---
+
 ## Cold ingest worker prototype (#855)
 
 Take a measurement with:
