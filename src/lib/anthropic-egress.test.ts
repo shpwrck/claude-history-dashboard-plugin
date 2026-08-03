@@ -268,6 +268,76 @@ describe('callAnthropic governance', () => {
     });
   });
 
+  it.each([
+    'X-Egress-Secret',
+    'X-API-KEY',
+    'aUtHoRiZaTiOn',
+    'ANTHROPIC-VERSION',
+    'Content-Type',
+    'AnThRoPiC-BeTa',
+  ])('rejects Rule-B caller header %s before fetch', async (headerName) => {
+    let fetchCalls = 0;
+    const scrubbed = egressScrub(
+      'server.audit-judge',
+      {
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'safe prompt' }],
+      },
+      { logger: () => undefined }
+    );
+    const request = {
+      credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
+      path: '/messages',
+      scrubbedBody: scrubbed,
+      headers: { [headerName]: 'transcript-derived-secret' },
+      capChecked: true,
+      capReceipt: capReceipt(),
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return response({ ok: true });
+      },
+    } as unknown as CallAnthropicRequest;
+
+    await expect(
+      callAnthropic('server.audit-judge', request)
+    ).rejects.toMatchObject({
+      code: 'ERR_DASHBOARD_LLM_CALLER_HEADERS',
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it.each([
+    'X-Transcript-Data',
+    'AUTHORIZATION',
+    'aNtHrOpIc-BeTa',
+    'Content-Type',
+  ])('rejects Rule-A caller header %s before fetch', async (headerName) => {
+    let fetchCalls = 0;
+    const request = {
+      credential: { kind: 'oauth', token: 'oauth-token' },
+      path: '/messages',
+      body: {
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+      containsClaudeData: false,
+      headers: { [headerName]: 'transcript-derived-secret' },
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return response({ ok: true });
+      },
+    } as unknown as CallAnthropicRequest;
+
+    await expect(
+      callAnthropic('server.usage-gauge', request)
+    ).rejects.toMatchObject({
+      code: 'ERR_DASHBOARD_LLM_CALLER_HEADERS',
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
   it('rejects Console-key audit calls when the cap control is not attested', async () => {
     const scrubbed = egressScrub(
       'server.audit-judge',

@@ -284,8 +284,8 @@ export function routeKey(route) {
 export function collectEnterpriseRouteKeys(source) {
   const routes = new Map();
 
-  for (const match of source.matchAll(/pathname\s*===\s*'([^']+)'/g)) {
-    const value = match[1];
+  for (const match of source.matchAll(/pathname\s*===\s*(['"])([^'"]+)\1/g)) {
+    const value = match[2];
     if (isEnterpriseDataRoute(value)) {
       routes.set(routeKey({ kind: 'exact', value }), {
         kind: 'exact',
@@ -294,8 +294,10 @@ export function collectEnterpriseRouteKeys(source) {
     }
   }
 
-  for (const match of source.matchAll(/pathname\.startsWith\('([^']+)'\)/g)) {
-    const value = match[1];
+  for (const match of source.matchAll(
+    /pathname\.startsWith\((['"])([^'"]+)\1\)/g
+  )) {
+    const value = match[2];
     if (GENERIC_PREFIXES.has(value)) continue;
     if (isEnterpriseDataRoute(value)) {
       routes.set(routeKey({ kind: 'prefix', value }), {

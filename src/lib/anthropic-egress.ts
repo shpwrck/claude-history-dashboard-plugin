@@ -19,7 +19,8 @@ export interface CallAnthropicRequest {
   path: '/messages' | '/models';
   body?: unknown;
   scrubbedBody?: EgressScrubResult<unknown>;
-  headers?: Record<string, string>;
+  /** Caller-supplied headers are forbidden at the governed server chokepoint. */
+  headers?: never;
   containsClaudeData?: boolean;
   capChecked?: boolean;
   capReceipt?: LlmCapReceipt;
@@ -157,6 +158,12 @@ export async function callAnthropic(
     throw new AnthropicEgressError(
       'ERR_DASHBOARD_LLM_CREDENTIAL_MISMATCH',
       `${registryId} requires ${entry.credential}, got ${req.credential.kind}`
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(req, 'headers')) {
+    throw new AnthropicEgressError(
+      'ERR_DASHBOARD_LLM_CALLER_HEADERS',
+      `${registryId} cannot send caller-supplied headers; governed Anthropic headers are constructed internally`
     );
   }
 
@@ -461,10 +468,9 @@ function buildHeaders(
   hasBody: boolean
 ): Record<string, string> {
   const base: Record<string, string> = {
-    ...req.headers,
     'anthropic-version': ANTHROPIC_VERSION,
   };
-  if (hasBody && !hasHeader(base, 'content-type')) {
+  if (hasBody) {
     base['content-type'] = 'application/json';
   }
   if (req.credential.kind === 'oauth') {
@@ -552,11 +558,6 @@ function jsonByteLength(value: unknown): number {
   } catch {
     return 0;
   }
-}
-
-function hasHeader(headers: Record<string, string>, name: string): boolean {
-  const wanted = name.toLowerCase();
-  return Object.keys(headers).some((key) => key.toLowerCase() === wanted);
 }
 
 function isUsageGaugeProbeBody(body: unknown): boolean {

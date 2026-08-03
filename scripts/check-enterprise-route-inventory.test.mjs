@@ -44,6 +44,26 @@ check('collector finds exact, prefix, and regex enterprise data routes', () => {
   ]);
 });
 
+check('collector inventories double-quoted exact and prefix handlers', () => {
+  const source = [
+    'if (pathname === "/api/new-sensitive-route") return;',
+    'if (pathname.startsWith("/api/private/")) return;',
+  ].join('\n');
+
+  const routes = collectEnterpriseRouteKeys(source);
+  assert.deepEqual(routes.map(routeKey), [
+    'exact:/api/new-sensitive-route',
+    'prefix:/api/private/',
+  ]);
+  assert.deepEqual(
+    validateEnterpriseRouteInventory(routes, [], {}),
+    [
+      'exact:/api/new-sensitive-route is handled by scripts/server.mjs but missing from ENTERPRISE_ROUTE_INVENTORY',
+      'prefix:/api/private/ is handled by scripts/server.mjs but missing from ENTERPRISE_ROUTE_INVENTORY',
+    ]
+  );
+});
+
 check('inventory covers the current server route surface', () => {
   const source = readFileSync(new URL('./server.mjs', import.meta.url), 'utf8');
   const routes = collectEnterpriseRouteKeys(source);
