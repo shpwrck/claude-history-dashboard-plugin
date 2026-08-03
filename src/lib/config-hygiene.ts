@@ -122,6 +122,15 @@ const ACTIVE_WINDOW_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Whether a session timestamp can support an observation claim. Keep the
+ * global and project-scoped gates on this one predicate so malformed imports
+ * and clock-skewed future rows cannot qualify one scope but not the other.
+ */
+function isValidObservedStart(startTime: number, now: number): boolean {
+  return Number.isFinite(startTime) && startTime > 0 && startTime <= now;
+}
+
+/**
  * The minimum input the engine needs. Sessions are passed because attribution
  * carries only sessionIds; we join here to get per-invocation timestamps for
  * the recency window. Token data is *not* required — none of v1's findings
@@ -226,11 +235,10 @@ function resourceScope(resource: { scope?: string; projectPath?: string }): Hygi
  * we tag findings with the `window-shorter-than-threshold` hedge so the UI
  * can phrase honestly instead of overstating staleness.
  *
- * Returns `Infinity` when there are no sessions at all — kept defined for
- * this helper in isolation, but `computeConfigHygiene` (#3118) now returns no
- * findings at all *before* reaching this call when `sessions` is empty:
- * zero retained sessions is zero observation, not evidence for "unused", so
- * no hedge can make an unused claim honest in that case.
+ * Returns `null` when no finite, positive, non-future session exists. Empty
+ * and invalid-only corpora are both zero observation, not evidence for
+ * "unused", so no hedge can make an unused claim honest in either case
+ * (#3118/#3559).
  *
  * Exported (#3249) so the `workflow.unused-installed-*` wording helper
  * (`detectors/workflow/unused-installed-window.ts`) states the OBSERVED
@@ -241,13 +249,13 @@ function resourceScope(resource: { scope?: string; projectPath?: string }): Hygi
 export function effectiveDataWindowDays(
   sessions: HygieneInput['sessions'],
   now: number
-): number {
-  if (sessions.length === 0) return Infinity;
-  let oldest = now;
+): number | null {
+  let oldest: number | null = null;
   for (const s of sessions) {
-    if (s.startTime > 0 && s.startTime < oldest) oldest = s.startTime;
+    if (!isValidObservedStart(s.startTime, now)) continue;
+    if (oldest === null || s.startTime < oldest) oldest = s.startTime;
   }
-  return Math.max(0, (now - oldest) / DAY_MS);
+  return oldest === null ? null : Math.max(0, (now - oldest) / DAY_MS);
 }
 
 /**
@@ -482,8 +490,7 @@ function computeProjectObservations(
   const observedInWindow = new Set<string>();
   for (const s of sessions) {
     if (!s.project) continue;
-    if (!Number.isFinite(s.startTime)) continue;
-    if (s.startTime <= 0 || s.startTime > now) continue;
+    if (!isValidObservedStart(s.startTime, now)) continue;
     if (s.startTime >= windowStart) observedInWindow.add(projectObservationKey(s.project));
   }
   const out = new Map<string, HygieneHedge | undefined>();
@@ -509,8 +516,7 @@ function oldestValidStartByProject(
   const oldestByProject = new Map<string, number>();
   for (const s of sessions) {
     if (!s.project) continue;
-    if (!Number.isFinite(s.startTime)) continue;
-    if (s.startTime <= 0 || s.startTime > now) continue;
+    if (!isValidObservedStart(s.startTime, now)) continue;
     const key = projectObservationKey(s.project);
     const oldest = oldestByProject.get(key);
     if (oldest == null || s.startTime < oldest) oldestByProject.set(key, s.startTime);
@@ -538,8 +544,7 @@ export function observedWindowDaysForScope(
   now: number
 ): number | null {
   if (scope.kind === 'global') {
-    const days = effectiveDataWindowDays(sessions, now);
-    return Number.isFinite(days) ? days : null;
+    return effectiveDataWindowDays(sessions, now);
   }
   const oldest = oldestValidStartByProject(sessions, now).get(
     projectObservationKey(scope.project)
@@ -563,8 +568,7 @@ export function newestObservedStartForScopes(
   const includesGlobal = scopes.some((scope) => scope.kind === 'global');
   let newest: number | null = null;
   for (const session of sessions) {
-    if (!Number.isFinite(session.startTime)) continue;
-    if (session.startTime <= 0 || session.startTime > now) continue;
+    if (!isValidObservedStart(session.startTime, now)) continue;
     const project = session.project;
     const contributes =
       includesGlobal ||
@@ -776,14 +780,14 @@ function findingsForScopedResources<T extends { scope?: string; projectPath?: st
 export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
   const lc = input.liveConfig;
   if (!lc) return [];
-  // Zero retained sessions means zero observation window — there is no
-  // evidence to compare any resource's usage against, so no resource can be
-  // honestly called "unused" (#3118). Emit no findings rather than an
-  // unhedged blanket "unused" claim for every installed resource.
-  if (input.sessions.length === 0) return [];
   const now = input.now ?? Date.now();
   const windowStart = now - ACTIVE_WINDOW_DAYS * DAY_MS;
   const dataWindowDays = effectiveDataWindowDays(input.sessions, now);
+  // Empty and invalid-only retained corpora both mean zero observation:
+  // without at least one finite, positive, non-future session there is no
+  // evidence against which any global resource can honestly be called unused
+  // (#3118/#3559). The same validity predicate backs project scopes above.
+  if (dataWindowDays === null) return [];
   const hedge: HygieneHedge | undefined =
     dataWindowDays < ACTIVE_WINDOW_DAYS
       ? 'window-shorter-than-threshold'

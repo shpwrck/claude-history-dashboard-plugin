@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   computeConfigHygiene,
+  effectiveDataWindowDays,
   observedWindowDaysForScope,
 } from './config-hygiene';
 import type { LiveConfig } from '../types';
@@ -286,6 +287,87 @@ describe('computeConfigHygiene no-session input (#3118)', () => {
     });
 
     expect(findings).toEqual([]);
+  });
+
+  it('treats a nonempty invalid-only global corpus as zero observation (#3559)', () => {
+    const sessions = [
+      { sessionId: 's-nan', startTime: Number.NaN },
+      { sessionId: 's-positive-infinity', startTime: Number.POSITIVE_INFINITY },
+      { sessionId: 's-negative-infinity', startTime: Number.NEGATIVE_INFINITY },
+      { sessionId: 's-zero', startTime: 0 },
+      { sessionId: 's-negative', startTime: -DAY_MS },
+      { sessionId: 's-future', startTime: now + DAY_MS },
+    ];
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        skills: [
+          { id: 'build-helper', scope: 'user', path: '/u/.claude/skills/build-helper' },
+        ],
+      }),
+      attribution: [],
+      sessions,
+      now,
+    });
+
+    expect(findings).toEqual([]);
+    expect(effectiveDataWindowDays(sessions, now)).toBeNull();
+    expect(observedWindowDaysForScope({ kind: 'global' }, sessions, now)).toBeNull();
+  });
+
+  it('ignores invalid global rows when valid recent coverage exists (#3559)', () => {
+    const sessions = [
+      { sessionId: 's-nan', startTime: Number.NaN },
+      { sessionId: 's-infinity', startTime: Number.POSITIVE_INFINITY },
+      { sessionId: 's-zero', startTime: 0 },
+      { sessionId: 's-future', startTime: now + DAY_MS },
+      { sessionId: 's-valid', startTime: now - 2 * DAY_MS },
+    ];
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        skills: [
+          { id: 'build-helper', scope: 'user', path: '/u/.claude/skills/build-helper' },
+        ],
+      }),
+      attribution: [],
+      sessions,
+      now,
+    });
+
+    expect(findings).toMatchObject([
+      {
+        id: 'skill.unused:build-helper',
+        scope: { kind: 'global' },
+        hedge: 'window-shorter-than-threshold',
+      },
+    ]);
+    expect(effectiveDataWindowDays(sessions, now)).toBe(2);
+    expect(observedWindowDaysForScope({ kind: 'global' }, sessions, now)).toBe(2);
+  });
+
+  it('preserves an unhedged global finding when valid coverage spans the window (#3559)', () => {
+    const sessions = [
+      { sessionId: 's-old', startTime: now - 40 * DAY_MS },
+      { sessionId: 's-recent', startTime: now - DAY_MS },
+      { sessionId: 's-future', startTime: now + DAY_MS },
+    ];
+    const findings = computeConfigHygiene({
+      liveConfig: liveConfig({
+        skills: [
+          { id: 'build-helper', scope: 'user', path: '/u/.claude/skills/build-helper' },
+        ],
+      }),
+      attribution: [],
+      sessions,
+      now,
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      id: 'skill.unused:build-helper',
+      scope: { kind: 'global' },
+    });
+    expect(findings[0].hedge).toBeUndefined();
+    expect(effectiveDataWindowDays(sessions, now)).toBe(40);
   });
 
   it('still applies the window-shorter-than-threshold hedge for a non-empty sub-30-day dataset', () => {

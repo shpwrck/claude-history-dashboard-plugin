@@ -94,6 +94,61 @@ describe('safety.config-hygiene-rollup (#1164)', () => {
     // clock passed to the detector.
     expect(rec.provenance?.asOf).toBe('2026-05-31');
     expect(rec.provenance?.stale).toBeUndefined(); // wide window → not stale
+    expect(rec.title).toContain('unused in the last 30 days');
+    expect(rec.detail).not.toContain('available history');
+  });
+
+  it('suppresses an invalid-only nonempty global corpus (#3559)', () => {
+    const rec = detector.rule(
+      input({
+        sessions: [
+          { sessionId: 's-nan', startTime: Number.NaN },
+          { sessionId: 's-infinity', startTime: Number.POSITIVE_INFINITY },
+          { sessionId: 's-zero', startTime: 0 },
+          { sessionId: 's-negative', startTime: -DAY_MS },
+          { sessionId: 's-future', startTime: NOW + DAY_MS },
+        ] as unknown as RecommendationInput['sessions'],
+      }),
+      NOW,
+    );
+
+    expect(rec).toBeNull();
+  });
+
+  it('bases evidence and stale wording only on valid mixed-corpus coverage (#3559)', () => {
+    const rec = detector.rule(
+      input({
+        sessions: [
+          { sessionId: 's-nan', startTime: Number.NaN },
+          { sessionId: 's-infinity', startTime: Number.POSITIVE_INFINITY },
+          { sessionId: 's-zero', startTime: 0 },
+          { sessionId: 's-future', startTime: NOW + DAY_MS },
+          { sessionId: 's-valid', startTime: NOW - 2 * DAY_MS },
+        ] as unknown as RecommendationInput['sessions'],
+      }),
+      NOW,
+    )!;
+
+    expect(rec.affected).toBe(3);
+    expect(rec.title).toContain('unused in the available history');
+    expect(rec.title).not.toContain('last 30 days');
+    expect(rec.detail).toContain('~2 day(s) of retained coverage');
+    expect(rec.detail).toContain('as of 2026-05-30');
+    expect(rec.detail).not.toMatch(/NaN|Infinity/);
+    expect(rec.evidence).toEqual([
+      'mcpServer server-a (global): 0 lifetime invocation(s)',
+      'mcpServer server-b (global): 0 lifetime invocation(s)',
+      'plugin plug-a (global): 0 lifetime invocation(s)',
+    ]);
+    expect(rec.provenance?.observations[0]).toMatchObject({
+      source: 'config-hygiene',
+      value: 3,
+    });
+    expect(rec.provenance?.asOf).toBe('2026-05-30');
+    expect(rec.provenance?.stale).toBe(true);
+    expect(rec.fix?.target).toBe('command');
+    expect(rec.fix?.snippet).toContain('delete data.mcpServers[server]');
+    expect(rec.fix?.snippet).toContain('const plugin = "plug-a";');
   });
 
   it('demotes wording and marks provenance stale when the data window is short', () => {
