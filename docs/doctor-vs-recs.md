@@ -51,6 +51,20 @@ byte-identical and make zero external calls, as required by the
 The gate is necessary, not sufficient: it does not by itself justify duplicating
 `/doctor`.
 
+## Recommended-posture stance
+
+`/doctor` (v2.1.220) actively recommends permissive posture: check 8 writes
+`permissions.defaultMode: auto` and check 9 mints transcript-mined
+`permissions.allow` rules. Per
+[ADR 0021](./adr/0021-doctor-recommended-posture-safety-stance.md) (#3408),
+the safety category **differentiates and reconciles** rather than conceding or
+re-alarming: posture at or below that `/doctor` baseline is not alarm-grade on
+posture alone — findings must cite observed behaviour (what ran unattended,
+what each rule admitted; #3596) — and where a change is provably
+`/doctor`-authored, the finding is framed as a follow-up on a known change,
+not an alarm (#3597). Posture beyond the baseline (e.g. `bypassPermissions`,
+write-capable allow rules) remains alarm-grade.
+
 ## Deliberate seam enhancements
 
 The boundary still permits recommendations to make better use of already-local
