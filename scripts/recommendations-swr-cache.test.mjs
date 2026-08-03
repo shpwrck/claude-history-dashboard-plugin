@@ -237,6 +237,23 @@ async function getRecs(base, query = '') {
   };
 }
 
+async function postLocalAnalyze(base) {
+  const res = await fetch(`${base}/api/analyze/local`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      connection: 'close',
+    },
+    body: '{}',
+  });
+  const body = await res.text();
+  return {
+    status: res.status,
+    body,
+    parsed: JSON.parse(body),
+  };
+}
+
 function recommendationsFromBody(body) {
   const parsed = JSON.parse(body);
   return Array.isArray(parsed) ? parsed : parsed.recommendations ?? [];
@@ -1012,6 +1029,111 @@ try {
     await check('cache converges to a fresh hit after the background rebuild', () => {
       assert.ok(settled, 'recs cache never settled to a hit after content change');
       assert.equal(settled.status, 200);
+    });
+
+    // A cold recommendation key that suffers a source create during BOTH
+    // bounded attempts must return the freshest build as explicitly unsettled,
+    // not throw a 500 and freeze on an older body. The FIFO is read after each
+    // dataset/recommendation assemble, giving the test an exact mutation point.
+    await rm(adoptionReceiptsPath, { force: true });
+    const exhaustionFifo = spawnSync('mkfifo', [adoptionReceiptsPath]);
+    await check('source-exhaustion fixture creates its receipts FIFO', () => {
+      assert.equal(exhaustionFifo.status, 0, String(exhaustionFifo.stderr || ''));
+    });
+    const exhaustionQuery = '?project=%2Ftmp%2Fsource-churn';
+    const exhaustedRequest = getRecs(base, exhaustionQuery);
+    const exhaustionGateOne = await startFifoGate(adoptionReceiptsPath);
+    await writeFile(
+      join(projectDir, 'source-churn-one.jsonl'),
+      sessionJsonl(
+        'source-churn-one',
+        'first source mutation during the recommendation build',
+        '2024-01-07T15:00:00.000Z'
+      )
+    );
+    await releaseFifoGate(exhaustionGateOne);
+    const exhaustionGateTwo = await startFifoGate(adoptionReceiptsPath);
+    await writeFile(
+      join(projectDir, 'source-churn-two.jsonl'),
+      sessionJsonl(
+        'source-churn-two',
+        'second source mutation during the recommendation retry',
+        '2024-01-07T16:00:00.000Z'
+      )
+    );
+    // The current reader/writer keep the FIFO inode alive; replace its path now
+    // so the next request can prove the unsettled entry revalidates normally.
+    await rm(adoptionReceiptsPath, { force: true });
+    await writeFile(adoptionReceiptsPath, '');
+    await releaseFifoGate(exhaustionGateTwo);
+    const exhausted = await exhaustedRequest;
+    await check('source-only retry exhaustion serves a live recommendation body', () => {
+      assert.equal(exhausted.status, 200);
+      assert.equal(exhausted.cache, 'miss');
+      assert.ok(Array.isArray(JSON.parse(exhausted.body)));
+    });
+
+    const unsettledRecheck = await getRecs(base, exhaustionQuery);
+    await check('source-racy recommendation entry cannot become a signature hit', () => {
+      assert.equal(unsettledRecheck.status, 200);
+      assert.equal(
+        unsettledRecheck.cache,
+        'stale',
+        'the final mutation must force revalidation of the explicitly unsettled entry'
+      );
+    });
+    let exhaustionSettled = null;
+    for (let i = 0; i < 80; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const candidate = await getRecs(base, exhaustionQuery);
+      if (candidate.cache === 'hit' || candidate.cache === 'hit-content') {
+        exhaustionSettled = candidate;
+        break;
+      }
+    }
+    await check('source-racy recommendation entry converges once churn stops', () => {
+      assert.ok(exhaustionSettled);
+    });
+
+    // Local analysis has its own bounded loop. Exhaust both attempts under the
+    // same deterministic source-only churn; after the second FIFO read, replace
+    // the path with a regular file so ensureCurrentLocalAnalyzeBuild can perform
+    // its ordinary stable recheck without blocking.
+    await rm(adoptionReceiptsPath, { force: true });
+    const localFifo = spawnSync('mkfifo', [adoptionReceiptsPath]);
+    await check('local-analysis source-exhaustion fixture creates its FIFO', () => {
+      assert.equal(localFifo.status, 0, String(localFifo.stderr || ''));
+    });
+    const localRequest = postLocalAnalyze(base);
+    const localGateOne = await startFifoGate(adoptionReceiptsPath);
+    await writeFile(
+      join(projectDir, 'local-churn-one.jsonl'),
+      sessionJsonl(
+        'local-churn-one',
+        'first source mutation during local analysis',
+        '2024-01-07T17:00:00.000Z'
+      )
+    );
+    await releaseFifoGate(localGateOne);
+    const localGateTwo = await startFifoGate(adoptionReceiptsPath);
+    await writeFile(
+      join(projectDir, 'local-churn-two.jsonl'),
+      sessionJsonl(
+        'local-churn-two',
+        'second source mutation during local analysis retry',
+        '2024-01-07T18:00:00.000Z'
+      )
+    );
+    await rm(adoptionReceiptsPath, { force: true });
+    await writeFile(adoptionReceiptsPath, '');
+    await releaseFifoGate(localGateTwo);
+    const localExhausted = await localRequest;
+    await check('local-analysis source exhaustion retains deterministic recommendations', () => {
+      assert.equal(localExhausted.status, 200);
+      assert.equal(localExhausted.parsed.source, 'deterministic');
+      assert.ok(localExhausted.parsed.recommendations.length > 0);
+      assert.match(localExhausted.parsed.reason, /local model endpoint not configured/i);
+      assert.doesNotMatch(localExhausted.parsed.reason, /recommendation engine unavailable/i);
     });
   }
 } finally {

@@ -177,13 +177,6 @@ function recommendationSourceState() {
   };
 }
 
-function sameRecommendationSourceState(a, b) {
-  return (
-    a.sourceSig === b.sourceSig &&
-    sameDocIssueCacheState(a.docIssueCacheState, b.docIssueCacheState)
-  );
-}
-
 async function buildRecommendationResult({
   project,
   surface,
@@ -259,14 +252,29 @@ async function buildStableRecommendationResult(params) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const built = await buildRecommendationResult(params);
     const completedSourceState = recommendationSourceState();
-    if (
-      sameRecommendationSourceState(expectedSourceState, completedSourceState) &&
+    const sourceSigStable =
+      expectedSourceState.sourceSig === completedSourceState.sourceSig;
+    const docIssueStateStable =
+      sameDocIssueCacheState(
+        expectedSourceState.docIssueCacheState,
+        completedSourceState.docIssueCacheState
+      ) &&
       sameDocIssueCacheState(
         built.docIssueCacheState,
         completedSourceState.docIssueCacheState
-      )
-    ) {
-      return { ...built, sourceState: completedSourceState };
+      );
+    if (docIssueStateStable && (sourceSigStable || attempt === 1)) {
+      return {
+        ...built,
+        sourceState: {
+          ...completedSourceState,
+          // A final source-racy build is safe to serve because its exact
+          // document-issue trust state is current, but it is not safe to cache
+          // under a signature the built dataset did not observe. The parent
+          // response cache will retry/commit it as explicitly unsettled.
+          sourceSig: sourceSigStable ? completedSourceState.sourceSig : null,
+        },
+      };
     }
     if (attempt === 1) {
       const err = new Error(

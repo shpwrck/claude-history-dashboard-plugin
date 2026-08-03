@@ -442,11 +442,107 @@ test('worker discards a result when source state changes mid-build and retries o
   }
 });
 
-test('worker fails closed when source state changes again during its retry', async () => {
+test('worker serves the freshest result unsettled when only source state changes again during its retry', async () => {
   const home = buildFixtureHome();
   const projectDir = join(home, '.claude', 'projects', '-tmp-proj');
   const gate = join(home, 'worker-double-source-race.fifo');
   try {
+    const baseline = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-2196-worker-double-baseline-${randomUUID()}.db`)
+    );
+    const fifo = spawnSync('mkfifo', [gate]);
+    assert.equal(fifo.status, 0, String(fifo.stderr || ''));
+
+    let retryStarted = false;
+    const raced = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-2196-worker-double-race-${randomUUID()}.db`),
+      {},
+      {
+        env: {
+          CHD_RECS_CACHE_TEST_EVENTS: '1',
+          CHD_RECS_WORKER_TEST_AFTER_RECEIPTS_GATE: gate,
+        },
+        onLog(msg) {
+          if (msg.message === '[recs-cache-test] worker-receipts-read') {
+            writeFileSync(
+              join(projectDir, 'sess-gamma.jsonl'),
+              sessionJsonl({
+                prompt: 'first concurrent change',
+                text: 'Gamma result.',
+                toolName: 'Read',
+                toolInput: { file_path: '/tmp/gamma.txt' },
+                ts: '2026-01-03T00:00:00.000Z',
+                model: 'claude-opus-4',
+              })
+            );
+            writeFileSync(gate, 'release');
+          }
+          if (
+            msg.message ===
+            '[recs-worker] source changed during rebuild; retrying once'
+          ) {
+            retryStarted = true;
+            writeFileSync(
+              join(projectDir, 'sess-delta.jsonl'),
+              sessionJsonl({
+                prompt: 'second concurrent change',
+                text: 'Delta result.',
+                toolName: 'Read',
+                toolInput: { file_path: '/tmp/delta.txt' },
+                ts: '2026-01-04T00:00:00.000Z',
+                model: 'claude-opus-4',
+              })
+            );
+          }
+        },
+      }
+    );
+    assert.equal(retryStarted, true, 'the second mutation lands during the bounded retry');
+    assert.notEqual(
+      raced.contentHash,
+      baseline.contentHash,
+      'the final reply serves the fresher retry build rather than the pre-churn build'
+    );
+    assert.equal(
+      raced.sourceSig,
+      null,
+      'the source-racy reply is explicitly unsettled and cannot become a signature hit'
+    );
+    assert.equal(raced.docIssueCacheState, null);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('worker still fails closed when document-issue trust state changes during the final retry', async () => {
+  const home = buildFixtureHome();
+  const projectDir = join(home, '.claude', 'projects', '-tmp-proj');
+  const docsRoot = join(home, 'docs-root');
+  const cacheRoot = join(home, 'chd-cache');
+  const snapshotPath = join(cacheRoot, 'doc-issues', 'acme__widgets.json');
+  const gate = join(home, 'worker-doc-trust-race.fifo');
+  const repo = 'acme/widgets';
+  const refs = [101];
+  const makeSnapshot = (state, asOf) => ({
+    repo,
+    refs,
+    records: [{ number: 101, state }],
+    asOf,
+    complete: true,
+    fingerprint: createHash('sha256')
+      .update(`${repo}\n${refs.join(',')}`)
+      .digest('hex'),
+  });
+  try {
+    mkdirSync(join(cacheRoot, 'doc-issues'), { recursive: true });
+    mkdirSync(docsRoot, { recursive: true });
+    writeFileSync(join(docsRoot, 'REFERENCES.md'), 'Tracked in #101.\n');
+    writeFileSync(
+      snapshotPath,
+      JSON.stringify(makeSnapshot('open', new Date(Date.now() - 60_000).toISOString()))
+    );
     const fifo = spawnSync('mkfifo', [gate]);
     assert.equal(fifo.status, 0, String(fifo.stderr || ''));
 
@@ -454,10 +550,14 @@ test('worker fails closed when source state changes again during its retry', asy
     await assert.rejects(
       workerRebuild(
         home,
-        join(tmpdir(), `chd-2196-worker-double-race-${randomUUID()}.db`),
+        join(tmpdir(), `chd-2196-worker-doc-trust-race-${randomUUID()}.db`),
         {},
         {
           env: {
+            CHD_CACHE_DIR: cacheRoot,
+            CHD_DOC_GRAPH_ROOT: docsRoot,
+            CHD_DOC_ISSUES: repo,
+            CHD_DOC_ISSUES_TOKEN: 'fixture-token',
             CHD_RECS_CACHE_TEST_EVENTS: '1',
             CHD_RECS_WORKER_TEST_AFTER_RECEIPTS_GATE: gate,
           },
@@ -466,7 +566,7 @@ test('worker fails closed when source state changes again during its retry', asy
               writeFileSync(
                 join(projectDir, 'sess-gamma.jsonl'),
                 sessionJsonl({
-                  prompt: 'first concurrent change',
+                  prompt: 'trigger the bounded retry',
                   text: 'Gamma result.',
                   toolName: 'Read',
                   toolInput: { file_path: '/tmp/gamma.txt' },
@@ -482,15 +582,13 @@ test('worker fails closed when source state changes again during its retry', asy
             ) {
               retryStarted = true;
               writeFileSync(
-                join(projectDir, 'sess-delta.jsonl'),
-                sessionJsonl({
-                  prompt: 'second concurrent change',
-                  text: 'Delta result.',
-                  toolName: 'Read',
-                  toolInput: { file_path: '/tmp/delta.txt' },
-                  ts: '2026-01-04T00:00:00.000Z',
-                  model: 'claude-opus-4',
-                })
+                snapshotPath,
+                JSON.stringify(
+                  makeSnapshot(
+                    'closed',
+                    new Date(Date.now() - 30_000).toISOString()
+                  )
+                )
               );
             }
           },
@@ -498,7 +596,7 @@ test('worker fails closed when source state changes again during its retry', asy
       ),
       /source state changed across the bounded rebuild retry/i
     );
-    assert.equal(retryStarted, true, 'the second mutation lands during the bounded retry');
+    assert.equal(retryStarted, true);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

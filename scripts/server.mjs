@@ -3033,32 +3033,41 @@ async function ensureCurrentRecommendationsCacheEntry(
 
     const completedSourceSig = api.sourceSignature();
     const completedDocIssueState = currentDocIssueCacheState(api);
-    if (
-      entry.sourceSig !== completedSourceSig ||
-      !docIssueCacheStatesEqual(
-        entry.docIssueCacheState,
-        completedDocIssueState
-      )
-    ) {
+    const sourceSigStable = entry.sourceSig === completedSourceSig;
+    const docIssueStateStable = docIssueCacheStatesEqual(
+      entry.docIssueCacheState,
+      completedDocIssueState
+    );
+    if (!sourceSigStable || !docIssueStateStable) {
       if (sourceRetriesRemaining <= 0) {
+        if (!docIssueStateStable) {
+          discardRecommendationsCacheEntry(entry);
+          throw new Error(
+            'Recommendation source state changed across the bounded rebuild retry'
+          );
+        }
+        // Only the coarse source signature kept moving. The candidate's exact
+        // document-issue trust state is still current, so serve the freshest
+        // build instead of freezing the cache on an older body. Mark it
+        // unsettled so the next request cannot early-hit a signature the built
+        // dataset did not observe; its contentHash gate will restamp an
+        // identical value or schedule the ordinary SWR refresh.
+        entry.sourceSig = null;
+      } else {
+        sourceRetriesRemaining -= 1;
+        const currentBuild = state.recommendationsBuilds.get(key);
+        if (currentBuild && currentBuild !== buildOwner) {
+          discardRecommendationsCacheEntry(entry);
+          return currentBuild.promise;
+        }
+        if (currentBuild === buildOwner) {
+          buildOwner.sourceSig = completedSourceSig;
+        }
         discardRecommendationsCacheEntry(entry);
-        throw new Error(
-          'Recommendation source state changed across the bounded rebuild retry'
-        );
+        entry = await retryBuild(completedSourceSig);
+        clockConfigRetriesRemaining = 1;
+        continue;
       }
-      sourceRetriesRemaining -= 1;
-      const currentBuild = state.recommendationsBuilds.get(key);
-      if (currentBuild && currentBuild !== buildOwner) {
-        discardRecommendationsCacheEntry(entry);
-        return currentBuild.promise;
-      }
-      if (currentBuild === buildOwner) {
-        buildOwner.sourceSig = completedSourceSig;
-      }
-      discardRecommendationsCacheEntry(entry);
-      entry = await retryBuild(completedSourceSig);
-      clockConfigRetriesRemaining = 1;
-      continue;
     }
 
     if (recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
@@ -5392,8 +5401,8 @@ async function buildLocalAnalyzeDeterministic(req, project) {
     });
     const completedSourceSig = ingestApi.sourceSignature();
     const completedDocIssueState = currentDocIssueCacheState(ingestApi);
-    if (
-      expectedSourceSig === completedSourceSig &&
+    const sourceSigStable = expectedSourceSig === completedSourceSig;
+    const docIssueStateStable =
       docIssueCacheStatesEqual(
         docIssueCacheState,
         builtDocIssueCacheState
@@ -5403,11 +5412,15 @@ async function buildLocalAnalyzeDeterministic(req, project) {
         builtDocIssueCacheState,
         completedDocIssueState
       ) &&
-      docIssueCacheStateIsUsable(completedDocIssueState, Date.now())
-    ) {
+      docIssueCacheStateIsUsable(completedDocIssueState, Date.now());
+    if (docIssueStateStable && (sourceSigStable || attempt === 1)) {
       return {
         ingestApi,
-        sourceSig: completedSourceSig,
+        // A deterministic final-attempt candidate remains safe to serve when
+        // only the coarse source signature moved. Keep it explicitly
+        // unsettled so a later model result cannot be attached as though the
+        // evidence were stable; ensureCurrentLocalAnalyzeBuild will recheck it.
+        sourceSig: sourceSigStable ? completedSourceSig : null,
         docIssueCacheState: builtDocIssueCacheState,
         recommendations: extractRecommendations(recs),
       };
