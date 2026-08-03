@@ -48,6 +48,8 @@ const DEFINITION_REF = {
 const SUBJECTS = [2760, 2719, 2713, 2706, 2710, 2670];
 const TREATMENTS = ["haiku-solo", "haiku-sonnet-sidekick"];
 const CHECK_IDS = ["checks/gate-2702-vitest", "checks/gate-2702-typecheck"];
+const SEAL_RSS_PROBE_RETAINED_BUDGET_BYTES = 8 * 1024 * 1024;
+const SEAL_RSS_PROBE_MAX_BYTES = 192 * 1024 * 1024;
 const CHECK_SPECS = {
   "checks/gate-2702-vitest": {
     argv: ["npx", "vitest", "run"],
@@ -2787,6 +2789,97 @@ test("the C5 sealer is inert until explicitly enabled", () => {
     assert.equal(existsSync(stateRoot), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("aggregate retained-object budget rejects multi-file evidence before reads", async () => {
+  const fixture = createFixture();
+  try {
+    await assert.rejects(
+      sealTrial(
+        {
+          ...fixture.options,
+          maxRetainedObjectBytes: 32 * 1024,
+        },
+        fixture.dependencies,
+      ),
+      /aggregate retained object byte budget.*before reading evidence bytes/i,
+    );
+    assert.equal(existsSync(fixture.markerPath), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bundle verification enforces the aggregate object budget before reads", async () => {
+  const fixture = createFixture();
+  try {
+    await sealTrial(fixture.options, fixture.dependencies);
+    await assert.rejects(
+      verifyTrial({
+        ...fixture.options,
+        maxRetainedObjectBytes: 32 * 1024,
+      }),
+      /aggregate retained object byte budget.*before reading sealed objects/i,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("within-budget sealing stays below its isolated peak-RSS budget", (t) => {
+  const fixture = createFixture();
+  const helper = join(fixture.root, "seal-rss-probe.mjs");
+  writeFileSync(
+    helper,
+    `import { readFileSync } from "node:fs";\n` +
+      `import { join } from "node:path";\n` +
+      `import { sealTrial } from ${JSON.stringify(pathToFileURL(SEALER).href)};\n` +
+      `const read = (path) => JSON.parse(readFileSync(path, "utf8"));\n` +
+      `const dependencies = {\n` +
+      `  classification(_options, registration) { return read(join(registration.runDir, "classification.json")); },\n` +
+      `  accounting(_options, registration) { return read(join(registration.runDir, "accounting.json")); },\n` +
+      `  judge() { throw new Error("unexpected judge"); },\n` +
+      `};\n` +
+      `const result = await sealTrial({\n` +
+      `  trial: process.env.TRIAL_ID,\n` +
+      `  stateRoot: process.env.STATE_ROOT,\n` +
+      `  maxRetainedObjectBytes: Number(process.env.MAX_RETAINED_OBJECT_BYTES),\n` +
+      `}, dependencies);\n` +
+      `process.stdout.write(JSON.stringify({\n` +
+      `  result,\n` +
+      `  maxRssBytes: process.resourceUsage().maxRSS * 1024,\n` +
+      `}) + "\\n");\n`,
+    "utf8",
+  );
+  try {
+    const probe = spawnSync(process.execPath, [helper], {
+      env: {
+        ...process.env,
+        TRIAL_ID: fixture.trialId,
+        STATE_ROOT: fixture.stateRoot,
+        MAX_RETAINED_OBJECT_BYTES: String(
+          SEAL_RSS_PROBE_RETAINED_BUDGET_BYTES,
+        ),
+        NODE_ENV: "test",
+      },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    const measured = JSON.parse(probe.stdout);
+    assert.equal(measured.result.state, "verified");
+    assert.equal(existsSync(fixture.markerPath), true);
+    t.diagnostic(
+      `isolated seal peak RSS: ${measured.maxRssBytes} bytes ` +
+        `(${(measured.maxRssBytes / (1024 * 1024)).toFixed(1)} MiB)`,
+    );
+    assert.ok(
+      measured.maxRssBytes <= SEAL_RSS_PROBE_MAX_BYTES,
+      `isolated seal peak RSS ${measured.maxRssBytes} exceeded ${SEAL_RSS_PROBE_MAX_BYTES} bytes`,
+    );
+  } finally {
+    fixture.cleanup();
   }
 });
 

@@ -12277,6 +12277,12 @@ function readRegularBytes(path, maximumBytes = MAX_RECEIPT_BYTES, label = path) 
 	if (bytes.length !== metadata.size) fail$1(`${label} changed while it was read`);
 	return bytes;
 }
+function resolveMaxRetainedObjectBytes(options = {}) {
+	const configured = options.maxRetainedObjectBytes ?? process.env.CHD_EXPERIMENT_2702_MAX_RETAINED_OBJECT_BYTES ?? DEFAULT_MAX_RETAINED_OBJECT_BYTES;
+	const parsed = typeof configured === "number" ? configured : Number(configured);
+	if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > DEFAULT_MAX_RETAINED_OBJECT_BYTES) fail$1(`max retained object bytes must be an integer from 1 through ${DEFAULT_MAX_RETAINED_OBJECT_BYTES}`);
+	return parsed;
+}
 function readJson(path, maximumBytes = MAX_RECEIPT_BYTES, label = path) {
 	try {
 		return JSON.parse(readRegularBytes(path, maximumBytes, label).toString("utf8"));
@@ -13288,10 +13294,12 @@ function buildRunCandidate(runtime, paths, evidence, judge, artifactByPath, prio
 	};
 }
 function addObject(objectMap, sourcePath, bytes, mediaType = "application/octet-stream") {
+	if (bytes.length > objectMap.maxRetainedBytes - objectMap.retainedBytes) fail$1(`aggregate retained object byte budget exceeded while adding ${sourcePath}: ${objectMap.retainedBytes} retained + ${bytes.length} candidate > ${objectMap.maxRetainedBytes} byte budget`);
 	const contentDigest = sha256Bytes(bytes);
 	const existing = objectMap.objects.get(contentDigest);
 	if (existing && !existing.equals(bytes)) fail$1(`SHA-256 collision while storing ${sourcePath}`);
 	objectMap.objects.set(contentDigest, bytes);
+	objectMap.retainedBytes += bytes.length;
 	const entry = {
 		sourcePath,
 		contentDigest,
@@ -14093,7 +14101,7 @@ async function loadRuntime$1() {
 		contracts
 	};
 }
-function verifyBundleDirectory(runtime, paths, marker, bundleDirectory) {
+function verifyBundleDirectory(runtime, paths, marker, bundleDirectory, maxRetainedObjectBytes) {
 	if (!isWithin(paths.bundles, bundleDirectory)) fail$1("seal marker bundle path escapes the trial");
 	const metadata = lstatSync(bundleDirectory);
 	if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail$1("seal bundle is not a real directory");
@@ -14104,9 +14112,14 @@ function verifyBundleDirectory(runtime, paths, marker, bundleDirectory) {
 	const objectsMetadata = lstatSync(objectsRoot);
 	if (!objectsMetadata.isDirectory() || objectsMetadata.isSymbolicLink()) fail$1("seal objects root is not a self-contained directory");
 	if (!sameValue$1(readdirSync(objectsRoot).sort(), [...new Set(manifest.artifacts.map((entry) => entry.objectName))].sort())) fail$1("seal object directory is not exact");
-	const objectBytes = /* @__PURE__ */ new Map();
+	let plannedObjectBytes = 0;
 	for (const entry of manifest.artifacts) {
 		if (!DIGEST_PATTERN.test(entry.contentDigest ?? "") || entry.objectName !== entry.contentDigest.replace(":", "-") || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0 || typeof entry.sourcePath !== "string" || !entry.sourcePath) fail$1("seal manifest contains an invalid artifact entry");
+		if (entry.sizeBytes > maxRetainedObjectBytes - plannedObjectBytes) fail$1(`aggregate retained object byte budget exceeded before reading sealed objects: ${plannedObjectBytes} planned + ${entry.sizeBytes} candidate > ${maxRetainedObjectBytes} byte budget`);
+		plannedObjectBytes += entry.sizeBytes;
+	}
+	const objectBytes = /* @__PURE__ */ new Map();
+	for (const entry of manifest.artifacts) {
 		const bytes = readRegularBytes(join(objectsRoot, entry.objectName), MAX_OBJECT_BYTES, `sealed object ${entry.objectName}`);
 		if (bytes.length !== entry.sizeBytes || sha256Bytes(bytes) !== entry.contentDigest) fail$1(`sealed object ${entry.sourcePath} failed content verification`);
 		objectBytes.set(entry.contentDigest, bytes);
@@ -14249,11 +14262,12 @@ async function loadVerifiedTrial(optionsInput) {
 		...optionsInput,
 		stateRoot: resolve(optionsInput.stateRoot || defaultStateRoot$1())
 	};
+	const maxRetainedObjectBytes = resolveMaxRetainedObjectBytes(options);
 	const runtime = await loadRuntime$1();
 	const paths = trialPaths(options);
 	const marker = readReceipt(paths.marker, "Gate2702VerifiedSeal", "verified seal marker");
 	if (marker.verified !== true || marker.trialId !== options.trial || !sameValue$1(marker.definitionRef, runtime.plan.definitionRef) || !DIGEST_PATTERN.test(marker.trialDigest ?? "") || !/^[0-9a-f]{40}$/.test(marker.baseSha ?? "") || !DIGEST_PATTERN.test(marker.worktreeManifestDigest ?? "") || !DIGEST_PATTERN.test(marker.bundleDigest ?? "") || marker.bundleDirectory !== join("bundles", marker.bundleDigest.replace(":", "-")) || !Number.isFinite(Date.parse(marker.sealedAt ?? ""))) fail$1("verified seal marker is not the exact C5 cleanup authority");
-	const verified = verifyBundleDirectory(runtime, paths, marker, join(paths.sealRoot, marker.bundleDirectory));
+	const verified = verifyBundleDirectory(runtime, paths, marker, join(paths.sealRoot, marker.bundleDirectory), maxRetainedObjectBytes);
 	return {
 		definition: verified.definition,
 		registry: verified.registry,
@@ -14277,6 +14291,7 @@ async function sealTrial(optionsInput, dependencies = productionValidators) {
 		...optionsInput,
 		stateRoot: resolve(optionsInput.stateRoot || defaultStateRoot$1())
 	};
+	const maxRetainedObjectBytes = resolveMaxRetainedObjectBytes(options);
 	const runtime = await loadRuntime$1();
 	const paths = trialPaths(options);
 	if (existsSync(paths.marker)) return verifyTrial(options);
@@ -14284,13 +14299,27 @@ async function sealTrial(optionsInput, dependencies = productionValidators) {
 	const armEvidence = state.registrations.map((registration) => validateTerminalArm(runtime, paths, registration, dependencies, options));
 	const selected = selectedAttempts(paths, state.trial, armEvidence);
 	const judgeBySubject = validateJudging(paths, options, selected, dependencies);
-	const evidencePaths = assertNoUnknownEvidence(paths, expectedEvidencePaths(paths, armEvidence, selected));
+	const evidencePlan = assertNoUnknownEvidence(paths, expectedEvidencePaths(paths, armEvidence, selected)).map((path) => {
+		const absolute = join(paths.trialRoot, path);
+		const metadata = lstatSync(absolute);
+		if (!metadata.isFile() || metadata.isSymbolicLink()) fail$1(`${path} is not a regular file`);
+		if (metadata.size > MAX_OBJECT_BYTES) fail$1(`${path} exceeds its fixed size limit`);
+		return {
+			path,
+			absolute,
+			sizeBytes: metadata.size
+		};
+	});
+	const plannedEvidenceBytes = evidencePlan.reduce((total, entry) => total + entry.sizeBytes, 0);
+	if (!Number.isSafeInteger(plannedEvidenceBytes) || plannedEvidenceBytes > maxRetainedObjectBytes) fail$1(`aggregate retained object byte budget exceeded before reading evidence bytes: ${plannedEvidenceBytes} bytes across ${evidencePlan.length} artifacts > ${maxRetainedObjectBytes} byte budget`);
 	const objectMap = {
 		objects: /* @__PURE__ */ new Map(),
 		artifacts: [],
-		byPath: /* @__PURE__ */ new Map()
+		byPath: /* @__PURE__ */ new Map(),
+		retainedBytes: 0,
+		maxRetainedBytes: maxRetainedObjectBytes
 	};
-	for (const path of evidencePaths) addObject(objectMap, path, readRegularBytes(join(paths.trialRoot, path), MAX_OBJECT_BYTES, path), path.endsWith(".json") ? "application/json" : path.endsWith(".jsonl") ? "application/x-ndjson" : "application/octet-stream");
+	for (const { path, absolute } of evidencePlan) addObject(objectMap, path, readRegularBytes(absolute, MAX_OBJECT_BYTES, path), path.endsWith(".json") ? "application/json" : path.endsWith(".jsonl") ? "application/x-ndjson" : "application/octet-stream");
 	collectExternalAccountingObjects(objectMap, armEvidence);
 	addObject(objectMap, "generated/definition.json", Buffer.from(`${runtime.contracts.canonicalDocumentJson(runtime.definition)}\n`, "utf8"), "application/json");
 	addObject(objectMap, "generated/registry.json", Buffer.from(`${canonicalJson$1(runtime.registry)}\n`, "utf8"), "application/json");
@@ -14413,7 +14442,7 @@ async function sealTrial(optionsInput, dependencies = productionValidators) {
 		bundleDirectory: join("bundles", manifest.contentDigest.replace(":", "-")),
 		sealedAt: (/* @__PURE__ */ new Date()).toISOString()
 	});
-	verifyBundleDirectory(runtime, paths, marker, bundleDirectory);
+	verifyBundleDirectory(runtime, paths, marker, bundleDirectory, maxRetainedObjectBytes);
 	maybeCrash("before-marker");
 	atomicWriteJson(paths.marker, marker);
 	return verifyTrial(options);
@@ -14424,7 +14453,7 @@ async function main$1() {
 	const result = options.command === "seal" ? await sealTrial(options) : await verifyTrial(options);
 	process.stdout.write(`${JSON.stringify(result)}\n`);
 }
-var PROJECT_ROOT, SIDEKICK_SNAPSHOT_DIRECTORY, SIDEKICK_SNAPSHOT_PREFIX, SIDEKICK_SNAPSHOT_PATH_RE, CLASSIFIER_PATH, ACCOUNTING_PATH, JUDGE_PATH, DEFINITION_DIGEST, DEFINITION_ID, DEFINITION_VERSION, REPOSITORY, SUBJECTS, TREATMENTS, CHECK_IDS, MAX_RECEIPT_BYTES, MAX_OBJECT_BYTES, MAX_GIT_BYTES, MAX_WORKTREE_DIFF_ARTIFACTS, MAX_WORKTREE_DIFF_RAW_BYTES, MAX_TRIAL_DIFF_ARTIFACTS, MAX_TRIAL_DIFF_RAW_BYTES, JUDGE_MODEL, SIDEKICK_MODEL, JUDGE_TIMEOUT_MS, JUDGE_BUDGET_USD, JUDGE_MAX_STREAM_BYTES, JUDGE_DIMENSIONS, JUDGE_SCHEMA, UUID_PATTERN$1, DIGEST_PATTERN, DEFINITION_REF, productionValidators;
+var PROJECT_ROOT, SIDEKICK_SNAPSHOT_DIRECTORY, SIDEKICK_SNAPSHOT_PREFIX, SIDEKICK_SNAPSHOT_PATH_RE, CLASSIFIER_PATH, ACCOUNTING_PATH, JUDGE_PATH, DEFINITION_DIGEST, DEFINITION_ID, DEFINITION_VERSION, REPOSITORY, SUBJECTS, TREATMENTS, CHECK_IDS, MAX_RECEIPT_BYTES, MAX_OBJECT_BYTES, DEFAULT_MAX_RETAINED_OBJECT_BYTES, MAX_GIT_BYTES, MAX_WORKTREE_DIFF_ARTIFACTS, MAX_WORKTREE_DIFF_RAW_BYTES, MAX_TRIAL_DIFF_ARTIFACTS, MAX_TRIAL_DIFF_RAW_BYTES, JUDGE_MODEL, SIDEKICK_MODEL, JUDGE_TIMEOUT_MS, JUDGE_BUDGET_USD, JUDGE_MAX_STREAM_BYTES, JUDGE_DIMENSIONS, JUDGE_SCHEMA, UUID_PATTERN$1, DIGEST_PATTERN, DEFINITION_REF, productionValidators;
 var init_seal = __esmMin((() => {
 	init_behavior_context();
 	init_seal_accounting();
@@ -14454,6 +14483,7 @@ var init_seal = __esmMin((() => {
 	CHECK_IDS = ["checks/gate-2702-vitest", "checks/gate-2702-typecheck"];
 	MAX_RECEIPT_BYTES = 32 * 1024 * 1024;
 	MAX_OBJECT_BYTES = 256 * 1024 * 1024;
+	DEFAULT_MAX_RETAINED_OBJECT_BYTES = 512 * 1024 * 1024;
 	MAX_GIT_BYTES = 256 * 1024 * 1024;
 	MAX_WORKTREE_DIFF_ARTIFACTS = 1024;
 	MAX_WORKTREE_DIFF_RAW_BYTES = 64 * 1024 * 1024;
