@@ -28,7 +28,7 @@
 
 /** The measured stop-hook overhead the corrective is built from. */
 export interface HookOverheadCorrectiveInput {
-  /** Mean per-turn overhead over the timed subset, ms (`meanTimedDurationMs`). */
+  /** Mean overhead among timed stop events, ms (`meanTimedDurationMs`). */
   meanTimedDurationMs: number;
   /** Worst single timed stop event, ms (`maxDurationMs`). */
   maxDurationMs: number;
@@ -36,7 +36,7 @@ export interface HookOverheadCorrectiveInput {
   timedEvents: number;
 }
 
-/** Mirror the `speed.hook-overhead` detector's "heavy" bar (5s per turn). */
+/** Mirror the `speed.hook-overhead` detector's "heavy" bar (5s timed mean). */
 const HEAVY_OVERHEAD_MS = 5000;
 
 function fmtSeconds(ms: number): string {
@@ -59,21 +59,19 @@ export function hookOverheadCorrective(
   const { meanTimedDurationMs, maxDurationMs, timedEvents } = input;
   const heavy = meanTimedDurationMs >= HEAVY_OVERHEAD_MS;
   const lead = heavy
-    ? `Stop hooks are adding about ${fmtSeconds(
+    ? `Among ${timedEvents.toLocaleString()} timed Stop events, measured hook duration averaged ${fmtSeconds(
         meanTimedDurationMs
-      )} of wall-clock to every turn (up to ${fmtSeconds(
+      )} and reached ${fmtSeconds(
         maxDurationMs
-      )}, over ${timedEvents.toLocaleString()} timed stop event(s)). That latency is paid on every turn the agent finishes.`
-    : `Stop hooks are adding about ${fmtSeconds(
+      )}. That measured delay is large enough to tune now.`
+    : `Among ${timedEvents.toLocaleString()} timed Stop events, measured hook duration averaged ${fmtSeconds(
         meanTimedDurationMs
-      )} of wall-clock per turn (up to ${fmtSeconds(
-        maxDurationMs
-      )}, over ${timedEvents.toLocaleString()} timed stop event(s)) — worth reviewing before it grows.`;
+      )} and reached ${fmtSeconds(maxDurationMs)} — worth reviewing before it grows.`;
   return [
     lead,
     '',
     'To act on it, review your Stop hooks in `.claude/settings.json`:',
-    '- Make the slow hook asynchronous (fire-and-forget, e.g. append ` &` / `nohup … &`) so its wall-clock no longer blocks each turn — but only if its output is advisory; a hook that must gate the turn has to stay synchronous.',
+    '- Make the slow hook asynchronous (fire-and-forget, e.g. append ` &` / `nohup … &`) so its wall-clock no longer blocks completion when it fires — but only if its output is advisory; a hook that must gate completion has to stay synchronous.',
     '- Or drop the hook entirely if its side effect is no longer needed.',
     "Per-hook timing is sparse and the runtime emits no per-hook name, so identify the offender from the hook `command` strings in your settings.json.",
   ].join('\n');

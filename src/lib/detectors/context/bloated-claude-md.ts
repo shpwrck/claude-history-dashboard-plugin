@@ -19,7 +19,7 @@ export const detector: Detector = {
     const parts = mergedClaudeMdParts(input.liveConfig);
     const text = parts.join('\n\n');
     if (text.length === 0) return null;
-    const lines = text.split('\n').length;
+    const lines = text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
     if (lines <= WARN_LINES) return null;
     return {
       id: 'context.bloated-claude-md',

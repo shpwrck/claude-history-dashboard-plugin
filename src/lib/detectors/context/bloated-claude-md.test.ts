@@ -21,9 +21,22 @@ function input(
 }
 
 describe('context.bloated-claude-md (#412)', () => {
-  it('stays silent at or below the 200-line target', () => {
-    expect(detector.rule(input('x\n'.repeat(150)), 0)).toBeNull();
+  it.each([
+    ['newline-terminated', 'x\n'.repeat(200)],
+    ['unterminated', Array(200).fill('x').join('\n')],
+  ])('stays silent for exactly 200 %s lines', (_description, text) => {
+    expect(detector.rule(input(text), 0)).toBeNull();
+  });
+
+  it('stays silent for empty input', () => {
     expect(detector.rule(input(''), 0)).toBeNull();
+  });
+
+  it.each([
+    ['newline-terminated', 'x\n'.repeat(201)],
+    ['unterminated', Array(201).fill('x').join('\n')],
+  ])('reports exactly 201 affected %s lines', (_description, text) => {
+    expect(detector.rule(input(text), 0)?.affected).toBe(201);
   });
 
   it('warns past 200 lines and escalates to critical past 400', () => {
@@ -46,10 +59,8 @@ describe('context.bloated-claude-md (#412)', () => {
     it('reproduces the reported line count from the cited text', () => {
       const cited = (lines: number) =>
         detector.rule(input('x\n'.repeat(lines)), 0)!.provenance!.observations[0].value;
-      // `split('\n').length` counts the trailing empty segment, so N repeats of
-      // "x\n" is N+1 lines — the point is that the cited value tracks the input.
-      expect(cited(250)).toBe(251);
-      expect(cited(300)).toBe(301);
+      expect(cited(250)).toBe(250);
+      expect(cited(300)).toBe(300);
     });
 
     it('discloses that the count is a MERGE, with how many documents', () => {
