@@ -11,20 +11,43 @@
 // fails against the pre-#3085 tree.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { captureGate2702BehaviorContext } from "./behavior-context.mjs";
 import {
   assertGate2702SandboxPreDispatch,
   assertGate2702SandboxReady,
+  buildGate2702SandboxLaunch,
+  finalizeGate2702SandboxLaunch,
   gate2702IsolatedHome,
   gate2702SandboxEnabled,
   gate2702SandboxProbeAction,
   GATE_2702_SANDBOX_ENV_KEYS,
 } from "./sandbox-dispatch.mjs";
+import {
+  GATE_2702_BROKER_PLACEHOLDER_TOKEN,
+  GATE_2702_MODEL_DOMAIN,
+} from "./credential-broker.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SRT_PACKAGE_ROOT = resolve(
+  HERE,
+  "..",
+  "..",
+  "node_modules",
+  "@anthropic-ai",
+  "sandbox-runtime",
+);
 
 test("the hosted sandbox probe skips normally but fails when CI requires proof", () => {
   assert.equal(gate2702SandboxProbeAction(true, {}), "run");
@@ -88,12 +111,117 @@ test("the documented child-environment allowlist carries no host credential keys
       `${key} must not be in the sandbox environment allowlist`,
     );
   }
+  assert.equal(
+    GATE_2702_SANDBOX_ENV_KEYS.includes("CLAUDE_CODE_OAUTH_TOKEN"),
+    true,
+    "only the fixed non-secret broker placeholder may occupy the OAuth env seam",
+  );
   assert.equal(GATE_2702_SANDBOX_ENV_KEYS.includes("HOME"), true);
   // HOME is present but must be re-pointed at the isolated home, never inherited.
   assert.equal(
     new Set(GATE_2702_SANDBOX_ENV_KEYS).size,
     GATE_2702_SANDBOX_ENV_KEYS.length,
   );
+});
+
+test("a launch keeps the credential and broker socket outside the jailed home", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gate-2702-broker-launch-"));
+  const hostHome = join(root, "host-home");
+  const worktree = join(root, "worktree");
+  const runDir = join(root, "trial", "runs", "issue-1", "haiku-solo", "attempt-1");
+  const gitDirectory = join(root, "repo", ".git", "worktrees", "arm");
+  const gitCommonDirectory = join(root, "repo", ".git");
+  for (const path of [
+    join(hostHome, ".claude"),
+    worktree,
+    runDir,
+    gitDirectory,
+    gitCommonDirectory,
+  ]) {
+    mkdirSync(path, { recursive: true });
+  }
+  writeFileSync(
+    join(hostHome, ".claude", ".credentials.json"),
+    `${JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "launch-credential-canary",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      },
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const executable = process.execPath;
+  const launch = await buildGate2702SandboxLaunch({
+    workerArgv: [executable, "-e", ""],
+    registration: {
+      runDir,
+      worktreePath: worktree,
+      subject: 1,
+      treatmentId: "haiku-solo",
+      attempt: 1,
+      baseSha: "1".repeat(40),
+      trialId: "4f503910-77de-4ac0-b454-3ac913d96288",
+    },
+    gitDirectory,
+    gitCommonDirectory,
+    sandboxRuntime: {
+      enforcer: "srt",
+      packageRoot: SRT_PACKAGE_ROOT,
+      cliPath: join(SRT_PACKAGE_ROOT, "dist", "cli.js"),
+      package: {
+        name: "@anthropic-ai/sandbox-runtime",
+        version: "0.0.52",
+        root: SRT_PACKAGE_ROOT,
+        cliPath: join(SRT_PACKAGE_ROOT, "dist", "cli.js"),
+        manifestDigest: `sha256:${"1".repeat(64)}`,
+        cliDigest: `sha256:${"2".repeat(64)}`,
+      },
+      tools: ["bwrap", "socat", "rg"].map((name) => ({
+        name,
+        command: executable,
+        resolved: executable,
+        version: process.version,
+      })),
+      sidekick: null,
+    },
+    sidekickEnvironment: {},
+    brokerRequestPolicy: {
+      allowedModels: ["claude-haiku-4-5-20251001"],
+      wallTimeMs: 3_000_000,
+      costCapUsd: 18,
+    },
+    env: {
+      HOME: hostHome,
+      CHD_EXPERIMENT_2702_TEST_MODE: "1",
+      CHD_EXPERIMENT_2702_TEST_SANDBOX: "1",
+    },
+  });
+  try {
+    const isolatedHome = join(runDir, "sandbox", "home");
+    assert.equal(
+      existsSync(join(isolatedHome, ".claude", ".credentials.json")),
+      false,
+    );
+    assert.equal(
+      launch.environment.CLAUDE_CODE_OAUTH_TOKEN,
+      GATE_2702_BROKER_PLACEHOLDER_TOKEN,
+    );
+    assert.equal(
+      launch.attestation.policy.network.mitmProxy.domains[0],
+      GATE_2702_MODEL_DOMAIN,
+    );
+    assert.equal(
+      launch.attestation.credentialBroker.socketPath.startsWith(hostHome),
+      true,
+    );
+    assert.equal(existsSync(launch.attestation.credentialBroker.socketPath), true);
+    assert.equal(existsSync(launch.attestation.credentialBroker.caCertPath), true);
+  } finally {
+    await finalizeGate2702SandboxLaunch(launch);
+    assert.equal(existsSync(launch.attestation.credentialBroker.socketPath), false);
+    assert.equal(existsSync(launch.attestation.credentialBroker.caCertPath), false);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("pre-dispatch validation rejects a receipt with no enforcer attestation", () => {

@@ -4,9 +4,13 @@
 //   node scripts/check-llm-egress.test.mjs
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   collectLlmWrapperCalls,
+  findAnthropicOriginOffenders,
   isRuntimeSource,
   parsePublicExposureDeployment,
   validateLlmPrePublicExposure,
@@ -75,6 +79,37 @@ check('runtime-source classifier includes src and scripts, excludes tests', () =
   assert.equal(isRuntimeSource('scripts/server.mjs'), true);
   assert.equal(isRuntimeSource('scripts/check-llm-egress.test.mjs'), false);
   assert.equal(isRuntimeSource('docs/enterprise-readiness.md'), false);
+});
+
+check('origin gate allows only the broker pinned-domain declaration', () => {
+  const root = mkdtempSync(join(tmpdir(), 'llm-egress-broker-origin-'));
+  const file = 'scripts/gate-2702/credential-broker.mjs';
+  const path = join(root, file);
+  try {
+    mkdirSync(join(root, 'scripts/gate-2702'), { recursive: true });
+    writeFileSync(
+      path,
+      'export const GATE_2702_MODEL_DOMAIN = "api.anthropic.com";\n'
+    );
+    assert.deepEqual(findAnthropicOriginOffenders([file], root), []);
+
+    writeFileSync(
+      path,
+      [
+        'export const GATE_2702_MODEL_DOMAIN = "api.anthropic.com";',
+        'await fetch("https://api.anthropic.com/v1/messages");',
+      ].join('\n')
+    );
+    assert.deepEqual(findAnthropicOriginOffenders([file], root), [`${file}:2`]);
+
+    writeFileSync(
+      path,
+      'export const OTHER_MODEL_DOMAIN = "api.anthropic.com";\n'
+    );
+    assert.deepEqual(findAnthropicOriginOffenders([file], root), [`${file}:1`]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 check('collector finds literal wrapper ids and line numbers', () => {

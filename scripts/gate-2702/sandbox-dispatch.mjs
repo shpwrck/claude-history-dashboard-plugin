@@ -1,17 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  closeSync,
   constants as fsConstants,
   copyFileSync,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
-  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -24,6 +20,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { shellQuote } from "../lib/shell-quote.mjs";
 import { GATE_2702_SIDEKICK_VERSION } from "./behavior-context.mjs";
+import {
+  GATE_2702_BROKER_PLACEHOLDER_TOKEN,
+  GATE_2702_MODEL_DOMAIN,
+  gate2702BrokerRequestPolicy,
+  startGate2702CredentialBroker,
+} from "./credential-broker.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HERE, "..", "..");
@@ -37,10 +39,9 @@ const SRT_PACKAGE_JSON = join(SRT_PACKAGE_ROOT, "package.json");
 const SRT_CLI = join(SRT_PACKAGE_ROOT, "dist", "cli.js");
 const SRT_INDEX = join(SRT_PACKAGE_ROOT, "dist", "index.js");
 const EXPECTED_SRT_VERSION = "0.0.52";
-const MAX_CREDENTIAL_BYTES = 1024 * 1024;
 const MAX_PLUGIN_FILES = 1024;
 const MAX_PLUGIN_BYTES = 16 * 1024 * 1024;
-const MODEL_DOMAIN = "api.anthropic.com";
+const MODEL_DOMAIN = GATE_2702_MODEL_DOMAIN;
 const SIDEKICK_SNAPSHOT_ROOTS = [".claude-plugin", "hooks", "scripts"];
 // Derived, not re-typed: the snapshot directory must track the same pin the
 // runtime enforces. Two hand-written copies of "0.3.3" would disagree the
@@ -56,20 +57,30 @@ export const GATE_2702_SANDBOX_ENV_KEYS = [
   "CHD_EXPERIMENT_2702_SUBJECT",
   "CHD_EXPERIMENT_2702_TREATMENT",
   "CHD_EXPERIMENT_2702_TRIAL_ID",
+  "CLAUDE_CODE_OAUTH_TOKEN",
   "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
   "CLAUDE_CODE_TMPDIR",
   "CLAUDE_CONFIG_DIR",
+  "AWS_CA_BUNDLE",
+  "CARGO_HTTP_CAINFO",
+  "CURL_CA_BUNDLE",
+  "DENO_CERT",
   "DISABLE_AUTOUPDATER",
   "GIT_CONFIG_GLOBAL",
   "GIT_CONFIG_NOSYSTEM",
+  "GIT_SSL_CAINFO",
   "HOME",
   "LANG",
   "LC_ALL",
   "NO_COLOR",
   "NPM_CONFIG_CACHE",
   "NPM_CONFIG_USERCONFIG",
+  "NODE_EXTRA_CA_CERTS",
   "PATH",
+  "PIP_CERT",
+  "REQUESTS_CA_BUNDLE",
   "SHELL",
+  "SSL_CERT_FILE",
   "TERM",
   "TMPDIR",
   "TZ",
@@ -400,59 +411,13 @@ export function prepareGate2702SandboxRuntime({
   return { ...identity, sidekick };
 }
 
-function readCredentialOnly(source) {
-  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
-  const fd = openSync(source, flags);
-  try {
-    const before = fstatSync(fd);
-    if (!before.isFile() || before.size > MAX_CREDENTIAL_BYTES) {
-      fail("subscription credential is not a bounded regular file");
-    }
-    const bytes = Buffer.alloc(before.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
-      if (read === 0) fail("subscription credential changed while read");
-      offset += read;
-    }
-    const after = fstatSync(fd);
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs
-    ) {
-      fail("subscription credential changed while read");
-    }
-    return bytes;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function installCredential(isolatedHome, hostHome) {
-  const claudeRoot = join(isolatedHome, ".claude");
-  const destination = join(claudeRoot, ".credentials.json");
-  mkdirSync(claudeRoot, { recursive: true, mode: 0o700 });
-  if (readdirSync(claudeRoot).length !== 0) {
-    fail("isolated Claude home was not empty before credential install");
-  }
-  const source = join(hostHome, ".claude", ".credentials.json");
-  const bytes = readCredentialOnly(source);
-  try {
-    writeFileSync(destination, bytes, {
-      flag: "wx",
-      mode: 0o600,
-    });
-  } finally {
-    bytes.fill(0);
-  }
-  return destination;
-}
-
 function uniqueSorted(values) {
   return [...new Set(values.map((value) => resolve(value)))].sort();
+}
+
+function pathWithin(root, candidate) {
+  const local = relative(resolve(root), resolve(candidate));
+  return local === "" || (!local.startsWith("..") && !isAbsolute(local));
 }
 
 function sandboxEnvironmentValue({
@@ -460,6 +425,7 @@ function sandboxEnvironmentValue({
   sidekickEnvironment,
   isolatedHome,
   runtimeExecutables,
+  credentialBroker,
 }) {
   const tmp = join(isolatedHome, "tmp");
   const xdgConfig = join(isolatedHome, ".config");
@@ -473,18 +439,25 @@ function sandboxEnvironmentValue({
     CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
     CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
     CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+    CLAUDE_CODE_OAUTH_TOKEN: GATE_2702_BROKER_PLACEHOLDER_TOKEN,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_TMPDIR: tmp,
     CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+    AWS_CA_BUNDLE: credentialBroker.caCertPath,
+    CARGO_HTTP_CAINFO: credentialBroker.caCertPath,
+    CURL_CA_BUNDLE: credentialBroker.caCertPath,
+    DENO_CERT: credentialBroker.caCertPath,
     DISABLE_AUTOUPDATER: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_SSL_CAINFO: credentialBroker.caCertPath,
     HOME: isolatedHome,
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
     NO_COLOR: "1",
     NPM_CONFIG_CACHE: npmCache,
     NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+    NODE_EXTRA_CA_CERTS: credentialBroker.caCertPath,
     PATH: [
       ...new Set([
         ...runtimeExecutables.map((path) => dirname(path)),
@@ -493,7 +466,10 @@ function sandboxEnvironmentValue({
         "/bin",
       ]),
     ].join(":"),
+    PIP_CERT: credentialBroker.caCertPath,
+    REQUESTS_CA_BUNDLE: credentialBroker.caCertPath,
     SHELL: "/bin/bash",
+    SSL_CERT_FILE: credentialBroker.caCertPath,
     TERM: "dumb",
     // Keep the enforcer's host-side Unix socket paths below Linux's 108-byte
     // limit. SRT replaces TMPDIR in the sandboxed child with
@@ -512,6 +488,7 @@ function sandboxEnvironment({
   sidekickEnvironment,
   isolatedHome,
   runtimeExecutables,
+  credentialBroker,
 }) {
   const tmp = join(isolatedHome, "tmp");
   const xdgConfig = join(isolatedHome, ".config");
@@ -526,6 +503,7 @@ function sandboxEnvironment({
     sidekickEnvironment,
     isolatedHome,
     runtimeExecutables,
+    credentialBroker,
   });
 }
 
@@ -536,6 +514,7 @@ export async function buildGate2702SandboxLaunch({
   gitCommonDirectory,
   sandboxRuntime,
   sidekickEnvironment,
+  brokerRequestPolicy,
   env = process.env,
 }) {
   if (!sandboxRuntime) fail("C5 sandbox runtime is missing");
@@ -558,9 +537,24 @@ export async function buildGate2702SandboxLaunch({
   const settingsPath = join(sandboxRoot, "settings.json");
   mkdirSync(sandboxRoot, { recursive: true, mode: 0o700 });
   mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
-  const credentialPath = installCredential(isolatedHome, hostHome);
+  const credentialPath = join(hostHome, ".claude", ".credentials.json");
+  const brokerName = sha256(registration.runDir).slice("sha256:".length, 17);
+  const brokerSocketPath = join(
+    hostHome,
+    ".claude",
+    `.g2702-${process.pid}-${brokerName}.sock`,
+  );
+  const brokerCaCertPath = join(sandboxRoot, "broker-ca.crt");
+  let credentialBroker = null;
 
   try {
+    credentialBroker = await startGate2702CredentialBroker({
+      credentialPath,
+      socketPath: brokerSocketPath,
+      caCertPath: brokerCaCertPath,
+      srtPackageRoot: sandboxRuntime.packageRoot,
+      requestPolicy: brokerRequestPolicy,
+    });
     const rg = sandboxRuntime.tools.find((tool) => tool.name === "rg");
     if (!rg) fail("C5 sandbox has no pinned ripgrep runtime");
 
@@ -598,6 +592,10 @@ export async function buildGate2702SandboxLaunch({
         allowedDomains:
           env.CHD_EXPERIMENT_2702_TEST_MODE === "1" ? [] : [MODEL_DOMAIN],
         deniedDomains: [],
+        mitmProxy: {
+          socketPath: credentialBroker.socketPath,
+          domains: [MODEL_DOMAIN],
+        },
       },
       filesystem: {
         denyRead: [hostHome],
@@ -626,6 +624,7 @@ export async function buildGate2702SandboxLaunch({
         rg.resolved,
         ...(claude ? [claude.resolved] : [workerArgv[0]]),
       ],
+      credentialBroker,
     });
     const inner = [
       `cd ${shellQuote(registration.worktreePath)}`,
@@ -648,7 +647,7 @@ export async function buildGate2702SandboxLaunch({
           ...GATE_2702_SRT_INJECTED_ENV_KEYS,
         ]),
       ].sort(),
-      credentialPath,
+      credentialBroker,
       isolatedHome,
       attestation: {
         enforcer: sandboxRuntime.enforcer,
@@ -666,21 +665,29 @@ export async function buildGate2702SandboxLaunch({
           settings.filesystem.denyRead.includes(hostHome) &&
           !settings.filesystem.allowRead.includes(hostHome),
         isolatedHome,
-        credentialMode: "isolated-home-credential-only",
+        credentialMode: credentialBroker.credentialMode,
+        credentialBroker: {
+          transport: "srt-mitm-unix",
+          socketPath: credentialBroker.socketPath,
+          caCertPath: credentialBroker.caCertPath,
+          caCertDigest: credentialBroker.caCertDigest,
+          modelDomain: credentialBroker.modelDomain,
+          allowedRequests: credentialBroker.allowedRequests,
+          requestPolicy: credentialBroker.requestPolicy,
+          tokenRefresh: "operator-outside-jail-required",
+        },
         sidekickSnapshot: sandboxRuntime.sidekick,
         workerArgv: effectiveWorkerArgv,
       },
     };
   } catch (error) {
     try {
-      unlinkSync(credentialPath);
+      await credentialBroker?.close();
     } catch (cleanupError) {
-      if (cleanupError?.code !== "ENOENT") {
-        throw new AggregateError(
-          [error, cleanupError],
-          "C5 sandbox launch failed and its credential copy could not be removed",
-        );
-      }
+      throw new AggregateError(
+        [error, cleanupError],
+        "C5 sandbox launch failed and its credential broker could not be closed",
+      );
     }
     throw error;
   }
@@ -713,7 +720,7 @@ export function assertGate2702SandboxPreDispatch({
     preDispatch.argv?.[4] !== "-c" ||
     typeof preDispatch.argv?.[5] !== "string" ||
     preDispatch.argv.length !== 6 ||
-    sandbox.credentialMode !== "isolated-home-credential-only" ||
+    sandbox.credentialMode !== "host-proxy-bearer-injection" ||
     sandbox.hostHomeDenied !== true ||
     typeof sandbox.hostHome !== "string" ||
     typeof sandbox.isolatedHome !== "string" ||
@@ -746,6 +753,44 @@ export function assertGate2702SandboxPreDispatch({
     "sandbox-runtime",
     SIDEKICK_SNAPSHOT_DIRECTORY,
   );
+  const expectedBrokerCaPath = join(
+    registration.runDir,
+    "sandbox",
+    "broker-ca.crt",
+  );
+  const broker = sandbox.credentialBroker;
+  let derivedBrokerPolicy = null;
+  try {
+    derivedBrokerPolicy = gate2702BrokerRequestPolicy({
+      allowedModels: broker?.requestPolicy?.allowedModels,
+      wallTimeMs: broker?.requestPolicy?.wallTimeMs,
+      costCapUsd: broker?.requestPolicy?.costCapUsd,
+    });
+  } catch {
+    fail("pre-dispatch credential broker request policy is invalid");
+  }
+  const brokerSocketRelative = relative(hostHome, broker?.socketPath ?? "");
+  if (
+    broker?.transport !== "srt-mitm-unix" ||
+    broker?.modelDomain !== MODEL_DOMAIN ||
+    broker?.caCertPath !== expectedBrokerCaPath ||
+    !DIGEST_PATTERN.test(broker?.caCertDigest ?? "") ||
+    broker?.tokenRefresh !== "operator-outside-jail-required" ||
+    !sameValue(broker?.allowedRequests, [
+      { method: "GET", path: "/api/hello" },
+      { method: "POST", path: "/v1/messages?beta=true" },
+    ]) ||
+    !sameValue(broker?.requestPolicy, derivedBrokerPolicy) ||
+    broker?.requestPolicy?.wallTimeMs !== 3_000_000 ||
+    broker?.requestPolicy?.costCapUsd !== 18 ||
+    !isAbsolute(broker?.socketPath ?? "") ||
+    brokerSocketRelative === "" ||
+    brokerSocketRelative.startsWith("..") ||
+    isAbsolute(brokerSocketRelative) ||
+    sandbox.allowedReadRoots.some((root) => pathWithin(root, broker.socketPath))
+  ) {
+    fail("pre-dispatch credential broker is not host-contained");
+  }
   if (
     !Array.isArray(sandbox.tools) ||
     sandbox.tools.length !== 3 ||
@@ -784,6 +829,27 @@ export function assertGate2702SandboxPreDispatch({
     !isAbsolute(sandbox.workerArgv[0])
   ) {
     fail("pre-dispatch sandbox command scope is not the registered scope");
+  }
+  if (preDispatch.executionMode !== "test") {
+    const modelIndex = sandbox.workerArgv.indexOf("--model");
+    const expectedModels = [sandbox.workerArgv[modelIndex + 1]];
+    if (preDispatch.sidekickEnvironment?.SIDEKICK_ENABLE === "1") {
+      expectedModels.push(
+        preDispatch.sidekickEnvironment.SIDEKICK_MODEL,
+        preDispatch.sidekickEnvironment.SIDEKICK_TRIAGE_MODEL,
+      );
+    }
+    if (
+      modelIndex < 0 ||
+      expectedModels.some((model) => typeof model !== "string" || !model) ||
+      !sameValue(
+        broker.requestPolicy.allowedModels,
+        // perf-index-contract: broker-validation-model-membership always-consumed: every production receipt compares the complete unique registered model list against broker policy
+        [...new Set(expectedModels)],
+      )
+    ) {
+      fail("pre-dispatch credential broker models exceed the registered arm");
+    }
   }
   if (
     (preDispatch.executionMode === "test" &&
@@ -836,7 +902,11 @@ export function assertGate2702SandboxPreDispatch({
     preDispatch.executionMode === "test" ? [] : [MODEL_DOMAIN];
   if (
     !sameValue(sandbox.policy.network?.allowedDomains, expectedDomains) ||
-    !sameValue(sandbox.policy.network?.deniedDomains, [])
+    !sameValue(sandbox.policy.network?.deniedDomains, []) ||
+    !sameValue(sandbox.policy.network?.mitmProxy, {
+      socketPath: broker.socketPath,
+      domains: [MODEL_DOMAIN],
+    })
   ) {
     fail("pre-dispatch sandbox network scope is not model-only");
   }
@@ -868,6 +938,7 @@ export function assertGate2702SandboxPreDispatch({
     sidekickEnvironment: preDispatch.sidekickEnvironment,
     isolatedHome,
     runtimeExecutables: [rg.resolved, sandbox.workerArgv[0]],
+    credentialBroker: broker,
   });
   if (
     !sameValue(preDispatch.environmentKeys, expectedEnvironmentKeys) ||
@@ -886,18 +957,7 @@ export function assertGate2702SandboxPreDispatch({
   return sandbox;
 }
 
-export function removeGate2702SandboxCredential(launch) {
-  const path = launch?.credentialPath;
-  if (typeof path !== "string" || !path) return;
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
-}
-
 export function finalizeGate2702SandboxHome(launch) {
-  removeGate2702SandboxCredential(launch);
   const isolatedHome = launch?.isolatedHome;
   if (typeof isolatedHome !== "string" || !isAbsolute(isolatedHome)) return;
   for (const name of readdirSync(isolatedHome)) {
@@ -916,4 +976,15 @@ export function finalizeGate2702SandboxHome(launch) {
       unlinkSync(path);
     }
   }
+}
+
+export async function finalizeGate2702SandboxLaunch(launch) {
+  let closeError = null;
+  try {
+    await launch?.credentialBroker?.close();
+  } catch (error) {
+    closeError = error;
+  }
+  finalizeGate2702SandboxHome(launch);
+  if (closeError) throw closeError;
 }

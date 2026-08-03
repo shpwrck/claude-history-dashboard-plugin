@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { gate2702SandboxProbeAction } from "./sandbox-dispatch.mjs";
+import { GATE_2702_BROKER_PLACEHOLDER_TOKEN } from "./credential-broker.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RUNNER = join(HERE, "run.mjs");
@@ -156,7 +157,12 @@ function createFixture({
     writeFileSync(canaryPath, `${canaryValue}\n`, "utf8");
     writeFileSync(
       join(fixtureHome, ".claude", ".credentials.json"),
-      '{"claudeAiOauth":{"accessToken":"fixture-oauth-token"}}\n',
+      `${JSON.stringify({
+        claudeAiOauth: {
+          accessToken: canaryValue,
+          expiresAt: Date.now() + 60 * 60 * 1000,
+        },
+      })}\n`,
       { encoding: "utf8", mode: 0o600 },
     );
     // User-scope Sidekick instructions in the LAUNCHER's home (#3085). The
@@ -289,6 +295,7 @@ if (canaryPath) {
     parentSentinel: process.env.GATE2702_PARENT_SECRET ?? null,
     authAvailable: existsSync(join(claudeRoot, '.credentials.json')),
     claudeEntries: existsSync(claudeRoot) ? readdirSync(claudeRoot).sort() : [],
+    oauthPlaceholder: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
   }, null, 2) + '\\n', 'utf8');
 }
 const head = spawnSync('git', ['rev-parse', 'HEAD'], {
@@ -778,12 +785,18 @@ test("arm dispatch denies a hostile ~/.claude canary and passes only the documen
       assert.equal(observation.canary, null);
       assert.notEqual(observation.canaryError, null);
       assert.equal(observation.parentSentinel, null);
-      assert.equal(observation.authAvailable, true);
-      assert.deepEqual(observation.claudeEntries, [".credentials.json"]);
+      assert.equal(observation.authAvailable, false);
+      assert.deepEqual(observation.claudeEntries, []);
+      assert.equal(
+        observation.oauthPlaceholder,
+        GATE_2702_BROKER_PLACEHOLDER_TOKEN,
+      );
       assert.deepEqual(
         observation.environmentKeys,
         [
           "ALL_PROXY",
+          "AWS_CA_BUNDLE",
+          "CARGO_HTTP_CAINFO",
           "CHD_EXPERIMENT_2702_ATTEMPT",
           "CHD_EXPERIMENT_2702_BASE_SHA",
           "CHD_EXPERIMENT_2702_RUN_DIR",
@@ -793,17 +806,21 @@ test("arm dispatch denies a hostile ~/.claude canary and passes only the documen
           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
           "CLAUDE_CODE_HOST_HTTP_PROXY_PORT",
           "CLAUDE_CODE_HOST_SOCKS_PROXY_PORT",
+          "CLAUDE_CODE_OAUTH_TOKEN",
           "CLAUDE_CODE_TMPDIR",
           "CLAUDE_CONFIG_DIR",
           "CLOUDSDK_PROXY_ADDRESS",
           "CLOUDSDK_PROXY_PORT",
           "CLOUDSDK_PROXY_TYPE",
+          "CURL_CA_BUNDLE",
+          "DENO_CERT",
           "DISABLE_AUTOUPDATER",
           "DOCKER_HTTPS_PROXY",
           "DOCKER_HTTP_PROXY",
           "FTP_PROXY",
           "GIT_CONFIG_GLOBAL",
           "GIT_CONFIG_NOSYSTEM",
+          "GIT_SSL_CAINFO",
           "GIT_SSH_COMMAND",
           "GRPC_PROXY",
           "HOME",
@@ -815,13 +832,17 @@ test("arm dispatch denies a hostile ~/.claude canary and passes only the documen
           "NO_PROXY",
           "NPM_CONFIG_CACHE",
           "NPM_CONFIG_USERCONFIG",
+          "NODE_EXTRA_CA_CERTS",
           "OLDPWD",
           "PATH",
+          "PIP_CERT",
           "PWD",
           "RSYNC_PROXY",
+          "REQUESTS_CA_BUNDLE",
           "SANDBOX_RUNTIME",
           "SHELL",
           "SHLVL",
+          "SSL_CERT_FILE",
           "SIDEKICK_AUDITS",
           "SIDEKICK_BACKOFF_AFTER",
           "SIDEKICK_BACKOFF_MAX",
@@ -880,7 +901,7 @@ test("arm dispatch denies a hostile ~/.claude canary and passes only the documen
     assert.equal(
       filesNamed(trialRoot, ".credentials.json").length,
       0,
-      "the subscription credential copy must be removed after dispatch",
+      "the subscription credential must never enter the trial tree",
     );
     assert.equal(filesNamed(trialRoot, "model-request.txt").length, ARM_COUNT);
     assert.ok(

@@ -153,10 +153,35 @@ makes no external call.
 Each arm gets an isolated `HOME` beneath its registered run directory. The host home is denied and
 only the disposable worktree, its Git metadata, the registered run directory, the pinned Sidekick
 snapshot, and exact runtime executables are re-exposed beneath that denial. Production network
-access is limited to `api.anthropic.com`; test dispatch has no allowed domain. The bridge copies
-only `~/.claude/.credentials.json` into the isolated home, refuses symlinked or oversized
-credentials, and removes that copy plus all non-Sidekick home state after the process group
-quiesces. Sidekick's per-session ledger remains arm-local for accounting and sealing.
+access is limited to `api.anthropic.com`; test dispatch has no allowed domain. The bridge copies no
+credential into the isolated home. A per-arm host process reads only the bounded
+`claudeAiOauth.accessToken` from `~/.claude/.credentials.json`, then SRT routes the model domain
+through that process over its external-MITM Unix-socket seam. The worker receives a fixed,
+non-secret OAuth placeholder and a public ephemeral CA certificate; the broker terminates TLS,
+removes worker-supplied authentication headers, and adds the real bearer token only on the trusted
+upstream leg. The token, broker socket, and transient CA private key remain outside every sandbox
+read root. The broker accepts only the observed Claude Code calls (`GET /api/hello` and
+`POST /v1/messages?beta=true`), pins upstream host and SNI to `api.anthropic.com`, rejects ambiguous
+framing and upgrades, bounds headers/body/idle time, and never follows redirects. The placeholder
+is not an authority boundary: any jailed process can present it. The host broker therefore also
+pins each Messages body to the arm's registered worker model (plus the treatment's exact Sidekick
+and triage models when enabled), requires streaming JSON, and independently reserves the registered
+dollar ceiling before every upstream call. The reservation treats body bytes as an upper bound on
+input tokens and requested `max_tokens` as the output bound, using the maximum 1-hour-cache input
+and output rates for the allowed Haiku/Sonnet families. The trusted leg pins `service_tier` to
+`standard_only`; remote MCP, container, URL/file source, and typed server-tool expansion is rejected
+because it could add unreserved input or flat fees. A reservation is never refunded after a failed call.
+Fixed ceilings of eight physical broker connections, four concurrently active proxy requests,
+an 8 MiB aggregate declared-body reservation, 256 upstream requests, 8 MiB per request, 65,536
+requested output tokens per call, and 1,800,000 requested output tokens per arm remain defense in
+depth. Connection and request admission happen before body collection, and every reservation is
+released on completion or abort. An access token
+that cannot remain valid through the Definition's full 50-minute arm limit plus teardown buffer
+fails dispatch before the jail starts; the operator must refresh it outside the jail because the
+bridge deliberately does not reimplement the vendor's rotating OAuth protocol. Broker process,
+socket, and public CA are torn down after the process group quiesces; the parent repeats artifact
+cleanup after an unexpected broker exit. Sidekick's per-session ledger
+remains arm-local for accounting and sealing.
 
 The child environment allowlist is fixed in `scripts/gate-2702/sandbox-dispatch.mjs` and asserted
 by the hostile-canary acceptance test:
@@ -167,7 +192,10 @@ by the hostile-canary acceptance test:
 - Isolated runtime: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CLAUDE_CODE_TMPDIR`,
   `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `HOME`,
   `LANG`, `LC_ALL`, `NO_COLOR`, `NPM_CONFIG_CACHE`, `NPM_CONFIG_USERCONFIG`, `PATH`, `SHELL`,
-  `TERM`, `TMPDIR`, `TZ`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`.
+  `TERM`, `TMPDIR`, `TZ`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`; the fixed
+  non-secret `CLAUDE_CODE_OAUTH_TOKEN` placeholder; and public-CA trust paths `AWS_CA_BUNDLE`,
+  `CARGO_HTTP_CAINFO`, `CURL_CA_BUNDLE`, `DENO_CERT`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`,
+  `PIP_CERT`, `REQUESTS_CA_BUNDLE`, and `SSL_CERT_FILE`.
 - Fixed Sidekick treatment: `SIDEKICK_AUDITS`, `SIDEKICK_BACKOFF_AFTER`, `SIDEKICK_BACKOFF_MAX`,
   `SIDEKICK_CALL_BUDGET_USD`, `SIDEKICK_CONCURRENCY`, `SIDEKICK_ENABLE`, `SIDEKICK_GATE`,
   `SIDEKICK_MIN_DELTA`, `SIDEKICK_MODEL`, `SIDEKICK_NEARDUP`, `SIDEKICK_NEARDUP_MIN_SHARED`,

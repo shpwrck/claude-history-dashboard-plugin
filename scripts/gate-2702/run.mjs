@@ -40,7 +40,7 @@ import {
   assertGate2702SandboxReady,
   assertGate2702SandboxPreDispatch,
   buildGate2702SandboxLaunch,
-  finalizeGate2702SandboxHome,
+  finalizeGate2702SandboxLaunch,
   gate2702SandboxEnabled,
   prepareGate2702SandboxRuntime,
 } from "./sandbox-dispatch.mjs";
@@ -1641,6 +1641,13 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
   if (!treatment) fail(`unknown treatment ${registration.treatmentId}`);
   const workerArgv = armCommand(plan);
   const sidekickEnvironment = gate2702SidekickEnvironment(treatment);
+  const brokerAllowedModels = [gate2702ModelIds().worker];
+  if (sidekickEnvironment.SIDEKICK_ENABLE === "1") {
+    brokerAllowedModels.push(
+      sidekickEnvironment.SIDEKICK_MODEL,
+      sidekickEnvironment.SIDEKICK_TRIAGE_MODEL,
+    );
+  }
   const prompt = workerPrompt(snapshot, registration);
   const worktreeIdentity = readOperationalWorktreeIdentity(registration);
   const gitCommonDirectory = resolve(
@@ -1667,6 +1674,12 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
         gitCommonDirectory,
         sandboxRuntime,
         sidekickEnvironment,
+        brokerRequestPolicy: {
+          // perf-index-contract: broker-launch-model-membership always-consumed: every production sandbox launch passes its complete unique model list into broker policy
+          allowedModels: [...new Set(brokerAllowedModels)],
+          wallTimeMs: plan.limits.wallTimeMs,
+          costCapUsd: plan.limits.costUsd,
+        },
       })
     : null;
   const argv = sandboxLaunch?.argv ?? workerArgv;
@@ -1706,7 +1719,7 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
       startedAt,
     });
   } catch (error) {
-    finalizeGate2702SandboxHome(sandboxLaunch);
+    await finalizeGate2702SandboxLaunch(sandboxLaunch);
     throw error;
   }
 
@@ -1728,7 +1741,7 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
   } catch (error) {
     if (stdoutFd !== undefined) closeSync(stdoutFd);
     if (stderrFd !== undefined) closeSync(stderrFd);
-    finalizeGate2702SandboxHome(sandboxLaunch);
+    await finalizeGate2702SandboxLaunch(sandboxLaunch);
     throw error;
   }
 
@@ -1744,7 +1757,7 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
   } catch (error) {
     closeSync(stdoutFd);
     closeSync(stderrFd);
-    finalizeGate2702SandboxHome(sandboxLaunch);
+    await finalizeGate2702SandboxLaunch(sandboxLaunch);
     writeTerminal(runDir, registration, {
       preDispatchDigest: preDispatch.contentDigest,
       outcome: "spawn-error",
@@ -1763,7 +1776,7 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
     const spawnError = await new Promise((resolveError) => {
       child.once("error", resolveError);
     });
-    finalizeGate2702SandboxHome(sandboxLaunch);
+    await finalizeGate2702SandboxLaunch(sandboxLaunch);
     writeTerminal(runDir, registration, {
       preDispatchDigest: preDispatch.contentDigest,
       outcome: "spawn-error",
@@ -1795,7 +1808,7 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
     });
   } catch (error) {
     await quiesceManagedProcessGroup(child.pid);
-    finalizeGate2702SandboxHome(sandboxLaunch);
+    await finalizeGate2702SandboxLaunch(sandboxLaunch);
     throw error;
   }
 
@@ -1844,7 +1857,7 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
   } catch (error) {
     if (killTimer) clearTimeout(killTimer);
     await quiesceManagedProcessGroup(child.pid);
-    finalizeGate2702SandboxHome(sandboxLaunch);
+    await finalizeGate2702SandboxLaunch(sandboxLaunch);
     throw error;
   }
 
@@ -1853,7 +1866,7 @@ async function executeArm(plan, paths, trial, registration, sandboxRuntime) {
     processGroupQuiescent = await quiesceManagedProcessGroup(child.pid);
   } finally {
     if (killTimer) clearTimeout(killTimer);
-    finalizeGate2702SandboxHome(sandboxLaunch);
+    await finalizeGate2702SandboxLaunch(sandboxLaunch);
   }
 
   writeTerminal(runDir, registration, {

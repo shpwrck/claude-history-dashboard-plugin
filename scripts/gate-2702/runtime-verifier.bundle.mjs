@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
+import http from "node:http";
+import https from "node:https";
 //#region \0rolldown/runtime.js
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -197,14 +199,14 @@ function normalizeDocument(document) {
 function canonicalDocumentJson(document) {
 	return serializeCanonical(normalizeDocument(document));
 }
-function sha256$2(value) {
+function sha256$3(value) {
 	return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
 /** Digest a complete authoritative document after omitting its own digest. */
 function computeDocumentDigest(document) {
 	const normalized = normalizeDocument(document);
 	delete normalized.contentDigest;
-	return sha256$2(serializeCanonical(normalized));
+	return sha256$3(serializeCanonical(normalized));
 }
 /** Return a normalized immutable-document candidate with its digest populated. */
 function withDocumentDigest(document) {
@@ -217,7 +219,7 @@ function computeBehaviorFingerprintDigest(fingerprint) {
 	const cloned = toJsonValue(fingerprint);
 	delete cloned.digest;
 	normalizeFingerprint(cloned);
-	return sha256$2(serializeCanonical(cloned));
+	return sha256$3(serializeCanonical(cloned));
 }
 function withBehaviorFingerprintDigest(fingerprint) {
 	const cloned = toJsonValue(fingerprint);
@@ -9870,7 +9872,7 @@ var init_behavior_context = __esmMin((() => {
 * in its session, numeric, count, usage, observation, or source-evidence fields.
 * The caller remains responsible for validating receipt identity and lineage.
 */
-function fail$5(message) {
+function fail$6(message) {
 	throw new Error(message);
 }
 function canonicalValue$5(value) {
@@ -9881,13 +9883,13 @@ function canonicalValue$5(value) {
 function canonicalJson$5(value) {
 	return JSON.stringify(canonicalValue$5(value));
 }
-function sha256$1(value) {
+function sha256$2(value) {
 	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 function retainedBytes$2(value, maximumBytes, label) {
-	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$5(`${label} must be retained bytes`);
+	if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) fail$6(`${label} must be retained bytes`);
 	const bytes = Buffer.from(value);
-	if (bytes.length > maximumBytes) fail$5(`${label} exceeds its fixed size limit`);
+	if (bytes.length > maximumBytes) fail$6(`${label} exceeds its fixed size limit`);
 	return bytes;
 }
 function workerEvidence(workerStdoutBytes) {
@@ -9910,7 +9912,7 @@ function workerEvidence(workerStdoutBytes) {
 		evidence: {
 			source: "worker-terminal-json",
 			byteLength: bytes.length,
-			contentDigest: sha256$1(bytes)
+			contentDigest: sha256$2(bytes)
 		}
 	};
 }
@@ -9925,7 +9927,7 @@ function parseLedgerRows(sidekickLedgerBytes) {
 	const bytes = retainedBytes$2(sidekickLedgerBytes, MAX_SIDEKICK_LEDGER_BYTES, "exact Sidekick ledger");
 	const lines = bytes.toString("utf8").split("\n");
 	if (lines.at(-1) === "") lines.pop();
-	if (lines.length > MAX_SIDEKICK_LEDGER_ROWS) fail$5("exact Sidekick ledger exceeds its fixed row limit");
+	if (lines.length > MAX_SIDEKICK_LEDGER_ROWS) fail$6("exact Sidekick ledger exceeds its fixed row limit");
 	let malformed = false;
 	return {
 		bytes,
@@ -9944,22 +9946,22 @@ function parseLedgerRows(sidekickLedgerBytes) {
 			return {
 				rowNumber: index + 1,
 				row,
-				contentDigest: sha256$1(line)
+				contentDigest: sha256$2(line)
 			};
 		}),
 		malformed
 	};
 }
 function requiredString(value, label) {
-	if (typeof value !== "string" || value.length === 0) fail$5(`${label} is missing`);
+	if (typeof value !== "string" || value.length === 0) fail$6(`${label} is missing`);
 	return value;
 }
 function requiredTurn(value, label) {
-	if (!Number.isSafeInteger(value) || value < 0) fail$5(`${label} is invalid`);
+	if (!Number.isSafeInteger(value) || value < 0) fail$6(`${label} is invalid`);
 	return value;
 }
 function requireZeroCost(row, label) {
-	if (row.costUsd !== 0 || Object.is(row.costUsd, -0)) fail$5(`${label} must have known zero cost`);
+	if (row.costUsd !== 0 || Object.is(row.costUsd, -0)) fail$6(`${label} must have known zero cost`);
 }
 function normalizeGate2702Cost(value) {
 	if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || Object.is(value, -0)) return null;
@@ -9967,10 +9969,10 @@ function normalizeGate2702Cost(value) {
 	return Number.isFinite(normalized) && !Object.is(normalized, -0) ? normalized : null;
 }
 function requireNoShippedField(row, label) {
-	if (row.shipped !== void 0) fail$5(`${label} cannot declare a shipped intervention`);
+	if (row.shipped !== void 0) fail$6(`${label} cannot declare a shipped intervention`);
 }
 function requireShippedBoolean(row, label, expected) {
-	if (typeof row.shipped !== "boolean" || expected !== void 0 && row.shipped !== expected) fail$5(`${label} has an invalid shipped state`);
+	if (typeof row.shipped !== "boolean" || expected !== void 0 && row.shipped !== expected) fail$6(`${label} has an invalid shipped state`);
 }
 function unknownSidekickValues(reason, rowEvidence) {
 	const reasons = [reason];
@@ -10056,7 +10058,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 			const turn = requiredTurn(row.turn, `${row.model} Sidekick turn`);
 			const trigger = requiredString(row.trigger, `${row.model} Sidekick trigger`);
 			const skipped = row.model === "stop-review" && row.skipped === "empty-tail";
-			if (row.skipped !== void 0 && !skipped) fail$5(`${row.model} Sidekick skipped state is unrecognized`);
+			if (row.skipped !== void 0 && !skipped) fail$6(`${row.model} Sidekick skipped state is unrecognized`);
 			if (skipped) {
 				requireZeroCost(row, "skipped stop-review Sidekick row");
 				requireNoShippedField(row, "skipped stop-review Sidekick row");
@@ -10074,7 +10076,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 			else conflict = true;
 		} else if (row.model === "triage") {
 			const turn = requiredTurn(row.turn, "triage Sidekick turn");
-			if (typeof row.fired !== "boolean") fail$5("triage Sidekick fired result is invalid");
+			if (typeof row.fired !== "boolean") fail$6("triage Sidekick fired result is invalid");
 			requireNoShippedField(row, "triage Sidekick row");
 			identity = `probe:${workerSessionId}:triage:${turn}`;
 			lifecycle = "triage";
@@ -10138,7 +10140,7 @@ function collectSidekickRows(rows, workerSessionId, sidekickModel) {
 			rowNumber: evidence.rowNumber,
 			contentDigest: evidence.contentDigest,
 			lifecycle,
-			...identity ? { identityDigest: sha256$1(identity) } : {},
+			...identity ? { identityDigest: sha256$2(identity) } : {},
 			...duplicate ? { duplicate: true } : {},
 			...conflict ? { conflict: true } : {}
 		});
@@ -10198,8 +10200,8 @@ function unavailableSidekickValues(reason) {
 	};
 }
 function deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) {
-	if (typeof sidekickModel !== "string" || sidekickModel.length === 0) fail$5("sidekickModel must identify the configured Sidekick model");
-	if (worker.workerSessionId === null && sidekickLedgerBytes != null) fail$5("Sidekick ledger bytes cannot bind without a worker session id");
+	if (typeof sidekickModel !== "string" || sidekickModel.length === 0) fail$6("sidekickModel must identify the configured Sidekick model");
+	if (worker.workerSessionId === null && sidekickLedgerBytes != null) fail$6("Sidekick ledger bytes cannot bind without a worker session id");
 	const relativePath = worker.workerSessionId === null ? null : `${worker.workerSessionId}/__sidekick.jsonl`;
 	const ledger = worker.workerSessionId === null ? {
 		status: "unavailable",
@@ -10227,7 +10229,7 @@ function deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) {
 		...invalidAllInCost ? ["all-in-cost-invalid"] : []
 	])];
 	const unknownReasons = [...new Set([...allInUnknownReasons, ...values.unknownReasons])];
-	const ledgerDigest = ledger.status === "settled" ? sha256$1(ledger.bytes) : null;
+	const ledgerDigest = ledger.status === "settled" ? sha256$2(ledger.bytes) : null;
 	const evidenceDigests = [worker.evidence.contentDigest, ...ledgerDigest === null ? [] : [ledgerDigest]];
 	return {
 		workerSessionId: worker.workerSessionId,
@@ -10308,9 +10310,9 @@ function deriveControl(worker, definitionDigest) {
 * @param {string} input.sidekickModel Pinned Sidekick advisor model id.
 */
 function deriveGate2702AccountingEvidence({ workerStdoutBytes, sidekickLedgerBytes = null, sidekickEnabled, definitionDigest, sidekickModel }) {
-	if (typeof sidekickEnabled !== "boolean") fail$5("sidekickEnabled must be a boolean Definition value");
-	if (!SHA256_PATTERN$2.test(definitionDigest ?? "")) fail$5("definitionDigest must be a sha256 content digest");
-	if (!sidekickEnabled && sidekickLedgerBytes != null) fail$5("a Sidekick-disabled treatment cannot bind Sidekick ledger bytes");
+	if (typeof sidekickEnabled !== "boolean") fail$6("sidekickEnabled must be a boolean Definition value");
+	if (!SHA256_PATTERN$2.test(definitionDigest ?? "")) fail$6("definitionDigest must be a sha256 content digest");
+	if (!sidekickEnabled && sidekickLedgerBytes != null) fail$6("a Sidekick-disabled treatment cannot bind Sidekick ledger bytes");
 	const worker = workerEvidence(workerStdoutBytes);
 	return sidekickEnabled ? deriveTreatment(worker, sidekickLedgerBytes, sidekickModel) : deriveControl(worker, definitionDigest);
 }
@@ -10323,11 +10325,11 @@ function deriveGate2702AccountingEvidence({ workerStdoutBytes, sidekickLedgerByt
 * @param {object} input.accounting Parsed Gate2702Accounting receipt.
 */
 function validateGate2702AccountingEvidence({ accounting, ...inputs }) {
-	if (accounting === null || typeof accounting !== "object" || Array.isArray(accounting)) fail$5("Gate2702Accounting receipt must be an object");
+	if (accounting === null || typeof accounting !== "object" || Array.isArray(accounting)) fail$6("Gate2702Accounting receipt must be an object");
 	const expected = deriveGate2702AccountingEvidence(inputs);
 	for (const field of ACCOUNTING_EVIDENCE_FIELDS) {
 		const expectedHasField = Object.hasOwn(expected, field);
-		if (expectedHasField !== Object.hasOwn(accounting, field) || expectedHasField && !isDeepStrictEqual(accounting[field], expected[field])) fail$5(`Gate2702Accounting ${field} does not rederive from retained evidence`);
+		if (expectedHasField !== Object.hasOwn(accounting, field) || expectedHasField && !isDeepStrictEqual(accounting[field], expected[field])) fail$6(`Gate2702Accounting ${field} does not rederive from retained evidence`);
 	}
 	return expected;
 }
@@ -10360,6 +10362,663 @@ function shellQuote(value) {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 var init_shell_quote = __esmMin((() => {}));
+//#endregion
+//#region scripts/gate-2702/credential-broker.mjs
+function fail$5(message) {
+	throw new Error(message);
+}
+function sha256$1(value) {
+	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+function unlinkIfPresent(path) {
+	if (typeof path !== "string" || !path) return;
+	try {
+		unlinkSync(path);
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
+	}
+}
+function readBoundedRegularFile(path, label) {
+	const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+	let fd;
+	try {
+		fd = openSync(path, flags);
+	} catch (error) {
+		fail$5(`${label} is not a bounded regular file (${error?.code ?? "open"})`);
+	}
+	try {
+		const before = fstatSync(fd);
+		if (!before.isFile() || before.size <= 0 || before.size > MAX_CREDENTIAL_BYTES) fail$5(`${label} is not a bounded regular file`);
+		const bytes = Buffer.alloc(before.size);
+		let offset = 0;
+		while (offset < bytes.length) {
+			const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+			if (count === 0) fail$5(`${label} changed while read`);
+			offset += count;
+		}
+		const after = fstatSync(fd);
+		if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+			bytes.fill(0);
+			fail$5(`${label} changed while read`);
+		}
+		return bytes;
+	} finally {
+		closeSync(fd);
+	}
+}
+function readAccessToken(credentialPath, now = Date.now()) {
+	const bytes = readBoundedRegularFile(credentialPath, "subscription credential");
+	try {
+		let parsed;
+		try {
+			parsed = JSON.parse(bytes.toString("utf8"));
+		} catch {
+			fail$5("subscription credential is not valid JSON");
+		}
+		const oauth = parsed?.claudeAiOauth;
+		const token = oauth?.accessToken;
+		const expiresAt = oauth?.expiresAt;
+		if (typeof token !== "string" || token.length === 0 || Buffer.byteLength(token) > MAX_ACCESS_TOKEN_BYTES) fail$5("subscription credential has no bounded Claude OAuth access token");
+		if (!Number.isSafeInteger(expiresAt)) fail$5("subscription credential has no bounded Claude OAuth expiry");
+		if (expiresAt <= now + MIN_TOKEN_LIFETIME_MS) fail$5("subscription OAuth access token is expired or too near expiry; refresh it outside the jail before dispatch");
+		return token;
+	} finally {
+		bytes.fill(0);
+	}
+}
+function headerValues(request, name) {
+	if (request.headersDistinct && Array.isArray(request.headersDistinct[name])) return request.headersDistinct[name];
+	const values = [];
+	for (let index = 0; index < request.rawHeaders.length; index += 2) if (request.rawHeaders[index].toLowerCase() === name) values.push(request.rawHeaders[index + 1]);
+	return values;
+}
+function hasAmbiguousHeaders(request) {
+	for (const name of [
+		"authorization",
+		"x-api-key",
+		"host",
+		"content-length",
+		"content-type",
+		"proxy-authorization",
+		"transfer-encoding"
+	]) if (headerValues(request, name).length > 1) return true;
+	return false;
+}
+function writeError(response, statusCode, message) {
+	if (response.headersSent) {
+		response.destroy();
+		return;
+	}
+	response.writeHead(statusCode, {
+		"content-type": "text/plain; charset=utf-8",
+		"content-length": Buffer.byteLength(message),
+		connection: "close"
+	});
+	response.end(message);
+}
+function writeSocketError(socket, statusCode, message) {
+	if (socket.destroyed) return;
+	socket.end(`HTTP/1.1 ${statusCode} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+}
+function allowedRequest(method, path) {
+	return ALLOWED_REQUESTS.find((candidate) => candidate.method === method && candidate.path === path);
+}
+function boundedRequestPolicy(value) {
+	if (!value || Array.isArray(value) || typeof value !== "object" || !Array.isArray(value.allowedModels) || value.allowedModels.length === 0 || value.allowedModels.length > 3 || value.allowedModels.some((model) => typeof model !== "string" || !/^claude-(?:haiku|sonnet)-[a-z0-9-]+$/.test(model)) || new Set(value.allowedModels).size !== value.allowedModels.length || !Number.isSafeInteger(value.wallTimeMs) || value.wallTimeMs <= 0 || value.wallTimeMs > MAX_POLICY_WALL_TIME_MS || !Number.isFinite(value.costCapUsd) || value.costCapUsd <= 0 || value.costCapUsd > MAX_POLICY_COST_USD) fail$5("credential broker request policy is outside the registered C5 bounds");
+	const maxRequests = Math.min(MAX_MESSAGES_REQUESTS, Math.ceil(value.wallTimeMs / MIN_REQUEST_INTERVAL_MS));
+	const maxCostMicroUsd = Math.floor(value.costCapUsd * 1e6);
+	return {
+		allowedModels: [...value.allowedModels],
+		wallTimeMs: value.wallTimeMs,
+		costCapUsd: value.costCapUsd,
+		maxRequests,
+		maxTokensPerRequest: MAX_OUTPUT_TOKENS_PER_REQUEST,
+		maxTotalOutputTokens: MAX_TOTAL_OUTPUT_TOKENS,
+		maxCostMicroUsd,
+		maxConnections: MAX_BROKER_CONNECTIONS,
+		maxActiveRequests: MAX_ACTIVE_PROXY_REQUESTS,
+		maxBufferedRequestBodyBytes: MAX_BUFFERED_REQUEST_BODY_BYTES,
+		familyRatesMicroUsd: MODEL_FAMILY_RATES_MICRO_USD
+	};
+}
+function gate2702BrokerRequestPolicy(value) {
+	return boundedRequestPolicy(value);
+}
+function reserveBrokerRequest(policy, route, body) {
+	if (policy.remainingRequests <= 0) fail$5("broker request ceiling exhausted");
+	let requestedOutputTokens = 0;
+	let upstreamBody = body;
+	if (route.authenticate) {
+		let parsed;
+		try {
+			parsed = JSON.parse(body.toString("utf8"));
+		} catch {
+			fail$5("broker Messages body is not valid JSON");
+		}
+		if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") fail$5("broker Messages body is not an object");
+		const values = [parsed];
+		let visitedValues = 0;
+		let hasExternalSource = false;
+		while (values.length > 0) {
+			const value = values.pop();
+			visitedValues += 1;
+			if (visitedValues > 1e5) fail$5("broker Messages body structure exceeds its bound");
+			if (!value || Array.isArray(value) || typeof value !== "object") continue;
+			if ("file_id" in value || value.source && !Array.isArray(value.source) && typeof value.source === "object" && ["url", "file"].includes(value.source.type)) {
+				hasExternalSource = true;
+				break;
+			}
+			for (const nested of Object.values(value)) if (nested && typeof nested === "object") if (Array.isArray(nested)) for (const item of nested) values.push(item);
+			else values.push(nested);
+		}
+		requestedOutputTokens = parsed.max_tokens;
+		if (!policy.metadata.allowedModels.includes(parsed.model) || parsed.stream !== true || "mcp_servers" in parsed || "container" in parsed || hasExternalSource || !Number.isSafeInteger(requestedOutputTokens) || requestedOutputTokens <= 0 || requestedOutputTokens > policy.metadata.maxTokensPerRequest || parsed.tools !== void 0 && (!Array.isArray(parsed.tools) || parsed.tools.some((tool) => !tool || Array.isArray(tool) || typeof tool !== "object" || "type" in tool))) fail$5("broker Messages body exceeds its model, tool, or token policy");
+		try {
+			upstreamBody = Buffer.from(JSON.stringify({
+				...parsed,
+				service_tier: "standard_only"
+			}));
+		} catch {
+			fail$5("broker Messages body cannot be normalized");
+		}
+		if (requestedOutputTokens > policy.remainingOutputTokens) fail$5("broker output-token ceiling exhausted");
+		const rates = MODEL_FAMILY_RATES_MICRO_USD[parsed.model.includes("-sonnet-") ? "sonnet" : "haiku"];
+		const requestedCostMicroUsd = Math.max(body.length, upstreamBody.length) * rates.input + requestedOutputTokens * rates.output;
+		if (requestedCostMicroUsd > policy.remainingCostMicroUsd) fail$5("broker dollar ceiling exhausted");
+		policy.remainingCostMicroUsd -= requestedCostMicroUsd;
+	}
+	policy.remainingRequests -= 1;
+	policy.remainingOutputTokens -= requestedOutputTokens;
+	return upstreamBody;
+}
+function waitForDrainOrAbort(response, signal) {
+	return new Promise((resolveWait) => {
+		let settled = false;
+		const finish = (drained) => {
+			if (settled) return;
+			settled = true;
+			response.removeListener("drain", onDrain);
+			response.removeListener("close", onClose);
+			response.removeListener("error", onClose);
+			signal.removeEventListener("abort", onClose);
+			resolveWait(drained);
+		};
+		const onDrain = () => finish(true);
+		const onClose = () => finish(false);
+		response.once("drain", onDrain);
+		response.once("close", onClose);
+		response.once("error", onClose);
+		signal.addEventListener("abort", onClose, { once: true });
+		if (signal.aborted || response.destroyed) onClose();
+	});
+}
+function forwardHeaders(request, accessToken, authenticate, bodyLength) {
+	const headers = {
+		host: GATE_2702_MODEL_DOMAIN,
+		"content-length": String(bodyLength)
+	};
+	for (const [name, value] of Object.entries(request.headers)) {
+		if (!FORWARDED_REQUEST_HEADERS.has(name) || value === void 0) continue;
+		if (Array.isArray(value)) fail$5(`ambiguous ${name} request header`);
+		headers[name] = value;
+	}
+	if (authenticate) headers.authorization = `Bearer ${accessToken}`;
+	return headers;
+}
+async function readRequestBody(request, expectedBytes, signal) {
+	if (expectedBytes > MAX_REQUEST_BODY_BYTES) fail$5("request body exceeds broker bound");
+	const body = Buffer.alloc(expectedBytes);
+	let bytes = 0;
+	try {
+		for await (const chunk of request) {
+			if (signal.aborted) fail$5("request aborted");
+			const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			if (value.length > expectedBytes - bytes || value.length > MAX_REQUEST_BODY_BYTES - bytes) fail$5("request body exceeds broker bound");
+			value.copy(body, bytes);
+			bytes += value.length;
+		}
+		if (bytes !== expectedBytes) fail$5("request body length is inconsistent");
+		return body;
+	} catch (error) {
+		body.fill(0);
+		throw error;
+	}
+}
+function responseHeaders(value) {
+	if (!value || Array.isArray(value) || typeof value !== "object") fail$5("upstream response headers are invalid");
+	const output = {};
+	let count = 0;
+	for (const [rawName, rawValue] of Object.entries(value)) {
+		const name = rawName.toLowerCase();
+		if (HOP_BY_HOP_HEADERS.has(name) || name === "set-cookie" || rawValue === void 0) continue;
+		count += 1;
+		if (count > MAX_RESPONSE_HEADERS) fail$5("upstream sent too many headers");
+		const joined = Array.isArray(rawValue) ? rawValue.join(", ") : String(rawValue);
+		if (Buffer.byteLength(joined) > MAX_RESPONSE_HEADER_VALUE_BYTES) fail$5("upstream response header exceeds broker bound");
+		output[name] = joined;
+	}
+	return output;
+}
+async function proxyRequest({ request, response, accessToken, requestPolicy, forwardUpstream, reserveBufferedRequestBody, releaseBufferedRequestBody }) {
+	const controller = new AbortController();
+	let reservedRequestBodyBytes = 0;
+	const abort = () => controller.abort();
+	request.once("aborted", abort);
+	response.once("close", abort);
+	request.setTimeout(IDLE_TIMEOUT_MS, () => {
+		controller.abort();
+		request.destroy();
+	});
+	try {
+		if (typeof request.url !== "string" || !request.url.startsWith("/") || request.url.startsWith("//") || request.url.includes("#") || hasAmbiguousHeaders(request)) {
+			writeError(response, 400, "malformed broker request");
+			return;
+		}
+		const hostValues = headerValues(request, "host");
+		if (hostValues.length !== 1 || !["api.anthropic.com", `api.anthropic.com:443`].includes(hostValues[0].toLowerCase())) {
+			writeError(response, 403, "broker host denied");
+			return;
+		}
+		if (request.headers.upgrade !== void 0 || String(request.headers.connection ?? "").toLowerCase().split(",").map((value) => value.trim()).includes("upgrade")) {
+			writeError(response, 426, "broker upgrades denied");
+			return;
+		}
+		const policy = allowedRequest(request.method, request.url);
+		if (!policy) {
+			writeError(response, 403, "broker route denied");
+			return;
+		}
+		if (request.headers["transfer-encoding"] !== void 0) {
+			writeError(response, 400, "chunked broker requests denied");
+			return;
+		}
+		const contentLengthValues = headerValues(request, "content-length");
+		const contentLength = contentLengthValues.length === 0 ? 0 : Number(contentLengthValues[0]);
+		if (!Number.isSafeInteger(contentLength) || contentLength < 0 || contentLength > MAX_REQUEST_BODY_BYTES) {
+			writeError(response, 413, "broker request body denied");
+			return;
+		}
+		if (policy.authenticate && request.headers.authorization !== `Bearer gate-2702-host-broker-placeholder-not-a-credential`) {
+			writeError(response, 403, "broker placeholder auth required");
+			return;
+		}
+		if (policy.authenticate && (contentLengthValues.length !== 1 || contentLength === 0 || request.headers["content-type"] !== "application/json")) {
+			writeError(response, 400, "broker Messages framing denied");
+			return;
+		}
+		if (!policy.authenticate && (request.headers.authorization !== void 0 || request.headers["x-api-key"] !== void 0 || contentLength !== 0)) {
+			writeError(response, 403, "broker unauthenticated route denied");
+			return;
+		}
+		if (!reserveBufferedRequestBody(contentLength)) {
+			writeError(response, 503, "broker request capacity exhausted");
+			return;
+		}
+		reservedRequestBodyBytes = contentLength;
+		const body = await readRequestBody(request, contentLength, controller.signal);
+		if (controller.signal.aborted) return;
+		let upstreamBody;
+		try {
+			upstreamBody = reserveBrokerRequest(requestPolicy, policy, body);
+		} catch (error) {
+			writeError(response, /ceiling exhausted/.test(error?.message ?? "") ? 429 : 403, "broker arm policy denied");
+			return;
+		}
+		let upstream;
+		try {
+			upstream = await forwardUpstream({
+				hostname: GATE_2702_MODEL_DOMAIN,
+				servername: GATE_2702_MODEL_DOMAIN,
+				method: policy.method,
+				path: policy.path,
+				headers: forwardHeaders(request, accessToken, policy.authenticate, upstreamBody.length),
+				body: upstreamBody,
+				signal: controller.signal
+			});
+		} catch {
+			if (!controller.signal.aborted) writeError(response, 502, "broker upstream unavailable");
+			return;
+		}
+		if (!Number.isInteger(upstream?.statusCode) || upstream.statusCode < 100 || upstream.statusCode > 599 || !upstream.body || typeof upstream.body[Symbol.asyncIterator] !== "function") {
+			writeError(response, 502, "broker upstream response invalid");
+			return;
+		}
+		response.writeHead(upstream.statusCode, responseHeaders(upstream.headers ?? {}));
+		let responseBytes = 0;
+		for await (const chunk of upstream.body) {
+			if (controller.signal.aborted) break;
+			responseBytes += Buffer.byteLength(chunk);
+			if (responseBytes > MAX_RESPONSE_BODY_BYTES) {
+				upstream.body.destroy?.();
+				response.destroy();
+				break;
+			}
+			if (!response.write(chunk) && !await waitForDrainOrAbort(response, controller.signal)) {
+				upstream.body.destroy?.();
+				break;
+			}
+		}
+		if (!controller.signal.aborted) response.end();
+	} catch (error) {
+		if (!controller.signal.aborted) writeError(response, /exceeds broker bound/.test(error?.message ?? "") ? 413 : 400, "broker request denied");
+	} finally {
+		releaseBufferedRequestBody(reservedRequestBodyBytes);
+		request.removeListener("aborted", abort);
+		response.removeListener("close", abort);
+	}
+}
+function forwardGate2702Upstream(request) {
+	return new Promise((resolveRequest, rejectRequest) => {
+		const upstream = https.request({
+			hostname: GATE_2702_MODEL_DOMAIN,
+			servername: GATE_2702_MODEL_DOMAIN,
+			port: 443,
+			method: request.method,
+			path: request.path,
+			headers: request.headers,
+			agent: false,
+			maxHeaderSize: MAX_HEADER_BYTES
+		}, (response) => resolveRequest({
+			statusCode: response.statusCode,
+			headers: response.headers,
+			body: response
+		}));
+		const abort = () => upstream.destroy(/* @__PURE__ */ new Error("broker request aborted"));
+		upstream.once("close", () => request.signal.removeEventListener("abort", abort));
+		upstream.once("error", rejectRequest);
+		upstream.once("upgrade", (_response, socket) => {
+			socket.destroy();
+			rejectRequest(/* @__PURE__ */ new Error("broker upstream upgrade denied"));
+		});
+		request.signal.addEventListener("abort", abort, { once: true });
+		if (request.signal.aborted) {
+			abort();
+			return;
+		}
+		upstream.setTimeout(IDLE_TIMEOUT_MS, () => upstream.destroy(/* @__PURE__ */ new Error("broker upstream idle timeout")));
+		upstream.end(request.body);
+	});
+}
+async function createBroker({ credentialPath, socketPath, caCertPath, srtPackageRoot, requestPolicy, forwardUpstream }) {
+	if (typeof credentialPath !== "string" || typeof socketPath !== "string" || typeof caCertPath !== "string" || typeof srtPackageRoot !== "string" || typeof forwardUpstream !== "function") fail$5("credential broker configuration is incomplete");
+	const policyMetadata = boundedRequestPolicy(requestPolicy);
+	const policyState = {
+		metadata: policyMetadata,
+		remainingRequests: policyMetadata.maxRequests,
+		remainingOutputTokens: policyMetadata.maxTotalOutputTokens,
+		remainingCostMicroUsd: policyMetadata.maxCostMicroUsd
+	};
+	let accessToken = readAccessToken(credentialPath);
+	let ca = null;
+	let outer = null;
+	let closed = false;
+	let activeProxyRequests = 0;
+	let bufferedRequestBodyBytes = 0;
+	const sockets = /* @__PURE__ */ new Set();
+	const innerSockets = /* @__PURE__ */ new Set();
+	try {
+		const caModule = await import(pathToFileURL(join(resolve(srtPackageRoot), "dist", "sandbox", "mitm-ca.js")).href);
+		const leafModule = await import(pathToFileURL(join(resolve(srtPackageRoot), "dist", "sandbox", "mitm-leaf.js")).href);
+		ca = caModule.createMitmCA({});
+		const leaf = leafModule.mintLeafCert(ca, GATE_2702_MODEL_DOMAIN);
+		mkdirSync(dirname(caCertPath), {
+			recursive: true,
+			mode: 448
+		});
+		writeFileSync(caCertPath, ca.certPem, {
+			flag: "wx",
+			mode: 420
+		});
+		const inner = https.createServer({
+			ALPNProtocols: ["http/1.1"],
+			cert: leaf.certPem,
+			key: leaf.keyPem,
+			maxHeaderSize: MAX_HEADER_BYTES,
+			requestTimeout: IDLE_TIMEOUT_MS,
+			headersTimeout: CONNECT_TIMEOUT_MS,
+			keepAliveTimeout: IDLE_TIMEOUT_MS
+		}, (request, response) => {
+			if (activeProxyRequests >= MAX_ACTIVE_PROXY_REQUESTS) {
+				writeError(response, 503, "broker request capacity exhausted");
+				return;
+			}
+			activeProxyRequests += 1;
+			proxyRequest({
+				request,
+				response,
+				accessToken,
+				requestPolicy: policyState,
+				forwardUpstream,
+				reserveBufferedRequestBody(bytes) {
+					if (bytes > MAX_BUFFERED_REQUEST_BODY_BYTES - bufferedRequestBodyBytes) return false;
+					bufferedRequestBodyBytes += bytes;
+					return true;
+				},
+				releaseBufferedRequestBody(bytes) {
+					bufferedRequestBodyBytes -= bytes;
+				}
+			}).finally(() => {
+				activeProxyRequests -= 1;
+			});
+		});
+		inner.on("connection", (socket) => {
+			if (!sockets.has(socket) || innerSockets.size >= MAX_BROKER_CONNECTIONS) {
+				socket.destroy();
+				return;
+			}
+			innerSockets.add(socket);
+			socket.setTimeout(IDLE_TIMEOUT_MS, () => socket.destroy());
+			socket.once("close", () => innerSockets.delete(socket));
+		});
+		inner.on("connect", (_request, socket) => writeSocketError(socket, 403, "Forbidden"));
+		inner.on("upgrade", (_request, socket) => writeSocketError(socket, 426, "Upgrade Required"));
+		inner.on("clientError", (_error, socket) => writeSocketError(socket, 400, "Bad Request"));
+		outer = http.createServer({
+			maxHeaderSize: MAX_HEADER_BYTES,
+			requestTimeout: CONNECT_TIMEOUT_MS,
+			headersTimeout: CONNECT_TIMEOUT_MS,
+			keepAliveTimeout: CONNECT_TIMEOUT_MS
+		});
+		outer.on("connection", (socket) => {
+			if (sockets.size >= MAX_BROKER_CONNECTIONS) {
+				socket.destroy();
+				return;
+			}
+			sockets.add(socket);
+			socket.setTimeout(CONNECT_TIMEOUT_MS, () => socket.destroy());
+			socket.once("close", () => sockets.delete(socket));
+		});
+		outer.on("request", (_request, response) => writeError(response, 403, "broker CONNECT required"));
+		outer.on("upgrade", (_request, socket) => writeSocketError(socket, 426, "Upgrade Required"));
+		outer.on("clientError", (_error, socket) => writeSocketError(socket, 400, "Bad Request"));
+		outer.on("connect", (request, socket, head) => {
+			const target = `${GATE_2702_MODEL_DOMAIN}:443`;
+			const hosts = headerValues(request, "host");
+			if (request.url !== target || hosts.length !== 1 || hosts[0].toLowerCase() !== target || hasAmbiguousHeaders(request)) {
+				writeSocketError(socket, 403, "Forbidden");
+				return;
+			}
+			socket.setTimeout(IDLE_TIMEOUT_MS, () => socket.destroy());
+			socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+			if (head.length) socket.unshift(head);
+			inner.emit("connection", socket);
+		});
+		unlinkIfPresent(socketPath);
+		await new Promise((resolveListen, rejectListen) => {
+			const onError = (error) => rejectListen(error);
+			outer.once("error", onError);
+			outer.listen(socketPath, () => {
+				outer.removeListener("error", onError);
+				resolveListen();
+			});
+		});
+		chmodSync(socketPath, 384);
+		await caModule.disposeMitmCA(ca);
+		ca = null;
+		const close = async () => {
+			if (closed) return;
+			closed = true;
+			for (const socket of [...innerSockets, ...sockets]) socket.destroy();
+			if (outer?.listening) await new Promise((resolveClose) => outer.close(() => resolveClose()));
+			unlinkIfPresent(socketPath);
+			unlinkIfPresent(caCertPath);
+			accessToken = null;
+		};
+		return {
+			socketPath,
+			caCertPath,
+			caCertDigest: sha256$1(readBoundedRegularFile(caCertPath, "broker CA")),
+			credentialMode: "host-proxy-bearer-injection",
+			modelDomain: GATE_2702_MODEL_DOMAIN,
+			allowedRequests: ALLOWED_REQUESTS.map(({ method, path }) => ({
+				method,
+				path
+			})),
+			requestPolicy: policyMetadata,
+			close
+		};
+	} catch (error) {
+		for (const socket of [...innerSockets, ...sockets]) socket.destroy();
+		if (outer?.listening) await new Promise((resolveClose) => outer.close(() => resolveClose()));
+		unlinkIfPresent(socketPath);
+		unlinkIfPresent(caCertPath);
+		if (ca) try {
+			await (await import(pathToFileURL(join(resolve(srtPackageRoot), "dist", "sandbox", "mitm-ca.js")).href)).disposeMitmCA(ca);
+		} catch {}
+		accessToken = null;
+		throw error;
+	}
+}
+async function serveBroker(config) {
+	let broker;
+	let closing = false;
+	const close = async (exitCode = 0) => {
+		if (closing) return;
+		closing = true;
+		try {
+			await broker?.close();
+		} finally {
+			process.disconnect?.();
+			process.exit(exitCode);
+		}
+	};
+	try {
+		broker = await createBroker({
+			...config,
+			forwardUpstream: forwardGate2702Upstream
+		});
+		process.on("message", (message) => {
+			if (message?.type === "close") close(0);
+		});
+		process.once("disconnect", () => void close(0));
+		process.once("SIGTERM", () => void close(0));
+		process.once("SIGINT", () => void close(0));
+		process.send?.({
+			type: "ready",
+			metadata: {
+				socketPath: broker.socketPath,
+				caCertPath: broker.caCertPath,
+				caCertDigest: broker.caCertDigest,
+				credentialMode: broker.credentialMode,
+				modelDomain: broker.modelDomain,
+				allowedRequests: broker.allowedRequests,
+				requestPolicy: broker.requestPolicy
+			}
+		});
+	} catch (error) {
+		process.send?.({
+			type: "error",
+			message: error?.message || "credential broker failed closed"
+		});
+		await close(1);
+	}
+}
+var GATE_2702_MODEL_DOMAIN, GATE_2702_BROKER_PLACEHOLDER_TOKEN, MAX_CREDENTIAL_BYTES, MAX_ACCESS_TOKEN_BYTES, MAX_HEADER_BYTES, MAX_REQUEST_BODY_BYTES, MAX_BROKER_CONNECTIONS, MAX_ACTIVE_PROXY_REQUESTS, MAX_BUFFERED_REQUEST_BODY_BYTES, MAX_RESPONSE_BODY_BYTES, MAX_RESPONSE_HEADERS, MAX_RESPONSE_HEADER_VALUE_BYTES, IDLE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_POLICY_WALL_TIME_MS, MAX_POLICY_COST_USD, MIN_REQUEST_INTERVAL_MS, MAX_MESSAGES_REQUESTS, MAX_OUTPUT_TOKENS_PER_REQUEST, MAX_TOTAL_OUTPUT_TOKENS, MODEL_FAMILY_RATES_MICRO_USD, MIN_TOKEN_LIFETIME_MS, ALLOWED_REQUESTS, FORWARDED_REQUEST_HEADERS, HOP_BY_HOP_HEADERS;
+var init_credential_broker = __esmMin((() => {
+	GATE_2702_MODEL_DOMAIN = "api.anthropic.com";
+	GATE_2702_BROKER_PLACEHOLDER_TOKEN = "gate-2702-host-broker-placeholder-not-a-credential";
+	fileURLToPath(import.meta.url);
+	MAX_CREDENTIAL_BYTES = 1024 * 1024;
+	MAX_ACCESS_TOKEN_BYTES = 16 * 1024;
+	MAX_HEADER_BYTES = 32 * 1024;
+	MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+	MAX_BROKER_CONNECTIONS = 8;
+	MAX_ACTIVE_PROXY_REQUESTS = 4;
+	MAX_BUFFERED_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+	MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
+	MAX_RESPONSE_HEADERS = 128;
+	MAX_RESPONSE_HEADER_VALUE_BYTES = 16 * 1024;
+	IDLE_TIMEOUT_MS = 12e4;
+	CONNECT_TIMEOUT_MS = 1e4;
+	MAX_POLICY_WALL_TIME_MS = 3e6;
+	MAX_POLICY_COST_USD = 18;
+	MIN_REQUEST_INTERVAL_MS = 1e4;
+	MAX_MESSAGES_REQUESTS = 256;
+	MAX_OUTPUT_TOKENS_PER_REQUEST = 64 * 1024;
+	MAX_TOTAL_OUTPUT_TOKENS = 18e5;
+	MODEL_FAMILY_RATES_MICRO_USD = Object.freeze({
+		haiku: Object.freeze({
+			input: 2,
+			output: 5
+		}),
+		sonnet: Object.freeze({
+			input: 6,
+			output: 15
+		})
+	});
+	MIN_TOKEN_LIFETIME_MS = 306e4;
+	ALLOWED_REQUESTS = Object.freeze([Object.freeze({
+		method: "GET",
+		path: "/api/hello",
+		authenticate: false
+	}), Object.freeze({
+		method: "POST",
+		path: "/v1/messages?beta=true",
+		authenticate: true
+	})]);
+	FORWARDED_REQUEST_HEADERS = new Set([
+		"accept",
+		"accept-encoding",
+		"anthropic-beta",
+		"anthropic-dangerous-direct-browser-access",
+		"anthropic-version",
+		"content-type",
+		"user-agent",
+		"x-app",
+		"x-claude-code-session-id",
+		"x-stainless-arch",
+		"x-stainless-lang",
+		"x-stainless-os",
+		"x-stainless-package-version",
+		"x-stainless-retry-count",
+		"x-stainless-runtime",
+		"x-stainless-runtime-version",
+		"x-stainless-timeout"
+	]);
+	HOP_BY_HOP_HEADERS = new Set([
+		"connection",
+		"keep-alive",
+		"proxy-authenticate",
+		"proxy-authorization",
+		"te",
+		"trailer",
+		"transfer-encoding",
+		"upgrade"
+	]);
+	if (process.argv[2] === "__serve") {
+		let config;
+		try {
+			config = JSON.parse(process.argv[3]);
+		} catch {
+			process.send?.({
+				type: "error",
+				message: "credential broker config invalid"
+			});
+			process.exit(1);
+		}
+		serveBroker(config);
+	}
+}));
 //#endregion
 //#region scripts/gate-2702/sandbox-dispatch.mjs
 function fail$4(message) {
@@ -10426,7 +11085,11 @@ function digestGate2702SidekickSnapshot(root) {
 function uniqueSorted(values) {
 	return [...new Set(values.map((value) => resolve(value)))].sort();
 }
-function sandboxEnvironmentValue({ registration, sidekickEnvironment, isolatedHome, runtimeExecutables }) {
+function pathWithin(root, candidate) {
+	const local = relative(resolve(root), resolve(candidate));
+	return local === "" || !local.startsWith("..") && !isAbsolute(local);
+}
+function sandboxEnvironmentValue({ registration, sidekickEnvironment, isolatedHome, runtimeExecutables, credentialBroker }) {
 	const tmp = join(isolatedHome, "tmp");
 	const xdgConfig = join(isolatedHome, ".config");
 	const xdgCache = join(isolatedHome, ".cache");
@@ -10439,25 +11102,35 @@ function sandboxEnvironmentValue({ registration, sidekickEnvironment, isolatedHo
 		CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
 		CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
 		CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+		CLAUDE_CODE_OAUTH_TOKEN: GATE_2702_BROKER_PLACEHOLDER_TOKEN,
 		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 		CLAUDE_CODE_TMPDIR: tmp,
 		CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+		AWS_CA_BUNDLE: credentialBroker.caCertPath,
+		CARGO_HTTP_CAINFO: credentialBroker.caCertPath,
+		CURL_CA_BUNDLE: credentialBroker.caCertPath,
+		DENO_CERT: credentialBroker.caCertPath,
 		DISABLE_AUTOUPDATER: "1",
 		GIT_CONFIG_GLOBAL: "/dev/null",
 		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_SSL_CAINFO: credentialBroker.caCertPath,
 		HOME: isolatedHome,
 		LANG: "C.UTF-8",
 		LC_ALL: "C.UTF-8",
 		NO_COLOR: "1",
 		NPM_CONFIG_CACHE: npmCache,
 		NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+		NODE_EXTRA_CA_CERTS: credentialBroker.caCertPath,
 		PATH: [...new Set([
 			...runtimeExecutables.map((path) => dirname(path)),
 			"/usr/local/bin",
 			"/usr/bin",
 			"/bin"
 		])].join(":"),
+		PIP_CERT: credentialBroker.caCertPath,
+		REQUESTS_CA_BUNDLE: credentialBroker.caCertPath,
 		SHELL: "/bin/bash",
+		SSL_CERT_FILE: credentialBroker.caCertPath,
 		TERM: "dumb",
 		TMPDIR: "/tmp",
 		TZ: "UTC",
@@ -10469,12 +11142,32 @@ function sandboxEnvironmentValue({ registration, sidekickEnvironment, isolatedHo
 }
 function assertGate2702SandboxPreDispatch({ preDispatch, registration, worktreeIdentity }) {
 	const sandbox = preDispatch?.sandbox;
-	if (!sandbox || sandbox.enforcer !== "srt" || sandbox.package?.name !== "@anthropic-ai/sandbox-runtime" || sandbox.package?.version !== EXPECTED_SRT_VERSION || !sandbox.package?.root?.endsWith("/node_modules/@anthropic-ai/sandbox-runtime") || !DIGEST_PATTERN$1.test(sandbox.package?.manifestDigest ?? "") || !DIGEST_PATTERN$1.test(sandbox.package?.cliDigest ?? "") || !isAbsolute(sandbox.package?.root ?? "") || sandbox.package?.cliPath !== join(sandbox.package?.root ?? "", "dist", "cli.js") || sandbox.launcherExecutable !== preDispatch.argv?.[0] || sandbox.package.cliPath !== preDispatch.argv?.[1] || preDispatch.argv?.[2] !== "-s" || preDispatch.argv?.[3] !== join(registration.runDir, "sandbox", "settings.json") || preDispatch.argv?.[4] !== "-c" || typeof preDispatch.argv?.[5] !== "string" || preDispatch.argv.length !== 6 || sandbox.credentialMode !== "isolated-home-credential-only" || sandbox.hostHomeDenied !== true || typeof sandbox.hostHome !== "string" || typeof sandbox.isolatedHome !== "string" || typeof sandbox.gitDirectory !== "string" || typeof sandbox.gitCommonDirectory !== "string") fail$4("pre-dispatch receipt has no valid sandbox enforcer attestation");
+	if (!sandbox || sandbox.enforcer !== "srt" || sandbox.package?.name !== "@anthropic-ai/sandbox-runtime" || sandbox.package?.version !== EXPECTED_SRT_VERSION || !sandbox.package?.root?.endsWith("/node_modules/@anthropic-ai/sandbox-runtime") || !DIGEST_PATTERN$1.test(sandbox.package?.manifestDigest ?? "") || !DIGEST_PATTERN$1.test(sandbox.package?.cliDigest ?? "") || !isAbsolute(sandbox.package?.root ?? "") || sandbox.package?.cliPath !== join(sandbox.package?.root ?? "", "dist", "cli.js") || sandbox.launcherExecutable !== preDispatch.argv?.[0] || sandbox.package.cliPath !== preDispatch.argv?.[1] || preDispatch.argv?.[2] !== "-s" || preDispatch.argv?.[3] !== join(registration.runDir, "sandbox", "settings.json") || preDispatch.argv?.[4] !== "-c" || typeof preDispatch.argv?.[5] !== "string" || preDispatch.argv.length !== 6 || sandbox.credentialMode !== "host-proxy-bearer-injection" || sandbox.hostHomeDenied !== true || typeof sandbox.hostHome !== "string" || typeof sandbox.isolatedHome !== "string" || typeof sandbox.gitDirectory !== "string" || typeof sandbox.gitCommonDirectory !== "string") fail$4("pre-dispatch receipt has no valid sandbox enforcer attestation");
 	if (!sandbox.policy || sandbox.policyDigest !== sha256(canonicalJson$4(sandbox.policy)) || !Array.isArray(sandbox.allowedReadRoots) || !Array.isArray(sandbox.allowedWriteRoots) || sandbox.allowedReadRoots.some((path) => !isAbsolute(path)) || sandbox.allowedWriteRoots.some((path) => !isAbsolute(path)) || !sameValue$4(sandbox.policy.filesystem?.allowRead, sandbox.allowedReadRoots) || !sameValue$4(sandbox.policy.filesystem?.allowWrite, sandbox.allowedWriteRoots)) fail$4("pre-dispatch sandbox policy attestation is inconsistent");
 	const hostHome = resolve(sandbox.hostHome);
 	const isolatedHome = resolve(sandbox.isolatedHome);
 	const expectedIsolatedHome = resolve(registration.runDir, "sandbox", "home");
 	const expectedSidekickPath = resolve(registration.runDir, "../../../..", "sandbox-runtime", SIDEKICK_SNAPSHOT_DIRECTORY$1);
+	const expectedBrokerCaPath = join(registration.runDir, "sandbox", "broker-ca.crt");
+	const broker = sandbox.credentialBroker;
+	let derivedBrokerPolicy = null;
+	try {
+		derivedBrokerPolicy = gate2702BrokerRequestPolicy({
+			allowedModels: broker?.requestPolicy?.allowedModels,
+			wallTimeMs: broker?.requestPolicy?.wallTimeMs,
+			costCapUsd: broker?.requestPolicy?.costCapUsd
+		});
+	} catch {
+		fail$4("pre-dispatch credential broker request policy is invalid");
+	}
+	const brokerSocketRelative = relative(hostHome, broker?.socketPath ?? "");
+	if (broker?.transport !== "srt-mitm-unix" || broker?.modelDomain !== MODEL_DOMAIN || broker?.caCertPath !== expectedBrokerCaPath || !DIGEST_PATTERN$1.test(broker?.caCertDigest ?? "") || broker?.tokenRefresh !== "operator-outside-jail-required" || !sameValue$4(broker?.allowedRequests, [{
+		method: "GET",
+		path: "/api/hello"
+	}, {
+		method: "POST",
+		path: "/v1/messages?beta=true"
+	}]) || !sameValue$4(broker?.requestPolicy, derivedBrokerPolicy) || broker?.requestPolicy?.wallTimeMs !== 3e6 || broker?.requestPolicy?.costCapUsd !== 18 || !isAbsolute(broker?.socketPath ?? "") || brokerSocketRelative === "" || brokerSocketRelative.startsWith("..") || isAbsolute(brokerSocketRelative) || sandbox.allowedReadRoots.some((root) => pathWithin(root, broker.socketPath))) fail$4("pre-dispatch credential broker is not host-contained");
 	if (!Array.isArray(sandbox.tools) || sandbox.tools.length !== 3 || sandbox.tools.some((tool) => !tool || typeof tool !== "object" || Array.isArray(tool) || ![
 		"bwrap",
 		"socat",
@@ -10485,6 +11178,12 @@ function assertGate2702SandboxPreDispatch({ preDispatch, registration, worktreeI
 	const rg = sandbox.tools.find((tool) => tool.name === "rg");
 	if (sandbox.policy.bwrapPath !== bwrap.resolved || sandbox.policy.socatPath !== socat.resolved || sandbox.policy.ripgrep?.command !== rg.resolved) fail$4("pre-dispatch sandbox policy does not bind its runtime tools");
 	if (resolve(sandbox.gitDirectory) !== resolve(worktreeIdentity.gitDirectory) || resolve(sandbox.gitCommonDirectory) !== resolve(worktreeIdentity.gitDirectory, "../..") || !Array.isArray(sandbox.workerArgv) || sandbox.workerArgv.length === 0 || sandbox.workerArgv.some((value) => typeof value !== "string" || !value) || !isAbsolute(sandbox.workerArgv[0])) fail$4("pre-dispatch sandbox command scope is not the registered scope");
+	if (preDispatch.executionMode !== "test") {
+		const modelIndex = sandbox.workerArgv.indexOf("--model");
+		const expectedModels = [sandbox.workerArgv[modelIndex + 1]];
+		if (preDispatch.sidekickEnvironment?.SIDEKICK_ENABLE === "1") expectedModels.push(preDispatch.sidekickEnvironment.SIDEKICK_MODEL, preDispatch.sidekickEnvironment.SIDEKICK_TRIAGE_MODEL);
+		if (modelIndex < 0 || expectedModels.some((model) => typeof model !== "string" || !model) || !sameValue$4(broker.requestPolicy.allowedModels, [...new Set(expectedModels)])) fail$4("pre-dispatch credential broker models exceed the registered arm");
+	}
 	if (preDispatch.executionMode === "test" && sandbox.sidekickSnapshot !== null || preDispatch.executionMode !== "test" && (sandbox.sidekickSnapshot?.path !== expectedSidekickPath || !DIGEST_PATTERN$1.test(sandbox.sidekickSnapshot?.contentDigest ?? ""))) fail$4("pre-dispatch sandbox has no fixed Sidekick snapshot");
 	const expectedAllowedReadRoots = uniqueSorted([
 		registration.worktreePath,
@@ -10502,7 +11201,10 @@ function assertGate2702SandboxPreDispatch({ preDispatch, registration, worktreeI
 		worktreeIdentity.gitDirectory
 	])) || !sameValue$4(sandbox.allowedReadRoots, expectedAllowedReadRoots) || preDispatch.argv[5] !== [`cd ${shellQuote(registration.worktreePath)}`, `exec ${sandbox.workerArgv.map(shellQuote).join(" ")}`].join(" && ")) fail$4("pre-dispatch sandbox filesystem scope is not the registered scope");
 	const expectedDomains = preDispatch.executionMode === "test" ? [] : [MODEL_DOMAIN];
-	if (!sameValue$4(sandbox.policy.network?.allowedDomains, expectedDomains) || !sameValue$4(sandbox.policy.network?.deniedDomains, [])) fail$4("pre-dispatch sandbox network scope is not model-only");
+	if (!sameValue$4(sandbox.policy.network?.allowedDomains, expectedDomains) || !sameValue$4(sandbox.policy.network?.deniedDomains, []) || !sameValue$4(sandbox.policy.network?.mitmProxy, {
+		socketPath: broker.socketPath,
+		domains: [MODEL_DOMAIN]
+	})) fail$4("pre-dispatch sandbox network scope is not model-only");
 	if (!preDispatch.environment || Array.isArray(preDispatch.environment) || Object.values(preDispatch.environment).some((value) => typeof value !== "string") || preDispatch.environmentDigest !== sha256(canonicalJson$4(preDispatch.environment))) fail$4("pre-dispatch sandbox environment has no valid attestation");
 	const expectedEnvironmentKeys = [...new Set([...GATE_2702_SANDBOX_ENV_KEYS, ...Object.keys(preDispatch.sidekickEnvironment ?? {})])].sort();
 	const expectedWorkerEnvironmentKeys = [...new Set([...expectedEnvironmentKeys, ...GATE_2702_SRT_INJECTED_ENV_KEYS])].sort();
@@ -10510,7 +11212,8 @@ function assertGate2702SandboxPreDispatch({ preDispatch, registration, worktreeI
 		registration,
 		sidekickEnvironment: preDispatch.sidekickEnvironment,
 		isolatedHome,
-		runtimeExecutables: [rg.resolved, sandbox.workerArgv[0]]
+		runtimeExecutables: [rg.resolved, sandbox.workerArgv[0]],
+		credentialBroker: broker
 	});
 	if (!sameValue$4(preDispatch.environmentKeys, expectedEnvironmentKeys) || !sameValue$4(Object.keys(preDispatch.environment).sort(), expectedEnvironmentKeys) || !sameValue$4(preDispatch.workerEnvironmentKeys, expectedWorkerEnvironmentKeys) || !sameValue$4(preDispatch.environment, expectedEnvironment)) fail$4("pre-dispatch sandbox environment exceeds its fixed allowlist");
 	return sandbox;
@@ -10519,6 +11222,7 @@ var SRT_PACKAGE_ROOT, EXPECTED_SRT_VERSION, MAX_PLUGIN_FILES, MAX_PLUGIN_BYTES, 
 var init_sandbox_dispatch = __esmMin((() => {
 	init_shell_quote();
 	init_behavior_context();
+	init_credential_broker();
 	SRT_PACKAGE_ROOT = join(resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."), "node_modules", "@anthropic-ai", "sandbox-runtime");
 	join(SRT_PACKAGE_ROOT, "package.json");
 	join(SRT_PACKAGE_ROOT, "dist", "cli.js");
@@ -10526,7 +11230,7 @@ var init_sandbox_dispatch = __esmMin((() => {
 	EXPECTED_SRT_VERSION = "0.0.52";
 	MAX_PLUGIN_FILES = 1024;
 	MAX_PLUGIN_BYTES = 16 * 1024 * 1024;
-	MODEL_DOMAIN = "api.anthropic.com";
+	MODEL_DOMAIN = GATE_2702_MODEL_DOMAIN;
 	SIDEKICK_SNAPSHOT_ROOTS = [
 		".claude-plugin",
 		"hooks",
@@ -10541,20 +11245,30 @@ var init_sandbox_dispatch = __esmMin((() => {
 		"CHD_EXPERIMENT_2702_SUBJECT",
 		"CHD_EXPERIMENT_2702_TREATMENT",
 		"CHD_EXPERIMENT_2702_TRIAL_ID",
+		"CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 		"CLAUDE_CODE_TMPDIR",
 		"CLAUDE_CONFIG_DIR",
+		"AWS_CA_BUNDLE",
+		"CARGO_HTTP_CAINFO",
+		"CURL_CA_BUNDLE",
+		"DENO_CERT",
 		"DISABLE_AUTOUPDATER",
 		"GIT_CONFIG_GLOBAL",
 		"GIT_CONFIG_NOSYSTEM",
+		"GIT_SSL_CAINFO",
 		"HOME",
 		"LANG",
 		"LC_ALL",
 		"NO_COLOR",
 		"NPM_CONFIG_CACHE",
 		"NPM_CONFIG_USERCONFIG",
+		"NODE_EXTRA_CA_CERTS",
 		"PATH",
+		"PIP_CERT",
+		"REQUESTS_CA_BUNDLE",
 		"SHELL",
+		"SSL_CERT_FILE",
 		"TERM",
 		"TMPDIR",
 		"TZ",

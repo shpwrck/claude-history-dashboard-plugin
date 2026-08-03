@@ -12,6 +12,7 @@ import {
   GATE_2702_SANDBOX_ENV_KEYS,
   GATE_2702_SRT_INJECTED_ENV_KEYS,
 } from "./sandbox-dispatch.mjs";
+import { GATE_2702_BROKER_PLACEHOLDER_TOKEN } from "./credential-broker.mjs";
 import { validateGate2702ClassificationEvidence } from "./seal-classification.mjs";
 
 const TRIAL_ID = "4f503910-77de-4ac0-b454-3ac913d96288";
@@ -138,6 +139,8 @@ function sandboxedWorkerDispatch(
   const sandboxRoot = join(registration.runDir, "sandbox");
   const isolatedHome = join(sandboxRoot, "home");
   const settingsPath = join(sandboxRoot, "settings.json");
+  const brokerCaCertPath = join(sandboxRoot, "broker-ca.crt");
+  const brokerSocketPath = join(hostHome, ".claude", ".g2702-fixture.sock");
   const packageRoot =
     "/fixture/runtime/node_modules/@anthropic-ai/sandbox-runtime";
   const cliPath = join(packageRoot, "dist", "cli.js");
@@ -182,6 +185,10 @@ function sandboxedWorkerDispatch(
     network: {
       allowedDomains: ["api.anthropic.com"],
       deniedDomains: [],
+      mitmProxy: {
+        socketPath: brokerSocketPath,
+        domains: ["api.anthropic.com"],
+      },
     },
     filesystem: {
       denyRead: [hostHome],
@@ -200,18 +207,25 @@ function sandboxedWorkerDispatch(
     CHD_EXPERIMENT_2702_SUBJECT: String(registration.subject),
     CHD_EXPERIMENT_2702_TREATMENT: registration.treatmentId,
     CHD_EXPERIMENT_2702_TRIAL_ID: registration.trialId,
+    AWS_CA_BUNDLE: brokerCaCertPath,
+    CARGO_HTTP_CAINFO: brokerCaCertPath,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_TMPDIR: join(isolatedHome, "tmp"),
     CLAUDE_CONFIG_DIR: join(isolatedHome, ".claude"),
+    CLAUDE_CODE_OAUTH_TOKEN: GATE_2702_BROKER_PLACEHOLDER_TOKEN,
+    CURL_CA_BUNDLE: brokerCaCertPath,
+    DENO_CERT: brokerCaCertPath,
     DISABLE_AUTOUPDATER: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_SSL_CAINFO: brokerCaCertPath,
     HOME: isolatedHome,
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
     NO_COLOR: "1",
     NPM_CONFIG_CACHE: join(isolatedHome, ".npm"),
     NPM_CONFIG_USERCONFIG: join(isolatedHome, ".npmrc"),
+    NODE_EXTRA_CA_CERTS: brokerCaCertPath,
     PATH: [
       ...new Set([
         dirname(rg.resolved),
@@ -221,7 +235,10 @@ function sandboxedWorkerDispatch(
         "/bin",
       ]),
     ].join(":"),
+    PIP_CERT: brokerCaCertPath,
+    REQUESTS_CA_BUNDLE: brokerCaCertPath,
     SHELL: "/bin/bash",
+    SSL_CERT_FILE: brokerCaCertPath,
     TERM: "dumb",
     TMPDIR: "/tmp",
     TZ: "UTC",
@@ -279,7 +296,45 @@ function sandboxedWorkerDispatch(
       hostHome,
       hostHomeDenied: true,
       isolatedHome,
-      credentialMode: "isolated-home-credential-only",
+      credentialMode: "host-proxy-bearer-injection",
+      credentialBroker: {
+        transport: "srt-mitm-unix",
+        socketPath: brokerSocketPath,
+        caCertPath: brokerCaCertPath,
+        caCertDigest: `sha256:${"4".repeat(64)}`,
+        modelDomain: "api.anthropic.com",
+        allowedRequests: [
+          { method: "GET", path: "/api/hello" },
+          { method: "POST", path: "/v1/messages?beta=true" },
+        ],
+        requestPolicy: {
+          allowedModels: [
+            workerArgv.includes("--model")
+              ? workerArgv[workerArgv.indexOf("--model") + 1]
+              : "claude-haiku-4-5-20251001",
+            ...(recordedSidekickEnvironment.SIDEKICK_ENABLE === "1"
+              ? [
+                  recordedSidekickEnvironment.SIDEKICK_MODEL,
+                  recordedSidekickEnvironment.SIDEKICK_TRIAGE_MODEL,
+                ]
+              : []),
+          ],
+          wallTimeMs: 3_000_000,
+          costCapUsd: 18,
+          maxRequests: 256,
+          maxTokensPerRequest: 65_536,
+          maxTotalOutputTokens: 1_800_000,
+          maxCostMicroUsd: 18_000_000,
+          maxConnections: 8,
+          maxActiveRequests: 4,
+          maxBufferedRequestBodyBytes: 8 * 1024 * 1024,
+          familyRatesMicroUsd: {
+            haiku: { input: 2, output: 5 },
+            sonnet: { input: 6, output: 15 },
+          },
+        },
+        tokenRefresh: "operator-outside-jail-required",
+      },
       sidekickSnapshot: {
         path: sidekickPath,
         contentDigest: `sha256:${"3".repeat(64)}`,

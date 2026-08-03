@@ -54,6 +54,13 @@ const ALLOWED_ORIGIN_LINE_PATTERNS = new Map([
     'scripts/gate-2702/sandbox-dispatch.mjs',
     [/^const MODEL_DOMAIN = "api\.anthropic\.com";$/],
   ],
+  // #3474: the outside-jail broker pins the sole provider domain it will
+  // accept from jailed workers. Keep this exception to the exact declaration;
+  // every other origin literal in the broker remains a gate failure.
+  [
+    'scripts/gate-2702/credential-broker.mjs',
+    [/^export const GATE_2702_MODEL_DOMAIN = "api\.anthropic\.com";$/],
+  ],
   [
     'src/components/Settings.tsx',
     [
