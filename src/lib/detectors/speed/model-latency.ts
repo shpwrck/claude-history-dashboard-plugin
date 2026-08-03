@@ -1,10 +1,11 @@
-import type { Detector } from '../types';
+import type { Detector, RecProvenance } from '../types';
 import {
   aggregateModelLatency,
   type ModelLatency,
   type ModelLatencySample,
 } from '../../parse-telemetry';
-import { short } from '../shared';
+import { newestIsoDate, short, STALE_WEEKS } from '../shared';
+import { isAsOfStale } from '../provenance';
 
 /**
  * speed.model-latency (#915, epic #866) — a hard-gated clock detector.
@@ -101,7 +102,7 @@ export const detector: Detector = {
   id: 'speed.model-latency',
   category: 'speed',
   dataDeps: ['modelLatency'],
-  rule(input) {
+  rule(input, now) {
     const samples = input.modelLatency ?? [];
     if (samples.length === 0) return null;
 
@@ -111,6 +112,20 @@ export const detector: Detector = {
     const reclaimedMin = Number((candidate.reclaimedMs / 60_000).toFixed(1));
     const severity =
       reclaimedMin >= WARNING_RECLAIMED_MINUTES ? 'warning' : 'info';
+    const contributingSamples = samples.filter(
+      (sample) =>
+        sample.model === candidate.slow.model ||
+        sample.model === candidate.baseline.model
+    );
+    const asOf = newestIsoDate(
+      contributingSamples.map((sample) => sample.client_timestamp)
+    );
+    const stale = isAsOfStale(asOf, now, STALE_WEEKS * 7);
+    const historyLead = stale
+      ? `As of ${asOf}, successful-path telemetry showed`
+      : 'Successful-path telemetry shows';
+    const slowRate = candidate.slow.msPerOutputToken ?? 0;
+    const baselineRate = candidate.baseline.msPerOutputToken ?? 0;
 
     return {
       id: 'speed.model-latency',
@@ -118,20 +133,89 @@ export const detector: Detector = {
       severity,
       title: `Route latency-sensitive work off ${candidate.slow.model}`,
       detail:
-        `Successful-path telemetry shows ${candidate.slow.model} at ` +
-        `${fmtMsPerToken(candidate.slow.msPerOutputToken ?? 0)} across ` +
+        `${historyLead} ${candidate.slow.model} at ` +
+        `${fmtMsPerToken(slowRate)} across ` +
         `${candidate.slow.samples} session(s), while ${candidate.baseline.model} ` +
-        `is ${fmtMsPerToken(candidate.baseline.msPerOutputToken ?? 0)}. ` +
+        `is ${fmtMsPerToken(baselineRate)}. ` +
         `The signal comes from tengu_exit API duration, excludes the 30s slow-first-byte timeout ceiling, ` +
         `and estimates ${fmtDuration(candidate.reclaimedMs)} of clock on similar output volume.`,
-      action:
-        `For latency-sensitive runs that do not need ${candidate.slow.model}'s capability tier, ` +
-        `route or pin that workflow to ${candidate.baseline.model} or another measured faster model. ` +
-        `Keep ${candidate.slow.model} for tasks that genuinely need its capability.`,
+      action: stale
+        ? `Treat this as historical evidence and remeasure both model cohorts before rerouting current work. If the gap persists, route latency-sensitive runs that do not need ${candidate.slow.model}'s capability tier to ${candidate.baseline.model} or another measured faster model.`
+        : `For latency-sensitive runs that do not need ${candidate.slow.model}'s capability tier, ` +
+          `route or pin that workflow to ${candidate.baseline.model} or another measured faster model. ` +
+          `Keep ${candidate.slow.model} for tasks that genuinely need its capability.`,
       affected: candidate.slow.samples,
       estTimeReclaimedMin: reclaimedMin,
       view: 'recommendations',
       evidence: evidenceRows(samples, candidate.slow.model),
+      provenance: ({
+        observations: [
+          {
+            claim:
+              `${candidate.slow.samples} ${candidate.slow.model} sample(s) summed ` +
+              `${candidate.slow.totalApiDurationMs} API ms and ${candidate.slow.totalOutputTokens} output tokens`,
+            source:
+              'parse-telemetry (aggregateModelLatency over tengu_exit events)',
+            record: candidate.slow.model,
+            field: 'modelLatency[].{apiDurationMs,outputTokens}',
+            value: `${candidate.slow.totalApiDurationMs}/${candidate.slow.totalOutputTokens}`,
+          },
+          {
+            claim:
+              `${candidate.baseline.samples} ${candidate.baseline.model} sample(s) summed ` +
+              `${candidate.baseline.totalApiDurationMs} API ms and ${candidate.baseline.totalOutputTokens} output tokens`,
+            source:
+              'parse-telemetry (aggregateModelLatency over tengu_exit events)',
+            record: candidate.baseline.model,
+            field: 'modelLatency[].{apiDurationMs,outputTokens}',
+            value: `${candidate.baseline.totalApiDurationMs}/${candidate.baseline.totalOutputTokens}`,
+          },
+          ...(asOf
+            ? [
+                {
+                  claim: `the latest contributing client timestamp falls on ${asOf}`,
+                  source: 'parse-telemetry (tengu_exit events)',
+                  field: 'modelLatency[].client_timestamp',
+                  value: asOf,
+                },
+              ]
+            : []),
+        ],
+        derivations: [
+          {
+            id: 'slow-ms-per-output-token',
+            formula: 'totalApiDurationMs / totalOutputTokens',
+            operands: {
+              totalApiDurationMs: candidate.slow.totalApiDurationMs,
+              totalOutputTokens: candidate.slow.totalOutputTokens,
+            },
+            value: slowRate,
+          },
+          {
+            id: 'baseline-ms-per-output-token',
+            formula: 'totalApiDurationMs / totalOutputTokens',
+            operands: {
+              totalApiDurationMs: candidate.baseline.totalApiDurationMs,
+              totalOutputTokens: candidate.baseline.totalOutputTokens,
+            },
+            value: baselineRate,
+          },
+          {
+            id: 'reclaimed-ms-on-slow-output-volume',
+            formula:
+              '(slowMsPerOutputToken - baselineMsPerOutputToken) * slowOutputTokens',
+            operands: {
+              slowMsPerOutputToken: slowRate,
+              baselineMsPerOutputToken: baselineRate,
+              slowOutputTokens: candidate.slow.totalOutputTokens,
+            },
+            value: candidate.reclaimedMs,
+          },
+        ],
+        inference:
+          'The reclaimed clock is an equal-output-volume counterfactual: it applies the measured baseline rate to the slow cohort output volume. It is a routing estimate, not controlled proof that model choice caused the whole gap or that both cohorts had equivalent task difficulty.',
+        ...(asOf ? { asOf, stale } : {}),
+      } satisfies RecProvenance) as RecProvenance,
     };
   },
 };

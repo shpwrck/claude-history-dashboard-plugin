@@ -7,14 +7,14 @@
  * (Write/Edit/NotebookEdit), network egress (WebFetch/WebSearch), or an entire
  * `mcp__*` server.
  *
- * The contract asserted here: only a catalogued, reviewed, SCOPED rule set may
- * produce an allow snippet; every other dominant tool yields a
- * manual-analysis finding with no `permissions.allow` snippet at all.
+ * The contract asserted here: aggregate prompt frequency never produces an
+ * allow snippet. Even command-prefixed Bash wildcards can admit redirection,
+ * output paths, or other unobserved effects, so every dominant tool remains a
+ * manual-analysis finding until operation-level safety evidence exists.
  */
 import { describe, it, expect } from 'vitest';
-import { detector, safeAllowRulesFor } from './prompt-friction';
-import { effectiveFixKind, validateFixSnippet } from '../fix-validity';
-import { BASH_SAFE_ALLOW_RULES } from '../shared';
+import { detector } from './prompt-friction';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { ToolUsageData } from '../../parse-tools-types';
 
@@ -42,57 +42,65 @@ function dominatedBy(toolName: string, n = 40): RecommendationInput {
   } as unknown as RecommendationInput;
 }
 
-/** Any `permissions.allow` array anywhere inside a parsed snippet. */
-function allowArrayOf(snippet: string): unknown {
-  const parsed = JSON.parse(snippet) as {
-    permissions?: { allow?: unknown };
-  };
-  return parsed.permissions?.allow;
-}
+// ── Aggregate frequency must never become an automatic permission grant ────
 
-// ── The catalogued (safe, scoped) case still produces a validated fix ───────
-
-describe('safety.prompt-friction catalogued tools (#3223)', () => {
-  it('emits the scoped Bash safe-variant rules, not a bare "Bash" grant', () => {
+describe('safety.prompt-friction operation-level safety (#3224)', () => {
+  it('emits no fix when Bash dominates aggregate prompt frequency', () => {
     const rec = detector.rule(dominatedBy('Bash'), 0);
     expect(rec?.id).toBe('safety.prompt-friction');
-    expect(rec?.fix).toBeDefined();
-    // The LITERAL field, not effectiveFixKind: the classification must be
-    // DECLARED. effectiveFixKind() returns 'validated' whether the field is
-    // present or absent, so on its own it cannot tell a deliberate claim from an
-    // inherited default — which is exactly the gap #3221 was about.
-    expect(rec!.fix!.fixKind).toBe('validated');
-    expect(effectiveFixKind(rec!.fix!)).toBe('validated');
-    expect(validateFixSnippet(rec!.fix!)).toEqual([]);
-
-    const allow = allowArrayOf(rec!.fix!.snippet) as string[];
-    expect(allow).toEqual(BASH_SAFE_ALLOW_RULES);
-    // Never the bare tool name.
-    expect(allow).not.toContain('Bash');
-    // Every rule is scoped to a named command.
-    for (const rule of allow) expect(rule).toMatch(/^Bash\(.+\)$/);
+    expect(rec?.fix).toBeUndefined();
+    expect(rec?.fixes).toBeUndefined();
+    expect(rec?.action).toMatch(/frequency.*not safety/i);
+    expect(JSON.stringify(rec)).not.toContain('"allow"');
   });
 
-  it('self-suppresses once the scoped Bash rules are already allowed', () => {
+  it('cites the promptable numerator, denominator, and sessions without claiming a safe rule derivation', () => {
     const input = dominatedBy('Bash');
-    (input as { liveConfig: unknown }).liveConfig = {
-      settings: { permissions: { allow: [...BASH_SAFE_ALLOW_RULES] } },
-    };
-    expect(detector.rule(input, 0)).toBeNull();
-  });
+    const calls = input.toolData[0].calls;
+    calls.push(
+      ...Array.from({ length: 10 }, (_, i) => ({
+        timestamp: `2026-07-09T11:00:${String(i).padStart(2, '0')}.000Z`,
+        toolName: 'Write',
+        input: { file_path: `f${i}.ts` },
+        toolUseId: `w${i}`,
+        isError: null,
+        resultBytes: 0,
+      }))
+    );
 
-  it('exposes only reviewed, scoped catalog entries', () => {
-    expect(safeAllowRulesFor('Bash')).toEqual(BASH_SAFE_ALLOW_RULES);
-    // Prototype keys must not masquerade as catalogued tools.
-    for (const key of ['constructor', '__proto__', 'toString', 'valueOf']) {
-      expect(safeAllowRulesFor(key)).toBeNull();
-    }
+    const rec = detector.rule(input, 0)!;
+
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'rankPromptProneTools().promptableCalls',
+          value: 40,
+        }),
+        expect.objectContaining({
+          field: 'rankPromptProneTools()[].promptableCalls',
+          value: 50,
+        }),
+        expect.objectContaining({
+          field: 'rankPromptProneTools().sessionCount',
+          value: 1,
+        }),
+      ])
+    );
+    expect(rec.provenance?.derivations).toContainEqual({
+      id: 'promptable-share-percent',
+      formula: '(promptableCalls / totalPromptableCalls) * 100',
+      operands: { promptableCalls: 40, totalPromptableCalls: 50 },
+      value: 80,
+    });
+    expect(rec.provenance?.inference).toMatch(/frequency.*not.*safety/i);
+    expect(JSON.stringify(rec.provenance)).not.toContain('BASH_SAFE_ALLOW_RULES');
   });
 });
 
-// ── Privileged / unknown tools must never get an allow snippet ──────────────
+// ── Every other prompt-prone tool must also remain manual ───────────────────
 
-describe('safety.prompt-friction privileged non-Bash tools (#3223)', () => {
+describe('safety.prompt-friction non-Bash tools (#3223)', () => {
   const privileged = [
     'Write', // arbitrary file writes
     'Edit', // arbitrary file writes

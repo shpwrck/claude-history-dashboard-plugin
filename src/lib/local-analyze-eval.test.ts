@@ -15,6 +15,7 @@ import {
   type AnalyzeEvalSample,
 } from './local-analyze-eval';
 import type { LocalAnalyzeRecommendation } from './local-analyze';
+import { validateClaimProvenance } from './claim-provenance';
 
 const rec = (id: string): LocalAnalyzeRecommendation => ({
   id,
@@ -276,6 +277,102 @@ describe('committed corpus', () => {
     new URL('../../fixtures/local-analyze-eval/corpus.json', import.meta.url)
   );
   const corpus = JSON.parse(readFileSync(corpusPath, 'utf8'));
+
+  it('grounds every current and future recommendation row in structured synthetic evidence', () => {
+    const groundedCopy: Record<string, { title: string; detail: string }> = {
+      'context.rot': {
+        title: 'Compaction re-sends 32K tokens and evicts earlier context',
+        detail:
+          'The synthetic session re-sent 32,000 tokens at compaction and marked earlier context as evicted.',
+      },
+      'cost.cache-1h-waste': {
+        title: '60-minute cache write covers a 4-minute idle gap',
+        detail:
+          'The synthetic write used a 60-minute cache TTL for a 4-minute idle gap; it is priced higher than the 5-minute default.',
+      },
+      'cost.thinking-budget': {
+        title: 'Thinking tokens are 12x output tokens',
+        detail:
+          'The synthetic mechanical task recorded 48,000 thinking tokens and 4,000 output tokens.',
+      },
+      'workflow.tool-loop': {
+        title: 'Four read/edit cycles occur before progress',
+        detail:
+          'The synthetic history recorded 4 read/edit cycles, with the first progress signal after cycle 4.',
+      },
+      'config.mcp-sprawl': {
+        title: 'Four configured MCP servers receive zero calls',
+        detail:
+          'The synthetic fixture configured 4 MCP servers, called 0 of them, and included their schemas on all 12 observed turns.',
+      },
+      'workflow.retry-storm': {
+        title: 'Six failing-command attempts use one approach',
+        detail:
+          'The synthetic fixture recorded 6 failing-command attempts and 1 distinct approach.',
+      },
+      'reliability.no-verify': {
+        title: 'Two success claims have no recorded verification',
+        detail:
+          'The synthetic fixture recorded 2 success claims, 0 verification runs, and 0 post-change rereads.',
+      },
+    };
+    const samples = corpus.samples as Array<{
+      id: string;
+      syntheticEvidence: { observedAt: string; [key: string]: unknown };
+      recommendations: Array<{
+        id?: string;
+        title?: string;
+        detail?: string;
+        provenance?: {
+          observations?: Array<{
+            source?: string;
+            record?: string;
+            field?: string;
+            value?: unknown;
+          }>;
+          inference?: string;
+          asOf?: string;
+        };
+      }>;
+    }>;
+    const recommendations = samples.flatMap((sample) => sample.recommendations);
+
+    expect(recommendations.length).toBeGreaterThan(0);
+    expect(recommendations).toHaveLength(Object.keys(groundedCopy).length);
+    for (const sample of samples) {
+      for (const recommendation of sample.recommendations) {
+        expect(recommendation).toMatchObject(
+          groundedCopy[recommendation.id ?? '(missing id)']
+        );
+        expect(
+          validateClaimProvenance(recommendation.provenance),
+          `${recommendation.id ?? '(missing id)'} must carry valid provenance`
+        ).toEqual([]);
+        expect(recommendation.provenance?.inference).toEqual(expect.any(String));
+        expect(recommendation.provenance?.asOf).toBe(
+          sample.syntheticEvidence.observedAt.slice(0, 10)
+        );
+
+        for (const observation of recommendation.provenance?.observations ?? []) {
+          expect(observation.source).toBe('fixtures/local-analyze-eval/corpus.json');
+          expect(observation.record).toBe(`samples[id=${sample.id}]`);
+          expect(observation.field).toMatch(/^syntheticEvidence(?:\.[A-Za-z][A-Za-z0-9]*)+$/);
+          const resolved = observation.field!
+            .split('.')
+            .reduce<unknown>((value, key) => {
+              if (!value || typeof value !== 'object' || !(key in value)) {
+                return undefined;
+              }
+              return (value as Record<string, unknown>)[key];
+            }, sample);
+          expect(
+            resolved,
+            `${recommendation.id ?? '(missing id)'} cites missing ${observation.field}`
+          ).toEqual(observation.value);
+        }
+      }
+    }
+  });
 
   it('parses fail-closed and runs offline into a receipt showing the constrained arm ahead', async () => {
     const samples = parseAnalyzeEvalCorpus(corpus);

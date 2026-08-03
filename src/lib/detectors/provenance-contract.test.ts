@@ -270,6 +270,17 @@ describe('PROVENANCE_DETECTORS allowlist', () => {
       expect(registered.has(id), `${id} is on the allowlist but not registered`).toBe(true);
     }
   });
+
+  it('fixture-proves the round-14 structured-provenance migrations', () => {
+    expect(PROVENANCE_DETECTORS).toEqual(
+      expect.arrayContaining([
+        'safety.prompt-friction',
+        'security.model-deceit',
+        'speed.model-latency',
+        'workflow.tool-undo-rate',
+      ])
+    );
+  });
 });
 
 // ── Inverted default: provenance is required unless exempt (#3205) ─────────
@@ -286,9 +297,9 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * than the path of least resistance. Update this number DOWNWARD only.
  *
  * 22 at the inversion; 15 after the round-10 cost batch (#3194/#3201) migrated
- * the seven cost.* ids off the register.
+ * the seven cost.* ids; 11 after the round-14 #3224/#3226/#3227/#3247 batch.
  */
-const EXEMPT_AT_INVERSION = 15;
+const EXEMPT_AT_INVERSION = 11;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {
@@ -681,6 +692,104 @@ const ctxReads = (
   }) as unknown as RecommendationInput['toolData'][number];
 
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
+  'safety.prompt-friction': () => ({
+    input: baseInput({
+      toolData: [
+        {
+          sessionId: 'prompt-friction',
+          calls: Array.from({ length: 40 }, (_, index) => ({
+            timestamp: `2026-06-09T12:00:${String(index).padStart(2, '0')}.000Z`,
+            toolName: 'Bash',
+            input: { command: 'git status --short' },
+            toolUseId: `prompt-${index}`,
+            isError: null,
+            resultBytes: 0,
+          })),
+        },
+      ] as RecommendationInput['toolData'],
+      permissionRows: [
+        { mode: 'default', sessionId: 'prompt-friction' },
+      ] as RecommendationInput['permissionRows'],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+
+  'security.model-deceit': () => ({
+    input: baseInput({
+      deceitSignals: [
+        {
+          sessionId: 'deceit-fixture',
+          assistantTurnCount: 8,
+          unbackedClaimCount: 2,
+          contradictedClaimCount: 1,
+          claimSnippets: ['I ran the tests', 'the build is green'],
+        },
+      ],
+    }),
+    now: Date.parse('2026-06-10T00:00:00.000Z'),
+  }),
+
+  'speed.model-latency': () => {
+    const latency = (
+      session_id: string,
+      model: string,
+      apiDurationMs: number
+    ) => ({
+      session_id,
+      model,
+      apiDurationMs,
+      toolDurationMs: 0,
+      inputTokens: 0,
+      outputTokens: 1_000,
+      client_timestamp: '2026-06-09T12:00:00.000Z',
+    });
+    return {
+      input: baseInput({
+        modelLatency: [
+          latency('slow-a', 'claude-opus-4-8[1m]', 70_000),
+          latency('slow-b', 'claude-opus-4-8[1m]', 70_000),
+          latency('slow-c', 'claude-opus-4-8[1m]', 70_000),
+          latency('fast-a', 'claude-haiku-4-5-20251001', 15_000),
+          latency('fast-b', 'claude-haiku-4-5-20251001', 15_000),
+          latency('fast-c', 'claude-haiku-4-5-20251001', 15_000),
+        ],
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
+  'workflow.tool-undo-rate': () => {
+    const calls: RecommendationInput['toolData'][number]['calls'] = [];
+    let second = 0;
+    const edit = (file: string) => ({
+      timestamp: `2026-06-09T12:00:${String(second++).padStart(2, '0')}.000Z`,
+      toolName: 'Edit',
+      input: { file_path: file },
+      toolUseId: `edit-${second}`,
+      isError: null,
+      resultBytes: 0,
+    });
+    const restore = () => ({
+      timestamp: `2026-06-09T12:00:${String(second++).padStart(2, '0')}.000Z`,
+      toolName: 'Bash',
+      input: { command: 'git restore .' },
+      toolUseId: `restore-${second}`,
+      isError: null,
+      resultBytes: 0,
+    });
+    calls.push(edit('f0.ts'), restore(), edit('f1.ts'), restore());
+    for (let index = 2; index < 10; index += 1) {
+      calls.push(edit(`f${index}.ts`));
+    }
+    return {
+      input: baseInput({
+        toolData: [{ sessionId: 'undo-fixture', calls }],
+        timelines: [],
+      }),
+      now: Date.parse('2026-06-10T00:00:00.000Z'),
+    };
+  },
+
   'activity.stale-projects': () => {
     // Two projects over the session floor whose last activity predates the
     // 4-week cutoff, and no `cleanupPeriodDays` ageing history out.

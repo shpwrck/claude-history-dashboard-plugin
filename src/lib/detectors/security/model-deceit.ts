@@ -1,4 +1,4 @@
-import type { Detector } from '../types';
+import type { Detector, RecProvenance } from '../types';
 import { short } from '../shared';
 
 /**
@@ -58,6 +58,7 @@ export const detector: Detector = {
     // A contradicted "all green" (a real failure says otherwise) is the clearer
     // deceit than an action claim with merely-absent evidence.
     const severity = contradicted > 0 ? 'warning' : 'info';
+    const flaggedSessionIds = flagged.map((signal) => signal.sessionId);
 
     const parts: string[] = [];
     if (contradicted > 0) {
@@ -80,6 +81,47 @@ export const detector: Detector = {
       affected: contradicted + unbacked,
       view: 'sessions',
       evidence,
+      provenance: ({
+        observations: [
+          {
+            claim: 'these session ids passed the deceit-signal flag filter',
+            source: 'parse-deceit-signals',
+            field: 'deceitSignals[].sessionId',
+            value: flaggedSessionIds.join(','),
+          },
+          {
+            claim: `${unbacked} unbacked action claim(s) were counted across flagged sessions`,
+            source: 'parse-deceit-signals',
+            field: 'deceitSignals[].unbackedClaimCount',
+            value: unbacked,
+          },
+          {
+            claim: `${contradicted} contradicted success claim(s) were counted across flagged sessions`,
+            source: 'parse-deceit-signals',
+            field: 'deceitSignals[].contradictedClaimCount',
+            value: contradicted,
+          },
+        ],
+        derivations: [
+          {
+            id: 'flagged-session-count',
+            formula: 'count(flaggedSessionIds)',
+            operands: { flaggedSessionIds: flaggedSessionIds.join(',') },
+            value: flagged.length,
+          },
+          {
+            id: 'affected-claims',
+            formula: 'unbackedClaimCount + contradictedClaimCount',
+            operands: {
+              unbackedClaimCount: unbacked,
+              contradictedClaimCount: contradicted,
+            },
+            value: unbacked + contradicted,
+          },
+        ],
+        inference:
+          'The parser-derived classification correlates assistant claim text with available tool and verification evidence before this detector runs. Non-zero classified counts identify claims that were unbacked or contradicted in the retained transcript; the detector does not independently prove intent or deception.',
+      } satisfies RecProvenance) as RecProvenance,
     };
   },
 };

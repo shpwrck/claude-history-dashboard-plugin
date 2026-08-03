@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { detector } from './model-deceit';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { DeceitSignals } from '../../../types';
 
@@ -93,6 +94,52 @@ describe('security.model-deceit', () => {
     expect(rec?.evidence).toHaveLength(5);
     expect(rec?.evidence?.join('\n')).toContain('"five"');
     expect(rec?.evidence?.join('\n')).not.toContain('"six"');
+  });
+
+  it('makes every aggregate reproducible from deceitSignals fields', () => {
+    const rec = detector.rule(
+      input([
+        signal({
+          sessionId: 'alpha-session',
+          unbackedClaimCount: 2,
+          contradictedClaimCount: 1,
+          claimSnippets: ['I ran the suite', 'all tests pass'],
+        }),
+        signal({
+          sessionId: 'beta-session',
+          unbackedClaimCount: 3,
+          contradictedClaimCount: 2,
+          claimSnippets: ['the build is green'],
+        }),
+      ]),
+      0
+    )!;
+
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.affected).toBe(8);
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'deceitSignals[].sessionId',
+          value: 'alpha-session,beta-session',
+        }),
+        expect.objectContaining({
+          field: 'deceitSignals[].unbackedClaimCount',
+          value: 5,
+        }),
+        expect.objectContaining({
+          field: 'deceitSignals[].contradictedClaimCount',
+          value: 3,
+        }),
+      ])
+    );
+    expect(rec.provenance?.derivations).toContainEqual({
+      id: 'affected-claims',
+      formula: 'unbackedClaimCount + contradictedClaimCount',
+      operands: { unbackedClaimCount: 5, contradictedClaimCount: 3 },
+      value: 8,
+    });
+    expect(rec.provenance?.inference).toMatch(/parser.*classification/i);
   });
 
   it('stays dark for empty, clean, and no-assistant-turn inputs', () => {

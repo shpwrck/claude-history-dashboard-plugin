@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './tool-undo-rate';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { ToolUsageData, ToolCall } from '../../parse-tools';
 
@@ -29,5 +30,53 @@ describe('workflow.tool-undo-rate (#422)', () => {
   });
   it('self-suppresses when a PreToolUse Edit hook exists', () => {
     expect(detector.rule(input(true), 0)).toBeNull();
+  });
+
+  it('cites both rollback-rate operands and their division', () => {
+    const rec = detector.rule(
+      input(),
+      Date.parse('2026-01-02T00:00:00Z')
+    )!;
+
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(rec.affected).toBe(2);
+    expect(rec.detail).toContain('20%');
+    expect(rec.provenance?.asOf).toBe('2026-01-01');
+    expect(rec.provenance?.stale).toBe(false);
+    expect(rec.provenance?.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'computeToolEffectiveness().tool',
+          value: 'Edit',
+        }),
+        expect.objectContaining({
+          field: 'computeToolEffectiveness().invocations',
+          value: 10,
+        }),
+        expect.objectContaining({
+          field: 'computeToolEffectiveness().immediatelyFollowedByUndo',
+          value: 2,
+        }),
+      ])
+    );
+    expect(rec.provenance?.derivations).toContainEqual({
+      id: 'undo-rate-percent',
+      formula: 'round((immediatelyFollowedByUndo / invocations) * 100)',
+      operands: { immediatelyFollowedByUndo: 2, invocations: 10 },
+      value: 20,
+    });
+  });
+
+  it('demotes a stale rollback window to dated historical wording', () => {
+    const rec = detector.rule(
+      input(),
+      Date.parse('2026-06-10T00:00:00Z')
+    )!;
+
+    expect(rec.provenance?.asOf).toBe('2026-01-01');
+    expect(rec.provenance?.stale).toBe(true);
+    expect(rec.detail).toMatch(/^As of 2026-01-01,/);
+    expect(rec.action).toMatch(/^Treat this as historical evidence/);
+    expect(rec.action).toContain('remeasure');
   });
 });

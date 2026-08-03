@@ -78,19 +78,66 @@ is out of reach for it.
   not parsing transcripts. That is a separate, larger piece of work and is not
   recommended on the strength of this one ask.
 
-## Reproduce
+## Frozen receipt and reproduction
+
+The published numbers above are bound to the minimized, redacted receipt at
+[`fixtures/hook-timing-spike/receipt.json`](../fixtures/hook-timing-spike/receipt.json):
+
+- schema version `1`;
+- receipt revision `hook-timing-spike/2026-05-31/redacted-r1`;
+- source snapshot `claude-projects-2026-05-31-redacted-r1`, captured
+  `2026-05-31T23:59:59.000Z` from `~/.claude/projects/**/*.jsonl`.
+
+The receipt retains one atomic pseudonymous file id, subtype code, search-row
+type/mask, or Stop-hook-info tuple per observation. It contains no raw transcript
+text, prompt, command, hook command, path, or session id, and it stores no
+published totals. The analyzer is bounded and refuses any other schema/revision,
+so it recomputes every number rather than trusting a copied aggregate:
 
 ```sh
-# Enumerate all type:system subtypes:
-python3 - <<'PY'
-import json, glob, os, collections
-sub = collections.Counter()
-for f in glob.glob(os.path.expanduser('~/.claude/projects')+'/**/*.jsonl', recursive=True):
-    for line in open(f, errors='ignore'):
-        if '"type"' not in line: continue
-        try: o = json.loads(line)
-        except: continue
-        if o.get('type') == 'system': sub[o.get('subtype','<none>')] += 1
-print(sub.most_common())
-PY
+node scripts/audits/hook-timing-receipt.mjs fixtures/hook-timing-spike/receipt.json
 ```
+
+Canonical output (kept equal to a fresh recomputation by
+`scripts/audits/hook-timing-receipt.test.mjs`):
+
+<!-- hook-timing-receipt-output:start -->
+```json
+{
+  "schemaVersion": 1,
+  "receiptRevision": "hook-timing-spike/2026-05-31/redacted-r1",
+  "sourceSnapshotId": "claude-projects-2026-05-31-redacted-r1",
+  "transcriptFiles": 363,
+  "systemLines": 475,
+  "systemSubtypes": {
+    "stop_hook_summary": 286,
+    "turn_duration": 85,
+    "api_error": 56,
+    "away_summary": 20,
+    "local_command": 16,
+    "informational": 6,
+    "bridge_status": 3,
+    "scheduled_task_fire": 3
+  },
+  "hookStringHits": {
+    "PreToolUse": 65,
+    "PostToolUse": 163,
+    "hook_response": 78,
+    "hook_started": 4
+  },
+  "hookStringClassifications": {
+    "type:user -> message/toolUseResult": 161,
+    "type:attachment -> attachment": 87,
+    "type:assistant -> message": 49,
+    "type:queue-operation -> content": 7
+  },
+  "persistedPerToolHookTimingEvents": 0,
+  "stopHookEvents": 286,
+  "hookInfos": 287,
+  "hookInfosWithDurationMs": 17,
+  "hookInfosWithDurationPct": 6,
+  "hookInfosWithNameOrId": 0,
+  "hookInfosWithNameOrIdPct": 0
+}
+```
+<!-- hook-timing-receipt-output:end -->

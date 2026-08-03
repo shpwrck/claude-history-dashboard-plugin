@@ -69,11 +69,7 @@ export const PROVENANCE_EXEMPT: readonly string[] = [
   'reliability.mcp-needs-auth',
   'reliability.overload-reretry',
   'safety.allow-rule-overlaps-deny',
-  'safety.prompt-friction',
-  'security.model-deceit',
-  'speed.model-latency',
   'speed.time-motion',
-  'workflow.tool-undo-rate',
   'workflow.unused-installed-commands',
   'workflow.unused-installed-plugins',
   'workflow.unused-installed-skills',
@@ -169,6 +165,11 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'cost.priority-tier-spend',
   'cost.unknown-model',
   'cost.web-search-spend',
+  // #3224/#3226/#3227/#3247 — round-14 structured-provenance batch.
+  'safety.prompt-friction',
+  'security.model-deceit',
+  'speed.model-latency',
+  'workflow.tool-undo-rate',
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
