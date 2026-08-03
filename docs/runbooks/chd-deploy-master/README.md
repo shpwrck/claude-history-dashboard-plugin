@@ -7,215 +7,209 @@ status: current
 # Standing `chd-deploy-master` dashboard instance leave-behind
 
 The single long-running local dashboard deployment on this dev box: podman
-container `chd-deploy-master_app_1` (compose project `chd-deploy-master`),
-serving the dashboard on host port 5173 while reading `~/.claude` live. It is
-the dogfooding target the `recs` SessionStart hook reads
-(`http://127.0.0.1:5173/api/recommendations.json`), so keeping it current and
-healthy is what makes the injected `[recs]` findings reflect the latest engine.
+container `claude-history-dashboard_app_1` (compose project
+`claude-history-dashboard`), serving the dashboard on host port 5173 while
+reading `~/.claude` live. It is the dogfooding target the `recs` SessionStart
+hook reads (`http://127.0.0.1:5173/api/recommendations.json`), so keeping it
+current and healthy is what makes the injected `[recs]` findings reflect the
+latest engine.
+
+> **Box migration (2026-08-03).** The instance moved to a new machine: user
+> `jskrzype`, `HOME=/home/jskrzype`, host uid **104177** (not 1000), SELinux
+> **Enforcing**, checkout at `~/workdir/claude-history-dashboard`,
+> podman-compose 1.5.0. Container and compose-project names changed to the
+> defaults derived from that checkout dir (`claude-history-dashboard[_app_1]`);
+> the old box's `chd-deploy-master` project name, `~/project/*` checkouts, and
+> `chdref` alias are retired. Earlier revisions of this file describe the old
+> box — treat them as historical. The state-scope name stays
+> `chd-deploy-master` (artifact identity, not the compose project name).
 
 ## Operability
 
 ### State and access
 
-- **Running unit:** container `chd-deploy-master_app_1`, podman compose project
-  `chd-deploy-master`, host port `5173`. Not managed by systemd (any
-  `PODMAN_SYSTEMD_UNIT` label on the container is vestigial — `systemctl --user`
-  reports the unit `not-found`).
-- **Image currently live (2026-07-31):** `localhost/claude-history-dashboard:local`,
-  built by `npm run deploy` from commit `219177a0` (the #3527/#3528/#3529/#3532
-  merge set). This is **ahead of the Compose digest pin**, which still points at
-  the July-27 published image (`ghcr.io/…@sha256:566ea25b…`). Consequence: any
-  pull-path refresh (`chdref`) or bare `up -d --force-recreate` WITHOUT
-  `CHD_APP_IMAGE` set will ROLL THE CONTAINER BACK to that older pin until a
-  reviewed pin update lands (see Verify and recover, and How to drive it).
-- **Deploy origin:** the dedicated master checkout `~/project/chd-deploy-master`
-  (kept on `master`, fast-forwarded before deploying; this is what
-  `npm run deploy` ran from on 2026-07-31). The main checkout
-  `~/project/claude-history-dashboard` is a shared working dir that may sit on a
-  detached/stale HEAD — do not deploy from it. (An older
-  `~/project/deploy-staging/chd-deploy-master` path in old container labels is
-  historical, not a source of truth.)
-- **Live data:** host `~/.claude` is bind-mounted in and read live. Before a
-  manual compose command, derive the login home with
-  `CHD_HOST_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"` and refuse an
-  empty result. The deploy MUST run with `HOME="$CHD_HOST_HOME"` so the bind
-  path does not nest to `${HOME}/.claude` (a stray HOME yields a 0-session
-  dashboard).
-- **Adoption-spool coordination state (new since #3529):** the server's receipt
-  drain and the recs SessionStart hook (producer, `~/.agents`
-  `skills/recs/scripts/session-start-hook.mjs`, updated by agent-skills#25)
-  coordinate through a transient sibling lock file
+- **Running unit:** container `claude-history-dashboard_app_1`, podman compose
+  project `claude-history-dashboard` (default from the checkout dir — do NOT
+  pass `-p chd-deploy-master` on this box; that would spin a second stack that
+  collides on port 5173). Not managed by systemd; `restart: unless-stopped`
+  only, so after a reboot the container stays down until re-run.
+- **Image currently live (2026-08-03):**
+  `ghcr.io/shpwrck/claude-history-dashboard@sha256:e4b7e3b73e4ededd7906d1973b70640326e74b53c24ca1539bd5a9b9a796810a`
+  — the published `:latest` for master `7ae189e8`, selected explicitly via
+  `CHD_APP_IMAGE`. This is **ahead of the committed Compose digest pin**
+  (July-27 `…@sha256:566ea25b…`), so any recreate WITHOUT `CHD_APP_IMAGE` set
+  ROLLS BACK to the pin until a reviewed pin update lands (same ahead-of-pin
+  condition as 2026-07-31, now via pull instead of local build).
+- **Deploy origin:** the checkout `~/workdir/claude-history-dashboard`
+  (fast-forwarded to `origin/master` before deploying), with the repo's
+  committed `docker-compose.yml` + `docker-compose.local.yml` **plus two
+  box-local artifacts** (both outside the repo, both load-bearing):
+  - `~/.local/share/chd/compose.box-override.yml` — third compose file setting
+    `userns_mode: "keep-id:uid=1000,gid=1000"` (host uid 104177 ≠ the image's
+    `node`/1000, so plain `keep-id` leaves `~/.claude` unreadable in the
+    container) and `security_opt: label=disable` (SELinux Enforcing denies the
+    unlabeled bind mount even where DAC allows; a per-container exemption
+    beats `:z`-relabeling the user's real `~/.claude`).
+  - `~/.local/share/chd/claude-dir-shim/` — one symlink literally named
+    `.claude}` pointing at `~/.claude`. Works around podman-compose 1.5.0
+    mis-parsing the volume `${CLAUDE_DIR:-${HOME}/.claude}` into
+    `<CLAUDE_DIR value>/.claude}` (issue #3580; unset CLAUDE_DIR hard-errors
+    instead). With `CLAUDE_DIR=~/.local/share/chd/claude-dir-shim` the mangled
+    path resolves through the symlink to the real `~/.claude`. Without it the
+    container mounts a nonexistent path and serves an **empty-but-healthy**
+    dashboard.
+- **Registry access:** the GHCR package is private; pulls require a
+  `read:packages`-scoped token (granted 2026-08-03 via user-run
+  `gh auth refresh -h github.com -s read:packages`; credential lives in the
+  `gh` keyring). Login: `gh auth token | podman login ghcr.io -u shpwrck
+  --password-stdin`. Under-scoped tokens fail MISLEADINGLY — `manifest
+  unknown` on digest pulls, `denied` on tag pulls — which looks like a dead
+  pin, not a scope problem (#3581, retraction in #3579).
+- **Live data:** host `~/.claude` bind-mounted read-only at
+  `/home/node/.claude` (via the shim), `~/.claude.json` read-only,
+  `~/.claude/.cache/chd` read-write as the adoption store. The SQLite ingest
+  cache is the named volume `claude-history-dashboard_cache` — **regenerable
+  by design**; after any uid-mapping change delete it, or the server
+  crash-loops on `unable to open database file`.
+- **Adoption-spool coordination state (#3529):** the server's receipt drain
+  and the recs SessionStart hook coordinate through a transient lock
   `~/.claude/.cache/chd/adoption-spool.jsonl.rotation-lock` (protocol v1,
-  contract in `docs/recs-adoption-receipts.md`). Seeing it appear/disappear is
-  normal; a file older than ~10 s is stale and is reclaimed automatically.
-- **Bind posture (env-controlled):** `BIND_HOST` selects the host interface
-  (`127.0.0.1` loopback default, `0.0.0.0` for LAN). The #2064 guard in
-  `scripts/server.mjs` refuses to start on an unauthenticated beyond-loopback
-  bind, and since #3295 there is **no override** — a LAN bind must configure auth
-  (see Credentials/access). Canonical posture is **loopback**; the instance is on
-  loopback as of this writing.
-- **Credentials/access:** the loopback run needs **no secrets** — reach it at
-  `http://127.0.0.1:5173`. LAN exposure REQUIRES HTTP Basic auth via
-  `DASHBOARD_USER`/`DASHBOARD_PASS` (locations: shell env / `~/.bashrc`) plus TLS
-  terminated at a trusted reverse proxy, so the documented LAN URL is `https://…`;
-  without the credentials the server fails closed at boot. Never copy any of these
-  values into this file. The `chdref` alias definition lives in `~/.bashrc`.
+  contract in `docs/recs-adoption-receipts.md`). Appearing/disappearing is
+  normal; >~10 s old is stale and auto-reclaimed.
+- **Bind posture:** loopback (`127.0.0.1:5173`), no secrets needed. The #2064
+  guard refuses an unauthenticated beyond-loopback bind and since #3295 there
+  is **no insecure override**; LAN exposure requires `DASHBOARD_USER`/
+  `DASHBOARD_PASS` (locations: shell env; not set on this box) behind a
+  TLS-terminating proxy. No `BIND_HOST` exports exist in `~/.bashrc` here; the
+  old box's LAN posture was not migrated.
+- **Port conflict to know about:** the Claude Code plugin's node server
+  (`~/.claude/plugins/marketplaces/claude-history-dashboard/scripts/plugin-ctl.mjs
+  start`, also reachable via the `/claude-history-dashboard:dashboard` slash
+  command) serves the same port 5173 from the plugin's static `dist`. Stop it
+  (`… plugin-ctl.mjs stop`) before `compose up`; prefer the container as the
+  standing instance.
 
 ### Template map
 
-- docker-compose.yml + docker-compose.local.yml (deploy checkout) -> running container `chd-deploy-master_app_1` (compose project `chd-deploy-master`)
-- scripts/deploy.sh via `npm run deploy` (deploy checkout at origin/master) -> locally-built `localhost/claude-history-dashboard:local` image + recreated container (includes the host-side repo-map artifact refresh)
-- docker-compose.yml's reviewed `ghcr.io/shpwrck/claude-history-dashboard:latest@sha256:...` default -> the immutable published artifact any pull-path or CHD_APP_IMAGE-less recreate selects
-- .github/workflows/docker-publish.yml's `:latest` / `:sha-<short>` outputs -> discovery candidates whose resolved digest must land through a reviewed pin update before pull-path deployment
-- ~/.bashrc `chdref` alias + `BIND_HOST` (+ `DASHBOARD_USER`/`DASHBOARD_PASS` for a LAN bind) exports -> the refresh command and the container's bind posture
+- docker-compose.yml + docker-compose.local.yml (checkout) + ~/.local/share/chd/compose.box-override.yml -> running container `claude-history-dashboard_app_1` (compose project `claude-history-dashboard`)
+- ~/.local/share/chd/claude-dir-shim/.claude} symlink + CLAUDE_DIR env in the re-run command -> the container's /home/node/.claude mount resolving to the real ~/.claude
+- CHD_APP_IMAGE env (explicit `ghcr.io/…@sha256:<digest>` of the verified published build, or `localhost/claude-history-dashboard:local` after `npm run deploy`) -> the image the container actually runs, ahead of the committed pin
+- docker-compose.yml's reviewed `ghcr.io/…:latest@sha256:…` default -> the artifact any CHD_APP_IMAGE-less recreate silently rolls back to
+- .github/workflows/docker-publish.yml `:latest` / `:sha-<short>` outputs -> discovery candidates; land a reviewed pin update before making the pull path CHD_APP_IMAGE-less
 - host ~/.claude -> bind-mounted into the container as the live data source
 
 ### Re-run
 
-**Local-build path (what put the current state live — post-merge deploy per
-AGENTS.md):**
+**Published-image path (what put the current state live, 2026-08-03):**
 
 ```bash
-( cd ~/project/chd-deploy-master \
-  && git pull --ff-only origin master \
-  && npm run deploy )
+cd ~/workdir/claude-history-dashboard \
+  && git -C ~/workdir/claude-history-dashboard fetch origin \
+  && git -C ~/workdir/claude-history-dashboard merge --ff-only origin/master \
+  && gh auth token | podman login ghcr.io -u shpwrck --password-stdin \
+  && podman pull ghcr.io/shpwrck/claude-history-dashboard:latest \
+  && DIGEST=$(podman image inspect ghcr.io/shpwrck/claude-history-dashboard:latest --format '{{.Digest}}') \
+  && CLAUDE_DIR=$HOME/.local/share/chd/claude-dir-shim \
+     CHD_APP_IMAGE=ghcr.io/shpwrck/claude-history-dashboard@$DIGEST \
+     podman-compose -f docker-compose.yml -f docker-compose.local.yml \
+       -f ~/.local/share/chd/compose.box-override.yml up -d --force-recreate
 ```
 
-`scripts/deploy.sh` already force-recreates; do **NOT** chase it with a bare
-`up -d --force-recreate` — without `CHD_APP_IMAGE` that rolls the container back
-to the digest pin (this exact mistake happened and was recovered on 2026-07-31).
-If a manual recreate is genuinely needed after a local build:
-
-```bash
-( cd ~/project/chd-deploy-master \
-  && CHD_APP_IMAGE=localhost/claude-history-dashboard:local \
-     podman compose -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate )
-```
-
-**Published-image pull path (user-run `chdref`, carries the LAN authorization):**
-
-```bash
-( CHD_HOST_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)" \
-  && test -n "$CHD_HOST_HOME" \
-  && cd ~/project/claude-history-dashboard \
-  && HOME="$CHD_HOST_HOME" podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml pull \
-  && HOME="$CHD_HOST_HOME" podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate )
-```
-
-This tracks the reviewed digest committed in the checkout — it deliberately does
-**not** follow later `:latest` retags, and while the local build is ahead of the
-pin it is a ROLLBACK. To advance it, wait for `docker-publish.yml`, verify the
-candidate image's revision label and registry digest, land the pin update, then
-refresh. Prereq for LAN: `BIND_HOST=0.0.0.0` **and** `DASHBOARD_USER`/
-`DASHBOARD_PASS` set (exported from `~/.bashrc`), fronted by the TLS reverse
-proxy in `docker-compose.tls.yml`; loopback needs none of these.
-
-**Agent-safe loopback recreate** (no guard-disarming flag — see Decisions):
-
-```bash
-CHD_HOST_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)" && \
-test -n "$CHD_HOST_HOME" && cd ~/project/chd-deploy-master && \
-HOME="$CHD_HOST_HOME" BIND_HOST=127.0.0.1 CHD_APP_IMAGE=localhost/claude-history-dashboard:local \
-podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate
-```
+**Local-build path (post-merge deploys / verifying local changes):** run
+`npm ci` then `scripts/deploy.sh` from the checkout with
+`CLAUDE_DIR=$HOME/.local/share/chd/claude-dir-shim
+CHD_APP_IMAGE=localhost/claude-history-dashboard:local` — **then ALWAYS chase
+it** with the same three-file `up -d --force-recreate` above (keeping
+`CHD_APP_IMAGE=localhost/claude-history-dashboard:local`): `deploy.sh` only
+knows the two repo compose files, so its own recreate lacks the box override
+and comes up unable to read `~/.claude`. (This inverts the old box's "do not
+chase deploy.sh" rule — here the chase IS the fix, because it must re-apply
+the override. Keep `CHD_APP_IMAGE` set in both steps or the chase rolls back
+to the pin.)
 
 ### Verify and recover
 
-- **Health:** `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5173/api/dashboard-status` → `200`;
-  `/api/recommendations.json` should return substantial JSON (~200 KB).
-- **Confirm WHICH image is live (the load-bearing check after any recreate):**
-  `podman inspect chd-deploy-master_app_1 --format '{{.ImageName}}'` — after a
-  local-build deploy it must print `localhost/claude-history-dashboard:local`;
-  if it prints the `ghcr.io/…@sha256:…` digest instead, the recreate fell back
-  to the pin (stale). Cross-check freshness with
-  `podman image inspect localhost/claude-history-dashboard:local --format '{{.Created}}'`.
-- **Rolled back to the pin by accident:** re-run the `CHD_APP_IMAGE=localhost/…:local`
-  recreate under Re-run; verify `ImageName` again.
-- **Crash-loop `Refusing to start … reachable UNAUTHENTICATED`:** bound `0.0.0.0`
-  with no `DASHBOARD_USER`/`DASHBOARD_PASS` — the #2064 guard is fail-closed with
-  no override (#3295). Recreate on loopback (agent-safe command above) or set the
-  credentials behind TLS and re-run `chdref`. Logs:
-  `podman logs --tail 25 chd-deploy-master_app_1`.
-- **`Address already in use` on 5173:** compose ran under the wrong project name
-  and spun a second stack. Always pass `-p chd-deploy-master` (note:
-  `npm run deploy` from the `chd-deploy-master` checkout derives that project
-  name from the directory automatically).
-- **Rollback to a known-good published build:** resolve a `:sha-<short>`
-  candidate to its reviewed digest, set
-  `CHD_APP_IMAGE=ghcr.io/shpwrck/claude-history-dashboard@sha256:<digest>` for
-  `pull` + `up -d --force-recreate`, and verify the baked `GIT_SHA`
-  (`podman inspect … | grep '^GIT_SHA='`).
-- **Drain health after deploys touching the spool path:**
-  `podman logs chd-deploy-master_app_1 | grep -i 'adoption\|spool'` should show
-  nothing (silent success); a lingering
-  `~/.claude/.cache/chd/adoption-spool.jsonl.rotation-lock` older than ~10 s is
-  stale and will be reclaimed by the next drain or hook. A sibling
-  `.rotation-lock.reclaim-<dev>-<ino>` should exist only during that removal;
-  if it persists, acquisition fails closed pending the orphan-recovery work in
-  #3557 rather than risking deletion of a fresh lock.
+- **Health:** `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5173/healthz`
+  → `200`. Do NOT use `/api/dashboard-status` — that route no longer exists
+  and falls through to the SPA HTML with a 200, so it false-passes.
+- **Confirm real data is being read (the load-bearing check):**
+  `curl -s http://127.0.0.1:5173/api/dataset.json | python3 -c "import json,sys; print(len(json.load(sys.stdin)['entries']))"`
+  must be **> 0** (1905 on 2026-08-03). This deployment's signature failure
+  mode is *empty-but-healthy* — healthz 200, SPA loads, zero sessions — caused
+  by a missing shim, a recreate without the box override, or (pre-migration)
+  a nested `${HOME}` bind path.
+- **Confirm WHICH image is live:** `podman inspect claude-history-dashboard_app_1
+  --format '{{.ImageName}}'` must print the explicit `CHD_APP_IMAGE` value
+  (currently the `…@sha256:e4b7e3b7…` digest); the committed-pin digest
+  instead means an accidental rollback — re-run with `CHD_APP_IMAGE` set.
+  Cross-check the baked commit:
+  `podman inspect claude-history-dashboard_app_1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^GIT_SHA='`.
+- **Crash-loop `unable to open database file`:** stale ingest-cache volume
+  from a previous uid mapping. `podman rm -f claude-history-dashboard_app_1 &&
+  podman volume rm claude-history-dashboard_cache`, then re-run. The volume is
+  regenerable; adoption receipts live on the host bind mount, not in it.
+- **`Permission denied` on /home/node/.claude inside the container:** the
+  recreate ran without the box override — re-run with all three `-f` files.
+- **Mount source ends in `.claude}`:** expected (the shim). Verify
+  `readlink ~/.local/share/chd/claude-dir-shim/.claude}` →
+  `/home/jskrzype/.claude`.
+- **`manifest unknown` / `denied` from ghcr.io:** almost certainly token
+  scope, not a dead pin — re-run the login above; the user grants
+  `read:packages` via `gh auth refresh` if missing (#3581).
+- **`Address already in use` on 5173:** either the plugin-ctl node server is
+  running (`… plugin-ctl.mjs stop`) or a second compose stack was created
+  under a different `-p` name (`podman ps -a`, remove the stray stack).
+- **Rollback:** resolve a `:sha-<short>` tag to its digest, set it as
+  `CHD_APP_IMAGE`, and re-run; or re-tag a previous local image ID.
 
 ## Decision log
 
 ### Decisions
 
-- **2026-07-31: local build deployed AHEAD of the digest pin.** The four merges
-  #3527 (CopyButton flake), #3528 (render-churn verified-port refusal), #3529
-  (adoption-spool rotation lock, drain half), #3532 (gate discrimination
-  ratchet) were deployed via `npm run deploy` per the AGENTS.md post-merge
-  contract; the compose pin still references the July-27 published image. The
-  instance intentionally runs the newer local build; converge by landing a
-  reviewed pin update for a post-`219177a0` published digest, after which the
-  pull path is canonical again.
-- **Do not chase `deploy.sh` with a bare force-recreate.** deploy.sh
-  force-recreates internally; a follow-up `up -d --force-recreate` without
-  `CHD_APP_IMAGE` re-resolves the service to the compose digest pin and rolls
-  the deploy back (observed and recovered 2026-07-31; also recorded in project
-  memory `deploy-build-needs-force-recreate`).
-- **Cross-process spool rotation lock is live on both sides (protocol v1).**
-  Server drain (#3529) and the `~/.agents` recs hook (agent-skills#25) now
-  coordinate rotation/append through the sibling lock file; constants are a
-  cross-repo contract documented in `docs/recs-adoption-receipts.md` — never
-  change one side alone. Read-side residual tracked as agent-skills#26.
-- **Digest-pinned published-image pull path remains the steady-state.** The
-  standing instance normally runs the reviewed CI artifact committed in
-  Compose; refresh is a fast pull + recreate without trusting later tag
-  movement. `npm run deploy`/`--build` covers post-merge deploys and verifying
-  local changes, and creates the ahead-of-pin condition above until the pin
-  advances.
-- **`HOME="$CHD_HOST_HOME"` is load-bearing** — derive `CHD_HOST_HOME` from the
-  login account as shown above; omitting it nests the `~/.claude` bind mount and
-  the dashboard reads 0 sessions (looks like missing data, not an error).
-- **`-p chd-deploy-master` is load-bearing on manual compose calls** — the
-  default project name derived from a different checkout directory spins a
-  second stack that collides on port 5173 instead of recreating this one.
-- **LAN exposure requires auth; the insecure override is removed (#3295).** A
-  beyond-loopback bind MUST set `DASHBOARD_USER`/`DASHBOARD_PASS` behind a
-  TLS-terminating reverse proxy; the #2064 guard fails the boot closed
-  otherwise. The former `DASHBOARD_ALLOW_INSECURE_BIND=1` mode is prohibited
-  legacy and inert.
-- **The agent-safe posture is loopback.** Restoring LAN reachability is the
-  user's `chdref` call with credentials configured; an agent binding `0.0.0.0`
-  inline is denied by the auto-mode safety classifier, and an unauthenticated
-  LAN bind cannot start regardless.
+- **2026-08-03: box migration fixed with box-local artifacts, not repo
+  edits.** Three independent breakages left the migrated container
+  empty-but-healthy or unrunnable: (1) podman-compose 1.5.0 mangles the
+  `${CLAUDE_DIR:-${HOME}/.claude}` volume (#3580) → the `claude-dir-shim`
+  symlink; (2) host uid 104177 breaks plain `keep-id` → `keep-id:uid=1000`;
+  (3) SELinux Enforcing denies the unlabeled mount → `label=disable`, chosen
+  over `:z` because relabeling the real `~/.claude` drifts as host processes
+  create new files. All three live under `~/.local/share/chd/`; the repo
+  compose files stay clean and the upstream bugs are filed (#3580).
+- **2026-08-03: published-pull path restored; runs `:latest` by explicit
+  digest, ahead of the pin.** The pull path was blocked by a missing
+  `read:packages` scope whose GHCR errors masqueraded as a dead digest pin —
+  #3579 filed on that misdiagnosis and closed with a retraction; the docs
+  footgun is #3581. With the scope granted the instance runs the verified
+  published build for master HEAD via `CHD_APP_IMAGE`, keeping the committed
+  pin as the reviewed rollback target until a pin update lands.
+- **Cache volume is disposable.** `claude-history-dashboard_cache` holds only
+  the regenerable SQLite ingest cache; deleting it is the sanctioned fix for
+  uid-mapping changes (crash-loop `unable to open database file`, hit and
+  fixed 2026-08-03).
+- **Cross-process spool rotation lock is live on both sides (protocol v1,
+  #3529).** Server drain and the `~/.agents` recs hook coordinate through the
+  sibling lock file; constants are a cross-repo contract in
+  `docs/recs-adoption-receipts.md` — never change one side alone.
+- **LAN exposure requires auth; the insecure override is removed (#3295).**
+  A beyond-loopback bind MUST set `DASHBOARD_USER`/`DASHBOARD_PASS` behind
+  TLS; the guard fails closed otherwise. The agent-safe posture is loopback;
+  restoring LAN reachability is the user's call with credentials configured.
+- **Historical (old box, superseded):** dedicated `~/project/chd-deploy-master`
+  checkout, `-p chd-deploy-master` project pinning, `chdref` alias,
+  `CHD_HOST_HOME` HOME-derivation, and the 2026-07-31 "do not chase deploy.sh"
+  rule — all replaced by the current box's checkout/default-project/box-override
+  discipline above. The HOME nesting hazard is moot here only because the
+  shim supplies an absolute `CLAUDE_DIR`.
 
 ### How to drive it
 
-Routine refresh after dashboard code lands on master — two modes:
-
-1. **Immediate (local build, what agents do post-merge):** fast-forward
-   `~/project/chd-deploy-master`, run `npm run deploy`, then ALWAYS verify
-   `podman inspect … --format '{{.ImageName}}'` prints
-   `localhost/claude-history-dashboard:local` and `/api/dashboard-status`
-   returns 200. Do not add a manual force-recreate afterward.
-2. **Converge to the reviewed pin (user-driven):** wait for
-   `docker-publish.yml` to publish the merge commit
-   (`gh run list --workflow=docker-publish.yml --branch master`), verify the
-   candidate's revision label + registry digest, land the digest in the Compose
-   pin, then run `chdref` (pull + recreate) and confirm the baked `GIT_SHA`
-   matches the pin's commit.
-
-While mode 1's build is ahead of the pin, treat any pull-path refresh as a
-rollback. To change exposure posture, edit the `~/.bashrc` exports (including
-`DASHBOARD_USER`/`DASHBOARD_PASS` for LAN) and re-run `chdref` once — never
-hand-edit the container. Record notable deploy events by updating this file in
-a docs PR, not by leaving them in session transcripts.
+Routine refresh after dashboard code lands on master: (1) wait for
+`docker-publish.yml` on the merge commit
+(`gh -R shpwrck/claude-history-dashboard run list --workflow=docker-publish.yml --branch master`);
+(2) run the published-image Re-run block above (fast-forward, login, pull,
+three-file recreate with the pulled digest as `CHD_APP_IMAGE`); (3) verify
+`/healthz` 200, `entries > 0`, and `GIT_SHA` == the merge commit; (4) walk
+Verify and recover on any miss — the causes are enumerated there. Converge to
+the committed pin only through a reviewed pin-update PR, after which a
+CHD_APP_IMAGE-less recreate is safe again. Record notable deploy events by
+updating this file in a docs PR, not by leaving them in session transcripts.
