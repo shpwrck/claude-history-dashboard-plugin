@@ -264,8 +264,53 @@ const INJECT = `
   } catch(e) {}
 `;
 
-async function measureViewIsolated(hash, runs = 3) {
+/** Refuse to publish a measurement under the wrong route or sample window. */
+export function assertViewIdentity(view, observed) {
+  if (observed.heading !== view.expectedHeading) {
+    throw new Error(
+      `${view.name}: expected h1 ${JSON.stringify(view.expectedHeading)}, ` +
+        `observed ${JSON.stringify(observed.heading)}`
+    );
+  }
+  if (
+    view.expectedSessionCount !== undefined &&
+    observed.sessionCount !== view.expectedSessionCount
+  ) {
+    throw new Error(
+      `${view.name}: expected ${view.expectedSessionCount} sessions, ` +
+        `observed ${JSON.stringify(observed.sessionCount)}`
+    );
+  }
+}
+
+/** Run teardown on every path without replacing the failure that triggered it. */
+export async function runWithCleanup(run, cleanup) {
+  let primaryFailed = false;
+  try {
+    return await run();
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
+  } finally {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      if (!primaryFailed) throw cleanupError;
+    }
+  }
+}
+
+/** Terminate and reap a preview started by this harness. */
+export async function stopPreview(proc) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  const closed = new Promise((resolve) => proc.once('close', resolve));
+  proc.kill();
+  await closed;
+}
+
+async function measureViewIsolated(view, runs = 3) {
   const browser = await chromium.launch({ headless: true });
+  return runWithCleanup(async () => {
   const allRuns = [];
   for (let run = 0; run < runs; run++) {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
@@ -273,11 +318,21 @@ async function measureViewIsolated(hash, runs = 3) {
     await page.addInitScript(INJECT);
 
     const t0 = performance.now();
-    await page.goto(`http://127.0.0.1:${PORT}/${hash}`, { waitUntil: 'networkidle', timeout: 15000 });
+    await page.goto(`http://127.0.0.1:${PORT}/${view.hash}`, { waitUntil: 'networkidle', timeout: 15000 });
     const navDoneMs = performance.now() - t0;
 
     // Wait for charts to render + ResizeObserver callbacks to fire
     await page.waitForTimeout(1500);
+
+    const observed = await page.evaluate(() => {
+      const heading = document.querySelector('h1')?.textContent?.trim() ?? null;
+      const sessionMatch = document.body.textContent?.match(/(\d+) sessions ·/);
+      return {
+        heading,
+        sessionCount: sessionMatch ? Number(sessionMatch[1]) : null,
+      };
+    });
+    assertViewIdentity(view, observed);
 
     const loadMetrics = await page.evaluate(() => {
       const lt = window.__m.lt.map(e => ({ dur: e.dur }));
@@ -301,6 +356,32 @@ async function measureViewIsolated(hash, runs = 3) {
       return { lt, cls };
     });
 
+    let firstExpandMetrics = null;
+    if (view.expandControl) {
+      await page.evaluate(() => {
+        window.__m.lt = [];
+        window.__m.cls = [];
+      });
+      const expandStarted = performance.now();
+      await page.getByRole('button', { name: view.expandControl, exact: true }).click();
+      await page.getByText('Worst Cache Hit Rates (Top 15)', { exact: true }).waitFor();
+      const firstVisibleMs = performance.now() - expandStarted;
+      // Let deferred layout/observer work settle after separately recording the
+      // user-visible disclosure latency above.
+      await page.waitForTimeout(300);
+      firstExpandMetrics = await page.evaluate(() => {
+        const lt = window.__m.lt.map(e => ({ dur: e.dur }));
+        const cls = window.__m.cls.reduce((s, v) => s + v, 0);
+        const content = document.querySelector('.pf-v6-c-expandable-section__content');
+        return {
+          lt,
+          cls,
+          detailNodeCount: content?.querySelectorAll('*').length ?? 0,
+        };
+      });
+      firstExpandMetrics.firstVisibleMs = firstVisibleMs;
+    }
+
     allRuns.push({
       navDoneMs,
       loadLTCount: loadMetrics.lt.length,
@@ -311,11 +392,19 @@ async function measureViewIsolated(hash, runs = 3) {
       resizeLTTotalMs: resizeMetrics.lt.reduce((s, e) => s + e.dur, 0),
       resizeLTDurs: resizeMetrics.lt.map(e => e.dur.toFixed(0)),
       resizeCLS: resizeMetrics.cls,
+      ...(firstExpandMetrics
+        ? {
+            firstExpandVisibleMs: firstExpandMetrics.firstVisibleMs,
+            firstExpandLTCount: firstExpandMetrics.lt.length,
+            firstExpandLTTotalMs: firstExpandMetrics.lt.reduce((s, e) => s + e.dur, 0),
+            firstExpandLTDurs: firstExpandMetrics.lt.map(e => e.dur.toFixed(0)),
+            firstExpandCLS: firstExpandMetrics.cls,
+            detailNodeCount: firstExpandMetrics.detailNodeCount,
+          }
+        : {}),
     });
     await ctx.close();
   }
-  await browser.close();
-
   // Compute medians
   function median(arr) {
     const s = arr.slice().sort((a, b) => a - b);
@@ -328,22 +417,53 @@ async function measureViewIsolated(hash, runs = 3) {
       resizeLTTotalMs: median(allRuns.map(r => r.resizeLTTotalMs)),
       resizeLTCount: median(allRuns.map(r => r.resizeLTCount)),
       navDoneMs: median(allRuns.map(r => r.navDoneMs)),
+      ...(view.expandControl
+        ? {
+            firstExpandVisibleMs: median(allRuns.map(r => r.firstExpandVisibleMs)),
+            firstExpandLTTotalMs: median(allRuns.map(r => r.firstExpandLTTotalMs)),
+            firstExpandLTCount: median(allRuns.map(r => r.firstExpandLTCount)),
+            detailNodeCount: median(allRuns.map(r => r.detailNodeCount)),
+          }
+        : {}),
     },
     runs: allRuns,
   };
+  }, () => browser.close());
 }
 
-// The highest-priority views: those with multiple useContainerWidth calls
-// or large table renders
-const VIEWS_TO_MEASURE = [
-  { name: 'Tokens (3x useContainerWidth, chart-heavy)',       hash: '#/tokens' },
-  { name: 'Tool Usage (2x useContainerWidth)',                hash: '#/tool-usage' },
-  { name: 'Context Health (2x useContainerWidth + large)',    hash: '#/context-health' },
-  { name: 'Sessions (large table, no charts)',                hash: '#/sessions' },
-  { name: 'Patterns (1x useContainerWidth + histograms)',     hash: '#/conversation' },
-  { name: 'Agents (1x useContainerWidth)',                    hash: '#/agents' },
-  { name: 'Errors (1x useContainerWidth)',                    hash: '#/errors' },
-  { name: 'File Impact (2x useContainerWidth)',               hash: '#/file-impact' },
+export const VIEWS_TO_MEASURE = [
+  { name: 'Token Usage', hash: '#/tokens', expectedHeading: 'Token Usage' },
+  { name: 'Tool Usage', hash: '#/tools', expectedHeading: 'Tool Usage' },
+  {
+    name: 'Context Health',
+    hash: '#/context?time=all',
+    expectedHeading: 'Context Health',
+    expectedSessionCount: 18,
+    expandControl: 'Session detail',
+    resizeBudgetMs: 100,
+  },
+  {
+    name: 'Sessions',
+    hash: '#/sessions?time=all',
+    expectedHeading: 'Sessions',
+    expectedSessionCount: 18,
+  },
+  {
+    name: 'Turn Patterns',
+    hash: '#/conversation',
+    expectedHeading: 'Turn Patterns',
+  },
+  {
+    name: 'Agent & Skill Usage',
+    hash: '#/agents',
+    expectedHeading: 'Agent & Skill Usage',
+  },
+  {
+    name: 'Error & Retry Analysis',
+    hash: '#/errors',
+    expectedHeading: 'Error & Retry Analysis',
+  },
+  { name: 'File Impact', hash: '#/files', expectedHeading: 'File Impact' },
 ];
 
 async function main() {
@@ -361,6 +481,7 @@ async function main() {
   }
   const { proc, provenance } = started;
 
+  return runWithCleanup(async () => {
   console.log('# Isolated render-churn measurements (issue #666)');
   console.log(`# Verified build:  ${provenance.build}`);
   console.log(`# Verified corpus: ${provenance.corpus.id}`);
@@ -370,9 +491,14 @@ async function main() {
   const summary = [];
   for (const v of VIEWS_TO_MEASURE) {
     process.stdout.write(`Measuring: ${v.name}...\n`);
-    const r = await measureViewIsolated(v.hash, 3);
+    const r = await measureViewIsolated(v, 3);
     summary.push({ ...v, ...r.median });
     console.log(`  runs: ${r.runs.map(run => `load=${run.loadLTTotalMs.toFixed(0)}ms(${run.loadLTCount}lt) resize=${run.resizeLTTotalMs.toFixed(0)}ms(${run.resizeLTCount}lt)`).join(' | ')}`);
+    if (v.expandControl) {
+      console.log(
+        `  first expand: ${r.runs.map(run => `visible=${run.firstExpandVisibleMs.toFixed(0)}ms longtasks=${run.firstExpandLTTotalMs.toFixed(0)}ms(${run.firstExpandLTCount}lt) nodes=${run.detailNodeCount}`).join(' | ')}`
+      );
+    }
     console.log(`  MEDIAN: load=${r.median.loadLTTotalMs.toFixed(0)}ms(${r.median.loadLTCount}lt) resize=${r.median.resizeLTTotalMs.toFixed(0)}ms(${r.median.resizeLTCount}lt) nav=${r.median.navDoneMs.toFixed(0)}ms\n`);
   }
 
@@ -381,9 +507,26 @@ async function main() {
   console.log('-----------------------------------------------|---------|---------------|---------------|-----------------|----------------');
   for (const r of summary) {
     console.log(`${r.name.padEnd(46)} | ${String(r.navDoneMs.toFixed(0)).padStart(7)} | ${String(r.loadLTTotalMs.toFixed(0)).padStart(13)} | ${String(r.loadLTCount).padStart(13)} | ${String(r.resizeLTTotalMs.toFixed(0)).padStart(15)} | ${r.resizeLTCount}`);
+    if (r.firstExpandVisibleMs !== undefined) {
+      console.log(
+        `  first expand: visible=${r.firstExpandVisibleMs.toFixed(0)}ms ` +
+          `longtasks=${r.firstExpandLTTotalMs.toFixed(0)}ms(${r.firstExpandLTCount}lt) ` +
+          `nodes=${r.detailNodeCount}`
+      );
+    }
   }
 
-  if (proc) { proc.kill(); await new Promise(r => proc.on('close', r)); }
+  for (const r of summary) {
+    if (r.resizeBudgetMs !== undefined && r.resizeLTTotalMs > r.resizeBudgetMs) {
+      process.stderr.write(
+        `${r.name}: resize long-task median ${r.resizeLTTotalMs.toFixed(0)}ms ` +
+          `exceeds ${r.resizeBudgetMs}ms budget\n`
+      );
+      process.exitCode = 1;
+    }
+  }
+
+  }, () => stopPreview(proc));
 }
 
 const invokedDirectly =

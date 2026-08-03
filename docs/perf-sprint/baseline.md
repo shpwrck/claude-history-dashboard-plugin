@@ -1,12 +1,39 @@
 # Perf sprint — baseline (cycle 1)
 
-Measured against the running container (`ghcr.io/shpwrck/claude-history-dashboard:latest`, podman, port 5173) with the live `~/.claude` mounted RO.
+> **Status: historical measurement, not a current host baseline.** This cycle
+> was measured on 2026-05-29 at `965e472e` against the running container
+> (`ghcr.io/shpwrck/claude-history-dashboard:latest`, podman, port 5173) with
+> that day's live `~/.claude` mounted read-only. The timings and conclusions
+> below describe only that recorded corpus scale. They must not be treated as
+> current without a new full benchmark run.
 
-Data shape:
+Measurement basis (2026-05-29):
+
 - 40 project directories under `~/.claude/projects`
-- 213 `.jsonl` files total (sessions + subagents), 82MB on disk
+- 213 `.jsonl` files total (sessions + subagents), recorded as 82 MB on disk
 - Largest single session file: 25.5 MB
 - Server reports `total=100` sessions in the SQLite ingest cache
+
+Freshness check only (2026-08-03; **not** a timing re-measurement): the same
+host now has 1,530 `.jsonl` files totaling 531,724,012 bytes (531.7 MB decimal;
+507.1 MiB), or 7.2x the files and approximately 6.5x when the historical 82 MB
+record is interpreted as decimal units. This does not recertify the timing or
+current session count; it records that the original measurement corpus has
+drifted.
+
+Count and apparent bytes come from one exact file set; a second command
+independently reproduced the byte total:
+
+```sh
+find ~/.claude/projects -type f -name '*.jsonl' -printf '%s\n' |
+  awk '{ files += 1; bytes += $1 } END { printf "%d %d\n", files, bytes }'
+find ~/.claude/projects -type f -name '*.jsonl' -print0 |
+  du --files0-from=- -cb | tail -1
+```
+
+These returned `1530 531724012` and `531724012 total`, respectively. An earlier
+draft's 210,148,980-byte value is superseded: it came from an independent byte
+probe that was not bound to the counted file set and could not be reproduced.
 
 ## Browser baseline (Playwright)
 

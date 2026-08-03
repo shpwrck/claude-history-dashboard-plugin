@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
+import { cleanup, renderHook } from '@testing-library/react';
 import {
+  ALL_PROJECTS,
   DEFAULT_DASHBOARD_FILTER,
   navigateWithFilter,
   parseDashboardFilter,
@@ -8,6 +10,7 @@ import {
   presetToRange,
   routeToHash,
   scrollToSignalAnchor,
+  useHashRoute,
 } from './routing';
 
 describe('parseRoute', () => {
@@ -109,6 +112,16 @@ describe('parseRoute', () => {
       viewFilter: { project: '/repo/alpha' },
       filter: { time: '7d', project: '/repo/alpha' },
     });
+  });
+
+  it('uses a variant time default only when the URL does not name one', () => {
+    expect(parseRoute('#/sessions', { defaultTime: 'all' }).filter.time).toBe(
+      'all'
+    );
+    expect(
+      parseRoute('#/sessions?time=7d', { defaultTime: 'all' }).filter.time
+    ).toBe('7d');
+    expect(parseRoute('#/sessions').filter.time).toBe('24h');
   });
 
   it('parses per-view evidence filters alongside dashboard filters', () => {
@@ -248,6 +261,31 @@ describe('navigateWithFilter', () => {
     });
     expect(hash).toBe('#/automation?time=7d&project=All+projects&mode=sdk-cli');
     expect(window.location.hash).toBe('#/automation?time=7d&project=All+projects&mode=sdk-cli');
+  });
+});
+
+describe('useHashRoute', () => {
+  it('keeps the configured implicit time when applying a bare hash', () => {
+    window.location.hash = '#/sessions';
+    const onFilterChange = vi.fn();
+
+    const hook = renderHook(() =>
+      useHashRoute({
+        currentView: 'sessions',
+        dashboardFilter: { time: 'all', project: ALL_PROJECTS },
+        viewFilter: {},
+        onNavigate: vi.fn(),
+        onOpenSession: vi.fn(),
+        onFilterChange,
+        onViewFilterChange: vi.fn(),
+        defaultTime: 'all',
+      })
+    );
+
+    expect(onFilterChange).not.toHaveBeenCalled();
+    hook.unmount();
+    cleanup();
+    window.location.hash = '';
   });
 });
 

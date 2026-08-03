@@ -109,11 +109,11 @@ The initial-render longtask cost (median 624 ms) shows the same table-layout
 problem at first paint: the browser pays a large upfront layout cost to size all
 the nested `<Table>` instances and their expandable rows simultaneously.
 
-With a real `~/.claude` directory (100 sessions per the baseline.md dataset vs
-18 in the sample corpus), this cost will scale roughly linearly with row count.
-At 100 sessions the resize-storm cost is expected to approach **~6 s** of
-blocked main-thread time (extrapolated from the 18-session 1108 ms observation),
-making the Sessions table the highest-priority render-churn target.
+At the time, this was treated as a likely row-count scaling problem. The old
+100-session / ~6 s estimate was an unverified extrapolation, not a measurement,
+and is now retired: the host baseline has drifted substantially, and the later
+#714/#3287 windowing work below disproved linear DOM growth by bounding rendered
+rows at 300- and 1,000-session scale.
 
 ---
 
@@ -235,6 +235,48 @@ win, not a performance fix.
 
 ---
 
+### Context Health and sample-window integrity — 2026-08-02 (#3512, #3505)
+
+Measured on the branch based on `ca9659dc` with the corrected isolated harness
+and verified corpus `sample-data.zip 28467 bytes sha256:19f28d16990626ed`.
+The harness now fails closed unless the route renders the expected `h1`; the
+Context Health and Sessions workloads additionally assert the all-time sample
+count of 18 sessions. This replaces the invalid historical
+`#/context-health` route with `#/context?time=all`.
+
+A targeted pre-fix A/B isolated the Context resize cost before changing the
+component:
+
+| Context Health variant | resize-storm runs |
+|------------------------|-------------------|
+| Full detail subtree mounted while collapsed | 716 / 702 ms |
+| KPI strip hidden only | 664 / 712 ms |
+| Collapsed `Session detail` subtree not mounted | 0 / 0 ms |
+
+The collapsed subtree contained 1,265 descendants, four tables, and five
+cards. `ContextHealthPf` now mounts that investigative detail only on first
+expansion. The final three-run measurement was:
+
+| Metric | runs | median | budget |
+|--------|------|--------|--------|
+| Initial-load longtasks (informational) | 296 / 125 / 121 ms | 125 ms | -- |
+| Collapsed resize-storm longtasks | 0 / 0 / 0 ms | 0 ms | <=100 ms — MET |
+| First expansion to visible detail | 244 / 232 / 286 ms | 244 ms | recorded separately |
+| First-expansion longtasks | 115 / 115 / 139 ms | 115 ms (one task) | recorded separately |
+
+All three expansion runs mounted 1,265 detail descendants. This is a deliberate
+transfer of work from every collapsed resize to the user's first disclosure;
+it does not claim that rendering the detail is free.
+
+The sample-window contract was corrected at the same time. The generated sample
+timestamps remain fixed and byte-stable. In sample mode, a bare Sessions route
+now means all time and reports 18 sessions / 33 entries / 18 token sessions;
+an explicit `?time=24h` still wins and reports 5 / 10 / 5. Server and upload
+builds retain the 24-hour implicit default, and every explicit URL time filter
+wins in every build mode.
+
+---
+
 ## How to re-run
 
 ```sh
@@ -258,7 +300,10 @@ Both scripts exit cleanly and kill the preview server they started. Pipe output
 to a file to preserve the JSON results.
 
 `measure-isolated-views.mjs` verifies what it is about to measure and **exits
-nonzero** rather than publishing numbers it cannot attribute: the responder must
-serve this dashboard's shell (matching `index.html`'s `<title>`, not merely some
-built Vite app) and a real `sample-data.zip`. If you see
-`refusing to measure port …`, the message names the build to run.
+nonzero** rather than publishing numbers it cannot attribute: the responder
+must serve this dashboard's shell (matching `index.html`'s `<title>`, not merely
+some built Vite app) and a real `sample-data.zip`. Each route must render its
+expected `h1`; Context Health and Sessions must report the expected 18-session
+all-time sample workload. The Context collapsed resize median must remain at or
+below 100 ms or the harness exits nonzero. If you see `refusing to measure port
+…`, the message names the build to run.

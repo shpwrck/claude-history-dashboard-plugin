@@ -92,6 +92,8 @@ export interface ParsedRoute {
 export interface ParseRouteOptions {
   /** Known project ids. When present, any other project falls back to All projects. */
   validProjects?: readonly string[] | undefined;
+  /** Variant-specific fallback used only when the URL omits a valid time value. */
+  defaultTime?: TimePreset | undefined;
 }
 
 export interface RouteToHashOptions {
@@ -108,9 +110,10 @@ export function isTimePreset(value: string | null | undefined): value is TimePre
 }
 
 export function normalizeTimePreset(
-  value: string | null | undefined
+  value: string | null | undefined,
+  fallback: TimePreset = DEFAULT_TIME_PRESET
 ): TimePreset {
-  return isTimePreset(value) ? value : DEFAULT_TIME_PRESET;
+  return isTimePreset(value) ? value : fallback;
 }
 
 export function normalizeProjectFilter(
@@ -144,7 +147,7 @@ export function parseDashboardFilter(
       ? new URLSearchParams(query.replace(/^\?/, ''))
       : query;
   return {
-    time: normalizeTimePreset(params.get('time')),
+    time: normalizeTimePreset(params.get('time'), options.defaultTime),
     project: normalizeProjectFilter(params.get('project'), options.validProjects),
   };
 }
@@ -219,7 +222,7 @@ export function parseRoute(
   if (!body) {
     return {
       viewFilter: {},
-      filter: normalizeDashboardFilter(null, options.validProjects),
+      filter: parseDashboardFilter('', options),
     };
   }
   const [path, query = ''] = body.split('?');
@@ -337,7 +340,7 @@ export function initialRoute(options: ParseRouteOptions = {}): ParsedRoute {
   if (typeof window === 'undefined') {
     return {
       viewFilter: {},
-      filter: normalizeDashboardFilter(null, options.validProjects),
+      filter: parseDashboardFilter('', options),
     };
   }
   return parseRoute(window.location.hash, options);
@@ -382,6 +385,8 @@ export interface HashRouteHandlers {
   onViewFilterChange: (filter: RouteFilter) => void;
   /** Known project ids for stale-project fallback. */
   validProjects?: readonly string[] | undefined;
+  /** Variant-specific fallback used only by hashes without a valid time value. */
+  defaultTime?: TimePreset | undefined;
 }
 
 /**
@@ -404,6 +409,7 @@ export function useHashRoute({
   onFilterChange,
   onViewFilterChange,
   validProjects,
+  defaultTime,
 }: HashRouteHandlers): void {
   // Latest handlers/state, read inside the stable hashchange listener without
   // re-subscribing. Updated in an effect (never during render).
@@ -416,6 +422,7 @@ export function useHashRoute({
     onFilterChange,
     onViewFilterChange,
     validProjects,
+    defaultTime,
   });
   useEffect(() => {
     ref.current = {
@@ -427,6 +434,7 @@ export function useHashRoute({
       onFilterChange,
       onViewFilterChange,
       validProjects,
+      defaultTime,
     };
   });
 
@@ -435,6 +443,7 @@ export function useHashRoute({
     const apply = () => {
       const { view, session, filter, viewFilter } = parseRoute(window.location.hash, {
         validProjects: ref.current.validProjects,
+        defaultTime: ref.current.defaultTime,
       });
       if (!dashboardFiltersEqual(filter, ref.current.dashboardFilter)) {
         ref.current.onFilterChange(filter);
@@ -458,7 +467,10 @@ export function useHashRoute({
   // Write side: reflect in-app navigation into the hash.
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const currentRoute = parseRoute(window.location.hash, { validProjects });
+    const currentRoute = parseRoute(window.location.hash, {
+      validProjects,
+      defaultTime,
+    });
     const nextHash = routeToHash(currentView, {
       session: currentRoute.view === currentView ? currentRoute.session : undefined,
       filter: dashboardFilter,
@@ -468,5 +480,5 @@ export function useHashRoute({
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
-  }, [currentView, dashboardFilter, viewFilter, validProjects]);
+  }, [currentView, dashboardFilter, viewFilter, validProjects, defaultTime]);
 }

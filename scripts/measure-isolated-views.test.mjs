@@ -35,6 +35,10 @@ import {
   verifyTarget,
   expectedShellTitle,
   CORPUS_BUILD_COMMAND,
+  VIEWS_TO_MEASURE,
+  assertViewIdentity,
+  runWithCleanup,
+  stopPreview,
 } from './measure-isolated-views.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +61,89 @@ const ZIP_BODY = Buffer.concat([
   Buffer.from([0x50, 0x4b, 0x03, 0x04]),
   Buffer.from('rest of an archive'),
 ]);
+
+test('the Context benchmark uses the real route, all-time sample window, and a resize budget', () => {
+  const contextView = VIEWS_TO_MEASURE.find((view) => view.name === 'Context Health');
+  assert.deepEqual(contextView, {
+    name: 'Context Health',
+    hash: '#/context?time=all',
+    expectedHeading: 'Context Health',
+    expectedSessionCount: 18,
+    expandControl: 'Session detail',
+    resizeBudgetMs: 100,
+  });
+});
+
+test('assertViewIdentity accepts the expected route and sample workload', () => {
+  assert.doesNotThrow(() =>
+    assertViewIdentity(
+      {
+        name: 'Context Health',
+        expectedHeading: 'Context Health',
+        expectedSessionCount: 18,
+      },
+      { heading: 'Context Health', sessionCount: 18 }
+    )
+  );
+});
+
+test('assertViewIdentity rejects a route that rendered the wrong h1', () => {
+  assert.throws(
+    () =>
+      assertViewIdentity(
+        { name: 'Context Health', expectedHeading: 'Context Health' },
+        { heading: 'Overview', sessionCount: 18 }
+      ),
+    /expected h1.*Context Health.*Overview/
+  );
+});
+
+test('assertViewIdentity rejects the wrong sample session window', () => {
+  assert.throws(
+    () =>
+      assertViewIdentity(
+        {
+          name: 'Context Health',
+          expectedHeading: 'Context Health',
+          expectedSessionCount: 18,
+        },
+        { heading: 'Context Health', sessionCount: 5 }
+      ),
+    /expected 18 sessions.*observed 5/
+  );
+});
+
+test('runWithCleanup always cleans up and preserves the primary failure', async () => {
+  const primary = new Error('wrong route');
+  const cleanup = new Error('cleanup also failed');
+  let cleaned = false;
+
+  await assert.rejects(
+    () =>
+      runWithCleanup(
+        async () => {
+          throw primary;
+        },
+        async () => {
+          cleaned = true;
+          throw cleanup;
+        }
+      ),
+    (error) => error === primary
+  );
+  assert.equal(cleaned, true);
+});
+
+test('stopPreview terminates and reaps the preview child', async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+  });
+  await new Promise((resolve) => child.once('spawn', resolve));
+
+  await stopPreview(child);
+
+  assert.notEqual(child.signalCode ?? child.exitCode, null);
+});
 
 test("expectedShellTitle: reads this repo's own product marker out of index.html", () => {
   assert.equal(typeof TITLE, 'string');
