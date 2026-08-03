@@ -559,6 +559,19 @@ export interface LiveSettings {
   enabledPlugins?: Record<string, boolean>;
 }
 
+/**
+ * Server-observed evidence for a recursive config-resource removal. The
+ * browser formatter cannot inspect the filesystem, so it requires this
+ * canonical-containment verdict in addition to its own lexical guard.
+ */
+export interface RecursiveRemovalSafety {
+  /** Configured resource root as supplied to the server-side loader. */
+  configuredRoot: string;
+  /** True only when realpath resolved both paths and the target was strictly
+   * inside the root. */
+  canonicalPathContained: boolean;
+}
+
 /** Locally-installed resource the dashboard can enumerate from the filesystem. */
 export interface LiveResource {
   /** Stable, user-facing identifier. For skills/agents/commands this is the
@@ -587,6 +600,8 @@ export interface LiveResource {
    * `maintenance.skill-hook-integrity`.
    */
   danglingRefs?: string[];
+  /** Present for directory-backed resources whose removal would be recursive. */
+  removalSafety?: RecursiveRemovalSafety;
 }
 
 /** A plugin's bundled artifacts so phase 2 can roll up "any used" to "plugin
@@ -600,6 +615,9 @@ export interface LivePlugin {
   /** Registry/config file that owns this plugin install entry. */
   sourcePath?: string;
   installPath: string;
+  /** Server-side canonical containment of installPath under the configured
+   * plugins root. */
+  removalSafety?: RecursiveRemovalSafety;
   installedAt: string;
   /** Identifiers of bundled skills/commands/agents discovered in the plugin's
    *  install dir; phase 2 attribution maps these to "plugin used". Empty when

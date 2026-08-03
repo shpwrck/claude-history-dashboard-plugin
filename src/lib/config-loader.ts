@@ -11,17 +11,28 @@ import { readTextFileCappedSync as cappedRead } from './capped-read';
 import {
   existsSync,
   lstatSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, parse, resolve, sep } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import {
   validateSettingsJson,
   type EffectiveSettingsEnvironment,
 } from './config-hygiene';
 import type {
   HookReferencedPath,
+  LiveConfig,
+  RecursiveRemovalSafety,
   SettingsEnvironmentObservation,
   SettingsHealth,
 } from '../types';
@@ -458,21 +469,61 @@ interface Resource {
   path: string;
   projectPath?: string;
   description?: string;
+  removalSafety?: RecursiveRemovalSafety;
 }
 
-function listResources(
+type ResourcePath = Pick<
+  Resource,
+  'id' | 'scope' | 'path' | 'projectPath'
+>;
+
+function recursiveRemovalSafety(
+  configuredRoot: string,
+  removalPath: string
+): RecursiveRemovalSafety {
+  let canonicalPathContained = false;
+  try {
+    const realRoot = realpathSync(configuredRoot);
+    canonicalPathContained = canonicalTargetIsStrictDescendant(
+      realRoot,
+      removalPath
+    );
+  } catch {
+    // Missing, dangling, or inaccessible paths are never safe to automate.
+  }
+  return { configuredRoot, canonicalPathContained };
+}
+
+function canonicalTargetIsStrictDescendant(
+  realRoot: string,
+  removalPath: string
+): boolean {
+  try {
+    const realTarget = realpathSync(removalPath);
+    const rel = relative(realRoot, realTarget);
+    return (
+      rel !== '' &&
+      rel !== '..' &&
+      !rel.startsWith(`..${sep}`) &&
+      !isAbsolute(rel)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function listResourcePaths(
   root: string,
   kind: 'directory' | 'file',
-  maxBytes: number,
   maxEntries: number,
   scope: Resource['scope'] = 'user',
   projectPath?: string
-): Resource[] {
+): ResourcePath[] {
   if (!existsSync(root)) return [];
   const entries = readDirentsBoundedSync(root, maxEntries)
     .map((entry) => entry.name)
     .sort();
-  const out: Resource[] = [];
+  const out: ResourcePath[] = [];
   for (const name of entries) {
     if (out.length >= maxEntries) break;
     const p = join(root, name);
@@ -483,12 +534,12 @@ function listResources(
       continue;
     }
     if (kind === 'directory' && st.isDirectory()) {
-      const description = readSkillDescription(p, maxBytes);
-      out.push(
-        description
-          ? { id: name, scope, path: p, ...(projectPath ? { projectPath } : {}), description }
-          : { id: name, scope, path: p, ...(projectPath ? { projectPath } : {}) }
-      );
+      out.push({
+        id: name,
+        scope,
+        path: p,
+        ...(projectPath ? { projectPath } : {}),
+      });
     } else if (kind === 'file' && st.isFile() && name.endsWith('.md')) {
       out.push({
         id: name.replace(/\.md$/, ''),
@@ -501,22 +552,51 @@ function listResources(
   return out;
 }
 
-function listProjectResources(
+function listResources(
+  root: string,
+  kind: 'directory' | 'file',
+  maxBytes: number,
+  maxEntries: number,
+  scope: Resource['scope'] = 'user',
+  projectPath?: string
+): Resource[] {
+  return listResourcePaths(
+    root,
+    kind,
+    maxEntries,
+    scope,
+    projectPath
+  ).map((resource) => {
+    if (kind === 'file') return resource;
+    const description = readSkillDescription(resource.path, maxBytes);
+    const removalSafety = recursiveRemovalSafety(root, resource.path);
+    return {
+      id: resource.id,
+      scope: resource.scope,
+      path: resource.path,
+      ...(resource.projectPath
+        ? { projectPath: resource.projectPath }
+        : {}),
+      ...(description ? { description } : {}),
+      removalSafety,
+    };
+  });
+}
+
+function listProjectResourcePaths(
   projectRoots: string[],
   dirName: 'skills' | 'agents' | 'commands',
   kind: 'directory' | 'file',
-  maxBytes: number,
   maxEntries: number
-): Resource[] {
-  const out: Resource[] = [];
+): ResourcePath[] {
+  const out: ResourcePath[] = [];
   for (const projectRoot of projectRoots) {
     if (out.length >= maxEntries) break;
     const remaining = maxEntries - out.length;
     out.push(
-      ...listResources(
+      ...listResourcePaths(
         join(projectRoot, '.claude', dirName),
         kind,
-        maxBytes,
         remaining,
         'project',
         projectRoot
@@ -524,6 +604,39 @@ function listProjectResources(
     );
   }
   return out;
+}
+
+function listProjectResources(
+  projectRoots: string[],
+  dirName: 'skills' | 'agents' | 'commands',
+  kind: 'directory' | 'file',
+  maxBytes: number,
+  maxEntries: number
+): Resource[] {
+  return listProjectResourcePaths(
+    projectRoots,
+    dirName,
+    kind,
+    maxEntries
+  ).map((resource) => {
+    if (kind === 'file') return resource;
+    const configuredRoot = join(
+      resource.projectPath ?? '',
+      '.claude',
+      dirName
+    );
+    const description = readSkillDescription(resource.path, maxBytes);
+    return {
+      id: resource.id,
+      scope: resource.scope,
+      path: resource.path,
+      ...(resource.projectPath
+        ? { projectPath: resource.projectPath }
+        : {}),
+      ...(description ? { description } : {}),
+      removalSafety: recursiveRemovalSafety(configuredRoot, resource.path),
+    };
+  });
 }
 
 interface PluginBundle {
@@ -574,14 +687,23 @@ interface PluginEntry {
   version: string;
   sourcePath: string;
   installPath: string;
+  removalSafety: RecursiveRemovalSafety;
   installedAt: string;
   bundled: PluginBundle | undefined;
 }
 
-function readPlugins(paths: LiveConfigPaths, enabled: Obj | undefined): PluginEntry[] {
+interface PluginInstallRecord {
+  id: string;
+  scope: 'project' | 'user';
+  version: string;
+  installPath: string;
+  installedAt: string;
+}
+
+function readPluginInstallRecords(paths: LiveConfigPaths): PluginInstallRecord[] {
   const reg = asObj(readJsonOrNull(paths.pluginsRegistry, paths.configFileMaxBytes));
   const map = reg && typeof reg.plugins === 'object' ? (reg.plugins as Obj) : {};
-  const out: PluginEntry[] = [];
+  const out: PluginInstallRecord[] = [];
   for (const [id, installs] of Object.entries(map)) {
     if (out.length >= paths.configResourceMaxEntries) break;
     if (!Array.isArray(installs)) continue;
@@ -589,28 +711,237 @@ function readPlugins(paths: LiveConfigPaths, enabled: Obj | undefined): PluginEn
       if (out.length >= paths.configResourceMaxEntries) break;
       if (!raw || typeof raw !== 'object') continue;
       const inst = raw as Obj;
-      const installPath = typeof inst.installPath === 'string' ? inst.installPath : '';
       out.push({
         id,
         scope: inst.scope === 'project' ? 'project' : 'user',
         version: typeof inst.version === 'string' ? inst.version : 'unknown',
-        sourcePath: paths.pluginsRegistry,
-        installPath,
+        installPath: typeof inst.installPath === 'string' ? inst.installPath : '',
         installedAt: typeof inst.installedAt === 'string' ? inst.installedAt : '',
-        // Only enumerate bundles when the plugin is enabled — saves IO on
-        // disabled plugins. Phase 2 needs the bundle to roll up usage.
-        bundled:
-          enabled?.[id] && (!paths.scoped || withinClaudeDir(paths, installPath))
-            ? enumeratePluginBundle(
-                installPath,
-                paths.configFileMaxBytes,
-                paths.configResourceMaxEntries
-              )
-            : undefined,
       });
     }
   }
   return out;
+}
+
+function readPlugins(paths: LiveConfigPaths, enabled: Obj | undefined): PluginEntry[] {
+  const configuredRoot = join(paths.claudeDir, 'plugins');
+  return readPluginInstallRecords(paths).map((install) => ({
+    id: install.id,
+    scope: install.scope,
+    version: install.version,
+    sourcePath: paths.pluginsRegistry,
+    installPath: install.installPath,
+    removalSafety: recursiveRemovalSafety(configuredRoot, install.installPath),
+    installedAt: install.installedAt,
+    // Only enumerate bundles when the plugin is enabled — saves IO on
+    // disabled plugins. Phase 2 needs the bundle to roll up usage.
+    bundled:
+      enabled?.[install.id] &&
+      (!paths.scoped || withinClaudeDir(paths, install.installPath))
+        ? enumeratePluginBundle(
+            install.installPath,
+            paths.configFileMaxBytes,
+            paths.configResourceMaxEntries
+          )
+        : undefined,
+  }));
+}
+
+type RecursiveRemovalResourceKind = 'plugin' | 'skill';
+
+interface RecursiveRemovalResourceRecord {
+  kind: RecursiveRemovalResourceKind;
+  id: string;
+  scope: 'project' | 'user';
+  projectPath: string;
+  removalPath: string;
+  configuredRoot: string;
+}
+
+interface RecursiveRemovalSafetyEntry extends RecursiveRemovalResourceRecord {
+  canonicalPathContained: boolean;
+}
+
+function digestRecursiveRemovalSafety(
+  entries: readonly RecursiveRemovalSafetyEntry[]
+): string {
+  const hash = createHash('sha256');
+  for (const entry of entries) {
+    hash.update(JSON.stringify([
+      entry.kind,
+      entry.id,
+      entry.scope,
+      entry.projectPath,
+      entry.removalPath,
+      entry.configuredRoot,
+      entry.canonicalPathContained,
+    ]));
+    hash.update('\n');
+  }
+  return `${entries.length}:${hash.digest('hex')}`;
+}
+
+interface RecursiveRemovalSafetyExtraction {
+  identity: string;
+  installs: PluginInstallRecord[];
+  projectRoots: string[];
+}
+
+// perf-index-contract: recursive-removal-extraction-memo always-consumed: every recursiveRemovalSafetySignature call immediately queries this bounded memo by its resolved path key
+const recursiveRemovalSafetyExtractionMemo = new Map<
+  string,
+  RecursiveRemovalSafetyExtraction
+>();
+const RECURSIVE_REMOVAL_SAFETY_MEMO_MAX_KEYS = 8;
+
+function recursiveRemovalExtractionIdentity(paths: LiveConfigPaths): string {
+  return JSON.stringify([
+    sourceStatIdentity(paths.pluginsRegistry),
+    sourceStatIdentity(paths.claudeJson),
+  ]);
+}
+
+function currentRecursiveRemovalRecords(
+  paths: LiveConfigPaths,
+  extraction: RecursiveRemovalSafetyExtraction
+): RecursiveRemovalResourceRecord[] {
+  const pluginRoot = join(paths.claudeDir, 'plugins');
+  const userSkillPaths = listResourcePaths(
+    paths.skillsDir,
+    'directory',
+    paths.configResourceMaxEntries
+  );
+  const projectSkillPaths = listProjectResourcePaths(
+    extraction.projectRoots,
+    'skills',
+    'directory',
+    paths.configResourceMaxEntries
+  );
+  const skills = [...userSkillPaths, ...projectSkillPaths].slice(
+    0,
+    paths.configResourceMaxEntries
+  );
+  return [
+    ...extraction.installs.map((install) => ({
+      kind: 'plugin' as const,
+      id: install.id,
+      scope: install.scope,
+      projectPath: '',
+      removalPath: install.installPath,
+      configuredRoot: pluginRoot,
+    })),
+    ...skills.map((skill) => ({
+      kind: 'skill' as const,
+      id: skill.id,
+      scope: skill.scope,
+      projectPath: skill.projectPath ?? '',
+      removalPath: skill.path,
+      configuredRoot:
+        skill.scope === 'project' && skill.projectPath
+          ? join(skill.projectPath, '.claude', 'skills')
+          : paths.skillsDir,
+    })),
+  ];
+}
+
+/**
+ * Bounded current-state signature for the canonical containment verdicts that
+ * recursive-removal snippets consume: plugins plus user- and project-scoped
+ * skills. Registry/project-root parsing is memoized on the same source stat
+ * identities used by the request-time gate. Skill directory enumeration and
+ * every canonical-path probe remain fresh and bounded by the config resource
+ * cap, so restored directory mtimes and intermediate symlink changes cannot
+ * preserve a cached affirmative verdict.
+ */
+export function recursiveRemovalSafetySignature(
+  opts: LiveConfigPathOptions = {}
+): string {
+  const paths = liveConfigPaths(opts);
+  const memoKey = JSON.stringify([
+    paths.claudeDir,
+    paths.pluginsRegistry,
+    paths.claudeJson,
+    paths.skillsDir,
+    paths.scoped,
+    paths.projectRoots,
+    paths.configFileMaxBytes,
+    paths.configResourceMaxEntries,
+  ]);
+  const identity = recursiveRemovalExtractionIdentity(paths);
+  let extraction = recursiveRemovalSafetyExtractionMemo.get(memoKey);
+  if (extraction?.identity !== identity) extraction = undefined;
+  if (!extraction) {
+    const claudeJson = asObj(
+      readJsonOrNull(paths.claudeJson, paths.configFileMaxBytes)
+    );
+    extraction = {
+      identity,
+      installs: readPluginInstallRecords(paths),
+      projectRoots: readableProjectRoots(paths, claudeJson),
+    };
+    if (
+      !recursiveRemovalSafetyExtractionMemo.has(memoKey) &&
+      recursiveRemovalSafetyExtractionMemo.size >=
+        RECURSIVE_REMOVAL_SAFETY_MEMO_MAX_KEYS
+    ) {
+      const oldest = recursiveRemovalSafetyExtractionMemo.keys().next().value;
+      if (oldest !== undefined) {
+        recursiveRemovalSafetyExtractionMemo.delete(oldest);
+      }
+    }
+    recursiveRemovalSafetyExtractionMemo.set(memoKey, extraction);
+  }
+  const records = currentRecursiveRemovalRecords(paths, extraction);
+  if (records.length === 0) return digestRecursiveRemovalSafety([]);
+  // perf-index-contract: recursive-removal-root-cache always-consumed: every nonempty record set populates and queries this cache for each configured root
+  const realRoots = new Map<string, string | null>();
+  for (const record of records) {
+    if (realRoots.has(record.configuredRoot)) continue;
+    try {
+      realRoots.set(record.configuredRoot, realpathSync(record.configuredRoot));
+    } catch {
+      realRoots.set(record.configuredRoot, null);
+    }
+  }
+  return digestRecursiveRemovalSafety(
+    records.map((record) => {
+      const realRoot = realRoots.get(record.configuredRoot) ?? null;
+      return {
+        ...record,
+        canonicalPathContained:
+          realRoot !== null &&
+          canonicalTargetIsStrictDescendant(realRoot, record.removalPath),
+      };
+    })
+  );
+}
+
+/** Bind persisted cache metadata to the exact verdicts serialized in a body. */
+export function recursiveRemovalSafetySignatureFromLiveConfig(
+  liveConfig: Pick<LiveConfig, 'plugins' | 'skills'>
+): string {
+  return digestRecursiveRemovalSafety([
+    ...liveConfig.plugins.map((plugin) => ({
+      kind: 'plugin' as const,
+      id: plugin.id,
+      scope: plugin.scope,
+      projectPath: '',
+      removalPath: plugin.installPath,
+      configuredRoot: plugin.removalSafety?.configuredRoot ?? '',
+      canonicalPathContained:
+        plugin.removalSafety?.canonicalPathContained === true,
+    })),
+    ...liveConfig.skills.map((skill) => ({
+      kind: 'skill' as const,
+      id: skill.id,
+      scope: skill.scope,
+      projectPath: skill.projectPath ?? '',
+      removalPath: skill.path,
+      configuredRoot: skill.removalSafety?.configuredRoot ?? '',
+      canonicalPathContained:
+        skill.removalSafety?.canonicalPathContained === true,
+    })),
+  ]);
 }
 
 interface McpServerEntry {

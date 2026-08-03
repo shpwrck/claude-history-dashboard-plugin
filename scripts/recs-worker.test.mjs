@@ -16,7 +16,14 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+} from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -248,6 +255,11 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
       'worker returns the source signature validated after the build'
     );
     assert.equal(
+      reply.recursiveRemovalSafetyState,
+      ingest.recursiveRemovalSafetyStateForServer(),
+      'worker returns the canonical-containment state bound to its dataset'
+    );
+    assert.equal(
       reply.json,
       jsonInline,
       'worker recs body must be byte-identical to the inline build'
@@ -436,6 +448,95 @@ test('worker discards a result when source state changes mid-build and retries o
       raced.docIssueCacheState,
       null,
       'the source-race retry preserves the feature-off metadata shape'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('worker retries and binds the rebuilt body to changed skill containment state (#3377)', async () => {
+  const home = buildFixtureHome();
+  const claudeDir = join(home, '.claude');
+  const skillsRoot = join(claudeDir, 'skills');
+  const riskySkill = join(skillsRoot, 'risky-skill');
+  const outsideSkill = join(home, 'outside', 'risky-skill');
+  const gate = join(home, 'worker-skill-safety-race.fifo');
+  for (const skill of ['safe-a', 'safe-b', 'risky-skill']) {
+    mkdirSync(join(skillsRoot, skill), { recursive: true });
+    writeFileSync(
+      join(skillsRoot, skill, 'SKILL.md'),
+      `---\ndescription: ${skill}\n---\n`
+    );
+  }
+  mkdirSync(outsideSkill, { recursive: true });
+  writeFileSync(
+    join(outsideSkill, 'SKILL.md'),
+    '---\ndescription: escaped risky skill\n---\n'
+  );
+
+  try {
+    const { recursiveRemovalSafetySignature } = await import(
+      `../src/lib/config-loader.ts?fixture=${randomUUID()}`
+    );
+    const containedState = recursiveRemovalSafetySignature({ claudeDir, homeDir: home });
+    const skillsRootStat = statSync(skillsRoot);
+    const fifo = spawnSync('mkfifo', [gate]);
+    assert.equal(fifo.status, 0, String(fifo.stderr || ''));
+    let retries = 0;
+    const raced = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-3377-worker-race-${randomUUID()}.db`),
+      {},
+      {
+        env: {
+          CHD_RECS_CACHE_TEST_EVENTS: '1',
+          CHD_RECS_WORKER_TEST_AFTER_RECEIPTS_GATE: gate,
+        },
+        onLog(msg) {
+          if (msg.message === '[recs-cache-test] worker-receipts-read') {
+            rmSync(riskySkill, { recursive: true, force: true });
+            symlinkSync(outsideSkill, riskySkill, 'dir');
+            utimesSync(
+              skillsRoot,
+              skillsRootStat.atimeMs / 1_000,
+              (Math.floor(skillsRootStat.mtimeMs) + 0.5) / 1_000
+            );
+            writeFileSync(gate, 'release');
+          }
+          if (
+            msg.message ===
+            '[recs-worker] source changed during rebuild; retrying once'
+          ) {
+            retries += 1;
+          }
+        },
+      }
+    );
+
+    const escapedState = recursiveRemovalSafetySignature({ claudeDir, homeDir: home });
+    assert.equal(retries, 1, 'the containment transition triggers one bounded retry');
+    assert.equal(
+      Math.floor(statSync(skillsRoot).mtimeMs),
+      Math.floor(skillsRootStat.mtimeMs),
+      'the race remains invisible to the skills-root stat mtime gate'
+    );
+    assert.notEqual(escapedState, containedState);
+    assert.equal(
+      raced.recursiveRemovalSafetyState,
+      escapedState,
+      'the accepted worker entry is bound to the rebuilt path graph'
+    );
+    const recommendations = JSON.parse(raced.json);
+    const skillRecommendation = recommendations.find(
+      (recommendation) => recommendation.id === 'workflow.unused-installed-skills'
+    );
+    assert.doesNotMatch(
+      skillRecommendation?.fix?.snippet ?? '',
+      new RegExp(`rm -rf -- '${riskySkill}'`)
+    );
+    assert.match(
+      skillRecommendation?.fix?.snippet ?? '',
+      /Refusing to generate an automatic recursive delete for skill risky-skill/
     );
   } finally {
     rmSync(home, { recursive: true, force: true });

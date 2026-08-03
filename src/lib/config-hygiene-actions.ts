@@ -22,9 +22,8 @@ function openablePath(path: string): string {
 }
 
 /**
- * The directory each recursively-removable resource type installs under,
- * relative to a `.claude` root. A recursive delete is only ever emitted for a
- * path nested INSIDE one of these, never for the root itself (#3117).
+ * Human-facing name of each recursively-removable resource root. The actual
+ * configured root and its canonical-containment verdict arrive as server data.
  */
 const RECURSIVE_REMOVAL_ROOTS: Partial<Record<HygieneFinding['resourceType'], string>> = {
   skill: 'skills',
@@ -44,20 +43,25 @@ type RemovalAction =
  * Claude config root, and the user copy-pastes a recursive delete of it. So the
  * SCOPE has to be bounded too, not just the syntax.
  *
- * Containment is anchored to an actual Claude resource root, not merely to a
- * segment that happens to be NAMED `skills`/`plugins` — otherwise a poisoned
- * registry pointing at `/tmp/plugins/victim` would still pass. The target must:
+ * Canonical containment is decided by the server because only it can see both
+ * the configured root and the filesystem (#3377). This browser-safe second
+ * check validates the exact lexical strings carried by that verdict. The
+ * target must:
  *
  *   1. be absolute, or `~`-anchored (a relative path is cwd-dependent, so what
  *      it resolves to when pasted is not knowable here);
  *   2. contain no upward traversal;
- *   3. sit under a `.claude` directory whose NEXT segment is this resource
- *      type's root, mirroring how config-loader derives `<claudeDir>/skills`;
- *   4. have at least one segment below that root, so the root itself survives.
+ *   3. be a strict lexical descendant of the configured resource root;
+ *   4. carry an affirmative server-side canonical-containment verdict.
  *
  * `/`, `~`, `/home/me` and `~/.claude` all fail without being enumerated.
  */
-function isBoundedRemovalPath(path: string, root: string): boolean {
+function isBoundedRemovalPath(
+  path: string,
+  safety: HygieneFinding['removalSafety']
+): boolean {
+  if (!safety?.canonicalPathContained) return false;
+  const root = safety.configuredRoot;
   // Validate EXACTLY the string the command will carry. An earlier version
   // normalized `\\` to `/` first, which meant the validator and the emitted
   // `rm -rf` disagreed about where the separators were: `/tmp/.claude\\plugins\\victim`
@@ -65,24 +69,30 @@ function isBoundedRemovalPath(path: string, root: string): boolean {
   // ordinary filename characters, so the command deleted an out-of-root
   // directory. A backslash cannot appear in a legitimate Claude resource path,
   // so refuse it outright rather than trying to interpret it.
-  if (path.includes('\\')) return false;
+  if (path.includes('\\') || root.includes('\\')) return false;
   // Drop any trailing slash so `skills/foo/` is not read as having an empty
   // segment below the root.
   const normalized = path.replace(/\/+$/, '');
-  if (!normalized) return false;
+  const normalizedRoot = root.replace(/\/+$/, '');
+  if (!normalized || !normalizedRoot) return false;
 
-  const anchored = normalized.startsWith('/') || /^~\//.test(normalized);
-  if (!anchored) return false;
+  const anchor = normalized.startsWith('/') ? '/' : /^~\//.test(normalized) ? '~' : null;
+  const rootAnchor = normalizedRoot.startsWith('/')
+    ? '/'
+    : /^~\//.test(normalizedRoot)
+      ? '~'
+      : null;
+  if (!anchor || anchor !== rootAnchor) return false;
 
   const segments = normalized.split('/').filter((s) => s !== '' && s !== '.');
-  if (segments.includes('..')) return false;
-
-  // Use the LAST `.claude` so a nested project checkout under a home-level
-  // `.claude` is judged by the root that actually owns the resource.
-  const claudeIndex = segments.lastIndexOf('.claude');
-  if (claudeIndex === -1) return false;
-  if (segments[claudeIndex + 1] !== root) return false;
-  return segments.length > claudeIndex + 2;
+  const rootSegments = normalizedRoot
+    .split('/')
+    .filter((s) => s !== '' && s !== '.');
+  if (segments.includes('..') || rootSegments.includes('..')) return false;
+  if (rootSegments.length === 0 || segments.length <= rootSegments.length) {
+    return false;
+  }
+  return rootSegments.every((segment, index) => segments[index] === segment);
 }
 
 /**
@@ -105,7 +115,7 @@ function manualRemovalInstruction(finding: HygieneFinding): string {
   return (
     `# Refusing to generate an automatic recursive delete for ` +
     `${commentSafe(finding.resourceType)} ${commentSafe(finding.resourceId)}: ` +
-    `the recorded path is not inside the expected .claude/${root} directory. ` +
+    `the server could not verify it as a strict descendant of the configured ${root} directory. ` +
     `Verify ${commentSafe(finding.removalPath ?? 'the install path')} by hand ` +
     `before removing anything.`
   );
@@ -116,7 +126,7 @@ function directRemovalAction(finding: HygieneFinding): RemovalAction | null {
   const quoted = shellQuote(finding.removalPath);
   const recursiveRoot = RECURSIVE_REMOVAL_ROOTS[finding.resourceType];
   if (recursiveRoot) {
-    if (!isBoundedRemovalPath(finding.removalPath, recursiveRoot)) {
+    if (!isBoundedRemovalPath(finding.removalPath, finding.removalSafety)) {
       return { kind: 'manual', note: manualRemovalInstruction(finding) };
     }
     return { kind: 'command', snippet: `rm -rf -- ${quoted}` };

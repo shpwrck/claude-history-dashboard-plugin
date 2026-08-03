@@ -40,6 +40,7 @@ import type {
   LiveConfig,
   LiveMcpServer,
   LivePlugin,
+  RecursiveRemovalSafety,
   SettingsHealth,
   SettingsHealthFinding,
   SettingsEnvironmentObservation,
@@ -115,6 +116,8 @@ export interface HygieneFinding {
    * servers are JSON keys, so they usually omit this and use sourcePath only.
    */
   removalPath?: string;
+  /** Server-side canonical containment evidence for recursive removals. */
+  removalSafety?: RecursiveRemovalSafety;
 }
 
 /** Recency window for the *active* resource types (Q6 in #172). */
@@ -271,6 +274,7 @@ function emitUnusedFinding(args: {
   hedge?: HygieneHedge;
   sourcePath?: string;
   removalPath?: string;
+  removalSafety?: RecursiveRemovalSafety;
 }): HygieneFinding {
   const {
     resourceType,
@@ -280,6 +284,7 @@ function emitUnusedFinding(args: {
     hedge,
     sourcePath,
     removalPath,
+    removalSafety,
   } = args;
   const scopeSuffix = scope.kind === 'project' ? `@${scope.project}` : '';
   return {
@@ -295,6 +300,7 @@ function emitUnusedFinding(args: {
     ...(hedge ? { hedge } : {}),
     ...(sourcePath ? { sourcePath } : {}),
     ...(removalPath ? { removalPath } : {}),
+    ...(removalSafety ? { removalSafety } : {}),
   };
 }
 
@@ -635,6 +641,7 @@ function findingsForPlugins(
         hedge,
         sourcePath: p.sourcePath,
         removalPath: p.installPath,
+        removalSafety: p.removalSafety,
       })
     );
   }
@@ -700,6 +707,7 @@ interface ScopedResourceFamily<T> {
   id: (resource: T) => string;
   sourcePath: (resource: T) => string | undefined;
   removalPath: (resource: T) => string | undefined;
+  removalSafety?: (resource: T) => RecursiveRemovalSafety | undefined;
   /**
    * Whether {@link isStructurallyExcluded} applies. Skills and subagents have
    * structurally-not-removable members (`_shared` dirs, subskills, test
@@ -766,6 +774,7 @@ function findingsForScopedResources<T extends { scope?: string; projectPath?: st
         hedge,
         sourcePath: family.sourcePath(resource),
         removalPath: family.removalPath(resource),
+        removalSafety: family.removalSafety?.(resource),
       })
     );
   }
@@ -820,6 +829,7 @@ export function computeConfigHygiene(input: HygieneInput): HygieneFinding[] {
         id: (r) => r.id,
         sourcePath: (r) => skillManifestPath(r.path),
         removalPath: (r) => r.path,
+        removalSafety: (r) => r.removalSafety,
         // Structurally-not-removable resources (#2015): `_shared` utility dirs,
         // subskills of an installed parent, built-in test fixtures.
         applyStructuralExclusions: true,

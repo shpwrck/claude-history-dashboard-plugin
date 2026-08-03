@@ -15,6 +15,10 @@ function finding(over: Partial<HygieneFinding>): HygieneFinding {
     resourceId: 'some-skill',
     scope: { kind: 'global' },
     removalPath: '/home/me/.claude/skills/some-skill',
+    removalSafety: {
+      configuredRoot: '/home/me/.claude/skills',
+      canonicalPathContained: true,
+    },
     ...over,
   } as HygieneFinding;
 }
@@ -32,8 +36,8 @@ describe('buildConfigRemovalSnippet recursive-delete containment (#3117)', () =>
     ['out-of-root path', '/etc'],
     ['relative out-of-root path', 'some/other/dir'],
     // A segment merely NAMED `skills`/`plugins` is not containment: these must
-    // be anchored under a real .claude root, or a poisoned registry pointing at
-    // /tmp still earns an rm -rf.
+    // be anchored under the declared configured resource root, or a poisoned
+    // registry pointing at /tmp still earns an rm -rf.
     ['decoy root outside .claude', '/tmp/skills/victim'],
     ['relative decoy root', 'skills/victim'],
     ['claude-adjacent but wrong root', '/home/me/.claude/other/victim'],
@@ -62,6 +66,10 @@ describe('buildConfigRemovalSnippet recursive-delete containment (#3117)', () =>
         resourceType: 'plugin',
         resourceId: 'rogue',
         removalPath: '/home/me/Documents',
+        removalSafety: {
+          configuredRoot: '/home/me/.claude/plugins',
+          canonicalPathContained: true,
+        },
       })
     );
 
@@ -83,6 +91,10 @@ describe('buildConfigRemovalSnippet recursive-delete containment (#3117)', () =>
         resourceType: 'plugin',
         resourceId: 'pack',
         removalPath: '/home/me/.claude/plugins/pack',
+        removalSafety: {
+          configuredRoot: '/home/me/.claude/plugins',
+          canonicalPathContained: true,
+        },
       })
     );
 
@@ -91,7 +103,13 @@ describe('buildConfigRemovalSnippet recursive-delete containment (#3117)', () =>
 
   it('accepts a deeply nested resource below its root', () => {
     const snippet = buildConfigRemovalSnippet(
-      finding({ removalPath: '/home/me/proj/.claude/skills/group/nested-skill' })
+      finding({
+        removalPath: '/home/me/proj/.claude/skills/group/nested-skill',
+        removalSafety: {
+          configuredRoot: '/home/me/proj/.claude/skills',
+          canonicalPathContained: true,
+        },
+      })
     );
 
     expect(snippet).toContain('rm -rf --');
@@ -118,6 +136,15 @@ describe('buildConfigRemovalSnippet recursive-delete containment (#3117)', () =>
         })
       )
     ).toBe("rm -- '/home/me/.claude/commands/cmd.md'");
+  });
+
+  it('fails closed when older data has no server-side containment verdict', () => {
+    const snippet = buildConfigRemovalSnippet(
+      finding({ removalSafety: undefined })
+    );
+
+    expect(snippet).not.toContain('rm -rf');
+    expect(snippet).toContain('# Refusing to generate an automatic recursive delete');
   });
 });
 
@@ -157,6 +184,10 @@ describe('manual fallback is inert against poisoned values (#3117)', () => {
         resourceId: 'rogue',
         sourcePath: '/home/me/.claude/installed_plugins.json',
         removalPath: '/home/me/Documents',
+        removalSafety: {
+          configuredRoot: '/home/me/.claude/plugins',
+          canonicalPathContained: true,
+        },
       })
     );
 
@@ -175,6 +206,10 @@ describe('manual fallback is inert against poisoned values (#3117)', () => {
         resourceId: 'pack',
         sourcePath: '/home/me/.claude/installed_plugins.json',
         removalPath: '/home/me/.claude/plugins/pack',
+        removalSafety: {
+          configuredRoot: '/home/me/.claude/plugins',
+          canonicalPathContained: true,
+        },
       })
     );
 

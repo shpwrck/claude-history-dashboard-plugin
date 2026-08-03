@@ -90,6 +90,8 @@ import {
   refreshDocIssueSnapshotForServer,
   docIssueSnapshotCacheStateForServer,
   docIssueSnapshotCacheStateFromDataset,
+  recursiveRemovalSafetyStateForServer,
+  recursiveRemovalSafetyStateFromDataset,
 } from './ingest.mjs';
 import {
   readWorkflows,
@@ -310,10 +312,10 @@ const {
 const { computeSessionOutcomes } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-timeline-success.ts')
 );
-// DIST_DIR/CLAUDE_DIR overrides exist only so the route tests can point the
-// server at throwaway temp dirs (see scripts/policy-write.test.mjs). In the
-// container neither is set, so these resolve to the real bundled dist/ and the
-// bind-mounted ~/.claude exactly as before.
+// DIST_DIR lets route tests point at throwaway bundles. CLAUDE_DIR also supports
+// those tests, while enterprise scoped ingest temporarily repoints it at each
+// principal's configured data root. In the ordinary local container neither is
+// set, so these resolve to bundled dist/ and the bind-mounted ~/.claude.
 const DIST = process.env.DIST_DIR || join(PROJECT_DIR, 'dist');
 function splitPathList(raw) {
   if (!raw) return [];
@@ -1288,6 +1290,8 @@ const GLOBAL_INGEST_API = {
   refreshDocIssueSnapshotForServer,
   docIssueSnapshotCacheStateForServer,
   docIssueSnapshotCacheStateFromDataset,
+  recursiveRemovalSafetyStateForServer,
+  recursiveRemovalSafetyStateFromDataset,
 };
 
 function datasetState(apiPromise, key = 'global') {
@@ -1529,10 +1533,33 @@ function datasetCacheEntryMatchesDocIssueState(entry, api, now = Date.now()) {
   );
 }
 
+function currentRecursiveRemovalSafetyState(api) {
+  if (typeof api.recursiveRemovalSafetyStateForServer !== 'function') return null;
+  return api.recursiveRemovalSafetyStateForServer();
+}
+
+// Canonical containment is a hard cache boundary: stale-while-revalidate must
+// never serve a body whose affirmative recursive-removal verdict no longer
+// matches the current filesystem path graph. APIs predating this seam retain
+// their test/fallback behavior; every production ingest API exports it.
+function datasetCacheEntryMatchesRecursiveRemovalSafetyState(entry, api) {
+  if (!entry) return false;
+  const current = currentRecursiveRemovalSafetyState(api);
+  if (current === null) return true;
+  return (
+    entry.recursiveRemovalSafetyStateKnown === true &&
+    entry.recursiveRemovalSafetyState === current
+  );
+}
+
 async function buildDatasetCache(api, contentHash) {
   const dataset = api.assembleDataset();
   const docIssueCacheState =
     api.docIssueSnapshotCacheStateFromDataset(dataset);
+  const recursiveRemovalSafetyState =
+    typeof api.recursiveRemovalSafetyStateFromDataset === 'function'
+      ? api.recursiveRemovalSafetyStateFromDataset(dataset)
+      : null;
   // Serialize the dataset exactly ONCE (#2070). buildDatasetBody serializes the
   // stable view (dataset minus the volatile generatedAt), then splices
   // generatedAt back into the served body without a second full stringify. The
@@ -1572,6 +1599,8 @@ async function buildDatasetCache(api, contentHash) {
     contentHash,
     docIssueCacheState,
     docIssueCacheStateKnown: true,
+    recursiveRemovalSafetyState,
+    recursiveRemovalSafetyStateKnown: recursiveRemovalSafetyState !== null,
   };
 }
 
@@ -2266,13 +2295,18 @@ async function rebuildDatasetCache(state, sig) {
 
     if (
       state.datasetCache?.contentHash === stats.contentHash &&
-      datasetCacheEntryMatchesDocIssueState(state.datasetCache, api)
+      datasetCacheEntryMatchesDocIssueState(state.datasetCache, api) &&
+      datasetCacheEntryMatchesRecursiveRemovalSafetyState(state.datasetCache, api)
     ) {
       candidate = state.datasetCache;
       cached = true;
     } else {
       const fromDisk = api.loadDatasetCache(stats.contentHash);
-      if (fromDisk && datasetCacheEntryMatchesDocIssueState(fromDisk, api)) {
+      if (
+        fromDisk &&
+        datasetCacheEntryMatchesDocIssueState(fromDisk, api) &&
+        datasetCacheEntryMatchesRecursiveRemovalSafetyState(fromDisk, api)
+      ) {
         candidate = fromDisk;
         cached = true;
       } else {
@@ -2282,15 +2316,16 @@ async function rebuildDatasetCache(state, sig) {
     }
 
     // The source can move while ingest/assemble/compression is running. Prefer a
-    // candidate built under one stable source+snapshot state; if only the coarse
-    // signature moved, retry once against the completed state. The doc-issue trust
-    // state (the GitHub snapshot claims baked into the body) is the HARD gate and
-    // is never relaxed — we must never SWR-serve a body whose issue-state is stale.
+    // candidate built under one stable source+trust state; if only the coarse
+    // signature moved, retry once against the completed state. GitHub snapshot
+    // and recursive-removal containment claims are HARD gates and never relaxed.
     const completedSig = api.sourceSignature();
     const completedDocIssueState = currentDocIssueCacheState(api);
     const docIssueStable =
       docIssueCacheStatesEqual(buildDocIssueState, completedDocIssueState) &&
       datasetCacheEntryMatchesDocIssueState(candidate, api);
+    const recursiveRemovalSafetyStable =
+      datasetCacheEntryMatchesRecursiveRemovalSafetyState(candidate, api);
     const sigStable = completedSig === buildSig;
     // Commit a fully stable candidate; on the FINAL bounded attempt commit the
     // freshest candidate even when only the coarse source signature moved. On a
@@ -2301,7 +2336,11 @@ async function rebuildDatasetCache(state, sig) {
     // `stats.contentHash`, so persisting it stays sound. Mark a racy commit
     // UNSETTLED (`lastSourceSig = null`) so the next request re-refreshes instead
     // of skip-serving it, and let a later quiet build record the settled signature.
-    if (docIssueStable && (sigStable || attempt === 1)) {
+    if (
+      docIssueStable &&
+      recursiveRemovalSafetyStable &&
+      (sigStable || attempt === 1)
+    ) {
       state.datasetCache = candidate;
       if (persist) api.saveDatasetCache(candidate, Date.now());
       state.lastSourceSig = sigStable ? completedSig : null;
@@ -2310,11 +2349,12 @@ async function rebuildDatasetCache(state, sig) {
 
     buildSig = completedSig;
   }
-  // Reached only when the doc-issue trust gate failed on the final attempt — the
-  // GitHub snapshot state moved under us, so serving or persisting the candidate
-  // would ship stale issue-state claims. Keep last-good rather than a wrong body.
+  // Reached only when a hard trust state failed on the final attempt — the
+  // GitHub snapshot or recursive-removal containment state moved under us, so
+  // serving or persisting the candidate would ship stale claims. Keep last-good
+  // rather than a wrong body.
   throw new Error(
-    'Dataset source state changed across the bounded rebuild retry'
+    'Dataset trust state changed across the bounded rebuild retry'
   );
 }
 
@@ -2745,6 +2785,9 @@ function recommendationsCacheEntryIsCurrent(entry, api, now) {
   ) {
     return false;
   }
+  if (!datasetCacheEntryMatchesRecursiveRemovalSafetyState(entry, api)) {
+    return false;
+  }
   if (
     !entry.guidanceCacheValidity ||
     !externalGuidanceCacheValidityContains(entry.guidanceCacheValidity, now)
@@ -2798,6 +2841,7 @@ async function buildRecommendationsCacheEntryViaWorker(
     editFormatChurnCacheValidity: editChurnCacheValidity,
     sourceSig: workerSourceSig,
     docIssueCacheState,
+    recursiveRemovalSafetyState,
     acceptSuppressionTransitions,
     discardSuppressionTransitions,
   } = workerResult;
@@ -2813,6 +2857,9 @@ async function buildRecommendationsCacheEntryViaWorker(
     contentHash,
     sourceSig: workerSourceSig,
     docIssueCacheState,
+    recursiveRemovalSafetyState,
+    recursiveRemovalSafetyStateKnown:
+      typeof recursiveRemovalSafetyState === 'string',
     guidanceTransitions,
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
@@ -2855,6 +2902,10 @@ async function buildRecommendationsCacheEntry(
   );
   const docIssueCacheState =
     api.docIssueSnapshotCacheStateFromDataset(dataset);
+  const recursiveRemovalSafetyState =
+    typeof api.recursiveRemovalSafetyStateFromDataset === 'function'
+      ? api.recursiveRemovalSafetyStateFromDataset(dataset)
+      : null;
   // Pin one clock instant across label rendering and its cache metadata. A
   // request that finishes after the interval changes is redecorated before it
   // is returned below, so even a boundary crossed mid-build cannot leak.
@@ -2929,6 +2980,8 @@ async function buildRecommendationsCacheEntry(
     contentHash: stats.contentHash,
     sourceSig,
     docIssueCacheState,
+    recursiveRemovalSafetyState,
+    recursiveRemovalSafetyStateKnown: recursiveRemovalSafetyState !== null,
     guidanceTransitions,
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
@@ -3038,20 +3091,26 @@ async function ensureCurrentRecommendationsCacheEntry(
       entry.docIssueCacheState,
       completedDocIssueState
     );
-    if (!sourceSigStable || !docIssueStateStable) {
+    const recursiveRemovalSafetyStateStable =
+      datasetCacheEntryMatchesRecursiveRemovalSafetyState(entry, api);
+    if (
+      !sourceSigStable ||
+      !docIssueStateStable ||
+      !recursiveRemovalSafetyStateStable
+    ) {
       if (sourceRetriesRemaining <= 0) {
-        if (!docIssueStateStable) {
+        if (!docIssueStateStable || !recursiveRemovalSafetyStateStable) {
           discardRecommendationsCacheEntry(entry);
           throw new Error(
             'Recommendation source state changed across the bounded rebuild retry'
           );
         }
         // Only the coarse source signature kept moving. The candidate's exact
-        // document-issue trust state is still current, so serve the freshest
-        // build instead of freezing the cache on an older body. Mark it
-        // unsettled so the next request cannot early-hit a signature the built
-        // dataset did not observe; its contentHash gate will restamp an
-        // identical value or schedule the ordinary SWR refresh.
+        // document-issue and recursive-removal trust states are current, so
+        // serve the freshest build instead of freezing the cache on an older
+        // body. Mark it unsettled so the next request cannot early-hit a
+        // signature the built dataset did not observe; its contentHash gate
+        // will restamp an identical value or schedule the ordinary SWR refresh.
         entry.sourceSig = null;
       } else {
         sourceRetriesRemaining -= 1;
@@ -3159,6 +3218,16 @@ async function recommendationsResponseCache(
   ) {
     // Issue-state mismatch/expiry can add or remove an auditable claim. It is a
     // hard miss: never take content-restamp or stale-while-revalidate paths.
+    state.recommendationsCache.delete(key);
+    cached = undefined;
+  }
+  if (
+    cached &&
+    !datasetCacheEntryMatchesRecursiveRemovalSafetyState(cached, api)
+  ) {
+    // A canonical-containment mismatch can turn a safe manual fallback into an
+    // unsafe cached rm -rf (or vice versa). It is a hard miss: never content-
+    // restamp or SWR-serve a recommendation body under a different path graph.
     state.recommendationsCache.delete(key);
     cached = undefined;
   }
@@ -9725,15 +9794,22 @@ async function handleDatasetJson(req, res) {
   }
   if (
     ingestState.datasetCache &&
-    !datasetCacheEntryMatchesDocIssueState(
-      ingestState.datasetCache,
-      ingestApi,
-      Date.now()
+    (
+      !datasetCacheEntryMatchesDocIssueState(
+        ingestState.datasetCache,
+        ingestApi,
+        Date.now()
+      ) ||
+      !datasetCacheEntryMatchesRecursiveRemovalSafetyState(
+        ingestState.datasetCache,
+        ingestApi
+      )
     )
   ) {
-    // Snapshot mismatch/expiry is a hard boundary: never SWR-serve a body whose
-    // GitHub state claims are no longer current. This also rejects a persisted
-    // flag-on body after a flag-off restart before the first response.
+    // Snapshot mismatch/expiry and canonical-containment drift are hard
+    // boundaries: never SWR-serve a body whose GitHub or recursive-removal
+    // claims are no longer current. This also rejects legacy persisted bodies
+    // without the state needed to prove those claims.
     ingestState.datasetCache = null;
     ingestState.lastSourceSig = null;
   }

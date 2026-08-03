@@ -10,11 +10,129 @@ import {
   hostEnvironmentObservationSignature,
   readStopHookConfigState,
 } from './config-loader';
+import { computeConfigHygiene, type HygieneFinding } from './config-hygiene';
+import { buildConfigRemovalSnippet } from './config-hygiene-actions';
 import { detector as settingsJsonInvalidDetector } from './detectors/reliability/settings-json-invalid';
 import { detector as skillHookIntegrityDetector } from './detectors/maintenance/skill-hook-integrity';
 import type { RecommendationInput } from './detectors/types';
 
 describe('assembleLiveConfig', () => {
+  const removalSnippetFor = (
+    liveConfig: ReturnType<typeof assembleLiveConfig>,
+    resourceType: HygieneFinding['resourceType']
+  ): string => {
+    const now = Date.UTC(2026, 7, 1);
+    const finding = computeConfigHygiene({
+      liveConfig,
+      attribution: [],
+      sessions: [{ sessionId: 'observed', startTime: now - 31 * 24 * 60 * 60 * 1000 }],
+      now,
+    }).find((candidate) => candidate.resourceType === resourceType);
+    expect(finding).toBeDefined();
+    return buildConfigRemovalSnippet(finding!);
+  };
+
+  it('emits a recursive removal for a skill inside a configured root not named .claude (#3377)', () => {
+    const configuredRoot = join(root, 'enterprise', 'principal-a');
+    const skillPath = join(configuredRoot, 'skills', 'custom-root-skill');
+    mkdirSync(skillPath, { recursive: true });
+    writeFileSync(join(skillPath, 'SKILL.md'), '---\ndescription: Custom root skill\n---\n');
+
+    const snippet = removalSnippetFor(
+      assembleLiveConfig({ claudeDir: configuredRoot, homeDir: root, scoped: true }),
+      'skill'
+    );
+
+    expect(snippet).toBe(`rm -rf -- '${skillPath}'`);
+  });
+
+  it('emits a recursive removal for a plugin inside a configured root not named .claude (#3377)', () => {
+    const configuredRoot = join(root, 'enterprise', 'principal-a');
+    const installPath = join(configuredRoot, 'plugins', 'cache', 'custom-root-plugin');
+    mkdirSync(join(installPath, 'skills', 'bundled-skill'), { recursive: true });
+    writeFileSync(
+      join(configuredRoot, 'settings.json'),
+      JSON.stringify({ enabledPlugins: { custom: true } })
+    );
+    writeFileSync(
+      join(configuredRoot, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({
+        plugins: {
+          custom: [{ scope: 'user', version: '1.0.0', installPath }],
+        },
+      })
+    );
+
+    const snippet = removalSnippetFor(
+      assembleLiveConfig({ claudeDir: configuredRoot, homeDir: root, scoped: true }),
+      'plugin'
+    );
+
+    expect(snippet).toContain(`rm -rf -- '${installPath}'`);
+  });
+
+  it('refuses a plugin path whose intermediate symlink escapes the configured root (#3377)', () => {
+    const outside = join(root, 'outside-plugins');
+    const installPath = join(claudeDir, 'plugins', 'link', 'victim');
+    mkdirSync(join(outside, 'victim', 'skills', 'bundled-skill'), { recursive: true });
+    mkdirSync(join(claudeDir, 'plugins'), { recursive: true });
+    symlinkSync(outside, join(claudeDir, 'plugins', 'link'));
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({ enabledPlugins: { escaped: true } })
+    );
+    writeFileSync(
+      join(claudeDir, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({
+        plugins: {
+          escaped: [{ scope: 'user', version: '1.0.0', installPath }],
+        },
+      })
+    );
+
+    const snippet = removalSnippetFor(
+      assembleLiveConfig({ claudeDir, homeDir: root }),
+      'plugin'
+    );
+
+    expect(snippet).not.toContain('rm -rf');
+    expect(snippet).toContain('# Refusing to generate an automatic recursive delete');
+  });
+
+  it('fails closed when a recorded plugin path cannot be canonicalized (#3377)', () => {
+    const installPath = join(claudeDir, 'plugins', 'missing', 'victim');
+    mkdirSync(join(claudeDir, 'plugins'), { recursive: true });
+    writeFileSync(
+      join(claudeDir, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({
+        plugins: {
+          missing: [{ scope: 'user', version: '1.0.0', installPath }],
+        },
+      })
+    );
+    const liveConfig = assembleLiveConfig({ claudeDir, homeDir: root });
+    const plugin = liveConfig.plugins[0];
+    const finding: HygieneFinding = {
+      id: 'plugin.unused:missing',
+      resourceType: 'plugin',
+      resourceId: 'missing',
+      scope: { kind: 'global' },
+      state: 'unused',
+      lastSeen: null,
+      lifetimeCount: 0,
+      windowCount: 0,
+      windowDays: 30,
+      sourcePath: plugin.sourcePath,
+      removalPath: plugin.installPath,
+      removalSafety: plugin.removalSafety,
+    };
+
+    const snippet = buildConfigRemovalSnippet(finding);
+
+    expect(snippet).not.toContain('rm -rf');
+    expect(snippet).toContain('# Refusing to generate an automatic recursive delete');
+  });
+
   it('stamps the mutable config snapshot with the supplied canonical capture instant', () => {
     const capturedAt = new Date('2026-07-30T12:34:56.789Z');
     const liveConfig = assembleLiveConfig({
@@ -422,11 +540,19 @@ describe('assembleLiveConfig', () => {
       scope: 'user',
       path: join(claudeDir, 'skills', 'small-skill'),
       description: 'Small bounded skill',
+      removalSafety: {
+        configuredRoot: join(claudeDir, 'skills'),
+        canonicalPathContained: true,
+      },
     });
     expect(liveConfig.skills.find((skill) => skill.id === 'huge-skill')).toEqual({
       id: 'huge-skill',
       scope: 'user',
       path: join(claudeDir, 'skills', 'huge-skill'),
+      removalSafety: {
+        configuredRoot: join(claudeDir, 'skills'),
+        canonicalPathContained: true,
+      },
     });
   });
 
@@ -598,6 +724,10 @@ describe('assembleLiveConfig', () => {
       projectPath: projectRoot,
       path: join(projectRoot, '.claude', 'skills', 'project-skill'),
       description: 'Project-only test skill',
+      removalSafety: {
+        configuredRoot: join(projectRoot, '.claude', 'skills'),
+        canonicalPathContained: true,
+      },
     });
     expect(liveConfig.subagents).toContainEqual({
       id: 'project-agent',

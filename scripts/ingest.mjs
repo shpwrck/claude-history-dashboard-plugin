@@ -2112,6 +2112,8 @@ const {
   readTextFileCappedSync,
   readStopHookConfigState,
   hookReferencedTargetsSignature,
+  recursiveRemovalSafetySignature,
+  recursiveRemovalSafetySignatureFromLiveConfig,
   hostEnvironmentObservation,
   hostEnvironmentObservationSignature,
 } = configLoaderModule;
@@ -2143,6 +2145,21 @@ export function stopHookConfigState() {
     projectRoots: liveConfigProjectRoots(repoMapArtifactRoots()),
     environment: LIVE_CONFIG_ENVIRONMENT_OBSERVATION,
   });
+}
+
+/** Current bounded canonical-containment state for cache hard-gating. */
+export function recursiveRemovalSafetyStateForServer() {
+  return recursiveRemovalSafetySignature({
+    claudeDir: CLAUDE,
+    homeDir: CLAUDE_HOME,
+    scoped: SCOPED_INGEST,
+    projectRoots: liveConfigProjectRoots(repoMapArtifactRoots()),
+  });
+}
+
+/** Exact canonical-containment state serialized in an assembled dataset. */
+export function recursiveRemovalSafetyStateFromDataset(dataset) {
+  return recursiveRemovalSafetySignatureFromLiveConfig(dataset.liveConfig);
 }
 
 // Values-free probed-state signature for every hook-referenced target (#2539),
@@ -2331,6 +2348,17 @@ try {
 // restart can distinguish them from an older unpartitioned row.
 try {
   db.exec('ALTER TABLE dataset_cache ADD COLUMN doc_issue_state TEXT');
+} catch {
+  /* column already present (added on a prior boot) */
+}
+
+// #3377: bind persisted bodies to every recursive-removal containment verdict
+// they serialized (plugins plus user/project skills). A nested path component
+// can become an escaping symlink without moving a watched root mtime or source
+// bytes; legacy NULL rows therefore hard-miss instead of reusing an unbound
+// affirmative verdict.
+try {
+  db.exec('ALTER TABLE dataset_cache ADD COLUMN recursive_removal_safety_state TEXT');
 } catch {
   /* column already present (added on a prior boot) */
 }
@@ -2524,8 +2552,13 @@ export const PARSER_SIG_VERSION = 'v6';
 // turnover rejects persisted v31 bodies that cannot distinguish a same-file git
 // undo from an unrelated checkout/restore. toolData is local and present
 // in BOTH paths, so flag-off bumps in step (30 -> 31).
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 32;
-export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 31;
+// v33 (#3377): liveConfig skill/plugin entries now carry server-observed
+// canonical containment evidence for recursive-removal snippets. The source
+// config may be unchanged while a persisted v32 body lacks that evidence and
+// therefore fails closed in the browser formatter, so both local dataset paths
+// advance together (flag-off 31 -> 32).
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 33;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 32;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2542,19 +2575,20 @@ export function datasetAssemblySchemaKey() {
 }
 
 const selDatasetCache = db.prepare(
-  'SELECT etag, json_br, json_gz, doc_issue_state FROM dataset_cache WHERE content_hash = ?'
+  'SELECT etag, json_br, json_gz, doc_issue_state, recursive_removal_safety_state FROM dataset_cache WHERE content_hash = ?'
 );
 const selLatestDatasetCache = db.prepare(
-  'SELECT content_hash, etag, json_br, json_gz, doc_issue_state FROM dataset_cache WHERE schema_key = ? ORDER BY created_at DESC LIMIT 1'
+  'SELECT content_hash, etag, json_br, json_gz, doc_issue_state, recursive_removal_safety_state FROM dataset_cache WHERE schema_key = ? ORDER BY created_at DESC LIMIT 1'
 );
 const insDatasetCache = db.prepare(`
-  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state, recursive_removal_safety_state)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(content_hash) DO UPDATE SET
     etag=excluded.etag, json_br=excluded.json_br,
     json_gz=excluded.json_gz, created_at=excluded.created_at,
     schema_key=excluded.schema_key,
-    doc_issue_state=excluded.doc_issue_state
+    doc_issue_state=excluded.doc_issue_state,
+    recursive_removal_safety_state=excluded.recursive_removal_safety_state
 `);
 const pruneDatasetCache = db.prepare(`
   DELETE FROM dataset_cache WHERE content_hash NOT IN (
@@ -2591,6 +2625,18 @@ function decodePersistedDocIssueCacheState(raw) {
   }
 }
 
+function decodePersistedRecursiveRemovalSafetyState(raw) {
+  return typeof raw === 'string' && raw !== ''
+    ? {
+        recursiveRemovalSafetyStateKnown: true,
+        recursiveRemovalSafetyState: raw,
+      }
+    : {
+        recursiveRemovalSafetyStateKnown: false,
+        recursiveRemovalSafetyState: null,
+      };
+}
+
 // Load a persisted compressed dataset by its content fingerprint. Returns the
 // same shape the server's in-memory cache uses ({ etag, json, brBuf, gzBuf,
 // contentHash }), reconstructing the raw JSON string by gunzipping the stored
@@ -2622,6 +2668,9 @@ export function loadDatasetCache(contentHash) {
     gzBuf,
     contentHash,
     ...decodePersistedDocIssueCacheState(row.doc_issue_state),
+    ...decodePersistedRecursiveRemovalSafetyState(
+      row.recursive_removal_safety_state
+    ),
   };
 }
 
@@ -2650,6 +2699,9 @@ export function loadLatestDatasetCache() {
     gzBuf,
     contentHash: row.content_hash,
     ...decodePersistedDocIssueCacheState(row.doc_issue_state),
+    ...decodePersistedRecursiveRemovalSafetyState(
+      row.recursive_removal_safety_state
+    ),
   };
 }
 
@@ -2659,7 +2711,14 @@ export function loadLatestDatasetCache() {
 // rather than failing the request. `createdAt` is injected by the caller (the
 // server) to keep this module free of wall-clock reads.
 export function saveDatasetCache(
-  { contentHash, etag, brBuf, gzBuf, docIssueCacheState = null },
+  {
+    contentHash,
+    etag,
+    brBuf,
+    gzBuf,
+    docIssueCacheState = null,
+    recursiveRemovalSafetyState,
+  },
   createdAt
 ) {
   try {
@@ -2670,7 +2729,8 @@ export function saveDatasetCache(
       gzBuf,
       createdAt,
       datasetAssemblySchemaKey(),
-      JSON.stringify(docIssueCacheState)
+      JSON.stringify(docIssueCacheState),
+      recursiveRemovalSafetyState ?? null
     );
     pruneDatasetCache.run(DATASET_CACHE_KEEP);
   } catch (err) {
@@ -3501,9 +3561,10 @@ function hashProjectLiveConfigFiles(roots, hash) {
 }
 
 // Cheap "could anything have changed since the last full ingest?" signature
-// for the server's stat-gate (#182). Stats only the projects dir, each
-// top-level project dir, top-level dataset files, liveConfig dirs, and a bounded
-// repo-map root-discovery set — no recursion into transcripts and no SQLite.
+// for the server's stat-gate (#182). Stats the projects dir, each top-level
+// project dir, top-level dataset files, liveConfig dirs, and a bounded repo-map
+// root-discovery set; derived security claims add their own bounded path probes
+// (registered plugin/skill realpaths) — no transcript recursion or SQLite.
 // Lets the server skip the full ingest() walk on a refresh when nothing
 // structural changed.
 //
@@ -3622,10 +3683,16 @@ export function sourceSignature() {
   // transition refreshes instead of serving stale reference-integrity state
   // (#2539).
   parts.push(`hook-targets:${hookTargetsSignature()}`);
-  // liveConfig resource dirs: their membership feeds the dataset, and skill
-  // descriptions are read from SKILL.md under the config file cap. Hashing the
-  // tree's mtime/size pairs catches both add/remove/rename and bounded metadata
-  // edits without loading those files during the cheap source-signature pass.
+  // #3377: canonical containment is derived from the CURRENT path graph, not
+  // only source bytes or watched root mtimes. Enumerate the bounded skill set
+  // and probe it plus registered plugin installs so an intermediate component
+  // becoming an escaping symlink moves the request-time gate immediately.
+  parts.push(`recursive-removal-safety:${recursiveRemovalSafetyStateForServer()}`);
+  // liveConfig resource dirs: their direct membership feeds the dataset, and
+  // skill descriptions are read from SKILL.md under the config file cap. Root
+  // directory mtimes catch direct add/remove/rename events; the dedicated
+  // containment signature above covers plugin and global/project skill paths
+  // without reading their file bodies.
   for (const d of [SKILLS_DIR, AGENTS_DIR, COMMANDS_DIR, PLUGINS_CACHE]) {
     try {
       parts.push(`${d}:${Math.floor(statSync(d).mtimeMs)}`);
@@ -3870,6 +3937,12 @@ export function ingest() {
   // rebuild the persisted dataset cache even though no hashed source moved.
   hash.update('hook-targets\n');
   hash.update(hookTargetsSignature());
+  hash.update('\n');
+  // These containment verdicts feed liveConfig. Directory-only plugin/skill
+  // paths can change canonical state without changing hashTree's file list, so
+  // fold the exact bounded derived state into the persistent content key.
+  hash.update('recursive-removal-safety\n');
+  hash.update(recursiveRemovalSafetyStateForServer());
   hash.update('\n');
   // Walk the resource directories so a new SKILL.md or command file
   // invalidates without us having to re-stat each individual file.

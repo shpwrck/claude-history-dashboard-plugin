@@ -11,7 +11,15 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, brotliCompressSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
@@ -41,8 +49,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      32,
-      'enabled datasets include exact git undo path evidence (#3160)'
+      33,
+      'enabled datasets include canonical recursive-removal evidence (#3377)'
     );
     // Pin the FLAG-OFF (local-first default) schema version as a LITERAL so a
     // regression that lowers it — e.g. back to v28 — fails here (#2955). The
@@ -52,8 +60,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION,
-      31,
-      'flag-off advances to v31 because local toolData now carries git undo paths (#3160)'
+      32,
+      'flag-off advances to v32 because local liveConfig carries recursive-removal evidence (#3377)'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -65,11 +73,11 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       key,
       `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'flag-off uses the exact v31 cache key for local git undo path evidence'
+      'flag-off uses the exact v32 cache key for canonical recursive-removal evidence'
     );
-    // The immediately-preceding v30 key needs no dedicated notEqual: the literal
-    // equal(FLAG_OFF, 31) pin above fixes the flag-off version exactly, so any
-    // regression (v30 included) fails there (#2709 review item; avoids
+    // The immediately-preceding v31 key needs no dedicated notEqual: the literal
+    // equal(FLAG_OFF, 32) pin above fixes the flag-off version exactly, so any
+    // regression (v31 included) fails there (#2709 review item; avoids
     // accumulating one dead assertion per bump).
     assert.notEqual(
       key,
@@ -133,7 +141,7 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       enabledKey,
       `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'an enabled snapshot turns over persisted v31 flag-off datasets'
+      'an enabled snapshot turns over persisted v32 flag-off datasets'
     );
     assert.notEqual(ingest.sourceSignature(), flagOffSourceSignature);
     assert.notEqual(ingest.ingest().contentHash, flagOffContentHash);
@@ -179,7 +187,14 @@ test('loadLatestDatasetCache fences on the schema key: a NEWER row from another 
 
     // A row built under the CURRENT schema, persisted through the real path.
     ingest.saveDatasetCache(
-      { contentHash: 'cur-hash', etag: '"cur"', brBuf, gzBuf },
+      {
+        contentHash: 'cur-hash',
+        etag: '"cur"',
+        brBuf,
+        gzBuf,
+        recursiveRemovalSafetyState:
+          ingest.recursiveRemovalSafetyStateForServer(),
+      },
       1_000
     );
     const current = ingest.loadLatestDatasetCache();
@@ -192,6 +207,11 @@ test('loadLatestDatasetCache fences on the schema key: a NEWER row from another 
       'new flag-off rows persist an explicit known-null snapshot state'
     );
     assert.equal(current.docIssueCacheState, null);
+    assert.equal(current.recursiveRemovalSafetyStateKnown, true);
+    assert.equal(
+      current.recursiveRemovalSafetyState,
+      ingest.recursiveRemovalSafetyStateForServer()
+    );
 
     // A row built under a DIFFERENT (older) schema, with a NEWER created_at —
     // exactly the persisted-volume-across-a-schema-bump case. Inserted directly
@@ -242,6 +262,8 @@ test('persisted dataset rows round-trip exact doc-issue identity and expiry meta
         brBuf: brotliCompressSync(body),
         gzBuf: gzipSync(body),
         docIssueCacheState: state,
+        recursiveRemovalSafetyState:
+          ingest.recursiveRemovalSafetyStateForServer(),
       },
       2_000
     );
@@ -250,6 +272,11 @@ test('persisted dataset rows round-trip exact doc-issue identity and expiry meta
     assert.ok(loaded);
     assert.equal(loaded.docIssueCacheStateKnown, true);
     assert.deepEqual(loaded.docIssueCacheState, state);
+    assert.equal(loaded.recursiveRemovalSafetyStateKnown, true);
+    assert.equal(
+      loaded.recursiveRemovalSafetyState,
+      ingest.recursiveRemovalSafetyStateForServer()
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
     if (origHome === undefined) delete process.env.HOME;
@@ -375,6 +402,111 @@ test('hook-target existence transition moves sourceSignature with settings untou
       ingest.sourceSignature(),
       absent,
       'removing it again must restore the signature exactly (values-free: state only)'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('skill and plugin containment transitions move both dataset cache gates (#3377)', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const home = join(tmpdir(), `chd-3377-home-${randomUUID()}`);
+  const claudeDir = join(home, '.claude');
+  const pluginsCache = join(claudeDir, 'plugins', 'cache');
+  const pluginComponent = join(pluginsCache, 'marketplace', 'demo');
+  const installPath = join(pluginComponent, '1.0.0');
+  const outsideComponent = join(home, 'outside', 'demo');
+  const skillsRoot = join(claudeDir, 'skills');
+  const skillPath = join(skillsRoot, 'risky-skill');
+  const outsideSkill = join(home, 'outside', 'risky-skill');
+  mkdirSync(join(claudeDir, 'projects'), { recursive: true });
+  mkdirSync(installPath, { recursive: true });
+  mkdirSync(join(outsideComponent, '1.0.0'), { recursive: true });
+  mkdirSync(skillPath, { recursive: true });
+  mkdirSync(outsideSkill, { recursive: true });
+  writeFileSync(
+    join(skillPath, 'SKILL.md'),
+    '---\ndescription: risky skill\n---\n'
+  );
+  writeFileSync(
+    join(outsideSkill, 'SKILL.md'),
+    '---\ndescription: escaped risky skill\n---\n'
+  );
+  writeFileSync(
+    join(claudeDir, 'plugins', 'installed_plugins.json'),
+    JSON.stringify({
+      plugins: {
+        demo: [{ scope: 'user', version: '1.0.0', installPath }],
+      },
+    })
+  );
+
+  try {
+    const ingest = await loadIngest(home);
+    const containedState = ingest.recursiveRemovalSafetyStateForServer();
+    const containedSourceSignature = ingest.sourceSignature();
+    const containedContentHash = ingest.ingest().contentHash;
+    const skillsRootStat = statSync(skillsRoot);
+
+    rmSync(skillPath, { recursive: true, force: true });
+    symlinkSync(outsideSkill, skillPath, 'dir');
+    utimesSync(
+      skillsRoot,
+      skillsRootStat.atimeMs / 1_000,
+      (Math.floor(skillsRootStat.mtimeMs) + 0.5) / 1_000
+    );
+    assert.equal(
+      Math.floor(statSync(skillsRoot).mtimeMs),
+      Math.floor(skillsRootStat.mtimeMs),
+      'the skill transition must not rely on the skills-root mtime moving'
+    );
+    const escapedSkillState = ingest.recursiveRemovalSafetyStateForServer();
+    const escapedSkillSourceSignature = ingest.sourceSignature();
+    const escapedSkillContentHash = ingest.ingest().contentHash;
+    assert.notEqual(
+      escapedSkillState,
+      containedState,
+      'the bounded skill realpath probes must observe the containment transition'
+    );
+    assert.notEqual(
+      escapedSkillSourceSignature,
+      containedSourceSignature,
+      'the request-time stat gate must not skip the changed skill verdict'
+    );
+    assert.notEqual(
+      escapedSkillContentHash,
+      containedContentHash,
+      'the persisted content gate must bind the changed skill verdict'
+    );
+
+    const rootMtime = statSync(pluginsCache).mtimeMs;
+
+    rmSync(pluginComponent, { recursive: true, force: true });
+    symlinkSync(outsideComponent, pluginComponent, 'dir');
+    assert.equal(
+      statSync(pluginsCache).mtimeMs,
+      rootMtime,
+      'the nested replacement must not rely on the plugin-cache root mtime moving'
+    );
+    assert.notEqual(
+      ingest.recursiveRemovalSafetyStateForServer(),
+      escapedSkillState,
+      'the bounded plugin realpath probes must observe the containment transition'
+    );
+    assert.notEqual(
+      ingest.sourceSignature(),
+      escapedSkillSourceSignature,
+      'the request-time stat gate must not skip the changed plugin verdict'
+    );
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      escapedSkillContentHash,
+      'the persisted content gate and assembled memo must bind the plugin verdict'
     );
   } finally {
     rmSync(home, { recursive: true, force: true });

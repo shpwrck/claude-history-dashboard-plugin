@@ -8,6 +8,10 @@ const plugin = (id: string) => ({
   version: '1.0.0',
   sourcePath: '/home/u/.claude/plugins/installed_plugins.json',
   installPath: `/home/u/.claude/plugins/${id}`,
+  removalSafety: {
+    configuredRoot: '/home/u/.claude/plugins',
+    canonicalPathContained: true,
+  },
   installedAt: '2026-01-01T00:00:00.000Z',
   bundled: { skills: [`${id}-skill`], agents: [] },
 });

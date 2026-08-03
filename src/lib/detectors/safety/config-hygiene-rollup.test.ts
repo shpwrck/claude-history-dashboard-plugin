@@ -48,6 +48,10 @@ function input(over: Partial<RecommendationInput> = {}): RecommendationInput {
           scope: 'global',
           sourcePath: '/home/u/.claude/plugins/installed_plugins.json',
           installPath: '/home/u/.claude/plugins/plug-a',
+          removalSafety: {
+            configuredRoot: '/home/u/.claude/plugins',
+            canonicalPathContained: true,
+          },
           bundled: { skills: ['plug-a-skill'], agents: [] },
         },
       ],
@@ -108,6 +112,10 @@ describe('safety.config-hygiene-rollup (#1164)', () => {
                 scope: 'global',
                 sourcePath: registryPath,
                 installPath,
+                removalSafety: {
+                  configuredRoot: installPath.replace(/[\\/]plug-a$/, ''),
+                  canonicalPathContained: recursiveDelete,
+                },
                 bundled: { skills: ['plug-a-skill'], agents: [] },
               },
             ],

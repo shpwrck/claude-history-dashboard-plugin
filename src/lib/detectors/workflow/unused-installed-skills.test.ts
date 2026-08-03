@@ -2,7 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { detector } from './unused-installed-skills';
 import type { RecommendationInput } from '../types';
 
-const skill = (id: string) => ({ id, scope: 'user', path: `/home/u/.claude/skills/${id}` });
+const skill = (id: string) => ({
+  id,
+  scope: 'user',
+  path: `/home/u/.claude/skills/${id}`,
+  removalSafety: {
+    configuredRoot: '/home/u/.claude/skills',
+    canonicalPathContained: true,
+  },
+});
 const liveConfig = (ids: string[]) =>
   ({
     skills: ids.map(skill),

@@ -28,7 +28,7 @@
 //     scoped by `filters`. The clock/config metadata below is dataset-derived and
 //     therefore surface-independent.
 //   worker -> parent: { id, ok:true, json, contentHash, sourceSig,
-//                       docIssueCacheState,
+//                       docIssueCacheState, recursiveRemovalSafetyState,
 //                       suppressionEmissionId,
 //                       guidanceTransitions, guidanceCacheValidity,
 //                       hookOverheadCacheValidity, hookOverheadConfigState,
@@ -140,6 +140,8 @@ const {
   sourceSignature,
   docIssueSnapshotCacheStateForServer,
   docIssueSnapshotCacheStateFromDataset,
+  recursiveRemovalSafetyStateForServer,
+  recursiveRemovalSafetyStateFromDataset,
 } = ingestApi;
 const { safeJsonStringify } = await import(
   join(projectDir, 'src', 'lib', 'json-safe.ts')
@@ -174,6 +176,7 @@ function recommendationSourceState() {
   return {
     sourceSig: sourceSignature(),
     docIssueCacheState: docIssueSnapshotCacheStateForServer(),
+    recursiveRemovalSafetyState: recursiveRemovalSafetyStateForServer(),
   };
 }
 
@@ -236,6 +239,7 @@ async function buildRecommendationResult({
   return {
     dataset,
     docIssueCacheState: docIssueSnapshotCacheStateFromDataset(dataset),
+    recursiveRemovalSafetyState: recursiveRemovalSafetyStateFromDataset(dataset),
     json: safeJsonStringify(result),
     contentHash: stats.contentHash,
     guidanceTransitions,
@@ -263,15 +267,25 @@ async function buildStableRecommendationResult(params) {
         built.docIssueCacheState,
         completedSourceState.docIssueCacheState
       );
-    if (docIssueStateStable && (sourceSigStable || attempt === 1)) {
+    const recursiveRemovalSafetyStateStable =
+      expectedSourceState.recursiveRemovalSafetyState ===
+        completedSourceState.recursiveRemovalSafetyState &&
+      built.recursiveRemovalSafetyState ===
+        completedSourceState.recursiveRemovalSafetyState;
+    if (
+      docIssueStateStable &&
+      recursiveRemovalSafetyStateStable &&
+      (sourceSigStable || attempt === 1)
+    ) {
       return {
         ...built,
         sourceState: {
           ...completedSourceState,
           // A final source-racy build is safe to serve because its exact
-          // document-issue trust state is current, but it is not safe to cache
-          // under a signature the built dataset did not observe. The parent
-          // response cache will retry/commit it as explicitly unsettled.
+          // document-issue and recursive-removal trust states are current, but it
+          // is not safe to cache under a signature the built dataset did not
+          // observe. The parent response cache will retry/commit it as
+          // explicitly unsettled.
           sourceSig: sourceSigStable ? completedSourceState.sourceSig : null,
         },
       };
@@ -351,6 +365,7 @@ parentPort.on('message', async (msg) => {
       editFormatChurnCacheValidity: built.editFormatChurnCacheValidity,
       sourceSig: built.sourceState.sourceSig,
       docIssueCacheState: built.docIssueCacheState,
+      recursiveRemovalSafetyState: built.recursiveRemovalSafetyState,
       suppressionEmissionId,
     });
   } catch (err) {
