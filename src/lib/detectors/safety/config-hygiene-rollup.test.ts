@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './config-hygiene-rollup';
 import { buildRecommendations } from '../../recommendations';
+import { effectiveFixKind, validateFixSnippet } from '../fix-validity';
 import type { RecommendationInput } from '../types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -68,6 +69,81 @@ describe('safety.config-hygiene-rollup (#1164)', () => {
     expect(rollup[0].fix?.snippet).toContain('delete data.mcpServers[server]');
     expect(rollup[0].fix?.snippet).toContain('const plugin = "plug-a";');
   });
+
+  it.each([
+    {
+      platform: 'Linux',
+      sourcePath: '/home/alice/.claude.json',
+      registryPath: '/home/alice/.claude/plugins/installed_plugins.json',
+      installPath: '/home/alice/.claude/plugins/plug-a',
+      recursiveDelete: true,
+    },
+    {
+      platform: 'macOS',
+      sourcePath: '/Users/alice/.claude.json',
+      registryPath: '/Users/alice/.claude/plugins/installed_plugins.json',
+      installPath: '/Users/alice/.claude/plugins/plug-a',
+      recursiveDelete: true,
+    },
+    {
+      platform: 'Windows',
+      sourcePath: 'C:\\Users\\alice\\.claude.json',
+      registryPath: 'C:\\Users\\alice\\.claude\\plugins\\installed_plugins.json',
+      installPath: 'C:\\Users\\alice\\.claude\\plugins\\plug-a',
+      recursiveDelete: false,
+    },
+  ])(
+    'declares the actual emitted $platform host-path fix manual (#3565)',
+    ({ sourcePath, registryPath, installPath, recursiveDelete }) => {
+      const rec = detector.rule(
+        input({
+          liveConfig: liveConfig({
+            mcpServers: [
+              { id: 'server-a', scope: 'global', sourcePath },
+              { id: 'server-b', scope: 'global', sourcePath },
+            ],
+            plugins: [
+              {
+                id: 'plug-a',
+                scope: 'global',
+                sourcePath: registryPath,
+                installPath,
+                bundled: { skills: ['plug-a-skill'], agents: [] },
+              },
+            ],
+          }),
+        }),
+        NOW
+      )!;
+      const fix = rec.fix!;
+
+      // Prove the detector's real runtime bytes carry each host-local path;
+      // the source-scan gate cannot see values interpolated by the action builder.
+      expect(fix.snippet).toContain(`const path = ${JSON.stringify(sourcePath)};`);
+      expect(fix.snippet).toContain(`const path = ${JSON.stringify(registryPath)};`);
+      expect(fix.snippet).toContain(
+        `const installPath = ${JSON.stringify(installPath)};`
+      );
+
+      // Negative control: these exact bytes violate the validated portability
+      // contract, so the detector must explicitly demote the concrete command.
+      expect(
+        validateFixSnippet({ ...fix, fixKind: 'validated' }).length
+      ).toBeGreaterThan(0);
+      expect(fix.fixKind).toBe('manual');
+      expect(effectiveFixKind(fix)).toBe('manual');
+      expect(validateFixSnippet(fix)).toEqual([]);
+
+      if (recursiveDelete) {
+        expect(fix.snippet).toContain(`rm -rf -- '${installPath}'`);
+      } else {
+        expect(fix.snippet).not.toContain('rm -rf');
+        expect(fix.snippet).toContain(
+          'Refusing to generate an automatic recursive delete'
+        );
+      }
+    }
+  );
 
   it('does NOT emit families covered by workflow.unused-installed-* (no double-count)', () => {
     // Unused skills/subagents/commands present, but NO mcp/plugin → rollup stays silent.

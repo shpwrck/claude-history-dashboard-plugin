@@ -101,6 +101,7 @@ export const detector: Detector = {
         ),
       fix: {
         target: 'command',
+        fixKind: 'manual',
         label: 'Prune unused MCP/plugins',
         note: 'Copy and run after confirming each MCP server or plugin is no longer needed.',
         snippet: buildConfigRemovalSnippetBlock(unused),
