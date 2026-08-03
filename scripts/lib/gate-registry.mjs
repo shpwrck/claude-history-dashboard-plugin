@@ -54,6 +54,11 @@ export const GATE_REGISTRY = [
     discriminatingTest: 'scripts/check-no-binary-sources.test.mjs',
   },
   {
+    name: 'check-personal-paths',
+    script: 'scripts/check-personal-paths.mjs',
+    discriminatingTest: 'scripts/check-personal-paths.test.mjs',
+  },
+  {
     // The pure evaluator's must-fail cases live in the vitest suite; the CLI
     // is a thin filesystem wrapper around it.
     name: 'check-bundle-size',

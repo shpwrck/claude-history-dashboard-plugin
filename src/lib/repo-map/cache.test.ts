@@ -230,7 +230,7 @@ describe('artifactPathFor', () => {
     // with the same artifact dir + root, so they MUST resolve to the same file.
     const dir = '/usage-data/repo-map';
     const roots = [
-      '/home/jskrzypek/project/claude-history-dashboard',
+      '/home/user/project/claude-history-dashboard',
       '/tmp/proj-with-dash',
       'C:\\Users\\dev\\repo',
     ];

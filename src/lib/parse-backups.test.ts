@@ -44,7 +44,7 @@ function snap(
   };
 }
 
-const PROJECT = '/home/tariq/work/payments-monorepo';
+const PROJECT = '/home/user/work/payments-monorepo';
 
 // ── diffConfigDrift tests ────────────────────────────────────────────────────
 

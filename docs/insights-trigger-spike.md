@@ -33,7 +33,7 @@ Observed result event:
 ```
 result/success  is_error=false
 "Your shareable insights report is ready:
- file:///home/jskrzypek/.claude/usage-data/report-2026-05-31-091526.html"
+ file:///home/user/.claude/usage-data/report-2026-05-31-091526.html"
 ```
 
 ### Evidence it wrote the real artifacts `parse-insights.ts` consumes

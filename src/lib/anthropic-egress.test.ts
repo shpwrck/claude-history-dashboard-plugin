@@ -146,7 +146,7 @@ describe('egressScrub', () => {
         {
           role: 'user',
           content:
-            'ACTION: bash cat /home/jane/.claude/.credentials.json; ' +
+            'ACTION: bash cat /home/user/.claude/.credentials.json; ' +
             'leaked key sk-ant-abcdef0123456789ABCDEFG in the log; ' +
             'export DB_PASSWORD=hunter2supersecretvalue; ' +
             'ping ops@example.com',
@@ -162,7 +162,7 @@ describe('egressScrub', () => {
     // The secret-shaped substrings must be gone from what would egress.
     expect(payload).not.toContain('sk-ant-abcdef0123456789ABCDEFG');
     expect(payload).not.toContain('hunter2supersecretvalue');
-    expect(payload).not.toContain('/home/jane/.claude');
+    expect(payload).not.toContain('/home/user/.claude');
     expect(payload).not.toContain('ops@example.com');
     expect(payload).toContain('[REDACTED_KEY]');
     expect(payload).toContain('[REDACTED_PATH]');

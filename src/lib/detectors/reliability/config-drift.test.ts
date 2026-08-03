@@ -16,8 +16,8 @@ const NOW = 1_717_200_000_000; // fixed clock epoch-ms
 const H = 3_600_000;
 const DAY = 24 * H;
 
-const PROJECT = '/home/tariq/work/payments-monorepo';
-const OTHER = '/home/tariq/work/other-repo';
+const PROJECT = '/home/user/work/payments-monorepo';
+const OTHER = '/home/user/work/other-repo';
 
 function baseInput(configBackups?: DriftEvent[]): RecommendationInput & { configBackups?: DriftEvent[] } {
   return {

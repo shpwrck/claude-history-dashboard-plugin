@@ -262,7 +262,7 @@ describe('transcript egress sanitizing (#3111)', () => {
     jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk',
     bearer: 'Bearer abcdefghijklmnop0123456789',
     env: 'GITHUB_TOKEN=ghp_ZzYyXxWwVvUuTtSsRrQqPpOoNnMmLlKk',
-    home: '/home/jskrzypek/.claude/settings.json',
+    home: '/home/user/.claude/settings.json',
     email: 'jankoszy@gmail.com',
     hex: 'a3f5c9d2e7b148a6f0c3d9e2b7a4f6c108d5e3b9a7c2f4d6e8b0a1c3d5e7f9b2',
   };

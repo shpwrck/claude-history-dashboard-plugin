@@ -58,8 +58,8 @@ because we snapshot rather than transfer):
 - **Personal deploy coupling** - genericize `chd-main`/`chd-spa`/`chd-ent` instance + port refs
   (8000/7000/8190) in `AGENTS.md`, `README.md`, `docker-compose.spa.yml`, `.dockerignore`,
   `.gitignore`.
-- **Personal paths** - `/home/jskrzypek` refs in `docs/insights-trigger-spike.md`,
-  `docs/reviews/per-view-synthesis.md`.
+- **Personal paths** - keep observed host paths portable in retained evidence,
+  and gate the tracked tree against unreviewed Unix/Windows home identities.
 - **`~/.claude` / dogfooding coupling** - the `/recs` dogfooding rule, shadow-calls references,
   burn-epic/groom-release operating manual, personal ports/instances in `CLAUDE.md`/`AGENTS.md`,
   `hooks/`, `commands/`, `.claude-plugin/marketplace.json`, `deploy/` hooks. Decide per-file:

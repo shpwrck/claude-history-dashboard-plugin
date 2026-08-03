@@ -35,9 +35,12 @@ healthy is what makes the injected `[recs]` findings reflect the latest engine.
   detached/stale HEAD — do not deploy from it. (An older
   `~/project/deploy-staging/chd-deploy-master` path in old container labels is
   historical, not a source of truth.)
-- **Live data:** host `~/.claude` is bind-mounted in and read live. The deploy
-  MUST run with `HOME=/home/jskrzypek` so the bind path does not nest to
-  `${HOME}/.claude` (a stray HOME yields a 0-session dashboard).
+- **Live data:** host `~/.claude` is bind-mounted in and read live. Before a
+  manual compose command, derive the login home with
+  `CHD_HOST_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"` and refuse an
+  empty result. The deploy MUST run with `HOME="$CHD_HOST_HOME"` so the bind
+  path does not nest to `${HOME}/.claude` (a stray HOME yields a 0-session
+  dashboard).
 - **Adoption-spool coordination state (new since #3529):** the server's receipt
   drain and the recs SessionStart hook (producer, `~/.agents`
   `skills/recs/scripts/session-start-hook.mjs`, updated by agent-skills#25)
@@ -92,9 +95,11 @@ If a manual recreate is genuinely needed after a local build:
 **Published-image pull path (user-run `chdref`, carries the LAN authorization):**
 
 ```bash
-( cd ~/project/claude-history-dashboard \
-  && HOME=/home/jskrzypek podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml pull \
-  && HOME=/home/jskrzypek podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate )
+( CHD_HOST_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)" \
+  && test -n "$CHD_HOST_HOME" \
+  && cd ~/project/claude-history-dashboard \
+  && HOME="$CHD_HOST_HOME" podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml pull \
+  && HOME="$CHD_HOST_HOME" podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate )
 ```
 
 This tracks the reviewed digest committed in the checkout — it deliberately does
@@ -108,8 +113,9 @@ proxy in `docker-compose.tls.yml`; loopback needs none of these.
 **Agent-safe loopback recreate** (no guard-disarming flag — see Decisions):
 
 ```bash
-cd ~/project/chd-deploy-master && \
-HOME=/home/jskrzypek BIND_HOST=127.0.0.1 CHD_APP_IMAGE=localhost/claude-history-dashboard:local \
+CHD_HOST_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)" && \
+test -n "$CHD_HOST_HOME" && cd ~/project/chd-deploy-master && \
+HOME="$CHD_HOST_HOME" BIND_HOST=127.0.0.1 CHD_APP_IMAGE=localhost/claude-history-dashboard:local \
 podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.local.yml up -d --force-recreate
 ```
 
@@ -176,9 +182,9 @@ podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.loca
   movement. `npm run deploy`/`--build` covers post-merge deploys and verifying
   local changes, and creates the ahead-of-pin condition above until the pin
   advances.
-- **`HOME=/home/jskrzypek` is load-bearing** — omitting it nests the `~/.claude`
-  bind mount and the dashboard reads 0 sessions (looks like missing data, not an
-  error).
+- **`HOME="$CHD_HOST_HOME"` is load-bearing** — derive `CHD_HOST_HOME` from the
+  login account as shown above; omitting it nests the `~/.claude` bind mount and
+  the dashboard reads 0 sessions (looks like missing data, not an error).
 - **`-p chd-deploy-master` is load-bearing on manual compose calls** — the
   default project name derived from a different checkout directory spins a
   second stack that collides on port 5173 instead of recreating this one.
