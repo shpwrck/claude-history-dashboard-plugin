@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { zipSync, strToU8 } from 'fflate';
 import {
+  MAX_COMPRESSED_PUSH_BYTES,
   unzipBundle,
   unzipBundleFromChunks,
   shouldSkipFile,
@@ -18,6 +22,36 @@ import {
   UploadTooLargeError,
   type LoadedFile,
 } from './unzip-upload';
+
+const MIB = 1024 * 1024;
+const MAX_TEST_INFLATED_CHUNK_BYTES = 5 * MIB;
+const PROJECT_DIR = fileURLToPath(new URL('../..', import.meta.url));
+
+function forgeDeclaredSize(zip: Uint8Array, declared: number): Uint8Array {
+  const out = zip.slice();
+  const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  for (let i = 0; i + 4 <= out.length; i += 1) {
+    const sig = dv.getUint32(i, true);
+    if (sig === 0x04034b50) dv.setUint32(i + 22, declared, true);
+    else if (sig === 0x02014b50) dv.setUint32(i + 24, declared, true);
+  }
+  return out;
+}
+
+function observeSubarrays(chunk: Uint8Array, sizes: number[]): Uint8Array {
+  return new Proxy(chunk, {
+    get(target, property) {
+      if (property === 'subarray') {
+        return (start?: number, end?: number) => {
+          const slice = target.subarray(start, end);
+          sizes.push(slice.byteLength);
+          return slice;
+        };
+      }
+      return Reflect.get(target, property, target);
+    },
+  });
+}
 
 describe('shouldSkipFile', () => {
   it('keeps history and session transcripts', () => {
@@ -502,17 +536,6 @@ describe('unzipBundle forged size metadata (#3176)', () => {
    * declared length. This is what a hand-crafted malicious archive looks like:
    * the metadata says "tiny", the stream emits anything it likes.
    */
-  function forgeDeclaredSize(zip: Uint8Array, declared: number): Uint8Array {
-    const out = zip.slice();
-    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
-    for (let i = 0; i + 4 <= out.length; i += 1) {
-      const sig = dv.getUint32(i, true);
-      if (sig === 0x04034b50) dv.setUint32(i + 22, declared, true);
-      else if (sig === 0x02014b50) dv.setUint32(i + 24, declared, true);
-    }
-    return out;
-  }
-
   it('rejects an entry that emits past maxEntryBytes despite a small declared size', async () => {
     const zip = forgeDeclaredSize(
       buildZip({ 'projects/p/sess.jsonl': 'x'.repeat(200_000) }),
@@ -561,5 +584,88 @@ describe('unzipBundle forged size metadata (#3176)', () => {
     await expect(unzipBundle(zip, { maxEntryBytes: 50_000 })).rejects.toBeInstanceOf(
       UploadTooLargeError
     );
+  });
+});
+
+describe('unzipBundle bounded output allocation (#3368)', () => {
+  it('bounds the bomb chunk, rejects it, and stops both input loops promptly', async () => {
+    const archive = forgeDeclaredSize(
+      zipSync({ 'projects/p/bomb.jsonl': new Uint8Array(64 * MIB) }),
+      10
+    );
+    const pushes: number[] = [];
+    const inflated: number[] = [];
+    let outerYields = 0;
+
+    function* chunks(): Iterable<Uint8Array> {
+      outerYields += 1;
+      yield observeSubarrays(archive, pushes);
+      outerYields += 1;
+      yield archive;
+    }
+
+    await expect(
+      unzipBundleFromChunks(
+        chunks(),
+        archive.byteLength,
+        { maxEntryBytes: MIB },
+        (bytes) => inflated.push(bytes)
+      )
+    ).rejects.toBeInstanceOf(UploadTooLargeError);
+
+    expect(inflated.length).toBeGreaterThan(0);
+    expect(Math.max(...inflated)).toBeLessThanOrEqual(MAX_TEST_INFLATED_CHUNK_BYTES);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toBe(MAX_COMPRESSED_PUSH_BYTES);
+    expect(pushes.reduce((sum, bytes) => sum + bytes, 0)).toBeLessThan(archive.byteLength);
+    expect(outerYields).toBe(1);
+  });
+
+  it('does not buffer multiple bounded pushes into an oversized final delivery', async () => {
+    const rawBytes = 24 * MIB;
+    const archive = zipSync({
+      'projects/p/high-ratio.jsonl': new Uint8Array(rawBytes),
+    });
+    const pushes: number[] = [];
+    const inflated: number[] = [];
+
+    const loaded = await unzipBundleFromChunks(
+      [observeSubarrays(archive, pushes)],
+      archive.byteLength,
+      {},
+      (bytes) => inflated.push(bytes)
+    );
+
+    expect(pushes.length).toBeGreaterThan(1);
+    expect(pushes.every((bytes) => bytes <= MAX_COMPRESSED_PUSH_BYTES)).toBe(true);
+    expect(inflated.length).toBeGreaterThan(1);
+    expect(inflated.reduce((sum, bytes) => sum + bytes, 0)).toBe(rawBytes);
+    expect(Math.max(...inflated)).toBeLessThanOrEqual(MAX_TEST_INFLATED_CHUNK_BYTES);
+    expect(inflated.at(-1)).toBeLessThanOrEqual(MAX_TEST_INFLATED_CHUNK_BYTES);
+    expect(loaded[0].text).toHaveLength(rawBytes);
+  });
+
+  it('keeps the isolated bomb RSS delta inside 32 MiB', () => {
+    const archive = forgeDeclaredSize(
+      zipSync({ 'projects/p/bomb.jsonl': new Uint8Array(64 * MIB) }),
+      10
+    );
+    const probe = spawnSync(
+      process.execPath,
+      [
+        '--expose-gc',
+        '--import',
+        join(PROJECT_DIR, 'scripts/register-ts.mjs'),
+        join(PROJECT_DIR, 'scripts/fixtures/unzip-upload-rss-probe.mjs'),
+      ],
+      { cwd: PROJECT_DIR, encoding: 'utf8', input: archive }
+    );
+    expect(probe.status, probe.stderr || probe.stdout).toBe(0);
+    const receipt = JSON.parse(probe.stdout.trim()) as {
+      rejected: boolean;
+      rssDelta: number;
+    };
+    expect(receipt.rejected).toBe(true);
+    expect(receipt.rssDelta).toBeLessThanOrEqual(32 * MIB);
   });
 });

@@ -21,9 +21,9 @@ export const SKIP_DIRECTORIES = ['.git', 'node_modules', '__pycache__'];
 // caps are deliberately generous — a real `~/.claude` bundle is megabytes of
 // well-compressing `.jsonl`, far under them — so they only ever trip on
 // genuinely huge input or a decompression bomb (small compressed, vast inflated).
-// The per-entry and total caps are enforced inside the fflate `filter` hook, so
-// over-budget bytes are NEVER decompressed: memory stays bounded even when the
-// guard fires.
+// Declared sizes provide an early-rejection hint; the authoritative per-entry
+// and total caps use observed output bytes. Compressed input is fed to fflate in
+// bounded pushes so the observed-byte guard has a finite allocation overshoot.
 
 /** Compressed-input ceiling, checked before any decompression starts. */
 export const MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
@@ -33,6 +33,13 @@ export const MAX_ENTRY_BYTES = 512 * 1024 * 1024; // 512 MiB
 export const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
 /** Cap on the number of admitted entries. */
 export const MAX_ENTRIES = 200_000;
+/**
+ * Maximum compressed archive bytes handed to fflate in one push. DEFLATE can
+ * expand one compressed byte roughly 1,032x; keeping pushes at 4 KiB prevents
+ * fflate from materializing an arbitrarily large output buffer before the
+ * observed-byte guards below can reject it (#3368).
+ */
+export const MAX_COMPRESSED_PUSH_BYTES = 4096;
 
 /**
  * Thrown when an upload trips a {@link MAX_ARCHIVE_BYTES}/{@link MAX_TOTAL_BYTES}/
@@ -324,6 +331,8 @@ export interface UploadLimits {
   maxEntries: number;
 }
 
+export type UnzipTestInstrumentation = (inflatedBytes: number) => void;
+
 const DEFAULT_LIMITS: UploadLimits = {
   maxArchiveBytes: MAX_ARCHIVE_BYTES,
   maxEntryBytes: MAX_ENTRY_BYTES,
@@ -351,7 +360,8 @@ export async function unzipBundleFromFile(
 export async function unzipBundleFromChunks(
   chunks: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
   archiveBytes?: number,
-  limits: Partial<UploadLimits> = {}
+  limits: Partial<UploadLimits> = {},
+  observeForTest?: UnzipTestInstrumentation
 ): Promise<LoadedFile[]> {
   const { maxArchiveBytes, maxEntryBytes, maxTotalBytes, maxEntries } = {
     ...DEFAULT_LIMITS,
@@ -367,8 +377,8 @@ export async function unzipBundleFromChunks(
     );
   }
 
-  // The streaming unzip handler enforces the skip rules AND the size/count
-  // budget before `start()` is called, so rejected files are never decompressed.
+  // The streaming unzip handler enforces skip rules plus declared-size/count
+  // hints before `start()`; observed output enforces the authoritative budgets.
   // Unlike fflate's object-returning `unzip`, this decodes admitted entries
   // directly into `LoadedFile`s and avoids a second full decompressed byte map.
   let admittedCount = 0;
@@ -454,6 +464,7 @@ export async function unzipBundleFromChunks(
             return;
           }
           if (chunk) {
+            if (import.meta.env?.MODE === 'test') observeForTest?.(chunk.byteLength);
             observedBytes += chunk.byteLength;
             if (observedBytes > maxEntryBytes) {
               const tooLarge = new UploadTooLargeError(
@@ -491,9 +502,12 @@ export async function unzipBundleFromChunks(
   unzip.register(AsyncUnzipInflate);
 
   try {
+    feed:
     for await (const chunk of chunks) {
-      if (overflow) break;
-      unzip.push(chunk, false);
+      for (let offset = 0; offset < chunk.length; ) {
+        if (overflow) break feed;
+        unzip.push(chunk.subarray(offset, (offset += MAX_COMPRESSED_PUSH_BYTES)), false);
+      }
     }
     if (!overflow) unzip.push(new Uint8Array(), true);
     await Promise.all(pending);
@@ -501,10 +515,9 @@ export async function unzipBundleFromChunks(
     streamError = err instanceof Error ? err : new Error(String(err));
   }
 
-  if (overflow) throw overflow;
-  if (streamError) throw streamError;
+  if (overflow || streamError) throw overflow || streamError;
 
-  return loaded.filter((file): file is LoadedFile => file !== undefined);
+  return loaded.filter(Boolean) as LoadedFile[];
 }
 
 /**
