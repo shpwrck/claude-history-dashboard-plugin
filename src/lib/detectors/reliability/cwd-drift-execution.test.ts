@@ -7,9 +7,9 @@ import type { ToolCall, ToolUsageData } from '../../parse-tools';
 import type { LiveConfig } from '../../../types';
 
 let seq = 0;
-function bash(command: string): ToolCall {
+function bash(command: string, timestamp = '2026-06-10T00:00:00Z'): ToolCall {
   return {
-    timestamp: '2026-06-10T00:00:00Z',
+    timestamp,
     toolName: 'Bash',
     input: { command },
     toolUseId: `t${seq++}`,
@@ -276,6 +276,51 @@ describe('reliability.cwd-drift-execution — historical demotion', () => {
     expect(rec!.detail).not.toContain('silently targets the wrong repository');
   });
 
+  it('dates the historical branch from the latest counted unanchored operation', () => {
+    const rec = detector.rule(
+      input(
+        [
+          session('a', [bash('git status', '2026-06-10T23:00:00-0500')]),
+          session('b', [
+            bash('git -C /repo status', '2026-07-30T00:00:00Z'),
+            bash('gh issue list', '2026-06-12T08:00:00Z'),
+          ]),
+          session('c', [bash('git log -1', '2026-06-11T12:00:00Z')]),
+        ],
+        liveConfigWithGuard(true)
+      ),
+      Date.parse('2026-08-01T00:00:00Z')
+    );
+    expect(rec!.severity).toBe('info');
+    expect(rec!.provenance!.asOf).toBe('2026-06-12');
+    expect(rec!.provenance!.stale).toBe(true);
+    expect(rec!.detail.startsWith(`As of ${rec!.provenance!.asOf},`)).toBe(true);
+    expect(rec!.provenance!.observations).toContainEqual(
+      expect.objectContaining({
+        field: 'toolData[].calls[].timestamp',
+        value: '2026-06-12',
+      })
+    );
+  });
+
+  it('does not manufacture a date when counted timestamps are untrustworthy', () => {
+    const rec = detector.rule(
+      input(
+        [
+          session('a', [bash('git status', 'not-a-date')]),
+          session('b', [bash('gh issue list', '2026-02-30T00:00:00Z')]),
+          session('c', [bash('git log -1', '')]),
+        ],
+        liveConfigWithGuard(true)
+      ),
+      Date.parse('2026-08-01T00:00:00Z')
+    );
+    expect(rec!.provenance!.asOf).toBeUndefined();
+    expect(rec!.provenance!.stale).toBeUndefined();
+    expect(rec!.detail).not.toMatch(/^As of /);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+  });
+
   it('demotes a would-be WARNING (>=10 in one session) to info when the guard is configured', () => {
     const many = session('hot', Array.from({ length: 10 }, () => bash('git status')));
     const rec = detector.rule(input([many], liveConfigWithGuard(true)), 0);
@@ -289,6 +334,9 @@ describe('reliability.cwd-drift-execution — historical demotion', () => {
     expect(rec!.severity).toBe('warning');
     expect(rec!.title).toBe('git/gh commands run unanchored to the project directory');
     expect(rec!.detail).toContain('silently targets the wrong repository');
+    expect(rec!.detail).not.toMatch(/^As of /);
+    expect(rec!.provenance!.asOf).toBeUndefined();
+    expect(rec!.provenance!.stale).toBeUndefined();
   });
 
   it('keeps present-tense (info) when readable config has NO guard hook and NO CLAUDE.md marker', () => {

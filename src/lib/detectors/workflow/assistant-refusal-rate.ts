@@ -26,10 +26,10 @@ export const detector: Detector = {
       id: 'workflow.assistant-refusal-rate',
       category: 'workflow',
       severity: 'info',
-      title: 'Assistant frequently course-corrects',
-      detail: `${pct}% of assistant turns (${refusals} of ${turns}) contain a refusal or concession ("I cannot", "I apologize", "you're right") — often a sign the prompt or project context left it guessing.`,
+      title: 'High refusal/concession rate in retained history',
+      detail: `Across the retained assistant history, ${pct}% of assistant turns (${refusals} of ${turns}) contained a refusal or concession marker ("I cannot", "I apologize", "you're right"). This is an undated historical rate, not evidence of current assistant behavior.`,
       action:
-        'Tighten recurring instructions in CLAUDE.md (constraints, file locations, conventions) so the assistant needs fewer corrections.',
+        'Review the retained sessions behind this rate before changing current instructions. If the same pattern still appears, clarify recurring constraints, file locations, and conventions in CLAUDE.md.',
       affected: refusals,
       provenance: {
         observations: [
@@ -76,8 +76,9 @@ export const detector: Detector = {
         inference:
           'Turns matching a refusal/concession phrase are counted; whether the ' +
           'assistant was actually wrong, and whether project context caused it, are ' +
-          'not measured. A sustained rate is read as underspecified recurring ' +
-          'instructions — an interpretation of the count, not the count itself.',
+          'not measured. Within the retained history, a high rate can indicate ' +
+          'underspecified recurring instructions, but it does not establish that the ' +
+          'pattern persists now.',
       },
     };
   },

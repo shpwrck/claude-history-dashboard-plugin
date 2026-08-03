@@ -84,6 +84,17 @@ describe('workflow.assistant-refusal-rate (#206)', () => {
     expect(rec?.detail).toContain('40 of 200');
   });
 
+  it('scopes the undated signal to retained history without claiming current behavior', () => {
+    const rec = detector.rule(input(firing()), 0)!;
+    expect(rec.title).toBe('High refusal/concession rate in retained history');
+    expect(rec.detail).toBe(
+      'Across the retained assistant history, 20% of assistant turns (40 of 200) contained a refusal or concession marker ("I cannot", "I apologize", "you\'re right"). This is an undated historical rate, not evidence of current assistant behavior.'
+    );
+    expect(rec.action).toBe(
+      'Review the retained sessions behind this rate before changing current instructions. If the same pattern still appears, clarify recurring constraints, file locations, and conventions in CLAUDE.md.'
+    );
+  });
+
   // ── Provenance (#3232) ────────────────────────────────────────────────────
   describe('provenance', () => {
     it('passes the contract when it fires', () => {

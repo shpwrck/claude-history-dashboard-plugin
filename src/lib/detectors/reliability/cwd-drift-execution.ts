@@ -8,6 +8,7 @@ import type {
 import {
   claudeMdMarksApplied,
   hasPreToolUseAnchorGuard,
+  newestIsoDate,
   truncate,
   splitSegments,
 } from '../shared';
@@ -121,6 +122,7 @@ interface SessionDrift {
   sessionId: string;
   count: number;
   example: string;
+  latestCountedDate?: string;
 }
 
 function leadingEnv(seg: string): string {
@@ -179,17 +181,28 @@ function collectSessionDrift(session: ToolUsageData): SessionDrift | null {
   let sawBash = false;
   let count = 0;
   let example = '';
+  let latestCountedDate: string | undefined;
   for (const call of session.calls) {
     const cmd = bashText(call);
     if (cmd === null) continue;
     sawBash = true;
     const { count: n, firstExample } = countUnanchored(cmd);
     count += n;
+    if (n > 0) {
+      latestCountedDate = newestIsoDate([latestCountedDate, call.timestamp]);
+    }
     if (!example && firstExample) example = firstExample;
   }
   if (!sawBash) return null;
 
-  return count > 0 ? { sessionId: session.sessionId, count, example } : null;
+  return count > 0
+    ? {
+        sessionId: session.sessionId,
+        count,
+        example,
+        latestCountedDate,
+      }
+    : null;
 }
 
 function insertTopSession(top: SessionDrift[], session: SessionDrift): void {
@@ -220,12 +233,14 @@ export const detector: Detector = {
     let totalUnanchored = 0;
     let sessionsAffected = 0;
     let maxPerSession = 0;
+    let latestCountedDate: string | undefined;
     for (const session of toolData) {
       const s = collectSessionDrift(session);
       if (!s) continue;
       totalUnanchored += s.count;
       sessionsAffected += 1;
       maxPerSession = Math.max(maxPerSession, s.count);
+      latestCountedDate = newestIsoDate([latestCountedDate, s.latestCountedDate]);
       insertTopSession(evidenceSessions, s);
     }
 
@@ -241,6 +256,7 @@ export const detector: Detector = {
     const configReadable = input.liveConfig != null;
     const guardConfigured = hasPreToolUseAnchorGuard(input.liveConfig?.settings);
     const demote = configReadable && guardConfigured;
+    const asOf = demote ? latestCountedDate : undefined;
 
     const severity = demote
       ? 'info'
@@ -279,6 +295,14 @@ export const detector: Detector = {
         field: 'hooks.PreToolUse',
       },
     ];
+    if (asOf) {
+      observations.push({
+        claim: `the latest counted unanchored operation was observed on ${asOf}`,
+        source: 'parse-tools',
+        field: 'toolData[].calls[].timestamp',
+        value: asOf,
+      });
+    }
 
     return {
       id: 'reliability.cwd-drift-execution',
@@ -288,7 +312,7 @@ export const detector: Detector = {
         ? 'git/gh ran unanchored in the past (cwd-anchor guard configured now)'
         : 'git/gh commands run unanchored to the project directory',
       detail: demote
-        ? `${totalUnanchored} \`git\`/\`gh\` command(s) across ${sessionsAffected} session(s) ran with no explicit anchor (no \`git -C <dir>\`, no preceding \`cd <dir> &&\`, no \`gh -R owner/repo\`/\`GH_REPO=\`) across your history. A cwd-anchor-guard PreToolUse hook is now configured and blocks these going forward, so this is historical — an unanchored git/gh op run from a drifted cwd would otherwise silently target the wrong repository (committing to the wrong tree, or reading stale state behind a false "merged/landed/verified" claim).`
+        ? `${asOf ? `As of ${asOf}, ` : ''}${totalUnanchored} \`git\`/\`gh\` command(s) across ${sessionsAffected} session(s) ran with no explicit anchor (no \`git -C <dir>\`, no preceding \`cd <dir> &&\`, no \`gh -R owner/repo\`/\`GH_REPO=\`) across your history. A cwd-anchor-guard PreToolUse hook is now configured and blocks these going forward, so this is historical — an unanchored git/gh op run from a drifted cwd would otherwise silently target the wrong repository (committing to the wrong tree, or reading stale state behind a false "merged/landed/verified" claim).`
         : `${totalUnanchored} \`git\`/\`gh\` command(s) across ${sessionsAffected} session(s) ran with no explicit anchor (no \`git -C <dir>\`, no preceding \`cd <dir> &&\`, no \`gh -R owner/repo\`/\`GH_REPO=\`). git/gh infer their target repo from the shell cwd, so if that cwd has drifted outside the project tree the op silently targets the wrong repository — committing to the wrong tree or reading stale state behind a false "merged/landed/verified" claim. Build families are excluded: they fail loudly in the wrong tree, and their drift can't be judged from command text alone.`,
       action: demote
         ? 'No action needed while the cwd-anchor guard stays configured; it blocks unanchored git/gh going forward. If you remove it, anchor every git/gh command yourself — `git -C <project-dir> …` (or `cd <project-dir> && git …`), and `gh -R owner/repo …` / `GH_REPO=owner/repo gh …`.'
@@ -302,6 +326,7 @@ export const detector: Detector = {
         inference: demote
           ? 'The unanchored-op count is historical and a cwd-anchor-guard PreToolUse hook is configured now, so the behaviour is already blocked going forward — the finding is not current and is demoted to past tense. (An unanchored git/gh op resolves its target repo from the shell cwd, which silently selects the wrong repo on a drifted session.)'
           : 'A git/gh op with no explicit anchor resolves its target repository from the shell cwd; on a session whose cwd has drifted outside the project tree that silently selects the wrong repo, so commits land in the wrong tree and reads feed false merge/landing/verification claims. Anchoring each op (or the cwd-anchor guard) removes the ambient-cwd dependency.',
+        ...(asOf ? { asOf, stale: true } : {}),
       },
       fix: {
         target: 'CLAUDE.md',

@@ -443,13 +443,13 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
     "view": "errors",
   },
   {
-    "action": "Tighten recurring instructions in CLAUDE.md (constraints, file locations, conventions) so the assistant needs fewer corrections.",
+    "action": "Review the retained sessions behind this rate before changing current instructions. If the same pattern still appears, clarify recurring constraints, file locations, and conventions in CLAUDE.md.",
     "affected": 30,
     "category": "workflow",
-    "detail": "30% of assistant turns (30 of 100) contain a refusal or concession ("I cannot", "I apologize", "you're right") — often a sign the prompt or project context left it guessing.",
+    "detail": "Across the retained assistant history, 30% of assistant turns (30 of 100) contained a refusal or concession marker ("I cannot", "I apologize", "you're right"). This is an undated historical rate, not evidence of current assistant behavior.",
     "id": "workflow.assistant-refusal-rate",
     "provenance": {
-      "inference": "Turns matching a refusal/concession phrase are counted; whether the assistant was actually wrong, and whether project context caused it, are not measured. A sustained rate is read as underspecified recurring instructions — an interpretation of the count, not the count itself.",
+      "inference": "Turns matching a refusal/concession phrase are counted; whether the assistant was actually wrong, and whether project context caused it, are not measured. Within the retained history, a high rate can indicate underspecified recurring instructions, but it does not establish that the pattern persists now.",
       "observations": [
         {
           "claim": "30 assistant turn(s) matched a refusal/concession marker",
@@ -478,7 +478,7 @@ Hit 1 rate-limit/overload (429/529) error(s) recently.
       ],
     },
     "severity": "info",
-    "title": "Assistant frequently course-corrects",
+    "title": "High refusal/concession rate in retained history",
   },
   {
     "action": "Prefer Grep/Glob/Read/Edit for equivalent file work. Avoid standalone cd calls by using absolute paths or a same-command \`cd <dir> && <cmd>\` anchor.",
