@@ -36,6 +36,7 @@ const bundleRoot = fileURLToPath(
   new URL('../../fixtures/proof/repo-map-context-waste/', import.meta.url)
 );
 const manifestPath = join(bundleRoot, 'manifest.json');
+const readmePath = join(bundleRoot, 'README.md');
 
 function loadBundle(): ProofPairBundle {
   const raw = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -135,6 +136,25 @@ describe('per-pair substrate and gates', () => {
       for (const token of fileTokens) {
         expect(existsSync(join(treeDir, token)), `${pair.pairId}: ${token}`).toBe(true);
       }
+    }
+  });
+
+  it('names exactly the manifest gate command in every pair instruction', () => {
+    for (const pair of bundle.pairs) {
+      const namedGateCommands = [...pair.instruction.matchAll(/`(node [^`]+\.mjs)`/g)].map(
+        (match) => match[1]
+      );
+      expect(namedGateCommands, pair.pairId).toEqual([pair.gate.command]);
+    }
+  });
+
+  it('reports every manifest gate kind truthfully in the README inventory', () => {
+    const readmeLines = readFileSync(readmePath, 'utf8').split('\n');
+    for (const pair of bundle.pairs) {
+      const row = readmeLines.find((line) => line.startsWith(`| ${pair.pairId} |`));
+      expect(row, `${pair.pairId}: missing README inventory row`).toBeDefined();
+      const cells = row!.split('|').slice(1, -1).map((cell) => cell.trim());
+      expect(cells[3], pair.pairId).toBe(pair.gate.kind);
     }
   });
 
