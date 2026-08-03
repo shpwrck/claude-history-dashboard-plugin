@@ -81,6 +81,16 @@ describe('parseStatsCache', () => {
     expect(parseStatsCache(bad)).toBeNull();
   });
 
+  it('rejects malformed or impossible lastComputedDate values (#3154)', () => {
+    for (const lastComputedDate of ['not-a-date', '2026/06/03', '2026-02-30']) {
+      expect(parseStatsCache(JSON.stringify({
+        version: 3,
+        lastComputedDate,
+        dailyActivity: [],
+      }))).toBeNull();
+    }
+  });
+
   it('skips malformed dailyActivity rows and keeps valid ones', () => {
     const mixed = JSON.stringify({
       version: 3,
@@ -90,6 +100,8 @@ describe('parseStatsCache', () => {
         'string-not-object',
         { date: '2026-06-01', messageCount: 10, sessionCount: 1, toolCallCount: 5 },
         { toolCallCount: 5 }, // missing date → skipped
+        { date: 'not-a-date', messageCount: 1, sessionCount: 1, toolCallCount: 1 },
+        { date: '2026-02-30', messageCount: 1, sessionCount: 1, toolCallCount: 1 },
       ],
     });
     const result = parseStatsCache(mixed)!;
@@ -97,17 +109,19 @@ describe('parseStatsCache', () => {
     expect(result.dailyActivity[0].date).toBe('2026-06-01');
   });
 
-  it('defaults missing numeric fields to 0 in otherwise valid rows', () => {
-    const partial = JSON.stringify({
+  it('skips rows with missing, negative, or non-finite activity counts (#3154)', () => {
+    const malformedCounts = JSON.stringify({
       version: 3,
       lastComputedDate: '2026-06-03',
-      dailyActivity: [{ date: '2026-06-01' }],
-    });
-    const result = parseStatsCache(partial)!;
-    const row = result.dailyActivity[0];
-    expect(row.messageCount).toBe(0);
-    expect(row.sessionCount).toBe(0);
-    expect(row.toolCallCount).toBe(0);
+      dailyActivity: [
+        { date: '2026-06-01' },
+        { date: '2026-06-02', messageCount: -1, sessionCount: 1, toolCallCount: 1 },
+        { date: '2026-06-03', messageCount: 1, sessionCount: '1', toolCallCount: 1 },
+        { date: '2026-06-04', messageCount: 1, sessionCount: 1, toolCallCount: 'OVERFLOW' },
+      ],
+    }).replace('"OVERFLOW"', '1e309');
+
+    expect(parseStatsCache(malformedCounts)?.dailyActivity).toEqual([]);
   });
 });
 

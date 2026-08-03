@@ -121,6 +121,20 @@ function finiteOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+function nonNegativeIntegerOrZero(v: unknown): number {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : 0;
+}
+
+function unitIntervalOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1
+    ? v
+    : null;
+}
+
+function nonNegativeFiniteOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 function isoOrNull(v: unknown): string | null {
   return typeof v === 'string' && ISO_DATE.test(v) ? v : null;
 }
@@ -154,15 +168,15 @@ export function parseCalibrationClass(v: unknown): LocalCalibrationClass | null 
     taskClass,
     localModel: typeof v.localModel === 'string' ? v.localModel : null,
     baselineModel: typeof v.baselineModel === 'string' ? v.baselineModel : null,
-    nRecords: finiteOrNull(v.nRecords) ?? 0,
-    nSamples: finiteOrNull(v.nSamples) ?? 0,
-    blindJudgeAgreement: finiteOrNull(v.blindJudgeAgreement),
-    costLocal: finiteOrNull(v.costLocal),
-    costClaude: finiteOrNull(v.costClaude),
+    nRecords: nonNegativeIntegerOrZero(v.nRecords),
+    nSamples: nonNegativeIntegerOrZero(v.nSamples),
+    blindJudgeAgreement: unitIntervalOrNull(v.blindJudgeAgreement),
+    costLocal: nonNegativeFiniteOrNull(v.costLocal),
+    costClaude: nonNegativeFiniteOrNull(v.costClaude),
     savingsUsdPerTask: finiteOrNull(v.savingsUsdPerTask),
     latency: {
-      localMeanMs: finiteOrNull(latency.localMeanMs),
-      claudeMeanMs: finiteOrNull(latency.claudeMeanMs),
+      localMeanMs: nonNegativeFiniteOrNull(latency.localMeanMs),
+      claudeMeanMs: nonNegativeFiniteOrNull(latency.claudeMeanMs),
     },
     parity: parseParity(v.parity),
     asOf: isoOrNull(v.asOf),
@@ -204,12 +218,36 @@ export function parseLocalCalibration(
   if (!isRecord(raw.thresholds)) return null;
   const minSamples = finiteOrNull(raw.thresholds.minSamples);
   const minAgreement = finiteOrNull(raw.thresholds.minAgreement);
-  if (minSamples === null || minSamples < 1) return null;
+  if (minSamples === null || !Number.isSafeInteger(minSamples) || minSamples < 1) return null;
   if (minAgreement === null || minAgreement < 0 || minAgreement > 1) return null;
   const classesRaw = Array.isArray(raw.classes) ? raw.classes : [];
   const classes = classesRaw
     .map(parseCalibrationClass)
-    .filter((c): c is LocalCalibrationClass => c !== null);
+    .filter((c): c is LocalCalibrationClass => c !== null)
+    .map((calibrationClass): LocalCalibrationClass => {
+      if (
+        calibrationClass.verdict !== 'pass' ||
+        (
+          Number.isInteger(calibrationClass.nSamples) &&
+          calibrationClass.nSamples >= minSamples &&
+          calibrationClass.blindJudgeAgreement !== null &&
+          calibrationClass.blindJudgeAgreement >= minAgreement &&
+          calibrationClass.blindJudgeAgreement <= 1 &&
+          calibrationClass.parity.held === true
+        )
+      ) {
+        return calibrationClass;
+      }
+
+      return {
+        ...calibrationClass,
+        verdict: 'insufficient',
+        reasons: [
+          ...calibrationClass.reasons,
+          'reader demoted unsupported pass verdict: declared evidence floors were not met',
+        ],
+      };
+    });
   return {
     version,
     kind: LOCAL_CALIBRATION_KIND,

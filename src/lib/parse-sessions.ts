@@ -100,6 +100,13 @@ function userMessageText(rawMessage: unknown): string {
   return '';
 }
 
+/** Runtime guard for untrusted transcript usage counters. */
+function nonNegativeFiniteOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
 function detectCompactionEvents(entries: TokenEntry[]): CompactionEvent[] {
   const compactionEvents: CompactionEvent[] = [];
   const MAX_GAP_MS = 5 * 60 * 1000;
@@ -270,16 +277,26 @@ export function parseSessionJsonl(
       const messageId = msg.id ?? `unknown-${tokenMap.size}`;
       const incoming = {
         timestamp: entry.timestamp ?? '',
-        inputTokens: msg.usage.input_tokens ?? 0,
-        outputTokens: msg.usage.output_tokens ?? 0,
-        cacheCreationTokens: msg.usage.cache_creation_input_tokens ?? 0,
+        inputTokens: nonNegativeFiniteOrZero(msg.usage.input_tokens),
+        outputTokens: nonNegativeFiniteOrZero(msg.usage.output_tokens),
+        cacheCreationTokens: nonNegativeFiniteOrZero(
+          msg.usage.cache_creation_input_tokens
+        ),
         cacheCreation1hTokens:
-          msg.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
-        cacheReadTokens: msg.usage.cache_read_input_tokens ?? 0,
+          nonNegativeFiniteOrZero(
+            msg.usage.cache_creation?.ephemeral_1h_input_tokens
+          ),
+        cacheReadTokens: nonNegativeFiniteOrZero(
+          msg.usage.cache_read_input_tokens
+        ),
         webSearchRequests:
-          msg.usage.server_tool_use?.web_search_requests ?? 0,
+          nonNegativeFiniteOrZero(
+            msg.usage.server_tool_use?.web_search_requests
+          ),
         webFetchRequests:
-          msg.usage.server_tool_use?.web_fetch_requests ?? 0,
+          nonNegativeFiniteOrZero(
+            msg.usage.server_tool_use?.web_fetch_requests
+          ),
         // #1927 accumulators (not part of TokenEntry): summed across the
         // message's lines, then resolved to `thinkingTokens` after the
         // outputTokens max-merge below.
@@ -393,6 +410,10 @@ export function parseSessionJsonl(
     );
     return {
       ...rest,
+      cacheCreation1hTokens: Math.min(
+        rest.cacheCreation1hTokens,
+        rest.cacheCreationTokens
+      ),
       thinkingTokens: reconstructThinkingTokens(
         rest.outputTokens,
         visibleTokens,

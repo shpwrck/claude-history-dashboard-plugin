@@ -121,11 +121,60 @@ describe('parseLocalCalibration (#2318)', () => {
       parseLocalCalibration(strip({ thresholds: { minSamples: 0, minAgreement: 0.8 } }))
     ).toBeNull(); // minSamples < 1
     expect(
+      parseLocalCalibration(strip({ thresholds: { minSamples: 1.5, minAgreement: 0.8 } }))
+    ).toBeNull(); // minSamples must be an integer count
+    expect(
       parseLocalCalibration(strip({ thresholds: { minSamples: 5, minAgreement: 1.5 } }))
     ).toBeNull(); // minAgreement out of [0,1]
     expect(
       parseLocalCalibration(strip({ thresholds: { minSamples: 5, minAgreement: 'x' } }))
     ).toBeNull();
+  });
+
+  it('does not preserve a pass verdict without every declared evidence floor (#3144)', () => {
+    const unsupportedPasses = [
+      { ...validClass, nSamples: 0 },
+      { ...validClass, blindJudgeAgreement: null },
+      { ...validClass, blindJudgeAgreement: 0.79 },
+      { ...validClass, parity: { ...validClass.parity, held: false } },
+      { ...validClass, parity: { ...validClass.parity, held: null } },
+    ];
+
+    for (const candidate of unsupportedPasses) {
+      const parsed = parseLocalCalibration(
+        JSON.stringify(report({ classes: [candidate] }))
+      );
+      expect(parsed?.classes).toHaveLength(1);
+      expect(parsed?.classes[0].verdict).not.toBe('pass');
+    }
+
+    expect(parseLocalCalibration(JSON.stringify(report()))?.classes[0].verdict).toBe('pass');
+  });
+
+  it('normalizes impossible evidence ranges (#3144)', () => {
+    const parsed = parseLocalCalibration(
+      JSON.stringify(
+        report({
+          classes: [{
+            ...validClass,
+            verdict: 'insufficient',
+            nRecords: -1,
+            nSamples: 1.5,
+            blindJudgeAgreement: 1.01,
+            costLocal: -0.001,
+            costClaude: -0.12,
+            latency: { localMeanMs: -1, claudeMeanMs: -2 },
+          }],
+        })
+      )
+    );
+
+    expect(parsed?.classes[0].nRecords).toBe(0);
+    expect(parsed?.classes[0].nSamples).toBe(0);
+    expect(parsed?.classes[0].blindJudgeAgreement).toBeNull();
+    expect(parsed?.classes[0].costLocal).toBeNull();
+    expect(parsed?.classes[0].costClaude).toBeNull();
+    expect(parsed?.classes[0].latency).toEqual({ localMeanMs: null, claudeMeanMs: null });
   });
 
   it('exposes a freshness horizon aligned with the hosted down-model proof', () => {

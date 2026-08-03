@@ -81,22 +81,37 @@ export interface ActivityTrendAnalysis {
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
-function isString(v: unknown): v is string {
-  return typeof v === 'string';
+function isIsoCalendarDate(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const timestamp = Date.parse(`${v}T00:00:00.000Z`);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === v;
 }
 
 function isFiniteNumber(v: unknown): v is number {
-  return typeof v === 'number' && isFinite(v);
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function isNonNegativeFiniteNumber(v: unknown): v is number {
+  return isFiniteNumber(v) && v >= 0;
 }
 
 function safeDailyActivity(raw: unknown): DailyActivity | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
-  if (!isString(r.date)) return null;
-  const messageCount = isFiniteNumber(r.messageCount) ? r.messageCount : 0;
-  const sessionCount = isFiniteNumber(r.sessionCount) ? r.sessionCount : 0;
-  const toolCallCount = isFiniteNumber(r.toolCallCount) ? r.toolCallCount : 0;
-  return { date: r.date, messageCount, sessionCount, toolCallCount };
+  if (!isIsoCalendarDate(r.date)) return null;
+  if (
+    !isNonNegativeFiniteNumber(r.messageCount) ||
+    !isNonNegativeFiniteNumber(r.sessionCount) ||
+    !isNonNegativeFiniteNumber(r.toolCallCount)
+  ) {
+    return null;
+  }
+  return {
+    date: r.date,
+    messageCount: r.messageCount,
+    sessionCount: r.sessionCount,
+    toolCallCount: r.toolCallCount,
+  };
 }
 
 function sumField(rows: DailyActivity[], field: keyof DailyActivity): number {
@@ -138,8 +153,8 @@ export function parseStatsCache(text: string | null | undefined): StatsCache | n
   const r = raw as Record<string, unknown>;
 
   const version = isFiniteNumber(r.version) ? r.version : 0;
-  const lastComputedDate = isString(r.lastComputedDate) ? r.lastComputedDate : '';
-  if (!lastComputedDate) return null;
+  if (!isIsoCalendarDate(r.lastComputedDate)) return null;
+  const lastComputedDate = r.lastComputedDate;
 
   const rawRows = Array.isArray(r.dailyActivity) ? r.dailyActivity : [];
   const dailyActivity: DailyActivity[] = rawRows

@@ -41,6 +41,58 @@ describe('parseSessionJsonl', () => {
     expect(out.hasUnknownModel).toBe(false)
   })
 
+  it('rejects malformed values for every billed usage counter (#3153)', () => {
+    const counters = [
+      { key: 'inputTokens', usage: (value: unknown) => ({ input_tokens: value }) },
+      { key: 'outputTokens', usage: (value: unknown) => ({ output_tokens: value }) },
+      { key: 'cacheCreationTokens', usage: (value: unknown) => ({ cache_creation_input_tokens: value }) },
+      { key: 'cacheReadTokens', usage: (value: unknown) => ({ cache_read_input_tokens: value }) },
+      {
+        key: 'cacheCreation1hTokens',
+        usage: (value: unknown) => ({ cache_creation: { ephemeral_1h_input_tokens: value } }),
+      },
+      {
+        key: 'webSearchRequests',
+        usage: (value: unknown) => ({ server_tool_use: { web_search_requests: value } }),
+      },
+      {
+        key: 'webFetchRequests',
+        usage: (value: unknown) => ({ server_tool_use: { web_fetch_requests: value } }),
+      },
+    ] as const
+
+    for (const counter of counters) {
+      for (const invalid of ['not-a-number', -1, 'OVERFLOW'] as const) {
+        const text = assistant(counter.usage(invalid)).replace('"OVERFLOW"', '1e309')
+        const out = parseSessionJsonl(text, 'malformed-usage.jsonl')!
+        const entry = out.entries[0]
+        expect(entry[counter.key]).toBe(0)
+        expect([
+          entry.inputTokens,
+          entry.outputTokens,
+          entry.cacheCreationTokens,
+          entry.cacheCreation1hTokens,
+          entry.cacheReadTokens,
+          entry.webSearchRequests,
+          entry.webFetchRequests,
+          estimateCost(out),
+        ].every((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0)).toBe(true)
+      }
+    }
+  })
+
+  it('bounds the 1h cache-write breakdown by total cache creation (#3153)', () => {
+    const text = assistant({
+      cache_creation_input_tokens: 1_000_000,
+      cache_creation: { ephemeral_1h_input_tokens: 2_000_000 },
+    })
+    const out = parseSessionJsonl(text, 'cache-breakdown.jsonl')!
+
+    expect(out.entries[0].cacheCreationTokens).toBe(1_000_000)
+    expect(out.entries[0].cacheCreation1hTokens).toBe(1_000_000)
+    expect(estimateCost(out)).toBeCloseTo(10)
+  })
+
   it('dedupes rows by message id (last write wins per id)', () => {
     const text = [
       assistant({ input_tokens: 100, output_tokens: 0 }, { id: 'dup' }),
