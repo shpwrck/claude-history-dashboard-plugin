@@ -228,6 +228,69 @@ function collect(
   );
 }
 
+async function waitForPath(path, label) {
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(path) && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  }
+  if (!existsSync(path)) throw new Error(`${label} was not created`);
+}
+
+async function collectAcrossLedgerMutationPhase(fixture, ledger, phase) {
+  const readyPath = join(fixture.runDir, `.ledger-${phase}-ready`);
+  const releasePath = join(fixture.runDir, `.ledger-${phase}-release`);
+  const child = spawn(process.execPath, collectArgs(fixture), {
+    env: {
+      ...fixture.env,
+      CHD_EXPERIMENT_2702_TEST_LEDGER_MUTATION_PHASE: phase,
+      CHD_EXPERIMENT_2702_TEST_LEDGER_READY_PATH: readyPath,
+      CHD_EXPERIMENT_2702_TEST_LEDGER_RELEASE_PATH: releasePath,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+  });
+  let timeout;
+  const exitPromise = new Promise((resolveExit, rejectExit) => {
+    timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      rejectExit(new Error(`accounting ${phase} fixture timed out`));
+    }, 10_000);
+    child.once("error", rejectExit);
+    child.once("close", (code, signal) => {
+      resolveExit({ code, signal });
+    });
+  });
+  try {
+    await Promise.race([
+      waitForPath(readyPath, `accounting ${phase} ready marker`),
+      exitPromise.then(({ code, signal }) => {
+        throw new Error(
+          `accounting ${phase} exited before its mutation: ${String(code)}/${String(signal)}\n${stdout}\n${stderr}`,
+        );
+      }),
+    ]);
+    appendFileSync(
+      ledger,
+      `${JSON.stringify({ model: "engage", costUsd: 0, phase })}\n`,
+    );
+    writeFileSync(releasePath, "", { flag: "wx", mode: 0o600 });
+    const exit = await exitPromise;
+    return { ...exit, stdout, stderr };
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+  }
+}
+
 function addRetryAttempt(fixture, workerResult) {
   const attempt1Classification = writeReceipt(
     join(fixture.runDir, "classification.json"),
@@ -1720,7 +1783,7 @@ test("lifecycle-specific shipped fields fail closed", () => {
   }
 });
 
-test("an append race during the settle window writes no accounting receipt", async () => {
+test("an append during the bounded ledger read writes no accounting receipt", async () => {
   const fixture = createEvidenceFixture({
     treatmentId: "haiku-sonnet-sidekick",
     workerResult: {
@@ -1733,39 +1796,47 @@ test("an append race during the settle window writes no accounting receipt", asy
     const ledger = writeSidekickLedger(fixture, [
       { model: "engage", costUsd: 0 },
     ]);
-    const child = spawn(process.execPath, collectArgs(fixture), {
-      env: { ...fixture.env, CHD_EXPERIMENT_2702_TEST_MODE: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.setEncoding("utf8").on("data", (chunk) => {
-      stderr += chunk;
-    });
-    const appender = setInterval(() => {
-      appendFileSync(
-        ledger,
-        `${JSON.stringify({ model: "engage", costUsd: 0, tick: Date.now() })}\n`,
-      );
-    }, 10);
-    const exit = await new Promise((resolveExit, rejectExit) => {
-      const timeout = setTimeout(() => {
-        child.kill("SIGKILL");
-        rejectExit(new Error("accounting append-race fixture timed out"));
-      }, 10_000);
-      child.once("error", rejectExit);
-      child.once("close", (code, signal) => {
-        clearTimeout(timeout);
-        resolveExit({ code, signal });
-      });
-    });
-    clearInterval(appender);
+    const result = await collectAcrossLedgerMutationPhase(
+      fixture,
+      ledger,
+      "bounded-read",
+    );
 
-    assert.notEqual(exit.code, 0, `${stdout}\n${stderr}`);
-    assert.match(stderr, /changed while accounting evidence was collected/);
+    assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(
+      result.stderr,
+      /exact Sidekick ledger changed while it was read/,
+    );
+    assert.equal(existsSync(join(fixture.runDir, "accounting.json")), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("an append during the settle window writes no accounting receipt", async () => {
+  const fixture = createEvidenceFixture({
+    treatmentId: "haiku-sonnet-sidekick",
+    workerResult: {
+      session_id: randomUUID(),
+      total_cost_usd: 0.5,
+      result: "private",
+    },
+  });
+  try {
+    const ledger = writeSidekickLedger(fixture, [
+      { model: "engage", costUsd: 0 },
+    ]);
+    const result = await collectAcrossLedgerMutationPhase(
+      fixture,
+      ledger,
+      "settle-window",
+    );
+
+    assert.notEqual(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(
+      result.stderr,
+      /Sidekick ledger changed while accounting evidence was collected/,
+    );
     assert.equal(existsSync(join(fixture.runDir, "accounting.json")), false);
   } finally {
     fixture.cleanup();

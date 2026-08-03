@@ -29,6 +29,12 @@ const MAX_SIDEKICK_LEDGER_ROWS = 4_096;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const LEDGER_MUTATION_TEST_PHASE_ENV =
+  "CHD_EXPERIMENT_2702_TEST_LEDGER_MUTATION_PHASE";
+const LEDGER_MUTATION_TEST_READY_ENV =
+  "CHD_EXPERIMENT_2702_TEST_LEDGER_READY_PATH";
+const LEDGER_MUTATION_TEST_RELEASE_ENV =
+  "CHD_EXPERIMENT_2702_TEST_LEDGER_RELEASE_PATH";
 
 function fail(message) {
   throw new Error(message);
@@ -75,6 +81,29 @@ function assertRegularFile(path, label) {
   return metadata;
 }
 
+function waitAtLedgerMutationTestBarrier(phase) {
+  if (
+    process.env.CHD_EXPERIMENT_2702_TEST_MODE !== "1" ||
+    process.env[LEDGER_MUTATION_TEST_PHASE_ENV] !== phase
+  ) {
+    return;
+  }
+  const readyPath = process.env[LEDGER_MUTATION_TEST_READY_ENV];
+  const releasePath = process.env[LEDGER_MUTATION_TEST_RELEASE_ENV];
+  if (!readyPath || !releasePath) {
+    fail(`ledger mutation test barrier ${phase} is missing marker paths`);
+  }
+  writeFileSync(readyPath, "", { flag: "wx", mode: 0o600 });
+  const deadline = Date.now() + 10_000;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  while (!existsSync(releasePath) && Date.now() < deadline) {
+    Atomics.wait(sleeper, 0, 0, 5);
+  }
+  if (!existsSync(releasePath)) {
+    fail(`ledger mutation test barrier ${phase} timed out`);
+  }
+}
+
 function readBounded(path, maximumBytes, label) {
   let descriptor;
   try {
@@ -87,6 +116,9 @@ function readBounded(path, maximumBytes, label) {
     if (before.size > maximumBytes)
       fail(`${label} exceeds its fixed size limit`);
     const bytes = readFileSync(descriptor);
+    if (label === "exact Sidekick ledger") {
+      waitAtLedgerMutationTestBarrier("bounded-read");
+    }
     const after = fstatSync(descriptor);
     if (
       ledgerFingerprint(before) !== ledgerFingerprint(after) ||
@@ -566,6 +598,7 @@ async function readSettledLedger(workerSessionId, sidekickRoot) {
   if (before.size !== bytes.length) {
     fail("Sidekick ledger changed while accounting evidence was collected");
   }
+  waitAtLedgerMutationTestBarrier("settle-window");
   await new Promise((resolveWait) =>
     setTimeout(
       resolveWait,
