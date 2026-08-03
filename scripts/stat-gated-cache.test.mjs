@@ -179,6 +179,49 @@ test('a source that never settles serves the freshest build uncached instead of 
   assert.equal(buildsMap.has('q:racy'), false, 'the in-flight owner is cleared');
 });
 
+test('retry exhaustion never serves a value built under a different trust state', async () => {
+  const { cacheMap, buildsMap } = newState();
+  cacheMap.set('q:trust-race', {
+    value: { body: 'last-known-good', observedState: 'state-A' },
+    sourceSig: 'sig-old',
+    sourceState: 'state-A',
+    lastAccess: 1,
+  });
+  let sig = 'sig-A';
+  let builds = 0;
+
+  await assert.rejects(
+    resolveStatGatedCache({
+      sourceSignature: () => sig,
+      sourceState: () => 'state-A',
+      builtSourceState: (value) => value.observedState,
+      sourceStatesEqual: (left, right) => left === right,
+      cacheMap,
+      buildsMap,
+      key: 'q:trust-race',
+      max: 16,
+      build: async () => {
+        builds += 1;
+        sig = builds === 1 ? 'sig-B' : 'sig-C';
+        return { body: `untrusted-${builds}`, observedState: 'state-B' };
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'SOURCE_CHANGED_DURING_BUILD');
+      assert.match(error.message, /trust state changed across the bounded rebuild retry/i);
+      return true;
+    }
+  );
+
+  assert.equal(builds, 2, 'the trust mismatch receives only the bounded retry');
+  assert.equal(
+    cacheMap.get('q:trust-race').value.body,
+    'last-known-good',
+    'neither trust-mismatched value is served into or committed over last-good'
+  );
+  assert.equal(buildsMap.has('q:trust-race'), false, 'the rejected owner is cleared');
+});
+
 test('an A -> B -> A build retries when the payload observed a different source state', async () => {
   const { cacheMap, buildsMap } = newState();
   let builds = 0;
