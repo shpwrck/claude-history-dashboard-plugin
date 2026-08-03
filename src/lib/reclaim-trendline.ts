@@ -33,6 +33,7 @@ import { isoWeekStart } from './weekly-delta';
 import {
   runReclaimCascade,
   rollupCascade,
+  scopeKeyOf,
   type ReclaimClaim,
   type CategoryCoverage,
 } from './reclaim';
@@ -104,6 +105,26 @@ export interface ReclaimTrendlineData {
   totalReclaim: number;
 }
 
+/** Deterministic work counters emitted by the representative scale probe. */
+export interface ReclaimTrendlineWorkload {
+  /** ISO-week cascades produced for the visible trendline. */
+  weeks: number;
+  /** Window-wide claims supplied by the recommendation surface. */
+  claims: number;
+  /** Claims actually supplied to weekly cascades after scope indexing. */
+  weeklyClaimInputs: number;
+  /** Prior exhaustive upper bound: every claim supplied to every week. */
+  exhaustiveWeeklyClaimInputs: number;
+  /** Distinct `(sessionId, model)` rows across all weekly matrices. */
+  weeklyScopeKeys: number;
+  /** Scope-index constructions; stays zero when no dated week can query it. */
+  claimIndexBuilds: number;
+}
+
+export type ReclaimTrendlineWorkloadProbe = (
+  workload: ReclaimTrendlineWorkload
+) => void;
+
 /** The claims a rec list carries, in stable rec order (mirrors recommendations.ts). */
 function claimsOf(recs: Recommendation[]): ReclaimClaim[] {
   const claims: ReclaimClaim[] = [];
@@ -138,32 +159,96 @@ function entryWeek(entry: TokenEntry): string | null {
  * `entries` by the entry's own timestamp so a session spanning two weeks
  * contributes its spend to each week it touched (the residual matrix is keyed by
  * `(sessionId, model)`, so a per-week slice naturally scopes the cascade to that
- * week's tokens). Returns a map week → that week's `SessionTokenData[]`.
+ * week's tokens). Returns each week's token rows plus its distinct scope keys.
  */
-function sliceByWeek(tokenData: SessionTokenData[]): Map<string, SessionTokenData[]> {
-  const byWeek = new Map<string, Map<string, SessionTokenData>>();
+interface ReclaimWeekSlice {
+  tokenData: SessionTokenData[];
+  scopeKeys: Set<string>;
+}
+
+function sliceByWeek(tokenData: SessionTokenData[]): Map<string, ReclaimWeekSlice> {
+  // perf-index-contract: reclaim-week-buckets always-consumed: every slice call enumerates all buckets into the returned weekly map
+  const byWeek = new Map<
+    string,
+    { sessions: Map<string, SessionTokenData>; scopeKeys: Set<string> }
+  >();
   for (const d of tokenData) {
     for (const entry of d.entries) {
       const week = entryWeek(entry);
       if (!week) continue;
-      let sessions = byWeek.get(week);
-      if (!sessions) {
-        sessions = new Map<string, SessionTokenData>();
-        byWeek.set(week, sessions);
+      let weekly = byWeek.get(week);
+      if (!weekly) {
+        // perf-index-contract: reclaim-week-members always-consumed: construction is guarded by a dated entry that immediately queries and populates both indexes
+        weekly = { sessions: new Map(), scopeKeys: new Set() };
+        byWeek.set(week, weekly);
       }
-      let slice = sessions.get(d.sessionId);
+      let slice = weekly.sessions.get(d.sessionId);
       if (!slice) {
         // A shallow clone with an empty `entries` list: the cascade reads only
         // `sessionId` + `entries`, so we copy the dimensions and re-bucket entries.
         slice = { ...d, entries: [] };
-        sessions.set(d.sessionId, slice);
+        weekly.sessions.set(d.sessionId, slice);
       }
       slice.entries.push(entry);
+      weekly.scopeKeys.add(scopeKeyOf(d.sessionId, entry.model || 'unknown'));
     }
   }
-  const out = new Map<string, SessionTokenData[]>();
-  for (const [week, sessions] of byWeek) out.set(week, [...sessions.values()]);
+  // perf-index-contract: reclaim-week-output always-consumed: the sole caller always enumerates this returned map and reads its size
+  const out = new Map<string, ReclaimWeekSlice>();
+  for (const [week, weekly] of byWeek) {
+    out.set(week, {
+      tokenData: [...weekly.sessions.values()],
+      scopeKeys: weekly.scopeKeys,
+    });
+  }
   return out;
+}
+
+/** Index each claim once by the concrete matrix rows it can address. */
+function claimIndexesByScope(claims: ReclaimClaim[]): Map<string, number[]> {
+  // perf-index-contract: reclaim-claim-scope-index non-querying
+  const byScope = new Map<string, number[]>();
+  claims.forEach((claim, claimIndex) => {
+    for (const scopeKey of new Set(claim.scopeKeys)) {
+      const indexes = byScope.get(scopeKey) ?? [];
+      indexes.push(claimIndex);
+      byScope.set(scopeKey, indexes);
+    }
+  });
+  return byScope;
+}
+
+/**
+ * Resolve only the claims applicable to one week's matrix and narrow their
+ * scope lists to the rows that week contains. The cascade still owns ordering,
+ * validation, coverage, and arithmetic; this index only removes impossible
+ * claim/scope work before the weekly call.
+ */
+function claimsForWeek(
+  claims: ReclaimClaim[],
+  indexesByScope: Map<string, number[]>,
+  scopeKeys: Set<string>
+): ReclaimClaim[] {
+  // perf-index-contract: reclaim-applicable-claims always-consumed: every weekly call spreads the complete candidate set into deterministic claim order
+  const applicableClaimIndexes = new Set<number>();
+  for (const scopeKey of scopeKeys) {
+    for (const claimIndex of indexesByScope.get(scopeKey) ?? []) {
+      applicableClaimIndexes.add(claimIndex);
+    }
+  }
+  // perf-index-contract: reclaim-applicable-order always-consumed: every weekly call immediately maps the complete sorted candidate list into cascade claims
+  return [...applicableClaimIndexes]
+    .sort((a, b) => a - b)
+    .map((claimIndex) => ({
+      ...claims[claimIndex],
+      // resolveRows preserves claim scope order, which is observable for
+      // sequential directUsd drains. Intersect in that same original order;
+      // never inherit the weekly token-data Set's insertion order.
+      // perf-index-contract: reclaim-claim-scope-order always-consumed: every applicable claim immediately filters its complete de-duplicated scope order against the week
+      scopeKeys: [...new Set(claims[claimIndex].scopeKeys)].filter((scopeKey) =>
+        scopeKeys.has(scopeKey)
+      ),
+    }));
 }
 
 /**
@@ -171,21 +256,24 @@ function sliceByWeek(tokenData: SessionTokenData[]): Map<string, SessionTokenDat
  *
  * - **Trendline:** the cascade is run once PER ISO-week slice of `tokenData`, so
  *   each week's `baseline` is its own repriced actual bill and `afterReclaim` is
- *   its post-counterfactual bill. The same `claims` are passed to every week;
- *   their `scopeKeys` only resolve to that week's sessions, so a week naturally
- *   books only the reclaim of the spend it contains.
+ *   its post-counterfactual bill. Claims are indexed once by `scopeKey`; each
+ *   weekly cascade receives only claims and scopes present in that week's
+ *   matrix, rather than resolving the complete window claim list again.
  * - **Gauge & levers:** computed ONCE over the whole window (a single cascade run
  *   over all `tokenData`), so the gauge is `price(claimed) / totalBill` across the
  *   period and is decoupled from the per-week trendline — it is never multiplied
  *   into any trendline series.
  *
- * `onReject` is forwarded to every cascade run (defaulting to a no-op here so the
- * UI does not spam the console; the engine path keeps its own `console.warn`).
+ * `onReject` is forwarded to the window-wide cascade and every applicable
+ * weekly cascade (defaulting to a no-op here so the UI does not spam the
+ * console; the engine path keeps its own `console.warn`). A claim absent from a
+ * week's scope index is not re-rejected for that week.
  */
 export function buildReclaimTrendline(
   recs: Recommendation[],
   tokenData: SessionTokenData[],
-  onReject: (msg: string) => void = () => {}
+  onReject: (msg: string) => void = () => {},
+  workloadProbe?: ReclaimTrendlineWorkloadProbe
 ): ReclaimTrendlineData {
   const claims = claimsOf(recs);
   const rejectionsByKey = new Map<string, ReclaimRejection>();
@@ -211,10 +299,25 @@ export function buildReclaimTrendline(
 
   // Per-week cascade → the two trendline series.
   const weeks = sliceByWeek(tokenData);
+  let claimIndexBuilds = 0;
+  let indexesByScope: Map<string, number[]> | undefined;
+  let weeklyClaimInputs = 0;
+  let weeklyScopeKeys = 0;
   const points: ReclaimWeekPoint[] = [...weeks.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([week, slice]) => {
-      const r = runReclaimCascade(claims, slice, onReject);
+      if (!indexesByScope) {
+        indexesByScope = claimIndexesByScope(claims);
+        claimIndexBuilds += 1;
+      }
+      const weeklyClaims = claimsForWeek(
+        claims,
+        indexesByScope,
+        slice.scopeKeys
+      );
+      weeklyClaimInputs += weeklyClaims.length;
+      weeklyScopeKeys += slice.scopeKeys.size;
+      const r = runReclaimCascade(weeklyClaims, slice.tokenData, onReject);
       return {
         week,
         baseline: r.billOriginal,
@@ -222,6 +325,15 @@ export function buildReclaimTrendline(
         reclaim: r.total,
       };
     });
+
+  workloadProbe?.({
+    weeks: weeks.size,
+    claims: claims.length,
+    weeklyClaimInputs,
+    exhaustiveWeeklyClaimInputs: weeks.size * claims.length,
+    weeklyScopeKeys,
+    claimIndexBuilds,
+  });
 
   return { points, gauge, byCategory, levers, rejections, totalReclaim: whole.total };
 }

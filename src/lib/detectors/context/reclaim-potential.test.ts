@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { detector } from './reclaim-potential';
+import {
+  detector,
+  measureReclaimPasteWorkload,
+} from './reclaim-potential';
 import { detector as crossSessionReread } from './cross-session-reread';
 import { detector as repoMapContextWaste } from './repo-map-context-waste';
 import { validateRecommendationProvenance } from '../provenance';
@@ -133,6 +136,81 @@ describe('context.reclaim-potential', () => {
     );
     expect(rec).not.toBeNull();
     expect(rec!.evidence!.join(' ')).toContain('re-pasted');
+  });
+
+  it('preserves whitespace-normalized duplicate identity and preview output (#3187)', () => {
+    const tail = 'x'.repeat(400_000);
+    const sessions = [
+      pasteSession('p1', [{ content: `  Alpha\n\t beta   ${tail}\n` }]),
+      pasteSession('p2', [{ content: `Alpha beta ${tail}` }]),
+    ];
+
+    const rec = detector.rule(
+      input({ sessions, tokenData: [tokenSession('p1')] }),
+      0
+    );
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(1);
+    expect(rec!.evidence).toEqual([
+      expect.stringContaining('("Alpha beta xxxxxxxxxxxxxxxxxxxxxxxxxxxxx…")'),
+    ]);
+  });
+
+  it('keeps distinct blocks separate when their primary portable digests collide (#3187)', () => {
+    // These fixed-length prefixes are a pinned FNV-1a collision. Appending the
+    // same suffix preserves the collision, so the secondary bounded discriminator
+    // must keep both duplicate groups separate.
+    const suffix = 'X'.repeat(400_000);
+    const first = `fqftnvslbgfe${suffix}`;
+    const second = `gsstgxoocizp${suffix}`;
+    const sessions = [
+      pasteSession('p1', [{ content: first }]),
+      pasteSession('p2', [{ content: first }]),
+      pasteSession('p3', [{ content: second }]),
+      pasteSession('p4', [{ content: second }]),
+    ];
+
+    const rec = detector.rule(
+      input({ sessions, tokenData: [tokenSession('p1')] }),
+      0
+    );
+
+    expect(rec).not.toBeNull();
+    expect(rec!.affected).toBe(2);
+    expect(rec!.evidence).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('fqftnvslbgfe'),
+        expect.stringContaining('gsstgxoocizp'),
+      ])
+    );
+  });
+
+  it('bounds retained paste metadata for many large unique blocks (#3187)', () => {
+    const blockCount = 128;
+    const blockChars = 32 * 1024;
+    const sessions = Array.from({ length: blockCount }, (_, index) =>
+      pasteSession(`unique-${index}`, [
+        { content: `${index.toString().padStart(4, '0')}:${'x'.repeat(blockChars)}` },
+      ])
+    );
+
+    const started = performance.now();
+    const workload = measureReclaimPasteWorkload(sessions);
+    const elapsedMs = performance.now() - started;
+
+    expect(workload.blocks).toBe(blockCount);
+    expect(workload.uniqueBlocks).toBe(blockCount);
+    expect(workload.normalizedCodeUnits).toBeGreaterThan(
+      blockCount * blockChars
+    );
+    // Keys, independent collision discriminators, and the 40-character preview
+    // stay below 250 UTF-16 code units per unique block; the ~4 MiB normalized
+    // corpus is streamed and never retained as Map keys or samples.
+    expect(workload.retainedMetadataCodeUnits).toBeLessThanOrEqual(
+      blockCount * 250
+    );
+    expect(elapsedMs).toBeLessThan(750);
   });
 
   it('stays silent below the dollar floor (min-effect gate — no zero-impact findings)', () => {

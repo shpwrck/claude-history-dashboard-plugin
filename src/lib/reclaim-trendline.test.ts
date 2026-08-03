@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { buildReclaimTrendline } from './reclaim-trendline';
+import {
+  buildReclaimTrendline,
+  type ReclaimTrendlineWorkload,
+} from './reclaim-trendline';
 import { scopeKeyOf, type ReclaimClaim } from './reclaim';
 import type { Recommendation } from './detectors/types';
 import type { SessionTokenData, TokenEntry } from '../types';
@@ -103,6 +106,48 @@ describe('buildReclaimTrendline', () => {
     expect(b.afterReclaim).toBeLessThan(b.baseline);
   });
 
+  it('preserves claim scope order when weekly token rows arrive reversed (#3164)', () => {
+    const scopeA = scopeKeyOf('scope-a', 'claude-opus-4-7');
+    const scopeB = scopeKeyOf('scope-b', 'claude-opus-4-7');
+    // Both rows are in one week, but token-data order is deliberately the
+    // reverse of the first claim's scope order. Each row has a $0.01 server fee.
+    const td = [
+      session('scope-b', 'claude-opus-4-7', [entry({ webSearchRequests: 1 })]),
+      session('scope-a', 'claude-opus-4-7', [entry({ webSearchRequests: 1 })]),
+    ];
+    const recs = [
+      rec(
+        'cost.first',
+        claim({
+          leverId: 'cost.first',
+          orderKey: 10,
+          scopeKeys: [scopeA, scopeB],
+          counterfactual: { kind: 'directUsd', usd: 0.01 },
+        })
+      ),
+      rec(
+        'cost.second',
+        claim({
+          leverId: 'cost.second',
+          orderKey: 20,
+          scopeKeys: [scopeA],
+          counterfactual: { kind: 'directUsd', usd: 0.01 },
+        })
+      ),
+    ];
+
+    const out = buildReclaimTrendline(recs, td, () => {});
+
+    expect(out.points).toHaveLength(1);
+    expect(out.points[0].baseline).toBeCloseTo(0.02, 9);
+    // Preserving [scopeA, scopeB] makes the first claim drain A, so the second
+    // overlapping A-only claim rejects exactly as it does window-wide. Reversing
+    // the scopes would drain B first and incorrectly book both claims ($0.02).
+    expect(out.points[0].reclaim).toBeCloseTo(0.01, 9);
+    expect(out.points[0].afterReclaim).toBeCloseTo(0.01, 9);
+    expect(out.totalReclaim).toBeCloseTo(0.01, 9);
+  });
+
   it('computes an INDEPENDENT coverage gauge that is never multiplied into the trendline', () => {
     // One scope: 1M input (claimed) + 1M output (UNCLAIMED). Opus rates:
     // input $5, output $25 → bill $30. The reprice lever owns only `input`, so
@@ -172,7 +217,10 @@ describe('buildReclaimTrendline', () => {
     const out = buildReclaimTrendline(recs, td, (msg) => rawRejects.push(msg));
 
     expect(out.points).toHaveLength(2);
-    expect(rawRejects).toHaveLength(3);
+    // The scope index excludes the ghost claim from both weekly cascades, so
+    // diagnostics are emitted once by the authoritative window-wide run rather
+    // than repeated once per visible week.
+    expect(rawRejects).toHaveLength(1);
     expect(out.rejections).toEqual([
       {
         leverId: 'cost.ghost',
@@ -301,9 +349,79 @@ describe('buildReclaimTrendline', () => {
         entry({ timestamp: 'not-a-date', inputTokens: 1_000_000 }),
       ]),
     ];
-    const out = buildReclaimTrendline([], td);
+    const recs = [
+      rec(
+        'cost.undated',
+        claim({
+          leverId: 'cost.undated',
+          ownedPools: ['input'],
+          scopeKeys: [scopeKeyOf('s1', 'claude-opus-4-7')],
+        })
+      ),
+    ];
+    let workload: ReclaimTrendlineWorkload | undefined;
+    const out = buildReclaimTrendline(recs, td, () => {}, (sample) => {
+      workload = sample;
+    });
     // The undated entry produces no week point but still no crash.
     expect(out.points).toHaveLength(0);
+    // perf-index-contract: reclaim-claim-scope-index non-querying
+    expect(workload?.claimIndexBuilds).toBe(0);
+  });
+
+  it('keeps a representative 52-week window within its claim-work and latency budgets (#3164)', () => {
+    const weekCount = 52;
+    const claimsPerWeek = 20;
+    const monday = Date.parse('2026-01-05T09:00:00.000Z');
+    const td: SessionTokenData[] = [];
+    const recs: Recommendation[] = [];
+    for (let week = 0; week < weekCount; week += 1) {
+      const timestamp = new Date(monday + week * 7 * 24 * 60 * 60 * 1000).toISOString();
+      for (let index = 0; index < claimsPerWeek; index += 1) {
+        const sessionId = `week-${week}-session-${index}`;
+        const scopeKey = scopeKeyOf(sessionId, 'claude-opus-4-7');
+        td.push(
+          session(sessionId, 'claude-opus-4-7', [
+            entry({ timestamp, inputTokens: 10_000 }),
+          ])
+        );
+        recs.push(
+          rec(
+            `cost.week-${week}-${index}`,
+            claim({
+              leverId: `cost.week-${week}-${index}`,
+              ownedPools: ['input'],
+              scopeKeys: [scopeKey],
+              counterfactual: {
+                kind: 'reprice',
+                toModel: 'claude-haiku-4-5-20251001',
+              },
+            })
+          )
+        );
+      }
+    }
+
+    let workload: ReclaimTrendlineWorkload | undefined;
+    const started = performance.now();
+    const out = buildReclaimTrendline(recs, td, () => {}, (sample) => {
+      workload = sample;
+    });
+    const elapsedMs = performance.now() - started;
+
+    expect(out.points).toHaveLength(weekCount);
+    expect(workload).toEqual({
+      weeks: weekCount,
+      claims: weekCount * claimsPerWeek,
+      weeklyClaimInputs: weekCount * claimsPerWeek,
+      exhaustiveWeeklyClaimInputs: weekCount * weekCount * claimsPerWeek,
+      weeklyScopeKeys: weekCount * claimsPerWeek,
+      claimIndexBuilds: 1,
+    });
+    // A deliberately generous CI ceiling: the fixture is 1,040 scoped claims
+    // across a full year. The allocation budget above is the primary invariant;
+    // this catches accidental multi-second regressions without timing noise.
+    expect(elapsedMs).toBeLessThan(750);
   });
 });
 

@@ -98,9 +98,167 @@ function callFingerprint(call: ToolCall): string {
   return `${call.toolName}::${key}`;
 }
 
-/** Collapse a pasted block to a stable content key (whitespace-normalized). */
-function pasteKey(content: string): string {
-  return content.replace(/\s+/g, ' ').trim();
+const PASTE_PREVIEW_CODE_UNITS = 40;
+const WHITESPACE_CODE_UNIT = /\s/;
+
+/** Deterministic retained-work counters for the paste-dedup scale probe. */
+export interface ReclaimPasteWorkload {
+  blocks: number;
+  uniqueBlocks: number;
+  normalizedCodeUnits: number;
+  /** UTF-16 code units retained by Map keys, discriminators, and previews. */
+  retainedMetadataCodeUnits: number;
+}
+
+interface PasteFingerprint {
+  primaryKey: string;
+  collisionKey: string;
+  normalizedLength: number;
+  preview: string;
+}
+
+interface PasteAggregate {
+  count: number;
+  bytes: number;
+  preview: string;
+  normalizedLength: number;
+  newestTs: number;
+}
+
+function hex32(value: number): string {
+  return (value >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Stream the old `content.replace(/\s+/g, ' ').trim()` normalization into a
+ * browser-safe FNV-1a digest without allocating the normalized block. A second,
+ * independently seeded FNV-1a lane plus bounded first/last samples explicitly
+ * disambiguates a collision in the primary digest+length bucket.
+ */
+function pasteFingerprint(content: string): PasteFingerprint | null {
+  let primary = 0x811c9dc5;
+  let secondary = 0x9e3779b9;
+  let normalizedLength = 0;
+  let preview = '';
+  const suffixRing = new Array<string>(PASTE_PREVIEW_CODE_UNITS);
+  let suffixCount = 0;
+  let suffixNext = 0;
+  let started = false;
+  let pendingSpace = false;
+
+  const append = (char: string) => {
+    const code = char.charCodeAt(0);
+    primary = Math.imul(primary ^ code, 0x01000193) >>> 0;
+    secondary = Math.imul(secondary ^ code, 0x01000193) >>> 0;
+    normalizedLength += 1;
+    if (preview.length < PASTE_PREVIEW_CODE_UNITS) preview += char;
+    suffixRing[suffixNext] = char;
+    suffixNext = (suffixNext + 1) % PASTE_PREVIEW_CODE_UNITS;
+    suffixCount = Math.min(suffixCount + 1, PASTE_PREVIEW_CODE_UNITS);
+  };
+
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    if (WHITESPACE_CODE_UNIT.test(char)) {
+      if (started) pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace) {
+      append(' ');
+      pendingSpace = false;
+    }
+    append(char);
+    started = true;
+  }
+  if (normalizedLength === 0) return null;
+
+  let suffix = '';
+  const suffixStart =
+    (suffixNext - suffixCount + PASTE_PREVIEW_CODE_UNITS) %
+    PASTE_PREVIEW_CODE_UNITS;
+  for (let index = 0; index < suffixCount; index += 1) {
+    suffix += suffixRing[(suffixStart + index) % PASTE_PREVIEW_CODE_UNITS];
+  }
+  return {
+    primaryKey: `${normalizedLength}:${hex32(primary)}`,
+    collisionKey: `${hex32(secondary)}:${preview}:${suffix}`,
+    normalizedLength,
+    preview,
+  };
+}
+
+function aggregatePastedContent(sessions: Session[]): {
+  aggregates: PasteAggregate[];
+  workload: ReclaimPasteWorkload;
+} {
+  const workload: ReclaimPasteWorkload = {
+    blocks: 0,
+    uniqueBlocks: 0,
+    normalizedCodeUnits: 0,
+    retainedMetadataCodeUnits: 0,
+  };
+  // perf-index-contract: paste-fingerprint-buckets always-consumed: every aggregation call flattens every outer bucket into its returned aggregate list
+  const buckets = new Map<string, Map<string, PasteAggregate>>();
+  for (const session of sessions) {
+    const sessionTs =
+      typeof session.startTime === 'number' ? session.startTime : 0;
+    for (const entry of session.entries ?? []) {
+      const pasted = entry.pastedContents;
+      if (!pasted) continue;
+      const ts =
+        typeof entry.timestamp === 'number' && entry.timestamp > 0
+          ? entry.timestamp
+          : sessionTs;
+      for (const pastedContent of Object.values(pasted)) {
+        if (!pastedContent || typeof pastedContent.content !== 'string') continue;
+        workload.blocks += 1;
+        const fingerprint = pasteFingerprint(pastedContent.content);
+        if (!fingerprint) continue;
+        workload.normalizedCodeUnits += fingerprint.normalizedLength;
+
+        let collisions = buckets.get(fingerprint.primaryKey);
+        if (!collisions) {
+          // perf-index-contract: paste-fingerprint-collisions always-consumed: creation is guarded by a primary-key miss and immediately followed by lookup and flattening
+          collisions = new Map<string, PasteAggregate>();
+          buckets.set(fingerprint.primaryKey, collisions);
+          workload.retainedMetadataCodeUnits += fingerprint.primaryKey.length;
+        }
+        let aggregate = collisions.get(fingerprint.collisionKey);
+        if (!aggregate) {
+          aggregate = {
+            count: 0,
+            bytes: 0,
+            preview: fingerprint.preview,
+            normalizedLength: fingerprint.normalizedLength,
+            newestTs: 0,
+          };
+          collisions.set(fingerprint.collisionKey, aggregate);
+          workload.uniqueBlocks += 1;
+          workload.retainedMetadataCodeUnits +=
+            fingerprint.collisionKey.length + fingerprint.preview.length;
+        }
+        aggregate.count += 1;
+        aggregate.bytes = Math.max(
+          aggregate.bytes,
+          pastedContent.content.length
+        );
+        aggregate.newestTs = Math.max(aggregate.newestTs, ts);
+      }
+    }
+  }
+
+  const aggregates: PasteAggregate[] = [];
+  for (const collisions of buckets.values()) {
+    aggregates.push(...collisions.values());
+  }
+  return { aggregates, workload };
+}
+
+/** Execute the production aggregation path and expose only bounded work stats. */
+export function measureReclaimPasteWorkload(
+  sessions: Session[]
+): ReclaimPasteWorkload {
+  return aggregatePastedContent(sessions).workload;
 }
 
 interface ToolItem {
@@ -231,46 +389,16 @@ export const detector: Detector = {
     // ── Bucket (b): re-pasted file content in user turns ──────────────────────
     // Aggregate identical pasted blocks across the whole corpus; a block pasted
     // N times re-ingests its bytes N times where one reference would load once.
-    const pasteAgg = new Map<
-      string,
-      { count: number; bytes: number; sample: string; newestTs: number }
-    >();
-    for (const s of sessions) {
-      const sessionTs = typeof s.startTime === 'number' ? s.startTime : 0;
-      for (const entry of s.entries ?? []) {
-        const pasted = entry.pastedContents;
-        if (!pasted) continue;
-        const ts = (typeof entry.timestamp === 'number' && entry.timestamp > 0
-          ? entry.timestamp
-          : sessionTs);
-        for (const pc of Object.values(pasted)) {
-          if (!pc || typeof pc.content !== 'string') continue;
-          const key = pasteKey(pc.content);
-          if (key.length === 0) continue;
-          const a = pasteAgg.get(key) ?? {
-            count: 0,
-            bytes: 0,
-            sample: key,
-            newestTs: 0,
-          };
-          a.count += 1;
-          a.bytes = Math.max(a.bytes, pc.content.length);
-          a.newestTs = Math.max(a.newestTs, ts);
-          pasteAgg.set(key, a);
-        }
-      }
-    }
-
-    for (const a of pasteAgg.values()) {
+    const { aggregates: pasteAggregates } = aggregatePastedContent(sessions);
+    for (const a of pasteAggregates) {
       if (a.count < MIN_PASTE_REPEATS) continue; // a one-off paste is not reclaim
       const perPasteTokens = Math.round(a.bytes / CHARS_PER_TOKEN);
       if (perPasteTokens <= 0) continue;
       const reclaimTokens = perPasteTokens * (a.count - 1); // repeats after the first
       if (reclaimTokens <= 0) continue;
-      const preview = a.sample.slice(0, 40);
       pasteItems.push({
         kind: 're-pasted-content',
-        label: `Pasted block re-pasted ${a.count}x — ~${perPasteTokens.toLocaleString()} tok each ("${preview}${a.sample.length > 40 ? '…' : ''}")`,
+        label: `Pasted block re-pasted ${a.count}x — ~${perPasteTokens.toLocaleString()} tok each ("${a.preview}${a.normalizedLength > PASTE_PREVIEW_CODE_UNITS ? '…' : ''}")`,
         reclaimTokens,
         occurrences: a.count - 1,
         newestTs: a.newestTs,
