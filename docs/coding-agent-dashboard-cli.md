@@ -25,15 +25,51 @@ coding-agent-dashboard stop
 `serve` reconciles one managed container:
 
 - container name: `coding-agent-dashboard`
-- image: `ghcr.io/shpwrck/claude-history-dashboard:latest` by default
+- image: `ghcr.io/shpwrck/claude-history-dashboard:latest@sha256:...` by
+  default — the readable tag is kept but pinned to an **immutable digest** so a
+  mutable `latest` tag cannot be swapped for a malicious image. Override with
+  `--image` / `CODING_AGENT_DASHBOARD_IMAGE`.
 - host binding: `127.0.0.1:<port>:5173` by default
-- data mount: host `~/.claude` to `/home/node/.claude:ro`
-- config mount: host `~/.claude.json` to `/home/node/.claude.json:ro` when the file exists
+- data mounts: an **allowlisted, credential-free projection** of `~/.claude` —
+  each history/config subpath the dashboard reads (`projects/`, `history.jsonl`,
+  `history.d/`, `usage-data/`, `settings.json`, `CLAUDE.md`, `skills/`,
+  `agents/`, `commands/`, `plugins/`, and the server-only artifact dirs) is
+  bind-mounted individually to `/home/node/.claude/<name>:ro` when it exists.
+  The whole `~/.claude` directory is **never** mounted.
+- credentials: `~/.claude/.credentials.json` (the OAuth subscription token) is
+  never mounted, and is additionally hard-masked with an empty `/dev/null`
+  source as defense in depth. `~/.claude.json` is **not** mounted at all.
 - cache volume: `coding-agent-dashboard-cache` to `/app/.cache`
+- egress: the container runs on a dedicated **internal (no-egress) network**
+  (`coding-agent-dashboard-noegress`, created on first `serve`), so a compromised
+  image cannot exfiltrate anything it reads; the published inbound port still
+  works. Image pulls happen host-side and are unaffected. `stop` tears the
+  network down.
 - env pass-through: `CODING_AGENT_SOURCES` when it is set
 
 For Podman, the launcher also adds `--userns=keep-id` so the read-only
-`~/.claude` bind mount remains readable in rootless setups.
+allowlisted bind mounts remain readable in rootless setups.
+
+### Security posture and intentional degradations (issue #3344, ADR 0008)
+
+Because the launcher runs the *published* image against your live local state,
+it treats that image as untrusted: digest-pinned, credential-free, and
+egress-denied. The trade-off is that a few features which needed either a secret
+or `~/.claude.json` degrade gracefully instead of exposing data:
+
+- The `/api/usage` plan-limit gauge shows "log in to Claude Code" (it needs
+  `~/.claude/.credentials.json`, which is intentionally withheld).
+- MCP-server attribution and config-drift (`~/.claude.json` and its `backups/`
+  snapshots, which can carry MCP secrets) are omitted.
+
+Everything on the local free path — history/session/token/cost/tool analysis,
+recommendations, config hygiene — reads only the allowlisted projection and is
+unaffected. Because the local path makes zero external calls, the no-egress
+network causes no functional loss.
+
+To grant a withheld capability, mount the specific subpath yourself with a
+source-built compose file (see the README); the launcher's default stays locked
+down.
 
 `recs` reads the same local `/api/recommendations.json` engine output as the
 dashboard Recommendations view and prints the top ranked finding as a compact
