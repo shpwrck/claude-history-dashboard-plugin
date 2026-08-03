@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,6 +15,7 @@ import {
   imageViolationsIn,
   poolViolationsIn,
   poolImageRefsIn,
+  buildConfigImageFieldsIn,
   producerTagsIn,
   crossFileStampOffenders,
   containerImageAbsences,
@@ -25,6 +26,7 @@ import {
   imageRefProblem,
   logicalLines,
   listWorkflowFiles,
+  listPublishedImageFiles,
   listRunnerImageFiles,
   listRunnerPoolFiles,
   inertnessReasons,
@@ -36,6 +38,11 @@ const LATEST_REF = 'image-registry.openshift-image-registry.svc:5000/arc-runners
 const STAMP = 'v2026-07-29-87858e92';
 /** The repository the in-cluster BuildConfig publishes to. */
 const REPO = 'image-registry.openshift-image-registry.svc:5000/arc-runners/chd-ci-runner';
+
+const buildConfigFrom = (value) =>
+  ['spec:', '  strategy:', '    dockerStrategy:', '      from:', `        name: ${value}`, ''].join('\n');
+const buildConfigOutput = (value) =>
+  ['spec:', '  output:', '    to:', `      name: ${value}`, ''].join('\n');
 
 const rulesFor = (source) => violationsIn(source).map((v) => v.rule);
 
@@ -213,16 +220,51 @@ test('IMAGE/PIN: a tagged base image is rejected, a digest-pinned one accepted',
 
 test('IMAGE/PIN: a BuildConfig `from.name` registry ref must carry a digest', () => {
   assert.deepEqual(
-    imageViolationsIn('        name: ghcr.io/actions/actions-runner:v2\n').map((v) => v.rule),
+    imageViolationsIn(buildConfigFrom('ghcr.io/actions/actions-runner:v2')).map((v) => v.rule),
     ['PIN']
   );
   assert.deepEqual(
-    imageViolationsIn(`        name: ghcr.io/actions/actions-runner@sha256:${'0'.repeat(64)}\n`),
+    imageViolationsIn(buildConfigFrom(`ghcr.io/actions/actions-runner@sha256:${'0'.repeat(64)}`)),
     []
   );
-  // A plain YAML name (not a registry reference) is not an image.
-  assert.deepEqual(imageViolationsIn('        name: chd-ci-runner\n'), []);
+  // A plain ImageStream name (not a tagged reference) is not mutable.
+  assert.deepEqual(imageViolationsIn(buildConfigFrom('chd-ci-runner')), []);
+  // A generic metadata name is not an image-bearing field.
   assert.deepEqual(imageViolationsIn('  name: arc-gha-rs-controller\n'), []);
+});
+
+test('#3509: alternate YAML spellings fail closed only at image-bearing BuildConfig paths', () => {
+  const nextLineOutput = [
+    'spec:',
+    '  output:',
+    '    to:',
+    '      name:',
+    '        chd-ci-runner:latest',
+    '',
+  ].join('\n');
+  const nextLineFrom = [
+    'spec:',
+    '  strategy:',
+    '    dockerStrategy:',
+    '      from:',
+    '        name:',
+    '          ghcr.io/actions/actions-runner:v2',
+    '',
+  ].join('\n');
+  for (const [source, rule] of [
+    [nextLineOutput, 'STAMP'],
+    [nextLineFrom, 'PIN'],
+    [buildConfigOutput('!!str chd-ci-runner:latest'), 'STAMP'],
+    [buildConfigFrom('&runner ghcr.io/actions/actions-runner:v2'), 'PIN'],
+  ]) {
+    const problems = imageViolationsIn(source);
+    assert.deepEqual(problems.map((problem) => problem.rule), [rule]);
+    assert.match(problems[0].detail, /cannot be checked|does not resolve/);
+  }
+
+  const metadataNextLine = ['metadata:', '  name:', '    chd-ci-runner', ''].join('\n');
+  assert.deepEqual(buildConfigImageFieldsIn(metadataNextLine), { fields: [], problems: [] });
+  assert.deepEqual(imageViolationsIn(metadataNextLine), []);
 });
 
 // --- #3340: the ARC runner pool -------------------------------------------
@@ -305,9 +347,9 @@ test('STAMP: the stamp grammar rejects near-misses', () => {
 test('STAMP: the BuildConfig OUTPUT tag is checked, not only the base image', () => {
   // Fixing only the values files would leave the producer writing `:latest` —
   // the bug relocated one layer down rather than closed.
-  const problems = imageViolationsIn('      name: chd-ci-runner:latest\n');
+  const problems = imageViolationsIn(buildConfigOutput('chd-ci-runner:latest'));
   assert.deepEqual(problems.map((p) => p.rule), ['STAMP']);
-  assert.deepEqual(imageViolationsIn(`      name: chd-ci-runner:${STAMP}\n`), []);
+  assert.deepEqual(imageViolationsIn(buildConfigOutput(`chd-ci-runner:${STAMP}`)), []);
   // Ordinary object names are still not images.
   assert.deepEqual(imageViolationsIn('  name: chd-ci-runner\n'), []);
   assert.deepEqual(imageViolationsIn('  name: arc-gha-rs-controller\n'), []);
@@ -578,6 +620,45 @@ test('INERT: the real repository is NOT inert', () => {
   assert.deepEqual(inertnessReasons(), []);
 });
 
+test('#3064: the exact root published-recipe inventory is scanned and digest-pinned', () => {
+  const files = listPublishedImageFiles();
+  assert.deepEqual(files.map((absolute) => absolute.split('/').pop()), ['Dockerfile', 'Dockerfile.spa']);
+  for (const absolute of files) {
+    assert.deepEqual(
+      imageViolationsIn(readFileSync(absolute, 'utf8')),
+      [],
+      `${absolute} must pin every non-scratch FROM image by digest`
+    );
+  }
+});
+
+test('#3506 INERT: every image-input walker explicitly refuses symlinked scoped files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'action-pins-symlinks-'));
+  try {
+    writeFileSync(join(root, 'recipe-target'), 'FROM node:24-slim\n');
+    symlinkSync('recipe-target', join(root, 'Dockerfile'));
+    writeFileSync(join(root, 'Dockerfile.spa'), `FROM node@sha256:${'0'.repeat(64)}\n`);
+
+    const runnerDirectory = join(root, 'deploy', 'arc', 'runner-image');
+    mkdirSync(runnerDirectory, { recursive: true });
+    writeFileSync(join(runnerDirectory, 'recipe-target'), 'FROM node:24\n');
+    symlinkSync('recipe-target', join(runnerDirectory, 'Dockerfile'));
+
+    const poolDirectory = join(root, 'deploy', 'arc');
+    writeFileSync(join(poolDirectory, 'pool-target.txt'), `image: ${LATEST_REF}:latest\n`);
+    symlinkSync('pool-target.txt', join(poolDirectory, 'runner-scale-set-values.yaml'));
+
+    const refusals = inertnessReasons(root).filter((reason) => /symbolic link/.test(reason));
+    assert.deepEqual(refusals, [
+      'scoped input Dockerfile is a symbolic link; this gate only checks regular files inside the reviewed worktree',
+      'scoped input deploy/arc/runner-image/Dockerfile is a symbolic link; this gate only checks regular files inside the reviewed worktree',
+      'scoped input deploy/arc/runner-scale-set-values.yaml is a symbolic link; this gate only checks regular files inside the reviewed worktree',
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the runner-image build is actually in the scanned set', () => {
   const files = listRunnerImageFiles().map((f) => f.split('/').pop());
   assert.ok(files.includes('Dockerfile'), 'runner-image Dockerfile must be scanned');
@@ -626,11 +707,11 @@ test('STAMP: YAML quoting is not a way out of the gate', () => {
   // and the reference passed unchecked.
   assert.equal(unquote('"chd-ci-runner:latest"'), 'chd-ci-runner:latest');
   assert.deepEqual(
-    imageViolationsIn('      name: "chd-ci-runner:latest"\n').map((p) => p.rule),
+    imageViolationsIn(buildConfigOutput('"chd-ci-runner:latest"')).map((p) => p.rule),
     ['STAMP']
   );
   assert.deepEqual(
-    imageViolationsIn("      name: 'chd-ci-runner:latest'\n").map((p) => p.rule),
+    imageViolationsIn(buildConfigOutput("'chd-ci-runner:latest'")).map((p) => p.rule),
     ['STAMP']
   );
   assert.deepEqual(
@@ -639,13 +720,13 @@ test('STAMP: YAML quoting is not a way out of the gate', () => {
   );
   // ...and a quoted VALID reference still passes.
   assert.deepEqual(poolViolationsIn(`        image: "${LATEST_REF}:${STAMP}"\n`), []);
-  assert.deepEqual(imageViolationsIn(`      name: "chd-ci-runner:${STAMP}"\n`), []);
+  assert.deepEqual(imageViolationsIn(buildConfigOutput(`"chd-ci-runner:${STAMP}"`)), []);
 });
 
 test('a quoted BuildConfig output tag is still seen as the producer', () => {
   // Quoting must not hide the producer -- but only at spec.output.to.name; a
   // bare `name:` elsewhere is an input and deliberately is NOT a producer.
-  const quoted = ['  output:', '    to:', `      name: "chd-ci-runner:${STAMP}"`, ''].join('\n');
+  const quoted = buildConfigOutput(`"chd-ci-runner:${STAMP}"`);
   const found = producerTagsIn(quoted);
   assert.equal(found.length, 1);
   assert.equal(found[0].tag, STAMP);

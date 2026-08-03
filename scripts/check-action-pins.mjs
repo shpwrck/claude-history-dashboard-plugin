@@ -24,7 +24,8 @@
 //
 //   PIN     — every non-local `uses:` in .github/ resolves to an immutable ref:
 //             a 40-character commit SHA for an action repo, or @sha256:<64 hex>
-//             for a `docker://` image. In deploy/arc/runner-image/, base images
+//             for a `docker://` image. In the root `Dockerfile` and
+//             `Dockerfile.spa`, and in deploy/arc/runner-image/, base images
 //             (Dockerfile `FROM`, BuildConfig `from.name`) must carry a digest.
 //             It does NOT claim the pinned commit is trustworthy — only that it
 //             cannot change under us. Reviewing what a SHA points at is still a
@@ -87,7 +88,8 @@
 //   over the four known-shape values files (no block scalars there), so no YAML
 //   parser is added to this gate's node-builtin-only path.
 //
-// SCOPE: .github/workflows/, .github/actions/, deploy/arc/runner-image/, and the
+// SCOPE: .github/workflows/, .github/actions/, the root `Dockerfile` and
+// `Dockerfile.spa` published-image recipes, deploy/arc/runner-image/, and the
 // deploy/arc ARC scale-set values (flat = spoke, hub/ = hub).
 // The runner-image directory is included deliberately — #3306 was fixed by
 // deleting the workflow-side gh installer and relying on the baked runner image,
@@ -101,11 +103,20 @@
 //
 // Run: node scripts/check-action-pins.mjs
 
-import { readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * The exact root recipes this gate claims to cover (#3064).
+ *
+ * This inventory is deliberately byte-honest: it does not infer publication
+ * from workflow text or claim to cover every Dockerfile in the repository.
+ * Keeping this list coupled to the publisher is tracked separately by #3513.
+ */
+export const PUBLISHED_IMAGE_RECIPES = ['Dockerfile', 'Dockerfile.spa'];
 
 /** An action repo ref pinned to a full commit SHA: `owner/repo[/subpath]@<40 hex>`. */
 const PINNED_ACTION_RE = /^[\w.-]+\/[\w.-]+(?:\/[\w./-]+)?@[0-9a-f]{40}$/;
@@ -286,6 +297,35 @@ export function imageRefProblem(ref) {
   return null;
 }
 
+/** Return directory entries only when the directory itself is not a symlink. */
+function regularDirectoryEntries(absolute) {
+  try {
+    if (!lstatSync(absolute).isDirectory()) return [];
+    return readdirSync(absolute, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The two root recipes that produce the dashboard's published server/SPA images.
+ * A symlink is intentionally not a file here: scoped inputs must live as regular
+ * files in the reviewed worktree, and scopedInputReasons() makes refusals loud.
+ */
+export function listPublishedImageFiles(root = REPO_ROOT) {
+  const found = [];
+  for (const recipe of PUBLISHED_IMAGE_RECIPES) {
+    const absolute = join(root, recipe);
+    try {
+      if (lstatSync(absolute).isFile()) found.push(absolute);
+    } catch {
+      // Missing inputs are reported by scopedInputReasons().
+    }
+  }
+  // perf-index-contract: published-recipe-order always-consumed: every caller receives this complete deterministic recipe list
+  return found.sort();
+}
+
 /** Workflow and composite-action definitions — everything CI will execute. */
 export function listWorkflowFiles(root = REPO_ROOT) {
   const found = [];
@@ -317,13 +357,7 @@ export function listWorkflowFiles(root = REPO_ROOT) {
 export function listRunnerImageFiles(root = REPO_ROOT) {
   const found = [];
   const directory = join(root, 'deploy', 'arc', 'runner-image');
-  let entries;
-  try {
-    entries = readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return found;
-  }
-  for (const entry of entries) {
+  for (const entry of regularDirectoryEntries(directory)) {
     if (entry.isFile()) found.push(join(directory, entry.name));
   }
   return found.sort();
@@ -344,17 +378,73 @@ export function listRunnerPoolFiles(root = REPO_ROOT) {
   const found = [];
   const isYaml = (name) => name.endsWith('.yml') || name.endsWith('.yaml');
   for (const directory of [join(root, 'deploy', 'arc'), join(root, 'deploy', 'arc', 'hub')]) {
-    let entries;
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      continue; // directory absent in this checkout
-    }
-    for (const entry of entries) {
+    for (const entry of regularDirectoryEntries(directory)) {
       if (entry.isFile() && isYaml(entry.name)) found.push(join(directory, entry.name));
     }
   }
+  // perf-index-contract: runner-pool-order always-consumed: every caller receives this complete deterministic pool-file list
   return found.sort();
+}
+
+/**
+ * One fail-closed policy for the three image-input walker families (#3506).
+ *
+ * The walkers refuse symlinks rather than following targets outside the
+ * reviewed worktree. Every skipped symlink in a scanned shape is named here so
+ * `main()` exits non-zero instead of turning "not checked" into "checked clean".
+ */
+export function scopedInputReasons(root = REPO_ROOT) {
+  const reasons = [];
+  const relativePath = (absolute) => relative(root, absolute).split(sep).join('/');
+  const refuse = (absolute) => {
+    reasons.push(
+      `scoped input ${relativePath(absolute)} is a symbolic link; this gate only checks ` +
+        'regular files inside the reviewed worktree'
+    );
+  };
+
+  for (const recipe of PUBLISHED_IMAGE_RECIPES) {
+    const absolute = join(root, recipe);
+    try {
+      const stat = lstatSync(absolute);
+      if (stat.isSymbolicLink()) refuse(absolute);
+      else if (!stat.isFile()) {
+        reasons.push(`required published-image recipe ${recipe} is not a regular file`);
+      }
+    } catch {
+      reasons.push(`required published-image recipe ${recipe} was not found`);
+    }
+  }
+
+  const runnerDirectory = join(root, 'deploy', 'arc', 'runner-image');
+  try {
+    if (lstatSync(runnerDirectory).isSymbolicLink()) refuse(runnerDirectory);
+    else {
+      for (const entry of regularDirectoryEntries(runnerDirectory)) {
+        if (entry.isSymbolicLink()) refuse(join(runnerDirectory, entry.name));
+      }
+    }
+  } catch {
+    // The existing inertness check reports an absent runner-image directory.
+  }
+
+  const isYaml = (name) => name.endsWith('.yml') || name.endsWith('.yaml');
+  for (const directory of [join(root, 'deploy', 'arc'), join(root, 'deploy', 'arc', 'hub')]) {
+    try {
+      if (lstatSync(directory).isSymbolicLink()) {
+        refuse(directory);
+        continue;
+      }
+      for (const entry of regularDirectoryEntries(directory)) {
+        if (entry.isSymbolicLink() && isYaml(entry.name)) refuse(join(directory, entry.name));
+      }
+    } catch {
+      // The existing inertness check reports an absent pool directory.
+    }
+  }
+
+  // perf-index-contract: scoped-input-reason-order always-consumed: every caller receives all unique refusal reasons in deterministic order
+  return [...new Set(reasons)].sort();
 }
 
 /**
@@ -518,12 +608,22 @@ export function poolImageRefsIn(source) {
   return refs;
 }
 
+/** Image-bearing BuildConfig paths this gate understands structurally. */
+const BUILD_CONFIG_IMAGE_PATHS = Object.freeze({
+  'spec.output.to.name': 'output',
+  'spec.strategy.dockerStrategy.from.name': 'from',
+});
+
 /**
- * The BuildConfig OUTPUT ImageStreamTag — the tag this cluster build actually
- * produces, and therefore the one every consumer has to be naming.
+ * Resolve only image-bearing BuildConfig `name:` fields (#3509).
+ *
+ * A context-free `name:` scan cannot distinguish these fields from
+ * `metadata.name`. The indentation path makes that distinction, while alternate
+ * YAML spellings the reader cannot safely resolve become explicit findings.
  */
-export function producerTagsIn(source) {
-  const produced = [];
+export function buildConfigImageFieldsIn(source) {
+  const fields = [];
+  const problems = [];
   const stack = [];
   let blockScalarIndent = null;
   const lines = source.split(/\r?\n/);
@@ -553,23 +653,46 @@ export function producerTagsIn(source) {
     stack.push({ indent, key });
 
     const rawValue = (rest ?? '').replace(/\s+#.*$/, '').trim();
-    if (rawValue === '' || /^[|>]/.test(rawValue)) {
-      if (/^[|>]/.test(rawValue)) blockScalarIndent = indent;
+    if (/^[|>]/.test(rawValue)) blockScalarIndent = indent;
+    if (key !== 'name') continue;
+    const path = stack.map((entry) => entry.key).join('.');
+    const kind = BUILD_CONFIG_IMAGE_PATHS[path];
+    if (!kind) continue;
+
+    const rule = kind === 'output' ? 'STAMP' : 'PIN';
+    if (rawValue === '') {
+      problems.push({
+        line: index + 1,
+        rule,
+        detail: `BuildConfig ${path} is not on the same line, so it cannot be checked here`,
+      });
       continue;
     }
-    if (key !== 'name') continue;
-
-    // ONLY `spec.output.to.name` is the tag this build publishes. A context-free
-    // `name:` match also swallows `spec.strategy.dockerStrategy.from.name` and
-    // any trigger's `from.name` — inputs, not outputs. If one of those carried
-    // the consumers' old stamp it would be recorded as a producer, and the
-    // first-match anchor would then agree with the stale consumers and report
-    // no violation while the build no longer produces the consumed tag.
-    if (!stack.map((entry) => entry.key).join('.').endsWith('output.to.name')) continue;
-
     const value = unquote(rawValue);
-    if (REGISTRY_REF_RE.test(value) || !IMAGE_STREAM_TAG_RE.test(value)) continue;
-    produced.push({ line: index + 1, name: imageRefName(value), tag: imageRefTag(value) });
+    const unparseable = unparseableImageValue(value);
+    if (unparseable) {
+      problems.push({
+        line: index + 1,
+        rule,
+        detail: `BuildConfig ${path} ${unparseable}`,
+      });
+      continue;
+    }
+    fields.push({ line: index + 1, path, kind, value });
+  }
+  return { fields, problems };
+}
+
+/**
+ * The BuildConfig OUTPUT ImageStreamTag — the tag this cluster build actually
+ * produces, and therefore the one every consumer has to be naming.
+ */
+export function producerTagsIn(source) {
+  const produced = [];
+  for (const field of buildConfigImageFieldsIn(source).fields) {
+    if (field.kind !== 'output') continue;
+    if (REGISTRY_REF_RE.test(field.value) || !IMAGE_STREAM_TAG_RE.test(field.value)) continue;
+    produced.push({ line: field.line, name: imageRefName(field.value), tag: imageRefTag(field.value) });
   }
   return produced;
 }
@@ -739,7 +862,8 @@ export function violationsIn(source) {
  * digest. `uses:` has no meaning here, so the action-pin rule does not apply.
  */
 export function imageViolationsIn(source) {
-  const problems = [];
+  const parsedBuildConfig = buildConfigImageFieldsIn(source);
+  const problems = [...parsedBuildConfig.problems];
   for (const { number, text } of logicalLines(source)) {
     const fromMatch = /(?:^|\s)FROM\s+(\S+)/.exec(text);
     const fromValue = fromMatch ? unquote(fromMatch[1]) : null;
@@ -751,41 +875,35 @@ export function imageViolationsIn(source) {
       });
     }
 
-    // OpenShift BuildConfig names its base image in `from: { name: ... }`.
-    const nameMatch = /^\s*name:\s*(\S+)\s*$/.exec(text);
-    const nameValue = nameMatch ? unquote(nameMatch[1]) : null;
-    if (nameValue && REGISTRY_REF_RE.test(nameValue) && !IMAGE_DIGEST_RE.test(nameValue)) {
-      problems.push({
-        line: number,
-        rule: 'PIN',
-        detail: `image reference \`${nameValue}\` is not pinned to an image digest`,
-      });
-    }
-
-    // ...and its OUTPUT in `output: { to: { name: <stream>:<tag> } }`. This is
-    // the other half of #3340 and the reason fixing only the scale-set values
-    // would relocate the bug rather than close it: the values may not point at a
-    // stamped tag that nothing produces, and a BuildConfig still writing
-    // `:latest` keeps a mutable tag alive for anything that later reaches for it.
-    if (
-      nameValue &&
-      !REGISTRY_REF_RE.test(nameValue) &&
-      IMAGE_STREAM_TAG_RE.test(nameValue) &&
-      !STAMPED_TAG_RE.test(imageRefTag(nameValue) ?? '')
-    ) {
-      problems.push({
-        line: number,
-        rule: 'STAMP',
-        detail:
-          `local ImageStream reference \`${nameValue}\` names a mutable tag`,
-      });
-    }
-
     if (FETCH_EXEC_RE.test(text)) {
       problems.push({
         line: number,
         rule: 'FETCH',
         detail: 'downloaded bytes are piped straight into an interpreter or archive extractor',
+      });
+    }
+  }
+
+  for (const { line, value } of parsedBuildConfig.fields) {
+    if (REGISTRY_REF_RE.test(value) && !IMAGE_DIGEST_RE.test(value)) {
+      problems.push({
+        line,
+        rule: 'PIN',
+        detail: `image reference \`${value}\` is not pinned to an image digest`,
+      });
+    }
+
+    // The BuildConfig output is the other half of #3340: a mutable local tag
+    // keeps a moving producer alive even when every consumer is stamped.
+    if (
+      !REGISTRY_REF_RE.test(value) &&
+      IMAGE_STREAM_TAG_RE.test(value) &&
+      !STAMPED_TAG_RE.test(imageRefTag(value) ?? '')
+    ) {
+      problems.push({
+        line,
+        rule: 'STAMP',
+        detail: `local ImageStream reference \`${value}\` names a mutable tag`,
       });
     }
   }
@@ -809,9 +927,12 @@ export function imageViolationsIn(source) {
  * hold only the files a given test cares about.
  */
 export function inertnessReasons(root = REPO_ROOT) {
-  const reasons = [];
+  const reasons = scopedInputReasons(root);
   if (listWorkflowFiles(root).length === 0) {
     reasons.push('no workflow or composite-action files were found under .github/');
+  }
+  if (listPublishedImageFiles(root).length === 0) {
+    reasons.push('no required root published-image recipes were found');
   }
   if (listRunnerImageFiles(root).length === 0) {
     reasons.push('no runner-image build files were found under deploy/arc/runner-image/');
@@ -847,6 +968,12 @@ export function scanRepository(root = REPO_ROOT) {
     }
   }
   for (const absolute of listRunnerImageFiles(root)) {
+    const file = relative(root, absolute).split(sep).join('/');
+    for (const problem of imageViolationsIn(readFileSync(absolute, 'utf8'))) {
+      offenders.push({ file, ...problem });
+    }
+  }
+  for (const absolute of listPublishedImageFiles(root)) {
     const file = relative(root, absolute).split(sep).join('/');
     for (const problem of imageViolationsIn(readFileSync(absolute, 'utf8'))) {
       offenders.push({ file, ...problem });
@@ -929,12 +1056,14 @@ function main() {
   if (offenders.length) {
     process.exit(1);
   }
+  const published = listPublishedImageFiles();
   const scanned =
-    listWorkflowFiles().length + listRunnerImageFiles().length + listRunnerPoolFiles().length;
+    listWorkflowFiles().length + published.length + listRunnerImageFiles().length + listRunnerPoolFiles().length;
   console.log(
-    `Action pins OK: ${scanned} workflow/action/runner-image/scale-set file(s) — every external ` +
-      '`uses:` and base image is pinned to an immutable ref, every runner-pool image is ' +
-      'digest-pinned or version-stamped, and no step pipes a download into an interpreter.'
+    `Action pins OK: ${scanned} scoped file(s), including published recipes ` +
+      `[${published.map((absolute) => relative(REPO_ROOT, absolute)).join(', ')}] — every external ` +
+      '`uses:` and scanned base image is pinned to an immutable ref, every runner-pool image ' +
+      'is digest-pinned or version-stamped, and no step pipes a download into an interpreter.'
   );
 }
 
