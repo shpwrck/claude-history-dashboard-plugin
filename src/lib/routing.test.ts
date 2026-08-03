@@ -252,6 +252,21 @@ describe('routeToHash', () => {
       rec: 'cost.output-verbosity',
     });
   });
+
+  it('round-trips response-latency band bounds for Sessions evidence', () => {
+    const hash = routeToHash('sessions', {
+      viewFilter: {
+        latencyGtMs: '500',
+        latencyLteMs: '1000',
+      },
+    });
+
+    expect(hash).toBe('#/sessions?latencyGtMs=500&latencyLteMs=1000');
+    expect(parseRoute(hash).viewFilter).toEqual({
+      latencyGtMs: '500',
+      latencyLteMs: '1000',
+    });
+  });
 });
 
 describe('navigateWithFilter', () => {

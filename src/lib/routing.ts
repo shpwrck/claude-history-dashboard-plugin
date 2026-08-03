@@ -72,6 +72,12 @@ export const ROUTE_FILTER_KEYS = [
   'table',
   'from',
   'to',
+  // Response-latency histogram drill (#3256): Sessions reproduces the source
+  // bucket against its per-session timelines. Bounds mirror histogram
+  // semantics exactly: elapsed milliseconds must be > latencyGtMs and
+  // <= latencyLteMs. The open-ended final bucket omits latencyLteMs.
+  'latencyGtMs',
+  'latencyLteMs',
   'sort',
   'tab',
 ] as const;

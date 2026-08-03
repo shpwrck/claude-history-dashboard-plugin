@@ -1,4 +1,4 @@
-import type { SessionTimeline, TimelineEntry } from './parse-timeline';
+import type { SessionTimeline } from './parse-timeline';
 
 export interface ConversationStat {
   sessionId: string;
@@ -33,6 +33,34 @@ const BUCKET_DEFS: { label: string; max: number }[] = [
 function parseMs(iso: string): number | null {
   const t = new Date(iso).getTime();
   return isNaN(t) ? null : t;
+}
+
+/**
+ * Pair pending user turns with the next assistant entry and return each
+ * non-negative response latency in milliseconds. Histogram sources and
+ * latency-band destinations share this helper so a routed bucket reproduces
+ * the same evidence instead of approximating it with total session duration.
+ */
+export function responseLatenciesMs(timeline: SessionTimeline): number[] {
+  if (timeline.entries.length < 2) return [];
+  const latencies: number[] = [];
+  let pendingUserMs: number[] = [];
+  for (const entry of timeline.entries) {
+    if (entry.kind === 'user') {
+      const ms = parseMs(entry.timestamp);
+      if (ms != null) pendingUserMs.push(ms);
+    } else if (entry.kind === 'assistant' && pendingUserMs.length > 0) {
+      const ms = parseMs(entry.timestamp);
+      if (ms != null) {
+        for (const userMs of pendingUserMs) {
+          const deltaMs = ms - userMs;
+          if (deltaMs >= 0) latencies.push(deltaMs);
+        }
+      }
+      pendingUserMs = [];
+    }
+  }
+  return latencies;
 }
 
 function isQuestion(s: string): boolean {
@@ -117,27 +145,8 @@ export function latencyHistogram(
   const counts = BUCKET_DEFS.map(() => 0);
 
   for (const t of timelines) {
-    const entries: TimelineEntry[] = t.entries;
-    if (entries.length < 2) continue;
-
-    // Single linear pass per session: enqueue user timestamps, drain on the
-    // next assistant entry. Pairs every pending user turn with the assistant
-    // that follows, matching the original quadratic-walk semantics in O(N).
-    let pendingUserMs: number[] = [];
-    for (const e of entries) {
-      if (e.kind === 'user') {
-        const ms = parseMs(e.timestamp);
-        if (ms != null) pendingUserMs.push(ms);
-      } else if (e.kind === 'assistant' && pendingUserMs.length > 0) {
-        const ms = parseMs(e.timestamp);
-        if (ms != null) {
-          for (const userMs of pendingUserMs) {
-            const deltaS = (ms - userMs) / 1000;
-            if (deltaS >= 0) counts[bucketIndexFor(deltaS)]++;
-          }
-        }
-        pendingUserMs = [];
-      }
+    for (const latencyMs of responseLatenciesMs(t)) {
+      counts[bucketIndexFor(latencyMs / 1000)]++;
     }
   }
 

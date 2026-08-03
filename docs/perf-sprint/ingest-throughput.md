@@ -16,14 +16,15 @@ Platform: Node 24 / Linux 5.15 (WSL2), tmpfs fixture, no container.
 
 ## Parse hot paths (per-parser micro-benchmarks, median of 7 runs)
 
-| Parser | Corpus | Median |
-|---|---|---|
-| `parseSessionJsonl` (parse-sessions.ts) | 18 sessions | 1.4 ms |
-| `parseToolUsage` (parse-tools.ts) | 18 sessions | 1.1 ms |
-| `parseSessionTimeline` (parse-timeline.ts) | 18 sessions | 1.4 ms |
+| Parser | Corpus | Median | 3x ceiling |
+|---|---|---|---|
+| `parseSessionJsonl` (parse-sessions.ts) | 18 sessions | 1.4 ms | 4.2 ms |
+| `parseToolUsage` (parse-tools.ts) | 18 sessions | 1.1 ms | 3.3 ms |
+| `parseSessionTimeline` (parse-timeline.ts) | 18 sessions | 1.4 ms | 4.2 ms |
 
-**Target:** keep each parser under 3x baseline (< 4 ms for 18 sessions) on the
-sample corpus. Growth beyond that indicates a regression in the parse loop.
+**Target:** keep each parser at or below its displayed 3x baseline ceiling on
+the 18-session sample corpus. Growth beyond that indicates a regression in the
+parse loop.
 
 ---
 

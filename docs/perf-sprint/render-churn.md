@@ -88,7 +88,7 @@ internal layout pass. This is a chart-library render cost, not a React
 re-render or forced-reflow problem.
 
 **Verdict for Tokens: moderate initial-render cost, not caused by
-layout thrash. The 364 ms figure is within the chart library's expected budget
+layout thrash. The 367 ms figure is within the chart library's expected budget
 for 3 simultaneous charts. No emergency.**
 
 ### 3. Sessions view — large-table DOM layout thrash (resize) — the actionable finding
