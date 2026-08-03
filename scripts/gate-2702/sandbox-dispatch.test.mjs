@@ -22,8 +22,21 @@ import {
   assertGate2702SandboxReady,
   gate2702IsolatedHome,
   gate2702SandboxEnabled,
+  gate2702SandboxProbeAction,
   GATE_2702_SANDBOX_ENV_KEYS,
 } from "./sandbox-dispatch.mjs";
+
+test("the hosted sandbox probe skips normally but fails when CI requires proof", () => {
+  assert.equal(gate2702SandboxProbeAction(true, {}), "run");
+  assert.equal(gate2702SandboxProbeAction(false, {}), "skip");
+  assert.throws(
+    () =>
+      gate2702SandboxProbeAction(false, {
+        CHD_REQUIRE_GATE_2702_SANDBOX_PROBE: "1",
+      }),
+    /required.*namespace-capable/i,
+  );
+});
 
 test("the C5 sandbox is mandatory outside the test harness", () => {
   // Production (no test-mode flag) must always be jailed.

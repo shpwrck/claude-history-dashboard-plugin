@@ -196,6 +196,16 @@ export function gate2702SandboxEnabled(env = process.env) {
   );
 }
 
+export function gate2702SandboxProbeAction(enforceable, env = process.env) {
+  if (enforceable) return "run";
+  if (env.CHD_REQUIRE_GATE_2702_SANDBOX_PROBE === "1") {
+    fail(
+      "required gate-2702 sandbox denial proof needs a namespace-capable host",
+    );
+  }
+  return "skip";
+}
+
 /**
  * The isolated HOME a jailed arm runs under, or null when the arm is
  * dispatched unjailed. ONE derivation with three consumers (accounting's

@@ -133,6 +133,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  */
 const WORKFLOW_SECRET_ALLOWLIST = Object.freeze({
   '.github/workflows/agent-cross-review.yml': ['ANTHROPIC_API_KEY', 'CODEX_TRIGGER_PAT'],
+  '.github/workflows/stage-b-target-agent-cross-review.yml': ['ANTHROPIC_API_KEY', 'CODEX_TRIGGER_PAT'],
   '.github/workflows/docker-publish.yml': ['GITHUB_TOKEN'],
   '.github/workflows/pages-publish-edge.yml': ['ACTIONS_DEPLOY_KEY_EDGE'],
   '.github/workflows/pages-publish-plugin.yml': ['ACTIONS_DEPLOY_KEY_PLUGIN'],

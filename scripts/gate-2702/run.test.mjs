@@ -17,6 +17,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { gate2702SandboxProbeAction } from "./sandbox-dispatch.mjs";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RUNNER = join(HERE, "run.mjs");
 const CLASSIFIER = join(HERE, "classify.mjs");
@@ -711,14 +713,13 @@ test("launch rejects a paused Sidekick before preparing or detaching the trial",
 });
 
 // The hostile-canary probe below launches the REAL enforcer, so it needs a host
-// that can actually unshare user and network namespaces. CI runs on a restricted
-// self-hosted container where that may not be permitted, and a security proof
-// that turns into a red build on an unrelated host gets deleted rather than
-// fixed. Probe the capability instead of assuming it -- and when it is absent,
-// skip LOUDLY: a silently skipped proof is how this gate would rot. The
-// host-independent half of the contract (the sandbox is mandatory, preparation
-// fails closed, the sealer rejects an unattested receipt) is asserted
-// unconditionally in scripts/gate-2702/sandbox-dispatch.test.mjs.
+// that can actually unshare user and network namespaces. The dedicated
+// arc-dind CI job sets CHD_REQUIRE_GATE_2702_SANDBOX_PROBE=1, so capability
+// absence is a hard failure there. On ordinary developer hosts and the regular
+// test pool, probe the capability instead of assuming it and skip LOUDLY when
+// absent. The host-independent half of the contract (the sandbox is mandatory,
+// preparation fails closed, the sealer rejects an unattested receipt) is
+// asserted unconditionally in scripts/gate-2702/sandbox-dispatch.test.mjs.
 function sandboxEnforceable() {
   const probe = spawnSync(
     "bwrap",
@@ -740,7 +741,7 @@ function sandboxEnforceable() {
 }
 
 test("arm dispatch denies a hostile ~/.claude canary and passes only the documented environment", async (t) => {
-  if (!sandboxEnforceable()) {
+  if (gate2702SandboxProbeAction(sandboxEnforceable()) === "skip") {
     console.error(
       "[gate-2702][#3085] SKIPPING the hostile-canary probe: this host cannot " +
         "unshare user/network namespaces under bubblewrap, so the enforcer " +
