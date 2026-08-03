@@ -6,6 +6,7 @@ import {
   type RecommendationSurfaceRequest,
 } from './recommendation-surface';
 import type { RouteFilter } from './routing';
+import { PROVENANCE_EXEMPT } from './detectors/provenance';
 
 // ── Query serializer contract (#2719) — the client half of the #2718 surface. ──
 describe('recommendationSurfaceQuery', () => {
@@ -227,6 +228,57 @@ describe('parseRecommendationResult', () => {
       expect(() => parseRecommendationResult(malformed)).toThrow(
         'Invalid recommendation analysis response'
       );
+    }
+  });
+
+  // #3492 regression. That change required `provenance` on every wire
+  // recommendation, but the engine's own `PROVENANCE_EXEMPT` register (#3205)
+  // is the reviewed, shrink-only set of ids that legitimately emit none. Because
+  // the envelope is validated all-or-nothing, a single exempt finding —
+  // `cost.cache-1h-waste` and `speed.time-motion` fire on ordinary local data —
+  // invalidated the whole response, and every recommendation surface rendered
+  // "Analysis unavailable. Invalid recommendation analysis response" instead of
+  // the analysis. The viewer cannot see the register, so it must not duplicate
+  // the policy: provenance is validated when present and required engine-side.
+  it('accepts a provenance-less recommendation for every PROVENANCE_EXEMPT id (#3492)', () => {
+    const coverage = { domain: 'cost', status: 'PROVE' };
+    expect(PROVENANCE_EXEMPT.length).toBeGreaterThan(0);
+
+    for (const id of PROVENANCE_EXEMPT) {
+      const envelope = {
+        recommendations: [
+          {
+            id,
+            category: 'cost',
+            severity: 'warning',
+            title: 'Reduce 1-hour cache writes',
+            detail: '0.22M tokens were written to the 1-hour cache.',
+            action: 'Check whether that context is genuinely reused.',
+            affected: 2,
+          },
+        ],
+        domainCoverage: [coverage],
+      };
+      expect(parseRecommendationResult(envelope)).toEqual(envelope);
+    }
+  });
+
+  it('still rejects a present-but-malformed provenance (#3492)', () => {
+    const base = {
+      id: 'cost.cache-1h-waste',
+      category: 'cost',
+      severity: 'warning',
+      title: 'Reduce 1-hour cache writes',
+      detail: '0.22M tokens were written to the 1-hour cache.',
+      action: 'Check whether that context is genuinely reused.',
+    };
+    for (const provenance of [null, 7, {}, { observations: [] }, { observations: [{}] }]) {
+      expect(() =>
+        parseRecommendationResult({
+          recommendations: [{ ...base, provenance }],
+          domainCoverage: [],
+        })
+      ).toThrow('Invalid recommendation analysis response');
     }
   });
 });

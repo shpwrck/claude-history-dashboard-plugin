@@ -205,7 +205,16 @@ function isRecommendation(value: unknown): boolean {
       ? typeof record.proofTier === 'string' &&
         PROOF_TIERS.has(record.proofTier)
       : true) &&
-    isClaimProvenance(record.provenance)
+    // Provenance is validated WHEN PRESENT, never required here. Who owes
+    // provenance is decided engine-side by `PROVENANCE_EXEMPT`
+    // (detectors/provenance.ts, #3205) — the reviewed, shrink-only register of
+    // ids that legitimately still emit none — and enforced by the detector
+    // contract test. Requiring it on the wire (#3492) duplicated that policy in
+    // the viewer, which cannot see the register: every envelope carrying an
+    // exempt finding (e.g. `cost.cache-1h-waste`, `speed.time-motion`) failed
+    // whole-envelope validation, so the entire analysis rendered as "Analysis
+    // unavailable" rather than the one finding degrading.
+    ('provenance' in record ? isClaimProvenance(record.provenance) : true)
   );
 }
 
