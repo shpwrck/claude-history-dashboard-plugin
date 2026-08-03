@@ -71,7 +71,7 @@
 //   A version-stamped tag is the next rung down, and the honest claim for it is
 //   narrow: it is NOT immutable — someone with push access can still move it. What
 //   it removes is the AUTOMATIC mover. `:latest` was reassigned by any rebuild,
-//   incidentally and invisibly; `v2026-07-29-87858e92` is only reassigned by
+//   incidentally and invisibly; `v2026-08-03-5a29159a` is only reassigned by
 //   someone deliberately re-pointing that exact name. Rebuilding from a changed
 //   recipe now requires editing the stamp in this repo, which makes the runner
 //   image change a REVIEWED diff — which is the property #3340 actually lost.
@@ -112,6 +112,7 @@
 // Run: node scripts/check-action-pins.mjs
 
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -178,10 +179,9 @@ const REGISTRY_REF_RE = /^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?\/\S+$/i;
  * A version-stamped tag: `v<YYYY>-<MM>-<DD>-<7..40 hex>` — the ISO date of the
  * build and a hash of the recipe's CONTENT (`sha256sum
  * deploy/arc/runner-image/Dockerfile | cut -c1-8`), NOT a commit: a commit
- * cannot contain its own SHA and the value must survive a squash. The in-force
- * `v2026-07-29-87858e92` predates that rule and its hex is a commit (a
- * grandfathered VALUE, not a definition); the grammar accepts any 7..40 hex, so
- * both spellings are valid and the next real re-stamp moves to the content hash.
+ * cannot contain its own SHA and the value must survive a squash. The general
+ * grammar accepts 7..40 hex; the cross-file runner rule below additionally
+ * requires the exact eight-hex content suffix for `chd-ci-runner`.
  *
  * This is an ALLOWLIST on purpose. Rejecting a denylist of known-mutable names
  * (`latest`, `main`, `stable`, ...) would keep passing the next mutable name
@@ -263,7 +263,7 @@ export function unquote(value) {
 
 /**
  * The image NAME of a reference — the last path segment, minus any tag or
- * digest. `.../arc-runners/chd-ci-runner:v2026-07-29-87858e92` and the
+ * digest. `.../arc-runners/chd-ci-runner:v2026-08-03-5a29159a` and the
  * BuildConfig's own `chd-ci-runner:latest` both yield `chd-ci-runner`, which is
  * what lets the producer and its consumers be recognised as the same image
  * across files that spell it at different lengths.
@@ -940,6 +940,100 @@ export function crossFileStampOffenders(producers, consumers) {
 }
 
 /**
+ * The chd-ci-runner stamp must name the exact reviewed recipe bytes (#3498,
+ * #3504), not merely resemble a stamp. The eight-hex suffix is the first eight
+ * characters of the Dockerfile SHA-256, matching the documented operator
+ * command and remaining computable before a squash merge.
+ */
+export function runnerRecipeStampOffenders(recipeSource, producers) {
+  const expectedHex = createHash('sha256')
+    .update(recipeSource)
+    .digest('hex')
+    .slice(0, 8);
+  const offenders = [];
+  for (const producer of producers) {
+    if (producer.name !== 'chd-ci-runner') continue;
+    const match = /^v\d{4}-\d{2}-\d{2}-([0-9a-f]{8})$/u.exec(
+      producer.tag ?? ''
+    );
+    if (match?.[1] === expectedHex) continue;
+    offenders.push({
+      file: producer.file,
+      line: producer.line,
+      rule: 'STAMP',
+      detail:
+        `\`${producer.tag}\` does not identify the runner recipe content; ` +
+        `the committed Dockerfile requires the eight-hex suffix \`${expectedHex}\``,
+    });
+  }
+  return offenders;
+}
+
+function inlinedRunnerRecipe(source) {
+  const lines = source.split(/\r?\n/u);
+  const starts = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^(\s*)dockerfile:\s*\|\s*$/u.exec(lines[index]);
+    if (match) starts.push({ index, indent: match[1].length });
+  }
+  if (starts.length !== 1) return null;
+  const [{ index, indent }] = starts;
+  const block = [];
+  for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+    const line = lines[cursor];
+    if (line.trim() === '') {
+      block.push(line);
+      continue;
+    }
+    const lineIndent = line.length - line.trimStart().length;
+    if (lineIndent <= indent) break;
+    block.push(line);
+  }
+  const contentIndent = indent + 2;
+  if (
+    !block.some((line) => line.trim() !== '') ||
+    block.some(
+      (line) =>
+        line.trim() !== '' &&
+        line.length - line.trimStart().length < contentIndent
+    )
+  ) {
+    return null;
+  }
+  return {
+    line: index + 1,
+    source: block
+      .map((line) => (line.trim() === '' ? '' : line.slice(contentIndent)))
+      .join('\n') + '\n',
+  };
+}
+
+/**
+ * OpenShift builds spec.source.dockerfile, so the committed Dockerfile can be a
+ * stamp source only when every byte is the same after removing the YAML block's
+ * two-space structural indentation. This deliberately preserves comments,
+ * heredoc contents, and all recipe whitespace.
+ */
+export function runnerRecipeParityOffenders(
+  dockerfileSource,
+  buildConfigSource
+) {
+  const inline = inlinedRunnerRecipe(buildConfigSource);
+  if (inline && inline.source === dockerfileSource) {
+    return [];
+  }
+  return [
+    {
+      file: 'deploy/arc/runner-image/buildconfig.yaml',
+      line: inline?.line ?? 1,
+      rule: 'STAMP',
+      detail:
+        'the authoritative BuildConfig inline recipe does not match the hashed Dockerfile shadow copy',
+    },
+  ];
+}
+
+/**
  * Drop comment-only lines and strip trailing ` # ...` comments, then join shell
  * line-continuations so a pipeline split across lines is scanned as one command
  * (the #3306 `curl ... \` / `  | tar -xz` shape).
@@ -1161,6 +1255,20 @@ export function scanRepository(root = REPO_ROOT) {
     }
   }
   offenders.push(...crossFileStampOffenders(producers, consumers));
+  try {
+    const recipe = readFileSync(
+      join(root, 'deploy', 'arc', 'runner-image', 'Dockerfile'),
+      'utf8'
+    );
+    const buildConfig = readFileSync(
+      join(root, 'deploy', 'arc', 'runner-image', 'buildconfig.yaml'),
+      'utf8'
+    );
+    offenders.push(...runnerRecipeParityOffenders(recipe, buildConfig));
+    offenders.push(...runnerRecipeStampOffenders(recipe, producers));
+  } catch {
+    // The existing inertness check reports an absent runner recipe/build file.
+  }
 
   return offenders;
 }

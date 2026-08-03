@@ -251,7 +251,7 @@ test('authorization receives only canonical fork metadata with no token permissi
   );
 });
 
-test('every ARC job depends transitively on authorization and the first one checks trust', () => {
+test('every ARC job depends on authorization and the verified merge resolver', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -281,12 +281,12 @@ test('every ARC job depends transitively on authorization and the first one chec
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /direct-bypass.*depend.*authorize/i);
-      assert.match(reasons, /alternate-bypass.*trusted ownership.*merge_commit_sha/i);
+      assert.match(reasons, /alternate-bypass.*verified merge output guard/i);
     }
   );
 });
 
-test('the first executable job also requires an available test-merge SHA', () => {
+test('the first executable job also requires the verified merge output', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -314,13 +314,120 @@ test('the first executable job also requires an available test-merge SHA', () =>
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /unsafe\.yml.*test.*non-null.*merge_commit_sha/i
+        /unsafe\.yml.*test.*verified merge output guard/i
       );
     }
   );
 });
 
-test('protected workflows isolate concurrency and checkout the exact PR merge SHA', () => {
+test('protected workflows must resolve one immutable merge SHA after authorization', () => {
+  withWorkflowFixture(
+    {
+      'unsafe.yml': [
+        'name: unsafe',
+        'on: pull_request_target',
+        'concurrency:',
+        '  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}',
+        'permissions: {}',
+        'jobs:',
+        '  authorize:',
+        '    permissions: {}',
+        '    uses: ./.github/workflows/pr-trust.yml',
+        '    with:',
+        '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
+        '  test:',
+        '    needs: authorize',
+        "    if: needs.authorize.outputs.trusted == 'true' && github.event.pull_request.merge_commit_sha != null",
+        '    runs-on: arc-runner-set',
+        '    steps:',
+        '      - run: npm test',
+        '',
+      ].join('\n'),
+    },
+    (root) => {
+      assert.match(
+        prWorkflowTrustReasons(root).join('\n'),
+        /unsafe\.yml.*resolve-merge.*pr-merge-sha\.yml/i
+      );
+    }
+  );
+});
+
+test('the reusable merge resolver is hosted, read-only, and contract-closed', () => {
+  withWorkflowFixture(
+    {
+      'pr-merge-sha.yml': [
+        'name: unsafe resolver',
+        'on: workflow_call',
+        'permissions:',
+        '  contents: write',
+        'jobs:',
+        '  resolve:',
+        '    runs-on: arc-dind',
+        '    permissions:',
+        '      contents: write',
+        '    steps:',
+        '      - run: echo merge-sha=forged >> "$GITHUB_OUTPUT"',
+        '',
+      ].join('\n'),
+    },
+    (root) => {
+      const reasons = prWorkflowTrustReasons(root).join('\n');
+      assert.match(reasons, /pr-merge-sha\.yml.*workflow_call.*input.*output/i);
+      assert.match(reasons, /pr-merge-sha\.yml.*workflow permissions.*\{\}/i);
+      assert.match(reasons, /pr-merge-sha\.yml.*ubuntu-latest/i);
+      assert.match(reasons, /pr-merge-sha\.yml.*timeout.*2/i);
+      assert.match(reasons, /pr-merge-sha\.yml.*contents.*pull-requests.*read/i);
+    }
+  );
+});
+
+test('post-resolver jobs cannot bypass the verified output guard or exact checkout', () => {
+  withWorkflowFixture(
+    {
+      'unsafe.yml': [
+        'name: unsafe',
+        'on: pull_request_target',
+        'concurrency:',
+        '  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}',
+        'permissions: {}',
+        'jobs:',
+        '  authorize:',
+        '    permissions: {}',
+        '    uses: ./.github/workflows/pr-trust.yml',
+        '    with:',
+        '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
+        '  resolve-merge:',
+        '    needs: authorize',
+        "    if: needs.authorize.outputs.trusted == 'true'",
+        '    permissions:',
+        '      contents: read',
+        '      pull-requests: read',
+        '    uses: ./.github/workflows/pr-merge-sha.yml',
+        '    with:',
+        '      pr-number: ${{ github.event.pull_request.number }}',
+        '      expected-head-sha: ${{ github.event.pull_request.head.sha }}',
+        '      expected-base-sha: ${{ github.event.pull_request.base.sha }}',
+        '  test:',
+        '    needs: resolve-merge',
+        "    if: needs.resolve-merge.outputs.merge-sha != '' || true",
+        '    runs-on: arc-runner-set',
+        '    steps:',
+        '      - uses: actions/checkout@0123456789012345678901234567890123456789',
+        '        with:',
+        '          ref: ${{ github.event.pull_request.merge_commit_sha }}',
+        '',
+      ].join('\n'),
+    },
+    (root) => {
+      const reasons = prWorkflowTrustReasons(root).join('\n');
+      assert.match(reasons, /unsafe\.yml.*test.*verified merge.*guard/i);
+      assert.match(reasons, /unsafe\.yml.*test.*checkout.*resolve-merge.*merge-sha/i);
+    }
+  );
+});
+
+test('protected workflows isolate concurrency and checkout the verified merge SHA', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -351,7 +458,7 @@ test('protected workflows isolate concurrency and checkout the exact PR merge SH
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /unsafe\.yml.*concurrency.*pull_request\.number/i);
-      assert.match(reasons, /unsafe\.yml.*checkout.*merge_commit_sha/i);
+      assert.match(reasons, /unsafe\.yml.*checkout.*resolve-merge.*merge-sha/i);
     }
   );
 });

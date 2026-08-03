@@ -18,6 +18,8 @@ import {
   buildConfigImageFieldsIn,
   producerTagsIn,
   crossFileStampOffenders,
+  runnerRecipeStampOffenders,
+  runnerRecipeParityOffenders,
   containerImageAbsences,
   imageRefTag,
   imageRefName,
@@ -42,7 +44,7 @@ import {
 
 /** The exact pre-fix line from all four scale-set values files (#3340). */
 const LATEST_REF = 'image-registry.openshift-image-registry.svc:5000/arc-runners/chd-ci-runner';
-const STAMP = 'v2026-07-29-87858e92';
+const STAMP = 'v2026-08-03-5a29159a';
 /** The repository the in-cluster BuildConfig publishes to. */
 const REPO = 'image-registry.openshift-image-registry.svc:5000/arc-runners/chd-ci-runner';
 
@@ -575,6 +577,96 @@ test('STAMP/cross-file: agreement is clean, and the producer is the anchor', () 
   // A producer bumped alone is caught on EVERY stale consumer, not just one.
   const bumped = [{ file: 'bc.yaml', line: 37, name: 'chd-ci-runner', tag: 'v2026-08-01-deadbee' }];
   assert.equal(crossFileStampOffenders(bumped, consumers).length, 2);
+});
+
+test('#3498/#3504 STAMP: the runner tag hex is derived from the recipe bytes', () => {
+  const recipe = 'FROM scratch\n';
+  const valid = [
+    {
+      file: 'deploy/arc/runner-image/buildconfig.yaml',
+      line: 39,
+      name: 'chd-ci-runner',
+      tag: 'v2026-08-03-bb57c7da',
+    },
+  ];
+  assert.deepEqual(runnerRecipeStampOffenders(recipe, valid), []);
+
+  const invented = valid.map((producer) => ({
+    ...producer,
+    tag: 'v2026-08-03-00000000',
+  }));
+  const offenders = runnerRecipeStampOffenders(recipe, invented);
+  assert.equal(offenders.length, 1);
+  assert.match(offenders[0].detail, /recipe content.*bb57c7da/i);
+});
+
+test('#3498 authoritative inline recipe cannot drift from the hashed Dockerfile', () => {
+  const dockerfile = [
+    '# shadow copy',
+    'FROM scratch',
+    'RUN echo safe',
+    '',
+  ].join('\n');
+  const buildConfig = [
+    'spec:',
+    '  source:',
+    '    type: Dockerfile',
+    '    dockerfile: |',
+    '      # shadow copy',
+    '      FROM scratch',
+    '      RUN echo safe',
+    '  strategy: {}',
+  ].join('\n');
+  assert.deepEqual(
+    runnerRecipeParityOffenders(dockerfile, buildConfig),
+    []
+  );
+
+  const drifted = buildConfig.replace('RUN echo safe', 'RUN echo attacker');
+  const offenders = runnerRecipeParityOffenders(dockerfile, drifted);
+  assert.equal(offenders.length, 1);
+  assert.match(offenders[0].detail, /authoritative.*inline.*hashed Dockerfile/i);
+});
+
+test('#3498 exact recipe parity preserves heredoc indentation and comment data', () => {
+  const dockerfile = [
+    'FROM scratch',
+    "RUN <<'EOF'",
+    '  indentation-is-data',
+    '# heredoc comment is data',
+    'EOF',
+    '',
+  ].join('\n');
+  const buildConfig = [
+    'spec:',
+    '  source:',
+    '    type: Dockerfile',
+    '    dockerfile: |',
+    '      FROM scratch',
+    "      RUN <<'EOF'",
+    '        indentation-is-data',
+    '      # heredoc comment is data',
+    '      EOF',
+    '  strategy: {}',
+    '',
+  ].join('\n');
+  assert.deepEqual(
+    runnerRecipeParityOffenders(dockerfile, buildConfig),
+    []
+  );
+
+  for (const drifted of [
+    buildConfig.replace(
+      '        indentation-is-data',
+      '       indentation-is-data'
+    ),
+    buildConfig.replace('      # heredoc comment is data\n', ''),
+  ]) {
+    assert.equal(
+      runnerRecipeParityOffenders(dockerfile, drifted).length,
+      1
+    );
+  }
 });
 
 test('STAMP/cross-file: an image no producer builds is rejected, not anchored to itself', () => {

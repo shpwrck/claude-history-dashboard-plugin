@@ -36,20 +36,35 @@ const TEMP_TARGET_ARC_WORKFLOWS = new Set([
   'stage-b-target-test.yml',
 ]);
 const MILESTONE_GUARD_WORKFLOW = 'milestone-guard.yml';
+const MERGE_RESOLVER_WORKFLOW = 'pr-merge-sha.yml';
 const TEMP_CHECK_NAME_PREFIX = 'TEMP ARC ';
 const HEAD_REPOSITORY_EXPRESSION =
   '${{ github.event.pull_request.head.repo.full_name }}';
-const TRUSTED_EXPRESSION =
-  "needs.authorize.outputs.trusted == 'true' && github.event.pull_request.merge_commit_sha != null";
+const TRUSTED_EXPRESSION = "needs.authorize.outputs.trusted == 'true'";
+const MERGE_AVAILABLE_EXPRESSION =
+  "needs.resolve-merge.outputs.merge-sha != ''";
 const PR_CONCURRENCY_GROUP =
   '${{ github.workflow }}-${{ github.event.pull_request.number }}';
 const MERGE_SHA_EXPRESSION =
-  '${{ github.event.pull_request.merge_commit_sha }}';
+  '${{ needs.resolve-merge.outputs.merge-sha }}';
+const PR_NUMBER_EXPRESSION = '${{ github.event.pull_request.number }}';
+const HEAD_SHA_EXPRESSION = '${{ github.event.pull_request.head.sha }}';
+const BASE_SHA_EXPRESSION = '${{ github.event.pull_request.base.sha }}';
 const BROKER_WORKFLOW_OUTPUT = '${{ jobs.authorize.outputs.trusted }}';
 const BROKER_JOB_OUTPUT = '${{ steps.same-repo.outputs.trusted }}';
 const BROKER_TRUST_EXPRESSION =
   '${{ inputs.head-repository == github.repository }}';
 const BROKER_COMMAND = 'echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"';
+const RESOLVER_WORKFLOW_OUTPUT = '${{ jobs.resolve.outputs.merge-sha }}';
+const RESOLVER_JOB_OUTPUT = '${{ steps.resolve.outputs.merge-sha }}';
+const RESOLVER_BASE_CHECKOUT = '${{ inputs.expected-base-sha }}';
+const RESOLVER_TOKEN_EXPRESSION = '${{ github.token }}';
+const RESOLVER_PR_INPUT = '${{ inputs.pr-number }}';
+const RESOLVER_HEAD_INPUT = '${{ inputs.expected-head-sha }}';
+const RESOLVER_BASE_INPUT = '${{ inputs.expected-base-sha }}';
+const RESOLVER_COMMAND = 'node scripts/resolve-pr-merge-sha.mjs';
+const CHECKOUT_ACTION =
+  'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
 const SANDBOX_PROOF_COMMAND =
   "node --test --test-name-pattern='arm dispatch denies a hostile ~/.claude canary and passes only the documented environment' scripts/gate-2702/run.test.mjs";
 
@@ -87,6 +102,26 @@ function usesApprovedHostedRunner(job) {
 function dependencyNames(job) {
   if (typeof job?.needs === 'string') return [job.needs];
   return Array.isArray(job?.needs) ? job.needs : [];
+}
+
+function hasOnlyKeys(value, allowed) {
+  return Object.keys(value ?? {}).every((key) => allowed.includes(key));
+}
+
+function hasExactReadPermissions(value) {
+  return (
+    value?.contents === 'read' &&
+    value?.['pull-requests'] === 'read' &&
+    Object.keys(value).length === 2
+  );
+}
+
+function hasVerifiedMergeGuard(expression) {
+  if (typeof expression !== 'string' || expression.includes('||')) return false;
+  return expression
+    .split('&&')
+    .map((part) => part.trim())
+    .includes(MERGE_AVAILABLE_EXPRESSION);
 }
 
 // perf-index-contract: pr-workflow-dependency-cycle-guard always-consumed: every recursive dependency visit checks and records its current job identity
@@ -247,28 +282,69 @@ export function prWorkflowTrustReasons(root) {
           reasons.push(`${entry.name}: authorize must not receive secrets`);
         }
       }
+      const resolver = workflow?.jobs?.['resolve-merge'];
+      if (resolver?.uses !== './.github/workflows/pr-merge-sha.yml') {
+        reasons.push(
+          `${entry.name}: protected jobs require a resolve-merge job using ./.github/workflows/pr-merge-sha.yml`
+        );
+      } else {
+        if (
+          dependencyNames(resolver).length !== 1 ||
+          dependencyNames(resolver)[0] !== 'authorize' ||
+          resolver.if !== TRUSTED_EXPRESSION
+        ) {
+          reasons.push(
+            `${entry.name}: resolve-merge must run only after trusted same-repository authorization`
+          );
+        }
+        if (!hasExactReadPermissions(resolver.permissions)) {
+          reasons.push(
+            `${entry.name}: resolve-merge permissions must be only contents: read and pull-requests: read`
+          );
+        }
+        if (
+          !hasOnlyKeys(resolver.with, [
+            'pr-number',
+            'expected-head-sha',
+            'expected-base-sha',
+          ]) ||
+          Object.keys(resolver.with ?? {}).length !== 3 ||
+          resolver?.with?.['pr-number'] !== PR_NUMBER_EXPRESSION ||
+          resolver?.with?.['expected-head-sha'] !== HEAD_SHA_EXPRESSION ||
+          resolver?.with?.['expected-base-sha'] !== BASE_SHA_EXPRESSION
+        ) {
+          reasons.push(
+            `${entry.name}: resolve-merge must receive only the event PR number, head SHA, and base SHA`
+          );
+        }
+        if ('secrets' in resolver) {
+          reasons.push(`${entry.name}: resolve-merge must not receive secrets`);
+        }
+      }
       for (const [jobName, job] of Object.entries(jobs)) {
-        if (jobName === 'authorize') continue;
+        if (jobName === 'authorize' || jobName === 'resolve-merge') continue;
         const jobKind = usesArc(job) ? 'ARC job' : 'job';
         const directDependencies = dependencyNames(job);
         if (!reachesJob(jobs, jobName, 'authorize')) {
           reasons.push(
             `${entry.name}: ${jobKind} ${jobName} must depend transitively on authorize`
           );
-        } else if (
-          directDependencies.includes('authorize') &&
-          job.if !== TRUSTED_EXPRESSION
-        ) {
+        }
+        if (!directDependencies.includes('resolve-merge')) {
           reasons.push(
-            `${entry.name}: ${jobKind} ${jobName} directly after authorize must require trusted ownership and a non-null merge_commit_sha`
+            `${entry.name}: ${jobKind} ${jobName} must depend directly on resolve-merge`
+          );
+        }
+        if (!hasVerifiedMergeGuard(job.if)) {
+          reasons.push(
+            `${entry.name}: ${jobKind} ${jobName} must use the verified merge output guard without an OR bypass`
           );
         }
         if (
-          !directDependencies.includes('authorize') &&
           /\b(?:always|cancelled|failure|success)\s*\(/iu.test(job?.if ?? '')
         ) {
           reasons.push(
-            `${entry.name}: ${jobKind} ${jobName} must not use a status function that can override skipped authorization`
+            `${entry.name}: ${jobKind} ${jobName} must not use a status function that can override skipped authorization or merge resolution`
           );
         }
         for (const step of job?.steps ?? []) {
@@ -278,7 +354,7 @@ export function prWorkflowTrustReasons(root) {
             step?.with?.ref !== MERGE_SHA_EXPRESSION
           ) {
             reasons.push(
-              `${entry.name}: ${jobKind} ${jobName} checkout ref must use github.event.pull_request.merge_commit_sha`
+              `${entry.name}: ${jobKind} ${jobName} checkout ref must use needs.resolve-merge.outputs.merge-sha`
             );
           }
         }
@@ -325,9 +401,132 @@ export function prWorkflowTrustReasons(root) {
         );
         if (proofCheckout?.with?.ref !== MERGE_SHA_EXPRESSION) {
           reasons.push(
-            'stage-b-target-test.yml: sandbox proof checkout must use github.event.pull_request.merge_commit_sha'
+            'stage-b-target-test.yml: sandbox proof checkout must use needs.resolve-merge.outputs.merge-sha'
           );
         }
+      }
+    }
+
+    if (entry.name === MERGE_RESOLVER_WORKFLOW) {
+      const mergeResolver = workflow;
+      if (
+        !hasOnlyKeys(mergeResolver, ['name', 'on', 'permissions', 'jobs'])
+      ) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: workflow may contain only canonical keys (name, on, permissions, jobs)`
+        );
+      }
+      const workflowCall = mergeResolver?.on?.workflow_call;
+      const inputs = workflowCall?.inputs ?? {};
+      const outputs = workflowCall?.outputs ?? {};
+      const expectedInputs = [
+        ['pr-number', 'number'],
+        ['expected-head-sha', 'string'],
+        ['expected-base-sha', 'string'],
+      ];
+      const inputsValid =
+        Object.keys(inputs).join(',') ===
+          expectedInputs.map(([name]) => name).join(',') &&
+        expectedInputs.every(
+          ([name, type]) =>
+            hasOnlyKeys(inputs[name], ['description', 'required', 'type']) &&
+            inputs[name]?.required === true &&
+            inputs[name]?.type === type
+        );
+      if (
+        !workflowCall ||
+        Object.keys(mergeResolver.on).length !== 1 ||
+        !hasOnlyKeys(workflowCall, ['inputs', 'outputs']) ||
+        !inputsValid ||
+        Object.keys(outputs).join(',') !== 'merge-sha' ||
+        !hasOnlyKeys(outputs['merge-sha'], ['description', 'value']) ||
+        outputs['merge-sha']?.value !== RESOLVER_WORKFLOW_OUTPUT
+      ) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: workflow_call must expose only required PR number/head/base inputs and one merge-sha output`
+        );
+      }
+      if (
+        !mergeResolver.permissions ||
+        Object.keys(mergeResolver.permissions).length !== 0
+      ) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: workflow permissions must be {}`
+        );
+      }
+      const resolverJobs = Object.keys(mergeResolver?.jobs ?? {});
+      const resolverJob = mergeResolver?.jobs?.resolve;
+      if (resolverJobs.length !== 1 || resolverJobs[0] !== 'resolve') {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: resolver must contain exactly one resolve job`
+        );
+      }
+      if (resolverJob?.['runs-on'] !== 'ubuntu-latest') {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: resolve must use the GitHub-hosted ubuntu-latest runner`
+        );
+      }
+      if (resolverJob?.['timeout-minutes'] !== 2) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: resolve timeout-minutes must remain 2`
+        );
+      }
+      if (!hasExactReadPermissions(resolverJob?.permissions)) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: resolve permissions must be only contents: read and pull-requests: read`
+        );
+      }
+      if (
+        !hasOnlyKeys(resolverJob, [
+          'runs-on',
+          'timeout-minutes',
+          'permissions',
+          'outputs',
+          'steps',
+        ]) ||
+        resolverJob?.outputs?.['merge-sha'] !== RESOLVER_JOB_OUTPUT ||
+        Object.keys(resolverJob?.outputs ?? {}).length !== 1
+      ) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: resolve job keys and merge-sha output must remain canonical`
+        );
+      }
+      const resolverSteps = resolverJob?.steps ?? [];
+      const checkoutStep = resolverSteps[0];
+      if (
+        resolverSteps.length !== 2 ||
+        !hasOnlyKeys(checkoutStep, ['name', 'uses', 'with']) ||
+        checkoutStep?.uses !== CHECKOUT_ACTION ||
+        !hasOnlyKeys(checkoutStep?.with, ['ref', 'persist-credentials']) ||
+        Object.keys(checkoutStep?.with ?? {}).length !== 2 ||
+        checkoutStep?.with?.ref !== RESOLVER_BASE_CHECKOUT ||
+        checkoutStep?.with?.['persist-credentials'] !== false
+      ) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: resolver checkout must pin the exact event base SHA without persisted credentials`
+        );
+      }
+      const resolveStep = resolverSteps[1];
+      const resolverEnv = resolveStep?.env ?? {};
+      if (
+        !hasOnlyKeys(resolveStep, ['name', 'id', 'env', 'run']) ||
+        resolveStep?.id !== 'resolve' ||
+        resolveStep?.run?.trim() !== RESOLVER_COMMAND ||
+        !hasOnlyKeys(resolverEnv, [
+          'GITHUB_TOKEN',
+          'PR_NUMBER',
+          'EXPECTED_HEAD_SHA',
+          'EXPECTED_BASE_SHA',
+        ]) ||
+        Object.keys(resolverEnv).length !== 4 ||
+        resolverEnv.GITHUB_TOKEN !== RESOLVER_TOKEN_EXPRESSION ||
+        resolverEnv.PR_NUMBER !== RESOLVER_PR_INPUT ||
+        resolverEnv.EXPECTED_HEAD_SHA !== RESOLVER_HEAD_INPUT ||
+        resolverEnv.EXPECTED_BASE_SHA !== RESOLVER_BASE_INPUT
+      ) {
+        reasons.push(
+          `${MERGE_RESOLVER_WORKFLOW}: resolve step must run only the canonical merge resolver with bound inputs`
+        );
       }
     }
   }
@@ -451,6 +650,9 @@ export function prWorkflowTrustReasons(root) {
     }
     if (!workflows.has(MILESTONE_GUARD_WORKFLOW)) {
       reasons.push(`missing base-only workflow ${MILESTONE_GUARD_WORKFLOW}`);
+    }
+    if (!workflows.has(MERGE_RESOLVER_WORKFLOW)) {
+      reasons.push(`missing hosted merge resolver ${MERGE_RESOLVER_WORKFLOW}`);
     }
   }
 
