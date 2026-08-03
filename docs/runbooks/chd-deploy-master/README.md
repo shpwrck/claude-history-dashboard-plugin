@@ -143,7 +143,10 @@ podman compose -p chd-deploy-master -f docker-compose.yml -f docker-compose.loca
   `podman logs chd-deploy-master_app_1 | grep -i 'adoption\|spool'` should show
   nothing (silent success); a lingering
   `~/.claude/.cache/chd/adoption-spool.jsonl.rotation-lock` older than ~10 s is
-  stale and will be reclaimed by the next drain or hook.
+  stale and will be reclaimed by the next drain or hook. A sibling
+  `.rotation-lock.reclaim-<dev>-<ino>` should exist only during that removal;
+  if it persists, acquisition fails closed pending the orphan-recovery work in
+  #3557 rather than risking deletion of a fresh lock.
 
 ## Decision log
 

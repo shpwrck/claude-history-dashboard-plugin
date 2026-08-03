@@ -47,7 +47,7 @@ already landed, no loss of what did not. Canonical readers ignore the frame
 rather than treating it as a receipt or as corrupt input, and the receipt writer
 rejects it, so it cannot be forged through the API.
 
-## Spool rotation lock — cross-process protocol v1 (#3402, #3369)
+## Spool rotation lock — cross-process protocol v1 (#3402, #3369, #3550)
 
 Rotation is a consumer-side move and cannot by itself quiesce the producer: a
 hook that opened the live spool for append *before* the rename holds a
@@ -62,6 +62,11 @@ cross-repo contract** — both implementations copy these constants exactly.
 - **Lock path.** `<resolved spool path> + '.rotation-lock'` — a sibling file.
   Spool path resolution is unchanged: `ADOPTION_SPOOL_PATH` env if set, else
   `join(CHD_CACHE_DIR default ~/.claude/.cache/chd, 'adoption-spool.jsonl')`.
+- **Generation-claim path.** A remover serializes against the observed lock
+  inode with `<lock path> + '.reclaim-' + dev + '-' + ino`. The claim is an
+  `O_EXCL` hard link to that exact lock generation, not a copy. This constant
+  and behavior are part of the cross-repo contract; producer synchronization is
+  tracked by #3556.
 - **Acquire.** Open with flag `'wx'`, mode `0o600`; write one single-line JSON
   payload:
 
@@ -73,15 +78,26 @@ cross-repo contract** — both implementations copy these constants exactly.
 - **On EEXIST.** `lstat` the lock path: missing → retry; a symlink or anything
   that is not a regular file → acquisition **fails permanently** (hostile
   squatting — never follow it, never unlink it). Otherwise stale check: an
-  `mtimeMs` older than **10000 ms** is reclaimed by `rename(lockPath, lockPath +
-  '.stale-' + pid + '-' + randomUUID())` then unlinking the renamed path
-  (rename-**first**, so two concurrent reclaimers cannot both win; ENOENT races
-  at either step are tolerated), then retry.
+  `mtimeMs` older than **10000 ms** is removed only after the contender creates
+  the generation-claim hard link with exclusive destination semantics and
+  revalidates that both the lock and claim still have the observed `dev` +
+  `ino`. A rival that observed the same stale file loses on `EEXIST`; a delayed
+  observer that links a fresh replacement fails generation validation and
+  removes only its claim. A contender that did not remove the observed
+  generation backs off before inspecting again, including when an orphan claim
+  keeps the generation fail-closed. The winner unlinks the old lock path, cleans
+  its claim in `finally`, then retries normal `'wx'` acquisition immediately.
+  This replaces the
+  path-only rename-first rule, whose observation→rename gap allowed two winners
+  under scheduler pressure (#3550).
 - **Backoff / budgets.** ~5 ms between attempts. Drain-side total acquisition
   budget: **2000 ms**. Producer-side budget: **250 ms**.
-- **Release.** Read and parse the lock file; unlink **only** if its `token`
-  matches the one this holder wrote (a stale reclaim may have replaced the lock
-  with a rival holder's). Always in `finally`; ENOENT tolerated.
+- **Release.** Observe the lock generation, take the same exclusive hard-link
+  claim used by stale reclaim, revalidate the generation, then read and parse
+  the lock file; unlink **only** if its `token` matches the one this holder
+  wrote. Always clean an owned claim in `finally`; ENOENT is tolerated. Using
+  the same generation claim for every protocol remover prevents release from
+  replacing or deleting a rival holder's lock.
 - **Hold windows.** The drain holds the lock across rotation ONLY — the rename +
   recreate inside `rotateLiveSpool`, never snapshot draining or receipt
   processing — so producer waits stay in the milliseconds. The producer holds it
@@ -97,7 +113,10 @@ cross-repo contract** — both implementations copy these constants exactly.
 - **Killswitch.** The `SHADOW_CALLS_OFF` / `OFF`-sentinel early-return runs
   before any lock activity on both sides.
 
-**Remaining residuals.** A non-protocol producer — a legacy hook, or a protocol
+**Remaining residuals.** A process killed after creating a generation claim but
+before `finally` cleanup can leave that generation fail-closed; automatic,
+race-free orphan recovery is tracked by #3557. A non-protocol producer — a
+legacy hook, or a protocol
 producer in degraded mode — can still write through a pre-rotation descriptor;
 the drain's bounded snapshot tail passes (it re-reads a snapshot that grew and
 refuses to unlink one whose bytes it has not all consumed) remain as the belt

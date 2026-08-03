@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   lstat,
+  link,
   mkdtemp,
   open,
   readdir,
@@ -20,6 +21,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+  ADOPTION_SPOOL_ROTATION_LOCK_RECLAIM_INFIX,
   ADOPTION_SPOOL_ROTATION_LOCK_SUFFIX,
   acquireAdoptionSpoolRotationLock,
   adoptionSpoolRotationLockPath,
@@ -113,6 +115,13 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
+function isReclaimResidue(name: string): boolean {
+  return (
+    name.includes('.stale-') ||
+    name.includes(ADOPTION_SPOOL_ROTATION_LOCK_RECLAIM_INFIX)
+  );
+}
+
 async function waitFor(
   predicate: () => Promise<boolean>,
   what: string,
@@ -200,6 +209,71 @@ if (lock) {
 process.exit(0);
 `;
 
+const STALE_CONTENTION_ROUNDS = 12;
+
+async function assertSingleStaleReclaimWinner(round: number): Promise<void> {
+  const dir = await makeDir();
+  const spool = join(dir, 'adoption-spool.jsonl');
+  const lockPath = adoptionSpoolRotationLockPath(spool);
+  await writeFile(spool, '', 'utf8');
+  await writeFile(
+    lockPath,
+    `${JSON.stringify({
+      schemaVersion: '1',
+      kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+      role: 'drain',
+      pid: 1,
+      token: randomUUID(),
+      createdAt: '2026-07-31T00:00:00.000Z',
+    })}\n`,
+    'utf8'
+  );
+  const past = new Date(Date.now() - 60_000);
+  await utimes(lockPath, past, past);
+
+  const goMarker = join(dir, 'go.marker');
+  const contenders = (['a', 'b'] as const).map((name) =>
+    spawnLockChild(CONTENDER_CHILD, {
+      CHD_SPOOL: spool,
+      CHD_READY_MARKER: join(dir, `${name}-ready.marker`),
+      CHD_GO_MARKER: goMarker,
+      CHD_WIN_MARKER: join(dir, `${name}-win.marker`),
+      CHD_LOSE_MARKER: join(dir, `${name}-lose.marker`),
+    })
+  );
+  await Promise.all(
+    contenders.map((contender, index) =>
+      waitFor(
+        () => exists(join(dir, `${index === 0 ? 'a' : 'b'}-ready.marker`)),
+        `round ${round} contender ${index === 0 ? 'a' : 'b'} ready (stderr: ${contender.stderr()})`
+      )
+    )
+  );
+  await writeFile(goMarker, '', 'utf8');
+  expect(await Promise.all(contenders.map(({ exited }) => exited))).toEqual([
+    0, 0,
+  ]);
+
+  const names = await readdir(dir);
+  const wins = names.filter((name) => name.endsWith('-win.marker'));
+  const losses = names.filter((name) => name.endsWith('-lose.marker'));
+  expect(wins, `round ${round} winners`).toHaveLength(1);
+  expect(losses, `round ${round} losers`).toHaveLength(1);
+  // No quarantine/reclaim residue, and the surviving lock belongs to the
+  // sole winner rather than a contender whose lock was renamed away.
+  expect(names.filter(isReclaimResidue), `round ${round} reclaim residue`).toEqual(
+    []
+  );
+  const winnerToken = await readFile(join(dir, wins[0]), 'utf8');
+  const surviving = JSON.parse(await readFile(lockPath, 'utf8'));
+  expect(surviving).toMatchObject({
+    schemaVersion: '1',
+    kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+    role: 'drain',
+    token: winnerToken,
+  });
+}
+
 describe('adoption-spool rotation lock (protocol v1)', () => {
   it('acquires, writes the contract payload, excludes a second acquirer, and releases', async () => {
     const dir = await makeDir();
@@ -229,6 +303,7 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
 
     await lock!.release();
     expect(await exists(lockPath)).toBe(false);
+    expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
 
     // Released means re-acquirable; release is idempotent.
     const again = await acquireAdoptionSpoolRotationLock(spool, {
@@ -263,9 +338,26 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
     await lock!.release();
     // The rival's lock survives our release.
     expect(await readFile(lockPath, 'utf8')).toBe(rival);
+    expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
   });
 
-  it('reclaims a stale lock within bounds and leaves no .stale residue', async () => {
+  it('cleans its generation claim when release payload validation throws', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, { role: 'drain' });
+    expect(lock).not.toBeNull();
+    // Preserve the acquired inode but make the release predicate throw while
+    // parsing. Release must fail closed and still clean the claim it owns.
+    await writeFile(lockPath, 'not-json\n', 'utf8');
+
+    await expect(lock!.release()).resolves.toBeUndefined();
+    expect(await readFile(lockPath, 'utf8')).toBe('not-json\n');
+    expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+  });
+
+  it('reclaims a stale lock within bounds and leaves no reclaim residue', async () => {
     const dir = await makeDir();
     const spool = join(dir, 'adoption-spool.jsonl');
     const lockPath = adoptionSpoolRotationLockPath(spool);
@@ -292,9 +384,7 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
     expect(lock).not.toBeNull();
     // Reclaim + reacquire is immediate, not a budget-length stall.
     expect(Date.now() - started).toBeLessThan(1000);
-    expect(
-      (await readdir(dir)).filter((name) => name.includes('.stale-'))
-    ).toEqual([]);
+    expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
     await lock!.release();
   });
 
@@ -324,9 +414,7 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
     expect((await lstat(lockPath)).isSymbolicLink()).toBe(true);
     expect(await readlink(lockPath)).toBe(victim);
     expect(await readFile(victim, 'utf8')).toBe(victimBody);
-    expect(
-      (await readdir(dir)).filter((name) => name.includes('.stale-'))
-    ).toEqual([]);
+    expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
   });
 
   // (a) A child PROCESS holds the lock: the real drain must not rotate the live
@@ -476,65 +564,152 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
   // (c) Two contender child processes racing a stale lock: it is reclaimed
   // within bounds and EXACTLY ONE contender wins.
   it(
-    'lets exactly one of two concurrent child contenders reclaim a stale lock',
+    'lets exactly one of two concurrent child contenders reclaim a stale lock across repeated parallel rounds',
     async () => {
-      const dir = await makeDir();
-      const spool = join(dir, 'adoption-spool.jsonl');
-      const lockPath = adoptionSpoolRotationLockPath(spool);
-      await writeFile(spool, '', 'utf8');
-      await writeFile(
-        lockPath,
-        `${JSON.stringify({
-          schemaVersion: '1',
-          kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
-          role: 'drain',
-          pid: 1,
-          token: randomUUID(),
-          createdAt: '2026-07-31T00:00:00.000Z',
-        })}\n`,
-        'utf8'
+      await Promise.all(
+        Array.from({ length: STALE_CONTENTION_ROUNDS }, (_, round) =>
+          assertSingleStaleReclaimWinner(round)
+        )
       );
-      const past = new Date(Date.now() - 60_000);
-      await utimes(lockPath, past, past);
+    },
+    30_000
+  );
 
-      const goMarker = join(dir, 'go.marker');
-      const contenders = (['a', 'b'] as const).map((name) =>
-        spawnLockChild(CONTENDER_CHILD, {
-          CHD_SPOOL: spool,
-          CHD_READY_MARKER: join(dir, `${name}-ready.marker`),
-          CHD_GO_MARKER: goMarker,
-          CHD_WIN_MARKER: join(dir, `${name}-win.marker`),
-          CHD_LOSE_MARKER: join(dir, `${name}-lose.marker`),
-        })
-      );
-      await waitFor(
-        () => exists(join(dir, 'a-ready.marker')),
-        `contender a ready (stderr: ${contenders[0].stderr()})`
-      );
-      await waitFor(
-        () => exists(join(dir, 'b-ready.marker')),
-        `contender b ready (stderr: ${contenders[1].stderr()})`
-      );
-      await writeFile(goMarker, '', 'utf8');
-      expect(await contenders[0].exited).toBe(0);
-      expect(await contenders[1].exited).toBe(0);
+  it('does not remove a fresh generation after a stale observer is delayed', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    const parkedStaleLock = join(dir, 'parked-stale-lock');
+    const stalePayload = `${JSON.stringify({
+      schemaVersion: '1',
+      kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+      role: 'drain',
+      pid: 1,
+      token: randomUUID(),
+      createdAt: '2026-07-31T00:00:00.000Z',
+    })}\n`;
+    await writeFile(lockPath, stalePayload, 'utf8');
+    const past = new Date(Date.now() - 60_000);
+    await utimes(lockPath, past, past);
 
-      const names = await readdir(dir);
-      const wins = names.filter((name) => name.endsWith('-win.marker'));
-      const losses = names.filter((name) => name.endsWith('-lose.marker'));
-      expect(wins).toHaveLength(1);
-      expect(losses).toHaveLength(1);
-      // No reclaim residue, and the surviving lock belongs to the winner.
-      expect(names.filter((name) => name.includes('.stale-'))).toEqual([]);
-      const winnerToken = await readFile(join(dir, wins[0]), 'utf8');
-      const surviving = JSON.parse(await readFile(lockPath, 'utf8'));
-      expect(surviving).toMatchObject({
+    let reportRemovalStarted!: () => void;
+    const removalStarted = new Promise<void>((resolve) => {
+      reportRemovalStarted = resolve;
+    });
+    let permitRemoval!: () => void;
+    const removalPermitted = new Promise<void>((resolve) => {
+      permitRemoval = resolve;
+    });
+    let paused = false;
+    const pauseFirstRemoval = async () => {
+      if (paused) return;
+      paused = true;
+      reportRemovalStarted();
+      await removalPermitted;
+    };
+
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        // Pause both the fixed claim operation and the legacy path-only
+        // rename. The same schedule therefore passes only when removal is
+        // bound to the generation observed before this pause.
+        link: async (...args: Parameters<typeof actual.link>) => {
+          await pauseFirstRemoval();
+          return actual.link(...args);
+        },
+        rename: async (...args: Parameters<typeof actual.rename>) => {
+          await pauseFirstRemoval();
+          return actual.rename(...args);
+        },
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireWithPausedRemoval } =
+        await import('./adoption-spool-lock');
+      const delayedObserver = acquireWithPausedRemoval(spool, {
+        role: 'drain',
+        budgetMs: 80,
+      });
+      await removalStarted;
+
+      // Another contender wins while this one is paused after stale
+      // inspection. Keep the stale inode alive so the replacement is
+      // guaranteed to have a distinct generation even on eager inode reuse.
+      await rename(lockPath, parkedStaleLock);
+      const freshToken = randomUUID();
+      const freshPayload = `${JSON.stringify({
         schemaVersion: '1',
         kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+        role: 'producer',
+        pid: 2,
+        token: freshToken,
+        createdAt: new Date().toISOString(),
+      })}\n`;
+      await writeFile(lockPath, freshPayload, 'utf8');
+      expect((await lstat(lockPath)).ino).not.toBe(
+        (await lstat(parkedStaleLock)).ino
+      );
+
+      permitRemoval();
+      expect(await delayedObserver).toBeNull();
+      expect(await readFile(lockPath, 'utf8')).toBe(freshPayload);
+      expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+    } finally {
+      permitRemoval();
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
+  it('backs off instead of spinning when a stale generation claim already exists', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    await writeFile(lockPath, 'stale-lock\n', 'utf8');
+    const past = new Date(Date.now() - 60_000);
+    await utimes(lockPath, past, past);
+    const generation = await lstat(lockPath, { bigint: true });
+    const claimPath = `${lockPath}${ADOPTION_SPOOL_ROTATION_LOCK_RECLAIM_INFIX}${generation.dev}-${generation.ino}`;
+    await link(lockPath, claimPath);
+
+    let linkAttempts = 0;
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        link: async (...args: Parameters<typeof actual.link>) => {
+          linkAttempts++;
+          return actual.link(...args);
+        },
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireCountingClaims } =
+        await import('./adoption-spool-lock');
+      const started = Date.now();
+      const lock = await acquireCountingClaims(spool, {
         role: 'drain',
-        token: winnerToken,
+        budgetMs: 90,
+        retryDelayMs: 15,
       });
-    },
-    20_000
-  );
+      const elapsedMs = Date.now() - started;
+
+      expect(lock).toBeNull();
+      expect(elapsedMs).toBeGreaterThanOrEqual(75);
+      expect(elapsedMs).toBeLessThan(1000);
+      expect(linkAttempts).toBeGreaterThanOrEqual(2);
+      expect(linkAttempts).toBeLessThanOrEqual(8);
+      expect(await readFile(lockPath, 'utf8')).toBe('stale-lock\n');
+      expect(await exists(claimPath)).toBe(true);
+    } finally {
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
 });
