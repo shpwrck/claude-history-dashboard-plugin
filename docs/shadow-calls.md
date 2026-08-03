@@ -49,13 +49,26 @@ firing path never reaches the consent step).
 
 1. You give a substantial prompt; the agent does the work and **delivers the Main answer in
    full** (unchanged — a shadow never edits what you got).
-2. The agent checks the budget (`budget.mjs decide live`). If it's not allowed (window busy,
+2. The agent runs the **content egress preflight** (`egress-preflight.mjs`, #3296) on the
+   task/context text BEFORE budget or consent. Shadow workers and the judge run on the
+   subscription OAuth credential, and ADR 0008's invariant forbids that credential from
+   transmitting `~/.claude`-derived content — so a task whose content carries a path into
+   `~/.claude`/`~/.codex`, credential material, or a transcript excerpt is **skipped
+   fail-closed**, and the skip reason records only the matched class names
+   (`claude-path`, `credential`, `transcript-excerpt`), never the matched text. The same
+   check is enforced structurally inside `buildWorkerLaunch` (throws before any launch
+   contract exists) and `buildJudgePayload` (degrades to the honest-null verdict path), so
+   no flow can forget it; the Tier-B local loopback lane is exempt (no credential seeded,
+   egress pinned to `127.0.0.1`, so local-only analysis of `~/.claude` content stays
+   allowed per ADR 0018).
+3. The agent checks the budget (`budget.mjs decide live`). If it's not allowed (window busy,
    cap hit, or kill switch), it silently skips.
-3. If allowed, it applies your **consent mode** (notify/ask/auto), picks the next rotation
+4. If allowed, it applies your **consent mode** (notify/ask/auto), picks the next rotation
    axis (`axes.mjs pickAxis`), and fires **one background worktree subagent** that redoes the
    same task with just that axis varied.
-4. When it returns: metrics + an LLM-judge decide a winner; a `mode:"live"` record is
-   appended to `~/.claude/shadow-calls/ledger.jsonl`; you see a one-line note like
+5. When it returns: metrics + an LLM-judge decide a winner (judge inputs pass the same
+   egress preflight); a `mode:"live"` record is appended to
+   `~/.claude/shadow-calls/ledger.jsonl`; you see a one-line note like
    `shadow [haiku] matched at 1/8 cost — logged`.
 
 ## What a replay looks like
@@ -70,7 +83,10 @@ node ~/.claude/shadow-calls/lib/driver.mjs contract    # the loop a /schedule or
 ```
 
 Each replay reconstructs the task at its base commit in an isolated worktree, runs a cold
-control + the varied attempt, judges, and logs a `mode:"replay"` record.
+control + the varied attempt, judges, and logs a `mode:"replay"` record. Replayed tasks
+pass the same fail-closed egress preflight as live shadows (#3296): a past task whose
+prompt or context embeds `~/.claude`-derived or secret-bearing content is skipped with a
+classes-only reason instead of being resent on the subscription credential.
 
 ## Inspecting the ledger
 
