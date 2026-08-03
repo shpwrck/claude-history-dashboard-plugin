@@ -137,6 +137,12 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 //       would stay saturated. The paired DATASET_ASSEMBLY_SCHEMA_VERSION bump in
 //       scripts/ingest.mjs turns over the downstream dataset body assembled from
 //       these rows.
+//   'undo-file-paths-v22' (#3160): parseToolUsage now persists bounded exact
+//       `commandUndoFilePaths` from full git checkout/restore commands
+//       before bulk ingest strips `input.command`. Reparse tool_json so undo
+//       effectiveness is attributed only when the command named the edited
+//       path. Dataset schema v32 (flag-off v31) rejects assembled bodies whose
+//       old rows cannot carry that path provenance.
 const SESSION_BLOB_PARSER_VERSION = SESSION_BLOB_OUTPUT.version;
 
 const { parseSessionJsonl } = await import(join(LIB, 'parse-sessions.ts'));

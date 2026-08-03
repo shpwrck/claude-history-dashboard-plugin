@@ -145,12 +145,18 @@ describe('workflow.rework-signature provenance (#3242)', () => {
     // The finding: burst geometry is a proxy, not proof of a cause. The copy
     // must restrict itself to the measured churn facts.
     const rec = detector.rule(makeInput([storm, medium, calm]), 0)!;
-    const blob = `${rec.title} ${rec.detail} ${rec.action}`.toLowerCase();
-    expect(blob).not.toContain('retry storm');
+    const blob = [
+      rec.title,
+      rec.detail,
+      rec.action,
+      ...(rec.evidence ?? []),
+      ...rec.provenance!.observations.map((observation) => observation.claim),
+      rec.provenance!.inference,
+    ].join(' ').toLowerCase();
+    expect(blob).not.toMatch(/\b(repeated|redone|retried|retries|retry)\b/);
     expect(blob).not.toContain('unclear prompt');
     expect(blob).not.toContain('brittle');
-    // The inference may NAME the proxy, but only as an explicitly-unproven one.
-    expect(rec.provenance!.inference).toMatch(/prox(y|ies)/i);
+    expect(rec.action).toContain('identifies neither file paths nor edit intent');
   });
 
   it('dates asOf from the newest snapshot mtime, not from now', () => {

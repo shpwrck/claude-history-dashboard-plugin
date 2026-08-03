@@ -6,10 +6,9 @@
  * is present the detector emits nothing, keeping existing test fixtures
  * compiling unchanged.
  *
- * A high "rework signature" means many pre-edit snapshots packed into a tight
- * time window (high burstRate). It is a churn proxy, not a diagnosis: the
- * aggregate does not identify whether the checkpoints came from trial-and-error
- * work, an unclear prompt, or ordinary iterative editing.
+ * A high legacy-named "rework signature" means many pre-edit snapshots packed
+ * into a tight time window (high burstRate). It is a checkpoint-density rank,
+ * not a diagnosis: the aggregate identifies neither file paths nor edit intent.
  *
  * Signal derivation (pure from parse-file-history; never reads snapshot bodies):
  *   reworkScore  = churn * (1 + burstRate)   per session
@@ -62,9 +61,9 @@ export const detector: Detector = {
         `(${top.burstRate}/min). These are checkpoint counts from ~/.claude/file-history: ` +
         `a high rate means many edits packed into a tight window.`,
       action:
-        'Review the highest-churn sessions. If the churn reflects trial-and-error, ' +
-        'clearer up-front specs or pre-edit lint/typecheck hooks can cut repeated ' +
-        'checkpoints; if it is ordinary iterative editing, no action is needed.',
+        'Use the session IDs to inspect surrounding activity only if the checkpoint ' +
+        'density is unexpected. File-history metadata identifies neither file paths ' +
+        'nor edit intent, so it does not support a corrective action by itself.',
       affected: top5.length,
       evidence: top5.map(
         (s) =>
@@ -104,15 +103,14 @@ export const detector: Detector = {
             value: top.spanMin,
           },
         ],
-        // reworkScore = churn × (1 + burstRate) ranks tight, churny sessions
-        // highest. It is a PROXY for retry-storm-style rework: the snapshot
-        // counts do NOT identify WHY the edits happened (an unclear prompt, a
-        // brittle edit, or normal iterative work all produce checkpoints), so no
-        // cause is claimed. burstRate >= 3 only raises the DISPLAY severity; it
-        // is not evidence of a specific cause.
+        // reworkScore = churn × (1 + burstRate) ranks tight, checkpoint-dense
+        // sessions highest. The legacy field name does not establish recurrence
+        // or intent: snapshot counts identify neither paths nor edit content.
+        // burstRate >= 3 only raises DISPLAY severity.
         inference:
-          'A high reworkScore concentrates many pre-edit checkpoints into a short window; ' +
-          'this proxies rework but does not identify its cause, which is not measured here.',
+          'The legacy-named reworkScore combines checkpoint count and rate to rank ' +
+          'dense file-history windows. This metadata identifies neither file paths ' +
+          'nor edit intent, so it supports no diagnosis about the work.',
         ...(asOf ? { asOf } : {}),
       },
     };

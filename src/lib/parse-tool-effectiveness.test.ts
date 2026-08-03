@@ -1,19 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import { computeToolEffectiveness } from './parse-tool-effectiveness'
-import type { ToolCall, ToolUsageData } from './parse-tools'
+import { deriveBashCommandSignals, type ToolCall, type ToolUsageData } from './parse-tools'
 import type { ApiErrorEvent } from './parse-errors'
 import type { SessionTimeline } from './parse-timeline'
 
 const T0 = '2026-01-01T00:00:00Z'
 const at = (sec: number) => `2026-01-01T00:00:${String(sec).padStart(2, '0')}Z`
 
-const tc = (toolName: string, opts: { ts?: string; input?: Record<string, unknown>; isError?: boolean } = {}): ToolCall => ({
+const tc = (toolName: string, opts: { ts?: string; input?: Record<string, unknown>; isError?: boolean; undoFilePaths?: string[] } = {}): ToolCall => ({
   timestamp: opts.ts ?? T0,
   toolName,
   input: opts.input ?? {},
   toolUseId: 'u',
   isError: opts.isError ?? null,
   resultBytes: 0,
+  ...(opts.undoFilePaths ? { commandUndoFilePaths: opts.undoFilePaths } : {}),
 })
 const session = (sessionId: string, calls: ToolCall[]): ToolUsageData => ({ sessionId, calls })
 const row = (rows: ReturnType<typeof computeToolEffectiveness>, tool: string) => rows.find((r) => r.tool === tool)!
@@ -57,7 +58,11 @@ describe('computeToolEffectiveness', () => {
     const data = [
       session('s', [
         tc('Edit', { ts: at(0), input: { file_path: '/a.ts' } }),
-        tc('Bash', { ts: at(1), input: { command: 'git checkout /a.ts' } }),
+        tc('Bash', {
+          ts: at(1),
+          input: { command: 'git checkout /a.ts' },
+          undoFilePaths: ['/a.ts'],
+        }),
       ]),
     ]
     const r = row(computeToolEffectiveness(data, [], []), 'Edit')
@@ -65,6 +70,75 @@ describe('computeToolEffectiveness', () => {
     expect(r.immediatelyFollowedByProgress).toBe(1) // the bash call is also a different target
     // good 1, bad (undo) 1 → (1+1)/(1+1+2) = 0.5
     expect(r.effectivenessScore).toBeCloseTo(0.5)
+  })
+
+  it('does not attribute a git undo that targets a different file', () => {
+    const data = [
+      session('s', [
+        tc('Edit', { ts: at(0), input: { file_path: '/a.ts' } }),
+        tc('Bash', {
+          ts: at(1),
+          input: { command: 'git restore /b.ts' },
+          undoFilePaths: ['/b.ts'],
+        }),
+      ]),
+    ]
+    const r = row(computeToolEffectiveness(data, [], []), 'Edit')
+    expect(r.immediatelyFollowedByUndo).toBe(0)
+    expect(r.immediatelyFollowedByProgress).toBe(1)
+    expect(r.effectivenessScore).toBeCloseTo(2 / 3)
+  })
+
+  it('suppresses undo attribution when exact path provenance is absent', () => {
+    const data = [
+      session('s', [
+        tc('Edit', { ts: at(0), input: { file_path: '/a.ts' } }),
+        tc('Bash', { ts: at(1), input: { command: 'git reset --hard' } }),
+      ]),
+    ]
+    expect(
+      row(computeToolEffectiveness(data, [], []), 'Edit').immediatelyFollowedByUndo
+    ).toBe(0)
+  })
+
+  it('does not treat an index-only git reset pathspec as a file undo', () => {
+    const data = [
+      session('s', [
+        tc('Edit', { ts: at(0), input: { file_path: '/a.ts' } }),
+        tc('Bash', {
+          ts: at(1),
+          input: { command: 'git reset HEAD -- /a.ts' },
+        }),
+      ]),
+    ]
+    expect(
+      row(computeToolEffectiveness(data, [], []), 'Edit').immediatelyFollowedByUndo
+    ).toBe(0)
+  })
+
+  it('distinguishes staged-only restore from a working-tree restore', () => {
+    const effectivenessFor = (command: string) => {
+      const restore = tc('Bash', { ts: at(1), input: { command } })
+      Object.assign(restore, deriveBashCommandSignals(command))
+      return row(
+        computeToolEffectiveness(
+          [
+            session('s', [
+              tc('Edit', { ts: at(0), input: { file_path: '/a.ts' } }),
+              restore,
+            ]),
+          ],
+          [],
+          []
+        ),
+        'Edit'
+      ).immediatelyFollowedByUndo
+    }
+
+    expect(effectivenessFor('git restore --staged -- /a.ts')).toBe(0)
+    expect(effectivenessFor('git restore -S -- /a.ts')).toBe(0)
+    expect(effectivenessFor('git restore --staged --worktree -- /a.ts')).toBe(1)
+    expect(effectivenessFor('git restore -S -W -- /a.ts')).toBe(1)
   })
 
   it('treats a fresh user message before the next tool call as progress', () => {

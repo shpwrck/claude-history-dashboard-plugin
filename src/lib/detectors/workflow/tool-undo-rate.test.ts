@@ -6,14 +6,14 @@ import type { ToolUsageData, ToolCall } from '../../parse-tools';
 
 const edit = (i: number, file: string): ToolCall =>
   ({ timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`, toolName: 'Edit', input: { file_path: file }, toolUseId: `e${i}`, isError: null, resultBytes: 0 });
-const restore = (i: number): ToolCall =>
-  ({ timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`, toolName: 'Bash', input: { command: 'git restore .' }, toolUseId: `b${i}`, isError: null, resultBytes: 0 });
+const restore = (i: number, file: string): ToolCall =>
+  ({ timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`, toolName: 'Bash', input: { command: `git restore -- ${file}` }, toolUseId: `b${i}`, isError: null, resultBytes: 0, commandUndoFilePaths: [file] });
 
 // 10 edits on distinct files; the first two are immediately followed by a git restore.
 const calls: ToolCall[] = [];
 let t = 0;
-calls.push(edit(t++, 'f0'), restore(t++));
-calls.push(edit(t++, 'f1'), restore(t++));
+calls.push(edit(t++, 'f0'), restore(t++, 'f0'));
+calls.push(edit(t++, 'f1'), restore(t++, 'f1'));
 for (let i = 2; i < 10; i++) calls.push(edit(t++, `f${i}`));
 const toolData: ToolUsageData[] = [{ sessionId: 's1', calls }];
 

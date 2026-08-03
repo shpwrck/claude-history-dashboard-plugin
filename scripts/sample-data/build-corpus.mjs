@@ -409,7 +409,12 @@ function buildFeatureSession(ctx, t0) {
 
   const agid = `${ctx.sessionId}-ag`;
   ctx.push(asstContent(t, [toolUseBlock(agid, 'Agent', { subagent_type: 'code-explorer' })]));
-  ctx.push(asstUsage(t + 500, MODELS.sonnet, {
+  // Keep designated feature sessions single-family so the model-gap workbench
+  // retains directly attributable samples after mixed-family sessions fail closed.
+  const gapMiningSample = ctx.sessionId === '20260513-1004-feat-sample';
+  const agentModel =
+    timeMotionSample || gapMiningSample ? MODELS.opus : MODELS.sonnet;
+  ctx.push(asstUsage(t + 500, agentModel, {
     input_tokens: int(600, 1200),
     output_tokens: int(900, 1800),
     cache_creation_input_tokens: int(2000, 5000),

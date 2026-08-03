@@ -105,16 +105,15 @@ test('session-blob version is the value the session_blob cache key actually bake
   assert.equal(typeof SESSION_BLOB_OUTPUT.version, 'string');
 });
 
-test('session-blob version turns over for the true pre-clip prompt length (#3511)', () => {
-  // A CONTENT-shape bump the column fingerprint above cannot force: user
-  // timeline_json entries now carry a sparse `summaryRawLen` (the true pre-clip
-  // prompt length), with no column added, removed, or renamed — exactly like the
-  // v20 entryId bump. Pinning the literal keeps the deliberate bump from being
-  // silently reverted.
+test('session-blob version turns over for exact git undo path evidence (#3160)', () => {
+  // A CONTENT-shape bump the column fingerprint above cannot force: tool_json
+  // calls now carry sparse `commandUndoFilePaths`, with no signal column added,
+  // removed, or renamed. Pinning the literal keeps the deliberate bump from
+  // silently reverting to a cache whose rows cannot attribute undo paths.
   assert.equal(
     SESSION_BLOB_OUTPUT.version,
-    'timeline-summary-rawlen-v21',
-    'user timeline_json entries now carry the true pre-clip summaryRawLen; the uuid-keyed v20 cache key must not remain current'
+    'undo-file-paths-v22',
+    'tool_json calls now carry exact parser-owned git undo path evidence; the summaryRawLen v21 cache key must not remain current'
   );
 });
 

@@ -431,6 +431,39 @@ describe('computeModelRecommendations — savings math', () => {
     expect(turn.savingsUsd).toBeCloseTo(expectedActual - expectedRec, 9)
   })
 
+  it('prices every mixed-model entry at the model that actually produced it', () => {
+    const t0 = nextTs()
+    const tl = timeline('s-mixed-price', [userEntry('tiny', t0)])
+    const tok = tokenData('s-mixed-price', 'claude-opus-4-8', [
+      tokenEntry({
+        timestamp: t0,
+        inputTokens: 1_000_000,
+        outputTokens: 100,
+        model: 'claude-opus-4-8',
+      }),
+      tokenEntry({
+        timestamp: t0,
+        inputTokens: 1_000_000,
+        outputTokens: 100,
+        model: 'claude-haiku-4-5-20251001',
+      }),
+    ])
+
+    const row = computeModelRecommendations([tok], [], [tl], [])[0]
+    const turn = row.turns[0]
+    const expectedActual = 5 + (100 / 1_000_000) * 25 + 1 + (100 / 1_000_000) * 5
+    const expectedRecommended = 2 * (1 + (100 / 1_000_000) * 5)
+    expect(turn.actualCostUsd).toBeCloseTo(expectedActual, 9)
+    expect(turn.recommendedCostUsd).toBeCloseTo(expectedRecommended, 9)
+    expect(turn.savingsUsd).toBeCloseTo(expectedActual - expectedRecommended, 9)
+    expect(row.session.estimatedSavingsUsd).toBeCloseTo(turn.savingsUsd, 9)
+    expect(row.session.downgradableTurns).toBe(0)
+    expect(summarizeModelRecommendations([row]).estimatedSavingsUsd).toBeCloseTo(
+      turn.savingsUsd,
+      9
+    )
+  })
+
   it('clamps savings to zero rather than reporting an upgrade as a gain', () => {
     // A complex Haiku turn is "recommended" to stay on Haiku → no swap, so
     // there is never negative savings to clamp; instead verify a swap where the
@@ -698,6 +731,50 @@ describe('computeModelRecommendations — session aggregation', () => {
     expect(row.session.downgradableTurns).toBe(1)
     expect(row.session.downgradablePct).toBe(50)
   })
+
+  it('counts only proven cheaper capability-tier transitions as downgradable', () => {
+    const cases = [
+      {
+        id: 'unknown-to-opus',
+        prompt: 'x'.repeat(2500),
+        model: 'unknown-model-id',
+        expected: 0,
+      },
+      {
+        id: 'sonnet-alias',
+        prompt: 'x'.repeat(800),
+        model: 'claude-sonnet-4-6',
+        expected: 0,
+      },
+      {
+        id: 'opus-to-sonnet',
+        prompt: 'x'.repeat(800),
+        model: 'claude-opus-4-8',
+        expected: 1,
+      },
+      {
+        id: 'unchanged-haiku',
+        prompt: 'tiny',
+        model: 'claude-haiku-4-5-20251001',
+        expected: 0,
+      },
+    ]
+
+    const rows = cases.map(({ id, prompt, model }) => {
+      const timestamp = nextTs()
+      return computeModelRecommendations(
+        [tokenData(id, model, [tokenEntry({ timestamp, model, outputTokens: 10 })])],
+        [],
+        [timeline(id, [userEntry(prompt, timestamp)])],
+        []
+      )[0]
+    })
+
+    expect(rows.map((row) => row.session.downgradableTurns)).toEqual(
+      cases.map(({ expected }) => expected)
+    )
+    expect(summarizeModelRecommendations(rows).downgradablePct).toBe(25)
+  })
 })
 
 // ── summarizeModelRecommendations ───────────────────────────────────
@@ -827,12 +904,12 @@ describe('estimateMonthlySavings', () => {
 // review reproduced: each would silently change output if the fast path drifted
 // from the old array-order / fallback semantics.
 describe('computeModelRecommendations — perf-refactor parity regressions', () => {
-  it('empty token window resolves to "unknown" (not tokens.model) → Opus, downgradable', () => {
+  it('empty token window resolves to "unknown" (not tokens.model) → Opus without proving a downgrade', () => {
     // Turn 0 owns the only token entry; turn 1's window [t1, ∞) is empty even
     // though the session's model is a real Opus id. The old code returned the
     // truthy string "unknown" for an empty window instead of falling through to
     // tokens.model — so a complex empty-window turn recommends Opus and counts
-    // as downgradable.
+    // as a model-id change. Unknown pricing cannot prove a cheaper transition.
     const t0 = nextTs()
     const t1 = nextTs()
     const longPrompt = 'x'.repeat(2500) // > MODERATE_PROMPT_CHARS → complex
@@ -852,7 +929,6 @@ describe('computeModelRecommendations — perf-refactor parity regressions', () 
     expect(emptyTurn.currentModel).toBe('unknown')
     expect(emptyTurn.bucket).toBe('complex')
     expect(emptyTurn.recommendedModel).toBe(REC_OPUS)
-    // downgradable: currentModel ("unknown") differs from the recommendation.
     expect(emptyTurn.currentModel).not.toBe(emptyTurn.recommendedModel)
     expect(emptyTurn.actualCostUsd).toBe(0)
   })
@@ -879,10 +955,10 @@ describe('computeModelRecommendations — perf-refactor parity regressions', () 
     expect(turn.features.fileEdits).toBe(1)
   })
 
-  it('an all-synthetic window keeps currentModel "<synthetic>" → zero cost, downgradable', () => {
+  it('an all-synthetic window keeps currentModel "<synthetic>" → zero cost and no downgrade claim', () => {
     // Synthetic entries must contribute nothing: currentModel resolves to
     // "<synthetic>" (zero pricing), NOT the session's real Opus model. The old
-    // code priced these at zero and still counted the turn downgradable.
+    // code priced these at zero. Synthetic work cannot prove a cheaper tier.
     const t0 = nextTs()
     const tl = timeline('s-synthetic', [userEntry('short prompt', t0)])
     const tok = tokenData('s-synthetic', 'claude-opus-4-8', [
@@ -894,12 +970,13 @@ describe('computeModelRecommendations — perf-refactor parity regressions', () 
       }),
     ])
 
-    const turn = computeModelRecommendations([tok], [], [tl], [])[0].turns[0]
+    const row = computeModelRecommendations([tok], [], [tl], [])[0]
+    const turn = row.turns[0]
     expect(turn.currentModel).toBe('<synthetic>')
     expect(turn.actualCostUsd).toBe(0)
     expect(turn.savingsUsd).toBe(0)
-    // Still counted downgradable: "<synthetic>" differs from the recommendation.
     expect(turn.currentModel).not.toBe(turn.recommendedModel)
+    expect(row.session.downgradableTurns).toBe(0)
   })
 
   it('picks the model in array order when a window has an inverted timestamp', () => {

@@ -143,6 +143,12 @@ export interface ToolCall {
   commandHeadIsPermissionPrefix?: true;
   /** Git-related command segments needed by workflow detectors after stripping. */
   commandGitSegments?: string[];
+  /**
+   * Bounded exact file pathspecs targeted by parser-proven git
+   * checkout/restore undo gestures. Derived from the full command before
+   * bulk ingest strips it; absence means no exact path attribution is proven.
+   */
+  commandUndoFilePaths?: string[];
   /** Precomputed native-tool-bypass categories for Bash commands. */
   commandBypassCategories?: BypassCategory[];
   /**

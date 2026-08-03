@@ -5,8 +5,15 @@
  * NEVER reads @v2 file bodies — only mtime-based structural counts.
  */
 
-import { describe, it, expect, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
+import { describe, it, expect, afterAll, vi } from 'vitest';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  utimesSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -109,6 +116,18 @@ writeFileSync(join(dirC, 'notes.txt'), 'not a snapshot');
 // top-level file
 writeFileSync(join(tmpRoot, 'not-a-dir.txt'), 'top-level file');
 
+// sessionD — one real snapshot plus two suffix-matching non-files.
+const dirD = join(tmpRoot, 'sessionD');
+mkdirSync(dirD);
+makeSnap(dirD, 'real@v2', T0_MS);
+mkdirSync(join(dirD, 'fake@v2'));
+symlinkSync(join(dirD, 'real@v2'), join(dirD, 'link@v2'));
+
+// sessionE — epoch-zero is a valid mtime, not a failed-stat sentinel.
+const dirE = join(tmpRoot, 'sessionE');
+mkdirSync(dirE);
+makeSnap(dirE, 'epoch@v2', 0);
+
 afterAll(() => {
   rmSync(tmpRoot, { recursive: true, force: true });
 });
@@ -118,9 +137,9 @@ describe('parseFileHistoryDir', () => {
 
   it('returns entries only for dirs with @v2 files', () => {
     sessions = parseFileHistoryDir(tmpRoot);
-    expect(sessions).toHaveLength(2);
+    expect(sessions).toHaveLength(4);
     const ids = sessions.map((s) => s.sessionId).sort();
-    expect(ids).toEqual(['sessionA', 'sessionB']);
+    expect(ids).toEqual(['sessionA', 'sessionB', 'sessionD', 'sessionE']);
   });
 
   it('sessionA: churn=2, spanMin=2, correct burst+rework', () => {
@@ -143,6 +162,66 @@ describe('parseFileHistoryDir', () => {
     expect(b.spanMin).toBe(0);
     expect(b.burstRate).toBe(4.00); // 4/max(1,0)=4
     expect(b.reworkScore).toBe(20.0); // 4*(1+4)
+  });
+
+  it('counts only regular snapshots, excluding @v2 directories and symlinks', () => {
+    sessions = parseFileHistoryDir(tmpRoot);
+    const d = sessions.find((s) => s.sessionId === 'sessionD')!;
+    expect(d.churn).toBe(1);
+    expect(d.firstMs).toBe(T0_MS);
+    expect(d.lastMs).toBe(T0_MS);
+    expect(d.spanMin).toBe(0);
+    expect(d.burstRate).toBe(1);
+    expect(d.reworkScore).toBe(2);
+  });
+
+  it('counts a successfully statted regular snapshot whose mtime is epoch zero', () => {
+    sessions = parseFileHistoryDir(tmpRoot);
+    const e = sessions.find((s) => s.sessionId === 'sessionE')!;
+    expect(e.churn).toBe(1);
+    expect(e.firstMs).toBe(0);
+    expect(e.lastMs).toBe(0);
+  });
+
+  it('derives churn and timing only from entries whose lstat succeeds', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'parse-file-history-vanish-'));
+    const sessionDir = join(dir, 'session-vanish');
+    const vanishedPath = join(sessionDir, 'vanished@v2');
+    try {
+      mkdirSync(sessionDir);
+      makeSnap(sessionDir, 'valid@v2', T0_MS);
+      makeSnap(sessionDir, 'vanished@v2', T1_MS);
+
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        const realLstat = actual.lstatSync as unknown as (...args: unknown[]) => unknown;
+        const lstatSync = (...args: unknown[]) => {
+          if (String(args[0]) === vanishedPath) {
+            throw Object.assign(new Error('entry vanished'), { code: 'ENOENT' });
+          }
+          return realLstat(...args);
+        };
+        return {
+          ...actual,
+          default: { ...actual, lstatSync },
+          lstatSync,
+        };
+      });
+
+      const { parseFileHistoryDir: parseWithFailedStat } = await import('./parse-file-history');
+      const [result] = parseWithFailedStat(dir);
+      expect(result.churn).toBe(1);
+      expect(result.firstMs).toBe(T0_MS);
+      expect(result.lastMs).toBe(T0_MS);
+      expect(result.spanMin).toBe(0);
+      expect(result.burstRate).toBe(1);
+      expect(result.reworkScore).toBe(2);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns empty array for a nonexistent directory', () => {

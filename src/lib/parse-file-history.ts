@@ -9,14 +9,14 @@
  * Persona P5 (Riley, prompt-pattern researcher). Signals per session:
  *   churn       = count of @v2 snapshot files in the session dir
  *   spanMin     = (lastMtime - firstMtime) / 60 000  (ms to minutes)
- *   burstRate   = churn / max(1, spanMin)             (edits/min — retry-storm proxy)
- *   reworkScore = churn * (1 + burstRate)             (tight+churny ranks highest)
+ *   burstRate   = churn / max(1, spanMin)             (checkpoints/minute)
+ *   reworkScore = churn * (1 + burstRate)             (legacy-named density rank)
  *
  * Rolled up per project by the aggregate helper when the caller provides a
  * sessionId-to-project mapping (e.g. from existing Session data).
  */
 
-import { statSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DEFAULT_ARTIFACT_MAX_ENTRIES,
@@ -34,9 +34,9 @@ export interface FileHistorySession {
   churn: number;
   /** Time span covered by the snapshots, in minutes (mtime-based). */
   spanMin: number;
-  /** Edits per minute; retry-storm proxy. */
+  /** Pre-edit checkpoints per minute. */
   burstRate: number;
-  /** Composite rework score: churn * (1 + burstRate). */
+  /** Legacy-named checkpoint-density score: churn * (1 + burstRate). */
   reworkScore: number;
   /** Epoch ms of the earliest snapshot mtime. */
   firstMs: number;
@@ -49,7 +49,7 @@ export interface FileHistoryProject {
   sessions: number;
   totalChurn: number;
   avgChurn: number;
-  /** Mean reworkScore across sessions attributed to this project. */
+  /** Mean legacy-named checkpoint-density score across project sessions. */
   reworkSignature: number;
 }
 
@@ -89,7 +89,7 @@ export function scoreSession(params: {
  * Walk ~/.claude/file-history/ and return one FileHistorySession per
  * non-empty session directory. Skips directories that contain no @v2 files.
  *
- * File BODIES are never read — only readdirSync (names) and statSync (mtime).
+ * File BODIES are never read — only readdirSync (names) and lstatSync (mtime).
  *
  * @param dir  Absolute path to the file-history root (e.g. ~/.claude/file-history).
  */
@@ -112,21 +112,24 @@ export function parseFileHistoryDir(
       remainingEntryCapacity(maxEntries, snapshotEntriesRead)
     );
     snapshotEntriesRead += sessionEntries.length;
-    const snapNames = sessionEntries.map((ent) => ent.name).filter((f) => f.endsWith('@v2'));
-
-    const churn = snapNames.length;
-    if (churn === 0) continue;
-
-    // Derive span from file mtimes — NEVER read file bodies.
-    const mtimesMs = snapNames.map((f) => {
-      try {
-        return statSync(join(sessionDir, f)).mtimeMs;
-      } catch {
-        return 0;
-      }
-    }).filter((ms) => ms > 0);
+    // Accept only regular snapshot files whose metadata can be read. Dirent
+    // rejects directories/symlinks at enumeration time; lstat closes the race
+    // where a regular file is replaced before metadata collection. Churn and
+    // timing are derived from this same accepted set.
+    const mtimesMs = sessionEntries
+      .filter((ent) => ent.isFile() && ent.name.endsWith('@v2'))
+      .map((ent) => {
+        try {
+          const stat = lstatSync(join(sessionDir, ent.name));
+          return stat.isFile() ? stat.mtimeMs : null;
+        } catch {
+          return null;
+        }
+      })
+      .filter((ms): ms is number => ms !== null);
 
     if (mtimesMs.length === 0) continue;
+    const churn = mtimesMs.length;
 
     const firstMs = Math.min(...mtimesMs);
     const lastMs = Math.max(...mtimesMs);

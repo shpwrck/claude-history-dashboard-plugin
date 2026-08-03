@@ -78,9 +78,7 @@ describe('workflow.file-churn', () => {
 
     it('reproduces the displayed file count from the cited field', () => {
       const rec = detector.rule(input(firing()), 0);
-      const count = rec!.provenance!.observations.find((o) =>
-        o.claim.includes('ranked file path(s) reached')
-      );
+      const count = rec!.provenance!.observations.find((o) => o.field === 'churn');
       expect(count!.value).toBe(rec!.affected);
       expect(count!.value).toBe(2);
       expect(count!.field).toBe('churn');
@@ -96,39 +94,28 @@ describe('workflow.file-churn', () => {
       expect(worst!.claim).not.toContain('low.ts');
     });
 
-    it('discloses the ranked-window cap rather than implying a corpus-wide total', () => {
-      // `topChurnFiles` returns only the top N paths, so the count is a FLOOR
-      // once more than N files clear the gate. Saying so is the honest fix;
-      // silently widening the window would change the number the card shows.
+    it('reports a corpus-wide count when more paths qualify than the evidence window', () => {
       const many = Array.from({ length: 25 }, (_, i) =>
         churnFile(`s${i}`, `/repo/src/f${i}.ts`, HIGH_CHURN + i, '2026-06-09T18:00:00.000Z')
       );
       const rec = detector.rule(input(many), 0);
-      expect(rec!.affected).toBe(20); // capped, not 25
+      expect(rec!.affected).toBe(25);
+      expect(rec!.detail).toContain('25 file(s)')
+      expect(rec!.evidence).toHaveLength(5)
       const count = rec!.provenance!.observations.find((o) => o.field === 'churn');
-      expect(count!.claim).toContain('of the 20 ranked file path(s)');
-      expect(count!.claim).toMatch(/capped at 20.*floor/);
-      // The floor claim is established by the 21-row probe, so the citation
-      // must name that limit or it cannot be reproduced.
-      expect(count!.source).toContain('probed at limit 21');
-      expect(rec!.provenance!.inference).toMatch(/floor/i);
+      expect(count!.value).toBe(25)
+      expect(count!.claim).toContain('25 of the 25 observed file path(s)')
+      expect(count!.source).toContain('unbounded ranking')
+      expect(rec!.provenance!.inference).toContain('full observed path aggregation')
     });
 
-    it('states the real denominator on a corpus smaller than the window', () => {
-      // Only three paths exist, so "2 of the 20" would assert a ranking window
-      // that never existed (Codex review, PR #3472). The denominator is the
-      // number of rows actually ranked, and there is no floor caveat because
-      // nothing was dropped.
+    it('states the real denominator on a small corpus', () => {
       const rec = detector.rule(input(firing()), 0);
       const count = rec!.provenance!.observations.find((o) => o.field === 'churn');
       expect(count!.claim).toContain('2 of the 3 ranked file path(s)');
-      expect(count!.claim).not.toContain('20');
-      expect(count!.claim).not.toMatch(/floor/);
     });
 
-    it('calls the count a floor only when the window was ACTUALLY truncated', () => {
-      // Exactly RANKED_LIMIT distinct paths: the window is full but nothing was
-      // dropped, so declaring a floor would be false (Codex review, PR #3472).
+    it('preserves the exact ranked-window count when exactly 20 paths qualify', () => {
       const exactly20 = Array.from({ length: 20 }, (_, i) =>
         churnFile(`s${i}`, `/repo/src/e${i}.ts`, HIGH_CHURN + i, '2026-06-09T18:00:00.000Z')
       );
@@ -136,14 +123,10 @@ describe('workflow.file-churn', () => {
       expect(rec!.affected).toBe(20);
       const count = rec!.provenance!.observations.find((o) => o.field === 'churn');
       expect(count!.claim).toContain('20 of the 20 ranked file path(s)');
-      expect(count!.claim).not.toMatch(/floor/);
-      expect(rec!.provenance!.inference).not.toMatch(/is a floor/);
+      expect(count!.claim).not.toContain('observed file path(s)');
     });
 
-    it('calls the count a floor only when an OMITTED path would have qualified', () => {
-      // 21 mutated paths but only one over the gate: the 21st fell off the
-      // ranking, yet nothing QUALIFYING was omitted, so the count is exact and
-      // the floor caveat would be a false claim (Codex review, PR #3472).
+    it('preserves the ranked-window output when omitted paths do not qualify', () => {
       const oneHotManyCalm: ToolUsageData[] = [
         churnFile('s-hot', '/repo/src/hot.ts', HIGH_CHURN + 5, '2026-06-09T18:00:00.000Z'),
         ...Array.from({ length: 20 }, (_, i) =>
@@ -153,8 +136,8 @@ describe('workflow.file-churn', () => {
       const rec = detector.rule(input(oneHotManyCalm), 0);
       expect(rec!.affected).toBe(1);
       const count = rec!.provenance!.observations.find((o) => o.field === 'churn');
-      expect(count!.claim).not.toMatch(/floor/);
-      expect(rec!.provenance!.inference).not.toMatch(/is a floor/);
+      expect(count!.claim).toContain('1 of the 20 ranked file path(s)');
+      expect(rec!.provenance!.inference).toContain('which did not bind here');
     });
 
     it('dates from the contributing MUTATIONS, not from later unrelated calls', () => {

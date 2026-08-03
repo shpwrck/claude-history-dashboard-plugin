@@ -24,7 +24,7 @@ import type { SessionTimeline } from './parse-timeline';
 import type { ToolUsageData } from './parse-tools';
 import type { ApiErrorEvent } from './parse-errors';
 import { resolveModelFamily, type ModelFamily } from './model-registry';
-import { entryCostAtModel } from './pricing';
+import { entryCostAtModel, resolveModelPricing } from './pricing';
 import type { EvalGapEvidence } from './model-eval-result';
 
 export const GAP_DIRECTIONS = ['haiku->sonnet', 'sonnet->opus'] as const;
@@ -181,13 +181,28 @@ export interface GapMiningDatasetInput {
   apiErrors?: ApiErrorEvent[];
 }
 
-/** The model attributed to a session: the first entry with a resolvable family. */
-function sessionFamily(entries: TokenEntry[]): { modelId: string; family: ModelFamily } | null {
+/**
+ * Resolve one model family for a session without misattributing mixed-family
+ * work. The miner only has session-wide timing and failure counters, so it
+ * cannot assign those signals to individual model segments. Fail closed when
+ * a non-synthetic entry is unresolved or more than one family appears;
+ * same-family aliases remain safe because they imply the same gap direction.
+ */
+function singleSessionFamily(
+  entries: TokenEntry[]
+): { modelId: string; family: ModelFamily; entries: TokenEntry[] } | null {
+  let resolved: { modelId: string; family: ModelFamily } | null = null;
+  const billableEntries: TokenEntry[] = [];
   for (const e of entries) {
+    const pricing = resolveModelPricing(e.model);
+    if (pricing.isSynthetic) continue;
     const family = resolveModelFamily(e.model);
-    if (family) return { modelId: e.model, family };
+    if (!family || pricing.isMissingModel || pricing.isUnknownModel) return null;
+    if (resolved && resolved.family !== family) return null;
+    resolved ??= { modelId: e.model, family };
+    billableEntries.push(e);
   }
-  return null;
+  return resolved ? { ...resolved, entries: billableEntries } : null;
 }
 
 function durationMsOf(tl: SessionTimeline | undefined): number {
@@ -219,12 +234,12 @@ export function buildGapMiningRuns(input: GapMiningDatasetInput): GapMiningRun[]
 
   const runs: GapMiningRun[] = [];
   for (const sd of input.tokenData) {
-    const fam = sessionFamily(sd.entries);
+    const fam = singleSessionFamily(sd.entries);
     if (!fam) continue;
 
     let costProxyUsd = 0;
     let totalTokens = 0;
-    for (const e of sd.entries) {
+    for (const e of fam.entries) {
       costProxyUsd += entryCostAtModel(e, e.model);
       totalTokens +=
         e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens;

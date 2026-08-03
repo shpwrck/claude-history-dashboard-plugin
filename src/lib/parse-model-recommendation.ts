@@ -28,7 +28,12 @@ import type { SessionTokenData, TokenEntry } from '../types';
 import type { ToolUsageData, ToolCall } from './parse-tools';
 import type { SessionTimeline } from './parse-timeline';
 import type { SessionAttribution } from './parse-agents';
-import { resolveModelPricing, SERVER_TOOL_PRICING, type ModelPricing } from './pricing';
+import {
+  resolveModelPricing,
+  SERVER_TOOL_PRICING,
+  type ModelPricing,
+  type ModelPricingResult,
+} from './pricing';
 import {
   CURRENT_RECOMMENDATION_MODEL_IDS,
   resolveModelFamily,
@@ -175,6 +180,65 @@ function recommendedFor(
   if (family === 'sonnet') return REC_SONNET;
   if (family === 'haiku') return REC_HAIKU;
   return REC_OPUS;
+}
+
+const MODEL_PRICE_KEYS = [
+  'input',
+  'output',
+  'cacheWrite5m',
+  'cacheWrite1h',
+  'cacheRead',
+] as const satisfies ReadonlyArray<keyof ModelPricing>;
+
+/**
+ * A model-id change is not itself a downgrade. Count only a recommendation
+ * whose resolved routing family is lower capability and whose resolved prices
+ * are strictly lower. Missing, synthetic, unknown, and same-family alias
+ * transitions are deliberately unproven.
+ */
+function isProvenTurnDowngrade(
+  entries: TokenEntry[],
+  recommendedModel: string
+): boolean {
+  const recommended = resolveModelPricing(recommendedModel);
+  const recommendedFamily = resolveModelFamily(recommendedModel);
+  if (
+    recommended.isMissingModel ||
+    recommended.isUnknownModel ||
+    recommended.isSynthetic ||
+    !recommendedFamily
+  ) {
+    return false;
+  }
+
+  let observedBillableModel = false;
+  for (const entry of entries) {
+    const current = resolveModelPricing(entry.model);
+    if (current.isSynthetic) continue;
+    const currentFamily = resolveModelFamily(entry.model);
+    const lowerCapability =
+      currentFamily === 'opus'
+        ? recommendedFamily !== 'opus'
+        : currentFamily === 'sonnet' && recommendedFamily === 'haiku';
+    const lowerPrice =
+      MODEL_PRICE_KEYS.every(
+        (key) => recommended.pricing[key] <= current.pricing[key]
+      ) &&
+      MODEL_PRICE_KEYS.some(
+        (key) => recommended.pricing[key] < current.pricing[key]
+      );
+    if (
+      current.isMissingModel ||
+      current.isUnknownModel ||
+      !currentFamily ||
+      !lowerCapability ||
+      !lowerPrice
+    ) {
+      return false;
+    }
+    observedBillableModel = true;
+  }
+  return observedBillableModel;
 }
 
 interface TurnSlice {
@@ -483,13 +547,37 @@ export function computeModelRecommendations(
     let complex = 0;
     let downgradable = 0;
     let estimatedSavings = 0;
-    const pricingCache = new Map<string, ModelPricing>();
-    const pricingFor = (model: string): ModelPricing => {
+    // perf-index-contract: model-pricing-resolution-cache always-consumed: every non-empty session turn prices its recommendation through this shared model cache
+    const pricingCache = new Map<string, ModelPricingResult>();
+    const pricingResolutionFor = (model: string): ModelPricingResult => {
       const cached = pricingCache.get(model);
       if (cached) return cached;
-      const pricing = resolveModelPricing(model).pricing;
-      pricingCache.set(model, pricing);
-      return pricing;
+      const resolution = resolveModelPricing(model);
+      pricingCache.set(model, resolution);
+      return resolution;
+    };
+    const pricingFor = (model: string): ModelPricing =>
+      pricingResolutionFor(model).pricing;
+
+    // Entries normally carry their own model id. When an entry is genuinely
+    // missing one, use the turn's observed model only when that fallback is
+    // itself priced and billable. Unrecognized ids remain excluded under the
+    // central pricing contract rather than being silently estimated.
+    const observedPricingFor = (
+      entry: TokenEntry,
+      turnModel: string
+    ): ModelPricing => {
+      const resolution = pricingResolutionFor(entry.model);
+      if (!resolution.isMissingModel) return resolution.pricing;
+      const fallback = pricingResolutionFor(turnModel);
+      if (
+        fallback.isMissingModel ||
+        fallback.isUnknownModel ||
+        fallback.isSynthetic
+      ) {
+        return resolution.pricing;
+      }
+      return fallback.pricing;
     };
 
     for (let i = 0; i < slices.length; i++) {
@@ -555,23 +643,16 @@ export function computeModelRecommendations(
 
       const currentModel = pickModelForEntry(turnEntries) || tokens?.model || 'unknown';
       const recommendedModel = recommendedFor(bucket, currentModel);
-      if (currentModel !== recommendedModel) downgradable += 1;
+      if (isProvenTurnDowngrade(turnEntries, recommendedModel)) {
+        downgradable += 1;
+      }
 
       let actualCost = 0;
       let recommendedCost = 0;
-      if (currentModel !== recommendedModel) {
-        const currentPricing = pricingFor(currentModel);
-        const recPricing = pricingFor(recommendedModel);
-        for (const e of turnEntries) {
-          actualCost += entryCostAt(e, currentPricing);
-          recommendedCost += entryCostAt(e, recPricing);
-        }
-      } else {
-        const pricing = pricingFor(currentModel);
-        for (const e of turnEntries) {
-          actualCost += entryCostAt(e, pricing);
-        }
-        recommendedCost = actualCost;
+      const recPricing = pricingFor(recommendedModel);
+      for (const e of turnEntries) {
+        actualCost += entryCostAt(e, observedPricingFor(e, currentModel));
+        recommendedCost += entryCostAt(e, recPricing);
       }
       const savings = Math.max(0, actualCost - recommendedCost);
       estimatedSavings += savings;

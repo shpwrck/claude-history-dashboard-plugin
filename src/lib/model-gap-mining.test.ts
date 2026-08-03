@@ -167,4 +167,64 @@ describe('buildGapMiningRuns / mineModelGapsFromDataset (adapter)', () => {
   it('returns [] when there is no token data', () => {
     expect(mineModelGapsFromDataset({ tokenData: [] })).toEqual([]);
   });
+
+  it('excludes mixed-family sessions instead of assigning whole-session evidence to the first model', () => {
+    const tokenData = [
+      tokenSession('mixed-family', [
+        entry('claude-haiku-4-5-20251001', { inputTokens: 10 }),
+        entry('claude-opus-4-8', {
+          inputTokens: 1_000_000,
+          outputTokens: 200_000,
+        }),
+      ]),
+    ];
+
+    expect(buildGapMiningRuns({ tokenData })).toEqual([]);
+    expect(mineModelGapsFromDataset({ tokenData })).toEqual([]);
+  });
+
+  it('excludes a known-family session when an unresolved model dominates its evidence', () => {
+    const tokenData = [
+      tokenSession('known-and-unknown', [
+        entry('claude-haiku-4-5-20251001', { inputTokens: 10 }),
+        entry('future-unregistered-model', {
+          inputTokens: 1_000_000,
+          outputTokens: 200_000,
+        }),
+      ]),
+    ];
+
+    expect(buildGapMiningRuns({ tokenData })).toEqual([]);
+    expect(mineModelGapsFromDataset({ tokenData })).toEqual([]);
+  });
+
+  it('ignores non-billable synthetic bookkeeping when assigning and aggregating a family', () => {
+    const tokenData = [
+      tokenSession('known-and-synthetic', [
+        entry('claude-haiku-4-5-20251001', { inputTokens: 10 }),
+        entry('<synthetic>', {
+          inputTokens: 1_000_000,
+          outputTokens: 200_000,
+        }),
+      ]),
+    ];
+
+    const [run] = buildGapMiningRuns({ tokenData });
+    expect(run.family).toBe('haiku');
+    expect(run.totalTokens).toBe(10);
+  });
+
+  it('keeps same-family model aliases because they share one gap direction', () => {
+    const tokenData = [
+      tokenSession('same-family', [
+        entry('claude-sonnet-4-6', { inputTokens: 100 }),
+        entry('claude-sonnet-5', { outputTokens: 200 }),
+      ]),
+    ];
+
+    const [run] = buildGapMiningRuns({ tokenData });
+    expect(run.family).toBe('sonnet');
+    expect(run.modelId).toBe('claude-sonnet-4-6');
+    expect(run.totalTokens).toBe(300);
+  });
 });

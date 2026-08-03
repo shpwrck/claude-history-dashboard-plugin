@@ -2518,8 +2518,14 @@ export const PARSER_SIG_VERSION = 'v6';
 // stale-while-revalidate startup and the routing detector would keep reading the
 // saturated 200-char length. `timelines` is local and present in BOTH paths, so
 // flag-off bumps in step (29 -> 30); this shape change is NOT gated by the opt-in.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 31;
-export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 30;
+// v32 (#3160): parseToolUsage persists bounded exact
+// `commandUndoFilePaths` from the full Bash command before bulk ingest strips
+// `input.command`. SESSION_BLOB_OUTPUT v22 reparses tool_json; this paired
+// turnover rejects persisted v31 bodies that cannot distinguish a same-file git
+// undo from an unrelated checkout/restore. toolData is local and present
+// in BOTH paths, so flag-off bumps in step (30 -> 31).
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 32;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 31;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

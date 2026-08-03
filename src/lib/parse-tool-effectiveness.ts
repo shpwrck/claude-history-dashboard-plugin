@@ -12,7 +12,8 @@ import type { SessionTimeline, TimelineEntry } from './parse-timeline';
  *         api_error event within a short window), or by an immediate same-tool
  *         retry on the same target (Bash with the same command, file tools on
  *         the same file_path), or by an undo gesture (Edit/Write touching the
- *         same path shortly after, or a Bash `git checkout/restore/revert`).
+ *         same path shortly after, or a Bash git undo whose parser-owned exact
+ *         path evidence matches the edited file).
  *  good : the call was followed by forward motion — a user message, or a
  *         *different* tool call on a *different* target.
  *
@@ -37,8 +38,6 @@ const LOOKAHEAD_TOOL_CALLS = 3;
 const API_ERROR_WINDOW_MS = 30_000;
 const SMOOTHING_ALPHA = 1;
 
-const UNDO_BASH_RE = /^(git\s+(checkout|restore|revert|reset)\b)/;
-
 function targetKey(call: ToolCall): string {
   if (call.toolName === 'Bash') {
     const cmd =
@@ -60,13 +59,34 @@ function isFileEditTool(name: string): boolean {
   return name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'NotebookEdit';
 }
 
-function isUndoBash(call: ToolCall): boolean {
-  if (call.toolName !== 'Bash') return false;
-  const cmd =
-    typeof call.input?.command === 'string'
-      ? call.input.command
-      : call.commandPreview ?? '';
-  return UNDO_BASH_RE.test(cmd.trim());
+function normalizeFilePathForComparison(filePath: string): string {
+  const slashed = filePath.replace(/\\/g, '/');
+  const drive = /^[A-Za-z]:\//.exec(slashed)?.[0] ?? '';
+  const absolute = drive.length > 0 || slashed.startsWith('/');
+  const rest = drive.length > 0 ? slashed.slice(drive.length) : slashed;
+  const parts: string[] = [];
+  for (const part of rest.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..' && parts.length > 0 && parts.at(-1) !== '..') {
+      parts.pop();
+    } else {
+      parts.push(part);
+    }
+  }
+  const prefix = drive || (absolute ? '/' : '');
+  return `${prefix}${parts.join('/')}`;
+}
+
+function undoTargetsFile(call: ToolCall, filePath: string): boolean {
+  if (call.toolName !== 'Bash' || !Array.isArray(call.commandUndoFilePaths)) {
+    return false;
+  }
+  const target = normalizeFilePathForComparison(filePath);
+  return call.commandUndoFilePaths.some(
+    (candidate) =>
+      typeof candidate === 'string' &&
+      normalizeFilePathForComparison(candidate) === target
+  );
 }
 
 interface SortedCall {
@@ -252,14 +272,14 @@ export function computeToolEffectiveness(
         if (!sawRetry && targetKey(next) === curKey) {
           sawRetry = true;
         }
-        // Undo: only fire on a bash `git checkout/restore/revert/reset` shortly
-        // after a file-mutating tool. A later Edit on the same file is too
-        // ambiguous (it's just as likely a follow-up tweak).
+        // Undo: only fire when the parser proved that a git undo gesture named
+        // this exact edited path before the raw Bash command was stripped. A
+        // command with absent/ambiguous path provenance fails closed.
         if (
           !sawUndo &&
           isFileEditTool(cur.toolName) &&
           curFile !== null &&
-          isUndoBash(next)
+          undoTargetsFile(next, curFile)
         ) {
           sawUndo = true;
         }

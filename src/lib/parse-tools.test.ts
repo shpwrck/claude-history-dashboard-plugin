@@ -390,6 +390,51 @@ Edit the source, install, verify, and record the decision.`
     expect(Object.prototype.hasOwnProperty.call(stripped.calls[3].input, 'command')).toBe(false)
   })
 
+  it('persists exact git undo pathspecs before stripping raw Bash commands', () => {
+    expect(
+      deriveBashCommandSignals('git restore /repo/src/a.ts').commandUndoFilePaths
+    ).toEqual(['/repo/src/a.ts'])
+    expect(
+      deriveBashCommandSignals('git checkout /repo/src/a.ts').commandUndoFilePaths
+    ).toEqual(['/repo/src/a.ts'])
+    expect(
+      deriveBashCommandSignals('git checkout HEAD -- src/a.ts src/b.ts')
+        .commandUndoFilePaths
+    ).toEqual(['src/a.ts', 'src/b.ts'])
+    expect(
+      deriveBashCommandSignals('git restore --staged --worktree -- src/a.ts')
+        .commandUndoFilePaths
+    ).toEqual(['src/a.ts'])
+    expect(
+      deriveBashCommandSignals('git restore -S -W -- src/a.ts')
+        .commandUndoFilePaths
+    ).toEqual(['src/a.ts'])
+    for (const command of [
+      'git checkout main',
+      'git revert deadbeef',
+      'git reset --hard',
+      'git reset HEAD -- src/a.ts',
+      'git restore --staged -- src/a.ts',
+      'git restore -S -- src/a.ts',
+      'git restore "$TARGET"',
+      'printf %s "git restore /repo/src/a.ts"',
+      'true || git restore /repo/src/a.ts',
+    ]) {
+      expect(
+        deriveBashCommandSignals(command).commandUndoFilePaths,
+        command
+      ).toBeUndefined()
+    }
+
+    const text = [
+      toolUse('undo', 'Bash', { command: 'git restore -- src/a.ts' }),
+      toolResult('undo', { content: 'restored' }),
+    ].join('\n')
+    const stripped = stripToolCommandBodies(parseToolUsage(text, 'undo.jsonl')!)
+    expect(stripped.calls[0].input.command).toBeUndefined()
+    expect(stripped.calls[0].commandUndoFilePaths).toEqual(['src/a.ts'])
+  })
+
   it('persists workflow git evidence only from parser-proven command words', () => {
     for (const command of [
       'printf %s "git stash"',

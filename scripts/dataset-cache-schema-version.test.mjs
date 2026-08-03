@@ -41,8 +41,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      31,
-      'enabled datasets include the timelines summaryRawLen schema (#3511)'
+      32,
+      'enabled datasets include exact git undo path evidence (#3160)'
     );
     // Pin the FLAG-OFF (local-first default) schema version as a LITERAL so a
     // regression that lowers it — e.g. back to v28 — fails here (#2955). The
@@ -52,8 +52,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION,
-      30,
-      'flag-off advances to v30 because local timelines now carry summaryRawLen (#3511)'
+      31,
+      'flag-off advances to v31 because local toolData now carries git undo paths (#3160)'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -65,11 +65,11 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       key,
       `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'flag-off uses the exact v30 cache key for the local timelines summaryRawLen shape'
+      'flag-off uses the exact v31 cache key for local git undo path evidence'
     );
-    // The immediately-preceding v28 key needs no dedicated notEqual: the literal
-    // equal(FLAG_OFF, 29) pin above fixes the flag-off version exactly, so any
-    // regression (v28 included) fails there (#2709 review item; avoids
+    // The immediately-preceding v30 key needs no dedicated notEqual: the literal
+    // equal(FLAG_OFF, 31) pin above fixes the flag-off version exactly, so any
+    // regression (v30 included) fails there (#2709 review item; avoids
     // accumulating one dead assertion per bump).
     assert.notEqual(
       key,
@@ -133,7 +133,7 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       enabledKey,
       `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'an enabled snapshot turns over persisted v30 flag-off datasets'
+      'an enabled snapshot turns over persisted v31 flag-off datasets'
     );
     assert.notEqual(ingest.sourceSignature(), flagOffSourceSignature);
     assert.notEqual(ingest.ingest().contentHash, flagOffContentHash);

@@ -769,15 +769,16 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
       isError: null,
       resultBytes: 0,
     });
-    const restore = () => ({
+    const restore = (file: string) => ({
       timestamp: `2026-06-09T12:00:${String(second++).padStart(2, '0')}.000Z`,
       toolName: 'Bash',
-      input: { command: 'git restore .' },
+      input: { command: `git restore -- ${file}` },
       toolUseId: `restore-${second}`,
       isError: null,
       resultBytes: 0,
+      commandUndoFilePaths: [file],
     });
-    calls.push(edit('f0.ts'), restore(), edit('f1.ts'), restore());
+    calls.push(edit('f0.ts'), restore('f0.ts'), edit('f1.ts'), restore('f1.ts'));
     for (let index = 2; index < 10; index += 1) {
       calls.push(edit(`f${index}.ts`));
     }

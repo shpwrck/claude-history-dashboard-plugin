@@ -433,10 +433,7 @@ function isDeploymentMutationSegment(tokens: string[]): boolean {
 
 function remoteAuthorityHasForbiddenCharacters(authority: string): boolean {
   if (/[\s\\'"{},<>&;|()]/.test(authority)) return true;
-  return [...authority].some((character) => {
-    const code = character.charCodeAt(0);
-    return code <= 0x1f || code === 0x7f;
-  });
+  return CONTROL_CHARACTER_RE.test(authority);
 }
 
 function isValidatedRemoteAuthority(authority: string): boolean {
@@ -3819,6 +3816,9 @@ function commandHeadIsPermissionPrefix(command: string, head: string): boolean {
   return trimmed === head || trimmed.startsWith(`${head} `);
 }
 
+// eslint-disable-next-line no-control-regex -- control characters are exactly what this rejects
+const CONTROL_CHARACTER_RE = /[\u0000-\u001f\u007f]/;
+
 const WORKFLOW_GIT_SEGMENT_RE =
   /\bgit\s+(?:stash\b|switch\b|checkout\b|reflog\b|cherry-pick\b|merge\s+--ff-only\b)/;
 
@@ -3873,10 +3873,6 @@ function workflowGitEvidence(tokens: string[]): string | null {
       const [checkoutTarget] = positionals;
       const checkoutComponents = checkoutTarget.split('/');
       const previousCheckoutTarget = /^@\{-\d+\}$/.test(checkoutTarget);
-      const hasControlCharacter = [...checkoutTarget].some((character) => {
-        const code = character.charCodeAt(0);
-        return code <= 0x1f || code === 0x7f;
-      });
       const unambiguousPathspec =
         /^(?:\.{1,2}(?:\/|$)|\/|:)/.test(checkoutTarget) ||
         checkoutTarget.endsWith('/') ||
@@ -3894,7 +3890,7 @@ function workflowGitEvidence(tokens: string[]): string | null {
         checkoutTarget.includes('?') ||
         checkoutTarget.includes('[') ||
         checkoutTarget.includes('\\') ||
-        hasControlCharacter ||
+        CONTROL_CHARACTER_RE.test(checkoutTarget) ||
         /\s/.test(checkoutTarget);
       if (unambiguousPathspec) return null;
     }
@@ -3922,7 +3918,43 @@ function workflowGitEvidence(tokens: string[]): string | null {
   return evidence && WORKFLOW_GIT_SEGMENT_RE.test(evidence) ? evidence : null;
 }
 
-function commandGitSegments(command: string, depth = 0): string[] {
+function appendGitUndoFilePaths(tokens: string[], paths: string[]): void {
+  if (tokens[0] !== 'git') return;
+  const verb = tokens[1];
+  const separator = tokens.indexOf('--', 2);
+  const prefix = tokens.slice(2, separator < 0 ? tokens.length : separator);
+  const candidates =
+    separator < 0 ? tokens.slice(2) : tokens.slice(separator + 1);
+  if (verb === 'restore') {
+    if (
+      (prefix.some((token) => token === '-S' || token === '--staged') &&
+        !prefix.some((token) => token === '-W' || token === '--worktree')) ||
+      (separator < 0 && candidates.some((token) => token.startsWith('-')))
+    ) return;
+  } else if (
+    verb !== 'checkout' ||
+    (separator < 0 &&
+      (candidates.length !== 1 ||
+        !/^(?:\/|\.\.?[\\/]|[A-Za-z]:[\\/])/.test(candidates[0])))
+  ) return;
+  if (
+    candidates.some(
+      (path) =>
+        path.length > 1024 ||
+        CONTROL_CHARACTER_RE.test(path) ||
+        /(?:^:\(|[$`*?[\]{}])/.test(path)
+    )
+  ) return;
+  for (const path of candidates) {
+    if (paths.push(path) >= MAX_COMMAND_GIT_SEGMENTS) return;
+  }
+}
+
+function commandGitSegments(
+  command: string,
+  depth = 0,
+  undoFilePaths?: string[]
+): string[] {
   const evidence: string[] = [];
   const push = (segments: readonly string[]) => {
     for (const segment of segments) {
@@ -3967,15 +3999,15 @@ function commandGitSegments(command: string, depth = 0): string[] {
     ']]',
   ]);
   let reachabilityUnproven = false;
+  let undoReachabilityUnproven = false;
   for (let index = 0; index < list.length; index += 1) {
     const { source } = list[index];
     const head = rawExecutableShellTokens(source)[0];
-    if (
-      list.length > 1 &&
-      riskyListSegmentCanChangeReachability(source) &&
-      !structuralHeads.has(head ?? '')
-    ) {
-      reachabilityUnproven = true;
+    const blocksFollowing =
+      list.length > 1 && riskyListSegmentCanChangeReachability(source);
+    if (blocksFollowing) {
+      undoReachabilityUnproven = true;
+      if (!structuralHeads.has(head ?? '')) reachabilityUnproven = true;
     }
     if (reachabilityUnproven || !eligible[index]) continue;
     const executableSource = executableShellSource(source);
@@ -3993,6 +4025,9 @@ function commandGitSegments(command: string, depth = 0): string[] {
     for (const tokens of executableSegments) {
       const projected = workflowGitEvidence(tokens);
       if (projected) push([projected]);
+      if (!undoReachabilityUnproven && undoFilePaths) {
+        appendGitUndoFilePaths(tokens, undoFilePaths);
+      }
       if (depth < 4) {
         const payload = shellCommandPayload(tokens);
         if (payload != null) push(commandGitSegments(payload, depth + 1));
@@ -4293,7 +4328,8 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
     MAX_PERSISTED_LEAVE_BEHIND_MUTATION_PATHS
   );
   const head = commandHead(command);
-  const gitSegments = commandGitSegments(command);
+  const undoFilePaths: string[] = [];
+  const gitSegments = commandGitSegments(command, 0, undoFilePaths);
   return {
     commandAnalysisComplete: true,
     commandFingerprint: bashCommandFingerprint(command),
@@ -4315,6 +4351,9 @@ export function deriveBashCommandSignals(command: string): Partial<ToolCall> {
       ? { commandHeadIsPermissionPrefix: true }
       : {}),
     ...(gitSegments.length > 0 ? { commandGitSegments: gitSegments } : {}),
+    ...(undoFilePaths.length > 0
+      ? { commandUndoFilePaths: undoFilePaths }
+      : {}),
     ...(bypassCategories.length > 0
       ? { commandBypassCategories: bypassCategories }
       : {}),
