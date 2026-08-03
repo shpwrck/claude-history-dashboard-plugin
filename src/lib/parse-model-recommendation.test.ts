@@ -522,10 +522,10 @@ describe('computeModelRecommendations — savings math', () => {
 // ── Attribution seams: sorted fast path vs unsorted fallback ────────
 //
 // The optimized attribution walks a cursor over timestamp-sorted token
-// entries / turn starts and binary-searches slices for tool calls; any
-// non-monotonic or invalid timestamp trips a fallback that must reproduce
-// the original O(turns × entries) filter exactly. These tests pin both
-// sides of that seam to the pre-optimization behavior.
+// entries / turn starts and binary-searches slices for tool calls. A
+// non-monotonic token stream is indexed once by timestamp, while malformed
+// turn order uses range queries that preserve original token-array order.
+// These tests pin both paths to the pre-optimization attribution behavior.
 
 describe('computeModelRecommendations — attribution fast-path/fallback seams', () => {
   function twoTurnFixture() {
@@ -633,6 +633,40 @@ describe('computeModelRecommendations — attribution fast-path/fallback seams',
     // Token windows follow timeline order too: turn 0's window [tLate, tEarly)
     // is empty, so every entry lands in turn 1's open-ended [tEarly, ∞).
     expect(turns.map((t) => t.features.outputTokens)).toEqual([0, 55])
+  })
+
+  it('examines reversed token timestamps near-linearly instead of once per turn (#3147)', () => {
+    const turnCount = 400
+    const tokenCount = 12_000
+    const base = Date.UTC(2026, 0, 2)
+    const turns = Array.from({ length: turnCount }, (_, i) =>
+      userEntry(`turn ${i}`, new Date(base + i * 1_000).toISOString())
+    )
+    const entries = Array.from({ length: tokenCount }, (_, i) =>
+      tokenEntry({
+        timestamp: new Date(base + i * 30).toISOString(),
+        outputTokens: 1,
+      })
+    ).reverse()
+    const diagnostics = { tokenEntryExaminations: 0 }
+
+    const rows = computeModelRecommendations(
+      [tokenData('s-reversed-scale', 'claude-opus-4-8', entries)],
+      [],
+      [timeline('s-reversed-scale', turns)],
+      [],
+      diagnostics
+    )
+
+    expect(rows[0].turns).toHaveLength(turnCount)
+    expect(rows[0].turns.reduce((sum, turn) => sum + turn.features.outputTokens, 0)).toBe(
+      tokenCount
+    )
+    const logarithmicSearchAllowance = turnCount * 40
+    expect(diagnostics.tokenEntryExaminations).toBeGreaterThanOrEqual(tokenCount)
+    expect(diagnostics.tokenEntryExaminations).toBeLessThanOrEqual(
+      tokenCount * 2 + logarithmicSearchAllowance
+    )
   })
 })
 

@@ -332,6 +332,26 @@ Note the unbounded payload has ~2 % headroom left against its 1,850,000 B
 ceiling; when ordinary growth trips it, raise it deliberately with a note — that
 ceiling is a growth alarm, not part of the ADR 0020 shipped-size decision.
 
+### Baseline (2026-08-03, this repo, 1,239 source files)
+
+Round 14 re-measured current `origin/master` plus this batch before changing the
+budget: `1,834,729 B` left only `15,271 B` (0.83%) under the `1,850,000 B`
+growth-alarm ceiling. The tree's ranking surface hash and honest 66.7%
+localization score were unchanged; this was ordinary repository composition
+growth, not a ranking or extraction
+regression. The ceiling is deliberately re-baselined to `1,925,000 B`, 4.9%
+above the measured natural serialization. The shipped 1 MiB persisted ceiling
+is unchanged.
+
+| Metric | Measured | Budget |
+|---|---|---|
+| payload (unbounded) | 1,834,729 B | <= 1,925,000 B |
+| files retained | 537 of 1,239 (43.3%) | >= 500 files |
+| persisted payload | 1,045,857 B | not gated (clamped) |
+| cold ingest | 7,204.7 ms | <= 30,000 ms |
+| localization recall (top 7% = 87) | 66.7% (2,262/3,390 edges) | >= 65%, baseline-anchored (#3510) |
+| reread tokens saved | 88,517 tok | >= 1,000 tok |
+
 Raise a ceiling/floor in `repo-map-budget.json` deliberately, with a note on
 why, when a change is a real win (a denser map, a legitimately larger root).
 Otherwise, trim the regression. The localization floor and slice are the

@@ -173,6 +173,25 @@ Add a test to `src/lib/recommendations.test.ts` (or a co-located test). Assert i
 **fires** on a triggering input and **stays silent** below the gate / when its
 fix is already applied. Use the `baseInput(...)` helper there.
 
+When a performance change adds a `Map`/`Set` or sorted-array index, declare
+its consumption contract beside the construction. This is enforced by
+`scripts/check-perf-index-contracts.mjs` on the PR diff:
+
+```ts
+// perf-index-contract: dropped-assignment-by-team non-querying
+const byTeam = new Map<string, DroppedAssignment[]>();
+```
+
+The same `non-querying` marker must appear in a newly added test with a literal
+zero-work assertion (`expect(reads).toBe(0)`, or the Node-assert equivalent).
+Use property/read counters through the detector's public `rule()` seam instead
+of a wall-clock assertion: the test should prove the index is never built for
+an empty, unmatched, or otherwise non-querying input. If every successful call
+necessarily consumes the index, declare
+`always-consumed: <concrete reason>` instead; the gate rejects a bare or vague
+rationale. Run `npm run gate:perf-index-contracts` and
+`npm run test:perf-index-contracts` locally.
+
 ### 5. Gate
 
 ```

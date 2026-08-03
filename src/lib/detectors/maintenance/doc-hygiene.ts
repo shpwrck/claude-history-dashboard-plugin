@@ -775,12 +775,49 @@ function scanDocsMapDrift(
   for (const n of graph.nodes) nodeByNormPath.set(normPath(n.path), n);
 
   const matchedProject = matchDocsMapProject(wrapper, repoMap);
-  const fileByNormPath = new Map<string, RepoMapProjectJoin['files'][number]>();
-  if (matchedProject) {
-    for (const file of matchedProject.files) {
+  type RepoFile = RepoMapProjectJoin['files'][number];
+  let referencedSourcesBySlug: Map<string, Set<string>> | undefined;
+  let fileByNormPath: Map<string, RepoFile> | undefined;
+  let symbolNamesByFile: Map<RepoFile, Set<string>> | undefined;
+
+  const referencedSources = (): Map<string, Set<string>> => {
+    if (referencedSourcesBySlug) return referencedSourcesBySlug;
+    // perf-index-contract: docs-map-drift-indexes non-querying
+    referencedSourcesBySlug = new Map<string, Set<string>>();
+    for (const edge of graph.edges) {
+      if (edge.kind !== 'src-ref') continue;
+      let paths = referencedSourcesBySlug.get(edge.from);
+      if (!paths) {
+        // perf-index-contract: docs-map-drift-indexes non-querying
+        paths = new Set<string>();
+        referencedSourcesBySlug.set(edge.from, paths);
+      }
+      paths.add(
+        normPath(edge.to.startsWith('src:') ? edge.to.slice(4) : edge.to)
+      );
+    }
+    return referencedSourcesBySlug;
+  };
+  const matchedFiles = (): Map<string, RepoFile> => {
+    if (fileByNormPath) return fileByNormPath;
+    // perf-index-contract: docs-map-drift-indexes non-querying
+    fileByNormPath = new Map<string, RepoFile>();
+    for (const file of matchedProject?.files ?? []) {
       fileByNormPath.set(normPath(file.path), file);
     }
-  }
+    return fileByNormPath;
+  };
+  const symbolNames = (file: RepoFile): Set<string> => {
+    // perf-index-contract: docs-map-drift-indexes non-querying
+    symbolNamesByFile ??= new Map<RepoFile, Set<string>>();
+    let names = symbolNamesByFile.get(file);
+    if (!names) {
+      // perf-index-contract: docs-map-drift-indexes non-querying
+      names = new Set(file.symbols.map((symbol) => symbol.name));
+      symbolNamesByFile.set(file, names);
+    }
+    return names;
+  };
 
   for (const [documentPath, doc] of Object.entries(wrapper.map.documents)) {
     const node = nodeByNormPath.get(normPath(documentPath));
@@ -798,13 +835,8 @@ function scanDocsMapDrift(
       // doc would trivially "fail to reference" every one of its sources.
       if (docExists) {
         const sourceNormPath = normPath(source.path);
-        const isReferenced = graph.edges.some(
-          (edge) =>
-            edge.kind === 'src-ref' &&
-            edge.from === node!.slug &&
-            normPath(edge.to.startsWith('src:') ? edge.to.slice(4) : edge.to) ===
-              sourceNormPath
-        );
+        const isReferenced =
+          referencedSources().get(node!.slug)?.has(sourceNormPath) ?? false;
         if (!isReferenced) {
           items.push({
             path: documentPath,
@@ -818,7 +850,7 @@ function scanDocsMapDrift(
       // Signals 2 + 4: independent of document existence — these are repo-map
       // claims about the source file, not doc-graph claims.
       if (matchedProject) {
-        const file = fileByNormPath.get(normPath(source.path));
+        const file = matchedFiles().get(normPath(source.path));
         if (!file) {
           items.push({
             path: documentPath,
@@ -828,9 +860,8 @@ function scanDocsMapDrift(
           });
           continue; // no symbol claim about a file that is gone
         }
-        const symbolNames = new Set(file.symbols.map((s) => s.name));
         for (const symbol of source.symbols) {
-          if (!symbolNames.has(symbol)) {
+          if (!symbolNames(file).has(symbol)) {
             items.push({
               path: documentPath,
               signal: 'docs-map-missing-symbol',

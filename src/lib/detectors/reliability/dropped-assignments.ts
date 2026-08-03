@@ -19,6 +19,8 @@ import { newestIsoDate } from '../shared';
 
 /** HIGH when an agent stalled or >= 50% of assignments dropped. */
 const HIGH_DROPPED_PCT = 50;
+/** Detail/evidence arrays are product-capped; stop formatting at the same bound. */
+const EVIDENCE_LIMIT = 5;
 
 export const detector: Detector = {
   id: 'reliability.dropped-assignments',
@@ -49,19 +51,29 @@ export const detector: Detector = {
       0
     );
 
-    // Collect unique stalled agent names for the detail line.
-    const stalledNames = withDropped
-      .flatMap((t) => t.stalledAgents.map((a) => `${t.teamId}/${a.agent}`))
-      .slice(0, 5);
-
-    // Evidence: up to 5 dropped entries with team + task info.
-    const evidence = withDropped
-      .flatMap((t) =>
-        t.droppedAssignments.map(
-          (d) => `${t.teamId}/${d.agent} [${d.taskId}] "${d.subject}" (unread ${d.ageMinutes}m)`
-        )
-      )
-      .slice(0, 5);
+    // Collect only the rows the product retains. A post-flatMap slice used to
+    // format the complete team history before throwing every row past five
+    // away (#3209).
+    const stalledNames: string[] = [];
+    const evidence: string[] = [];
+    for (const team of withDropped) {
+      for (const stalled of team.stalledAgents) {
+        if (stalledNames.length >= EVIDENCE_LIMIT) break;
+        stalledNames.push(`${team.teamId}/${stalled.agent}`);
+      }
+      for (const dropped of team.droppedAssignments) {
+        if (evidence.length >= EVIDENCE_LIMIT) break;
+        evidence.push(
+          `${team.teamId}/${dropped.agent} [${dropped.taskId}] "${dropped.subject}" (unread ${dropped.ageMinutes}m)`
+        );
+      }
+      if (
+        stalledNames.length >= EVIDENCE_LIMIT &&
+        evidence.length >= EVIDENCE_LIMIT
+      ) {
+        break;
+      }
+    }
 
     const detail = stalledNames.length > 0
       ? `${totalDropped}/${totalAssign} task assignment(s) were recorded unread past the grace window across ${withDropped.length} team(s); all-unread agent queues: ${stalledNames.join(', ')}.`

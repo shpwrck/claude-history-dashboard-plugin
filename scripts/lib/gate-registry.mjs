@@ -87,6 +87,11 @@ export const GATE_REGISTRY = [
     script: 'scripts/check-gate-discrimination.mjs',
     discriminatingTest: 'scripts/check-gate-discrimination.test.mjs',
   },
+  {
+    name: 'check-perf-index-contracts',
+    script: 'scripts/check-perf-index-contracts.mjs',
+    discriminatingTest: 'scripts/check-perf-index-contracts.test.mjs',
+  },
 
   // ── seeded legacy exceptions (null = no discriminating test YET) ─────────
   { name: 'check-action-pins', script: 'scripts/check-action-pins.mjs', discriminatingTest: null },

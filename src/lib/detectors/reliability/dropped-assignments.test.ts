@@ -248,6 +248,49 @@ describe('reliability.dropped-assignments — evidence and fix', () => {
     const rec = detector.rule(input(teams), 0);
     expect(rec?.evidence?.length).toBeLessThanOrEqual(5);
   });
+
+  it('formats only the five retained stalled names and evidence rows (#3209)', () => {
+    let agentReads = 0;
+    let subjectReads = 0;
+    const teams = Array.from({ length: 20 }, (_, i) => {
+      const stalled = { unreadCount: 1 } as { agent: string; unreadCount: number };
+      Object.defineProperty(stalled, 'agent', {
+        enumerable: true,
+        get() {
+          agentReads += 1;
+          return `agent-${i}`;
+        },
+      });
+      const dropped = {
+        agent: `agent-${i}`,
+        taskId: `task-${i}`,
+        ageMinutes: i + 1,
+      } as { agent: string; taskId: string; subject: string; ageMinutes: number };
+      Object.defineProperty(dropped, 'subject', {
+        enumerable: true,
+        get() {
+          subjectReads += 1;
+          return `Subject ${i}`;
+        },
+      });
+      return makeTeamSummary(`team-${i}`, 1, [dropped], [stalled]);
+    });
+
+    const rec = detector.rule(input(teams), 0);
+
+    expect(rec?.evidence).toHaveLength(5);
+    expect(rec?.evidence).toEqual(
+      Array.from(
+        { length: 5 },
+        (_, i) => `team-${i}/agent-${i} [task-${i}] "Subject ${i}" (unread ${i + 1}m)`
+      )
+    );
+    expect(rec?.detail).toContain(
+      'team-0/agent-0, team-1/agent-1, team-2/agent-2, team-3/agent-3, team-4/agent-4'
+    );
+    expect(agentReads).toBe(5);
+    expect(subjectReads).toBe(5);
+  });
 });
 
 describe('reliability.dropped-assignments — detector metadata', () => {

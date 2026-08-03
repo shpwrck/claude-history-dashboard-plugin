@@ -90,6 +90,11 @@ export interface ModelRecRow {
   turns: TurnRec[];
 }
 
+/** Optional operation-count sink used by the performance regression probe. */
+export interface ModelRecommendationDiagnostics {
+  tokenEntryExaminations: number;
+}
+
 export interface ModelRecSummary {
   totalTurns: number;
   trivialTurns: number;
@@ -190,11 +195,13 @@ interface TurnSlice {
 interface TimedTokenEntry {
   entry: TokenEntry;
   ms: number;
+  originalIndex: number;
 }
 
 interface TimedTokenEntries {
   entries: TimedTokenEntry[];
   sortedByTimestamp: boolean;
+  byTimestamp: TimedTokenEntry[];
 }
 
 /**
@@ -328,17 +335,35 @@ function findSliceForMs(
   return slices[0] ?? null;
 }
 
-function prepareTimedTokenEntries(entries: TokenEntry[]): TimedTokenEntries {
+function recordTokenExaminations(
+  diagnostics: ModelRecommendationDiagnostics | undefined,
+  count = 1
+): void {
+  if (diagnostics) diagnostics.tokenEntryExaminations += count;
+}
+
+function prepareTimedTokenEntries(
+  entries: TokenEntry[],
+  diagnostics: ModelRecommendationDiagnostics | undefined
+): TimedTokenEntries {
   const timed: TimedTokenEntry[] = [];
   let sortedByTimestamp = true;
   let previous = Number.NEGATIVE_INFINITY;
-  for (const entry of entries) {
+  for (let originalIndex = 0; originalIndex < entries.length; originalIndex++) {
+    const entry = entries[originalIndex];
     const ms = tsMs(entry.timestamp);
     if (ms < previous) sortedByTimestamp = false;
     previous = ms;
-    timed.push({ entry, ms });
+    timed.push({ entry, ms, originalIndex });
   }
-  return { entries: timed, sortedByTimestamp };
+  recordTokenExaminations(diagnostics, entries.length);
+  // perf-index-contract: token-window-timestamp-index always-consumed: every unsorted token stream immediately queries indexed ranges for its turns
+  const byTimestamp = sortedByTimestamp
+    ? timed
+    : [...timed].sort(
+        (a, b) => a.ms - b.ms || a.originalIndex - b.originalIndex
+      );
+  return { entries: timed, sortedByTimestamp, byTimestamp };
 }
 
 function collectTokenEntriesForWindow(
@@ -347,27 +372,60 @@ function collectTokenEntriesForWindow(
   endMs: number,
   cursor: number
 ): { entries: TokenEntry[]; nextCursor: number } {
-  while (cursor < timed.length && timed[cursor].ms < startMs) cursor++;
+  while (cursor < timed.length) {
+    if (timed[cursor].ms >= startMs) break;
+    cursor++;
+  }
 
   const entries: TokenEntry[] = [];
   let i = cursor;
-  for (; i < timed.length && timed[i].ms < endMs; i++) {
+  for (; i < timed.length; i++) {
+    if (timed[i].ms >= endMs) break;
     entries.push(timed[i].entry);
   }
 
   return { entries, nextCursor: i };
 }
 
-function collectTokenEntriesForWindowUnsorted(
+function lowerBoundTimedEntries(
+  timed: TimedTokenEntry[],
+  targetMs: number,
+  diagnostics: ModelRecommendationDiagnostics | undefined
+): number {
+  let lo = 0;
+  let hi = timed.length;
+  let examinations = 0;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    examinations += 1;
+    if (timed[mid].ms < targetMs) lo = mid + 1;
+    else hi = mid;
+  }
+  recordTokenExaminations(diagnostics, examinations);
+  return lo;
+}
+
+/**
+ * Query a timestamp-sorted per-session index, then restore the selected
+ * entries to their original array order. The latter preserves the historical
+ * first-model choice for malformed inverted input (#3147).
+ */
+function collectTokenEntriesForWindowIndexed(
   timed: TimedTokenEntry[],
   startMs: number,
-  endMs: number
+  endMs: number,
+  diagnostics: ModelRecommendationDiagnostics | undefined
 ): TokenEntry[] {
-  const entries: TokenEntry[] = [];
-  for (const item of timed) {
-    if (item.ms >= startMs && item.ms < endMs) entries.push(item.entry);
+  if (endMs <= startMs) return [];
+  const start = lowerBoundTimedEntries(timed, startMs, diagnostics);
+  const end = lowerBoundTimedEntries(timed, endMs, diagnostics);
+  const selected = timed.slice(start, end);
+  recordTokenExaminations(diagnostics, selected.length);
+  if (selected.length > 1) {
+    // perf-index-contract: token-window-original-order always-consumed: the selected entries are returned immediately in original array order
+    selected.sort((a, b) => a.originalIndex - b.originalIndex);
   }
-  return entries;
+  return selected.map((item) => item.entry);
 }
 
 function pickModelForEntry(entries: TokenEntry[]): string {
@@ -386,7 +444,8 @@ export function computeModelRecommendations(
   tokenData: SessionTokenData[],
   toolData: ToolUsageData[],
   timelines: SessionTimeline[],
-  attribution: SessionAttribution[]
+  attribution: SessionAttribution[],
+  diagnostics?: ModelRecommendationDiagnostics
 ): ModelRecRow[] {
   const tokenBySession = new Map<string, SessionTokenData>();
   for (const t of tokenData) tokenBySession.set(t.sessionId, t);
@@ -410,7 +469,9 @@ export function computeModelRecommendations(
     attachToolCalls(slices, toolsBySession.get(timeline.sessionId), slicesSorted);
 
     const tokens = tokenBySession.get(timeline.sessionId);
-    const timedTokens = tokens ? prepareTimedTokenEntries(tokens.entries) : null;
+    const timedTokens = tokens
+      ? prepareTimedTokenEntries(tokens.entries, diagnostics)
+      : null;
     let tokenCursor = 0;
     const sessionAttribution = attrBySession.get(timeline.sessionId);
     const sessionHasAgents =
@@ -448,10 +509,11 @@ export function computeModelRecommendations(
           turnEntries = collected.entries;
           tokenCursor = collected.nextCursor;
         } else {
-          turnEntries = collectTokenEntriesForWindowUnsorted(
-            timedTokens.entries,
+          turnEntries = collectTokenEntriesForWindowIndexed(
+            timedTokens.byTimestamp,
             slice.startMs,
-            windowEndMs
+            windowEndMs,
+            diagnostics
           );
         }
       }

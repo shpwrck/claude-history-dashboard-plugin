@@ -1250,6 +1250,63 @@ describe('maintenance.doc-hygiene — docs-map declared drift (#2489)', () => {
     expect(rec!.action).toContain('docs/docs-map.json');
     expect(rec!.fix).toBeUndefined();
   });
+
+  // perf-index-contract: docs-map-drift-indexes non-querying
+  it('indexes repeated docs-map references once and skips source indexes when none are queried (#3203, #3481)', () => {
+    const count = 30;
+    let edgeKindReads = 0;
+    let symbolArrayReads = 0;
+    const nodes = Array.from({ length: count }, (_, i) =>
+      node(`docs/guide-${i}`, { path: `docs/guide-${i}.md` })
+    );
+    const countedEdges = Array.from({ length: count }, (_, i) => {
+      const edge = srcRef(`docs/guide-${i}`, 'src/lib/shared.ts');
+      return Object.defineProperty(edge, 'kind', {
+        enumerable: true,
+        get() {
+          edgeKindReads += 1;
+          return 'src-ref';
+        },
+      });
+    });
+    const g = graph(nodes, countedEdges);
+    const documents = Object.fromEntries(
+      nodes.map((n) => [
+        n.path,
+        { sources: [{ path: 'src/lib/shared.ts', symbols: ['sharedFn'] }] },
+      ])
+    );
+    const project = repoMapProject([
+      { path: 'src/lib/shared.ts', symbols: ['sharedFn'] },
+    ]);
+    const sharedFile = project.files[0];
+    const symbols = sharedFile.symbols;
+    Object.defineProperty(sharedFile, 'symbols', {
+      enumerable: true,
+      get() {
+        symbolArrayReads += 1;
+        return symbols;
+      },
+    });
+    const rm = repoMapDataset([project]);
+
+    run(g, rm);
+    const baselineEdgeReads = edgeKindReads;
+    edgeKindReads = 0;
+    expect(run(g, rm, null, 0, docsMapWrapper(documents))).toBeNull();
+
+    expect(edgeKindReads - baselineEdgeReads).toBe(count);
+    expect(symbolArrayReads).toBe(1);
+
+    edgeKindReads = 0;
+    symbolArrayReads = 0;
+    const noSources = docsMapWrapper({
+      'docs/guide-0.md': { sources: [] },
+    });
+    expect(run(g, rm, null, 0, noSources)).toBeNull();
+    expect(edgeKindReads).toBe(baselineEdgeReads);
+    expect(symbolArrayReads).toBe(0);
+  });
 });
 
 describe('maintenance.doc-hygiene — docs-map identity suppression matrix (#2489)', () => {
