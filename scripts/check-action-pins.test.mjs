@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import {
   violationsIn,
@@ -29,9 +29,16 @@ import {
   listPublishedImageFiles,
   listRunnerImageFiles,
   listRunnerPoolFiles,
+  publisherCapabilityReasons,
   inertnessReasons,
   scanRepository,
+  workflowSecretReferences,
 } from './check-action-pins.mjs';
+import {
+  inspectContainerImageManifest,
+  publisherWorkflowDriftReasons,
+  renderContainerPublishWorkflow,
+} from './container-image-manifest.mjs';
 
 /** The exact pre-fix line from all four scale-set values files (#3340). */
 const LATEST_REF = 'image-registry.openshift-image-registry.svc:5000/arc-runners/chd-ci-runner';
@@ -43,6 +50,49 @@ const buildConfigFrom = (value) =>
   ['spec:', '  strategy:', '    dockerStrategy:', '      from:', `        name: ${value}`, ''].join('\n');
 const buildConfigOutput = (value) =>
   ['spec:', '  output:', '    to:', `      name: ${value}`, ''].join('\n');
+
+function writeContainerManifest(root, images) {
+  writeFileSync(
+    join(root, 'container-images.json'),
+    `${JSON.stringify({ schemaVersion: 1, images }, null, 2)}\n`
+  );
+}
+
+function fixtureImage(overrides = {}) {
+  return {
+    id: 'server',
+    image: 'example/dashboard',
+    recipe: 'Dockerfile',
+    context: '.',
+    buildMode: 'server',
+    ...overrides,
+  };
+}
+
+function fixtureSpaImage(overrides = {}) {
+  return {
+    id: 'spa',
+    image: 'example/dashboard-spa',
+    recipe: 'Dockerfile.spa',
+    context: '.',
+    buildMode: 'spa',
+    ...overrides,
+  };
+}
+
+function fixtureImages(serverOverrides = {}, spaOverrides = {}) {
+  return [fixtureImage(serverOverrides), fixtureSpaImage(spaOverrides)];
+}
+
+function writeFixtureRecipes(root) {
+  writeFileSync(join(root, 'Dockerfile'), `FROM node@sha256:${'0'.repeat(64)}\n`);
+  writeFileSync(join(root, 'Dockerfile.spa'), `FROM node@sha256:${'0'.repeat(64)}\n`);
+}
+
+function writeCanonicalPublisher(root) {
+  mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+  writeFileSync(join(root, '.github', 'workflows', 'docker-publish.yml'), renderContainerPublishWorkflow(root));
+}
 
 const rulesFor = (source) => violationsIn(source).map((v) => v.rule);
 
@@ -620,9 +670,14 @@ test('INERT: the real repository is NOT inert', () => {
   assert.deepEqual(inertnessReasons(), []);
 });
 
-test('#3064: the exact root published-recipe inventory is scanned and digest-pinned', () => {
+test('#3064/#3513: the complete declared published-recipe inventory is scanned and pinned', () => {
   const files = listPublishedImageFiles();
-  assert.deepEqual(files.map((absolute) => absolute.split('/').pop()), ['Dockerfile', 'Dockerfile.spa']);
+  assert.deepEqual(files.map((absolute) => relative(process.cwd(), absolute)), [
+    'Dockerfile',
+    'Dockerfile.spa',
+    'probaitio-operator/Dockerfile',
+    'probaitio-operator/Dockerfile.dispatch',
+  ]);
   for (const absolute of files) {
     assert.deepEqual(
       imageViolationsIn(readFileSync(absolute, 'utf8')),
@@ -632,12 +687,346 @@ test('#3064: the exact root published-recipe inventory is scanned and digest-pin
   }
 });
 
+test('#3513: the live publisher and gate consume one valid four-image manifest', () => {
+  const inspected = inspectContainerImageManifest();
+  assert.deepEqual(inspected.reasons, []);
+  assert.deepEqual(inspected.entries.map((entry) => entry.id), [
+    'server',
+    'spa',
+    'dispatch',
+    'operator-sdk',
+  ]);
+  assert.deepEqual(publisherWorkflowDriftReasons(), []);
+  assert.deepEqual(publisherCapabilityReasons(), []);
+  const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'docker-publish.yml'), 'utf8');
+  assert.match(workflow, /4 sequential dind jobs \(the former publisher used one job\)/);
+  assert.match(workflow, /fail-fast: true\n\s+max-parallel: 1/);
+});
+
+test('#3513: manifest schema and reserved server/SPA publication modes fail closed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'container-manifest-modes-'));
+  try {
+    writeFixtureRecipes(root);
+    writeContainerManifest(root, fixtureImages());
+    assert.deepEqual(inspectContainerImageManifest(root).reasons, []);
+
+    writeFileSync(
+      join(root, 'container-images.json'),
+      `${JSON.stringify({ schemaVersion: 1, images: fixtureImages(), typo: true }, null, 2)}\n`
+    );
+    assert.match(
+      inspectContainerImageManifest(root).reasons.join('\n'),
+      /must contain exactly images, schemaVersion/,
+      'unknown top-level keys must not silently survive a manifest typo'
+    );
+
+    writeContainerManifest(root, fixtureImages({ buildMode: 'plain' }));
+    const demoted = inspectContainerImageManifest(root).reasons.join('\n');
+    assert.match(demoted, /reserved id server must use buildMode server/);
+    assert.match(demoted, /exactly one server buildMode \(found 0\)/);
+
+    writeContainerManifest(root, fixtureImages({ buildMode: 'spa' }, { buildMode: 'server' }));
+    const swapped = inspectContainerImageManifest(root).reasons.join('\n');
+    assert.match(swapped, /reserved id server must use buildMode server/);
+    assert.match(swapped, /reserved id spa must use buildMode spa/);
+
+    writeFileSync(join(root, 'Dockerfile.extra'), 'FROM scratch\n');
+    writeContainerManifest(root, [
+      ...fixtureImages(),
+      {
+        id: 'extra-server',
+        image: 'example/extra-server',
+        recipe: 'Dockerfile.extra',
+        context: '.',
+        buildMode: 'server',
+      },
+    ]);
+    assert.match(
+      inspectContainerImageManifest(root).reasons.join('\n'),
+      /exactly one server buildMode \(found 2\)/
+    );
+
+    writeContainerManifest(root, [fixtureImage()]);
+    assert.match(
+      inspectContainerImageManifest(root).reasons.join('\n'),
+      /exactly one spa buildMode \(found 0\)/
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('#3513: a separate unknown-mechanism workflow cannot acquire publisher capability', () => {
+  const root = mkdtempSync(join(tmpdir(), 'container-publisher-capability-'));
+  const workflowDirectory = join(root, '.github', 'workflows');
+  const shadowWorkflow = join(workflowDirectory, 'shadow-publisher.yml');
+  try {
+    mkdirSync(workflowDirectory, { recursive: true });
+    writeFileSync(
+      shadowWorkflow,
+      [
+        'name: shadow-publisher',
+        'permissions:',
+        '  packages: write',
+        'jobs:',
+        '  publish:',
+        '    runs-on: arc-dind',
+        '    steps:',
+        '      - run: make publish-ghcr',
+        '',
+      ].join('\n')
+    );
+    const packageWriter = publisherCapabilityReasons(root).join('\n');
+    assert.match(packageWriter, /mentions the reserved packages capability/);
+    assert.doesNotMatch(packageWriter, /no explicit top-level permissions/);
+
+    writeFileSync(
+      shadowWorkflow,
+      [
+        'name: shadow-publisher',
+        'jobs:',
+        '  publish:',
+        '    permissions:',
+        '      contents: read',
+        '    runs-on: arc-dind',
+        '    steps:',
+        '      - run: make publish-ghcr',
+        '',
+      ].join('\n')
+    );
+    assert.match(
+      publisherCapabilityReasons(root).join('\n'),
+      /no explicit top-level permissions: declaration/,
+      'job-level or inherited permissions are not the required workflow ceiling'
+    );
+
+    writeFileSync(
+      shadowWorkflow,
+      [
+        'name: shadow-publisher',
+        'permissions: write-all',
+        'jobs:',
+        '  publish:',
+        '    runs-on: arc-runner-set',
+        '    steps:',
+        '      - run: make publish-ghcr',
+        '',
+      ].join('\n')
+    );
+    assert.match(
+      publisherCapabilityReasons(root).join('\n'),
+      /unsupported permissions scalar write-all/,
+      'write-all must not grant package authority without spelling packages'
+    );
+
+    writeFileSync(
+      shadowWorkflow,
+      [
+        'name: shadow-publisher',
+        'permissions:',
+        '  "pack\\u0061ges": write',
+        'jobs: {}',
+        '',
+      ].join('\n')
+    );
+    assert.match(
+      publisherCapabilityReasons(root).join('\n'),
+      /double-quoted escape this lexical capability boundary cannot resolve/,
+      'YAML string escapes cannot hide the reserved permission key'
+    );
+
+    writeFileSync(
+      shadowWorkflow,
+      [
+        'name: shadow-publisher',
+        'permissions:',
+        '  contents: read',
+        'jobs:',
+        '  publish:',
+        '    runs-on: arc-runner-set',
+        '    steps:',
+        '      - env:',
+        '          TOKEN: ${{ Secrets.CODEX_TRIGGER_PAT }}',
+        '        run: make publish-ghcr',
+        '',
+      ].join('\n')
+    );
+    assert.match(
+      publisherCapabilityReasons(root).join('\n'),
+      /references unapproved secret CODEX_TRIGGER_PAT/,
+      'a mixed-case dot context cannot let a new workflow borrow an existing credential'
+    );
+
+    writeFileSync(
+      shadowWorkflow,
+      [
+        'name: shadow-publisher',
+        'permissions:',
+        '  contents: read',
+        'jobs:',
+        '  publish:',
+        '    runs-on: arc-runner-set',
+        '    steps:',
+        '      - env:',
+        '          TOKEN: ${{ sEcReTs["CODEX_TRIGGER_PAT"] }}',
+        '        run: make publish-ghcr',
+        '',
+      ].join('\n')
+    );
+    assert.match(
+      publisherCapabilityReasons(root).join('\n'),
+      /references unapproved secret CODEX_TRIGGER_PAT/,
+      'a mixed-case bracket context cannot let a new workflow borrow an existing credential'
+    );
+
+    writeFileSync(join(workflowDirectory, 'target.txt'), 'permissions:\n  contents: read\n');
+    rmSync(shadowWorkflow);
+    symlinkSync('target.txt', shadowWorkflow);
+    assert.match(
+      publisherCapabilityReasons(root).join('\n'),
+      /shadow-publisher\.yml is a symbolic link/,
+      'a workflow symlink cannot redirect the capability scan'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('#3513: dynamic secret contexts fail closed instead of escaping the pairing inventory', () => {
+  assert.deepEqual(
+    workflowSecretReferences(
+      'env:\n  DOT: ${{ Secrets.Known_Dot }}\n  BRACKET: ${{ sEcReTs["Known_Bracket"] }}\n'
+    ),
+    {
+      references: ['KNOWN_DOT', 'KNOWN_BRACKET'],
+      ambiguous: false,
+    }
+  );
+  assert.deepEqual(workflowSecretReferences('env:\n  TOKEN: ${{ secrets.KNOWN }}\n'), {
+    references: ['KNOWN'],
+    ambiguous: false,
+  });
+  assert.equal(workflowSecretReferences('secrets: inherit\n').ambiguous, true);
+  assert.equal(workflowSecretReferences('env:\n  TOKEN: ${{ SeCrEtS[matrix.name] }}\n').ambiguous, true);
+});
+
+test('#3513: unknown publisher mechanisms and path redirects are generic workflow drift', () => {
+  const root = mkdtempSync(join(tmpdir(), 'container-publisher-drift-'));
+  try {
+    writeFixtureRecipes(root);
+    writeContainerManifest(root, fixtureImages());
+    writeCanonicalPublisher(root);
+    const canonical = readFileSync(join(root, '.github', 'workflows', 'docker-publish.yml'), 'utf8');
+
+    writeContainerManifest(root, fixtureImages({ image: 'example/changed-dashboard' }));
+    assert.match(
+      publisherWorkflowDriftReasons(root).join('\n'),
+      /differs from the canonical manifest-compiled publisher/,
+      'changing the source manifest must require regenerating the workflow'
+    );
+    writeContainerManifest(root, fixtureImages());
+
+    for (const mutation of [
+      '\n      - run: make publish\n',
+      '\n      - run: scripts/publish-wrapper.sh\n',
+      '\n      - uses: ./.github/actions/publish-image\n',
+      '\n        working-directory: elsewhere\n',
+      '\n      - run: cd elsewhere && docker build .\n',
+    ]) {
+      writeFileSync(join(root, '.github', 'workflows', 'docker-publish.yml'), canonical + mutation);
+      const reasons = publisherWorkflowDriftReasons(root);
+      assert.equal(reasons.length, 1);
+      assert.match(reasons[0], /differs from the canonical manifest-compiled publisher/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('#3513: malformed, duplicate, missing, symlinked, and outside-context manifest paths fail closed', () => {
+  const cases = [
+    {
+      name: 'malformed JSON',
+      prepare(root) {
+        writeFileSync(join(root, 'container-images.json'), '{ nope');
+      },
+      pattern: /not valid JSON/,
+    },
+    {
+      name: 'duplicate declarations',
+      prepare(root) {
+        writeFixtureRecipes(root);
+        writeContainerManifest(root, [...fixtureImages(), fixtureImage()]);
+      },
+      pattern: /duplicates/,
+    },
+    {
+      name: 'missing recipe',
+      prepare(root) {
+        writeFixtureRecipes(root);
+        writeContainerManifest(root, fixtureImages({ recipe: 'missing/Dockerfile', context: 'missing' }));
+      },
+      pattern: /does not exist/,
+    },
+    {
+      name: 'symlinked manifest',
+      prepare(root) {
+        writeFileSync(join(root, 'manifest-target.json'), '{}\n');
+        symlinkSync('manifest-target.json', join(root, 'container-images.json'));
+      },
+      pattern: /container-images\.json is a symbolic link/,
+    },
+    {
+      name: 'symlinked context path',
+      prepare(root) {
+        writeFixtureRecipes(root);
+        mkdirSync(join(root, 'real-context'));
+        writeFileSync(join(root, 'real-context', 'Dockerfile'), 'FROM scratch\n');
+        symlinkSync('real-context', join(root, 'linked-context'));
+        writeContainerManifest(
+          root,
+          fixtureImages({ recipe: 'linked-context/Dockerfile', context: 'linked-context' })
+        );
+      },
+      pattern: /linked-context is a symbolic link/,
+    },
+    {
+      name: 'outside-root recipe',
+      prepare(root) {
+        writeFixtureRecipes(root);
+        writeContainerManifest(root, fixtureImages({ recipe: '../Dockerfile' }));
+      },
+      pattern: /without `\.\.` traversal/,
+    },
+    {
+      name: 'recipe outside declared context',
+      prepare(root) {
+        writeFixtureRecipes(root);
+        mkdirSync(join(root, 'nested'));
+        writeContainerManifest(root, fixtureImages({ context: 'nested' }));
+      },
+      pattern: /is not inside build context/,
+    },
+  ];
+
+  for (const fixture of cases) {
+    const root = mkdtempSync(join(tmpdir(), 'container-manifest-invalid-'));
+    try {
+      fixture.prepare(root);
+      assert.match(inspectContainerImageManifest(root).reasons.join('\n'), fixture.pattern, fixture.name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test('#3506 INERT: every image-input walker explicitly refuses symlinked scoped files', () => {
   const root = mkdtempSync(join(tmpdir(), 'action-pins-symlinks-'));
   try {
     writeFileSync(join(root, 'recipe-target'), 'FROM node:24-slim\n');
     symlinkSync('recipe-target', join(root, 'Dockerfile'));
     writeFileSync(join(root, 'Dockerfile.spa'), `FROM node@sha256:${'0'.repeat(64)}\n`);
+    writeContainerManifest(root, [fixtureImage()]);
 
     const runnerDirectory = join(root, 'deploy', 'arc', 'runner-image');
     mkdirSync(runnerDirectory, { recursive: true });
@@ -649,11 +1038,10 @@ test('#3506 INERT: every image-input walker explicitly refuses symlinked scoped 
     symlinkSync('pool-target.txt', join(poolDirectory, 'runner-scale-set-values.yaml'));
 
     const refusals = inertnessReasons(root).filter((reason) => /symbolic link/.test(reason));
-    assert.deepEqual(refusals, [
-      'scoped input Dockerfile is a symbolic link; this gate only checks regular files inside the reviewed worktree',
-      'scoped input deploy/arc/runner-image/Dockerfile is a symbolic link; this gate only checks regular files inside the reviewed worktree',
-      'scoped input deploy/arc/runner-scale-set-values.yaml is a symbolic link; this gate only checks regular files inside the reviewed worktree',
-    ]);
+    assert.equal(refusals.length, 3);
+    assert.ok(refusals.some((reason) => /images\[0\]\.recipe Dockerfile is a symbolic link/.test(reason)));
+    assert.ok(refusals.some((reason) => /runner-image\/Dockerfile is a symbolic link/.test(reason)));
+    assert.ok(refusals.some((reason) => /runner-scale-set-values\.yaml is a symbolic link/.test(reason)));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

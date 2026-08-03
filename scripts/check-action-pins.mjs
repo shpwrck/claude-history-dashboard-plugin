@@ -24,9 +24,10 @@
 //
 //   PIN     — every non-local `uses:` in .github/ resolves to an immutable ref:
 //             a 40-character commit SHA for an action repo, or @sha256:<64 hex>
-//             for a `docker://` image. In the root `Dockerfile` and
-//             `Dockerfile.spa`, and in deploy/arc/runner-image/, base images
-//             (Dockerfile `FROM`, BuildConfig `from.name`) must carry a digest.
+//             for a `docker://` image. In every recipe declared by
+//             `container-images.json`, and in deploy/arc/runner-image/, base
+//             images (Dockerfile `FROM`, BuildConfig `from.name`) must carry a
+//             digest.
 //             It does NOT claim the pinned commit is trustworthy — only that it
 //             cannot change under us. Reviewing what a SHA points at is still a
 //             human job, and pinning without an update process goes stale, which
@@ -88,9 +89,16 @@
 //   over the four known-shape values files (no block scalars there), so no YAML
 //   parser is added to this gate's node-builtin-only path.
 //
-// SCOPE: .github/workflows/, .github/actions/, the root `Dockerfile` and
-// `Dockerfile.spa` published-image recipes, deploy/arc/runner-image/, and the
-// deploy/arc ARC scale-set values (flat = spoke, hub/ = hub).
+// SCOPE: .github/workflows/, .github/actions/, every published-image recipe in
+// `container-images.json`, deploy/arc/runner-image/, and the deploy/arc ARC
+// scale-set values (flat = spoke, hub/ = hub). The publisher workflow is itself
+// byte-equality checked against the manifest compiler, so unknown build
+// mechanisms in that workflow are workflow drift rather than undiscovered
+// scope. Every other direct workflow must carry an explicit permissions ceiling,
+// cannot mention the reserved packages capability, and may reference only its
+// inventoried secret names; a second unknown-mechanism publisher therefore
+// cannot borrow the built-in package-write token or a new credential pairing
+// without changing this reviewed policy (#3513).
 // The runner-image directory is included deliberately — #3306 was fixed by
 // deleting the workflow-side gh installer and relying on the baked runner image,
 // so the image build is where that responsibility LANDED. The scale-set values
@@ -106,17 +114,30 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  CONTAINER_PUBLISH_WORKFLOW,
+  inspectContainerImageManifest,
+  publisherWorkflowDriftReasons,
+} from './container-image-manifest.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
- * The exact root recipes this gate claims to cover (#3064).
+ * Existing external-credential seams, by direct workflow.
  *
- * This inventory is deliberately byte-honest: it does not infer publication
- * from workflow text or claim to cover every Dockerfile in the repository.
- * Keeping this list coupled to the publisher is tracked separately by #3513.
+ * A new workflow cannot borrow one of these credentials merely by naming it:
+ * that workflow/secret pairing must become a reviewed policy diff here. This is
+ * defense in depth around the stronger built-in-token boundary below; it does
+ * not claim an existing allowlisted credential has no capabilities beyond its
+ * documented use.
  */
-export const PUBLISHED_IMAGE_RECIPES = ['Dockerfile', 'Dockerfile.spa'];
+const WORKFLOW_SECRET_ALLOWLIST = Object.freeze({
+  '.github/workflows/agent-cross-review.yml': ['ANTHROPIC_API_KEY', 'CODEX_TRIGGER_PAT'],
+  '.github/workflows/docker-publish.yml': ['GITHUB_TOKEN'],
+  '.github/workflows/pages-publish-edge.yml': ['ACTIONS_DEPLOY_KEY_EDGE'],
+  '.github/workflows/pages-publish-plugin.yml': ['ACTIONS_DEPLOY_KEY_PLUGIN'],
+  '.github/workflows/pages-publish-stable.yml': ['ACTIONS_DEPLOY_KEY'],
+});
 
 /** An action repo ref pinned to a full commit SHA: `owner/repo[/subpath]@<40 hex>`. */
 const PINNED_ACTION_RE = /^[\w.-]+\/[\w.-]+(?:\/[\w./-]+)?@[0-9a-f]{40}$/;
@@ -308,20 +329,14 @@ function regularDirectoryEntries(absolute) {
 }
 
 /**
- * The two root recipes that produce the dashboard's published server/SPA images.
- * A symlink is intentionally not a file here: scoped inputs must live as regular
- * files in the reviewed worktree, and scopedInputReasons() makes refusals loud.
+ * Every recipe declared by the canonical container publisher (#3064, #3513).
+ * Manifest validation owns path containment and symlink refusal; an invalid
+ * inventory returns no scannable files and scopedInputReasons() reports why.
  */
 export function listPublishedImageFiles(root = REPO_ROOT) {
-  const found = [];
-  for (const recipe of PUBLISHED_IMAGE_RECIPES) {
-    const absolute = join(root, recipe);
-    try {
-      if (lstatSync(absolute).isFile()) found.push(absolute);
-    } catch {
-      // Missing inputs are reported by scopedInputReasons().
-    }
-  }
+  const inspected = inspectContainerImageManifest(root);
+  if (inspected.reasons.length) return [];
+  const found = inspected.entries.map((entry) => join(root, ...entry.recipe.split('/')));
   // perf-index-contract: published-recipe-order always-consumed: every caller receives this complete deterministic recipe list
   return found.sort();
 }
@@ -346,6 +361,152 @@ export function listWorkflowFiles(root = REPO_ROOT) {
   walk(join(root, '.github', 'workflows'));
   walk(join(root, '.github', 'actions'));
   return found.sort();
+}
+
+/**
+ * Secret-context references inside GitHub expressions.
+ *
+ * Only literal dot/bracket references are inventoryable. `secrets: inherit`,
+ * `toJSON(secrets)`, or a computed `secrets[matrix.name]` exposes a capability
+ * this static policy cannot bind to one reviewed name, so it is ambiguous and
+ * fails closed.
+ */
+export function workflowSecretReferences(source) {
+  const references = [];
+  let ambiguous = /^\s*secrets\s*:\s*inherit(?:\s*#.*)?$/im.test(source);
+  const expressionPattern = /\$\{\{([\s\S]*?)\}\}/g;
+  const literalReferencePattern =
+    /\bsecrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2\s*\])/gi;
+  for (const expression of source.matchAll(expressionPattern)) {
+    if (!/\bsecrets\b/i.test(expression[1])) continue;
+    const remainder = expression[1].replace(
+      literalReferencePattern,
+      (_match, dottedName, _quote, bracketName) => {
+        references.push((dottedName ?? bracketName).toUpperCase());
+        return '';
+      }
+    );
+    if (/\bsecrets\b/i.test(remainder)) ambiguous = true;
+  }
+  return { references, ambiguous };
+}
+
+/**
+ * Repo-wide publisher capability boundary (#3513).
+ *
+ * The canonical generated workflow is the only direct workflow allowed to
+ * mention GitHub's `packages` permission. Every other workflow must declare an
+ * explicit top-level `permissions:` block and must not contain the reserved
+ * `packages` token at all. The denial is deliberately lexical and conservative:
+ * it may reject benign prose, but it does not try to recognize `make`, bazel,
+ * wrappers, composite actions, or any other build syntax. With an explicit
+ * permissions ceiling, the built-in token cannot gain package-write authority
+ * even if the repository's mutable default permission changes later.
+ *
+ * Secret references are separately bound to the current workflow/name pairs.
+ * That prevents a new shadow workflow from borrowing an existing PAT or deploy
+ * key, while making no stronger claim about the scopes of an already allowlisted
+ * credential or a pre-authenticated runner.
+ */
+export function publisherCapabilityReasons(root = REPO_ROOT) {
+  const reasons = [];
+  for (const pathname of ['.github', '.github/workflows']) {
+    const absolute = join(root, ...pathname.split('/'));
+    try {
+      const stat = lstatSync(absolute);
+      if (stat.isSymbolicLink()) {
+        reasons.push(`${pathname} is a symbolic link; direct workflows must be reviewed bytes`);
+        return reasons;
+      }
+      if (!stat.isDirectory()) {
+        reasons.push(`${pathname} is not a directory`);
+        return reasons;
+      }
+    } catch {
+      reasons.push(`${pathname} was not found`);
+      return reasons;
+    }
+  }
+
+  const workflowDirectory = join(root, '.github', 'workflows');
+  const isYaml = (name) => name.endsWith('.yml') || name.endsWith('.yaml');
+  // perf-index-contract: publisher-capability-order always-consumed: every direct workflow is policy-checked once in deterministic path order before the gate can pass
+  const entries = readdirSync(workflowDirectory, { withFileTypes: true })
+    .filter((entry) => isYaml(entry.name))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  for (const entry of entries) {
+    const file = `.github/workflows/${entry.name}`;
+    const absolute = join(workflowDirectory, entry.name);
+    if (entry.isSymbolicLink()) {
+      reasons.push(`${file} is a symbolic link; direct workflows must be reviewed bytes`);
+      continue;
+    }
+    if (!entry.isFile()) {
+      reasons.push(`${file} is not a regular workflow file`);
+      continue;
+    }
+
+    let source;
+    try {
+      source = readFileSync(absolute, 'utf8');
+    } catch {
+      reasons.push(`${file} could not be read`);
+      continue;
+    }
+
+    if (file !== CONTAINER_PUBLISH_WORKFLOW) {
+      const permissionDeclarations = source
+        .split(/\r?\n/)
+        .map((line) => /^(\s*)permissions\s*:\s*([^#]*)(?:#.*)?$/.exec(line))
+        .filter(Boolean);
+      if (!permissionDeclarations.some((match) => match[1] === '')) {
+        reasons.push(
+          `${file} has no explicit top-level permissions: declaration; noncanonical workflows ` +
+            'must not inherit mutable repository token defaults'
+        );
+      }
+      for (const declaration of permissionDeclarations) {
+        const scalar = declaration[2].trim();
+        if (scalar !== '' && scalar !== '{}' && scalar !== 'read-all') {
+          reasons.push(
+            `${file} uses unsupported permissions scalar ${scalar}; use a mapping, {}, or read-all ` +
+              'so write-all cannot grant implicit package authority'
+          );
+        }
+      }
+      if (/\bpackages\b/.test(source)) {
+        reasons.push(
+          `${file} mentions the reserved packages capability; only ${CONTAINER_PUBLISH_WORKFLOW} ` +
+            'may request package authority'
+        );
+      }
+      if (/"[^"\r\n]*\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8})[^"\r\n]*"/i.test(source)) {
+        reasons.push(
+          `${file} contains a double-quoted escape this lexical capability boundary cannot ` +
+            'resolve; spell workflow keys and values literally'
+        );
+      }
+    }
+
+    const observed = workflowSecretReferences(source);
+    if (observed.ambiguous) {
+      reasons.push(`${file} uses a dynamic or inherited secrets context that cannot be inventory-bound`);
+    }
+    const allowed = WORKFLOW_SECRET_ALLOWLIST[file] ?? [];
+    for (const secret of observed.references) {
+      if (!allowed.includes(secret)) {
+        reasons.push(`${file} references unapproved secret ${secret}`);
+      }
+    }
+    for (const secret of allowed) {
+      if (!observed.references.includes(secret)) {
+        reasons.push(`${file} no longer references allowlisted secret ${secret}; remove the stale policy entry`);
+      }
+    }
+  }
+
+  return reasons;
 }
 
 /**
@@ -394,7 +555,10 @@ export function listRunnerPoolFiles(root = REPO_ROOT) {
  * `main()` exits non-zero instead of turning "not checked" into "checked clean".
  */
 export function scopedInputReasons(root = REPO_ROOT) {
-  const reasons = [];
+  const reasons = [
+    ...publisherWorkflowDriftReasons(root),
+    ...publisherCapabilityReasons(root),
+  ];
   const relativePath = (absolute) => relative(root, absolute).split(sep).join('/');
   const refuse = (absolute) => {
     reasons.push(
@@ -402,19 +566,6 @@ export function scopedInputReasons(root = REPO_ROOT) {
         'regular files inside the reviewed worktree'
     );
   };
-
-  for (const recipe of PUBLISHED_IMAGE_RECIPES) {
-    const absolute = join(root, recipe);
-    try {
-      const stat = lstatSync(absolute);
-      if (stat.isSymbolicLink()) refuse(absolute);
-      else if (!stat.isFile()) {
-        reasons.push(`required published-image recipe ${recipe} is not a regular file`);
-      }
-    } catch {
-      reasons.push(`required published-image recipe ${recipe} was not found`);
-    }
-  }
 
   const runnerDirectory = join(root, 'deploy', 'arc', 'runner-image');
   try {
@@ -1063,7 +1214,8 @@ function main() {
     `Action pins OK: ${scanned} scoped file(s), including published recipes ` +
       `[${published.map((absolute) => relative(REPO_ROOT, absolute)).join(', ')}] — every external ` +
       '`uses:` and scanned base image is pinned to an immutable ref, every runner-pool image ' +
-      'is digest-pinned or version-stamped, and no step pipes a download into an interpreter.'
+      'is digest-pinned or version-stamped, no step pipes a download into an interpreter, and ' +
+      'only the canonical generated workflow can request package authority.'
   );
 }
 

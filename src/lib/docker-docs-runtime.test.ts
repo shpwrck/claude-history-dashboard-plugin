@@ -53,7 +53,12 @@ describe('packaged doc git-times manifest (#2707)', () => {
       join(process.cwd(), '.github', 'workflows', 'docker-publish.yml'),
       'utf8'
     );
-    expect(workflow).toContain('fetch-depth: 0');
+    expect(workflow).toContain(
+      "fetch-depth: ${{ matrix.buildMode == 'server' && '0' || '1' }}"
+    );
+    expect(workflow).toMatch(
+      /name: Generate doc git-times manifest\n\s+if: matrix\.buildMode == 'server'/
+    );
     expect(workflow).toContain('doc-git-times-generate.mjs');
     expect(
       workflow.indexOf('doc-git-times-generate.mjs') < workflow.indexOf('docker build'),
