@@ -285,6 +285,46 @@ export function sanitizeSemanticIntentRow(
   };
 }
 
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Total order for the provenance row retained under one `evidenceRef`.
+ *
+ * A later classification wins; an exact-time tie prefers higher confidence,
+ * then falls through every remaining persisted field lexicographically. The
+ * final fallbacks do not assert that one conflicting VERDICT is truer than
+ * another: genuine disagreements are still normalized to `unknown`. They only
+ * make the provenance retained beside that conservative verdict independent of
+ * artifact/row arrival order. The comparison returns zero iff every persisted
+ * row field is equal.
+ */
+function compareRowsForRetention(
+  left: SemanticIntentRow,
+  right: SemanticIntentRow
+): number {
+  return (
+    compareStrings(left.classifiedAt, right.classifiedAt) ||
+    left.confidence - right.confidence ||
+    compareStrings(left.contentSha256, right.contentSha256) ||
+    compareStrings(left.intentClass, right.intentClass) ||
+    compareStrings(left.canonicalTaskClass ?? '', right.canonicalTaskClass ?? '') ||
+    compareStrings(left.evidenceRef, right.evidenceRef)
+  );
+}
+
+function sameSemanticIntentVerdict(
+  left: SemanticIntentRow,
+  right: SemanticIntentRow
+): boolean {
+  return (
+    left.contentSha256 === right.contentSha256 &&
+    left.intentClass === right.intentClass &&
+    left.canonicalTaskClass === right.canonicalTaskClass
+  );
+}
+
 interface ArtifactHeader {
   taxonomyVersion: string;
   classifier: SemanticIntentClassifier;
@@ -342,10 +382,9 @@ export function ingestSemanticIntent(
 
   const classifiers = new Map<string, SemanticIntentClassifier>();
   const taxonomyVersions = new Set<string>();
-  // Keyed by evidenceRef: one call has one intent. A second row for the same
-  // reference is ambiguous, and picking a winner (newest? highest confidence?)
-  // would be inventing a tie-break the classifier never expressed — so BOTH are
-  // suppressed to `unknown` instead.
+  // Keyed by evidenceRef: one call has one intent. Genuine verdict disagreement
+  // remains ambiguous and is normalized to `unknown`; `row` selects only the
+  // retained provenance by a documented total order so no arrival order leaks.
   const byRef = new Map<string, { row: SemanticIntentRow; conflicted: boolean }>();
 
   let artifactCount = 0;
@@ -388,20 +427,14 @@ export function ingestSemanticIntent(
       const existing = byRef.get(sanitized.row.evidenceRef);
       if (existing) {
         // Two receipts for one call. Only a genuine disagreement is ambiguous;
-        // a byte-identical re-emission of the same classification is just the
-        // producer running twice and must not be punished as a conflict.
-        const sameVerdict =
-          existing.row.contentSha256 === sanitized.row.contentSha256 &&
-          existing.row.intentClass === sanitized.row.intentClass &&
-          existing.row.canonicalTaskClass === sanitized.row.canonicalTaskClass;
+        // a re-emission of the same classification is just the producer running
+        // twice and must not be punished as a conflict. Confidence/timestamp
+        // differences choose deterministic provenance, never a different class.
+        const sameVerdict = sameSemanticIntentVerdict(existing.row, sanitized.row);
         suppressed.duplicate += 1;
-        if (!sameVerdict) {
-          existing.conflicted = true;
-          existing.row = {
-            ...existing.row,
-            intentClass: UNKNOWN_INTENT_CLASS,
-            canonicalTaskClass: null,
-          };
+        existing.conflicted ||= !sameVerdict;
+        if (compareRowsForRetention(existing.row, sanitized.row) < 0) {
+          existing.row = sanitized.row;
         }
         continue;
       }
@@ -411,7 +444,15 @@ export function ingestSemanticIntent(
   }
 
   const rows = [...byRef.values()]
-    .map((e) => e.row)
+    .map(({ row, conflicted }) =>
+      conflicted
+        ? {
+            ...row,
+            intentClass: UNKNOWN_INTENT_CLASS,
+            canonicalTaskClass: null,
+          }
+        : row
+    )
     .sort((a, b) => (a.evidenceRef < b.evidenceRef ? -1 : a.evidenceRef > b.evidenceRef ? 1 : 0));
 
   const counts = new Map<string, number>();

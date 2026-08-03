@@ -112,6 +112,27 @@ describe('ingestSemanticIntent', () => {
       .toBe(JSON.stringify(ingestSemanticIntent([artifact([b, a])])));
   });
 
+  it('selects same-verdict duplicate provenance byte-stably', () => {
+    const earlier = row({
+      evidenceRef: 'same-ref',
+      confidence: 0.95,
+      classifiedAt: '2026-07-01T10:00:00.000Z',
+    });
+    const later = row({
+      evidenceRef: 'same-ref',
+      confidence: 0.85,
+      classifiedAt: '2026-07-02T10:00:00.000Z',
+    });
+
+    const forward = ingestSemanticIntent([artifact([earlier]), artifact([later])]);
+    const reversed = ingestSemanticIntent([artifact([later]), artifact([earlier])]);
+
+    expect(JSON.stringify(forward)).toBe(JSON.stringify(reversed));
+    expect(forward.rows[0].confidence).toBe(0.85);
+    expect(forward.rows[0].classifiedAt).toBe('2026-07-02T10:00:00.000Z');
+    expect(forward.asOf).toBe('2026-07-02');
+  });
+
   it('rejects a whole artifact whose taxonomy version is unsupported', () => {
     // Class names may be reused across taxonomy revisions with different
     // meanings, so a best-effort read is exactly how a claim ends up scoped to a
@@ -152,16 +173,35 @@ describe('ingestSemanticIntent', () => {
 
   it('suppresses BOTH sides of a disagreeing duplicate rather than picking a winner', () => {
     // Choosing newest-wins or highest-confidence-wins would invent a tie-break
-    // the classifier never expressed.
-    const s = ingestSemanticIntent([
-      artifact([
-        row({ evidenceRef: 'dup', contentSha256: sha(1), intentClass: 'code-search' }),
-        row({ evidenceRef: 'dup', contentSha256: sha(1), intentClass: 'bug-fix' }),
-      ]),
-    ]);
+    // for the VERDICT. The retained provenance row still has a documented total
+    // order so every persisted field is byte-stable when input order reverses.
+    const earlier = row({
+      evidenceRef: 'dup',
+      contentSha256: sha(1),
+      intentClass: 'code-search',
+      confidence: 0.95,
+      canonicalTaskClass: 'search',
+      classifiedAt: '2026-07-01T10:00:00.000Z',
+    });
+    const later = row({
+      evidenceRef: 'dup',
+      contentSha256: sha(2),
+      intentClass: 'bug-fix',
+      confidence: 0.85,
+      canonicalTaskClass: 'debug',
+      classifiedAt: '2026-07-02T10:00:00.000Z',
+    });
+    const s = ingestSemanticIntent([artifact([earlier, later])]);
+    const reversed = ingestSemanticIntent([artifact([later, earlier])]);
+
+    expect(JSON.stringify(s)).toBe(JSON.stringify(reversed));
     expect(s.rowCount).toBe(1);
     expect(s.rows[0].intentClass).toBe(UNKNOWN_INTENT_CLASS);
     expect(s.rows[0].canonicalTaskClass).toBeNull();
+    expect(s.rows[0].contentSha256).toBe(sha(2));
+    expect(s.rows[0].confidence).toBe(0.85);
+    expect(s.rows[0].classifiedAt).toBe('2026-07-02T10:00:00.000Z');
+    expect(s.asOf).toBe('2026-07-02');
     expect(s.classifiedRowCount).toBe(0);
     expect(s.suppressed.duplicate).toBe(1);
   });
