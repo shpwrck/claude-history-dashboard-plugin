@@ -34,6 +34,8 @@ const DEFAULT_REPOS_MAX_BYTES = 8_192;
 const DEFAULT_MAX_REPOS = 25;
 const DEFAULT_MAX_PULLS_PER_REPO = 100;
 const DEFAULT_MAX_TIMELINE_REQUESTS = 100;
+const DEFAULT_TIMELINE_CONCURRENCY = 4;
+const DEFAULT_SYNC_DEADLINE_MS = 15_000;
 const DEFAULT_MAX_TIMELINE_EVENTS_PER_PR = 100;
 const DEFAULT_MAX_RECORDS = 5_000;
 
@@ -58,6 +60,8 @@ export interface GitHubReviewSyncConfig {
   maxRepos: number;
   maxPullsPerRepo: number;
   maxTimelineRequests: number;
+  timelineConcurrency: number;
+  syncDeadlineMs: number;
   maxTimelineEventsPerPr: number;
   maxRecords: number;
   configHash: string;
@@ -170,6 +174,8 @@ function configHashFor(config: {
   repos: GitHubReviewRepo[];
   maxPullsPerRepo: number;
   maxTimelineRequests: number;
+  timelineConcurrency: number;
+  syncDeadlineMs: number;
   maxTimelineEventsPerPr: number;
   maxRecords: number;
 }): string {
@@ -185,6 +191,8 @@ function configHashFor(config: {
         repos: config.repos.map((repo) => repo.fullName.toLowerCase()).sort(),
         maxPullsPerRepo: config.maxPullsPerRepo,
         maxTimelineRequests: config.maxTimelineRequests,
+        timelineConcurrency: config.timelineConcurrency,
+        syncDeadlineMs: config.syncDeadlineMs,
         maxTimelineEventsPerPr: config.maxTimelineEventsPerPr,
         maxRecords: config.maxRecords,
       })
@@ -262,6 +270,24 @@ export function parseGitHubReviewSyncConfig(
     1,
     10_000
   );
+  const timelineConcurrency = clampInt(
+    parseNonNegativeIntEnv(
+      env,
+      'DASHBOARD_GITHUB_REVIEW_TIMELINE_CONCURRENCY',
+      DEFAULT_TIMELINE_CONCURRENCY
+    ),
+    1,
+    16
+  );
+  const syncDeadlineMs = clampInt(
+    parseNonNegativeIntEnv(
+      env,
+      'DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS',
+      DEFAULT_SYNC_DEADLINE_MS
+    ),
+    100,
+    300_000
+  );
   const maxTimelineEventsPerPr = clampInt(
     parseNonNegativeIntEnv(
       env,
@@ -282,6 +308,8 @@ export function parseGitHubReviewSyncConfig(
     repos,
     maxPullsPerRepo,
     maxTimelineRequests,
+    timelineConcurrency,
+    syncDeadlineMs,
     maxTimelineEventsPerPr,
     maxRecords,
   });
@@ -307,6 +335,8 @@ export function parseGitHubReviewSyncConfig(
     maxRepos,
     maxPullsPerRepo,
     maxTimelineRequests,
+    timelineConcurrency,
+    syncDeadlineMs,
     maxTimelineEventsPerPr,
     maxRecords,
     configHash: hash,
@@ -328,18 +358,25 @@ function authHeaders(config: GitHubReviewSyncConfig): Record<string, string> {
   };
 }
 
-async function fetchWithTimeout(
+async function fetchWithTimeout<T>(
   fetchImpl: FetchLike,
   url: string,
   init: FetchInit,
-  timeoutMs: number
-): Promise<Response> {
+  timeoutMs: number,
+  syncSignal: AbortSignal | undefined,
+  consumeResponse: (response: Response) => Promise<T>
+): Promise<T> {
   const controller = new AbortController();
+  const abortForSync = () => controller.abort(syncSignal?.reason);
+  if (syncSignal?.aborted) abortForSync();
+  else syncSignal?.addEventListener('abort', abortForSync, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(url, { ...init, signal: controller.signal });
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    return await consumeResponse(response);
   } finally {
     clearTimeout(timer);
+    syncSignal?.removeEventListener('abort', abortForSync);
   }
 }
 
@@ -383,20 +420,24 @@ async function responseTextBounded(response: Response, maxBytes: number): Promis
 async function fetchJsonArray(
   config: GitHubReviewSyncConfig,
   fetchImpl: FetchLike,
-  url: string
+  url: string,
+  syncSignal?: AbortSignal
 ): Promise<unknown[]> {
-  const response = await fetchWithTimeout(
+  return await fetchWithTimeout(
     fetchImpl,
     url,
     { method: 'GET', headers: authHeaders(config) },
-    config.fetchTimeoutMs
+    config.fetchTimeoutMs,
+    syncSignal,
+    async (response) => {
+      const text = await responseTextBounded(response, config.maxResponseBytes);
+      if (!response.ok) {
+        throw new Error(`GitHub review sync request failed with ${response.status}`);
+      }
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed : [];
+    }
   );
-  const text = await responseTextBounded(response, config.maxResponseBytes);
-  if (!response.ok) {
-    throw new Error(`GitHub review sync request failed with ${response.status}`);
-  }
-  const parsed = JSON.parse(text);
-  return Array.isArray(parsed) ? parsed : [];
 }
 
 function currentRequestedReviewers(pull: Obj): string[] {
@@ -464,7 +505,8 @@ async function fetchRepoReviewRequests(
   fetchImpl: FetchLike,
   repo: GitHubReviewRepo,
   remainingRecords: number,
-  remainingTimelineRequests: number
+  remainingTimelineRequests: number,
+  syncSignal: AbortSignal
 ): Promise<{ records: PullRequestReviewRequest[]; timelineRequests: number }> {
   const pullsUrl = apiUrl(
     config,
@@ -476,36 +518,70 @@ async function fetchRepoReviewRequests(
       per_page: String(config.maxPullsPerRepo),
     }
   );
-  const pulls = await fetchJsonArray(config, fetchImpl, pullsUrl);
+  const pulls = await fetchJsonArray(config, fetchImpl, pullsUrl, syncSignal);
   const records: PullRequestReviewRequest[] = [];
-  let timelineRequests = 0;
-
+  const jobs: Array<{
+    pull: Obj;
+    pendingReviewers: string[];
+    pendingKeys: Set<string>;
+    timelineUrl: string;
+  }> = [];
   for (const rawPull of pulls.slice(0, config.maxPullsPerRepo)) {
-    if (records.length >= remainingRecords) break;
-    if (timelineRequests >= remainingTimelineRequests) break;
+    if (jobs.length >= remainingTimelineRequests) break;
     const pull = asObj(rawPull);
     const pendingReviewers = currentRequestedReviewers(pull);
     if (!pendingReviewers.length) continue;
     const number = Number(pull.number);
     if (!Number.isInteger(number) || number <= 0) continue;
+    // perf-index-contract: github-pending-reviewers always-consumed: every scheduled timeline immediately queries this complete reviewer membership set
     const pendingKeys = new Set(pendingReviewers.map(normalizeReviewerKey));
     const timelineUrl = apiUrl(
       config,
       `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/issues/${number}/timeline`,
       { per_page: String(config.maxTimelineEventsPerPr) }
     );
-    timelineRequests += 1;
-    const timeline = await fetchJsonArray(config, fetchImpl, timelineUrl);
-    const requestedAtByReviewer = reviewRequestTimesByReviewer(timeline, pendingKeys);
-    for (const reviewerId of pendingReviewers) {
+    jobs.push({ pull, pendingReviewers, pendingKeys, timelineUrl });
+  }
+
+  const timelines: unknown[][] = new Array(jobs.length);
+  let nextJobIndex = 0;
+  const worker = async () => {
+    while (nextJobIndex < jobs.length) {
+      const jobIndex = nextJobIndex;
+      nextJobIndex += 1;
+      timelines[jobIndex] = await fetchJsonArray(
+        config,
+        fetchImpl,
+        jobs[jobIndex].timelineUrl,
+        syncSignal
+      );
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(config.timelineConcurrency, jobs.length) },
+      worker
+    )
+  );
+
+  for (let jobIndex = 0; jobIndex < jobs.length; jobIndex += 1) {
+    const job = jobs[jobIndex];
+    const requestedAtByReviewer = reviewRequestTimesByReviewer(
+      timelines[jobIndex],
+      job.pendingKeys
+    );
+    for (const reviewerId of job.pendingReviewers) {
       if (records.length >= remainingRecords) break;
-      const requestedAt = requestedAtByReviewer.get(normalizeReviewerKey(reviewerId));
+      const requestedAt = requestedAtByReviewer.get(
+        normalizeReviewerKey(reviewerId)
+      );
       if (!requestedAt) continue;
-      const record = requestRecord(repo, pull, reviewerId, requestedAt);
+      const record = requestRecord(repo, job.pull, reviewerId, requestedAt);
       if (record) records.push(record);
     }
+    if (records.length >= remainingRecords) break;
   }
-  return { records, timelineRequests };
+  return { records, timelineRequests: jobs.length };
 }
 
 export async function fetchGitHubReviewEvents(
@@ -515,34 +591,55 @@ export async function fetchGitHubReviewEvents(
   if (!config.enabled) return null;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   if (!fetchImpl) throw new Error('fetch is unavailable for GitHub review sync');
-  const reviewRequests: PullRequestReviewRequest[] = [];
-  let timelineRequests = 0;
-  for (const repo of config.repos) {
-    if (reviewRequests.length >= config.maxRecords) break;
-    if (timelineRequests >= config.maxTimelineRequests) break;
-    const remaining = config.maxRecords - reviewRequests.length;
-    const result = await fetchRepoReviewRequests(
-      config,
-      fetchImpl,
-      repo,
-      remaining,
-      config.maxTimelineRequests - timelineRequests
-    );
-    timelineRequests += result.timelineRequests;
-    const records = result.records;
-    reviewRequests.push(...records);
-  }
-  reviewRequests.sort(
-    (a, b) =>
-      a.repository.localeCompare(b.repository) ||
-      a.pullRequestNumber - b.pullRequestNumber ||
-      a.reviewerId.localeCompare(b.reviewerId)
+  const syncController = new AbortController();
+  const deadline = setTimeout(
+    () =>
+      syncController.abort(
+        new Error(
+          `GitHub review synchronization exceeded ${config.syncDeadlineMs} ms deadline`
+        )
+      ),
+    config.syncDeadlineMs
   );
-  return {
-    source: GITHUB_REVIEW_SYNC_SOURCE,
-    generatedAt: new Date(opts.nowMs ?? Date.now()).toISOString(),
-    reviewRequests,
-  };
+  try {
+    const reviewRequests: PullRequestReviewRequest[] = [];
+    let timelineRequests = 0;
+    for (const repo of config.repos) {
+      if (reviewRequests.length >= config.maxRecords) break;
+      if (timelineRequests >= config.maxTimelineRequests) break;
+      const remaining = config.maxRecords - reviewRequests.length;
+      const result = await fetchRepoReviewRequests(
+        config,
+        fetchImpl,
+        repo,
+        remaining,
+        config.maxTimelineRequests - timelineRequests,
+        syncController.signal
+      );
+      timelineRequests += result.timelineRequests;
+      const records = result.records;
+      reviewRequests.push(...records);
+    }
+    // perf-index-contract: github-review-record-order always-consumed: every successful synchronization immediately returns the complete deterministically sorted review-request list
+    reviewRequests.sort(
+      (a, b) =>
+        a.repository.localeCompare(b.repository) ||
+        a.pullRequestNumber - b.pullRequestNumber ||
+        a.reviewerId.localeCompare(b.reviewerId)
+    );
+    return {
+      source: GITHUB_REVIEW_SYNC_SOURCE,
+      generatedAt: new Date(opts.nowMs ?? Date.now()).toISOString(),
+      reviewRequests,
+    };
+  } finally {
+    clearTimeout(deadline);
+    if (!syncController.signal.aborted) {
+      syncController.abort(
+        new Error('GitHub review synchronization settled')
+      );
+    }
+  }
 }
 
 /** Bounded read of the review-events cache; loop shared via capped-read (#3419). */

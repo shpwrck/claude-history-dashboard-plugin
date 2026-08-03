@@ -33,6 +33,37 @@ function config(cachePath = '/tmp/review-events-cache.json') {
 }
 
 describe('github review sync (#1127)', () => {
+  it('defaults and clamps review-sync concurrency and deadline budgets', () => {
+    expect(config()).toMatchObject({
+      timelineConcurrency: 4,
+      syncDeadlineMs: 15_000,
+    });
+
+    const minimums = parseGitHubReviewSyncConfig(
+      {
+        DASHBOARD_GITHUB_REVIEW_TIMELINE_CONCURRENCY: '0',
+        DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS: '0',
+      },
+      { cachePath: '/tmp/review-events-cache.json' }
+    );
+    expect(minimums).toMatchObject({
+      timelineConcurrency: 1,
+      syncDeadlineMs: 100,
+    });
+
+    const maximums = parseGitHubReviewSyncConfig(
+      {
+        DASHBOARD_GITHUB_REVIEW_TIMELINE_CONCURRENCY: '999',
+        DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS: '999999',
+      },
+      { cachePath: '/tmp/review-events-cache.json' }
+    );
+    expect(maximums).toMatchObject({
+      timelineConcurrency: 16,
+      syncDeadlineMs: 300_000,
+    });
+  });
+
   it('stays disabled without an explicit github source, token, and repo list', () => {
     expect(
       parseGitHubReviewSyncConfig({}, { cachePath: '/tmp/cache.json' })
@@ -206,6 +237,230 @@ describe('github review sync (#1127)', () => {
     expect(calls.filter((url) => url.includes('/timeline?'))).toHaveLength(1);
     expect(dataset?.reviewRequests.map((request) => request.pullRequestNumber)).toEqual([1]);
   });
+
+  it('overlaps delayed timelines only within its concurrency and latency budgets (#3127)', async () => {
+    const pullCount = 12;
+    const timelineDelayMs = 40;
+    const syncConfig = parseGitHubReviewSyncConfig(
+      {
+        DASHBOARD_REVIEW_EVENTS_SOURCE: 'github',
+        DASHBOARD_GITHUB_REVIEW_TOKEN: 'ghp_test_secret',
+        DASHBOARD_GITHUB_REVIEW_REPOS: 'acme/app',
+        DASHBOARD_GITHUB_REVIEW_API_BASE: 'https://github.example.test/api/v3',
+        DASHBOARD_GITHUB_REVIEW_MAX_TIMELINE_REQUESTS: String(pullCount),
+        DASHBOARD_GITHUB_REVIEW_TIMELINE_CONCURRENCY: '3',
+        DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS: '1000',
+      },
+      { cachePath: '/tmp/review-events-cache.json' }
+    );
+    let activeTimelines = 0;
+    let maxActiveTimelines = 0;
+    let timelineCalls = 0;
+    const fetchImpl = async (url: string) => {
+      if (url.includes('/pulls?')) {
+        return jsonResponse(
+          Array.from({ length: pullCount }, (_, index) => ({
+            number: index + 1,
+            title: `PR ${index + 1}`,
+            requested_reviewers: [{ login: 'alice' }],
+          }))
+        );
+      }
+      timelineCalls += 1;
+      activeTimelines += 1;
+      maxActiveTimelines = Math.max(maxActiveTimelines, activeTimelines);
+      await new Promise((resolve) => setTimeout(resolve, timelineDelayMs));
+      activeTimelines -= 1;
+      return jsonResponse([
+        {
+          event: 'review_requested',
+          created_at: '2026-06-01T12:00:00Z',
+          requested_reviewer: { login: 'alice' },
+        },
+      ]);
+    };
+
+    const started = performance.now();
+    const dataset = await fetchGitHubReviewEvents(syncConfig, { fetchImpl, nowMs: NOW });
+    const elapsedMs = performance.now() - started;
+
+    expect(timelineCalls).toBe(pullCount);
+    expect(dataset?.reviewRequests).toHaveLength(pullCount);
+    expect(maxActiveTimelines).toBe(3);
+    // Four 40 ms waves plus overhead; serial execution is at least 480 ms.
+    expect(elapsedMs).toBeLessThan(350);
+  }, 5_000);
+
+  it('starts queued timeline work as soon as any pool slot frees (#3127)', async () => {
+    const pullCount = 6;
+    const syncConfig = parseGitHubReviewSyncConfig(
+      {
+        DASHBOARD_REVIEW_EVENTS_SOURCE: 'github',
+        DASHBOARD_GITHUB_REVIEW_TOKEN: 'ghp_test_secret',
+        DASHBOARD_GITHUB_REVIEW_REPOS: 'acme/app',
+        DASHBOARD_GITHUB_REVIEW_API_BASE: 'https://github.example.test/api/v3',
+        DASHBOARD_GITHUB_REVIEW_MAX_TIMELINE_REQUESTS: String(pullCount),
+        DASHBOARD_GITHUB_REVIEW_TIMELINE_CONCURRENCY: '2',
+        DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS: '1000',
+      },
+      { cachePath: '/tmp/review-events-cache.json' }
+    );
+    let activeTimelines = 0;
+    let maxActiveTimelines = 0;
+    let firstSlowTimelineSettled = false;
+    let laterFastTimelineStartedBeforeSlowSettled = false;
+    const fetchImpl = async (url: string) => {
+      if (url.includes('/pulls?')) {
+        return jsonResponse(
+          Array.from({ length: pullCount }, (_, index) => ({
+            number: index + 1,
+            title: `PR ${index + 1}`,
+            requested_reviewers: [{ login: 'alice' }],
+          }))
+        );
+      }
+      const pullNumber = Number(/\/issues\/(\d+)\/timeline/.exec(url)?.[1]);
+      if (pullNumber >= 3 && !firstSlowTimelineSettled) {
+        laterFastTimelineStartedBeforeSlowSettled = true;
+      }
+      activeTimelines += 1;
+      maxActiveTimelines = Math.max(maxActiveTimelines, activeTimelines);
+      await new Promise((resolve) =>
+        setTimeout(resolve, pullNumber === 1 ? 120 : 10)
+      );
+      activeTimelines -= 1;
+      if (pullNumber === 1) firstSlowTimelineSettled = true;
+      return jsonResponse([
+        {
+          event: 'review_requested',
+          created_at: '2026-06-01T12:00:00Z',
+          requested_reviewer: { login: 'alice' },
+        },
+      ]);
+    };
+
+    const dataset = await fetchGitHubReviewEvents(syncConfig, {
+      fetchImpl,
+      nowMs: NOW,
+    });
+
+    expect(maxActiveTimelines).toBe(2);
+    expect(laterFastTimelineStartedBeforeSlowSettled).toBe(true);
+    expect(
+      dataset?.reviewRequests.map((request) => request.pullRequestNumber)
+    ).toEqual([1, 2, 3, 4, 5, 6]);
+  }, 3_000);
+
+  it('aborts the whole synchronization within one total deadline (#3127)', async () => {
+    const syncConfig = parseGitHubReviewSyncConfig(
+      {
+        DASHBOARD_REVIEW_EVENTS_SOURCE: 'github',
+        DASHBOARD_GITHUB_REVIEW_TOKEN: 'ghp_test_secret',
+        DASHBOARD_GITHUB_REVIEW_REPOS: 'acme/app',
+        DASHBOARD_GITHUB_REVIEW_API_BASE: 'https://github.example.test/api/v3',
+        DASHBOARD_GITHUB_REVIEW_MAX_TIMELINE_REQUESTS: '8',
+        DASHBOARD_GITHUB_REVIEW_TIMELINE_CONCURRENCY: '3',
+        DASHBOARD_GITHUB_REVIEW_FETCH_TIMEOUT_MS: '1000',
+        DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS: '120',
+      },
+      { cachePath: '/tmp/review-events-cache.json' }
+    );
+    let activeTimelines = 0;
+    let maxActiveTimelines = 0;
+    let abortedTimelines = 0;
+    const fetchImpl = async (
+      url: string,
+      init: { signal?: AbortSignal }
+    ): Promise<Response> => {
+      if (url.includes('/pulls?')) {
+        return jsonResponse(
+          Array.from({ length: 8 }, (_, index) => ({
+            number: index + 1,
+            title: `Stalled PR ${index + 1}`,
+            requested_reviewers: [{ login: 'alice' }],
+          }))
+        );
+      }
+      activeTimelines += 1;
+      maxActiveTimelines = Math.max(maxActiveTimelines, activeTimelines);
+      return await new Promise<Response>((_resolve, reject) => {
+        const abort = () => {
+          activeTimelines -= 1;
+          abortedTimelines += 1;
+          reject(init.signal?.reason ?? new Error('aborted'));
+        };
+        if (init.signal?.aborted) abort();
+        else init.signal?.addEventListener('abort', abort, { once: true });
+      });
+    };
+
+    const started = performance.now();
+    await expect(
+      fetchGitHubReviewEvents(syncConfig, { fetchImpl, nowMs: NOW })
+    ).rejects.toThrow();
+    const elapsedMs = performance.now() - started;
+
+    expect(maxActiveTimelines).toBe(3);
+    expect(abortedTimelines).toBe(3);
+    // Total 120 ms budget plus generous CI scheduling headroom; without a
+    // synchronization deadline the first request timeout alone is 1,000 ms.
+    expect(elapsedMs).toBeLessThan(500);
+  }, 3_000);
+
+  it('keeps the total deadline active while a response body is stalled (#3127)', async () => {
+    const syncConfig = parseGitHubReviewSyncConfig(
+      {
+        DASHBOARD_REVIEW_EVENTS_SOURCE: 'github',
+        DASHBOARD_GITHUB_REVIEW_TOKEN: 'ghp_test_secret',
+        DASHBOARD_GITHUB_REVIEW_REPOS: 'acme/app',
+        DASHBOARD_GITHUB_REVIEW_API_BASE: 'https://github.example.test/api/v3',
+        DASHBOARD_GITHUB_REVIEW_FETCH_TIMEOUT_MS: '1000',
+        DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS: '120',
+      },
+      { cachePath: '/tmp/review-events-cache.json' }
+    );
+    let timelineHeaders = 0;
+    let abortedBodies = 0;
+    const fetchImpl = async (
+      url: string,
+      init: { signal?: AbortSignal }
+    ): Promise<Response> => {
+      if (url.includes('/pulls?')) {
+        return jsonResponse([
+          {
+            number: 1,
+            title: 'Stalled response body',
+            requested_reviewers: [{ login: 'alice' }],
+          },
+        ]);
+      }
+      timelineHeaders += 1;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const abort = () => {
+              abortedBodies += 1;
+              controller.error(init.signal?.reason ?? new Error('aborted'));
+            };
+            if (init.signal?.aborted) abort();
+            else init.signal?.addEventListener('abort', abort, { once: true });
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    };
+
+    const started = performance.now();
+    await expect(
+      fetchGitHubReviewEvents(syncConfig, { fetchImpl, nowMs: NOW })
+    ).rejects.toThrow(/deadline/);
+    const elapsedMs = performance.now() - started;
+
+    expect(timelineHeaders).toBe(1);
+    expect(abortedBodies).toBe(1);
+    // The body is unbounded without the linked synchronization deadline.
+    expect(elapsedMs).toBeLessThan(500);
+  }, 1_000);
 
   it('writes a private cache and falls back to it after a later fetch failure', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'github-review-sync-'));

@@ -8077,10 +8077,10 @@ function githubReviewSyncPostureControl() {
     ? 'Disabled by default; set DASHBOARD_REVIEW_EVENTS_SOURCE=github to opt in'
     : problems.length > 0
       ? problems.join('; ')
-      : `Enabled for ${config.repos.length} GitHub repo(s) against ${config.apiBaseUrl}; fetch timeout ${config.fetchTimeoutMs}ms, response cap ${config.maxResponseBytes} byte(s), cache TTL ${config.cacheTtlMs}ms`;
+      : `Enabled for ${config.repos.length} GitHub repo(s) against ${config.apiBaseUrl}; ${config.timelineConcurrency} timeline request(s) in parallel, sync deadline ${config.syncDeadlineMs}ms, fetch timeout ${config.fetchTimeoutMs}ms, response cap ${config.maxResponseBytes} byte(s), cache TTL ${config.cacheTtlMs}ms`;
   const detail =
     'Server-only GitHub review sync fetches pending PR review requests into the transcript-free reviewEvents aggregate for admin/global recommendations. ' +
-    `Repo config is capped at ${config.reposMaxBytes} byte(s) and ${config.maxRepos} repo(s); each refresh reads at most ${config.maxPullsPerRepo} pull(s) per repo, ${config.maxTimelineRequests} timeline request(s), ${config.maxTimelineEventsPerPr} event(s) per timeline, and ${config.maxRecords} record(s). ` +
+    `Repo config is capped at ${config.reposMaxBytes} byte(s) and ${config.maxRepos} repo(s); each refresh runs for at most ${config.syncDeadlineMs}ms with at most ${config.timelineConcurrency} timeline request(s) in parallel, and reads at most ${config.maxPullsPerRepo} pull(s) per repo, ${config.maxTimelineRequests} timeline request(s), ${config.maxTimelineEventsPerPr} event(s) per timeline, and ${config.maxRecords} record(s). ` +
     'The admin posture exposes only status, counts, URL posture, and limits; it never returns the GitHub token or raw repository allowlist. Scoped member/viewer ingest keeps reviewEvents disabled.';
   return enterpriseSecurityControl(
     'github-review-sync',

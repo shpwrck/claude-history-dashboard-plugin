@@ -159,6 +159,8 @@ async function startServer(extraEnv = {}) {
       DASHBOARD_GITHUB_REVIEW_MAX_REPOS: '',
       DASHBOARD_GITHUB_REVIEW_MAX_PULLS_PER_REPO: '',
       DASHBOARD_GITHUB_REVIEW_MAX_TIMELINE_REQUESTS: '',
+      DASHBOARD_GITHUB_REVIEW_TIMELINE_CONCURRENCY: '',
+      DASHBOARD_GITHUB_REVIEW_SYNC_DEADLINE_MS: '',
       DASHBOARD_GITHUB_REVIEW_MAX_TIMELINE_EVENTS_PER_PR: '',
       DASHBOARD_GITHUB_REVIEW_MAX_RECORDS: '',
       DASHBOARD_GITHUB_REVIEW_FETCH_TIMEOUT_MS: '',
@@ -5378,6 +5380,8 @@ try {
   check(
     'enterprise GitHub review sync valid posture reports count and caps',
     control?.summary?.includes?.('2 GitHub repo') &&
+      control?.summary?.includes?.('4 timeline request') &&
+      control?.summary?.includes?.('sync deadline 15000ms') &&
       control?.summary?.includes?.('5000ms') &&
       control?.summary?.includes?.('1048576 byte') &&
       control?.summary?.includes?.('300000ms')

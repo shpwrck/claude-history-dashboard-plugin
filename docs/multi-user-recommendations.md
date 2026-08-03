@@ -37,7 +37,9 @@ open pull requests plus bounded issue timeline events from GitHub. The sync
 emits only currently pending individual reviewer requests that have an explicit
 `review_requested` timestamp in the timeline. If the source, token, or repo list
 is missing, `reviewEvents` stays null and `workflow.review-bottleneck` stays
-dark.
+dark. Timeline reads use a bounded pool (four requests by default), and one
+15-second synchronization deadline covers pull-list and timeline fetches across
+the configured repositories; operators can narrow both limits explicitly.
 
 The sync cache participates in the existing dataset source signature and content
 hash, so `/api/dataset.json` and `/api/recommendations.json` update when the
