@@ -23,6 +23,9 @@ import {
   isBlanketModelPinSnippet,
   NON_PORTABLE_SNIPPET_PATTERNS,
 } from './fix-validity';
+import { detector as blockedTaskPileupDetector } from './workflow/blocked-task-pileup';
+import type { RecommendationInput, RecFix } from './types';
+import type { TaskRecord } from '../parse-tasks';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');
@@ -61,6 +64,52 @@ describe('validateFixSnippet', () => {
   it('lets a manual or illustrative fix bypass the gate', () => {
     expect(validateFixSnippet({ fixKind: 'manual', snippet: 'claude-team redispatch' })).toEqual([]);
     expect(validateFixSnippet({ fixKind: 'illustrative', snippet: 'Run `/compact` at task boundaries.' })).toEqual([]);
+  });
+});
+
+function emittedBlockedTaskFix(rootSubject: string): RecFix {
+  const task = (
+    id: string,
+    subject: string,
+    blockedBy: string[] = []
+  ): TaskRecord => ({
+    id,
+    sessionId: 'runtime-fixture',
+    status: 'pending',
+    subject,
+    description: '',
+    activeForm: '',
+    owner: '',
+    blocks: [],
+    blockedBy,
+    mtimeMs: 0,
+  });
+  const tasks = [
+    task('root', rootSubject),
+    task('child-1', 'First child', ['root']),
+    task('child-2', 'Second child', ['root']),
+  ];
+  const input = {
+    tokenData: [],
+    toolData: [],
+    sessions: [],
+    projects: [],
+    permissionRows: [],
+    apiErrors: [],
+    tasks,
+  } as unknown as RecommendationInput;
+  return blockedTaskPileupDetector.rule(input, 0)!.fix!;
+}
+
+describe('emitted runtime fix portability (#3381)', () => {
+  it('demotes an actual emitted fix when interpolated artifact text trips the portability rules', () => {
+    const fix = emittedBlockedTaskFix('Run /deploy before continuing');
+
+    // Negative control: the detector's real emitted bytes violate the validated
+    // contract when the runtime classification is forced to validated.
+    expect(validateFixSnippet({ ...fix, fixKind: 'validated' }).length).toBeGreaterThan(0);
+    expect(effectiveFixKind(fix)).toBe('manual');
+    expect(validateFixSnippet(fix)).toEqual([]);
   });
 });
 

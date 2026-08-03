@@ -1,6 +1,6 @@
 import type { Detector } from '../types';
 import type { AppliedMarkers } from '../types';
-import { claudeMdMarksApplied, short, basename, newestIsoDate } from '../shared';
+import { claudeMdMarksApplied, short, basename, newestIsoDate, truncate } from '../shared';
 import { redundantReads, type RedundantRead } from '../../parse-files';
 import { parseFileReread } from '../../parse-file-reread';
 import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
@@ -9,6 +9,17 @@ const MARKERS_REDUNDANT_READS: AppliedMarkers = {
   headings: [/^##\s+Key files\b/i],
   bodyPhrases: ['Load these files once into context'],
 };
+
+/** Render parsed artifact text literally without letting it add Markdown lines/fences. */
+function markdownCodeSpan(value: string): string {
+  const flat = truncate(value, 120);
+  const longestRun = Math.max(
+    0,
+    ...Array.from(flat.matchAll(/`+/g), (match) => match[0].length)
+  );
+  const fence = '`'.repeat(longestRun + 1);
+  return `${fence} ${flat} ${fence}`;
+}
 
 /** Same file Read many times in one session — pin it instead. */
 export const detector: Detector = {
@@ -103,10 +114,11 @@ export const detector: Detector = {
       fix: (() => {
         // De-dupe the most re-read files by basename for a human-readable list.
         const names = Array.from(new Set(reads.map((r) => basename(r.filePath)))).slice(0, 5);
-        const bullets = names.map((n) => `- @${n}`).join('\n');
+        const bullets = names.map((n) => `- ${markdownCodeSpan(`@${n}`)}`).join('\n');
         return {
           target: 'CLAUDE.md' as const,
           label: 'Pin files in CLAUDE.md',
+          fixKind: 'illustrative' as const,
           note: 'Append to your project CLAUDE.md. The @-prefix imports the file so its contents load once into context instead of being re-Read each time. Replace the basenames with repo-relative paths.',
           snippet: `## Key files (kept in context)\n\nLoad these files once into context, then reuse that copy instead of re-reading them:\n${bullets}`,
           appliedMarkers: MARKERS_REDUNDANT_READS,

@@ -8,6 +8,20 @@ const MARKERS_REPEATED_COMMANDS: AppliedMarkers = {
   bodyPhrases: ['wrap them in a script'],
 };
 
+/** Render parsed command text literally without letting embedded backticks close the span. */
+function markdownCodeSpan(value: string): string {
+  const flat = truncate(value, 70);
+  const longestRun = Math.max(
+    0,
+    ...Array.from(flat.matchAll(/`+/g), (match) => match[0].length)
+  );
+  const fence = '`'.repeat(longestRun + 1);
+  const padding = flat.length === 0 || flat.startsWith('`') || flat.endsWith('`')
+    ? ' '
+    : '';
+  return `${fence}${padding}${flat}${padding}${fence}`;
+}
+
 /** Identical Bash commands run 3+ times in a session — automate them. */
 export const detector: Detector = {
   id: 'workflow.repeated-commands',
@@ -36,11 +50,12 @@ export const detector: Detector = {
       fix: (() => {
         const bullets = repeats
           .slice(0, 3)
-          .map((r) => `- \`${truncate(r.command, 70)}\``)
+          .map((r) => `- ${markdownCodeSpan(r.command)}`)
           .join('\n');
         return {
           target: 'CLAUDE.md' as const,
           label: 'Document a wrapper',
+          fixKind: 'illustrative' as const,
           note: 'Append to your project CLAUDE.md. Wrap these in a script or Make target and point the entry here, so future sessions run one command instead of repeating the steps.',
           snippet:
             `## Common commands\n\n` +

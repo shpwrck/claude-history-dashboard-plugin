@@ -13,6 +13,7 @@ import type { RecommendationInput } from '../types';
 import { newestEpochDate, short, truncate } from '../shared';
 import type { TaskRecord } from '../../parse-tasks';
 import { PILEUP_MIN } from '../../parse-tasks';
+import { validateFixSnippet } from '../fix-validity';
 
 /**
  * Flatten arbitrary parsed text to a single display line.
@@ -168,6 +169,13 @@ export const detector: Detector = {
         )
         .join('\n#\n')
     );
+    // The text is shell-inert because every line is a comment, but `validated`
+    // also promises portability. Judge the emitted bytes after interpolation:
+    // a task subject carrying a host path or harness-only slash command must be
+    // presented as a manual example, while ordinary subjects remain validated.
+    const emittedFixKind = validateFixSnippet({ snippet: fixSnippet }).length === 0
+      ? 'validated'
+      : 'manual';
 
     return {
       id: 'workflow.blocked-task-pileup',
@@ -186,16 +194,12 @@ export const detector: Detector = {
       fix: {
         target: 'command',
         label: 'Identify and unblock root tasks',
-        // Declared, never inherited — an absent fixKind silently defaults to
-        // 'validated', leaving the one-click classification unclaimed. Safe-to-
-        // paste is judged against the DECLARED TARGET: this snippet is
-        // comment-only, and in a shell every `#` line is an inert no-op, so
-        // pasting it verbatim cannot do anything — matching the established
-        // comment-only `target: 'command'` fix in cost.idle-mcp-tools. (Against a
-        // settings.json target the same block would be 'manual', since `#` lines
-        // are not valid JSON and would break the file.) The real remedy is the
-        // human action in `note`; the snippet only names the roots to act on.
-        fixKind: 'validated',
+        // Declared from the emitted bytes, never inherited. Ordinary comment-
+        // only output is a validated shell no-op; artifact text carrying a host
+        // path or harness-only command is still inert, but becomes manual because
+        // `validated` promises portability as well as shell safety. The real
+        // remedy is the human action in `note`; the snippet names the roots.
+        fixKind: emittedFixKind,
         note:
           'Review each root task. Assign an owner or split it; downstream tasks unblock automatically.',
         snippet: fixSnippet,
