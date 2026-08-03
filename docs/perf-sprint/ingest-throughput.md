@@ -162,7 +162,7 @@ unbounded traversal work.
 Take a measurement with:
 
 ```
-CHD_COLD_INGEST_TARGET_MB=128 \
+CHD_COLD_INGEST_TARGET_MB=384 \
 CHD_COLD_INGEST_WORKERS=8 \
 node --import ./scripts/register-ts.mjs scripts/cold-ingest-bench.mjs --measure-only
 ```
@@ -176,40 +176,44 @@ zero, so drop the variable and pass the flag.
 
 The benchmark scales the deterministic sample corpus into a first-ever
 empty-cache corpus on disk, parses session rows serially and through a bounded
-worker pool, then asserts byte-equivalent `session_blob` rows and
-transcript-derived dataset slices before reporting timing.
+worker pool, then compares deterministic per-shard fingerprints of every
+`session_blob` row and transcript-derived dataset value before reporting timing.
+Workers stream at most 32 parsed rows at a time and wait for the parent to
+acknowledge each batch before parsing more. The parent consumes every row into
+one fixed-size fingerprint per deterministic shard. This keeps structured clone
+and the future single-writer parent merge inside the timed parallel path without
+retaining a corpus-sized row set.
 
-Measured 2026-07-29 (`72b62944` + #3076), 8 workers, Node 24.15 with a 2240 MB
-heap limit:
+Measured 2026-08-03 (`f4e40a95` base + #3451), 8 workers, Node 24.13.1 with
+the default heap limit on Linux 5.15 WSL2:
 
 | Path | Corpus | Time |
 |---|---:|---:|
-| Serial read + parse | 10,043 sessions / 128.0 MiB | 14,507.2 ms |
-| Worker read + parse | 8 workers / same corpus | 4,083.8 ms |
+| Serial read + parse | 30,124 sessions / 384.0 MiB | 53,759.9 ms |
+| Worker read + parse + bounded parent consume | 8 workers / same corpus | 12,755.5 ms |
 
-Speedup: **3.55x**. The benchmark asserts byte-identical session rows before
-printing timing. Transcript-derived dataset hash:
-`fa58a9a82c1693dab6fab64c5ad1a58973e7d0b1`.
+Speedup: **4.21x**. Peak process RSS (including the eight worker-thread heaps):
+**2,268.5 MiB**. The parent consumed all **30,124** rows through acknowledged
+32-row batches. Row fingerprint:
+`3adde501f11e512098bf0fad0b4e327d98900cab`; transcript-derived dataset
+fingerprint: `dee667c14b1d382b910017bcc09794a56eab00ee`.
 
 Two notes on why this supersedes the 2026-06-11 entry (30,504 sessions /
 384.0 MiB, 14,929.7 ms serial vs 5,616.5 ms worker, 2.66x, dataset hash
 `1b8be9afe0738bc1a08c9feee26531478f131125`) rather than sitting beside it:
 
-- **The old dataset hash is not reproducible and should not be compared
-  against.** `assembleTranscriptDataset` kept a hand-written copy of the
-  dataset-key list; ingest later gained the `valueFlow` and `secretsAtRest`
-  signals, and every run after that died on a `TypeError` before reporting.
-  The accumulator is now derived from `SESSION_SIGNALS`, so the hash covers
-  the current signal set — a different, larger dataset than the June figure.
-- **The 384 MiB corpus is a separate, still-open problem.** Both the serial and
-  the worker row sets are held in memory at once and then JSON-serialized twice
-  for the equivalence check, so peak heap scales with the corpus. At 384 MiB
-  that exceeds a 2240 MB heap limit and the process dies with
-  `FATAL ERROR: Reached heap limit`. This reproduces identically on `72b62944`
-  without any of the #3076 changes, so it is pre-existing rather than a
-  regression; it is filed separately. Until it is bounded, 128 MiB is the
-  largest corpus that completes on a default-heap host.
+- **The old dataset hashes are not comparable.** `assembleTranscriptDataset`
+  first missed newer signal keys, then retained and serialized both complete
+  datasets. The replacement derives its keys from `SESSION_SIGNALS` and hashes
+  length-framed values incrementally in deterministic worker-shard order. The
+  new fingerprint covers the current signal set without materializing it.
+- **The 384 MiB run now completes on the default heap.** The prior benchmark
+  simultaneously retained serial rows, parallel rows, two row JSON strings,
+  two assembled datasets, and their JSON strings. The bounded fingerprint path
+  removes that corpus-sized overlap; the reported peak RSS makes future memory
+  drift visible instead of assuming a heap override.
 
-The prototype keeps SQLite out of workers. Workers return parsed row payloads
-only; the parent process owns the deterministic session-id merge order and is
-the only future SQLite writer.
+The prototype keeps SQLite out of workers. Workers stream bounded row batches;
+the parent owns every shard fingerprint, deterministic shard ordering, and the
+only future SQLite-writer seam. A worker has at most one unacknowledged batch,
+so the transport stays bounded by worker count rather than corpus size.

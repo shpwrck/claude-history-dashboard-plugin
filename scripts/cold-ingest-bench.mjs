@@ -1,9 +1,9 @@
 // Prototype benchmark for a first-ever empty-cache ingest fan-out (#855).
 //
 // This intentionally stops before production wiring: workers read + parse
-// per-session signal rows, then the parent process merges rows in deterministic
-// session_id order. SQLite remains a single-writer concern for the later wiring
-// slice. Run with:
+// per-session signal rows, then stream bounded row batches back to parent-owned
+// fingerprints in deterministic worker-shard order. SQLite remains a
+// single-writer concern for the later wiring slice. Run with:
 //
 //   npm run bench:ingest:cold
 //
@@ -22,26 +22,27 @@
 //                     against a nonsense threshold is always false, the same
 //                     accident that let a real regression exit green).
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { buildSampleCorpus } from './sample-data/build-corpus.mjs';
+import {
+  combineColdIngestFingerprints,
+  createColdIngestFingerprint,
+} from './lib/cold-ingest-fingerprint.mjs';
 import { envNumber } from './lib/env-number.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REGISTER_TS = join(PROJECT_DIR, 'scripts', 'register-ts.mjs');
 const RUN_ID = randomUUID();
+const ROW_BATCH_SIZE = 32;
 
 function hrMs() {
   const [s, ns] = process.hrtime();
   return s * 1e3 + ns / 1e6;
-}
-
-function sha1(text) {
-  return createHash('sha1').update(text).digest('hex');
 }
 
 function cloneJsonl(jsonl, fromSessionId, toSessionId, fromProject, toProject) {
@@ -104,81 +105,41 @@ function buildLargeFixtureHome(targetBytes) {
   };
 }
 
-function sortRows(rows) {
-  return [...rows].sort((a, b) => String(a.session_id).localeCompare(String(b.session_id)));
+function shardSessions(sessions, workerCount) {
+  const chunks = Array.from({ length: workerCount }, () => []);
+  sessions.forEach((session, index) => {
+    chunks[index % workerCount].push(session);
+  });
+  return chunks.filter((chunk) => chunk.length > 0);
 }
 
-function portableRowsForHash(rows) {
-  return sortRows(rows).map((row) => ({
-    ...row,
-    sig: '<file-signature>',
-  }));
-}
-
-function assembleTranscriptDataset(rows, sessionSignals) {
-  // The accumulator keys are DERIVED from the signal descriptors, never
-  // restated. A hand-written key list is a second copy of SESSION_SIGNALS that
-  // rots the moment ingest gains a signal — and it did: `valueFlow` and
-  // `secretsAtRest` were added after this bench was last touched (#1373), so
-  // `out[signal.datasetKey]` was `undefined` and the benchmark died with
-  // "Cannot read properties of undefined (reading 'push')" before it ever
-  // reached the speedup comparison. Deriving the keys makes that
-  // unrepresentable; the explicit throws below turn the NEXT descriptor change
-  // into a named failure instead of a TypeError.
-  const dataset = {};
-  for (const signal of sessionSignals) {
-    if (signal.datasetKey) dataset[signal.datasetKey] = [];
-  }
-  for (const key of ['permissionRows', 'permissionChanges', 'entries']) {
-    dataset[key] ??= [];
-  }
-
-  for (const row of sortRows(rows)) {
-    for (const signal of sessionSignals) {
-      if (signal.aggregate === 'push-truthy') {
-        const value =
-          signal.parseGuard === 'guarded'
-            ? row[signal.column]
-              ? JSON.parse(row[signal.column])
-              : null
-            : JSON.parse(row[signal.column]);
-        if (value) dataset[signal.datasetKey].push(value);
-      } else if (signal.aggregate === 'spread') {
-        for (const value of JSON.parse(row[signal.column]) || []) {
-          dataset[signal.datasetKey].push(value);
-        }
-      } else if (signal.id === 'perm') {
-        const perm = JSON.parse(row[signal.column]) || {
-          perModeEntries: [],
-          changes: [],
-        };
-        dataset.permissionRows.push(...(perm.perModeEntries || []));
-        dataset.permissionChanges.push(...(perm.changes || []));
-      } else if (signal.id === 'entries') {
-        dataset.entries.push(...(JSON.parse(row[signal.column]) || []));
-      } else {
-        throw new Error(
-          `cold ingest bench: unhandled session signal '${signal.id}' (aggregate '${signal.aggregate}') — teach assembleTranscriptDataset about it`
-        );
-      }
+async function parseSerial(ingest, chunks) {
+  const fingerprints = [];
+  for (const chunk of chunks) {
+    const fingerprint = createColdIngestFingerprint(ingest.SESSION_SIGNALS);
+    for (const session of chunk) {
+      const sig = ingest.sessionFileSignature(session);
+      fingerprint.addRow(
+        ingest.parseSessionBlobRowFromDisk(session, sig).byColumn
+      );
     }
+    fingerprints.push(fingerprint.finish());
   }
-  return dataset;
+  return fingerprints;
 }
 
-async function parseSerial(ingest, sessions) {
-  const rows = [];
-  for (const session of sessions) {
-    const sig = ingest.sessionFileSignature(session);
-    rows.push(ingest.parseSessionBlobRowFromDisk(session, sig).byColumn);
-  }
-  return rows;
-}
-
-function parseWorkerChunk(chunk, workerId, home) {
+function parseWorkerChunk(chunk, workerId, home, sessionSignals) {
   return new Promise((resolve, reject) => {
+    const fingerprint = createColdIngestFingerprint(sessionSignals);
+    let expectedSequence = 0;
+    let receivedRows = 0;
+    let settled = false;
     const worker = new Worker(new URL('./cold-ingest-worker.mjs', import.meta.url), {
-      workerData: { sessions: chunk, workerId },
+      workerData: {
+        sessions: chunk,
+        workerId,
+        rowBatchSize: ROW_BATCH_SIZE,
+      },
       execArgv: ['--import', REGISTER_TS],
       env: {
         ...process.env,
@@ -186,28 +147,86 @@ function parseWorkerChunk(chunk, workerId, home) {
         CHD_DB_PATH: ':memory:',
       },
     });
-    worker.once('message', (message) => {
-      if (message?.ok) resolve(message.rows);
-      else reject(new Error(message?.error || 'cold ingest worker failed'));
+
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      void worker.terminate();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+
+    worker.on('message', (message) => {
+      if (settled) return;
+      try {
+        if (message?.ok === false) {
+          throw new Error(message.error || 'cold ingest worker failed');
+        }
+        if (message?.type === 'rows') {
+          if (
+            message.workerId !== workerId ||
+            message.sequence !== expectedSequence ||
+            !Array.isArray(message.rows) ||
+            message.rows.length < 1 ||
+            message.rows.length > ROW_BATCH_SIZE
+          ) {
+            throw new Error(
+              `cold ingest worker ${workerId}: invalid row batch ${JSON.stringify({
+                workerId: message?.workerId,
+                sequence: message?.sequence,
+                rows: message?.rows?.length,
+              })}`
+            );
+          }
+          for (const row of message.rows) fingerprint.addRow(row);
+          receivedRows += message.rows.length;
+          expectedSequence += 1;
+          // The worker parses no more rows until this acknowledgement arrives,
+          // bounding transport to one ROW_BATCH_SIZE payload per worker while
+          // preserving the parent-side merge/future SQLite-writer seam.
+          worker.postMessage({ type: 'ack', sequence: message.sequence });
+          return;
+        }
+        if (message?.type === 'done') {
+          if (
+            message.workerId !== workerId ||
+            message.batches !== expectedSequence ||
+            message.rows !== receivedRows ||
+            receivedRows !== chunk.length
+          ) {
+            throw new Error(
+              `cold ingest worker ${workerId}: incomplete row stream (${receivedRows}/${chunk.length})`
+            );
+          }
+          settled = true;
+          resolve(fingerprint.finish());
+          return;
+        }
+        throw new Error(`cold ingest worker ${workerId}: invalid protocol message`);
+      } catch (err) {
+        fail(err);
+      }
     });
-    worker.once('error', reject);
+    worker.once('error', fail);
     worker.once('exit', (code) => {
-      if (code !== 0) reject(new Error(`cold ingest worker exited ${code}`));
+      if (!settled) {
+        fail(
+          new Error(
+            code === 0
+              ? `cold ingest worker ${workerId} exited before completing its row stream`
+              : `cold ingest worker ${workerId} exited ${code}`
+          )
+        );
+      }
     });
   });
 }
 
-async function parseParallel(sessions, workerCount, home) {
-  const chunks = Array.from({ length: workerCount }, () => []);
-  sessions.forEach((session, index) => {
-    chunks[index % workerCount].push(session);
-  });
-  const results = await Promise.all(
-    chunks
-      .filter((chunk) => chunk.length > 0)
-      .map((chunk, index) => parseWorkerChunk(chunk, index, home))
+async function parseParallel(chunks, home, sessionSignals) {
+  return Promise.all(
+    chunks.map((chunk, index) =>
+      parseWorkerChunk(chunk, index, home, sessionSignals)
+    )
   );
-  return results.flat();
 }
 
 const measureOnly = process.argv.includes('--measure-only');
@@ -268,37 +287,46 @@ try {
   const sessions = ingest
     .listSessions()
     .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
+  const chunks = shardSessions(sessions, workerCount);
 
   console.log(
     `Corpus: ${sessions.length} sessions, ${(fixture.totalTranscriptBytes / 1024 / 1024).toFixed(1)} MiB transcript JSONL\n`
   );
 
   const serialStart = hrMs();
-  const serialRows = await parseSerial(ingest, sessions);
+  const serialFingerprints = await parseSerial(ingest, chunks);
   const serialMs = hrMs() - serialStart;
 
   const parallelStart = hrMs();
-  const parallelRows = await parseParallel(sessions, workerCount, fixture.home);
-  const parallelMs = hrMs() - parallelStart;
-
-  const serialRowJson = JSON.stringify(sortRows(serialRows));
-  const parallelRowJson = JSON.stringify(sortRows(parallelRows));
-  if (serialRowJson !== parallelRowJson) {
-    throw new Error('parallel session rows differ from serial rows');
-  }
-
-  const serialDataset = assembleTranscriptDataset(serialRows, ingest.SESSION_SIGNALS);
-  const parallelDataset = assembleTranscriptDataset(
-    parallelRows,
+  const parallelFingerprints = await parseParallel(
+    chunks,
+    fixture.home,
     ingest.SESSION_SIGNALS
   );
-  const serialDatasetJson = JSON.stringify(serialDataset);
-  const parallelDatasetJson = JSON.stringify(parallelDataset);
-  if (serialDatasetJson !== parallelDatasetJson) {
-    throw new Error('parallel transcript-derived dataset differs from serial');
+  const parallelMs = hrMs() - parallelStart;
+
+  if (JSON.stringify(serialFingerprints) !== JSON.stringify(parallelFingerprints)) {
+    throw new Error(
+      'parallel session rows or transcript-derived datasets differ from serial'
+    );
   }
 
   const speedup = serialMs / parallelMs;
+  const equivalence = combineColdIngestFingerprints(serialFingerprints);
+  const parallelEquivalence = combineColdIngestFingerprints(
+    parallelFingerprints
+  );
+  if (equivalence.rows !== sessions.length) {
+    throw new Error(
+      `fingerprinted ${equivalence.rows} rows for ${sessions.length} sessions`
+    );
+  }
+  if (parallelEquivalence.rows !== sessions.length) {
+    throw new Error(
+      `parent consumed ${parallelEquivalence.rows} worker rows for ${sessions.length} sessions`
+    );
+  }
+  const peakRssMiB = +(process.resourceUsage().maxRSS / 1024).toFixed(1);
   const summary = {
     corpus: {
       sessions: sessions.length,
@@ -310,9 +338,15 @@ try {
     speedup: +speedup.toFixed(2),
     minSpeedup,
     gated: !measureOnly,
-    rowHash: sha1(JSON.stringify(portableRowsForHash(serialRows))),
-    transcriptDatasetHash: sha1(serialDatasetJson),
-    sqliteWritePolicy: 'single-writer parent merge; workers return rows only',
+    rowHash: equivalence.rowHash,
+    transcriptDatasetHash: equivalence.transcriptDatasetHash,
+    peakRssMiB,
+    rowBatchSize: ROW_BATCH_SIZE,
+    parentConsumedRows: parallelEquivalence.rows,
+    memoryPolicy:
+      'one acknowledged bounded row batch per worker; parent fingerprints rows incrementally',
+    sqliteWritePolicy:
+      'single-writer parent consumes every parsed row; workers never write SQLite',
   };
 
   console.log(`Serial read+parse:   ${serialMs.toFixed(1)} ms`);
@@ -320,6 +354,7 @@ try {
   console.log(`Speedup:             ${speedup.toFixed(2)}x`);
   console.log(`Row hash:            ${summary.rowHash} (file signatures normalized)`);
   console.log(`Dataset hash:        ${summary.transcriptDatasetHash}`);
+  console.log(`Peak RSS:            ${summary.peakRssMiB.toFixed(1)} MiB`);
   console.log('\nJSON summary:');
   console.log(JSON.stringify(summary, null, 2));
 
