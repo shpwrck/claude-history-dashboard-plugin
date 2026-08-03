@@ -101,7 +101,9 @@ export const detector: Detector = {
       proofTier: 'accounting',
       title: 'Files re-read repeatedly within a session',
       detail: `${reads.length} (session, file) pair(s) re-Read the same file 3+ times${
-        withCompaction > 0 ? `, ${withCompaction} alongside compaction (eviction-driven)` : ''
+        withCompaction > 0
+          ? `, ${withCompaction} alongside compaction; causation is not established`
+          : ''
       }. Each re-read re-pays the token cost.`,
       action:
         'Pin frequently-needed files in CLAUDE.md or pass their contents once instead of re-reading.',

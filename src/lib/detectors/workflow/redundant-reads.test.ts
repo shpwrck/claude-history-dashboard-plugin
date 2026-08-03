@@ -104,6 +104,18 @@ describe('workflow.redundant-reads (#951)', () => {
     expect(rec?.reclaim).toBeUndefined();
   });
 
+  it('reports same-session compaction as co-occurrence, not the cause of repeated reads', () => {
+    const compactedTokenData = tokenData.map((row) => ({
+      ...row,
+      compactionEvents: [{}],
+    })) as SessionTokenData[];
+    const rec = detector.rule(input({ tokenData: compactedTokenData }), 0)!;
+
+    expect(rec.detail).toMatch(/alongside compaction/i);
+    expect(rec.detail).toMatch(/causation is not established/i);
+    expect(rec.detail).not.toMatch(/eviction-driven/i);
+  });
+
   it('labels the basename template illustrative because it still needs repo-relative paths (#3243)', () => {
     const rec = detector.rule(input(), 0)!;
     expect(effectiveFixKind(rec.fix!)).toBe('illustrative');
