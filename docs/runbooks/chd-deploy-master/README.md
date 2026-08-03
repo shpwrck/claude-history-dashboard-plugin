@@ -33,10 +33,13 @@ latest engine.
   pass `-p chd-deploy-master` on this box; that would spin a second stack that
   collides on port 5173). Not managed by systemd; `restart: unless-stopped`
   only, so after a reboot the container stays down until re-run.
-- **Image currently live (2026-08-03):**
-  `ghcr.io/shpwrck/claude-history-dashboard@sha256:e4b7e3b73e4ededd7906d1973b70640326e74b53c24ca1539bd5a9b9a796810a`
-  — the published `:latest` for master `7ae189e8`, selected explicitly via
-  `CHD_APP_IMAGE`. This is **ahead of the committed Compose digest pin**
+- **Image currently live (2026-08-03, later same day):**
+  `ghcr.io/shpwrck/claude-history-dashboard@sha256:8bf60c662e30f43d4cd10db66effd6af4714c688d7c11d8e1d9ce87c31119bea`
+  — the published `:latest` for master `08c8dbbe` (baked `GIT_SHA` confirms it),
+  selected explicitly via `CHD_APP_IMAGE`. Replaces the earlier same-day
+  `…@sha256:e4b7e3b7…` (master `7ae189e8`); re-pulled so the box would run the
+  #3588 recommendation-surface fix. This is **ahead of the committed Compose
+  digest pin**
   (July-27 `…@sha256:566ea25b…`), so any recreate WITHOUT `CHD_APP_IMAGE` set
   ROLLS BACK to the pin until a reviewed pin update lands (same ahead-of-pin
   condition as 2026-07-31, now via pull instead of local build).
@@ -134,13 +137,14 @@ to the pin.)
   and falls through to the SPA HTML with a 200, so it false-passes.
 - **Confirm real data is being read (the load-bearing check):**
   `curl -s http://127.0.0.1:5173/api/dataset.json | python3 -c "import json,sys; print(len(json.load(sys.stdin)['entries']))"`
-  must be **> 0** (1905 on 2026-08-03). This deployment's signature failure
+  must be **> 0** (1905, then 1913 later the same day, on 2026-08-03). This
+  deployment's signature failure
   mode is *empty-but-healthy* — healthz 200, SPA loads, zero sessions — caused
   by a missing shim, a recreate without the box override, or (pre-migration)
   a nested `${HOME}` bind path.
 - **Confirm WHICH image is live:** `podman inspect claude-history-dashboard_app_1
   --format '{{.ImageName}}'` must print the explicit `CHD_APP_IMAGE` value
-  (currently the `…@sha256:e4b7e3b7…` digest); the committed-pin digest
+  (currently the `…@sha256:8bf60c66…` digest); the committed-pin digest
   instead means an accidental rollback — re-run with `CHD_APP_IMAGE` set.
   Cross-check the baked commit:
   `podman inspect claude-history-dashboard_app_1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^GIT_SHA='`.
@@ -182,6 +186,19 @@ to the pin.)
   footgun is #3581. With the scope granted the instance runs the verified
   published build for master HEAD via `CHD_APP_IMAGE`, keeping the committed
   pin as the reviewed rollback target until a pin update lands.
+- **2026-08-03: read this runbook BEFORE hand-patching compose — the three
+  host facts reproduce in order.** Verifying the #3588 fix, a session skipped
+  the documented three-file `up` and instead deployed hand-patched copies of
+  the repo compose files. That re-derived all three migration breakages the
+  hard way, in sequence: the #3580 mis-parse (`volume [${HOME/.claude}] not
+  defined in top level`), then the uid mismatch (crash-loop `unable to open
+  database file`), then the SELinux denial (`Permission denied` on
+  `/home/node/.claude`, visible as AVC `container_t` → `user_home_t` and as an
+  *empty-but-healthy* dashboard reporting 1 recommendation instead of 39).
+  Each has a documented one-line remedy above. Re-running the documented
+  local-build path plus its chase restored the instance; the box-override and
+  shim were never at fault. The cost is entirely avoidable: the Re-run section
+  is the entry point, not a fallback.
 - **Cache volume is disposable.** `claude-history-dashboard_cache` holds only
   the regenerable SQLite ingest cache; deleting it is the sanctioned fix for
   uid-mapping changes (crash-loop `unable to open database file`, hit and
