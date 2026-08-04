@@ -123,8 +123,8 @@ views (`serverOnly: true`) are marked (S).
 
 ### Roll-up
 
-- **Backed:** 18 view families — every actionable signal projects through a detector.
-- **Orientation-only (documented):** 12 view families — descriptive context with no
+- **Backed:** 19 view families — every actionable signal projects through a detector.
+- **Orientation-only (documented):** 11 view families — descriptive context with no
   implied action (Overview/Summary spend, Insights narrative, Adoption status,
   Enterprise posture, Memories, Search, Sessions, Projects, Timeline, Turn
   Patterns shape).

@@ -25,12 +25,30 @@ design. Do not read a cost result until they are controlled or decomposed.
 
 ### 1. Fork cache lineage per arm
 
-Give every arm its own cache lineage with an arm-specific appended system prompt:
+Give every arm its own cache lineage with an arm-specific appended system prompt.
+Generate each arm's salt **once, before any invocation**, persist it (a per-arm
+shell variable in the run script, or a field in the run manifest), and reuse that
+exact value for the arm's warm-up and every measured run:
 
 ```bash
-claude -p "$TASK" \
-  --append-system-prompt "experiment-arm: treatment-$(uuidgen)"
+# Once per arm, before ANY invocation — record both values in the run manifest:
+CONTROL_SALT="experiment-arm: control-$(uuidgen)"
+TREATMENT_SALT="experiment-arm: treatment-$(uuidgen)"
+
+# Within an arm, warm-up and measured runs reuse the SAME stored value, so the
+# --append-system-prompt content is byte-identical across all of them:
+claude -p "$WARMUP_TASK" --append-system-prompt "$TREATMENT_SALT"   # warm-up
+claude -p "$TASK"        --append-system-prompt "$TREATMENT_SALT"   # measured
+
+# Between arms, the values are distinct, so the lineages stay forked:
+claude -p "$WARMUP_TASK" --append-system-prompt "$CONTROL_SALT"     # warm-up
+claude -p "$TASK"        --append-system-prompt "$CONTROL_SALT"     # measured
 ```
+
+Do **not** inline `$(uuidgen)` in the `claude` invocation itself: command
+substitution re-expands on every run, so the warm-up and the measured command
+would append different content — different cache lineages per invocation — which
+recreates the exact confound control 2 below exists to prevent.
 
 Prompt caching matches exact prefix content. The added arm salt makes the
 measured tail segment distinct for each arm, so one arm cannot inherit the other
@@ -47,8 +65,9 @@ decomposition.
 
 Warm-up runs must match measured runs byte-for-byte for every flag that can
 change the prompt prefix. That includes `--allowedTools`, MCP/tool availability,
-model flags, appended system prompt content, and any harness setting that changes
-tool definitions.
+model flags, appended system prompt content — including the per-arm salt from
+control 1, which must be the stored per-arm value, never re-generated per
+invocation — and any harness setting that changes tool definitions.
 
 A mismatched warm-up warms the wrong lineage. #1310's isolation check caught this
 case: the warm-up omitted the measured tool restriction, so it created a different
@@ -106,7 +125,9 @@ a backstop, not a license to skip cache controls in new runs.
 Any proof or null receipt that reports cost from headless Claude Code experiments
 must state:
 
-- whether per-arm cache forking was used and what salt format was applied;
+- whether per-arm cache forking was used, what salt format was applied, and that
+  each arm's salt was generated once and reused verbatim across its warm-up and
+  measured runs;
 - whether warm-ups used the exact measured command;
 - how batches were interleaved or randomized across arms;
 - whether `DISABLE_PROMPT_CACHING=1` was used;

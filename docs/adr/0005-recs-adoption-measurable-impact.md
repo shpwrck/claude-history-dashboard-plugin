@@ -1,6 +1,16 @@
 # 0005 — Measurable, showable impact for the recs auto-injection
 
-Status: Accepted (2026-07-22 — #573 closed; the AdoptionScorecard ships this design; originally design-first from the #573 debate)
+Status: Accepted (2026-07-22 — #573 closed; the AdoptionScorecard shipped against this design's original wording; originally design-first from the #573 debate)
+Amended: 2026-08-03 (#3280, v0.6.0 data-integrity audit) — the marker-transition language
+below is corrected from causal claims ("the finding caused a change", "byte-level evidence
+the snippet was applied", ADOPTED) to non-causal **marker-confirmed** terminology. The
+matcher only establishes that a matching heading and case-insensitive body-phrase fragments
+exist somewhere in the merged CLAUDE.md after surfacing; that is evidence *consistent with*
+adoption, never proof of it. This amendment **prescribes** the corrected terminology as the
+design's semantics; the currently-shipped scorecard and receipts copy
+(`src/lib/adoption-scorecard.ts`, `src/components/AdoptionScorecard.tsx`,
+`docs/recs-adoption-receipts.md`) still uses the original ADOPTED wording — the copy rename
+is tracked in #3620.
 Date: 2026-06-04
 Supersedes: none
 Related: #573, ADR [0002](0002-dynamic-recommendation-rule-engine.md) (rule engine),
@@ -31,11 +41,12 @@ plus a synthesis pass. Full debate transcript: workflow run `wf_2d9abc24-bcc` (1
 
 Separate two claims the issue conflated, and never let them mix:
 
-1. **ADOPTION — "did the fix land?"** Provable, deterministic, ships in v0.
+1. **MARKER-CONFIRMED ALIGNMENT — "does merged CLAUDE.md now match the fix's markers?"**
+   Deterministic to check, **non-causal to interpret**; ships in v0.
 2. **EFFICACY — "did the fix change an outcome that would not have changed anyway?"**
    A bounded, replay-only fast-follow that we explicitly **do not claim in v0**.
 
-### Tier 1 — Adoption (the load-bearing, showable signal)
+### Tier 1 — Marker-confirmed alignment (the load-bearing, showable signal)
 
 Make the **`claudeMdMarksApplied()` FIRING→SUPPRESSED transition** the primary impact signal.
 
@@ -43,19 +54,30 @@ Make the **`claudeMdMarksApplied()` FIRING→SUPPRESSED transition** the primary
 and `return null` once a fix snippet's declared headings + body phrases appear in the merged
 CLAUDE.md (e.g. `reliability.rate-limits` dies once `## Rate-limit hygiene` +
 `"serialize heavy automated batches"` are present). That boolean is computed every pass and
-**thrown away**. It is the one place in the system where "the finding caused a change" is a
-deterministic config-state delta, not a behavioural inference — the marker string is copied
-verbatim from `fix.snippet`, so its presence in CLAUDE.md is byte-level evidence the snippet was
-applied. No task-mix / session-length / "agent would have done it anyway" confound touches it.
+**thrown away**. The transition itself is a deterministic config-state delta, not a behavioural
+inference — but what it establishes is bounded: the matcher checks only that a matching heading
+and case-insensitive body-phrase fragments exist *somewhere* in the merged (global + project)
+CLAUDE.md after the finding was surfaced. That is **marker-confirmed configuration alignment —
+evidence consistent with adoption, not proof that the recommendation caused the change or that
+the fix snippet was applied verbatim**: the fragments can be written independently, pre-exist in
+a different merged scope, or arrive for an unrelated reason, and temporal ordering alone does not
+establish causation. Task-mix / session-length / "agent would have done it anyway" confounds do
+not touch the marker check, but those false-positive attribution paths do.
 
-**Attribution, honestly bounded.** The adoption claim requires **both** a prior hook-stamped
-*surfaced* entry for finding F **and** the later *suppressed* transition. A suppression with no
-prior surface is labeled "organic / not attributed" and excluded from the coached count. We claim
-only that the loop closed (surfaced → fix applied → engine went quiet). We do **not** claim
-downstream behaviour measurably improved. The "stayed quiet for N sessions" number is labeled
+**Attribution, honestly bounded.** The marker-confirmed claim requires **both** a prior
+hook-stamped *surfaced* entry for finding F **and** the later *suppressed* transition. A
+suppression with no prior surface is labeled "organic / not attributed" and excluded from the
+surfaced-then-marker-confirmed count. We claim only that the loop closed (surfaced → markers now
+match → engine went quiet). We do **not** claim the recommendation caused the config change, that
+the snippet was applied, or that downstream behaviour measurably improved. **ADOPTED / "coached"
+attribution is reserved** for evidence the marker check does not provide: an explicit user action
+receipt (the user applying the fix through a recorded action) or a verified before/after
+CLAUDE.md hunk tied to the surfaced finding. The "stayed quiet for N sessions" number is labeled
 **"no recurrence," not "impact,"** with the explicit caveat that a *deleted* CLAUDE.md section
-also reads as quiet. `M/N` is reported as a **lower bound** — prose adoptions that miss the
-strict-AND markers are undercounted.
+also reads as quiet. `M/N` is reported as a **lower bound on marker matches** — prose adoptions
+that miss the strict-AND markers are undercounted — while, independently and in the other
+direction, a marker match can be a false-positive attribution (independently written,
+pre-existing in another merged scope, or unrelated); the two caveats do not cancel.
 
 ### Tier 2 — Efficacy (reuse shadow-calls; deferred; never a v0 gate)
 
@@ -74,16 +96,26 @@ dashboard shows "adoption: injected N times" only and withholds any causal verdi
 
 ### The demo artifact — the Adoption Card
 
-One per-finding card, three timestamped rows a viewer reads in 10 seconds:
+One per-finding card, three timestamped rows a viewer reads in 10 seconds. (The card keeps
+its shipped name; the 2026-08-03 amendment prescribes non-causal marker-confirmed wording
+for its states and aggregates. The shipped copy still renders the original `ADOPTED`
+wording — the rename is tracked in #3620.)
 
 - **SURFACED** — `reliability.rate-limits injected 2026-05-28, session <hash>`
-- **ADOPTED** — the matching CLAUDE.md hunk (`## Rate-limit hygiene` + body phrase),
-  rendered from `liveConfig` **at render time, never stored**
+- **MARKER-CONFIRMED** (shipped copy: `ADOPTED`; rename tracked in #3620) — the matching
+  CLAUDE.md hunk (`## Rate-limit hygiene` + body phrase), rendered from `liveConfig`
+  **at render time, never stored** — presented as evidence consistent with adoption, not
+  proof the snippet was applied
 - **SUPPRESSED** — `engine went silent 2026-05-29, markers now match`, with a non-causal
   "no recurrence for N sessions" sub-line and an `M/N` "lower bound" badge
 
-Status pill: `SURFACED | ADOPTED | SUPPRESSED`. Index header:
-`N surfaced / M adopted (marker-confirmed) / median days-to-adopt`.
+Prescribed status pill: `SURFACED | MARKER-CONFIRMED | SUPPRESSED`. Prescribed index
+header: `N surfaced / M marker-confirmed / median days-to-marker-match`. (The shipped
+scorecard still renders `ADOPTED`, "M adopted (marker-confirmed)", and "median
+days-to-adopt"; #3620 tracks aligning that copy.) An `ADOPTED` state may only be
+reintroduced as a distinct, stronger claim if the design later adds the required
+evidence: an explicit user action receipt or a before/after hunk tied to the surfaced
+finding.
 
 ### Storage & privacy (made structural)
 
@@ -117,13 +149,17 @@ kinds respect `killswitch.mjs OFF` / `SHADOW_CALLS_OFF=1` — one switch for "st
 
 ### Positive
 - v0 ships a showable, auditable artifact with **zero behavioural inference** — a skeptic's
-  "compared to what?" is answered by a deterministic config-state diff, not a correlation.
+  "compared to what?" is answered by a deterministic marker-state diff, explicitly labeled
+  as non-causal marker confirmation rather than proof of adoption.
 - Reuses shadow-calls for efficacy; no second measurement stack, no budget double-spend.
 - Privacy is structural (allowlist-drop, fail-closed, killswitch-aware, dashboard-owned store),
   so the global hook never persists project content.
 
 ### Negative / accepted limits
-- Adoption is a **lower bound**: prose fixes that miss strict-AND markers undercount uptake.
+- Marker confirmation bounds real uptake loosely in **both** directions: prose fixes that
+  miss strict-AND markers undercount it, while independently written, pre-existing, or
+  unrelated matching fragments can confirm without the finding causing anything — which is
+  why the state is never labeled proof of adoption.
 - "No recurrence" can be caused by a user *deleting* the CLAUDE.md section — labeled, not hidden.
 - Efficacy accrues slowly at N=1; a causal verdict is withheld below the #545 threshold.
 - The adoption schema must be client-side-encrypted-or-omitted from day one (#467) or the local
