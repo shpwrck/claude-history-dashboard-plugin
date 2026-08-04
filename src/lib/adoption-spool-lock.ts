@@ -114,7 +114,8 @@ interface LockGeneration {
 
 type LockHolderInspection =
   | { state: 'missing' | 'hostile' }
-  | { state: 'fresh' | 'stale'; generation: LockGeneration };
+  | { state: 'fresh'; generation: LockGeneration }
+  | { state: 'stale'; generation: LockGeneration; content: string };
 
 function sameLockGeneration(
   left: LockGeneration,
@@ -148,13 +149,25 @@ async function inspectLockHolder(
   if (stats.isSymbolicLink() || !stats.isFile()) {
     return { state: 'hostile' };
   }
-  return {
-    state:
-      BigInt(Date.now()) - stats.mtimeMs > BigInt(staleMs)
-        ? 'stale'
-        : 'fresh',
-    generation: { dev: stats.dev, ino: stats.ino },
-  };
+  const generation = { dev: stats.dev, ino: stats.ino };
+  if (BigInt(Date.now()) - stats.mtimeMs <= BigInt(staleMs)) {
+    return { state: 'fresh', generation };
+  }
+  // Stale: capture the observed bytes so the reclaim can bind removal to this
+  // exact lock instance. On an inode-recycling filesystem a rival's fresh
+  // replacement can reuse this generation's inode; the observed content plus a
+  // staleness re-check at removal time reject that impostor even though the
+  // (dev,ino) generation still matches (#3615).
+  let content: string;
+  try {
+    content = await readFile(lockPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { state: 'missing' };
+    }
+    throw error;
+  }
+  return { state: 'stale', generation, content };
 }
 
 /**
@@ -236,9 +249,41 @@ async function removeClaimedLockGeneration(
 
 async function reclaimStaleLock(
   lockPath: string,
-  generation: LockGeneration
+  generation: LockGeneration,
+  observedContent: string,
+  staleMs: number
 ): Promise<boolean> {
-  return removeClaimedLockGeneration(lockPath, generation, async () => true);
+  // Remove the stale lock ONLY if, after the hard-link claim has pinned the
+  // inode, the pinned file is STILL the exact lock we observed: same generation,
+  // same bytes, AND still stale. On an inode-recycling filesystem a rival's
+  // fresh replacement can reuse this generation's inode (so the (dev,ino) check
+  // in removeClaimedLockGeneration passes), but it carries a different token and
+  // a recent mtime — either signal rejects it, closing the double-reclaim
+  // window (#3615). The mtime re-check also covers the epsilon between inspect's
+  // lstat and its readFile, where a recycled replacement could have been
+  // captured as the "observed content".
+  return removeClaimedLockGeneration(lockPath, generation, async () => {
+    let stats;
+    try {
+      stats = await lstat(lockPath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+    if (stats.isSymbolicLink() || !stats.isFile()) return false;
+    if (!sameLockGeneration({ dev: stats.dev, ino: stats.ino }, generation)) {
+      return false;
+    }
+    if (BigInt(Date.now()) - stats.mtimeMs <= BigInt(staleMs)) return false;
+    let current: string;
+    try {
+      current = await readFile(lockPath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+    return current === observedContent;
+  });
 }
 
 async function releaseRotationLock(
@@ -316,7 +361,12 @@ export async function acquireAdoptionSpoolRotationLock(
       const holder = await inspectLockHolder(lockPath, staleMs);
       if (holder.state === 'hostile') return null;
       if (holder.state === 'stale') {
-        const reclaimed = await reclaimStaleLock(lockPath, holder.generation);
+        const reclaimed = await reclaimStaleLock(
+          lockPath,
+          holder.generation,
+          holder.content,
+          staleMs
+        );
         // Retry immediately only when this contender actually removed the old
         // generation. A contended/orphan claim must yield between attempts so
         // fail-closed acquisition cannot become a CPU spin (#3557).

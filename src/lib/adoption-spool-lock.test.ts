@@ -210,6 +210,7 @@ process.exit(0);
 `;
 
 const STALE_CONTENTION_ROUNDS = 12;
+const STALE_CONTENTION_BATCHES = 4;
 
 async function assertSingleStaleReclaimWinner(round: number): Promise<void> {
   const dir = await makeDir();
@@ -562,17 +563,28 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
   );
 
   // (c) Two contender child processes racing a stale lock: it is reclaimed
-  // within bounds and EXACTLY ONE contender wins.
+  // within bounds and EXACTLY ONE contender wins. Run >=48 rounds at
+  // concurrency 12 (the #3615 acceptance bar) in BATCHES — each batch is 12
+  // rounds x 2 children = 24 concurrent processes, awaited before the next — so
+  // CI runners are never hit with all 96 processes at once.
+  //
+  // NOTE: this only exercises the inode-reuse vulnerable path on an
+  // inode-recycling filesystem. os.tmpdir() is tmpfs here, whose inode numbers
+  // are monotonic (never recycled), so tmpfs MASKS the race and this stays a
+  // smoke test. The deterministic "refuses to remove a recycled-inode fresh
+  // generation" test below is the correctness proof for #3615.
   it(
     'lets exactly one of two concurrent child contenders reclaim a stale lock across repeated parallel rounds',
     async () => {
-      await Promise.all(
-        Array.from({ length: STALE_CONTENTION_ROUNDS }, (_, round) =>
-          assertSingleStaleReclaimWinner(round)
-        )
-      );
+      for (let batch = 0; batch < STALE_CONTENTION_BATCHES; batch++) {
+        await Promise.all(
+          Array.from({ length: STALE_CONTENTION_ROUNDS }, (_, i) =>
+            assertSingleStaleReclaimWinner(batch * STALE_CONTENTION_ROUNDS + i)
+          )
+        );
+      }
     },
-    30_000
+    60_000
   );
 
   it('does not remove a fresh generation after a stale observer is delayed', async () => {
@@ -655,6 +667,123 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
       );
 
       permitRemoval();
+      expect(await delayedObserver).toBeNull();
+      expect(await readFile(lockPath, 'utf8')).toBe(freshPayload);
+      expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+    } finally {
+      permitRemoval();
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
+  // Deterministic proof of the #3615 fix, filesystem-independent. It reproduces
+  // "same (dev,ino), different bytes" — the inode-RECYCLING case the natural
+  // reclaim path leaves open — by pausing the observer's claim link after it has
+  // inspected the stale lock (capturing its generation + content), replacing the
+  // file with a FRESH lock (new token, recent mtime, distinct real inode), and
+  // then spoofing that fresh inode's lstat to report the ORIGINAL stale
+  // (dev,ino). Pre-fix (shouldRemove === () => true) trusts (dev,ino) identity
+  // alone and removes the impostor -> the observer double-wins; the content +
+  // still-stale re-check must refuse it, so the observer acquires nothing.
+  it('refuses to remove a recycled-inode fresh generation during stale reclaim', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    const stalePayload = `${JSON.stringify({
+      schemaVersion: '1',
+      kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+      role: 'drain',
+      pid: 1,
+      token: randomUUID(),
+      createdAt: '2026-07-31T00:00:00.000Z',
+    })}\n`;
+    await writeFile(lockPath, stalePayload, 'utf8');
+    const past = new Date(Date.now() - 60_000);
+    await utimes(lockPath, past, past);
+    // The (dev,ino) the delayed observer will capture as its stale generation.
+    const staleStat = await lstat(lockPath, { bigint: true });
+    const spoofGen = { dev: staleStat.dev, ino: staleStat.ino };
+
+    let reportRemovalStarted!: () => void;
+    const removalStarted = new Promise<void>((resolve) => {
+      reportRemovalStarted = resolve;
+    });
+    let permitRemoval!: () => void;
+    const removalPermitted = new Promise<void>((resolve) => {
+      permitRemoval = resolve;
+    });
+    let paused = false;
+    const pauseFirstRemoval = async () => {
+      if (paused) return;
+      paused = true;
+      reportRemovalStarted();
+      await removalPermitted;
+    };
+
+    // After the swap, make the fresh replacement's real inode report the
+    // original stale (dev,ino) — emulating inode-number recycling on ANY FS,
+    // including tmpfs whose real inode numbers are monotonic.
+    let replaced = false;
+    let recycledIno: bigint | null = null;
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        link: async (...args: Parameters<typeof actual.link>) => {
+          await pauseFirstRemoval();
+          return actual.link(...args);
+        },
+        lstat: (async (
+          p: Parameters<typeof actual.lstat>[0],
+          opts?: Parameters<typeof actual.lstat>[1]
+        ) => {
+          const real = await actual.lstat(p, opts as never);
+          const realIno = (real as { ino: bigint }).ino;
+          if (replaced && recycledIno !== null && realIno === recycledIno) {
+            return {
+              dev: spoofGen.dev,
+              ino: spoofGen.ino,
+              mtimeMs: (real as { mtimeMs: bigint }).mtimeMs,
+              isSymbolicLink: () => real.isSymbolicLink(),
+              isFile: () => real.isFile(),
+            } as unknown as typeof real;
+          }
+          return real;
+        }) as typeof actual.lstat,
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireWithRecycledInode } =
+        await import('./adoption-spool-lock');
+      const delayedObserver = acquireWithRecycledInode(spool, {
+        role: 'drain',
+        budgetMs: 500,
+      });
+      await removalStarted;
+
+      // Replace the stale lock with a fresh one (distinct real inode), then arm
+      // the spoof so its lstat reports the recycled (original) generation.
+      await rm(lockPath, { force: true });
+      const freshToken = randomUUID();
+      const freshPayload = `${JSON.stringify({
+        schemaVersion: '1',
+        kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+        role: 'producer',
+        pid: 2,
+        token: freshToken,
+        createdAt: new Date().toISOString(),
+      })}\n`;
+      await writeFile(lockPath, freshPayload, 'utf8');
+      recycledIno = (await lstat(lockPath, { bigint: true })).ino;
+      replaced = true;
+
+      permitRemoval();
+      // The observer must NOT acquire: the pinned file is a fresh replacement
+      // (different token, recent mtime), so the content + still-stale re-check
+      // rejects removal even though the (dev,ino) generation matches.
       expect(await delayedObserver).toBeNull();
       expect(await readFile(lockPath, 'utf8')).toBe(freshPayload);
       expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
