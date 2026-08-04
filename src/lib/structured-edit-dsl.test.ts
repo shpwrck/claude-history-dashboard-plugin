@@ -65,6 +65,44 @@ describe('validateEditDsl', () => {
     if (!result.ok) expect(result.errors[0]).toMatch(/changes nothing/i);
   });
 
+  it('rejects a second edit whose anchor an earlier edit consumed (in-order simulation, #3175)', () => {
+    // Both edits anchor on the ONLY "abc" in the source; against the original
+    // both anchors "exist", but applying edit 1 consumes it, so edit 2 has no
+    // live anchor. A count/existence check passed this; in-order validation must
+    // reject it, or applyEditDsl would silently skip edit 2 and present "x" as a
+    // fully validated program.
+    const raw = JSON.stringify({
+      edits: [
+        { find: 'abc', replace: 'x' },
+        { find: 'abc', replace: 'y' },
+      ],
+    });
+    const result = validateEditDsl(raw, 'abc');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // Domain-phrased, names edit 2 and the consumed anchor; no raw parser trace.
+      expect(result.errors.some((e) => /Edit 2/.test(e) && e.includes('abc'))).toBe(true);
+      expect(result.errors.some((e) => /no longer present|already changed or consumed/i.test(e))).toBe(
+        true
+      );
+      expect(result.errors.join(' ')).not.toMatch(/SyntaxError|Unexpected token/i);
+    }
+    // And the same program must NOT parse to a "valid" partial application.
+    if (result.ok) throw new Error('unreachable: consumed-anchor program must not validate');
+  });
+
+  it('still accepts independent multi-edits whose anchors survive earlier edits (#3175 regression guard)', () => {
+    const raw = JSON.stringify({
+      edits: [
+        { find: 'a < max', replace: 'a <= max' },
+        { find: 'return', replace: 'return /* checked */' },
+      ],
+    });
+    const result = validateEditDsl(raw, SOURCE);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.edits).toHaveLength(2);
+  });
+
   it('reports every bad edit at once (does not stop at the first)', () => {
     const raw = JSON.stringify({
       edits: [

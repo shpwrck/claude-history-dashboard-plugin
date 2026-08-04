@@ -77,6 +77,30 @@ describe('generateStructuredEditArmSample', () => {
     expect(gen.repairRounds).toBe(2);
   });
 
+  it('does not present a partially-applicable multi-edit program as validated (#3175)', async () => {
+    // Two edits both anchored on the only "abc": application yields "x" (the
+    // second anchor is consumed), so the program must NOT validate. The
+    // constrained arm therefore exhausts and reports the source UNCHANGED with
+    // schemaValid=false — never the partial "x" dressed up as validated output.
+    const DOUBLE_ANCHOR = JSON.stringify({
+      edits: [
+        { find: 'abc', replace: 'x' },
+        { find: 'abc', replace: 'y' },
+      ],
+    });
+    const s = sample({
+      id: 'partial-multi-edit',
+      source: 'abc',
+      expected: 'xy', // the naive "both applied" fantasy that never actually happens
+      freeFormResponse: 'abc',
+      constrainedResponses: [DOUBLE_ANCHOR],
+    });
+    const gen = await generateStructuredEditArmSample(s, scriptedStructuredEditTransport, 2);
+    expect(gen.constrainedSchemaValid).toBe(false);
+    expect(gen.constrainedContent).toBe('abc'); // source unchanged, NOT the partial "x"
+    expect(gen.constrainedContent).not.toBe('x');
+  });
+
   it('honors a custom maxRounds bound (no budget -> the improved sample never repairs)', async () => {
     const s = sample({
       id: 'no-budget',

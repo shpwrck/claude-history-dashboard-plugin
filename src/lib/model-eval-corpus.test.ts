@@ -8,6 +8,7 @@ import {
   parseCorpusTask,
   validateCorpus,
   corpusTaskRef,
+  type CorpusTask,
 } from './model-eval-corpus';
 import { buildFixtureBackedBatchSpec } from './model-eval-batch';
 
@@ -68,6 +69,78 @@ describe('parseCorpus / parseCorpusTask', () => {
   it('parseCorpus returns [] for non-arrays', () => {
     expect(parseCorpus({})).toEqual([]);
     expect(parseCorpus(null)).toEqual([]);
+  });
+});
+
+describe('validateCorpus round-trip fidelity (#3133)', () => {
+  // A one-task corpus that IS its own normal form — the control the mutants
+  // below each break by exactly one normalization.
+  const clean = (): CorpusTask => ({
+    id: 'a',
+    title: 'A',
+    instruction: 'do a',
+    gate: { kind: 'test', command: 'npm test', expectExitCode: 0 },
+    tags: ['x'],
+  });
+
+  it('accepts a corpus whose tasks are already their normal form', () => {
+    const result = validateCorpus([clean()]);
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('CURATED_CORPUS stays valid (still round-trips clean)', () => {
+    expect(validateCorpus(CURATED_CORPUS).ok).toBe(true);
+  });
+
+  // Each of these keeps the task COUNT identical (nothing is dropped or
+  // duplicated) but is silently normalized on reparse. The old count-only check
+  // reported every one of them ok:true; the deep round-trip check must reject.
+  it('rejects a non-integer expectExitCode defaulted to 0', () => {
+    const task = { ...clean(), gate: { ...clean().gate, expectExitCode: 1.5 } };
+    const result = validateCorpus([task as unknown as CorpusTask]);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes('gate.expectExitCode'))).toBe(true);
+  });
+
+  it('rejects text that is trimmed on reparse (padded instruction)', () => {
+    const task = { ...clean(), instruction: '  do a  ' };
+    const result = validateCorpus([task]);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes('instruction'))).toBe(true);
+  });
+
+  it('rejects duplicate tags that dedupe on reparse', () => {
+    const task = { ...clean(), tags: ['x', 'x'] };
+    const result = validateCorpus([task]);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes('tags'))).toBe(true);
+  });
+
+  it('rejects an oversized tag dropped on reparse', () => {
+    const task = { ...clean(), tags: ['y'.repeat(200)] };
+    const result = validateCorpus([task]);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes('tags'))).toBe(true);
+  });
+
+  it('rejects an omitted tags field materialized to [] on reparse', () => {
+    const { id, title, instruction, gate } = clean();
+    const task = { id, title, instruction, gate }; // no tags key
+    const result = validateCorpus([task as unknown as CorpusTask]);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes('tags'))).toBe(true);
+  });
+
+  it('still reports the malformed/duplicate count error (retained)', () => {
+    const dup = [clean(), clean()]; // same id -> one dropped
+    const result = validateCorpus(dup);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => /failed validation or were duplicates/.test(e))).toBe(true);
+  });
+
+  it('still reports the empty-corpus error', () => {
+    expect(validateCorpus([]).errors).toContain('corpus is empty');
   });
 });
 

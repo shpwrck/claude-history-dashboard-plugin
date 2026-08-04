@@ -175,14 +175,81 @@ export function parseCorpus(raw: unknown): CorpusTask[] {
   return out;
 }
 
-/** A corpus is valid when it is non-empty and round-trips through the parser
- *  unchanged (no malformed/duplicate tasks). */
+/**
+ * Collect the dotted field paths at which `a` and `b` structurally differ,
+ * in a deterministic order (a's own keys first, then b's extra keys, arrays by
+ * index). Pure and total; uses no Map/Set/sort so it adds no eager-index
+ * contract. Used to turn a failed round-trip into a field-level drift report.
+ */
+function collectDriftPaths(a: unknown, b: unknown, path: string, out: string[]): void {
+  if (Object.is(a, b)) return;
+  const aObj = a !== null && typeof a === 'object';
+  const bObj = b !== null && typeof b === 'object';
+  if (!aObj || !bObj) {
+    out.push(path || '(root)');
+    return;
+  }
+  const aArr = Array.isArray(a);
+  const bArr = Array.isArray(b);
+  if (aArr || bArr) {
+    if (!aArr || !bArr) {
+      out.push(path || '(root)');
+      return;
+    }
+    const len = Math.max(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      collectDriftPaths(a[i], b[i], `${path}[${i}]`, out);
+    }
+    return;
+  }
+  const ar = a as Record<string, unknown>;
+  const br = b as Record<string, unknown>;
+  const seen: string[] = [];
+  for (const k of Object.keys(ar)) {
+    seen.push(k);
+    collectDriftPaths(ar[k], br[k], path ? `${path}.${k}` : k, out);
+  }
+  for (const k of Object.keys(br)) {
+    if (!seen.includes(k)) {
+      collectDriftPaths(ar[k], br[k], path ? `${path}.${k}` : k, out);
+    }
+  }
+}
+
+/**
+ * A corpus is valid when it is non-empty AND every supplied task round-trips
+ * through {@link parseCorpus} unchanged.
+ *
+ * The count check alone is not fidelity: a malformed/duplicate task is DROPPED
+ * (so the count falls and is caught here), but a task can also be silently
+ * NORMALIZED without being dropped — a non-integer `expectExitCode` defaulted to
+ * 0, leading/trailing whitespace trimmed, duplicate or oversized `tags`
+ * dropped/deduped, an omitted `tags` field materialized to `[]`. Those keep the
+ * count identical, so a count-only validator wrongly reports them valid. To make
+ * "valid" mean genuine faithfulness, compare the COMPLETE reparsed corpus to the
+ * supplied one with a deterministic deep-equality check and report the drifted
+ * fields per task. The original malformed/duplicate count error is retained.
+ */
 export function validateCorpus(tasks: CorpusTask[]): { ok: boolean; errors: string[] } {
   const errors: string[] = [];
   if (tasks.length === 0) errors.push('corpus is empty');
   const reparsed = parseCorpus(tasks);
   if (reparsed.length !== tasks.length) {
     errors.push(`${tasks.length - reparsed.length} task(s) failed validation or were duplicates`);
+  } else {
+    // Counts agree, so parseCorpus dropped nothing and reparsed[i] is the normal
+    // form of tasks[i] in input order — a 1:1 alignment safe to compare
+    // field-by-field for normalization/drift the count check cannot see.
+    for (let i = 0; i < tasks.length; i++) {
+      const drift: string[] = [];
+      collectDriftPaths(tasks[i], reparsed[i], '', drift);
+      if (drift.length > 0) {
+        errors.push(
+          `task "${reparsed[i].id}" does not round-trip through the parser — ` +
+            `normalized field(s): ${drift.join(', ')}`
+        );
+      }
+    }
   }
   return { ok: errors.length === 0, errors };
 }

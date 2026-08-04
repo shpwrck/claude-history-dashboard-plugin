@@ -102,6 +102,12 @@ export const detector: Detector = {
     // The session directory is passed as ONE separately shell-quoted argument
     // (never spliced into the command text), and `find … -exec jq … {} +` keeps
     // the whole thing a single command with no shell glob to expand (#3230).
+    // Scope agreement (#3385): `find` defaults to `-P` (physical — it does not
+    // descend a symlinked path operand), so it inspects only real session
+    // directories. That now matches `parseTasksDir`, which refuses symlinked
+    // session directories (bounded-fs `readSubdirectoryNamesBoundedSync`,
+    // #3378) — so no session the detector counts is one this command would fail
+    // to traverse.
     const fixSnippet = abandoned
       .slice(0, 3)
       .map(

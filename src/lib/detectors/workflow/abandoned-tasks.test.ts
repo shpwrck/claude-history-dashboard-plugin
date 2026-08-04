@@ -7,12 +7,15 @@
  * Issue #559.
  */
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, utimesSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { detector } from './abandoned-tasks';
 import { validateFixSnippet } from '../fix-validity';
 import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { TaskRecord } from '../../parse-tasks';
-import { COLD_DAYS } from '../../parse-tasks';
+import { COLD_DAYS, parseTasksDir } from '../../parse-tasks';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -240,6 +243,56 @@ describe('workflow.abandoned-tasks (#559)', () => {
     const rec = detector.rule(makeInput(tasks), NOW);
     // The id is passed as a separately shell-quoted argument (#3230).
     expect(rec?.fix?.snippet).toContain(`~/.claude/tasks/'${sid}'`);
+  });
+});
+
+// ── #3385: parse-tasks symlink refusal ⇒ detector count agrees with the -P fix
+// snippet's scope ────────────────────────────────────────────────────────────
+//
+// `parseTasksDir` refuses a symlinked SESSION directory (bounded-fs, #3378), and
+// the fix snippet's `find` runs in its default `-P` mode (it does not descend a
+// symlinked path operand). The two must agree on scope: a session the detector
+// counts must be one the recommended command could actually inspect. This drives
+// both through a real fs fixture — a symlinked foreign session alongside a real
+// cold one — and asserts the symlinked session contributes NOTHING.
+describe('workflow.abandoned-tasks scope agreement with parse-tasks symlink refusal (#3385)', () => {
+  it('never counts a symlinked session directory, so its find/-P fix snippet lists every reported task', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'abandoned-3385-outside-'));
+    const root = mkdtempSync(join(tmpdir(), 'abandoned-3385-root-'));
+    try {
+      // A FOREIGN session with an OPEN task, reachable only via a symlink.
+      mkdirSync(join(outside, 'foreign'));
+      const foreignTask = join(outside, 'foreign', '1.json');
+      writeFileSync(foreignTask, JSON.stringify({ status: 'in_progress', subject: 'stolen' }));
+      symlinkSync(join(outside, 'foreign'), join(root, 'sess-linked'));
+
+      // A REAL session with an OPEN task.
+      const realDir = join(root, 'sess-real');
+      mkdirSync(realDir);
+      const realTask = join(realDir, '1.json');
+      writeFileSync(realTask, JSON.stringify({ status: 'pending', subject: 'real open' }));
+
+      // Age BOTH files well past the cold gate: if parseTasksDir wrongly followed
+      // the symlink, the detector would fire on it too.
+      const oldSecs = Date.now() / 1000 - (COLD_DAYS + 5) * 24 * 60 * 60;
+      utimesSync(foreignTask, oldSecs, oldSecs);
+      utimesSync(realTask, oldSecs, oldSecs);
+
+      const records = parseTasksDir(root);
+      // Only the real session is ingested; the symlinked one is refused.
+      expect(records.map((r) => r.sessionId)).toEqual(['sess-real']);
+
+      const rec = detector.rule(makeInput(records), Date.now());
+      expect(rec?.id).toBe('workflow.abandoned-tasks');
+      // Exactly the one real open task — the symlinked session contributes none.
+      expect(rec?.affected).toBe(1);
+      // The fix snippet targets only the real session id.
+      expect(rec?.fix?.snippet).toContain('sess-real');
+      expect(rec?.fix?.snippet).not.toContain('sess-linked');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
