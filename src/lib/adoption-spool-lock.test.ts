@@ -389,6 +389,145 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
     await lock!.release();
   });
 
+  // #3625: a stale lock whose content read fails with a NON-ENOENT error
+  // (EACCES on a foreign-owned mode-0600 stale lock, a transient EIO) must be
+  // classified fail-closed — NEVER reclaimed — and acquisition must DEGRADE to
+  // unavailable (back off within budget, return null) rather than letting the
+  // read error propagate out of acquire and abort wholesale on the first read.
+  it('fails closed without reclaiming when a stale lock content read fails with a non-ENOENT error', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    const stalePayload = `${JSON.stringify({
+      schemaVersion: '1',
+      kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+      role: 'producer',
+      pid: 1,
+      token: randomUUID(),
+      createdAt: '2026-07-31T00:00:00.000Z',
+    })}\n`;
+    await writeFile(lockPath, stalePayload, 'utf8');
+    const past = new Date(Date.now() - 60_000);
+    await utimes(lockPath, past, past);
+
+    let lockReads = 0;
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        // Only the lock's CONTENT read fails; everything else is real. This is
+        // the EACCES-on-a-foreign-owned-stale-lock / transient-EIO case that the
+        // content-binding (#3615) added to inspectLockHolder.
+        readFile: (async (
+          p: Parameters<typeof actual.readFile>[0],
+          opts?: Parameters<typeof actual.readFile>[1]
+        ) => {
+          if (String(p) === lockPath) {
+            lockReads++;
+            const error = new Error(
+              'EACCES: permission denied'
+            ) as NodeJS.ErrnoException;
+            error.code = 'EACCES';
+            throw error;
+          }
+          return actual.readFile(p, opts as never);
+        }) as typeof actual.readFile,
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireWithUnreadableLock } =
+        await import('./adoption-spool-lock');
+      const started = Date.now();
+      const lock = await acquireWithUnreadableLock(spool, {
+        role: 'drain',
+        budgetMs: 90,
+        retryDelayMs: 15,
+      });
+      const elapsedMs = Date.now() - started;
+
+      // Fail closed: acquisition is unavailable, the unreadable stale lock is
+      // left INTACT (never reclaimed), and no reclaim/quarantine residue exists.
+      expect(lock).toBeNull();
+      expect(await readFile(lockPath, 'utf8')).toBe(stalePayload);
+      expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+      // The read error was classified, not propagated: acquire backed off across
+      // MULTIPLE attempts within budget. Pre-#3625 the throw exited acquire on
+      // the FIRST read (a single lockRead, in ~0 ms).
+      expect(lockReads).toBeGreaterThanOrEqual(2);
+      expect(elapsedMs).toBeGreaterThanOrEqual(75);
+      expect(elapsedMs).toBeLessThan(1000);
+    } finally {
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
+  // #3625 companion: an ENOENT content read (the lock vanished between our lstat
+  // and read) must still fail OPEN — treated as 'missing' so the next attempt
+  // recreates the lock — NOT as the fail-closed 'unreadable' state.
+  it('treats an ENOENT content-read (lock vanished mid-inspect) as missing and acquires', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    const stalePayload = `${JSON.stringify({
+      schemaVersion: '1',
+      kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+      role: 'producer',
+      pid: 1,
+      token: randomUUID(),
+      createdAt: '2026-07-31T00:00:00.000Z',
+    })}\n`;
+    await writeFile(lockPath, stalePayload, 'utf8');
+    const past = new Date(Date.now() - 60_000);
+    await utimes(lockPath, past, past);
+
+    let vanished = false;
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        readFile: (async (
+          p: Parameters<typeof actual.readFile>[0],
+          opts?: Parameters<typeof actual.readFile>[1]
+        ) => {
+          if (!vanished && String(p) === lockPath) {
+            vanished = true;
+            // Simulate the holder removing the lock between our lstat and read.
+            await actual.rm(lockPath, { force: true });
+            const error = new Error(
+              'ENOENT: no such file or directory'
+            ) as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return actual.readFile(p, opts as never);
+        }) as typeof actual.readFile,
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireAfterVanish } =
+        await import('./adoption-spool-lock');
+      const lock = await acquireAfterVanish(spool, {
+        role: 'drain',
+        budgetMs: 500,
+      });
+      // Fail OPEN: the vanished lock is treated as missing, so acquisition
+      // succeeds by recreating the lock rather than fail-closing to null.
+      expect(lock).not.toBeNull();
+      expect(await readFile(lockPath, 'utf8')).toContain(lock!.token);
+      expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+      await lock!.release();
+      expect(await exists(lockPath)).toBe(false);
+    } finally {
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
   // (d) A symlink planted at the lock path: acquisition refuses permanently —
   // nothing is followed, nothing is unlinked, and the budget is not waited out.
   it('refuses a symlink planted at the lock path without following or unlinking it', async () => {

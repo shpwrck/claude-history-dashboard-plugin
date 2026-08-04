@@ -115,7 +115,12 @@ interface LockGeneration {
 type LockHolderInspection =
   | { state: 'missing' | 'hostile' }
   | { state: 'fresh'; generation: LockGeneration }
-  | { state: 'stale'; generation: LockGeneration; content: string };
+  | { state: 'stale'; generation: LockGeneration; content: string }
+  // A stale lock whose bytes could NOT be read for a reason other than ENOENT
+  // (EACCES on a foreign-owned mode-0600 lock, a transient EIO, ...). Reclaim is
+  // content-bound (#3615), so a lock we cannot read cannot be reclaimed: this is
+  // an intended fail-closed state the acquirer treats as NON-reclaimable (#3625).
+  | { state: 'unreadable'; generation: LockGeneration };
 
 function sameLockGeneration(
   left: LockGeneration,
@@ -163,9 +168,21 @@ async function inspectLockHolder(
     content = await readFile(lockPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // The lock vanished between our lstat and this read: fail OPEN — treat it
+      // as missing so the next attempt can recreate it. Nothing to reclaim.
       return { state: 'missing' };
     }
-    throw error;
+    // Any OTHER read error (EACCES on a foreign-owned mode-0600 stale lock, a
+    // transient EIO, ...) means we cannot bind a reclaim to the lock's observed
+    // bytes (#3615). This is INTENDED fail-closed (#3625): classify it
+    // EXPLICITLY as `unreadable` — a non-reclaimable state — instead of letting
+    // the exception propagate out of acquire (which would abort acquisition
+    // wholesale on the first attempt) or guessing it is safe to remove a lock we
+    // cannot even read (#3557's "never guess it is safe to remove"). A
+    // foreign-owned/unreadable stale lock is NEVER reclaimed; rotation is simply
+    // unavailable this cycle and a later acquire retries once it is readable or
+    // gone.
+    return { state: 'unreadable', generation };
   }
   return { state: 'stale', generation, content };
 }
@@ -371,6 +388,15 @@ export async function acquireAdoptionSpoolRotationLock(
         // generation. A contended/orphan claim must yield between attempts so
         // fail-closed acquisition cannot become a CPU spin (#3557).
         if (!reclaimed) await sleep(retryDelayMs);
+        continue;
+      }
+      if (holder.state === 'unreadable') {
+        // Fail-closed (#3625): a stale lock whose bytes we cannot read cannot be
+        // bound to a content-verified reclaim (#3615), so we NEVER reclaim it.
+        // Back off and retry within budget rather than reclaiming or aborting;
+        // rotation is unavailable this cycle and a later acquire retries once the
+        // lock becomes readable or is removed.
+        await sleep(retryDelayMs);
         continue;
       }
       // 'missing' (holder released between our open and lstat) retries
