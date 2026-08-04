@@ -1,5 +1,5 @@
-import type { Detector } from '../types';
-import { short, RATE_LIMIT_STATUSES } from '../shared';
+import type { Detector, RecProvenance } from '../types';
+import { short, RATE_LIMIT_STATUSES, newestIsoDate } from '../shared';
 import { type ReclaimClaim } from '../../reclaim';
 import {
   PREFIX_REWASTE_FRAC,
@@ -82,16 +82,43 @@ export const detector: Detector = {
 
     const sessions = new Set(scopeKeys.map((k) => k.split('|')[0]));
     const maxAttempt = reretries.reduce((m, e) => Math.max(m, e.retryAttempt ?? 0), 0);
+    const windowSec = EVENT_WINDOW_MS / 1000;
+    // Dated by the newest OBSERVED re-attempt timestamp (#3205), never `now`.
+    const asOf = newestIsoDate(reretries.map((e) => e.timestamp));
+    const provenance: RecProvenance = {
+      observations: [
+        {
+          claim: `${reretries.length} overload/rate-limit error(s) with status 429/529 AND retryAttempt>1 (up to ${maxAttempt}) across ${sessions.size} session(s)`,
+          source: 'apiErrors',
+          field: 'ApiErrorEvent.status / retryAttempt / timestamp / sessionId',
+          value: reretries.length,
+        },
+        {
+          claim: `~${(cacheReadTokens / 1_000_000).toFixed(2)}M cache-read token(s) fell inside a +/-${windowSec}s window around those re-attempt timestamps, over ${scopeKeys.length} (session, model) scope(s)`,
+          source: 'tokenData',
+          field: 'TokenEntry.timestamp / cacheReadTokens (per session+model scope)',
+          value: cacheReadTokens,
+        },
+        {
+          claim: `a conservative ${Math.round(PREFIX_REWASTE_FRAC * 100)}% of that in-window cache-read is booked as estimated associated waste`,
+          source: 'tokenData',
+          field: 'TokenEntry.cacheReadTokens x PREFIX_REWASTE_FRAC',
+          value: Math.round(PREFIX_REWASTE_FRAC * 100),
+        },
+      ],
+      inference: `The token->error association is a +/-${windowSec}s timestamp join, not an exact request match (ApiErrorEvent carries no request/toolUseId), so it is APPROXIMATE — unrelated in-window cache reads can be swept in. The figure is therefore an ESTIMATE of the cache-read waste associated with overload re-attempts, not a proven exact repayment.`,
+      ...(asOf ? { asOf } : {}),
+    };
     return {
       id: LEVER_ID,
       category: 'reliability',
       severity: 'info',
-      title: 'Overload re-retries re-pay the cached prefix',
-      detail: `${reretries.length} overload/rate-limit (429/529) error(s) re-attempted (retryAttempt up to ${maxAttempt}) across ${sessions.size} session(s); each re-attempt re-reads the cached prefix. A conservative ${Math.round(
+      title: 'Overload re-retries likely re-read the cached prefix (estimated waste)',
+      detail: `${reretries.length} overload/rate-limit (429/529) error(s) re-attempted (retryAttempt up to ${maxAttempt}) across ${sessions.size} session(s); each re-attempt likely re-reads the turn's cached prefix. Associated by an approximate +/-${windowSec}s timestamp join (no exact request id), a conservative ${Math.round(
         PREFIX_REWASTE_FRAC * 100
       )}% of the in-window cache-read (~${(cacheReadTokens / 1_000_000).toFixed(
         2
-      )}M tokens) is re-paid waste.`,
+      )}M tokens) is the estimated associated cache-read waste.`,
       action:
         'Pace heavy automated runs and schedule large unattended batches off-peak so 429/529 backoff re-attempts stop re-feeding the cached prefix.',
       estSavingsUsd,
@@ -101,6 +128,7 @@ export const detector: Detector = {
         .slice(0, 5)
         .map((e) => `${short(e.sessionId)}, ${e.status} attempt ${e.retryAttempt}`),
       view: 'errors',
+      provenance,
     };
   },
 };

@@ -262,7 +262,7 @@ export function measureReclaimPasteWorkload(
 }
 
 interface ToolItem {
-  kind: 'oversized-output' | 'duplicate-output';
+  kind: 'oversized-output' | 'repeated-command';
   label: string;
   reclaimTokens: number;
   occurrences: number;
@@ -334,8 +334,15 @@ export const detector: Detector = {
     // ── Bucket (a): oversized + duplicate non-file tool_result payloads ───────
     for (const session of toolData) {
       const sessionTs = startIndex.get(session.sessionId) ?? 0;
-      // Group identical non-file calls within the session to find re-fetches.
-      const groups = new Map<string, { count: number; bytes: number; toolName: string; ts: number }>();
+      // Group non-file calls by (tool + command) within the session to find
+      // repeated commands. NOTE (#3186): the fingerprint is command identity, not
+      // OUTPUT identity — the transcript carries no result-content digest — so a
+      // group is a REPEATED COMMAND, not a proven duplicate result. We keep both
+      // the largest single result (`bytes`, representative) and the summed
+      // measured bytes across every call (`totalBytes`) so reclaim is sized from
+      // the actual per-repeat payloads rather than (count-1) x the max.
+      // perf-index-contract: reclaim-tool-call-groups always-consumed: each session groups map is iterated immediately below to emit oversized and repeated-command tool items
+      const groups = new Map<string, { count: number; bytes: number; totalBytes: number; toolName: string; ts: number }>();
       for (const call of session.calls) {
         if (FILE_TOOLS.has(call.toolName)) continue; // file-Read territory — excluded
         if (call.resultBytes <= 0) continue;
@@ -343,11 +350,13 @@ export const detector: Detector = {
         const g = groups.get(fp) ?? {
           count: 0,
           bytes: 0,
+          totalBytes: 0,
           toolName: call.toolName,
           ts: 0,
         };
         g.count += 1;
-        g.bytes = Math.max(g.bytes, call.resultBytes); // representative size
+        g.bytes = Math.max(g.bytes, call.resultBytes); // largest single result (representative)
+        g.totalBytes += call.resultBytes; // sum of measured per-call sizes
         g.ts = Math.max(g.ts, tsMs(call.timestamp) || sessionTs);
         groups.set(fp, g);
       }
@@ -358,12 +367,19 @@ export const detector: Detector = {
         const newestTs = g.ts || sessionTs;
         const fpTail = fp.split('::').slice(1).join('::').trim();
         if (g.count >= 2) {
-          // Duplicate: every repeat after the first re-pays the same ingestion.
-          const reclaimTokens = perCallTokens * (g.count - 1);
+          // #3186: a re-run command is NOT proof of identical OUTPUT (no
+          // result-content digest is captured), so this is a REPEATED-COMMAND
+          // estimate. Size it from the MEASURED bytes of the repeats — the summed
+          // payload minus the largest single result, kept as the one necessary
+          // fetch — never (count-1) x the max size, which overstates when the
+          // repeats returned different sizes.
+          const reclaimTokens = Math.round(
+            Math.max(0, g.totalBytes - g.bytes) / CHARS_PER_TOKEN
+          );
           if (reclaimTokens <= 0) continue;
           toolItems.push({
-            kind: 'duplicate-output',
-            label: `${g.toolName} result re-fetched ${g.count}x${fpTail ? ` (${fpTail.slice(0, 48)})` : ''} — ~${perCallTokens.toLocaleString()} tok each`,
+            kind: 'repeated-command',
+            label: `${g.toolName} command re-run ${g.count}x${fpTail ? ` (${fpTail.slice(0, 48)})` : ''} — ~${reclaimTokens.toLocaleString()} tok re-ingested on repeats (estimate; largest single result ~${perCallTokens.toLocaleString()} tok)`,
             reclaimTokens,
             occurrences: g.count - 1,
             newestTs,
@@ -446,27 +462,27 @@ export const detector: Detector = {
       }
     }
 
-    const dupCount = toolItems.filter((i) => i.kind === 'duplicate-output').length;
+    const repeatCount = toolItems.filter((i) => i.kind === 'repeated-command').length;
     const overCount = toolItems.filter((i) => i.kind === 'oversized-output').length;
     const pasteCount = pasteItems.length;
 
     const observations: RecObservation[] = [
       {
-        claim: `${overCount} oversized + ${dupCount} duplicate non-file tool_result payload(s) and ${pasteCount} re-pasted block(s) carry reclaimable context`,
+        claim: `${overCount} oversized + ${repeatCount} repeated-command non-file tool call(s) and ${pasteCount} re-pasted block(s) carry reclaimable context (repeated-command reclaim is an estimate — command identity, not proven-identical output)`,
         source: 'parse-tools',
-        field: 'toolData[].calls[] (non-file) resultBytes; sessions[].entries[].pastedContents',
+        field: 'toolData[].calls[] (non-file) toolName+command fingerprint + resultBytes; sessions[].entries[].pastedContents',
         value: items.length,
       },
       {
-        claim: `Total deterministically-reclaimable context across these items: ~${totalReclaimTokens.toLocaleString()} tokens`,
+        claim: `Estimated reclaimable context across these items: ~${totalReclaimTokens.toLocaleString()} tokens`,
         source: 'parse-tools',
-        field: 'resultBytes / 4 (duplicates: repeats x size; oversized: half the over-threshold tail) + pastedContents repeats',
+        field: 'resultBytes / 4 (repeated-command: measured repeat bytes = total - largest single result; oversized: half the over-threshold tail) + pastedContents repeats',
         value: totalReclaimTokens,
       },
     ];
     const provenance: RecProvenance = {
       observations,
-      inference: `Reclaim is the re-ingested/compressible tail only: duplicate tool results re-pay (count-1) x size, oversized single results book half the bytes above ${OVERSIZED_RESULT_BYTES.toLocaleString()}, and a block pasted N times re-pays (N-1) x size. File-Read re-ingestion is excluded (owned by cross-session-reread and repo-map-context-waste). Priced at the measured cache-read residual rate.`,
+      inference: `Reclaim is the re-ingested/compressible tail only: a repeated command re-pays the MEASURED bytes of its repeats (summed payload minus the largest single result) — an estimate, since the transcript captures no result-content digest to prove the outputs were identical; oversized single results book half the bytes above ${OVERSIZED_RESULT_BYTES.toLocaleString()}; and a block pasted N times re-pays (N-1) x size. File-Read re-ingestion is excluded (owned by cross-session-reread and repo-map-context-waste). Priced at the measured cache-read residual rate.`,
       ...(asOf ? { asOf } : {}),
       ...(stale !== undefined ? { stale } : {}),
     };
@@ -477,10 +493,10 @@ export const detector: Detector = {
       id: 'context.reclaim-potential',
       category: 'context',
       severity: 'info',
-      title: 'Reclaim duplicate tool output and re-pasted context',
-      detail: `${items.length} item(s) — ${overCount} oversized + ${dupCount} duplicate tool outputs and ${pasteCount} re-pasted block(s) — carry ~${totalReclaimTokens.toLocaleString()} tokens of deterministically-reclaimable context worth ~${fmtUsd(estSavingsUsd)}${trendPhrase}. This is the tool-output / paste bloat the file-Read detectors don't cover.`,
+      title: 'Reclaim repeated tool output and re-pasted context',
+      detail: `${items.length} item(s) — ${overCount} oversized + ${repeatCount} repeated-command tool output(s) and ${pasteCount} re-pasted block(s) — carry ~${totalReclaimTokens.toLocaleString()} tokens of estimated reclaimable context worth ~${fmtUsd(estSavingsUsd)}${trendPhrase}. Repeated-command reclaim is an estimate sized from the measured repeat bytes (command identity is not proof of identical output). This is the tool-output / paste bloat the file-Read detectors don't cover.`,
       action:
-        'Narrow oversized tool calls (head/grep/limit instead of dumping the whole output), avoid re-running identical commands, and reference re-pasted content once instead of pasting it each turn.',
+        'Narrow oversized tool calls (head/grep/limit instead of dumping the whole output), avoid re-running the same command when its output has not changed, and reference re-pasted content once instead of pasting it each turn.',
       estSavingsUsd,
       affected: items.length,
       view: 'context',

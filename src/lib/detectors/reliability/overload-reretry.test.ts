@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './overload-reretry';
+import { validateRecommendationProvenance } from '../provenance';
 import { PREFIX_REWASTE_FRAC } from './reclaim-prefix';
 import type { RecommendationInput } from '../types';
 import type { ApiErrorEvent } from '../../parse-errors';
@@ -114,6 +115,33 @@ describe('reliability.overload-reretry (#950)', () => {
     const summed = result.booked.reduce((s, b) => s + b.marginalUsd, 0);
     expect(summed).toBeCloseTo(result.billOriginal - result.billFinal, 9);
     expect(result.billFinal).toBeGreaterThanOrEqual(0);
+  });
+
+  it('emits structured provenance and softens the claim to an approximate estimate (#3214)', () => {
+    const td = [
+      session('s1', 'claude-opus-4-7', [entry({ cacheReadTokens: 2_000_000 })]),
+    ];
+    const rec = detector.rule(
+      input({ tokenData: td, apiErrors: [apiErr({ status: 529, retryAttempt: 2 })] }),
+      0
+    );
+    expect(rec).not.toBeNull();
+    // Passes the #3205 provenance contract.
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
+    // Observations cite BOTH artifact field sets and the +/-90s window.
+    const obs = rec!.provenance!.observations;
+    expect(
+      obs.some((o) => /ApiErrorEvent\.status.*retryAttempt.*timestamp.*sessionId/.test(o.field))
+    ).toBe(true);
+    expect(obs.some((o) => /cacheReadTokens/.test(o.field))).toBe(true);
+    expect(
+      obs.some((o) => /90s window/.test(o.claim)) ||
+        /90s timestamp join/.test(rec!.provenance!.inference ?? '')
+    ).toBe(true);
+    // Inference labels the join approximate; wording no longer claims exact repayment.
+    expect(rec!.provenance!.inference).toMatch(/approximate/i);
+    expect(rec!.detail).toMatch(/estimated associated cache-read waste/i);
+    expect(rec!.detail).not.toMatch(/is re-paid waste/i);
   });
 
   it('stays silent with no events, no token scope, or no cache-read', () => {

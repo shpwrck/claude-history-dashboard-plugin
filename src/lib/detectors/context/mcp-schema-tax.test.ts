@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './mcp-schema-tax';
 import { duplicateMcpServers, type ToolInventory } from '../../parse-tool-inventory';
+import { getModelPricing } from '../../pricing';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData, LiveConfig, TokenEntry } from '../../../types';
 
@@ -123,6 +124,63 @@ describe('context.mcp-schema-tax (#1920)', () => {
     expect(rec?.detail).toMatch(/50% of the/);
     expect(rec?.detail).toMatch(/tokens\/tool/);
     expect(rec?.evidence?.some((e) => e.includes('githubmcp'))).toBe(true);
+  });
+
+  it('bills each session for its OWN tool count, not the cross-session union (#3184)', () => {
+    // github + githubmcp are a duplicate pair. githubmcp exposes 30 tools in s1
+    // but only 10 in s2 — the old code charged the union (30) to BOTH sessions,
+    // over-billing s2. Each session must be billed for the schemas IT loaded.
+    const TOKENS_PER_TOOL_SCHEMA = 120; // mirrors the detector proxy
+    const shared = Array.from({ length: 30 }, (_, i) => `tool_${i}`);
+    const s1Inv: ToolInventory = {
+      sessionId: 's1',
+      toolsAvailable: [
+        ...shared.map((t) => `mcp__github__${t}`),
+        ...shared.map((t) => `mcp__githubmcp__${t}`), // 30 in s1
+      ],
+      toolsUsed: [],
+      unusedTools: [],
+      utilizationPct: 0,
+    };
+    const s2Inv: ToolInventory = {
+      sessionId: 's2',
+      toolsAvailable: [
+        ...shared.map((t) => `mcp__github__${t}`),
+        ...shared.slice(0, 10).map((t) => `mcp__githubmcp__${t}`), // only 10 in s2
+      ],
+      toolsUsed: [],
+      unusedTools: [],
+      utilizationPct: 0,
+    };
+    const td: SessionTokenData[] = [
+      { sessionId: 's1', entries: Array.from({ length: 50 }, entry) } as unknown as SessionTokenData,
+      { sessionId: 's2', entries: Array.from({ length: 50 }, entry) } as unknown as SessionTokenData,
+    ];
+    const rec = detector.rule(
+      input({
+        toolInventories: [s1Inv, s2Inv],
+        tokenData: td,
+        liveConfig: liveConfig(['github', 'githubmcp']),
+      }),
+      0
+    );
+    expect(rec).not.toBeNull();
+
+    // Expected = each session's OWN githubmcp schema count x write/read-turn
+    // pricing (write once + read on turns 2..N), summed. s1 own=30, s2 own=10.
+    const rates = getModelPricing('claude-opus-4-7');
+    const perSession = (tools: number, turns: number) =>
+      ((tools * TOKENS_PER_TOOL_SCHEMA) / 1_000_000) *
+      (rates.cacheWrite5m + rates.cacheRead * (turns - 1));
+    const expected = perSession(30, 50) + perSession(10, 50);
+    expect(rec!.estSavingsUsd).toBeCloseTo(expected, 9);
+    // …strictly less than the old union-count bill (30 charged to BOTH sessions).
+    const unionBill = perSession(30, 50) + perSession(30, 50);
+    expect(rec!.estSavingsUsd!).toBeLessThan(unionBill);
+
+    // Copy no longer claims a cache read on the first turn.
+    expect(rec!.detail).toMatch(/written once and cache-read on later turns/i);
+    expect(rec!.detail).not.toMatch(/cache-read every turn/i);
   });
 
   it('discloses the unique-tool loss caveat when overlap is partial', () => {

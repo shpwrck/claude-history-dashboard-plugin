@@ -70,15 +70,8 @@ const MIN_TOKEN_LEN = 3;
 
 /** Noise floor — fewer avoidable round-trips than this isn't worth a finding. */
 const MIN_INDEPENDENT_PAIRS = 3;
-/** At/above this the round-trip waste is heavy enough to warrant a warning. */
+/** At/above this the summary-absence heuristic surfaces enough candidates to warrant a warning. */
 const HEAVY_INDEPENDENT_PAIRS = 50;
-/**
- * Conservative per-inference latency credited to each avoided round-trip — a
- * TTFT-plus-minimal-emission floor, NOT the measured per-turn latency (which
- * includes tool-execution time). The honest lower bound for "one fewer
- * inference".
- */
-const PER_INFERENCE_FLOOR_MS = 2000;
 
 interface ReadStep {
   tokens: string[];
@@ -175,7 +168,12 @@ function countSessionGaps(timeline: SessionTimeline): SessionGap {
       if (entry.toolUseId) {
         const step = awaitingResult.get(entry.toolUseId);
         if (step) {
-          step.resultText = entry.summary ?? '';
+          // A stripped/absent result summary is UNVERIFIABLE (bulk timelines
+          // strip `summary`), NOT a provably empty result. Leave it `null` so
+          // the summary-absence heuristic cannot fire off a summary it never
+          // saw; only an explicit '' (an empty result that actually arrived)
+          // proves "contains no token" (#3228).
+          step.resultText = entry.summary ?? null;
           awaitingResult.delete(entry.toolUseId);
         }
       }
@@ -261,9 +259,6 @@ export const detector: Detector = {
     const summary = summarizeSerialGaps(input.timelines);
     if (summary.independent < MIN_INDEPENDENT_PAIRS) return null;
 
-    const reclaimMin = Math.round(
-      (summary.independent * PER_INFERENCE_FLOOR_MS) / 60000
-    );
     const severity =
       summary.independent >= HEAVY_INDEPENDENT_PAIRS ? 'warning' : 'info';
 
@@ -274,19 +269,19 @@ export const detector: Detector = {
       .slice(0, 5)
       .map(
         (s) =>
-          `${short(s.sessionId)}: ${s.independent} avoidable round-trip(s) (${s.naive} serialized read adjacency)`
+          `${short(s.sessionId)}: ${s.independent} candidate batchable pair(s) (${s.naive} serialized read adjacency)`
       );
 
     const provenance: RecProvenance = {
       observations: [
         {
-          claim: `${summary.independent} serialized read-only call pair(s) across ${summary.sessionsAffected} session(s) had the later call's path/pattern textually absent from the earlier call's result`,
+          claim: `${summary.independent} of ${summary.naive} serialized read-only call pair(s) across ${summary.sessionsAffected} session(s) had the later call's path/pattern absent from the earlier call's CLIPPED result summary — a summary-based heuristic candidate for batching, not proof of independence`,
           source: 'parse-timeline',
           field: 'entries[].toolName/summary',
           value: summary.independent,
         },
         {
-          claim: `${summary.naive} serialized read-only adjacencies before the independence gate (naive upper bound)`,
+          claim: `${summary.naive} serialized read-only adjacencies were seen before the summary-absence heuristic was applied`,
           source: 'parse-timeline',
           field: 'entries[].timestamp',
           value: summary.naive,
@@ -298,22 +293,20 @@ export const detector: Detector = {
           value: Math.round(activeP50Ms),
         },
       ],
-      inference: `Each independent serialized read-only call could have shipped in one assistant message, removing one model round-trip; credited at a conservative ${fmtSeconds(PER_INFERENCE_FLOOR_MS)} inference floor, not the full per-turn latency.`,
+      inference: `Tool-result summaries are clipped to ~200 chars and stripped from bulk timelines, so a later call's path being absent from the earlier summary does NOT establish that the later call was independent of the earlier FULL result. These are candidate pairs to review for batching — not a proven lower bound of avoidable round-trips — so no fixed reclaimed-time credit is asserted.`,
     };
 
     return {
       id: 'speed.serial-tool-gap',
       category: 'speed',
       severity,
-      title: 'Batch independent file reads to cut model round-trips',
+      title: 'Review serially-issued file reads for batching opportunities',
       detail:
-        `At least ${summary.independent} read-only tool call(s) across ${summary.sessionsAffected} session(s) were issued one-per-turn even though the next call did not depend on the previous result — each is one avoidable model round-trip. ` +
-        `Avoidable round-trips: ${summary.independent}-${summary.naive} (the ${summary.independent} lower bound survives an independence gate that drops pairs where the later call's path appears in the earlier result; ${summary.naive} is the naive pre-gate count). ` +
-        `Active turns ran ~${fmtSeconds(activeP50Ms)} (median) but that includes tool-execution time, so each avoided round-trip is credited only a conservative ${fmtSeconds(PER_INFERENCE_FLOOR_MS)} inference floor — about ${reclaimMin} min reclaimable (lower bound). ` +
-        `Independence is undecidable from flat transcripts; this counts only pairs whose later args are textually absent from the earlier result.`,
+        `${summary.independent} of ${summary.naive} serialized read-only tool call pair(s) across ${summary.sessionsAffected} session(s) were issued one-per-turn AND had the later call's path/pattern absent from the earlier call's result summary — a summary-based heuristic that flags candidate batchable reads, not proof. ` +
+        `Tool-result summaries are clipped to ~200 chars (and stripped from bulk timelines), so absence from the summary cannot establish that the later call was independent of the earlier full result; treat these as candidates to review, not a guaranteed count of avoidable round-trips. ` +
+        `For context, active turns ran ~${fmtSeconds(activeP50Ms)} (median), which includes tool-execution time — so no fixed reclaimed-time credit is asserted for these candidates.`,
       action:
-        'When the next file/glob/grep is independent of a read already in flight, issue them together in one assistant message instead of waiting for each result. Batch independent Read/Grep/Glob/LS discovery up front so the agent does not pay a round-trip per file.',
-      estTimeReclaimedMin: reclaimMin,
+        'When the next file/glob/grep is genuinely independent of a read already in flight, issue them together in one assistant message instead of waiting for each result. Batch independent Read/Grep/Glob/LS discovery up front so the agent does not pay a round-trip per file.',
       affected: summary.sessionsAffected,
       view: 'timeline',
       evidence,

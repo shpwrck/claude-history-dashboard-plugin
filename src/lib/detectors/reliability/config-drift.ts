@@ -51,9 +51,16 @@ export const detector: Detector = {
 
     const cutoff = now - RECENCY_MS;
 
-    // Project-scoped events only (global-churn is de-emphasised per P11 design)
+    // Project-scoped events only (global-churn is de-emphasised per P11 design),
+    // bounded to a FINITE timestamp inside [cutoff, now]. The upper bound matters
+    // (#3206): without it a future-dated backup timestamp would be counted and
+    // described as "in the last 7 days".
     const projectEvents = data.filter(
-      (e) => e.kind !== 'global-churn' && e.timestamp >= cutoff
+      (e) =>
+        e.kind !== 'global-churn' &&
+        Number.isFinite(e.timestamp) &&
+        e.timestamp >= cutoff &&
+        e.timestamp <= now
     );
 
     if (projectEvents.length < MIN_EVENTS) return null;
@@ -74,9 +81,17 @@ export const detector: Detector = {
     // Distinct projects affected
     const projects = [...new Set(projectEvents.map((e) => e.project).filter((p): p is string => Boolean(p)))];
 
-    // Evidence: format the most recent warning events (up to 5)
-    const evidence = warnings
-      .sort((a, b) => b.timestamp - a.timestamp)
+    // Evidence: capped rows from ALL included project events (#3206), not
+    // warnings-only — an info-only drift (e.g. a server appeared/vanished) reports
+    // affected events, so it must show at least one matching evidence row rather
+    // than an empty array. Warnings are prioritised, then most-recent first.
+    // perf-index-contract: config-drift-evidence-order always-consumed: this evidence sort runs on every emitted finding to order warnings-first and cap the rendered rows
+    const evidence = [...projectEvents]
+      .sort(
+        (a, b) =>
+          Number(b.severity === 'warning') - Number(a.severity === 'warning') ||
+          b.timestamp - a.timestamp
+      )
       .slice(0, 5)
       .map(formatConfigDriftEvidence);
 

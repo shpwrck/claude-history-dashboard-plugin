@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { detector } from './tool-call-right-sizing';
+import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
 import type { ToolUsageData, ToolCall } from '../../parse-tools';
-import { runReclaimCascade } from '../../reclaim';
 
 const call = (
   i: number,
@@ -67,21 +67,23 @@ const input = (overrides?: Partial<RecommendationInput>): RecommendationInput =>
   }) as RecommendationInput;
 
 describe('context.tool-call-right-sizing (#1924)', () => {
-  it('fires on over-fetch + verbose payloads and emits a structural-prefix cacheRead claim', () => {
+  it('fires on large payloads as a heuristic candidate without booking a reclaim (#3190)', () => {
     const rec = detector.rule(input(), 0);
     expect(rec?.id).toBe('context.tool-call-right-sizing');
     expect(rec?.category).toBe('context');
     // 1 fat Read + 5 verbose MCP returns.
     expect(rec?.affected).toBe(6);
-    expect(rec?.reclaim).toBeDefined();
-    expect(rec?.reclaim?.cause).toBe('structural-prefix');
-    expect(rec?.reclaim?.orderKey).toBeGreaterThanOrEqual(40);
-    expect(rec?.reclaim?.orderKey).toBeLessThan(90);
-    expect(rec?.reclaim?.ownedPools).toEqual(['cacheRead']);
-    expect(rec?.reclaim?.counterfactual.kind).toBe('scaleTokens');
-    if (rec?.reclaim?.counterfactual.kind === 'scaleTokens') {
-      expect(rec.reclaim.counterfactual.poolDeltaFrac.cacheRead).toBeGreaterThan(0);
-    }
+    // #3190: resultBytes cannot attribute per-turn cache reads, so no reclaim is
+    // booked — the compounded figure is a labeled projection, not a saving.
+    expect(rec?.reclaim).toBeUndefined();
+    expect(rec?.detail).toMatch(/heuristic candidate/i);
+    expect(rec?.detail).toMatch(/projects to a rough upper bound/i);
+    expect(rec?.detail).toMatch(/estimate/i);
+    // The removed observational overclaim: no "pulled far more than the task
+    // used" / "targeted alternative was smaller" assertion.
+    expect(rec?.detail).not.toMatch(/pulled far more into context than the task used/i);
+    expect(rec?.detail).not.toMatch(/targeted alternative/i);
+    expect(validateRecommendationProvenance(rec!)).toEqual([]);
   });
 
   it('surfaces the prescriptive per-tool payload ranking in evidence', () => {
@@ -91,18 +93,21 @@ describe('context.tool-call-right-sizing (#1924)', () => {
     expect(rec?.view).toBe('tools');
   });
 
-  it('books a positive cacheRead marginal through the cascade and preserves the identity', () => {
+  it('never books a reclaim even with full token data (#3190)', () => {
+    // tokenData is present, yet the detector books no deterministic reclaim —
+    // the projection stays a labeled estimate, not a cascade claim.
     const rec = detector.rule(input(), 0);
-    const result = runReclaimCascade([rec!.reclaim!], tokenData);
-    expect(result.total).toBeGreaterThan(0);
-    expect(result.byCategory.context).toBeCloseTo(result.total, 9);
-    expect(result.billOriginal - result.billFinal).toBeCloseTo(result.total, 9);
-  });
-
-  it('omits the claim when no token data resolves the affected session (rec still surfaces)', () => {
-    const rec = detector.rule(input({ tokenData: [] }), 0);
     expect(rec?.id).toBe('context.tool-call-right-sizing');
     expect(rec?.reclaim).toBeUndefined();
+  });
+
+  it('makes no over-fetch/reclaim claim for a lone large final Read (#3190)', () => {
+    // A single necessary whole-file Read: no later turns re-read it, and there is
+    // no basis to claim over-fetch, so the detector stays silent.
+    const lone: ToolUsageData[] = [
+      { sessionId: 's1', calls: [call(0, 'Read', 200_000)] },
+    ];
+    expect(detector.rule(input({ toolData: lone }), 0)).toBeNull();
   });
 
   it('stays silent below the affected-call floor', () => {

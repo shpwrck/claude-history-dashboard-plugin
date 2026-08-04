@@ -68,6 +68,16 @@ describe('reliability.config-drift', () => {
     expect(detector.rule(baseInput([old]), NOW)).toBeNull();
   });
 
+  it('does not fire on a future-dated event (recency upper bound, #3206)', () => {
+    // A backup timestamp after `now` cannot have happened "in the last 7 days".
+    const future = event('server-disabled', {
+      timestamp: NOW + DAY, // 1 day in the future
+      severity: 'warning',
+      server: 'postgres',
+    });
+    expect(detector.rule(baseInput([future]), NOW)).toBeNull();
+  });
+
   it('emits null for global-churn-only events (not project-scoped)', () => {
     const churn = event('global-churn', { project: undefined });
     expect(detector.rule(baseInput([churn]), NOW)).toBeNull();
@@ -143,6 +153,26 @@ describe('reliability.config-drift', () => {
       expect(rec).not.toBeNull();
       // No disabled events, so severity should be downgraded to info
       expect(rec!.severity).toBe('info');
+    });
+
+    it('emits a timestamped evidence row for an info-only appeared event (#3206)', () => {
+      // Info-only drift reports affected events, so evidence must be built from
+      // ALL included events — not warnings-only, which would return an empty
+      // evidence array while still counting the event.
+      const appeared = event('repo-server-appeared', {
+        severity: 'info',
+        server: 'sentry',
+        from: undefined,
+        to: 'sentry',
+        timestamp: NOW - H,
+      });
+      const rec = detector.rule(baseInput([appeared]), NOW);
+      expect(rec).not.toBeNull();
+      expect(rec!.severity).toBe('info');
+      expect(rec!.affected).toBe(1);
+      expect(rec!.evidence!.length).toBe(1);
+      expect(rec!.evidence![0]).toMatch(/sentry/);
+      expect(rec!.evidence![0]).toMatch(/\d{4}-\d{2}-\d{2}/); // ISO timestamp
     });
   });
 

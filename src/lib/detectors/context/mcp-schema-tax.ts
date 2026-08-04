@@ -4,6 +4,7 @@ import { MIN_SAVINGS_USD } from '../shared';
 import { getModelPricing } from '../../pricing';
 import {
   duplicateMcpServers,
+  parseMcpToolName,
   MCP_DUP_OVERLAP_THRESHOLD,
   type McpServerToolStats,
 } from '../../parse-tool-inventory';
@@ -106,22 +107,60 @@ export const detector: Detector = {
     const redundantSchemaTokens = redundantToolCount * TOKENS_PER_TOOL_SCHEMA;
     const totalMcpSchemaTokens = dup.totalMcpToolCount * TOKENS_PER_TOOL_SCHEMA;
 
+    // No token data means nothing to bill; return before building any per-session
+    // index so the constructions below are only ever built on a path that reads
+    // them. (An empty-tokenData call already yields estSavingsUsd 0 -> null.)
+    if (!input.tokenData || input.tokenData.length === 0) return null;
+
+    // Per-(session, server) distinct MCP tool count from each session's OWN
+    // inventory (#3184). A server can expose different tool subsets across
+    // sessions, so charging every session the cross-session UNION count
+    // (`McpServerToolStats.toolCount`) over-bills sessions that never loaded the
+    // full set. Bill each session for the schemas IT actually loaded.
+    // perf-index-contract: mcp-per-session-server-tool-count always-consumed: the token-billing loop below reads this map for every token-data session to size estSavingsUsd
+    const perSessionServerToolCount = new Map<string, Map<string, number>>();
+    for (const i of inv) {
+      // perf-index-contract: mcp-inventory-server-tools always-consumed: this per-inventory map is iterated immediately below to fold each server tool count into the session totals
+      const byServer = new Map<string, Set<string>>();
+      for (const name of i.toolsAvailable) {
+        const parsed = parseMcpToolName(name);
+        if (!parsed) continue;
+        let tools = byServer.get(parsed.server);
+        if (!tools) {
+          // perf-index-contract: mcp-server-tool-basenames always-consumed: this set dedupes each server basenames and its size is read a few lines below when folding counts
+          tools = new Set<string>();
+          byServer.set(parsed.server, tools);
+        }
+        tools.add(parsed.basename);
+      }
+      // Fold repeated inventories for the same session into one count map.
+      // perf-index-contract: mcp-session-counts always-consumed: this per-session count map is populated then stored into perSessionServerToolCount and read by the billing loop
+      const existing = perSessionServerToolCount.get(i.sessionId);
+      const counts = existing ?? new Map<string, number>();
+      for (const [server, tools] of byServer) {
+        counts.set(server, Math.max(counts.get(server) ?? 0, tools.size));
+      }
+      if (!existing) perSessionServerToolCount.set(i.sessionId, counts);
+    }
+
     let estSavingsUsd = 0;
     const affectedSessions = new Set<string>();
     for (const d of input.tokenData ?? []) {
-      // Redundant servers loaded in THIS session × their tool schemas.
+      // Redundant servers loaded in THIS session × the schemas THIS session saw.
+      const sessionCounts = perSessionServerToolCount.get(d.sessionId);
+      if (!sessionCounts) continue;
       let sessionRedundantTokens = 0;
       for (const s of redundantList) {
-        const stats = statsByServer.get(s);
-        if (stats && stats.sessionIds.includes(d.sessionId)) {
-          sessionRedundantTokens += stats.toolCount * TOKENS_PER_TOOL_SCHEMA;
+        const perSessionToolCount = sessionCounts.get(s) ?? 0;
+        if (perSessionToolCount > 0) {
+          sessionRedundantTokens += perSessionToolCount * TOKENS_PER_TOOL_SCHEMA;
         }
       }
       if (sessionRedundantTokens <= 0) continue;
       const turns = d.entries.length;
       if (turns <= 0) continue;
       const rates = getModelPricing(dominantModel(d));
-      // Cache-write once + cache-read on every later turn.
+      // Cache-write once + cache-read on later turns (never a read on turn 1).
       const usd =
         (sessionRedundantTokens / 1_000_000) *
         (rates.cacheWrite5m + rates.cacheRead * Math.max(0, turns - 1));
@@ -149,7 +188,7 @@ export const detector: Detector = {
           redundantSchemaTokens
         ).toLocaleString()} tokens, ${sharePct}% of the ~${Math.round(
           totalMcpSchemaTokens
-        ).toLocaleString()}-token MCP schema prefix) that are cache-read every turn of ${affectedSessions.size} session(s). ` +
+        ).toLocaleString()}-token MCP schema prefix) that are written once and cache-read on later turns of ${affectedSessions.size} session(s). ` +
         (totalUniqueToolsLost > 0
           ? `Note: ${totalUniqueToolsLost} tool(s) are unique to the redundant server(s) and would be lost on removal — verify before removing. `
           : '') +
@@ -190,7 +229,7 @@ export const detector: Detector = {
           },
         ],
         inference:
-          `Duplicate servers re-pay the same tool-schema block as cache-write + per-turn cache-read; removing all but one of each overlapping group recovers that recurring prefix cost. Servers are flagged at ≥${Math.round(
+          `Duplicate servers re-pay the same tool-schema block: it is written once (cache-write) and cache-read on later turns; removing all but one of each overlapping group recovers that recurring prefix cost. Each session is billed only for the schema count IT loaded (per-session toolInventories), not the cross-session union. Servers are flagged at ≥${Math.round(
             MCP_DUP_OVERLAP_THRESHOLD * 100
           )}% tool overlap, so a redundant server may still expose a few unique tools (disclosed above) that would be lost on removal. The dollar figure is a token-proxy estimate (tier-0) because tool schemas are not captured on the wire.`,
       },

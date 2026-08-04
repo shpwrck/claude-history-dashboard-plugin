@@ -99,7 +99,7 @@ function input(overrides: Partial<RecommendationInput> = {}): RecommendationInpu
 }
 
 describe('context.reclaim-potential', () => {
-  it('fires on a duplicate large Bash output with evidence, provenance, and a validated-template fix', () => {
+  it('fires on a repeated large Bash command output with evidence, provenance, and a validated-template fix', () => {
     const toolData = [
       session('s1', [
         bashCall('cat huge.log', 800_000),
@@ -121,6 +121,42 @@ describe('context.reclaim-potential', () => {
     expect(rec!.fix!.fixKind).toBe('illustrative');
     expect(validateFixSnippet(rec!.fix!)).toEqual([]);
     expect(rec!.fix!.snippet).toContain('Context reclaim discipline');
+  });
+
+  it('sizes a repeated command from measured per-repeat bytes, not (count-1) x max, and labels it an estimate (#3186)', () => {
+    // Same command, DIFFERENT result sizes. The transcript carries no
+    // result-content digest, so command identity is not proof of identical
+    // output — this is a REPEATED-COMMAND estimate, and reclaim must reflect the
+    // measured repeat bytes (total minus the largest single result), never
+    // (count-1) x the max (which would overstate here).
+    const differing = [
+      session('s1', [
+        bashCall('cat log', 800_000),
+        bashCall('cat log', 400_000),
+        bashCall('cat log', 400_000),
+      ]),
+    ];
+    const equal = [
+      session('s2', [
+        bashCall('cat log', 800_000),
+        bashCall('cat log', 800_000),
+        bashCall('cat log', 800_000),
+      ]),
+    ];
+    const recDiff = detector.rule(input({ toolData: differing, tokenData: [tokenSession('s1')] }), 0);
+    const recEq = detector.rule(input({ toolData: equal, tokenData: [tokenSession('s2')] }), 0);
+    expect(recDiff).not.toBeNull();
+    expect(recEq).not.toBeNull();
+    // Measured reclaim: (800k+400k+400k) - 800k = 800k bytes = 200k tok, vs the
+    // equal case's (2.4M - 800k) = 1.6M bytes = 400k tok. The old (count-1) x max
+    // formula would have booked 400k tok for BOTH — the overstatement #3186 fixes.
+    expect(recDiff!.estSavingsUsd!).toBeLessThan(recEq!.estSavingsUsd!);
+    // Relabeled as a repeated-command ESTIMATE, never a proven duplicate output.
+    expect(recDiff!.evidence!.join(' ')).toMatch(/re-run/);
+    expect(recDiff!.evidence!.join(' ')).toMatch(/estimate/);
+    expect(recDiff!.detail).not.toMatch(/duplicate tool output/i);
+    expect(recDiff!.detail).toMatch(/estimate/i);
+    expect(validateRecommendationProvenance(recDiff!)).toEqual([]);
   });
 
   it('fires on re-pasted file content across user turns', () => {

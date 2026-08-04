@@ -2051,12 +2051,13 @@ function toRecommendation(
       ? ({
           claim:
             `${receipt.sampleSize} measured rediscovery burst(s) in ${displayedTaskClass} clear the ` +
-            `${MIN_HANDOFF_RECEIPT_SAMPLES}-sample calibration floor: median ${fmtMin(receipt.medianMinutes)} ` +
-            `observed per occurrence, ${fmtMin(receipt.totalMinutes)} total, so the human-minute figure is ` +
-            `published as an observational (T2) measurement rather than the preset hypothesis`,
+            `${MIN_HANDOFF_RECEIPT_SAMPLES}-sample calibration floor and span ${fmtMin(receipt.totalMinutes)} of ` +
+            `elapsed wall-clock total (median ${fmtMin(receipt.medianMinutes)} per occurrence, start-of-session to ` +
+            `last rediscovery) -- an observed ACCOUNTING span that includes assistant work and idle time, not a ` +
+            `measurement of active human effort, so no human-minute saving is asserted`,
           source: 'parse-timeline',
           field:
-            'aggregated per taskClass from RediscoveryBurst.observedMinutes (unfloored measured span)',
+            'aggregated per taskClass from RediscoveryBurst.observedMinutes (elapsed start-to-last-hit wall-clock span)',
           value: receipt.totalMinutes,
         } satisfies RecObservation)
       : ({
@@ -2135,9 +2136,10 @@ function toRecommendation(
       (receipt
         ? `Across ${receipt.sampleSize} measured re-discovery burst(s) in ${displayedTaskClass} ` +
           `(median ${fmtMin(receipt.medianMinutes)} per occurrence, as of ${receipt.asOf}), ` +
-          `re-discovering that un-handed-off durable state has cost ~${fmtMin(receipt.totalMinutes)} of ` +
-          `human time -- a measured observational (T2) figure aggregated from the unfloored burst spans, ` +
-          `not the preset floor.`
+          `re-discovering that un-handed-off durable state spans ~${fmtMin(receipt.totalMinutes)} of elapsed ` +
+          `wall-clock (start-of-session to last rediscovery) -- an observed accounting span that includes ` +
+          `assistant work and idle time, not a measurement of active human effort, so no human-minute saving ` +
+          `is claimed.`
         : `Not enough history to size the handoff cost for ${displayedTaskClass} yet: ` +
           (roll.rediscoveries.length < MIN_HANDOFF_RECEIPT_SAMPLES
             ? `${roll.rediscoveries.length} measured re-discovery burst(s) is below the ` +
@@ -2148,18 +2150,21 @@ function toRecommendation(
     action:
       `For tasks in ${displayedTaskClass} that mutate material durable external state, follow docs/leave-behind-contract.md and update docs/runbooks/<state-scope>/README.md with both Operability and Decision log halves. Skip trivial local-only changes.`,
     affected: roll.preSignals.length,
-    // #2314: only a calibrated receipt puts a minutes figure into the ledger.
-    // Honest-null classes omit the field entirely (never the preset floor under
-    // a different label), so no reclaimed-minutes badge renders for them.
-    ...(receipt ? { estTimeReclaimedMin: receipt.totalMinutes } : {}),
+    // #3250: the burst quantity is elapsed wall-clock (start-of-session to last
+    // rediscovery), NOT a measured active-human-duration artifact — the transcript
+    // carries none — so it is never published as estTimeReclaimedMin. Booking an
+    // elapsed accounting span as reclaimed human time would over-claim causally.
     view: 'timeline',
     evidence,
-    claimClass: receipt ? 'causal' : 'accounting',
-    proofTier: receipt ? 'observational' : 'auditable',
+    // #3250: an elapsed burst span is an accounting measurement (arithmetic on
+    // timestamps), never a causal human-time claim. A receipt reports the observed
+    // span at proofTier 'accounting'; without one it stays 'auditable'.
+    claimClass: 'accounting',
+    proofTier: receipt ? 'accounting' : 'auditable',
     provenance: {
       observations,
       inference: receipt
-        ? `A missing handoff after a durable-state mutation is an accounting pre-signal; the ${receipt.sampleSize} measured early-turn rediscovery burst(s) in this task class calibrate a per-task-class re-discovery cost (median ${fmtMin(receipt.medianMinutes)} per occurrence), so the ~${fmtMin(receipt.totalMinutes)} human-minute figure is published as an observational (T2) measurement, not a preset hypothesis.`
+        ? `A missing handoff after a durable-state mutation is an accounting pre-signal; the ${receipt.sampleSize} measured early-turn rediscovery burst(s) in this task class span a median ${fmtMin(receipt.medianMinutes)} of elapsed wall-clock per occurrence (${fmtMin(receipt.totalMinutes)} total). That span is an observed ACCOUNTING measurement -- start-of-session to last rediscovery, including assistant work and idle time -- not a measured active-human-duration and not a causal saving, so no estTimeReclaimedMin is published.`
         : `A missing handoff after a durable-state mutation is an accounting pre-signal. Fewer than ${MIN_HANDOFF_RECEIPT_SAMPLES} measured early-turn rediscovery bursts exist for this task class, so no human-minute saving is asserted; the pre-signal is tracked until enough bursts accrue to calibrate an observational receipt.`,
       ...(publishAsOf ? { asOf: publishAsOf, stale: !!publishStale } : {}),
     },

@@ -67,7 +67,6 @@ export const PROVENANCE_EXEMPT: readonly string[] = [
   'cost.cache-1h-waste',
   'reliability.hook-prevented-continuation',
   'reliability.mcp-needs-auth',
-  'reliability.overload-reretry',
   'safety.allow-rule-overlaps-deny',
   'speed.time-motion',
   'workflow.unused-installed-commands',

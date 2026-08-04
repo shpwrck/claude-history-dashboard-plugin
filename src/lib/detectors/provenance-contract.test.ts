@@ -297,9 +297,10 @@ const EMITTABLE_IDS = new Set(DETECTORS.flatMap((d) => emittableIdsFor(d.id)));
  * than the path of least resistance. Update this number DOWNWARD only.
  *
  * 22 at the inversion; 15 after the round-10 cost batch (#3194/#3201) migrated
- * the seven cost.* ids; 11 after the round-14 #3224/#3226/#3227/#3247 batch.
+ * the seven cost.* ids; 11 after the round-14 #3224/#3226/#3227/#3247 batch;
+ * 10 after #3214 migrated reliability.overload-reretry onto the contract.
  */
-const EXEMPT_AT_INVERSION = 11;
+const EXEMPT_AT_INVERSION = 10;
 
 describe('PROVENANCE_EXEMPT debt register (#3205)', () => {
   it('only lists ids the catalog can actually emit', () => {

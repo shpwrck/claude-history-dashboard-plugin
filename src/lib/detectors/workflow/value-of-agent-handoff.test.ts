@@ -3286,7 +3286,7 @@ describe('workflow.value-of-agent-handoff', () => {
     expect(rec.detail).not.toMatch(/\bproven\b/i);
   });
 
-  it('publishes an observational human-minute figure once >=3 measured bursts calibrate a receipt (#2314 evidence)', () => {
+  it('reports a >=3-burst receipt as an observed elapsed accounting span, not a causal human-time saving (#3250)', () => {
     const setupBase = Date.parse('2026-07-01T10:00:00.000Z');
     const b1 = Date.parse('2026-07-03T10:00:00.000Z');
     const b2 = Date.parse('2026-07-04T10:00:00.000Z');
@@ -3328,14 +3328,20 @@ describe('workflow.value-of-agent-handoff', () => {
 
     expect(rec?.id).toBe('workflow.value-of-agent-handoff');
     expect(rec?.severity).toBe('warning');
-    // The receipt clears the sample floor -> published as a measured (T2)
-    // observational figure = the unfloored total 45, median 15 per occurrence.
-    expect(rec?.proofTier).toBe('observational');
-    expect(rec?.claimClass).toBe('causal');
-    expect(rec?.estTimeReclaimedMin).toBe(45);
+    // #3250: the three bursts here are pure idle spans between two user turns
+    // (10/15/20 min). The receipt reports that elapsed wall-clock span as an
+    // observed ACCOUNTING measurement — never a causal human-time saving — so
+    // there is no causal claim and no estTimeReclaimedMin from start-to-last-hit
+    // elapsed time.
+    expect(rec?.proofTier).toBe('accounting');
+    expect(rec?.claimClass).toBe('accounting');
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.detail).toMatch(/3 measured re-discovery burst\(s\)/i);
     expect(rec?.detail).toMatch(/median 15 minute\(s\) per occurrence/i);
-    expect(rec?.detail).toMatch(/measured observational \(T2\) figure/i);
+    expect(rec?.detail).toMatch(/observed accounting span/i);
+    expect(rec?.detail).toMatch(/not a measurement of active human effort/i);
+    expect(rec?.detail).not.toMatch(/has cost/i);
+    expect(rec?.detail).not.toMatch(/measured observational \(T2\) figure/i);
     expect(rec?.detail).not.toMatch(/not enough history/i);
     expect(rec?.detail).not.toMatch(/hypothesis/i);
     expect(
@@ -3387,8 +3393,8 @@ describe('workflow.value-of-agent-handoff', () => {
     // Still published (the receipt cleared the floor) but every contributing
     // burst is older than the 30-day decay window, so the present-tense claim
     // is demoted to an "As of <date>" figure with provenance.stale = true.
-    expect(rec?.proofTier).toBe('observational');
-    expect(rec?.estTimeReclaimedMin).toBe(45);
+    expect(rec?.proofTier).toBe('accounting');
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.detail).toMatch(/^As of 2026-04-05,/);
     expect(rec?.provenance?.asOf).toBe('2026-04-05');
     expect(rec?.provenance?.stale).toBe(true);
@@ -3446,8 +3452,8 @@ describe('workflow.value-of-agent-handoff', () => {
     // roll.latestMs is the fresh July mutation, but the receipt's freshness is
     // the latest April burst, so the published figure demotes to "As of" and
     // provenance.stale = true (adversarial-review #1).
-    expect(rec?.proofTier).toBe('observational');
-    expect(rec?.estTimeReclaimedMin).toBe(45);
+    expect(rec?.proofTier).toBe('accounting');
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.affected).toBe(2);
     expect(rec?.detail).toMatch(/^As of 2026-04-05,/);
     expect(rec?.provenance?.asOf).toBe('2026-04-05');
@@ -3551,8 +3557,8 @@ describe('workflow.value-of-agent-handoff', () => {
     // A's hypothesis total (75) exceeds B's (65), but only B has a calibrated
     // receipt, so B must be the single surfaced rollup and publish the measured
     // figure -- the 15-minute preset must not decide WHICH class publishes.
-    expect(rec?.proofTier).toBe('observational');
-    expect(rec?.estTimeReclaimedMin).toBe(45);
+    expect(rec?.proofTier).toBe('accounting');
+    expect(rec?.estTimeReclaimedMin).toBeUndefined();
     expect(rec?.detail).toMatch(/3 measured re-discovery burst\(s\)/i);
     expect(rec?.detail).toContain('/repo/b');
   });
