@@ -3,7 +3,7 @@
 // Source of truth = the per-session transcripts under ~/.claude/projects.
 // Each top-level session file (plus its subagents/*.jsonl) is parsed ONCE with
 // the app's own parsers and cached in SQLite, keyed by a file signature
-// (mtime+size). On each request we re-ingest only files whose signature changed
+// (mtime+size+ctime). On each request we re-ingest only files whose signature changed
 // (e.g. the live, growing session), so the dataset stays fresh without
 // re-parsing everything. history.jsonl plus history.d/*.jsonl are unioned in
 // for legacy sessions that have no transcript on disk.
@@ -2207,6 +2207,7 @@ const { stripToolCommandBodies } = await import(join(LIB, 'parse-tools.ts'));
 const {
   SESSION_SIGNALS,
   parseSessionBlobRowFromDisk: parseSessionBlobRowFromDiskPure,
+  sessionFileIdentities,
   sessionFileSignature: sessionFileSignaturePure,
 } = await import('./session-blob-row.mjs');
 export { SESSION_SIGNALS };
@@ -3320,8 +3321,8 @@ function persistTranscript(sessionId, mergedText) {
   return true;
 }
 
-export function sessionFileSignature(s) {
-  return sessionFileSignaturePure(s);
+export function sessionFileSignature(s, identities) {
+  return sessionFileSignaturePure(s, identities);
 }
 
 export function parseSessionBlobRowFromDisk(s, sig = sessionFileSignature(s)) {
@@ -3560,13 +3561,91 @@ function hashProjectLiveConfigFiles(roots, hash) {
   }
 }
 
+// #3401: per-file transcript identities observed by the last COMPLETED ingest()
+// in this process, keyed by absolute path. transcriptRewriteSignature() below
+// stats these paths (stat only — never a byte read, never a readdir) so the
+// request-time gate can see an in-place transcript rewrite whose length and
+// mtime were restored: such a rewrite moves neither the parent dir's mtime nor
+// the file's size/mtime, but it cannot avoid advancing ctime. Empty until the
+// first ingest() — a fresh process has no settled signature yet, so its first
+// request ingests anyway and any rewrite that happened while the process was
+// down is caught by the per-row ctime signature (sessionFileSignature).
+// perf-index-contract: transcript-rewrite-baseline always-consumed: every sourceSignature() call walks this baseline for the rewrite discriminator and every completed ingest() rebuilds it
+let transcriptIdentityBaseline = new Map();
+
+// Monotonic per-file rewrite epochs: path -> { mtimeMs, ctimeMs, epoch }.
+// LEVEL-triggered by design (PR #3633 review blocker): every other
+// sourceSignature() part persists its changed state until each consumer (the
+// dataset gate's lastSourceSig, every stat-gated digest/search entry, every
+// recs entry) independently re-acknowledges it. A detection that quiesced as
+// soon as any ingest() swapped the baseline was an edge trigger consumed by
+// whichever route ingested first — one interleaving /api/search (or a refresh
+// that failed AFTER its ingest committed) erased the evidence and the dataset
+// gate skip-served the stale body forever. So a detected rewrite bumps the
+// file's epoch, and the epoch stays in the signature: the output moves ONCE to
+// a new settled value and never reverts merely because ingest() committed.
+// Bounded: pruned in ingest() to paths still in the current baseline.
+// perf-index-contract: transcript-rewrite-baseline always-consumed: every sourceSignature() call folds the accumulated epochs into the emitted signature part
+let transcriptRewriteEpochs = new Map();
+
+// The rewrite discriminator folded into sourceSignature(). Detects a baseline
+// file whose mtime still MATCHES the last-ingested identity while its ctime
+// moved — the signature of an in-place rewrite hiding behind a restored mtime
+// (utimes restores mtime but itself advances ctime). Ordinary appends move
+// mtime and therefore never trigger detection, so the accepted append-lag
+// design of this gate (#182) is unchanged and a busy host cannot destabilize
+// the signature. A detection bumps the file's monotonic epoch ONLY when the
+// observed (mtime, ctime) pair is new — re-observing the same pending rewrite
+// on every request re-emits the same value instead of re-bumping, so the
+// signature cannot thrash consumers into a rebuild-per-request loop. Cost: one
+// statSync per known transcript file (bounded by the ingest discovery caps),
+// microseconds each; never a byte read.
+//
+// Acknowledged residual (review; identical to pre-PR behavior): a plain
+// rewrite that lets mtime move is stat-indistinguishable from an append here
+// and stays in the #182 lag envelope (the per-row ctime sig catches it at the
+// next ingest). Detecting on size-equality instead would catch some of those
+// at the cost of pulling every `touch` into the spurious-detection set.
+function transcriptRewriteSignature() {
+  for (const [path, base] of transcriptIdentityBaseline) {
+    let s;
+    try {
+      s = statSync(path);
+    } catch {
+      continue; // deletion/rename moves the parent dir mtime part instead
+    }
+    if (s.mtimeMs !== base.mtimeMs || s.ctimeMs === base.ctimeMs) continue;
+    const seen = transcriptRewriteEpochs.get(path);
+    if (!seen || seen.mtimeMs !== s.mtimeMs || seen.ctimeMs !== s.ctimeMs) {
+      transcriptRewriteEpochs.set(path, {
+        mtimeMs: s.mtimeMs,
+        ctimeMs: s.ctimeMs,
+        epoch: (seen?.epoch ?? 0) + 1,
+      });
+    }
+  }
+  if (transcriptRewriteEpochs.size === 0) return 'none';
+  const entries = [];
+  for (const [path, rec] of transcriptRewriteEpochs) {
+    entries.push(`${path}:${rec.epoch}`);
+  }
+  // perf-index-contract: transcript-rewrite-baseline always-consumed: the sorted epoch list is hashed into the returned signature part on every call
+  entries.sort();
+  const h = createHash('sha1');
+  for (const entry of entries) {
+    h.update(entry);
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
+
 // Cheap "could anything have changed since the last full ingest?" signature
 // for the server's stat-gate (#182). Stats the projects dir, each top-level
-// project dir, top-level dataset files, liveConfig dirs, and a bounded repo-map
-// root-discovery set; derived security claims add their own bounded path probes
-// (registered plugin/skill realpaths) — no transcript recursion or SQLite.
-// Lets the server skip the full ingest() walk on a refresh when nothing
-// structural changed.
+// project dir, top-level dataset files, liveConfig dirs, a bounded repo-map
+// root-discovery set, and (via transcriptRewriteSignature) each transcript
+// file the last ingest saw — stat probes only, no transcript byte reads or
+// SQLite. Lets the server skip the full ingest() walk on a refresh when
+// nothing structural changed.
 //
 // ACCEPTED LIMITATION (by design — see issue #182): POSIX directory mtime moves
 // only on entry add/remove/rename, NOT on in-place appends to an existing file.
@@ -3578,6 +3657,10 @@ function hashProjectLiveConfigFiles(roots, hash) {
 // directly. history.jsonl / ~/.claude.json are folded in to catch THEIR OWN
 // changes (their file mtime does move on append) — not as a transcript-freshness
 // proxy (history.jsonl was observed ~9h stale while transcripts were written).
+// NOT accepted (#3401): an in-place rewrite whose size and mtime were restored.
+// The transcript-rewrites part below observes exactly that case through the
+// ctime discriminator, so the gate schedules an ingest instead of skip-serving
+// claims derived from the rewritten transcript.
 export function sourceSignature() {
   const parts = [];
   parts.push(datasetAssemblySchemaKey());
@@ -3618,6 +3701,10 @@ export function sourceSignature() {
     }
     parts.push(`projects:${projectsRoot}:${Math.floor(maxDirMtime)}`);
   }
+  // #3401: the in-place-rewrite discriminator. The `projects:` dir parts above
+  // cannot see a rewrite that keeps a transcript's path, length, and mtime, so
+  // without this part the gate would skip-serve the stale cached parse forever.
+  parts.push(`transcript-rewrites:${transcriptRewriteSignature()}`);
   // Memory stores (#1990/#2558): readMemoryStores() reads each
   // <PROJECTS>/<slug>/memory fixed-depth surface (main + archive indexes and
   // direct fact files) into RecommendationInput.memoryStores. A
@@ -3802,6 +3889,12 @@ export function ingest() {
   let transcriptsWritten = 0;
   let removed = 0;
   let skippedSessions = 0;
+  // #3401: the next transcript-identity baseline for transcriptRewriteSignature().
+  // Filled from the SAME stat pass that builds each session's sig (no extra
+  // stat), swapped in only after COMMIT so a failed ingest keeps the old
+  // baseline and the rewrite part keeps firing until an ingest succeeds.
+  // perf-index-contract: transcript-rewrite-baseline always-consumed: every completed ingest swaps this in and every later sourceSignature() walks it
+  const nextBaseline = new Map();
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -3813,7 +3906,9 @@ export function ingest() {
         skippedSessions += 1;
         continue;
       }
-      const sig = sessionFileSignature(s);
+      const identities = sessionFileIdentities(s);
+      const sig = sessionFileSignature(s, identities);
+      for (const f of identities) nextBaseline.set(f.path, f);
       const row = blobCache.readSig(s.sessionId);
       if (!row || row.sig !== sig) {
         try {
@@ -3838,6 +3933,37 @@ export function ingest() {
   } catch (err) {
     db.exec('ROLLBACK');
     throw err;
+  }
+  transcriptIdentityBaseline = nextBaseline;
+  // Prune rewrite epochs whose file is GONE (deleted/renamed). For top-level
+  // transcripts the deletion moves a directory mtime the `projects:` part
+  // observes, so consumers refresh regardless. The prune CAN walk the level
+  // back when the triggering deletion is invisible to every other signature
+  // part (nested `<sid>/subagents/` transcripts — the `projects:` walk stats
+  // only top-level project dirs), but any such deletion was equally invisible
+  // pre-epoch, so the resulting settled value is exactly the state the gate
+  // would have held without this discriminator — never worse, and a later
+  // rewrite of a still-present file re-arms it.
+  //
+  // Absence from the new baseline is deliberately NOT the test. A session that
+  // grew past INGEST_SESSION_MAX_BYTES is skip-listed by the loop above and so
+  // leaves the baseline while its file sits on disk; dropping ITS epoch would
+  // walk the signature back to a value consumers had already settled on —
+  // exactly the level reversion this discriminator exists to prevent. Epochs
+  // for baselined paths are likewise never cleared: the signature must not
+  // revert just because this ingest committed.
+  //
+  // Bound: the map only ever holds paths some completed ingest baselined AND
+  // that still exist, so it stays within the discovery caps plus the few
+  // skip-listed files, and the statSync runs only for entries already off the
+  // baseline (none, in the steady state).
+  for (const path of [...transcriptRewriteEpochs.keys()]) {
+    if (nextBaseline.has(path)) continue;
+    try {
+      statSync(path);
+    } catch {
+      transcriptRewriteEpochs.delete(path);
+    }
   }
 
   const hash = createHash('sha1');

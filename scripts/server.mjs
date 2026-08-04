@@ -2365,6 +2365,14 @@ function startDatasetRefresh(state, sig) {
       rebuildDatasetCache(state, sig)
         .catch((err) => {
           console.error('dataset background refresh failed:', err?.message ?? err);
+          // #3401 review (Variant B): the failed rebuild may have already run
+          // ingest() (COMMIT landed, source state advanced) before the dataset
+          // build threw. Leaving lastSourceSig settled would let the next
+          // request skip-serve the last-good body as if it were current, so
+          // mark the gate UNSETTLED (same idiom as the racy-commit path in
+          // rebuildDatasetCache) — every request keeps retrying the refresh
+          // until one succeeds and records a genuinely settled signature.
+          state.lastSourceSig = null;
         })
         .finally(() => {
           state.datasetRefresh = null;
@@ -9781,13 +9789,16 @@ async function handleDatasetJson(req, res) {
     useCache: true,
   });
   // Stat-gate (#182): a bounded source signature answers "could anything
-  // have changed since the last full ingest?" without re-walking every
-  // transcript or touching SQLite. When it matches the signature from
+  // have changed since the last full ingest?" without reading transcript
+  // bytes or touching SQLite. When it matches the signature from
   // the last ingest AND we already hold a built dataset cache, skip ingest()
   // entirely and serve the cache. NOTE: an in-place append to an existing
   // transcript does NOT move this signature (POSIX dir mtime semantics), so
   // it lags until the next structural change — accepted by design; in-flight
-  // liveness is the Live Session widget's job (#131). See sourceSignature().
+  // liveness is the Live Session widget's job (#131). An in-place REWRITE with
+  // a restored mtime is NOT accepted lag: the signature's transcript-rewrites
+  // part observes it via ctime and schedules the refresh (#3401). See
+  // sourceSignature().
   const sig = ingestApi.sourceSignature();
   if (!ingestState.datasetCache) {
     ingestState.datasetCache = ingestApi.loadLatestDatasetCache();

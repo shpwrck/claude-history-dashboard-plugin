@@ -183,8 +183,24 @@ function isIngestSessionTooLargeError(err) {
   return err?.code === 'ERR_DASHBOARD_INGEST_SESSION_TOO_LARGE';
 }
 
+// Test-observable count of session transcript files opened for byte reads
+// (#3401). The incremental-ingest guarantee — an unchanged transcript is never
+// re-read — is asserted against this counter, so a future signature or digest
+// change that silently reintroduces a full-corpus byte scan fails a test
+// instead of shipping. Mirrors ingest.mjs's _getArtifactParseCount precedent.
+let sessionFileReads = 0;
+
+export function _getSessionFileReadCount() {
+  return sessionFileReads;
+}
+
+export function _resetSessionFileReadCount() {
+  sessionFileReads = 0;
+}
+
 function readUtf8FileCappedSync(filePath, maxBytes, initialBytes = 0) {
   const fd = openSync(filePath, 'r');
+  sessionFileReads += 1;
   const chunks = [];
   let bytes = initialBytes;
   const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes + 1));
@@ -281,19 +297,36 @@ export const SESSION_SIGNALS = makeSessionSignals({
   deriveEntries,
 });
 
-export function sessionFileSignature(session) {
+// Cheap per-file identity for the session cache key (#3401). ctimeMs is the
+// rewrite discriminator: userland can restore mtime after an in-place rewrite
+// (utimes), but that very call — like any write — advances ctime, which no
+// unprivileged syscall can set back. So a same-length rewrite with a restored
+// mtime still moves this identity while costing one stat, never a byte read.
+export function sessionFileIdentity(path) {
+  try {
+    const s = statSync(path);
+    return { path, size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs };
+  } catch {
+    return { path, size: 0, mtimeMs: 0, ctimeMs: 0 };
+  }
+}
+
+export function sessionFileIdentities(session) {
+  return [session.topPath, ...session.subPaths].map(sessionFileIdentity);
+}
+
+// The ctime component is new in the sig format; every pre-#3401 cached row
+// mismatches once and reparses on the next ingest (the sig change is itself
+// the invalidator — parse OUTPUT is unchanged, so content_hash and the
+// downstream dataset cache stay stable and no parser-version bump is needed).
+export function sessionFileSignature(
+  session,
+  identities = sessionFileIdentities(session)
+) {
   return [
     `parser:${SESSION_BLOB_PARSER_VERSION}`,
-    ...[session.topPath, ...session.subPaths].map((p) => {
-      try {
-        const s = statSync(p);
-        return `${p}:${s.mtimeMs}:${s.size}`;
-      } catch {
-        return `${p}:0:0`;
-      }
-    }),
-  ]
-    .join('|');
+    ...identities.map((f) => `${f.path}:${f.mtimeMs}:${f.size}:${f.ctimeMs}`),
+  ].join('|');
 }
 
 export function parseSessionBlobRow({ session, sig, topText, merged }) {
