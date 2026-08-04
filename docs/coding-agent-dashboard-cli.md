@@ -30,12 +30,33 @@ coding-agent-dashboard stop
   mutable `latest` tag cannot be swapped for a malicious image. Override with
   `--image` / `CODING_AGENT_DASHBOARD_IMAGE`.
 - host binding: `127.0.0.1:<port>:5173` by default
-- data mounts: an **allowlisted, credential-free projection** of `~/.claude` —
-  each history/config subpath the dashboard reads (`projects/`, `history.jsonl`,
-  `history.d/`, `usage-data/`, `settings.json`, `CLAUDE.md`, `skills/`,
-  `agents/`, `commands/`, `plugins/`, and the server-only artifact dirs) is
-  bind-mounted individually to `/home/node/.claude/<name>:ro` when it exists.
-  The whole `~/.claude` directory is **never** mounted.
+- data mounts: an **allowlist projection** of `~/.claude` — each history/config
+  subpath the dashboard reads (`projects/`, `history.jsonl`, `history.d/`,
+  `usage-data/`, `CLAUDE.md`, `skills/`, `agents/`, `commands/`, `plugins/`, and
+  the server-only artifact dirs) is bind-mounted individually to
+  `/home/node/.claude/<name>:ro` when it exists. The whole `~/.claude` directory
+  is **never** mounted. `shadow-calls/` is **not** mounted whole either — only
+  the individual files the dashboard reads (`shadow-calls/ledger.jsonl`,
+  `shadow-calls/calibration-report.json`, and the `shadow-calls/OFF` killswitch
+  flag) are projected.
+- settings: `settings.json` / `settings.local.json` are **never** mounted raw —
+  settings fields routinely carry secrets (the `env:` block, `mcpServers`
+  env/headers/args, hook commands, `apiKeyHelper`-style helper commands). The
+  launcher instead projects each file down to an **allowlist of only the fields
+  the dashboard reads** and bind-mounts that projection `:ro` from an
+  unpredictable per-serve temp dir:
+  - kept **verbatim**: `model`, `cleanupPeriodDays`,
+    `permissions.allow/ask/deny` rule strings, hook `matcher` patterns, and
+    `enabledPlugins` ids (values coerced to booleans) — identifiers and literal
+    match patterns the dashboard consumes as-is;
+  - kept **redacted**: `env` values and hook `command` strings collapse to a
+    `__redacted__` placeholder that preserves only their `${NAME}` references,
+    so config hygiene's env-dependency diagnostics still work without the
+    literal (possibly secret) text;
+  - **everything else is dropped** — `mcpServers` (including its nested `env`,
+    `headers`, `args`), `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
+    `otelHeadersHelper`, `statusLine`, and any unknown key never reach the
+    container, so a secret in a field the dashboard does not read cannot leak.
 - credentials: `~/.claude/.credentials.json` (the OAuth subscription token) is
   never mounted, and is additionally hard-masked with an empty `/dev/null`
   source as defense in depth. `~/.claude.json` is **not** mounted at all.
@@ -61,11 +82,21 @@ or `~/.claude.json` degrade gracefully instead of exposing data:
   `~/.claude/.credentials.json`, which is intentionally withheld).
 - MCP-server attribution and config-drift (`~/.claude.json` and its `backups/`
   snapshots, which can carry MCP secrets) are omitted.
+- Settings-health diagnostics degrade for what the settings projection drops or
+  redacts: typo/unknown-key warnings and wrong-type errors for dropped fields,
+  the syntax-error finding for an unparseable settings file (projected as `{}`),
+  and `${NAME}` references inside dropped fields are not surfaced inside the
+  container. Hook commands display as the `__redacted__` placeholder, and
+  hook-script reference-integrity (dangling-hook detection) cannot verify
+  scripts from a redacted command — it could not verify `~/.claude/hooks/`
+  scripts in this container anyway, since that directory is not mounted.
 
-Everything on the local free path — history/session/token/cost/tool analysis,
-recommendations, config hygiene — reads only the allowlisted projection and is
-unaffected. Because the local path makes zero external calls, the no-egress
-network causes no functional loss.
+Everything else on the local free path — history/session/token/cost/tool
+analysis, recommendations, the config-hygiene checks that read the projected
+fields (model, permissions, hooks structure, env keys and `${NAME}` graph,
+enabled plugins) — reads only the allowlisted projection and is unaffected.
+Because the local path makes zero external calls, the no-egress network causes
+no functional loss.
 
 To grant a withheld capability, mount the specific subpath yourself with a
 source-built compose file (see the README); the launcher's default stays locked

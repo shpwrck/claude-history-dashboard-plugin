@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -21,6 +22,11 @@ import {
   EGRESS_NETWORK,
   CLAUDE_MOUNT_TARGET,
   CREDENTIALS_BASENAME,
+  CLAUDE_DATA_SUBDIRS,
+  CLAUDE_DATA_FILES,
+  REDACTED_ENV_PLACEHOLDER,
+  SETTINGS_PROJECTION_DIRNAME,
+  redactSettingsProjection,
   // @ts-expect-error - JS launcher module, no type declarations
 } from '../../bin/serve-args.mjs';
 
@@ -36,14 +42,95 @@ function runCli(args: string[], env: Record<string, string | undefined> = {}) {
   });
 }
 
+// One secret per documented secret-bearing settings.json class (the
+// r17-rev-sec1 review's leak list). The projection must let NONE of these
+// bytes through — by redaction (env values, hook commands) or by dropping the
+// field entirely (mcpServers incl. nested env/headers/args, helper commands,
+// statusLine, unknown keys).
+const HOSTILE_SECRETS = {
+  topLevelEnv: 'sk-ant-TOPLEVEL-ENV-SECRET-0xc0ffee',
+  mcpNestedEnv: 'sk-mcp-NESTED-ENV-SECRET',
+  mcpHeader: 'sk-mcp-HEADER-SECRET',
+  mcpArg: 'sk-mcp-ARG-SECRET',
+  hookCommand: 'SLACKWEBHOOKTOKEN123',
+  apiKeyHelper: 'sk-ant-INLINE-HELPER-SECRET',
+  awsAuthRefresh: 'AWSSSOREFRESH-SECRET',
+  awsCredentialExport: 'AKIAINLINESECRET',
+  otelHeadersHelper: 'hcaik_INLINE_OTEL_SECRET',
+  statusLine: 'sk-STATUSLINE-SECRET',
+} as const;
+
+// A hostile-but-realistic settings.json carrying a secret in every class
+// above, alongside the legitimate fields the dashboard reads.
+function hostileSettings() {
+  return {
+    model: 'claude-opus-4',
+    cleanupPeriodDays: 30,
+    env: {
+      ANTHROPIC_API_KEY: HOSTILE_SECRETS.topLevelEnv,
+      DERIVED: '${BASE}/v1',
+    },
+    permissions: { allow: ['Bash(npm run *)'], deny: ['Read(.env)'] },
+    hooks: {
+      Stop: [
+        {
+          matcher: '',
+          hooks: [
+            {
+              type: 'command',
+              command:
+                `curl -s https://hooks.slack.com/services/${HOSTILE_SECRETS.hookCommand} -d done` +
+                ' && node ~/.claude/hooks/notify.mjs ${NOTIFY_CHANNEL}',
+              timeout: 5,
+            },
+          ],
+        },
+      ],
+    },
+    enabledPlugins: { 'claude-history-dashboard@repo': true },
+    mcpServers: {
+      corp: {
+        command: 'corp-mcp',
+        args: [`--token=${HOSTILE_SECRETS.mcpArg}`],
+        env: { MCP_API_KEY: HOSTILE_SECRETS.mcpNestedEnv },
+        headers: { Authorization: `Bearer ${HOSTILE_SECRETS.mcpHeader}` },
+      },
+    },
+    apiKeyHelper: `echo ${HOSTILE_SECRETS.apiKeyHelper}`,
+    awsAuthRefresh: `aws sso login --token ${HOSTILE_SECRETS.awsAuthRefresh}`,
+    awsCredentialExport: `echo ${HOSTILE_SECRETS.awsCredentialExport}`,
+    otelHeadersHelper: `echo ${HOSTILE_SECRETS.otelHeadersHelper}`,
+    statusLine: {
+      type: 'command',
+      command: `echo ${HOSTILE_SECRETS.statusLine}`,
+    },
+  };
+}
+
 function tempFixture() {
   const root = mkdtempSync(join(tmpdir(), 'cad-cli-'));
   const home = join(root, 'home');
-  // A realistic ~/.claude: allowlisted history/config subpaths PLUS the OAuth
-  // credential that must NEVER be mounted into the container.
+  // A realistic ~/.claude: allowlisted history/config subpaths PLUS secrets that
+  // must NEVER reach the container raw — the OAuth credential AND a settings
+  // file carrying a secret in every documented secret-bearing class.
   mkdirSync(join(home, '.claude', 'projects'), { recursive: true });
   writeFileSync(join(home, '.claude', 'history.jsonl'), '');
-  writeFileSync(join(home, '.claude', 'settings.json'), '{}\n');
+  writeFileSync(
+    join(home, '.claude', 'settings.json'),
+    JSON.stringify(hostileSettings()) + '\n'
+  );
+  // shadow-calls is narrowed to individual files, not the whole dir (#3604).
+  mkdirSync(join(home, '.claude', 'shadow-calls', 'lib'), { recursive: true });
+  writeFileSync(join(home, '.claude', 'shadow-calls', 'ledger.jsonl'), '');
+  writeFileSync(
+    join(home, '.claude', 'shadow-calls', 'calibration-report.json'),
+    '{}\n'
+  );
+  // A sibling file that is NOT read by the dashboard and must stay unmounted.
+  writeFileSync(
+    join(home, '.claude', 'shadow-calls', 'lib', 'budget.mjs'),
+    '// not read by the dashboard\n'
+  );
   writeFileSync(
     join(home, '.claude', '.credentials.json'),
     '{"claudeAiOauth":{"accessToken":"SECRET"}}\n'
@@ -105,6 +192,10 @@ describe('buildServeArgs container hardening (issue #3344)', () => {
   const present = new Set([
     join(DATA_DIR, 'projects'),
     join(DATA_DIR, 'history.jsonl'),
+    // shadow-calls is narrowed to individual files, not the whole dir (#3604).
+    join(DATA_DIR, 'shadow-calls', 'ledger.jsonl'),
+    join(DATA_DIR, 'shadow-calls', 'calibration-report.json'),
+    // The raw settings file exists on the host but must never be auto-mounted.
     join(DATA_DIR, 'settings.json'),
   ]);
   const exists = (p: string) => present.has(p);
@@ -205,16 +296,191 @@ describe('buildServeArgs container hardening (issue #3344)', () => {
     expect(args).not.toContain('CODING_AGENT_SOURCES');
   });
 
-  it('claudeDataMounts skips missing paths', () => {
+  it('claudeDataMounts skips missing paths and never auto-mounts raw settings', () => {
     const mounts = claudeDataMounts(DATA_DIR, exists) as Array<{
       source: string;
       target: string;
     }>;
+    // Present allowlisted paths only; nested shadow-calls files project at their
+    // nested targets; the raw settings.json is NOT in the allowlist (#3604).
     expect(mounts.map((m) => m.target)).toEqual([
       `${CLAUDE_MOUNT_TARGET}/projects`,
       `${CLAUDE_MOUNT_TARGET}/history.jsonl`,
-      `${CLAUDE_MOUNT_TARGET}/settings.json`,
+      `${CLAUDE_MOUNT_TARGET}/shadow-calls/ledger.jsonl`,
+      `${CLAUDE_MOUNT_TARGET}/shadow-calls/calibration-report.json`,
     ]);
+  });
+
+  it('narrows shadow-calls to individual files (never the whole dir)', () => {
+    // shadow-calls/ must not appear in either allowlist as a bare dir name.
+    expect(CLAUDE_DATA_SUBDIRS).not.toContain('shadow-calls');
+    // The only shadow-calls entries are the individual files the server reads.
+    const shadowFiles = (CLAUDE_DATA_FILES as string[]).filter((f) =>
+      f.startsWith('shadow-calls/')
+    );
+    expect(shadowFiles).toEqual([
+      'shadow-calls/ledger.jsonl',
+      'shadow-calls/calibration-report.json',
+      'shadow-calls/OFF',
+    ]);
+
+    const args = build();
+    const targets = volumeSpecs(args)
+      .map(parseVolume)
+      .map((v) => v.target);
+    // The whole shadow-calls dir is never a mount target...
+    expect(targets).not.toContain(`${CLAUDE_MOUNT_TARGET}/shadow-calls`);
+    // ...only the present narrowed files are.
+    expect(targets).toContain(`${CLAUDE_MOUNT_TARGET}/shadow-calls/ledger.jsonl`);
+    expect(targets).toContain(
+      `${CLAUDE_MOUNT_TARGET}/shadow-calls/calibration-report.json`
+    );
+  });
+
+  it('never mounts a raw settings file, and mounts the redacted projection instead', () => {
+    // Without a redacted source, the raw settings.json is NOT mounted at all
+    // (it is deliberately absent from the allowlist).
+    const bare = build();
+    const bareSpecs = volumeSpecs(bare).map(parseVolume);
+    expect(
+      bareSpecs.some((v) => v.source === join(DATA_DIR, 'settings.json'))
+    ).toBe(false);
+    expect(
+      bareSpecs.some((v) => v.target === `${CLAUDE_MOUNT_TARGET}/settings.json`)
+    ).toBe(false);
+
+    // With a redacted source supplied by serve(), the redacted copy mounts at
+    // the settings target :ro — and the raw source is still never mounted.
+    const redacted = '/tmp/cad-proj/settings.json';
+    const withProjection = build({
+      settingsSources: { 'settings.json': redacted },
+      exists: (p: string) => present.has(p) || p === redacted,
+    });
+    const specs = volumeSpecs(withProjection).map(parseVolume);
+    expect(specs).toContainEqual({
+      source: redacted,
+      target: `${CLAUDE_MOUNT_TARGET}/settings.json`,
+      mode: 'ro',
+    });
+    expect(
+      specs.some((v) => v.source === join(DATA_DIR, 'settings.json'))
+    ).toBe(false);
+  });
+});
+
+describe('redactSettingsProjection (issue #3604) — allowlist projection', () => {
+  it('lets NO secret byte from any documented secret-bearing class survive', () => {
+    const out = redactSettingsProjection(
+      JSON.stringify(hostileSettings())
+    ) as string;
+    for (const [cls, secret] of Object.entries(HOSTILE_SECRETS)) {
+      expect(out, `class "${cls}" leaked`).not.toContain(secret);
+    }
+  });
+
+  it('DROPS every field outside the read-set allowlist (mcpServers, helper commands, statusLine, unknown keys)', () => {
+    const parsed = JSON.parse(
+      redactSettingsProjection(
+        JSON.stringify({ ...hostileSettings(), someUnknownKey: 'whatever' })
+      ) as string
+    );
+    // Only the fields the dashboard reads survive, nothing else.
+    expect(Object.keys(parsed).sort()).toEqual([
+      'cleanupPeriodDays',
+      'enabledPlugins',
+      'env',
+      'hooks',
+      'model',
+      'permissions',
+    ]);
+    expect(parsed).not.toHaveProperty('mcpServers');
+    expect(parsed).not.toHaveProperty('apiKeyHelper');
+    expect(parsed).not.toHaveProperty('awsAuthRefresh');
+    expect(parsed).not.toHaveProperty('awsCredentialExport');
+    expect(parsed).not.toHaveProperty('otelHeadersHelper');
+    expect(parsed).not.toHaveProperty('statusLine');
+    expect(parsed).not.toHaveProperty('someUnknownKey');
+  });
+
+  it('keeps what the dashboard reads: model, cleanupPeriodDays, permission rules, plugin ids, env keys', () => {
+    const parsed = JSON.parse(
+      redactSettingsProjection(JSON.stringify(hostileSettings())) as string
+    );
+    // mergeLiveSettings scalars (detectors/shared.ts model checks;
+    // stale-projects/secrets-at-rest cleanupPeriodDays).
+    expect(parsed.model).toBe('claude-opus-4');
+    expect(parsed.cleanupPeriodDays).toBe(30);
+    // Permission rules are literal match patterns (Permissions view,
+    // deny-rule/dangerous-bypass detectors) — verbatim.
+    expect(parsed.permissions).toEqual({
+      allow: ['Bash(npm run *)'],
+      deny: ['Read(.env)'],
+    });
+    // Plugin ids gate bundle enumeration (readPlugins) — keys kept, boolean values.
+    expect(parsed.enabledPlugins).toEqual({
+      'claude-history-dashboard@repo': true,
+    });
+    // Env KEYS are retained (ConfigHygiene resolves references by NAME)...
+    expect(Object.keys(parsed.env).sort()).toEqual([
+      'ANTHROPIC_API_KEY',
+      'DERIVED',
+    ]);
+    // ...values are placeholdered.
+    expect(parsed.env.ANTHROPIC_API_KEY).toBe(REDACTED_ENV_PLACEHOLDER);
+  });
+
+  it('keeps hook STRUCTURE with the command redacted to placeholder + ${NAME} tokens', () => {
+    const parsed = JSON.parse(
+      redactSettingsProjection(JSON.stringify(hostileSettings())) as string
+    );
+    // Structure survives: event key, group matcher, entry type/timeout — so
+    // Stop-hook presence (readStopHookConfigState, hook-overhead) still works.
+    expect(parsed.hooks.Stop).toHaveLength(1);
+    expect(parsed.hooks.Stop[0].matcher).toBe('');
+    expect(parsed.hooks.Stop[0].hooks).toHaveLength(1);
+    const entry = parsed.hooks.Stop[0].hooks[0];
+    expect(entry.type).toBe('command');
+    expect(entry.timeout).toBe(5);
+    // The command's literal text (which held the webhook token) is gone...
+    expect(entry.command).not.toContain(HOSTILE_SECRETS.hookCommand);
+    expect(entry.command).toContain(REDACTED_ENV_PLACEHOLDER);
+    // ...but its ${NAME} reference survives for the missing-env diagnostic.
+    expect(entry.command).toContain('${NOTIFY_CHANNEL}');
+  });
+
+  it('preserves ${NAME} interpolation tokens so the missing-env diagnostic is unchanged', () => {
+    const raw = JSON.stringify({
+      env: {
+        BASE: 'https://secret-host.internal/v1',
+        DERIVED: '${BASE}/models?key=${MISSING_KEY}',
+      },
+    });
+    const parsed = JSON.parse(redactSettingsProjection(raw) as string);
+    // The literal secret host is gone...
+    expect(parsed.env.BASE).toBe(REDACTED_ENV_PLACEHOLDER);
+    // ...but every interpolation reference config-hygiene resolves is kept, in
+    // order, so its dependency graph (${BASE}, ${MISSING_KEY}) is identical.
+    const names = [
+      ...(parsed.env.DERIVED as string).matchAll(
+        /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+      ),
+    ].map((m) => m[1]);
+    expect(names).toEqual(['BASE', 'MISSING_KEY']);
+    expect(parsed.env.DERIVED).not.toContain('secret-host');
+  });
+
+  it('drops to {} on unparseable input rather than passing raw bytes through', () => {
+    const out = redactSettingsProjection(
+      '{ "env": { "ANTHROPIC_API_KEY": "sk-ant-LEAK" '
+    ) as string;
+    expect(out).not.toContain('sk-ant-LEAK');
+    expect(JSON.parse(out)).toEqual({});
+  });
+
+  it('projects a minimal settings file to its allowlisted fields (still valid JSON)', () => {
+    const raw = JSON.stringify({ model: 'claude-sonnet', hooks: {} });
+    const parsed = JSON.parse(redactSettingsProjection(raw) as string);
+    expect(parsed).toEqual({ model: 'claude-sonnet', hooks: {} });
   });
 });
 
@@ -237,7 +503,7 @@ describe('coding-agent-dashboard CLI', () => {
     expect(result.stderr).toContain('Usage:');
   });
 
-  it('prefers podman, mounts an allowlisted credential-free projection, denies egress, and passes CODING_AGENT_SOURCES through', () => {
+  it('prefers podman, mounts an allowlisted secret-free projection (redacted settings, narrowed shadow-calls), denies egress, and passes CODING_AGENT_SOURCES through', () => {
     const fixture = tempFixture();
     try {
       writeFakeRuntime(fixture.root, 'podman');
@@ -247,6 +513,8 @@ describe('coding-agent-dashboard CLI', () => {
         CODING_AGENT_SOURCES: '[{"id":"team"}]',
         HOME: fixture.home,
         PATH: fixture.root,
+        // Isolate the redacted-settings projection under the fixture.
+        TMPDIR: fixture.root,
       });
 
       expect(result.status).toBe(0);
@@ -282,6 +550,59 @@ describe('coding-agent-dashboard CLI', () => {
       expect(log).toContain(
         '--volume /dev/null:/home/node/.claude/.credentials.json:ro'
       );
+
+      // #3604 shadow-calls narrowing: only the individual files the dashboard
+      // reads are mounted; the whole shadow-calls dir and its unread siblings
+      // (e.g. lib/) are NOT.
+      expect(log).toContain(
+        `--volume ${join(fixture.home, '.claude', 'shadow-calls', 'ledger.jsonl')}:/home/node/.claude/shadow-calls/ledger.jsonl:ro`
+      );
+      expect(log).toContain(
+        `--volume ${join(fixture.home, '.claude', 'shadow-calls', 'calibration-report.json')}:/home/node/.claude/shadow-calls/calibration-report.json:ro`
+      );
+      expect(log).not.toContain(
+        `--volume ${join(fixture.home, '.claude', 'shadow-calls')}:/home/node/.claude/shadow-calls:ro`
+      );
+      expect(log).not.toContain(
+        join(fixture.home, '.claude', 'shadow-calls', 'lib')
+      );
+
+      // #3604 settings projection: the RAW settings.json is never a mount
+      // source; the allowlist projection is mounted at the settings target from
+      // an unpredictable per-serve temp dir; and its bytes carry no secret from
+      // ANY documented secret-bearing class.
+      const rawSettings = join(fixture.home, '.claude', 'settings.json');
+      const rawSettingsMount = `--volume ${rawSettings}:/home/node/.claude/settings.json:ro`;
+      expect(log).not.toContain(rawSettingsMount);
+      const projectedMount = log.match(
+        /--volume (\S+):\/home\/node\/\.claude\/settings\.json:ro/
+      );
+      expect(projectedMount).not.toBeNull();
+      const projected = projectedMount![1];
+      // Written under the fixture's TMPDIR in the launcher's projection parent,
+      // inside an unpredictable mkdtemp leaf.
+      expect(projected.startsWith(join(fixture.root, SETTINGS_PROJECTION_DIRNAME) + '/')).toBe(
+        true
+      );
+      expect(projected).toMatch(/serve-[^/]+\/settings\.json$/);
+      const projectedBytes = readFileSync(projected, 'utf8');
+      for (const [cls, secret] of Object.entries(HOSTILE_SECRETS)) {
+        expect(projectedBytes, `class "${cls}" leaked`).not.toContain(secret);
+      }
+      const projectedSettings = JSON.parse(projectedBytes);
+      expect(projectedSettings.env.ANTHROPIC_API_KEY).toBe(
+        REDACTED_ENV_PLACEHOLDER
+      );
+      // The read-set fields still project so config hygiene keeps working.
+      expect(projectedSettings.model).toBe('claude-opus-4');
+      expect(projectedSettings.permissions).toEqual({
+        allow: ['Bash(npm run *)'],
+        deny: ['Read(.env)'],
+      });
+      // Dropped classes are absent as whole fields, not just value-redacted.
+      expect(projectedSettings).not.toHaveProperty('mcpServers');
+      expect(projectedSettings).not.toHaveProperty('apiKeyHelper');
+
       expect(log).toContain('--env CODING_AGENT_SOURCES');
       expect(log).toContain('--userns=keep-id');
       // Digest-pinned image ref.
@@ -301,6 +622,7 @@ describe('coding-agent-dashboard CLI', () => {
         CAD_RUNTIME_LOG: fixture.log,
         HOME: fixture.home,
         PATH: fixture.root,
+        TMPDIR: fixture.root,
       });
 
       expect(result.status).toBe(0);
@@ -309,19 +631,29 @@ describe('coding-agent-dashboard CLI', () => {
       expect(log).toContain(`docker\tnetwork create --internal ${EGRESS_NETWORK}`);
       expect(log).toContain('--publish 0.0.0.0:4999:5173');
       expect(log).not.toContain('--userns=keep-id');
+      // The raw settings file is still never mounted under docker either.
+      expect(log).not.toContain(
+        `--volume ${join(fixture.home, '.claude', 'settings.json')}:/home/node/.claude/settings.json:ro`
+      );
     } finally {
       fixture.cleanup();
     }
   });
 
-  it('stop removes the managed container and tears down the no-egress network', () => {
+  it('stop removes the managed container, the no-egress network, and the settings projection', () => {
     const fixture = tempFixture();
     try {
       writeFakeRuntime(fixture.root, 'podman');
+      // A projection left behind by an earlier serve.
+      const projectionParent = join(fixture.root, SETTINGS_PROJECTION_DIRNAME);
+      mkdirSync(join(projectionParent, 'serve-stale'), { recursive: true });
+      writeFileSync(join(projectionParent, 'serve-stale', 'settings.json'), '{}\n');
+
       const result = runCli(['stop'], {
         CAD_RUNTIME_LOG: fixture.log,
         HOME: fixture.home,
         PATH: fixture.root + delimiter + process.env.PATH,
+        TMPDIR: fixture.root,
       });
 
       expect(result.status).toBe(0);
@@ -329,6 +661,8 @@ describe('coding-agent-dashboard CLI', () => {
       expect(log).toContain('podman\trm -f coding-agent-dashboard');
       expect(log).toContain(`podman\tnetwork rm ${EGRESS_NETWORK}`);
       expect(log).not.toContain('rm -f claude-history-dashboard');
+      // The projection dir is cleaned up with the container.
+      expect(existsSync(projectionParent)).toBe(false);
     } finally {
       fixture.cleanup();
     }
@@ -430,6 +764,27 @@ describe('coding-agent-dashboard serve (real podman)', () => {
           'cat /home/node/.claude/.credentials.json 2>/dev/null || echo ENOENT',
         ]);
         expect(creds.stdout).not.toContain('SECRET');
+
+        // No settings secret from any class reaches the container, and the
+        // whole shadow-calls dir is not exposed (only the read files) (#3604).
+        const settings = podman([
+          'exec',
+          'coding-agent-dashboard',
+          'sh',
+          '-c',
+          'cat /home/node/.claude/settings.json 2>/dev/null || echo ENOENT',
+        ]);
+        for (const [cls, secret] of Object.entries(HOSTILE_SECRETS)) {
+          expect(settings.stdout, `class "${cls}" leaked`).not.toContain(secret);
+        }
+        const shadowLib = podman([
+          'exec',
+          'coding-agent-dashboard',
+          'sh',
+          '-c',
+          'cat /home/node/.claude/shadow-calls/lib/budget.mjs 2>/dev/null || echo ENOENT',
+        ]);
+        expect(shadowLib.stdout).toContain('ENOENT');
       } finally {
         runCli(['stop']);
         podman(['rm', '-f', 'coding-agent-dashboard']);
