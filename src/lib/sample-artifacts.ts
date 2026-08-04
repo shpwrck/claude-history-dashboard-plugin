@@ -371,7 +371,7 @@ export function buildSampleLiveConfig(): LiveConfig {
     settings: {},
     settingsHealth: null,
     claudeMd: {
-      // The adoption hunk is appended so the Adoption Card's ADOPTED row — which
+      // The adoption hunk is appended so the Adoption Card's MARKER-CONFIRMED row — which
       // extracts the matching section live by `markerHeading` (#578) — resolves
       // against the same heading the sample SUPPRESSED receipt records.
       global: `# Working agreements\n\nPrefer small PRs; run lint + build before committing.\n\n${SAMPLE_ADOPTION_CLAUDE_MD_HUNK}\n`,
@@ -406,7 +406,7 @@ export function buildSampleLiveConfig(): LiveConfig {
  * the SPA), so without this seed the Adoption Card only ever shows its "needs a
  * server" empty state in demo mode. Paired with the adoption hunk folded into
  * `buildSampleLiveConfig()`'s CLAUDE.md, the scorecard derives one card that
- * traverses SURFACED -> ADOPTED (live hunk present) -> SUPPRESSED. The receipts
+ * traverses SURFACED -> MARKER-CONFIRMED (live hunk present) -> SUPPRESSED. The receipts
  * are authored in `build-corpus.mjs` (the sample-data source of truth) and
  * re-exported here typed, mirroring how the corpus feeds the upload path.
  */

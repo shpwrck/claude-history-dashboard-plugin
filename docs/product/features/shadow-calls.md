@@ -10,10 +10,16 @@ It is about to receive **far more** of it: continuous per-window replays from th
 scheduled routine, model-eval batches, proof-batch and live `/race` runs, and
 new axes and sources beyond today's set.
 
-Today the view is aggregate-only and can silently drop rows — the headline once
-counted 26 "experiments" while the ledger held 43 lines (15 synthetic demo rows
-and 2 excluded skips). That confusion is exactly what this epic closes: the view
-must **report correctly at volume**.
+Today the view is aggregate-only and can silently drop rows — as of 2026-06-26 the
+headline once counted 26 "experiments" while the maintainer's local ledger
+(`~/.claude/shadow-calls/ledger.jsonl`, a gitignored append-only runtime file) held
+43 lines: 15 synthetic demo rows and 2 excluded skips (26 + 15 + 2 = 43). That exact
+ledger state is a historical observation with **no immutable in-repo artifact**
+preserving it — the runtime ledger is not committed — but the breakdown reconciles
+against the parser's `counted + synthetic + skipped === total` invariant
+(`src/lib/parse-shadow-calls.ts`), so a reviewer can trace the 26 / 15 / 2 split to
+the counting model. That confusion is exactly what this epic closes: the view must
+**report correctly at volume**.
 
 ## The four redesign directions
 

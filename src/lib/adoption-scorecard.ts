@@ -6,8 +6,8 @@
  * metrics.
  *
  * Load-bearing honesty rules carried verbatim from ADR 0005:
- *  - The ADOPTED row's CLAUDE.md hunk is rendered from `liveConfig` **at render
- *    time, never stored** — we extract it here from the merged CLAUDE.md text by
+ *  - The MARKER-CONFIRMED row's CLAUDE.md hunk is rendered from `liveConfig` **at
+ *    render time, never stored** — we extract it here from the merged CLAUDE.md text by
  *    the receipt's `markerHeading`, we do NOT read it from the receipt.
  *  - `M/N` is a **lower bound** — strict-AND markers undercount prose adoptions.
  *  - "no recurrence for N sessions" is **non-causal** — a deleted CLAUDE.md
@@ -27,7 +27,7 @@ import type {
   SuppressedReceipt,
 } from './adoption-receipts';
 
-export type AdoptionStatus = 'SURFACED' | 'ADOPTED' | 'SUPPRESSED';
+export type AdoptionStatus = 'SURFACED' | 'MARKER-CONFIRMED' | 'SUPPRESSED';
 
 export interface AdoptionScorecardRow {
   /** Stable finding id — the join key, e.g. `reliability.rate-limits`. */
@@ -85,7 +85,7 @@ export interface AdoptionScorecard {
  * GENERIC CLAUDE.md marker ("## Winning prompt framing") certifies only that
  * SOME treatment was adopted — never that THIS finding is adopted.
  *
- * For these, the SURFACED-only marker-based ADOPTED inference is disabled: a
+ * For these, the SURFACED-only marker-based MARKER-CONFIRMED inference is disabled: a
  * treatment-scoped finding stays SURFACED until the engine's real FIRING→
  * SUPPRESSED transition (the detector stops firing entirely = every qualifying
  * treatment is adopted). This keeps a later, different, still-unadopted treatment
@@ -164,7 +164,7 @@ export function liveClaudeMdHunk(
 
 /**
  * Resolve the live CLAUDE.md hunk for a finding from its detector's declared
- * markers (#1785). Used for the SURFACED-only ADOPTED path, and preferred over
+ * markers (#1785). Used for the SURFACED-only MARKER-CONFIRMED path, and preferred over
  * the receipt's stored heading on the SUPPRESSED path (#1915). Returns a hunk
  * ONLY when the strict-AND markers are actually present in the merged CLAUDE.md
  * (a partial/absent fix stays SURFACED) and a heading regex resolves a concrete
@@ -228,7 +228,7 @@ export function buildAdoptionScorecard(
   liveConfig: LiveConfig | null | undefined,
   /**
    * Finding-id → CLAUDE.md marker signature (#1785). Lets a SURFACED-only
-   * finding resolve its live hunk and reach ADOPTED before any suppression
+   * finding resolve its live hunk and reach MARKER-CONFIRMED before any suppression
    * receipt exists. Client/route callers MUST pass the client-safe
    * `FINDING_MARKER_CATALOG` from `detectors/applied-markers` — NOT
    * `findingMarkerCatalog()` from the `detectors` barrel, which pulls the whole
@@ -300,7 +300,7 @@ export function buildAdoptionScorecard(
     }
     const attributionPending = suppressed !== null && surfaced === null;
 
-    // Treatment scoping affects only generic marker-based ADOPTED inference.
+    // Treatment scoping affects only generic marker-based MARKER-CONFIRMED inference.
     // Lifecycle recency itself is universal: any newer surface reopens a closed
     // finding id, while per-treatment rows remain the follow-up in #2850.
     const isTreatmentScoped = TREATMENT_SCOPED_FINDING_IDS.has(findingId);
@@ -322,11 +322,11 @@ export function buildAdoptionScorecard(
       // SURFACED-only: no stored markerHeading, so resolve the finding's markers
       // from the live detector catalog and read the hunk live (#1785). A
       // non-null hunk means the fix's markers landed in CLAUDE.md before any
-      // suppression receipt — "fix landed, awaiting quiet" → ADOPTED below.
+      // suppression receipt — "fix landed, awaiting quiet" → MARKER-CONFIRMED below.
       //
       // Skipped for a TREATMENT-SCOPED finding (#2842): its generic marker can be
       // present because a DIFFERENT treatment was adopted, so config-state marker
-      // presence must NOT mark it ADOPTED here — it stays SURFACED until a genuine
+      // presence must NOT mark it MARKER-CONFIRMED here — it stays SURFACED until a genuine
       // FIRING→SUPPRESSED transition (every treatment adopted) is recorded.
       liveHunk = liveHunkFromMarkers(liveConfig, findingMarkers?.get(findingId));
     }
@@ -347,8 +347,8 @@ export function buildAdoptionScorecard(
     } else if (liveHunk !== null) {
       // Surfaced and the marker section is present live, but no suppression
       // record has been emitted yet — the fix has landed but the engine hasn't
-      // confirmed it quiet. Treat as ADOPTED (config-state evidence).
-      status = 'ADOPTED';
+      // confirmed it quiet. Treat as MARKER-CONFIRMED (config-state evidence).
+      status = 'MARKER-CONFIRMED';
     } else {
       status = 'SURFACED';
     }
@@ -364,10 +364,10 @@ export function buildAdoptionScorecard(
     });
   }
 
-  // Stable sort: SUPPRESSED, then ADOPTED, then SURFACED; ties by finding id.
+  // Stable sort: SUPPRESSED, then MARKER-CONFIRMED, then SURFACED; ties by finding id.
   const statusRank: Record<AdoptionStatus, number> = {
     SUPPRESSED: 0,
-    ADOPTED: 1,
+    'MARKER-CONFIRMED': 1,
     SURFACED: 2,
   };
   rows.sort(

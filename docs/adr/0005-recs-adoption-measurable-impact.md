@@ -7,10 +7,10 @@ the snippet was applied", ADOPTED) to non-causal **marker-confirmed** terminolog
 matcher only establishes that a matching heading and case-insensitive body-phrase fragments
 exist somewhere in the merged CLAUDE.md after surfacing; that is evidence *consistent with*
 adoption, never proof of it. This amendment **prescribes** the corrected terminology as the
-design's semantics; the currently-shipped scorecard and receipts copy
+design's semantics; the shipped scorecard and receipts copy
 (`src/lib/adoption-scorecard.ts`, `src/components/AdoptionScorecard.tsx`,
-`docs/recs-adoption-receipts.md`) still uses the original ADOPTED wording — the copy rename
-is tracked in #3620.
+`docs/recs-adoption-receipts.md`) now render that marker-confirmed terminology, aligned via
+#3620.
 Date: 2026-06-04
 Supersedes: none
 Related: #573, ADR [0002](0002-dynamic-recommendation-rule-engine.md) (rule engine),
@@ -98,11 +98,11 @@ dashboard shows "adoption: injected N times" only and withholds any causal verdi
 
 One per-finding card, three timestamped rows a viewer reads in 10 seconds. (The card keeps
 its shipped name; the 2026-08-03 amendment prescribes non-causal marker-confirmed wording
-for its states and aggregates. The shipped copy still renders the original `ADOPTED`
-wording — the rename is tracked in #3620.)
+for its states and aggregates. The shipped copy renders that marker-confirmed wording as of
+#3620.)
 
 - **SURFACED** — `reliability.rate-limits injected 2026-05-28, session <hash>`
-- **MARKER-CONFIRMED** (shipped copy: `ADOPTED`; rename tracked in #3620) — the matching
+- **MARKER-CONFIRMED** — the matching
   CLAUDE.md hunk (`## Rate-limit hygiene` + body phrase), rendered from `liveConfig`
   **at render time, never stored** — presented as evidence consistent with adoption, not
   proof the snippet was applied
@@ -110,10 +110,9 @@ wording — the rename is tracked in #3620.)
   "no recurrence for N sessions" sub-line and an `M/N` "lower bound" badge
 
 Prescribed status pill: `SURFACED | MARKER-CONFIRMED | SUPPRESSED`. Prescribed index
-header: `N surfaced / M marker-confirmed / median days-to-marker-match`. (The shipped
-scorecard still renders `ADOPTED`, "M adopted (marker-confirmed)", and "median
-days-to-adopt"; #3620 tracks aligning that copy.) An `ADOPTED` state may only be
-reintroduced as a distinct, stronger claim if the design later adds the required
+header: `N surfaced / M marker-confirmed / median days-to-marker-match`. The shipped
+scorecard now renders this prescribed wording (aligned via #3620). An `ADOPTED` state may
+only be reintroduced as a distinct, stronger claim if the design later adds the required
 evidence: an explicit user action receipt or a before/after hunk tied to the surfaced
 finding.
 

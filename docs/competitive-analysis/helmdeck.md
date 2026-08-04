@@ -133,8 +133,12 @@ helmdeck touches.
 
 1. **Lead with a concrete, sourced cost table.** Their published before/after
    table is the most persuasive thing on their page, *despite* being unsourced.
-   We have the opposite asset: **real, parsed bills** ($9,447/mo in the reference
-   data). A *methodologically honest* savings table — "here's your actual spend,
+   We have the opposite asset: **real, parsed bills** — a one-time private pull of
+   the maintainer's `~/.claude` measured $9,447/mo **as of 2026-06-08** (31-day
+   window, repriced at API rates), a point-in-time observation, not a reproducible
+   current figure (see the provenance note in
+   [`docs/v0.3-efficiency-accounting.md`](../v0.3-efficiency-accounting.md)). A
+   *methodologically honest* savings table — "here's your actual spend,
    here's the reclaimable slice, here's the lever" — beats their marketing numbers
    on credibility. This is the v0.4 efficiency-accounting work; helmdeck validates
    the demand for it.

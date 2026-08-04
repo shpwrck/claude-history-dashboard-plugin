@@ -138,16 +138,19 @@ by `src/lib/adoption-scorecard.ts`) joins `SURFACED` + `SUPPRESSED` on finding
 id and renders one card per finding:
 
 - **SURFACED** — `<id> injected <date>, session <hash>`.
-- **ADOPTED** — the matching `CLAUDE.md` hunk, extracted **live from
+- **MARKER-CONFIRMED** — the matching `CLAUDE.md` hunk, extracted **live from
   `liveConfig` at render time by the receipt's `markerHeading`, never stored**.
-  Treatment-scoped findings with several fixes under one finding id withhold the
-  hunk because finding-level receipts cannot attribute it to one treatment.
+  Per the amended ADR 0005 this is evidence *consistent with* adoption (the fix's
+  markers now appear in merged `CLAUDE.md`), never proof the snippet was applied
+  or that the recommendation caused the change. Treatment-scoped findings with
+  several fixes under one finding id withhold the hunk because finding-level
+  receipts cannot attribute it to one treatment.
 - **SUPPRESSED** — `engine went silent <date>, markers now match`, with a
   **non-causal** "no recurrence" sub-line (a deleted `CLAUDE.md` section also
   reads as quiet).
 
-The index header reads `N surfaced / M adopted (marker-confirmed) / median
-days-to-adopt`, and `M/N` carries a **lower-bound** badge (strict-AND markers
+The index header reads `N surfaced / M marker-confirmed / median
+days-to-marker-match`, and `M/N` carries a **lower-bound** badge (strict-AND markers
 undercount prose adoptions). A `SUPPRESSED` record with no prior `SURFACED`
 renders **"attribution pending"** and is excluded from `M` until the hook-side
 surfaced write (#581) lands. See ADR 0005 "Demo artifact".

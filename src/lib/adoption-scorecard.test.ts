@@ -55,7 +55,7 @@ Unrelated body.
 // CLAUDE.md carrying the FULL `reliability.api-errors` marker signature
 // (MARKERS_RATE_LIMITS): the `## Rate-limit hygiene` heading AND its body phrase
 // "Avoid launching many parallel agent runs". Used for the catalog-backed
-// surfaced→ADOPTED path (#1785). The heading alone is not enough — the strict-AND
+// surfaced→MARKER-CONFIRMED path (#1785). The heading alone is not enough — the strict-AND
 // markers also require the body phrase.
 const CLAUDE_MD_RATE_LIMIT_ADOPTED = `# Project conventions
 
@@ -127,7 +127,7 @@ describe('buildAdoptionScorecard', () => {
     expect(row.attributionPending).toBe(false);
   });
 
-  it('header: N surfaced / M adopted / median days-to-adopt', () => {
+  it('header: N surfaced / M marker-confirmed / median days-to-marker-match', () => {
     const receipts: AdoptionReceipt[] = [
       surfaced('2026-05-20T00:00:00.000Z', ['a', 'b', 'c']),
       suppressed('2026-05-22T00:00:00.000Z', 'a', 'Heading A'),
@@ -170,7 +170,7 @@ describe('buildAdoptionScorecard', () => {
     expect(sc.header.adoptedCount).toBe(0);
   });
 
-  it('SURFACED finding whose detector markers are present live (no suppression yet) is ADOPTED (#1785)', () => {
+  it('SURFACED finding whose detector markers are present live (no suppression yet) is MARKER-CONFIRMED (#1785)', () => {
     // The receipt carries the EMITTED finding id — the api-errors detector's
     // fix-carrying warning branch emits `reliability.rate-limits`, and that is
     // what the /recs hook records (#2965; the catalog keys markers there).
@@ -180,13 +180,13 @@ describe('buildAdoptionScorecard', () => {
     // No suppression record, so no stored markerHeading — the heading is
     // resolved from the live detector catalog by finding id. The fix's full
     // strict-AND markers are present in CLAUDE.md, so the fix has landed and the
-    // row reaches the "awaiting quiet" ADOPTED state with the live hunk rendered.
+    // row reaches the "awaiting quiet" MARKER-CONFIRMED state with the live hunk rendered.
     const sc = buildAdoptionScorecard(
       receipts,
       config(CLAUDE_MD_RATE_LIMIT_ADOPTED),
       findingMarkerCatalog()
     );
-    expect(sc.rows[0].status).toBe('ADOPTED');
+    expect(sc.rows[0].status).toBe('MARKER-CONFIRMED');
     expect(sc.rows[0].liveHunk).toContain('## Rate-limit hygiene');
     expect(sc.rows[0].liveHunk).toContain('Avoid launching many parallel agent runs');
     // Still excluded from the coached M count — that requires a suppression.
@@ -227,7 +227,7 @@ describe('buildAdoptionScorecard', () => {
       config(guidance),
       findingMarkerCatalog()
     );
-    expect(sc.rows[0].status).toBe('ADOPTED');
+    expect(sc.rows[0].status).toBe('MARKER-CONFIRMED');
     expect(sc.rows[0].liveHunk).toContain(
       'choose native tools or path-safe alternatives before Bash'
     );
@@ -253,7 +253,7 @@ describe('buildAdoptionScorecard', () => {
       surfaced('2026-05-28T00:00:00.000Z', ['reliability.api-errors']),
     ];
     // Omitting the third arg (e.g. the SPA build) preserves the prior behaviour:
-    // surfaced-only findings cannot reach ADOPTED without the catalog.
+    // surfaced-only findings cannot reach MARKER-CONFIRMED without the catalog.
     const sc = buildAdoptionScorecard(receipts, config(CLAUDE_MD_RATE_LIMIT_ADOPTED));
     expect(sc.rows[0].status).toBe('SURFACED');
     expect(sc.rows[0].liveHunk).toBeNull();
@@ -275,7 +275,7 @@ describe('buildAdoptionScorecard', () => {
     expect(buildAdoptionScorecard([], config(CLAUDE_MD)).header.medianDaysToAdopt).toBeNull();
   });
 
-  it('orders SUPPRESSED before ADOPTED before SURFACED', () => {
+  it('orders SUPPRESSED before MARKER-CONFIRMED before SURFACED', () => {
     const receipts: AdoptionReceipt[] = [
       surfaced('2026-05-20T00:00:00.000Z', ['z-surfaced-only']),
       surfaced('2026-05-20T00:00:00.000Z', ['a-suppressed']),
@@ -378,7 +378,7 @@ describe('treatment-scoped findings (#2842)', () => {
     'Unrelated.',
   ].join('\n');
 
-  it('does NOT mark a treatment-scoped finding ADOPTED from generic marker presence', () => {
+  it('does NOT mark a treatment-scoped finding MARKER-CONFIRMED from generic marker presence', () => {
     // "structured" adopted (marker section present), but a different treatment
     // ("concise") is still live-surfaced — the finding must not read as adopted.
     const sc = buildAdoptionScorecard(
@@ -387,7 +387,7 @@ describe('treatment-scoped findings (#2842)', () => {
       findingMarkerCatalog()
     );
     const row = sc.rows.find((r) => r.findingId === 'workflow.shadow-prompt')!;
-    expect(row.status).toBe('SURFACED'); // NOT ADOPTED
+    expect(row.status).toBe('SURFACED'); // NOT MARKER-CONFIRMED
     expect(row.liveHunk).toBeNull(); // the earlier treatment's hunk is not attributed
     expect(sc.header.adoptedCount).toBe(0);
   });
@@ -583,7 +583,7 @@ describe('treatment-scoped findings (#2842)', () => {
     expect(sc.rows[0].surfaced?.sessionHash).toBe('server-validated');
   });
 
-  it('a NON-treatment-scoped finding still reaches ADOPTED from markers (guard is specific)', () => {
+  it('a NON-treatment-scoped finding still reaches MARKER-CONFIRMED from markers (guard is specific)', () => {
     // Uses the EMITTED fix-carrying id (#2965) — the catalog no longer
     // resolves the detector id for this dual-emit detector.
     const sc = buildAdoptionScorecard(
@@ -592,6 +592,6 @@ describe('treatment-scoped findings (#2842)', () => {
       findingMarkerCatalog()
     );
     const row = sc.rows.find((r) => r.findingId === 'reliability.rate-limits')!;
-    expect(row.status).toBe('ADOPTED');
+    expect(row.status).toBe('MARKER-CONFIRMED');
   });
 });

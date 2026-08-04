@@ -29,7 +29,7 @@ export function emittableIdsFor(detectorId: string): string[] {
  * emitted under (#2965). Adoption receipts store EMITTED finding ids, so the
  * marker catalogs must key markers by this id — keying by detector id left a
  * SURFACED-only `reliability.rate-limits` receipt unable to reach the #1785
- * "fix landed, awaiting quiet" ADOPTED state (marker lookup missed).
+ * "fix landed, awaiting quiet" MARKER-CONFIRMED state (marker lookup missed).
  *
  * Only detectors whose fix rides a non-detector-id branch belong here:
  * `safety.dangerous-bypass`'s branches carry no appliedMarkers, and

@@ -6,7 +6,7 @@
 // Adoption Scorecard join (the same buildAdoptionScorecard() the live view uses)
 // against the SPA's sample liveConfig. If the receipt shape, the join, or the
 // sample CLAUDE.md hunk drifts so the card no longer traverses
-// SURFACED -> ADOPTED -> SUPPRESSED, this fails instead of the SPA silently
+// SURFACED -> MARKER-CONFIRMED -> SUPPRESSED, this fails instead of the SPA silently
 // shipping a broken or empty Adoption Card.
 
 import { describe, it, expect } from 'vitest';
@@ -77,7 +77,7 @@ describe('sample adoption seed — scorecard shape (the Adoption Card)', () => {
     expect(row.attributionPending).toBe(false);
   });
 
-  it('renders the matching CLAUDE.md hunk live (the ADOPTED evidence)', () => {
+  it('renders the matching CLAUDE.md hunk live (the MARKER-CONFIRMED evidence)', () => {
     const row = scorecard.rows[0];
     expect(row.liveHunk).not.toBeNull();
     // The live hunk is the section under the receipt's markerHeading, pulled

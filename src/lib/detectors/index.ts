@@ -553,7 +553,7 @@ export const NEW_DETECTORS = DETECTORS;
  * (#1785). Built from each detector's declared {@link Detector.appliedMarkers},
  * so a finding's markers are resolvable even when its detector is currently
  * SUPPRESSED (markers already present in CLAUDE.md) and therefore absent from the
- * live recommendations — the exact adoption case the scorecard's surfaced→ADOPTED
+ * live recommendations — the exact adoption case the scorecard's surfaced→MARKER-CONFIRMED
  * transition needs. Detectors with no marker-gated CLAUDE.md fix are omitted.
  *
  * Keys are EMITTED finding ids, not detector ids (#2965): adoption receipts

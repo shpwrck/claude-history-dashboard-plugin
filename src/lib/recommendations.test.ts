@@ -4053,7 +4053,7 @@ describe('detector registry (#411/#468/#507 — static barrel)', () => {
     // catalog must be keyed by emitted id. A dual-emit detector whose fix
     // rides a non-detector-id branch (api-errors → reliability.rate-limits)
     // would otherwise strand its markers under a key no receipt ever carries,
-    // silently undercutting the #1785 SURFACED→ADOPTED path. Fired on the
+    // silently undercutting the #1785 SURFACED→MARKER-CONFIRMED path. Fired on the
     // bank so the pin covers what detectors actually EMIT, not what they
     // declare.
     const { DETECTORS, findingMarkerCatalog } = await import('./detectors');
