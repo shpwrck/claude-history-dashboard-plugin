@@ -105,12 +105,83 @@ describe('computeAgentEffectiveness', () => {
       )
     ).toBe(false)
   })
+
+  it('does not count same-turn parallel-sibling spawns as no-ops (#3614)', () => {
+    // Three same-type agents fanned out in ONE parallel cluster (shared
+    // timestamp), then a single Edit. The first two siblings are superseded by
+    // the near-simultaneous next spawn, NOT no-ops; only the last owns the Edit.
+    // Pre-fix this scored noOpRate 2/3 ≈ 0.67 and fired a fabricated
+    // "output may not be actionable" claim against a healthy parallel pattern.
+    const t0 = '2026-01-01T00:00:00.000Z'
+    const data = [
+      session('s', [
+        task('Fan', { ts: t0 }),
+        task('Fan', { ts: t0 }),
+        task('Fan', { ts: t0 }),
+        tc('Edit', { ts: '2026-01-01T00:01:00.000Z', input: { file_path: '/a.ts' } }),
+      ]),
+    ]
+    const rows = computeAgentEffectiveness([], [], [], data, [])
+    const fan = rows.find((x) => x.agentType === 'Fan')!
+    expect(fan.runs).toBe(3)
+    expect(fan.supersededRuns).toBe(2)
+    // 0 no-ops over the 1 non-superseded run → noOpRate 0, below the 0.5 gate.
+    expect(fan.noOpRate).toBe(0)
+
+    // The no-op recommendation must NOT fire for the parallel fan-out.
+    const suggestions = suggestAgentWorkflows(rows)
+    expect(suggestions.some((s) => s.message.includes('no parent follow-up'))).toBe(false)
+  })
+
+  it('still fires the no-op recommendation for genuine single-spawn no-ops (#3614)', () => {
+    // Three lone spawns across three sessions, each with no follow-up at all and
+    // no parallel sibling anywhere. Every run is a true no-op; the recommendation
+    // must still fire (no over-suppression from the superseded bucket).
+    const data = [
+      session('s1', [task('Lonely', { ts: '2026-01-01T00:00:00Z' })]),
+      session('s2', [task('Lonely', { ts: '2026-01-02T00:00:00Z' })]),
+      session('s3', [task('Lonely', { ts: '2026-01-03T00:00:00Z' })]),
+    ]
+    const rows = computeAgentEffectiveness([], [], [], data, [])
+    const lonely = rows.find((x) => x.agentType === 'Lonely')!
+    expect(lonely.runs).toBe(3)
+    expect(lonely.supersededRuns).toBe(0)
+    expect(lonely.noOpRate).toBe(1)
+    const suggestions = suggestAgentWorkflows(rows)
+    expect(suggestions.some((s) => s.message.includes('no parent follow-up'))).toBe(true)
+  })
+
+  it('a later, gapped spawn does not suppress a genuine no-op (#3614)', () => {
+    // Two 'Seq' spawns 30s apart — well beyond the 2s parallel-cluster window —
+    // with no follow-up. The first genuinely drew no action before the parent
+    // spawned again, so it must stay a no-op, NOT be reclassified as a superseded
+    // parallel sibling. Guards against over-suppression.
+    const pair = (baseIso: string): ToolCall[] => {
+      const base = Date.parse(baseIso)
+      return [
+        task('Seq', { ts: new Date(base).toISOString() }),
+        task('Seq', { ts: new Date(base + 30_000).toISOString() }),
+      ]
+    }
+    const data = [
+      session('s1', pair('2026-01-01T00:00:00Z')),
+      session('s2', pair('2026-01-02T00:00:00Z')),
+    ]
+    const rows = computeAgentEffectiveness([], [], [], data, [])
+    const seq = rows.find((x) => x.agentType === 'Seq')!
+    expect(seq.runs).toBe(4)
+    expect(seq.supersededRuns).toBe(0)
+    expect(seq.noOpRate).toBe(1)
+    const suggestions = suggestAgentWorkflows(rows)
+    expect(suggestions.some((s) => s.message.includes('no parent follow-up'))).toBe(true)
+  })
 })
 
 describe('suggestAgentWorkflows', () => {
   const baseRow = (over: Partial<AgentEffectivenessRow>): AgentEffectivenessRow => ({
     agentType: 'A',
     runs: 5,
+    supersededRuns: 0,
     medianTimeToResultMs: 0,
     produceArtifactRate: 0,
     noOpRate: 0,
@@ -150,6 +221,7 @@ describe('publishAgentTaskSuggestions', () => {
   const baseRow = (over: Partial<AgentEffectivenessRow>): AgentEffectivenessRow => ({
     agentType: 'A',
     runs: 5,
+    supersededRuns: 0,
     medianTimeToResultMs: 0,
     produceArtifactRate: 0,
     noOpRate: 0,

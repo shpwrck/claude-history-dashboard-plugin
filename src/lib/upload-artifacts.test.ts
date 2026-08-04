@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { collectUploadArtifacts } from './upload-artifacts';
+import { analyzeReliability, parseTelemetryDir } from './parse-telemetry';
 import type { LoadedFile } from './unzip-upload';
 
 describe('collectUploadArtifacts (#1051)', () => {
@@ -132,5 +136,67 @@ describe('collectUploadArtifacts (#1051)', () => {
     expect(artifacts.plans[0]).toMatchObject({ id: 'plan', hasVerification: true });
     expect(artifacts.updateResults[0].outcome).toBe('success');
     expect(artifacts.mcpAuth?.serversNeedingAuth).toEqual(['github']);
+  });
+
+  it('drops non-slow-first-byte telemetry so the upload matches server-side reliability metrics (#3613)', () => {
+    // A bundle whose telemetry/1p_failed_events.json carries ONE slow-first-byte
+    // failure and ONE tengu_exit line. The upload parser must drop the tengu_exit
+    // from the reliability slice exactly as the server-side parseTelemetryDir
+    // does — otherwise the #3159 dilution returns (totalEvents inflated,
+    // retryStormPct depressed) once App.tsx replaces the correctly-filtered
+    // server telemetry with these upload events.
+    const failMeta = Buffer.from(
+      JSON.stringify({ attempt: 5, elapsed_ms: 30001 }),
+    ).toString('base64');
+    const exitMeta = Buffer.from(
+      JSON.stringify({ last_session_api_duration: 12345 }),
+    ).toString('base64');
+    const ndjson =
+      JSON.stringify({
+        event_data: {
+          event_name: 'tengu_api_slow_first_byte',
+          client_timestamp: '2026-06-10T11:01:00Z',
+          model: 'claude-opus-4-8[1m]',
+          betas: '',
+          session_id: 'sess-mix',
+          additional_metadata: failMeta,
+        },
+      }) +
+      '\n' +
+      JSON.stringify({
+        event_data: {
+          event_name: 'tengu_exit',
+          client_timestamp: '2026-06-10T11:02:00Z',
+          model: 'claude-opus-4-8[1m]',
+          betas: '',
+          session_id: 'sess-mix',
+          additional_metadata: exitMeta,
+        },
+      }) +
+      '\n';
+
+    const files: LoadedFile[] = [
+      { name: '1p_failed_events.json', path: 'telemetry/1p_failed_events.json', text: ndjson },
+    ];
+    const artifacts = collectUploadArtifacts(files);
+
+    // Upload reliability slice: exactly the one slow-first-byte event.
+    expect(artifacts.telemetry).toHaveLength(1);
+    expect(artifacts.telemetry[0].event_name).toBe('tengu_api_slow_first_byte');
+    const uploadReliability = analyzeReliability(artifacts.telemetry);
+    expect(uploadReliability.totalEvents).toBe(1);
+    expect(uploadReliability.retryStormPct).toBe(100); // the single attempt-5 storm
+
+    // Server-side parse of the SAME corpus yields identical reliability metrics.
+    const dir = mkdtempSync(join(tmpdir(), 'upload-telemetry-3613-'));
+    try {
+      writeFileSync(join(dir, '1p_failed_events.json'), ndjson);
+      const serverReliability = analyzeReliability(parseTelemetryDir(dir));
+      expect(serverReliability.totalEvents).toBe(uploadReliability.totalEvents);
+      expect(serverReliability.totalStormEvents).toBe(uploadReliability.totalStormEvents);
+      expect(serverReliability.retryStormPct).toBe(uploadReliability.retryStormPct);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

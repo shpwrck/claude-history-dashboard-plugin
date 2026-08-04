@@ -35,6 +35,13 @@ import {
   normalizeMaxEntries,
   readDirentsBoundedSync,
 } from './bounded-fs'
+// The slow-first-byte event kind + predicate live in the fs-free
+// `telemetry-event-kind` leaf so the browser-bundled upload parser
+// (`upload-artifacts.ts`) can share the SAME predicate WITHOUT a runtime import
+// edge into this fs-touching module (#3613 — that edge leaked `node:fs` into a
+// browser view chunk). Re-exported below so existing `from './parse-telemetry'`
+// consumers keep resolving; `parseTelemetryLine` uses the imported binding.
+import { SLOW_FIRST_BYTE_EVENT, isSlowFirstByteEvent } from './telemetry-event-kind'
 
 // ---------- Types ----------
 
@@ -129,14 +136,10 @@ function num(v: unknown, fallback = 0): number {
   return typeof v === 'number' && isFinite(v) ? v : fallback
 }
 
-/**
- * The only event type the reliability path is about: the 30s slow-first-byte
- * timeout ceiling. The 1p_failed_events files also carry `tengu_exit`, retries,
- * MCP results, etc.; those are NOT reliability failures and must not enter the
- * retry-storm denominator (#3159). The `tengu_exit` latency path keys on its own
- * event separately.
- */
-export const SLOW_FIRST_BYTE_EVENT = 'tengu_api_slow_first_byte'
+// Re-export the fs-free event-kind leaf (imported at the top) so existing
+// `import { SLOW_FIRST_BYTE_EVENT } from './parse-telemetry'` consumers still
+// resolve. See the import-site comment for why this lives in a separate leaf.
+export { SLOW_FIRST_BYTE_EVENT, isSlowFirstByteEvent }
 
 function decodeMetadata(raw: unknown): RawAdditionalMetadata {
   if (typeof raw !== 'string' || !raw) return {}
@@ -183,8 +186,10 @@ export function parseTelemetryLine(line: string): TelemetryEvent | null {
   // `tengu_*` events (tengu_exit, retries, MCP) would default to attempt 1 /
   // elapsed_ms 0 and dilute totalEvents + depress retryStormPct, so they are
   // dropped before a TelemetryEvent is emitted. (This also rejects an empty
-  // event_name.) The tengu_exit latency reader is a separate parse path.
-  if (event_name !== SLOW_FIRST_BYTE_EVENT) return null
+  // event_name.) The tengu_exit latency reader is a separate parse path. The
+  // shared {@link isSlowFirstByteEvent} predicate keeps this filter identical to
+  // the upload parser's (#3613).
+  if (!isSlowFirstByteEvent(event_name)) return null
 
   const attempt = num(meta.attempt, 1)
   const elapsed_ms = num(meta.elapsed_ms, 0)

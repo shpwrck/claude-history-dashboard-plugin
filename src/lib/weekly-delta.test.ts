@@ -145,6 +145,35 @@ describe('computeWeeklyDeltas', () => {
     expect(topSignals).toEqual(['cost', 'retryStorms']);
   });
 
+  it('compares the two calendar weeks preceding the trailing week, not non-consecutive active weeks (#3179)', () => {
+    // Activity in ISO weeks 2026-01-05, 2026-01-19, 2026-02-02 — each a week
+    // apart, with the weeks between them empty. The trailing week 2026-02-02 is
+    // excluded; the comparison MUST be its two immediately-preceding calendar
+    // weeks (2026-01-26 vs 2026-01-19, the empty 2026-01-26 bucket read as 0),
+    // NOT 2026-01-19 vs 2026-01-05 — those are two weeks apart and would make the
+    // "week-over-week" percentage a false claim.
+    const apiErrors = [
+      apiError('2026-01-07T00:00:00Z'), // week of 2026-01-05
+      apiError('2026-01-21T00:00:00Z'), // week of 2026-01-19
+      apiError('2026-02-04T00:00:00Z'), // week of 2026-02-02 (trailing, excluded)
+    ];
+    const result = computeWeeklyDeltas({ tokenData: [], apiErrors, toolData: [] });
+    expect(result).not.toBeNull();
+    if (!result) return;
+
+    // Genuinely consecutive calendar weeks, derived from the trailing week.
+    expect(result.currentWeekStart).toBe('2026-01-26');
+    expect(result.previousWeekStart).toBe('2026-01-19');
+    // Explicitly NOT the non-adjacent active week.
+    expect(result.previousWeekStart).not.toBe('2026-01-05');
+
+    // 2026-01-26 had no activity (reads as 0); 2026-01-19 had one error.
+    expect(result.errors.current).toBe(0);
+    expect(result.errors.previous).toBe(1);
+    expect(result.errors.deltaAbs).toBe(-1);
+    expect(result.errors.deltaPct).toBeCloseTo(-1, 10);
+  });
+
   it('returns null with fewer than three distinct active ISO weeks (no two complete weeks to compare)', () => {
     // Only two active weeks → after excluding the trailing partial week, only
     // one complete week remains → null.

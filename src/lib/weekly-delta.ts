@@ -115,11 +115,13 @@ export interface WeeklyDeltaInput {
  *
  * "Complete" weeks are determined purely from the data, never the wall clock:
  * the most recent ISO week that has any activity is treated as the (possibly
- * partial) current week and excluded; the week before it is the "last complete"
- * week and the one before that is the "prior complete" week. This keeps the
- * function clock-free and deterministic — the cost of that purity is that the
- * banner needs a third active week to appear (the latest active week is always
- * assumed in-progress), rather than literally "two complete calendar weeks".
+ * partial) current week and excluded. The two compared weeks are then the
+ * calendar weeks IMMEDIATELY preceding it — its Monday minus 7 and minus 14 days
+ * — so they are always genuinely consecutive even when activity skips weeks; an
+ * absent bucket in a compared week reads as 0 (#3179). This keeps the function
+ * clock-free and deterministic — the cost of that purity is that the banner
+ * needs a third active week to appear (the latest active week is always assumed
+ * in-progress), rather than literally "two complete calendar weeks".
  */
 export function computeWeeklyDeltas(
   input: WeeklyDeltaInput
@@ -167,14 +169,28 @@ export function computeWeeklyDeltas(
   }
 
   // Descending list of active week starts. The most recent is the (possibly
-  // partial) current week and is excluded; the next two are the complete weeks
-  // we compare. Need at least three distinct active weeks for two *complete*
-  // ones to exist after dropping the trailing partial week.
+  // partial) current week and is excluded. Need at least three distinct active
+  // weeks of history before a week-over-week comparison is meaningful: the
+  // trailing partial week plus enough basis behind it.
   const weeks = Array.from(activeWeeks).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
   if (weeks.length < 3) return null;
 
-  const currentWeekStart = weeks[1]; // last complete week
-  const previousWeekStart = weeks[2]; // prior complete week
+  // #3179: the two compared weeks are the calendar weeks IMMEDIATELY preceding
+  // the trailing (excluded) week — not `weeks[1]`/`weeks[2]`. Positional indices
+  // into the sparse active-week list silently pick non-adjacent weeks when
+  // activity skips weeks (e.g. active in 01-05, 01-19, 02-02 would compare 01-19
+  // against 01-05 while the API/labels call them consecutive), so the reported
+  // "percent change vs last week" was not a true week-over-week delta. Deriving
+  // both Mondays by calendar arithmetic off the trailing week — and reading an
+  // absent bucket as 0 — yields a genuine consecutive comparison. `weeks[0]` is
+  // already a Monday, so stepping back 7/14 days lands on Mondays too.
+  const trailingWeekMs = new Date(weeks[0] + 'T00:00:00Z').getTime();
+  const currentWeekStart = new Date(trailingWeekMs - 7 * MS_PER_DAY)
+    .toISOString()
+    .slice(0, 10); // last complete week (trailing − 7d)
+  const previousWeekStart = new Date(trailingWeekMs - 14 * MS_PER_DAY)
+    .toISOString()
+    .slice(0, 10); // prior complete week (trailing − 14d)
 
   const cost = makeDelta(
     'cost',

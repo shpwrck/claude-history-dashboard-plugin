@@ -4,6 +4,11 @@ import type {
 import { parseLastUpdate, type UpdateResult } from './parse-last-update';
 import { parseMcpAuthCache, type McpAuthState } from './parse-mcp-auth';
 import { parseStatsCache, type StatsCache } from './parse-stats-cache';
+// #3613: share the reliability event filter with the server-side parser so the
+// two can never drift. Imported from the fs-free `telemetry-event-kind` LEAF —
+// NOT from `./parse-telemetry`, whose transitive `node:fs` graph (bounded-fs)
+// otherwise leaks into this browser/worker-bundled module's view chunks.
+import { isSlowFirstByteEvent } from './telemetry-event-kind';
 import type { LoadedFile } from './unzip-upload';
 
 type TaskStatus = 'pending' | 'in_progress' | 'completed';
@@ -384,7 +389,13 @@ function parseTelemetryLine(line: string): TelemetryEvent | null {
   const data = obj(raw?.event_data);
   if (!data) return null;
   const eventName = str(data.event_name);
-  if (!eventName) return null;
+  // #3613: the reliability path is slow-first-byte failures only. Drop
+  // tengu_exit/MCP/retry lines that an uploaded bundle carries in the same
+  // 1p_failed_events*.json — otherwise they inflate totalEvents and depress
+  // retryStormPct (the #3159 dilution) once App.tsx replaces the (correctly
+  // filtered) server telemetry with these upload events. Shared predicate so the
+  // upload and server parsers can't drift; also rejects an empty event_name.
+  if (!isSlowFirstByteEvent(eventName)) return null;
   const metadata = decodeBase64Json(data.additional_metadata);
   return {
     event_name: eventName,

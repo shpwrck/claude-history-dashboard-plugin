@@ -1,0 +1,1 @@
+var e=`tengu_api_slow_first_byte`;function t(t){return t===e}export{t};

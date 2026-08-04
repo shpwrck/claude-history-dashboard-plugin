@@ -32,14 +32,40 @@ const ARTIFACT_TOOLS = new Set([
 /** Window after a Task call within which the parent's next action is "the follow-up". */
 const FOLLOW_UP_WINDOW_MS = 10 * 60 * 1000;
 
+/**
+ * Simultaneity threshold that separates a same-turn PARALLEL fan-out from a
+ * genuinely-later sequential spawn (#3614). `ToolCall` carries no turn/message id,
+ * so timestamp proximity is the only cluster signal available: parallel `Task`
+ * calls dispatched in one assistant turn share (or near-share) the message
+ * timestamp, whereas the parent deliberating and spawning again later is seconds
+ * to minutes apart. A spawn whose interval is ended by another spawn within this
+ * window is a superseded parallel sibling (excluded from the no-op rate); ended
+ * by a spawn beyond it, the run genuinely drew no follow-up and stays a no-op.
+ * Kept far below {@link FOLLOW_UP_WINDOW_MS} and the 60s sequential-supersession
+ * gap the #3138 tests model, so those sequential spawns still count as no-ops.
+ */
+const PARALLEL_CLUSTER_MS = 2 * 1000;
+
 export interface AgentEffectivenessRow {
   /** The `subagent_type` string from the Task input, or `_unspecified`. */
   agentType: string;
   runs: number;
+  /**
+   * Runs whose interval was ended by a PARALLEL-SIBLING spawn (a same-turn
+   * fan-out, #3614), not by any action of their own. These are NOT no-ops — a
+   * user fanning out N same-type agents then acting once leaves N-1 siblings
+   * with no attributable follow-up purely as an artifact of the interval
+   * partition. Excluded from the {@link noOpRate} denominator.
+   */
+  supersededRuns: number;
   medianTimeToResultMs: number;
   /** Fraction (0..1) of runs whose next parent action was an artifact tool. */
   produceArtifactRate: number;
-  /** Fraction (0..1) of runs with no parent follow-up within the window. */
+  /**
+   * Fraction (0..1) of NON-superseded runs with no parent follow-up within the
+   * window (`noOpRuns / (runs - supersededRuns)`). Superseded parallel siblings
+   * are excluded so a healthy fan-out is not scored as non-actionable (#3614).
+   */
   noOpRate: number;
   /** Estimated USD spent on this agent's transcripts, mean per run. */
   meanCostUsd: number;
@@ -64,6 +90,7 @@ interface AgentAccumulator {
   durations: number[];
   artifactRuns: number;
   noOpRuns: number;
+  supersededRuns: number;
   followUps: Map<string, number>;
   failures: number;
   sessions: Set<string>;
@@ -75,6 +102,7 @@ function emptyAcc(): AgentAccumulator {
     durations: [],
     artifactRuns: 0,
     noOpRuns: 0,
+    supersededRuns: 0,
     followUps: new Map(),
     failures: 0,
     sessions: new Set(),
@@ -104,9 +132,16 @@ function taskAgentType(call: ToolCall): string | null {
  * look at the parent's next tool call in timestamp order. A non-agent call is
  * that spawn's "follow-up"; another agent-spawn ends this spawn's interval —
  * it was superseded before the parent acted, so it has no attributable
- * follow-up (#3138). If nothing (or only a superseding spawn) precedes the
- * parent's next non-agent move within {@link FOLLOW_UP_WINDOW_MS}, the run
- * counts as a no-op.
+ * follow-up (#3138).
+ *
+ * A run whose interval is ended by a spawn is then bucketed by WHEN that spawn
+ * arrived (#3614): a near-simultaneous one (within {@link PARALLEL_CLUSTER_MS})
+ * is a same-turn PARALLEL sibling, so the run is `superseded` — an artifact of
+ * fanning out N agents at once, NOT evidence the output was unactionable — and is
+ * excluded from the no-op rate. A spawn arriving only after a real gap leaves the
+ * run a genuine no-op. If no non-agent follow-up precedes the parent's next move
+ * within {@link FOLLOW_UP_WINDOW_MS} and no parallel sibling superseded it, the
+ * run counts as a no-op.
  */
 function recordTaskRuns(
   session: ToolUsageData,
@@ -129,17 +164,22 @@ function recordTaskRuns(
 
     let followUp: ToolCall | null = null;
     let followUpT = 0;
+    let supersedingSpawnT: number | null = null;
     for (let j = i + 1; j < sorted.length; j++) {
       const next = sorted[j];
       // #3138: a later agent-spawn (Task/Agent) supersedes this spawn's claim on
       // the parent's next move, so it ENDS this spawn's interval — only the
       // most-recent active spawn can own the single follow-up. Stop the scan at
-      // the next spawn and leave this run with no attributable follow-up
-      // (counted as a no-op). Skipping past the spawn instead (the prior #452
+      // the next spawn and record WHEN it arrived so the classifier below can
+      // tell a same-turn parallel sibling (#3614) from a genuinely-later
+      // sequential spawn. Skipping past the spawn instead (the prior #452
       // behaviour) attributed one Edit after Task(A), Task(B) to BOTH A and B,
       // inflating each agent's produceArtifactRate; the distilled data carries
       // no explicit completion/parent correlation to attribute it otherwise.
-      if (AGENT_SPAWN_TOOLS.has(next.call.toolName)) break;
+      if (AGENT_SPAWN_TOOLS.has(next.call.toolName)) {
+        supersedingSpawnT = next.t;
+        break;
+      }
       followUp = next.call;
       followUpT = next.t;
       break;
@@ -152,6 +192,15 @@ function recordTaskRuns(
         (acc.followUps.get(followUp.toolName) ?? 0) + 1
       );
       if (ARTIFACT_TOOLS.has(followUp.toolName)) acc.artifactRuns += 1;
+    } else if (
+      supersedingSpawnT !== null &&
+      supersedingSpawnT - t <= PARALLEL_CLUSTER_MS
+    ) {
+      // #3614: ended by a near-simultaneous PARALLEL-SIBLING spawn (same-turn
+      // fan-out), not by any action of its own — superseded, not a no-op. A
+      // later, gapped sequential spawn falls through to the no-op branch below,
+      // so a spawn that genuinely drew no follow-up is still counted.
+      acc.supersededRuns += 1;
     } else {
       acc.noOpRuns += 1;
     }
@@ -235,9 +284,17 @@ export function computeAgentEffectiveness(
     rows.push({
       agentType,
       runs: acc.runs,
+      supersededRuns: acc.supersededRuns,
       medianTimeToResultMs: median(acc.durations),
       produceArtifactRate: acc.runs === 0 ? 0 : acc.artifactRuns / acc.runs,
-      noOpRate: acc.runs === 0 ? 0 : acc.noOpRuns / acc.runs,
+      // #3614: exclude superseded parallel siblings from the denominator so a
+      // same-turn fan-out is not misreported as non-actionable. The last spawn
+      // in any cluster is never superseded, so runs - supersededRuns >= 1
+      // whenever runs >= 1; max(1, …) guards the runs === 0 case belt-and-braces.
+      noOpRate:
+        acc.runs === 0
+          ? 0
+          : acc.noOpRuns / Math.max(1, acc.runs - acc.supersededRuns),
       meanCostUsd: costs.get(agentType) ?? 0,
       commonFollowUps: followUps,
       failureModes: acc.failures,

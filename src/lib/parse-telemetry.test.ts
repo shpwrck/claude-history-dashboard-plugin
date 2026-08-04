@@ -16,6 +16,8 @@ import {
   parseTelemetryDir,
   analyzeReliability,
   RETRY_STORM_THRESHOLD,
+  isSlowFirstByteEvent,
+  SLOW_FIRST_BYTE_EVENT,
   parseTelemetryLatencyLine,
   parseTelemetryLatencyDir,
   aggregateModelLatency,
@@ -190,6 +192,25 @@ describe('parseTelemetryLine', () => {
     expect(ev).not.toBeNull()
     expect(ev.attempt).toBe(1)
     expect(ev.elapsed_ms).toBe(0)
+  })
+})
+
+describe('isSlowFirstByteEvent (shared #3613 predicate)', () => {
+  it('accepts only the slow-first-byte event and rejects others / empty', () => {
+    expect(isSlowFirstByteEvent(SLOW_FIRST_BYTE_EVENT)).toBe(true)
+    expect(isSlowFirstByteEvent('tengu_api_slow_first_byte')).toBe(true)
+    expect(isSlowFirstByteEvent('tengu_exit')).toBe(false)
+    expect(isSlowFirstByteEvent('tengu_mcp_connect')).toBe(false)
+    expect(isSlowFirstByteEvent('')).toBe(false)
+  })
+
+  it('is the gate parseTelemetryLine applies: tengu_exit is dropped, slow_first_byte kept', () => {
+    // The upload parser (upload-artifacts.ts) filters through this SAME predicate,
+    // so the two reliability parsers cannot drift (#3613).
+    expect(
+      parseTelemetryLine(makeExitLine('claude-opus-4-8[1m]', { last_session_api_duration: 12345 })),
+    ).toBeNull()
+    expect(parseTelemetryLine(makeLine('claude-opus-4-7[1m]', 3, 30001))).not.toBeNull()
   })
 })
 
