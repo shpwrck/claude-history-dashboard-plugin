@@ -61,7 +61,13 @@ export interface ParseDocHygieneArtifactOptions {
   expectedRoot?: string;
   /** Stable deploy locator; when supplied it must be stamped in repo.identity. */
   expectedIdentity?: string;
-  /** Full current commit. An artifact from another commit is stale and ignored. */
+  /**
+   * Full current commit. REQUIRED for acceptance (#3124): the parse fails closed
+   * unless a present, well-formed commit is supplied and the artifact's commit
+   * binds to it. An absent/empty/malformed value — or an artifact from another
+   * commit — yields `null`, so a schema-valid but unbound artifact is never
+   * silently accepted and presented as current.
+   */
   expectedCommit?: string | null;
 }
 
@@ -247,12 +253,18 @@ export function parseDocHygieneArtifact(
   ) {
     return null;
   }
-  if (
-    options.expectedCommit &&
-    !options.expectedCommit.toLowerCase().startsWith(commit.toLowerCase())
-  ) {
-    return null;
-  }
+  // Fail closed on provenance (#3124): a schema-valid artifact is trustworthy
+  // only once it is bound to a known runtime commit. Without a present,
+  // well-formed `expectedCommit` we cannot prove this artifact belongs to the
+  // current checkout, so refuse it rather than let historical findings/scores be
+  // presented as current state. The only production caller
+  // (`readDocHygieneArtifact` in scripts/ingest.mjs) already computes and threads
+  // a commit — and itself returns null when it cannot — so nothing relies on
+  // unbound acceptance.
+  const expectedCommit =
+    typeof options.expectedCommit === 'string' ? options.expectedCommit : null;
+  if (!expectedCommit || !/^[0-9a-f]{7,64}$/i.test(expectedCommit)) return null;
+  if (!expectedCommit.toLowerCase().startsWith(commit.toLowerCase())) return null;
 
   const checks = checksRaw.map(parseCheck);
   const findings = findingsRaw.map(parseFinding);

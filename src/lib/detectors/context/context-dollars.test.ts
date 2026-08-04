@@ -1,19 +1,20 @@
 /**
- * Context dollarization integration (epic #944, PR3 / #949).
+ * Context detectors emit no reclaimable %/$ (#3121; reverts epic #944 PR3 / #949).
  *
- * The two context detectors (`low-cache-hit`, `compaction-hot-sessions`) now emit
- * `scaleTokens` `ReclaimClaim`s grounded in `computeCacheEfficiency`. This proves
- * that, run together through the guarded-marginal cascade:
- *  - the dollar identity `sum(marginal) ≡ billOriginal − billFinal` holds,
- *  - the `residual ≥ 0` invariant holds (no over-draw, no rejection), and
- *  - the per-category **context** coverage rises off 0 — the census moves off 0/7.
+ * The two context detectors (`low-cache-hit`, `compaction-hot-sessions`) used to
+ * emit `scaleTokens` `ReclaimClaim`s whose deletable fraction came from the
+ * aggregate cache hit-rate (`reclaimableCacheWriteFrac`). Aggregate token totals
+ * cannot identify WHICH written prefixes were later read, so that fraction was
+ * not evidence-backed or reproducible. Those claims are removed; this integration
+ * proves neither detector puts a reclaimable fraction/dollar into the cascade —
+ * both stay advisory and context reclaim coverage stays at 0.
  */
 import { describe, it, expect } from 'vitest';
 import { detector as lowCacheHit } from './low-cache-hit';
 import { detector as compactionHot } from './compaction-hot-sessions';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
-import { runReclaimCascade, type ReclaimClaim } from '../../reclaim';
+import { runReclaimCascade } from '../../reclaim';
 
 // A near-window, twice-compacted session with poor cache reuse (low hit-rate)
 // and substantial cache-write — trips BOTH detectors.
@@ -50,45 +51,26 @@ const input = (tokenData: SessionTokenData[]): RecommendationInput => ({
   liveConfig: null,
 });
 
-describe('context dollars — both detectors through the cascade (#949)', () => {
+describe('context detectors emit no reclaimable %/$ (#3121)', () => {
   const td = [wasteful('s1', 1_000_000, 150_000), wasteful('s2', 1_000_000, 150_000)];
 
-  const claims = (): ReclaimClaim[] => {
-    const recs = [lowCacheHit.rule(input(td), 0), compactionHot.rule(input(td), 0)];
-    return recs.flatMap((r) => (r?.reclaim ? [r.reclaim] : []));
-  };
+  const recs = () => [lowCacheHit.rule(input(td), 0), compactionHot.rule(input(td), 0)];
 
-  it('both detectors emit a context claim', () => {
-    const c = claims();
-    expect(c.length).toBe(2);
-    expect(c.every((x) => x.category === 'context')).toBe(true);
+  it('both detectors still fire as advisory findings', () => {
+    expect(recs().every((r) => r != null)).toBe(true);
   });
 
-  it('preserves the dollar identity and residual ≥ 0 with the new claims', () => {
-    const rejects: string[] = [];
-    const result = runReclaimCascade(claims(), td, (m) => rejects.push(m));
-    // No over-draw / no rejection — every cell stayed ≥ 0.
-    expect(rejects).toEqual([]);
-    expect(result.booked.every((b) => !b.rejected)).toBe(true);
-    // Identity holds exactly.
-    const summed = result.booked.reduce((s, b) => s + b.marginalUsd, 0);
-    expect(summed).toBeCloseTo(result.total, 9);
-    expect(result.total).toBeCloseTo(result.billOriginal - result.billFinal, 9);
-    expect(result.billFinal).toBeGreaterThanOrEqual(0);
+  it('neither detector emits a reclaim claim', () => {
+    // With the OLD code this collected 2 context scaleTokens claims; the
+    // aggregate-hit-rate fraction is not evidence-backed, so it is now empty.
+    const claims = recs().flatMap((r) => (r?.reclaim ? [r.reclaim] : []));
+    expect(claims).toEqual([]);
   });
 
-  it('lifts context coverage off zero (census moves off 0/7)', () => {
-    const result = runReclaimCascade(claims(), td);
-    const ctx = result.coverageByCategory.context;
-    expect(ctx).toBeDefined();
-    expect(ctx!.claimedUsd).toBeGreaterThan(0);
-    expect(ctx!.coverage).toBeGreaterThan(0);
-  });
-
-  it('two overlapping context claims carve disjoint slices (no double-book)', () => {
-    // Both claims own the same cache-write cells; the cascade must not book more
-    // than the cells are worth.
-    const result = runReclaimCascade(claims(), td);
-    expect(result.total).toBeLessThanOrEqual(result.billOriginal + 1e-9);
+  it('books nothing for context — reclaim coverage stays at 0', () => {
+    const claims = recs().flatMap((r) => (r?.reclaim ? [r.reclaim] : []));
+    const result = runReclaimCascade(claims, td);
+    expect(result.total).toBe(0);
+    expect(result.coverageByCategory.context?.claimedUsd ?? 0).toBe(0);
   });
 });

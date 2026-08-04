@@ -8,9 +8,11 @@
  *
  * Honesty contract (AGENTS.md "recommendations are auditable claims"): a verdict
  * is an auditable, non-overclaimed result. So every verdict carries
- *  - `confidence: 'observational'` for `menu` assignment (the human self-selected
- *    the arm, so no causal claim) — upgraded to higher confidence only when
- *    assignment is `blind`;
+ *  - `confidence: 'observational'` unless EVERY contributing session on the axis
+ *    was assigned `blind` (the human self-selected the arm under `menu`, so any
+ *    self-selected session bars a causal claim) — a single non-blind session,
+ *    regardless of ingest/map-insertion order, keeps the axis observational and
+ *    retains the self-selection caveat (#3126);
  *  - a `counterMetric` whose v1 status is `not-auto-measured`, making any
  *    `success` explicitly PROVISIONAL: conversational availability alone can be
  *    gamed by making the underlying work worse, so a real win needs the
@@ -125,6 +127,13 @@ const MENU_ASSIGNMENT_CAVEAT =
   'not causal — the comparison can be contaminated by who chose which arm. A `blind` ' +
   'assignment regime is required before the delta supports a causal claim.';
 
+const MIXED_ASSIGNMENT_CAVEAT =
+  'This axis mixes assignment regimes: at least one contributing session was `blind` ' +
+  'but at least one was `menu` (self-selected). A causal claim requires EVERY ' +
+  'contributing session to be blind, so the axis is reported observational and the ' +
+  'self-selection contamination caveat is retained — one self-selected session cannot ' +
+  'be laundered into a causal result by the blind sessions around it (#3126).';
+
 /**
  * Compute the verdict for one axis from its per-arm session metrics.
  *
@@ -175,7 +184,11 @@ export function evaluateExperiments(
   // per-session metric. Only enrolled sessions that we actually have a timeline
   // for (and that have measurable work) contribute.
   interface AxisAccum {
-    assignment: SessionEnrollment['assignment'];
+    // Every contributing session's regime, not just the first (#3126): an axis is
+    // only causal when this set is exactly {'blind'}. Tracking the whole set makes
+    // the confidence claim order-independent — map-insertion order can no longer
+    // flip a self-selected axis into `causal`.
+    assignments: Set<SessionEnrollment['assignment']>;
     armValues: Map<string, number[]>;
   }
   const byAxis = new Map<string, AxisAccum>();
@@ -186,9 +199,12 @@ export function evaluateExperiments(
     if (metric === null) continue; // no measurable work in this session
     let acc = byAxis.get(enr.axis);
     if (!acc) {
-      acc = { assignment: enr.assignment, armValues: new Map() };
+      // perf-index-contract: axis-assignment-regime-set always-consumed: every axis that reaches the verdict loop reads this set to derive allBlind/mixedRegimes, so no non-querying path builds it for nothing
+      acc = { assignments: new Set(), armValues: new Map() };
       byAxis.set(enr.axis, acc);
     }
+    // Only sessions that actually contribute a metric count toward the regime.
+    acc.assignments.add(enr.assignment);
     const list = acc.armValues.get(enr.arm);
     if (list) list.push(metric);
     else acc.armValues.set(enr.arm, [metric]);
@@ -199,16 +215,27 @@ export function evaluateExperiments(
     const on = aggregate(acc.armValues.get(ON_ARM) ?? []);
     const off = aggregate(acc.armValues.get(OFF_ARM) ?? []);
     const { verdict, delta } = qualify(on, off);
-    // 'observational' for menu (the only assignment today); a 'blind' regime
-    // upgrades this to 'causal' since the human did not pick the arm.
-    const confidence: Confidence =
-      acc.assignment === 'blind' ? 'causal' : 'observational';
+    // Causal ONLY when every contributing session was blind; a single `menu`
+    // (self-selected) session — in any position — keeps the axis observational
+    // (#3126). `assignments` holds only regimes that actually contributed a
+    // metric, so the claim is order-independent.
+    const allBlind = acc.assignments.size > 0 && !acc.assignments.has('menu');
+    const mixedRegimes =
+      acc.assignments.has('blind') && acc.assignments.has('menu');
+    const confidence: Confidence = allBlind ? 'causal' : 'observational';
+    // Report the regime honestly: `blind` only when uniformly blind, else `menu`
+    // (the conservative, observational label) so `assignment` never disagrees
+    // with `confidence`.
+    const assignment: SessionEnrollment['assignment'] = allBlind
+      ? 'blind'
+      : 'menu';
     const caveats = [CONTROL_ARM_BIAS_CAVEAT];
-    if (acc.assignment !== 'blind') caveats.push(MENU_ASSIGNMENT_CAVEAT);
+    if (mixedRegimes) caveats.push(MIXED_ASSIGNMENT_CAVEAT);
+    else if (!allBlind) caveats.push(MENU_ASSIGNMENT_CAVEAT);
     verdicts.push({
       key,
       label: labelByKey.get(key) ?? key,
-      assignment: acc.assignment,
+      assignment,
       arms: { on, off },
       delta,
       verdict,

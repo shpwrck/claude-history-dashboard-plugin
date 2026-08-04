@@ -61,26 +61,58 @@ describe('parseDocHygieneArtifact', () => {
   });
 
   it('fails closed on malformed, cross-root, stale, or inconsistent artifacts', () => {
-    expect(parseDocHygieneArtifact(null)).toBeNull();
-    expect(parseDocHygieneArtifact({ ...artifact(), schemaVersion: 2 })).toBeNull();
+    // A binding commit so these cases reach the ROOT/IDENTITY/consistency checks
+    // rather than short-circuiting on the #3124 commit-binding guard.
+    const bind = { expectedCommit: 'abcdef1234567890' };
+    expect(parseDocHygieneArtifact(null, bind)).toBeNull();
     expect(
-      parseDocHygieneArtifact(artifact(), { expectedRoot: '/other' })
+      parseDocHygieneArtifact({ ...artifact(), schemaVersion: 2 }, bind)
     ).toBeNull();
     expect(
-      parseDocHygieneArtifact(artifact(), { expectedIdentity: 'other-repo' })
+      parseDocHygieneArtifact(artifact(), { ...bind, expectedRoot: '/other' })
+    ).toBeNull();
+    expect(
+      parseDocHygieneArtifact(artifact(), {
+        ...bind,
+        expectedIdentity: 'other-repo',
+      })
     ).toBeNull();
     expect(
       parseDocHygieneArtifact(artifact(), { expectedCommit: '1234567ffff' })
     ).toBeNull();
     expect(
-      parseDocHygieneArtifact({
-        ...artifact(),
-        summary: { ...artifact().summary, findingCount: 2 },
-      })
+      parseDocHygieneArtifact(
+        {
+          ...artifact(),
+          summary: { ...artifact().summary, findingCount: 2 },
+        },
+        bind
+      )
+    ).toBeNull();
+  });
+
+  it('refuses schema-valid but unbound artifacts (#3124)', () => {
+    const a = artifact();
+    // No options / no commit: NOT silently accepted just because the shape is valid.
+    expect(parseDocHygieneArtifact(a)).toBeNull();
+    expect(parseDocHygieneArtifact(a, {})).toBeNull();
+    expect(parseDocHygieneArtifact(a, { expectedCommit: null })).toBeNull();
+    expect(parseDocHygieneArtifact(a, { expectedCommit: '' })).toBeNull();
+    // A present but malformed (non-hex / too short) commit is also refused.
+    expect(parseDocHygieneArtifact(a, { expectedCommit: 'nothex!' })).toBeNull();
+    expect(parseDocHygieneArtifact(a, { expectedCommit: 'abc' })).toBeNull();
+    // A present, valid, binding commit is accepted; a valid non-binding one fails.
+    expect(
+      parseDocHygieneArtifact(a, { expectedCommit: 'abcdef1234567890' })
+    ).toEqual(a);
+    expect(
+      parseDocHygieneArtifact(a, { expectedCommit: 'fedcba0987654321' })
     ).toBeNull();
   });
 
   it('rejects duplicate finding ids and ambiguous check ownership', () => {
+    // Bind the commit so these reach the ownership checks (#3124 guard runs first).
+    const bind = { expectedCommit: 'abcdef1234567890' };
     const base = artifact();
     const duplicateFinding = {
       ...base,
@@ -93,7 +125,7 @@ describe('parseDocHygieneArtifact', () => {
       ],
       findings: [base.findings[0], { ...base.findings[0] }],
     };
-    expect(parseDocHygieneArtifact(duplicateFinding)).toBeNull();
+    expect(parseDocHygieneArtifact(duplicateFinding, bind)).toBeNull();
 
     const crossOwned = {
       ...base,
@@ -106,13 +138,13 @@ describe('parseDocHygieneArtifact', () => {
         },
       ],
     };
-    expect(parseDocHygieneArtifact(crossOwned)).toBeNull();
+    expect(parseDocHygieneArtifact(crossOwned, bind)).toBeNull();
 
     const unowned = {
       ...base,
       checks: [{ ...base.checks[0], findingIds: [] }],
     };
-    expect(parseDocHygieneArtifact(unowned)).toBeNull();
+    expect(parseDocHygieneArtifact(unowned, bind)).toBeNull();
   });
 
   it('turns only bounded safe repo keys into artifact basenames', () => {

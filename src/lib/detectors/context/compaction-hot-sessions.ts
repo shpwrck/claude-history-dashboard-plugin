@@ -4,8 +4,6 @@ import {
   computeCompactionRisk,
   summarizeCompactionRisk,
 } from '../../parse-compaction-risk';
-import { computeCacheEfficiency, reclaimableCacheWriteFrac } from '../../context-health';
-import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
 
 // A cohort of sessions sitting in the high compaction-risk band — uncontrolled
 // compaction re-sends 10–40K tokens per event. (#415)
@@ -63,58 +61,14 @@ export const detector: Detector = {
     }
     const lead = summary.topSuggestion ? ` Dominant fix for the cohort: ${summary.topSuggestion}.` : '';
 
-    // ── Reclaim claim (epic #944, PR3 / #949) ────────────────────────────────
-    // Uncontrolled compaction re-feeds the compacted prefix on every later turn —
-    // a hot session pays its prefix as cache-WRITE far more than it reuses it. We
-    // delete a fraction of the hot cohort's cache-write pools, where the fraction
-    // is **derived from each session's measured cache hit-rate**
-    // (`reclaimableCacheWriteFrac`), never a hardcoded constant: the further below
-    // the reuse floor a hot session sits, the more of its repeated prefix-writes
-    // bought nothing. `scaleTokens` carries one per-pool fraction for the whole
-    // claim, so we book a token-weighted mean frac over the hot sessions' write
-    // tokens — strictly grounded in `computeCacheEfficiency`, conservative (a hot
-    // session already at/above the reuse floor contributes 0). The cascade's
-    // residual carving keeps this from double-booking the cells low-cache-hit also
-    // touches (doc §4 guarded-marginal identity).
-    const hotIds = new Set(rows.filter((r) => r.riskClass !== 'low').map((r) => r.sessionId));
-    const fracBySession = new Map(
-      computeCacheEfficiency(input.tokenData)
-        .filter((r) => hotIds.has(r.sessionId))
-        .map((r) => [r.sessionId, reclaimableCacheWriteFrac(r.hitRate)])
-    );
-    const scopeKeys = new Set<string>();
-    let weightedFracNum = 0;
-    let writeTokens = 0;
-    for (const d of input.tokenData) {
-      if (!hotIds.has(d.sessionId)) continue;
-      const frac = fracBySession.get(d.sessionId) ?? 0;
-      for (const e of d.entries) {
-        const writes = e.cacheCreationTokens;
-        if (writes <= 0) continue;
-        scopeKeys.add(scopeKeyOf(d.sessionId, e.model || 'unknown'));
-        weightedFracNum += writes * frac;
-        writeTokens += writes;
-      }
-    }
-    const poolFrac = writeTokens > 0 ? weightedFracNum / writeTokens : 0;
-    const reclaim: ReclaimClaim | undefined =
-      writeTokens > 0 && poolFrac > 0
-        ? {
-            leverId: 'context.compaction-hot-sessions',
-            category: 'context',
-            cause: 'structural-prefix',
-            // Structural context band [40,90); slightly after low-cache-hit so the
-            // narrower compaction cohort books against the residual it leaves.
-            orderKey: 62,
-            ownedPools: ['cacheWrite5m', 'cacheWrite1h'],
-            scopeKeys: [...scopeKeys],
-            counterfactual: {
-              kind: 'scaleTokens',
-              poolDeltaFrac: { cacheWrite5m: poolFrac, cacheWrite1h: poolFrac },
-            },
-            evidenceTokens: writeTokens,
-          }
-        : undefined;
+    // ── No reclaimable %/$ claim (#3121) ─────────────────────────────────────
+    // The hot cohort's aggregate cache hit-rate cannot identify which written
+    // prefixes were later read, and the parsed token counters carry no per-prefix
+    // write->read lineage, so it cannot substantiate a reclaimable cache-write
+    // fraction or dollar amount. This detector therefore stays advisory (band
+    // membership is the measured signal) and emits no `reclaim` claim — the prior
+    // `reclaimableCacheWriteFrac`-derived scaleTokens claim (epic #944/#949) is
+    // reverted here as over-certified.
 
     const asOf = newestTokenDataDate(input.tokenData);
 
@@ -125,7 +79,6 @@ export const detector: Detector = {
       title: 'Multiple sessions at high compaction risk',
       detail: `${summary.hotSessions} session(s) (${summary.hotPercent.toFixed(0)}% of the fleet) are in the high compaction-risk band; uncontrolled compaction re-sends 10–40K tokens per event.`,
       action: `Run /compact at task boundaries, /clear when switching tasks, and scope Read with offset/limit.${lead}`,
-      ...(reclaim ? { reclaim } : {}),
       affected: summary.hotSessions,
       view: 'context',
       fix: {
@@ -172,29 +125,21 @@ export const detector: Detector = {
                 source: 'parse-compaction-risk (summarizeCompactionRisk)',
                 field: 'topSuggestion',
               },
-          ...(reclaim
-            ? [
-                {
-                  claim: `${writeTokens} cache-write token(s) across the hot cohort back the reclaim claim, of which the measured cache-shortfall fraction is ${(poolFrac * 100).toFixed(1)}%`,
-                  source: 'context-health (computeCacheEfficiency + reclaimableCacheWriteFrac)',
-                  field: 'tokenData[].entries[].cacheCreationTokens / hitRate',
-                  value: writeTokens,
-                },
-              ]
-            : []),
         ],
-        // The band membership and the cache-write pool are measured. The
-        // "10-40K tokens per event" in `detail` is a DOCUMENTED range, not a
-        // per-event measurement taken here — several v0.6 findings exist
-        // precisely because a detail sentence asserted a cost the detector
-        // never measured (#3180).
+        // Band membership is measured; the "10-40K tokens per event" in `detail`
+        // is a DOCUMENTED range, not a per-event measurement taken here — several
+        // v0.6 findings exist precisely because a detail sentence asserted a cost
+        // the detector never measured (#3180). This detector makes NO reclaimable
+        // %/$ claim: aggregate cache counters cannot identify which written
+        // prefixes went unread (#3121).
         inference:
           'What is measured is band membership (a heuristic composite of peak, growth, ' +
-          'tool-output rate, re-read density and compaction count) and the cohort\'s ' +
-          'cache-write pool. The 10-40K-tokens-per-event figure in the headline is a ' +
-          'documented range for compaction in general — this detector does not measure ' +
-          'the tokens any individual compaction re-sent. The risk band is a forward-looking ' +
-          'score, so a hot session has not necessarily compacted yet.',
+          'tool-output rate, re-read density and compaction count). The 10-40K-tokens-per-event ' +
+          'figure in the headline is a documented range for compaction in general — this ' +
+          'detector does not measure the tokens any individual compaction re-sent, and it ' +
+          'claims no reclaimable cache-write amount because aggregate counters cannot show ' +
+          'which written prefixes were later read. The risk band is a forward-looking score, ' +
+          'so a hot session has not necessarily compacted yet.',
         // Newest OBSERVED entry, never `now`.
         ...(asOf ? { asOf } : {}),
       },

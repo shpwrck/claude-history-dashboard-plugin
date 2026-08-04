@@ -3,13 +3,11 @@ import { detector } from './compaction-hot-sessions';
 import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 import type { SessionTokenData } from '../../../types';
-import { runReclaimCascade, scopeKeyOf } from '../../reclaim';
-import { reclaimableCacheWriteFrac } from '../../context-health';
 
 // A session whose single turn already sits near the 200K window and that has
 // compacted twice → high compaction-risk band. `writes`/`reads` set the
-// session-level cache totals `computeCacheEfficiency` reads, so the reclaim claim
-// can ground its deletable fraction in the measured hit-rate.
+// session-level cache totals; the detector makes NO reclaimable %/$ claim from
+// them (#3121), so they only exercise that no such claim leaks out.
 const hot = (id: string, writes = 0, reads = 0): SessionTokenData =>
   ({
     sessionId: id,
@@ -87,53 +85,32 @@ describe('context.compaction-hot-sessions (#415)', () => {
     });
   });
 
-  // ── Reclaim claim (epic #944, PR3 / #949) ────────────────────────────────
-  describe('reclaim claim (#949)', () => {
-    it('emits a context scaleTokens claim on the cache-write pools the cascade books', () => {
-      // Both hot sessions write 1M cache and read back nothing → hitRate 0 →
-      // frac = 1.0 (the whole shortfall below the reuse floor).
-      const td = [hot('s1', 1_000_000, 0), hot('s2', 1_000_000, 0)];
-      const rec = detector.rule(input(td), 0);
-      expect(rec?.reclaim).toBeDefined();
-      expect(rec!.reclaim!.category).toBe('context');
-      expect(rec!.reclaim!.cause).toBe('structural-prefix');
-      // Structural band [40,90).
-      expect(rec!.reclaim!.orderKey).toBeGreaterThanOrEqual(40);
-      expect(rec!.reclaim!.orderKey).toBeLessThan(90);
-      expect(rec!.reclaim!.counterfactual.kind).toBe('scaleTokens');
-      expect(rec!.reclaim!.ownedPools).toEqual(['cacheWrite5m', 'cacheWrite1h']);
-      expect(rec!.reclaim!.scopeKeys).toContain(scopeKeyOf('s1', 'claude-sonnet-4-6'));
-
-      const result = runReclaimCascade([rec!.reclaim!], td);
-      const booked = result.booked[0];
-      expect(booked.rejected).toBe(false);
-      // hitRate 0 ⇒ frac 1.0 ⇒ deletes the whole cache-write cost of both sessions.
-      expect(booked.marginalUsd).toBeGreaterThan(0);
-      // Identity holds.
-      expect(result.total).toBeCloseTo(result.billOriginal - result.billFinal, 9);
-      expect(booked.marginalUsd).toBeCloseTo(result.total, 9);
+  // ── No reclaimable %/$ claim (#3121) ─────────────────────────────────────
+  describe('no reclaimable %/$ claim (#3121)', () => {
+    it('emits no reclaim claim regardless of read totals — aggregate hit-rate cannot substantiate one', () => {
+      // Whatever the cohort's aggregate reads/writes, they cannot identify WHICH
+      // written prefixes were later read, so no reclaimable cache-write fraction
+      // or dollar amount is derivable. The prior scaleTokens claim (#949) is gone;
+      // the detector stays advisory across the whole hit-rate range.
+      for (const reads of [0, 200_000, 700_000, 1_200_000]) {
+        const rec = detector.rule(
+          input([hot('s1', 1_000_000, reads), hot('s2', 1_000_000, reads)]),
+          0
+        );
+        expect(rec?.id).toBe('context.compaction-hot-sessions');
+        expect(rec?.reclaim).toBeUndefined();
+      }
     });
 
-    it('derives poolDeltaFrac from computeCacheEfficiency, not a constant: higher hit-rate ⇒ smaller delta', () => {
-      const lowHit = detector.rule(input([hot('a1', 1_000_000, 200_000), hot('a2', 1_000_000, 200_000)]), 0);
-      const higherHit = detector.rule(input([hot('b1', 1_000_000, 700_000), hot('b2', 1_000_000, 700_000)]), 0);
-      const fLow = (lowHit!.reclaim!.counterfactual as { poolDeltaFrac: Record<string, number> }).poolDeltaFrac
-        .cacheWrite5m;
-      const fHigh = (higherHit!.reclaim!.counterfactual as { poolDeltaFrac: Record<string, number> })
-        .poolDeltaFrac.cacheWrite5m;
-      expect(fLow).toBeGreaterThan(fHigh);
-      // The frac is exactly the grounded helper of the measured hit-rate.
-      expect(fLow).toBeCloseTo(reclaimableCacheWriteFrac(200_000 / 1_200_000), 9);
-      expect(fHigh).toBeCloseTo(reclaimableCacheWriteFrac(700_000 / 1_700_000), 9);
-    });
-
-    it('omits the claim when a hot cohort already reuses its cache (hitRate at/above the floor)', () => {
-      // hitRate = 900K/(900K+1M) = 0.47... still below floor → still has a claim;
-      // push reads up so hitRate clears the 0.5 floor → frac 0 → no token claim.
-      const td = [hot('s1', 1_000_000, 1_200_000), hot('s2', 1_000_000, 1_200_000)];
-      const rec = detector.rule(input(td), 0);
-      expect(rec?.id).toBe('context.compaction-hot-sessions');
-      expect(rec?.reclaim).toBeUndefined();
+    it('asserts no reclaimable %/$ anywhere in its provenance', () => {
+      const rec = detector.rule(
+        input([hot('s1', 1_000_000, 0), hot('s2', 1_000_000, 0)]),
+        0
+      );
+      const claims = rec!.provenance!.observations.map((o) => o.claim).join(' ');
+      expect(claims).not.toMatch(/reclaim/i);
+      expect(claims).not.toMatch(/shortfall/i);
+      expect(rec!.provenance!.inference).toMatch(/no reclaimable/i);
     });
   });
 });

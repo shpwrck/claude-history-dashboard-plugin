@@ -233,7 +233,7 @@ Keep the working context well under the model's context window.
     },
     "id": "context.compaction-hot-sessions",
     "provenance": {
-      "inference": "What is measured is band membership (a heuristic composite of peak, growth, tool-output rate, re-read density and compaction count) and the cohort's cache-write pool. The 10-40K-tokens-per-event figure in the headline is a documented range for compaction in general — this detector does not measure the tokens any individual compaction re-sent. The risk band is a forward-looking score, so a hot session has not necessarily compacted yet.",
+      "inference": "What is measured is band membership (a heuristic composite of peak, growth, tool-output rate, re-read density and compaction count). The 10-40K-tokens-per-event figure in the headline is a documented range for compaction in general — this detector does not measure the tokens any individual compaction re-sent, and it claims no reclaimable cache-write amount because aggregate counters cannot show which written prefixes were later read. The risk band is a forward-looking score, so a hot session has not necessarily compacted yet.",
       "observations": [
         {
           "claim": "3 of 5 scored session(s) sit in the medium-or-high compaction-risk band",
@@ -259,33 +259,6 @@ Keep the working context well under the model's context window.
           "source": "parse-compaction-risk (summarizeCompactionRisk)",
           "value": 3,
         },
-        {
-          "claim": "4000000 cache-write token(s) across the hot cohort back the reclaim claim, of which the measured cache-shortfall fraction is 100.0%",
-          "field": "tokenData[].entries[].cacheCreationTokens / hitRate",
-          "source": "context-health (computeCacheEfficiency + reclaimableCacheWriteFrac)",
-          "value": 4000000,
-        },
-      ],
-    },
-    "reclaim": {
-      "category": "context",
-      "cause": "structural-prefix",
-      "counterfactual": {
-        "kind": "scaleTokens",
-        "poolDeltaFrac": {
-          "cacheWrite1h": 1,
-          "cacheWrite5m": 1,
-        },
-      },
-      "evidenceTokens": 4000000,
-      "leverId": "context.compaction-hot-sessions",
-      "orderKey": 62,
-      "ownedPools": [
-        "cacheWrite5m",
-        "cacheWrite1h",
-      ],
-      "scopeKeys": [
-        "automate|claude-opus-4-8",
       ],
     },
     "severity": "warning",

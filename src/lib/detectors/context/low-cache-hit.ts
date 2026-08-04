@@ -1,12 +1,7 @@
 import type { Detector } from '../types';
 import type { AppliedMarkers } from '../types';
 import { claudeMdMarksApplied, newestTokenDataDate, short } from '../shared';
-import {
-  LOW_HIT_RATE,
-  computeCacheEfficiency,
-  reclaimableCacheWriteFrac,
-} from '../../context-health';
-import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
+import { LOW_HIT_RATE, computeCacheEfficiency } from '../../context-health';
 
 const MARKERS_LOW_CACHE_HIT: AppliedMarkers = {
   headings: [/^##\s+(Keep the )?prompt cache\b/i],
@@ -33,54 +28,13 @@ export const detector: Detector = {
     const worst = low[0];
     const asOf = newestTokenDataDate(input.tokenData);
 
-    // ── Reclaim claim (epic #944, PR3 / #949) ────────────────────────────────
-    // A cache *write* that the session never read back is pure waste — the prefix
-    // was churned before the prompt cache could be reused. We delete a fraction of
-    // the low-hit-rate sessions' cache-WRITE pools, where the fraction is
-    // **derived from the measured hit-rate** (`reclaimableCacheWriteFrac`), never a
-    // hardcoded constant: the further below the reuse floor a session sits, the
-    // larger its wasted write share. `scaleTokens` carries ONE per-pool fraction
-    // for the whole claim, so we book a single token-weighted average frac across
-    // the low sessions' cache-write tokens — still strictly grounded in
-    // `computeCacheEfficiency` (higher measured hit-rate ⇒ smaller frac).
-    const lowIds = new Set(low.map((r) => r.sessionId));
-    const fracBySession = new Map(low.map((r) => [r.sessionId, reclaimableCacheWriteFrac(r.hitRate)]));
-    const scopeKeys = new Set<string>();
-    let weightedFracNum = 0;
-    let writeTokens = 0;
-    for (const d of input.tokenData) {
-      if (!lowIds.has(d.sessionId)) continue;
-      const frac = fracBySession.get(d.sessionId) ?? 0;
-      for (const e of d.entries) {
-        const writes = e.cacheCreationTokens;
-        if (writes <= 0) continue;
-        scopeKeys.add(scopeKeyOf(d.sessionId, e.model || 'unknown'));
-        weightedFracNum += writes * frac;
-        writeTokens += writes;
-      }
-    }
-    // Token-weighted mean deletable fraction across the low sessions' write pools.
-    const poolFrac = writeTokens > 0 ? weightedFracNum / writeTokens : 0;
-    // Only emit a token-touching claim when there is real cache-write to reclaim
-    // AND the grounded fraction is non-zero; otherwise the claim has no dollars to
-    // book and is omitted (the advisory finding still fires).
-    const reclaim: ReclaimClaim | undefined =
-      writeTokens > 0 && poolFrac > 0
-        ? {
-            leverId: 'context.low-cache-hit',
-            category: 'context',
-            cause: 'structural-prefix',
-            // Structural context band [40,90); behavioural causes run ahead.
-            orderKey: 60,
-            ownedPools: ['cacheWrite5m', 'cacheWrite1h'],
-            scopeKeys: [...scopeKeys],
-            counterfactual: {
-              kind: 'scaleTokens',
-              poolDeltaFrac: { cacheWrite5m: poolFrac, cacheWrite1h: poolFrac },
-            },
-            evidenceTokens: writeTokens,
-          }
-        : undefined;
+    // ── No reclaimable %/$ claim (#3121) ─────────────────────────────────────
+    // Aggregate hit-rate CANNOT identify which written prefixes were later read,
+    // so it cannot substantiate a reclaimable cache-write fraction or dollar
+    // amount, and the parsed token counters carry no per-prefix write->read
+    // lineage. This detector therefore stays advisory and exposes ONLY the
+    // measured read/write reuse ratio as a labeled heuristic — it emits no
+    // `reclaim` claim (see context-health.ts, epic #944/#949 reverted here).
 
     return {
       id: 'context.low-cache-hit',
@@ -90,7 +44,6 @@ export const detector: Detector = {
       detail: `${low.length} session(s) read back less than ${(LOW_HIT_RATE * 100).toFixed(0)}% of cached context (overall average ${(avg * 100).toFixed(0)}%). Low reuse means more tokens billed at full input rate.`,
       action:
         'Avoid frequent context churn within a session (large unrelated reads, mode switches) so the prompt cache stays warm.',
-      ...(reclaim ? { reclaim } : {}),
       affected: low.length,
       view: 'context',
       fix: {
@@ -129,27 +82,20 @@ export const detector: Detector = {
             field: 'hitRate',
             value: Number(worst.hitRate.toFixed(4)),
           },
-          ...(reclaim
-            ? [
-                {
-                  claim: `${writeTokens} cache-write token(s) sit under the low-reuse sessions, of which ${(poolFrac * 100).toFixed(1)}% is claimed as reclaimable`,
-                  source: 'context-health (reclaimableCacheWriteFrac over measured hitRate)',
-                  field: 'tokenData[].entries[].cacheCreationTokens',
-                  value: writeTokens,
-                },
-              ]
-            : []),
         ],
-        // The hit rates are measured. The reclaimable fraction is DERIVED from
-        // the measured shortfall below the floor — it is a counterfactual, not
-        // an observation that those tokens were wasted.
+        // Hit rates are measured; nothing here is a reclaimable amount. The
+        // aggregate read/write ratio is a labeled heuristic reuse signal only —
+        // it cannot identify WHICH written prefixes went unread, so it does not
+        // support a reclaimable fraction or dollar saving (#3121). Low reuse also
+        // has innocent causes (a genuinely short session, deliberately unrelated
+        // work) that the hit rate alone cannot separate.
         inference:
-          'Hit rates and cache-write volumes are measured. The reclaimable fraction is ' +
-          'derived from each session\'s shortfall below the reuse floor, so it is a ' +
-          'counterfactual estimate of what a warm cache would have avoided — not an ' +
-          'observation that those tokens were wasted, and not a measured dollar saving. ' +
-          'Low reuse also has innocent causes (a genuinely short session, deliberately ' +
-          'unrelated work) that the hit rate alone cannot separate.',
+          'Hit rates are measured re-use ratios (reads / (reads + writes)); they are ' +
+          'exposed as a heuristic signal, not a reclaimable amount. Aggregate counters ' +
+          'cannot identify which written prefixes were later read, so no reclaimable ' +
+          'cache-write fraction or dollar saving is derivable or claimed. Low reuse also ' +
+          'has innocent causes (a genuinely short session, deliberately unrelated work) ' +
+          'that the hit rate alone cannot separate.',
         // Newest OBSERVED entry, never `now`.
         ...(asOf ? { asOf } : {}),
       },

@@ -205,6 +205,28 @@ describe('evaluateExperiments', () => {
     expect(v.caveats.join(' ')).not.toMatch(/self-selected/i);
   });
 
+  it('mixed regimes stay observational in BOTH insertion orders (#3126)', () => {
+    // Same axis, one blind and one menu contributing session. The OLD code seeded
+    // the axis assignment from the FIRST enrollment only, so a blind-first order
+    // reported `causal` and dropped the self-selection caveat — a claim its mixed
+    // evidence cannot support, flippable by map-insertion order alone. Both orders
+    // must now be observational and keep the self-selection caveat.
+    const blind = enr('on-blind', 'on', 'blind');
+    const menu = enr('off-menu', 'off', 'menu');
+    const timelines = [session('on-blind', 2, 100), session('off-menu', 8, 100)];
+
+    for (const order of [
+      [blind, menu], // blind FIRST — the order that used to mislabel as causal
+      [menu, blind], // menu FIRST
+    ]) {
+      const v = evaluateExperiments(timelines, enrollMap(order), AXIS_META)[0];
+      expect(v.confidence).toBe('observational');
+      expect(v.assignment).toBe('menu'); // never claims the blind regime
+      // The self-selection contamination caveat is retained on the mix.
+      expect(v.caveats.join(' ')).toMatch(/self-selected/i);
+    }
+  });
+
   it('falls back to the axis key when no registry label is supplied', () => {
     const v = evaluateExperiments(
       [session('on-solo', 0, 100)],

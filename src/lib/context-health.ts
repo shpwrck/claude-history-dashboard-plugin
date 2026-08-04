@@ -130,32 +130,17 @@ export function computeCacheEfficiency(
   return stats.sort((a, b) => a.hitRate - b.hitRate);
 }
 
-/**
- * Reclaimable cache-write fraction for a session, **derived from its measured
- * cache hit-rate** — never a hardcoded constant (epic #944, PR3 / #949).
- *
- * A cache *write* that is never read back is pure waste: the prefix was churned
- * before the cache could be reused. `computeCacheEfficiency` already measures how
- * much of the cached context was reused (`hitRate = reads / (reads + writes)`);
- * the further a session sits below the {@link LOW_HIT_RATE} reuse floor, the
- * larger the share of its cache-write spend that bought nothing. So the deletable
- * fraction is the session's *shortfall* below the floor, expressed as a fraction
- * of the floor:
- *
- *     frac = clamp01((LOW_HIT_RATE − hitRate) / LOW_HIT_RATE)
- *
- * This is **fully grounded in the measured signal**: a session exactly at the
- * floor reclaims 0, one at hitRate 0 reclaims the whole shortfall (1.0), and a
- * **higher measured hit-rate always yields a smaller fraction** (strictly
- * monotonic decreasing) — the property #949 requires a test to assert. `LOW_HIT_RATE`
- * is the existing health threshold the detector already keys on, not a fabricated
- * reclaim constant.
- */
-export function reclaimableCacheWriteFrac(hitRate: number): number {
-  if (LOW_HIT_RATE <= 0) return 0;
-  const frac = (LOW_HIT_RATE - hitRate) / LOW_HIT_RATE;
-  return Math.min(1, Math.max(0, frac));
-}
+// NOTE (#3121): there is deliberately NO `reclaimableCacheWriteFrac` here.
+// A session's aggregate hit-rate (`reads / (reads + writes)`) CANNOT identify
+// which written prefixes were later read, so it cannot substantiate a
+// reclaimable cache-write fraction or dollar amount. Counter-example: 10 written
+// units, 9 reads all hitting ONE unit -> hitRate 9/19 implies a ~5.3%
+// "reclaimable" shortfall even though 9 of 10 written units were never reused
+// (~90% truly wasted). The parsed token counters (`SessionTokenData` /
+// `TokenEntry`: aggregate `cacheCreationTokens` / `cacheReadTokens`) carry no
+// per-prefix write->read lineage, so a validated savings fraction is not
+// derivable. `computeCacheEfficiency`'s hitRate is exposed only as a labeled
+// heuristic reuse signal — never as a reclaimable %/$.
 
 /**
  * Per-session cost breakdown.
