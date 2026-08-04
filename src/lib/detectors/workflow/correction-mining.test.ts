@@ -26,8 +26,10 @@ const input = (toolData: ToolUsageData[], liveConfig: LiveConfig | null = null):
   tokenData: [], toolData, sessions: [], projects: [], permissionRows: [], apiErrors: [], liveConfig,
 });
 
+// Same filename in the wrong directory — the correction the detector is for
+// (#3162: basename identity, not a stem-only match across a swapped extension).
 const pathFix = () => [session('s1', [
-  read('axion-formats/src/FirstClassEntity.java', true),
+  read('axion-formats/src/FirstClassEntity.scala', true),
   read('axion-scala-common/src/FirstClassEntity.scala', false),
 ])];
 
@@ -37,7 +39,7 @@ describe('workflow.correction-mining (#1040)', () => {
     expect(rec.id).toBe('workflow.correction-mining');
     expect(rec.category).toBe('workflow');
     expect(rec.affected).toBe(1);
-    expect(rec.evidence![0]).toMatch(/Read: .*FirstClassEntity\.java → .*FirstClassEntity\.scala/);
+    expect(rec.evidence![0]).toMatch(/Read: .*FirstClassEntity\.scala → .*FirstClassEntity\.scala/);
   });
 
   it('ships a marker-bearing CLAUDE.md fix (adoption/suppression can track it)', () => {

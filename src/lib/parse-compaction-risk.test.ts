@@ -244,3 +244,31 @@ describe('summarizeCompactionRisk', () => {
     expect(s.topSuggestionCount).toBe(0)
   })
 })
+
+describe('contextGrowthRate net-growth semantics (#3139)', () => {
+  it('reports zero growth when a compaction net-shrinks the window', () => {
+    // 100k → 120k → 20k → 40k: net (40k - 100k)/3 clamps to 0. The old
+    // positive-only sum reported (20k + 20k)/3 ≈ 13.3k and could emit a growth
+    // suggestion immediately after a compaction.
+    const rows = computeCompactionRisk([
+      session('compaction', [100_000, 120_000, 20_000, 40_000]),
+    ])
+    const r = rows[0]
+    expect(r.contextGrowthRate).toBe(0)
+    // No growth-threshold suggestion (WARN/HIGH growth messages carry these).
+    expect(
+      r.suggestions.some(
+        (s) => s.includes('tokens/turn') || s.includes('tokens per turn')
+      )
+    ).toBe(false)
+    expect(r.topFactor).not.toBe('growth')
+  })
+
+  it('keeps the arithmetic for a monotonically growing window', () => {
+    // 100k → 120k → 140k: net (140k - 100k)/2 = 20k tokens/turn, unchanged.
+    const rows = computeCompactionRisk([
+      session('monotonic', [100_000, 120_000, 140_000]),
+    ])
+    expect(rows[0].contextGrowthRate).toBe(20_000)
+  })
+})

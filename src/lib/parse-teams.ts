@@ -25,7 +25,6 @@ import {
   readSubdirectoryNamesBoundedSync,
   remainingEntryCapacity,
 } from './bounded-fs';
-import { parseDateMs } from './parse-utils';
 
 // ─── Wire shapes ────────────────────────────────────────────────────────────
 
@@ -318,7 +317,15 @@ export function analyzeTeams(
 
       const dropped = agentAssigns.filter((a) => {
         if (a.read) return false;
-        const ts = parseDateMs(a.timestamp);
+        // #3158: use the effective timestamp (envelope, then payload fallback),
+        // the SAME source that bounds the team. Reading only the envelope via
+        // parseDateMs returned 0 for a missing/invalid envelope timestamp, so an
+        // assignment with a valid payload timestamp inside the grace window was
+        // still reported as ancient and dropped. An assignment with no effective
+        // timestamp at all cannot be classified as dropped, so exclude it rather
+        // than assign it epoch age.
+        const ts = assignmentTimestampMs(a);
+        if (ts == null) return false;
         const ageMin = (now - ts) / 60_000;
         return ageMin >= graceMinutes;
       });
@@ -329,7 +336,10 @@ export function analyzeTeams(
       }
 
       for (const d of dropped) {
-        const ts = parseDateMs(d.timestamp);
+        // Non-null by construction: the filter above excludes null-effective
+        // timestamps, but guard so the age can never fall back to epoch.
+        const ts = assignmentTimestampMs(d);
+        if (ts == null) continue;
         droppedAssignments.push({
           agent,
           taskId: d.payload.taskId,

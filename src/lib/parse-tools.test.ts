@@ -2848,21 +2848,47 @@ const bashCall = (command: string, isError: boolean | null): ToolCall =>
   call({ toolName: 'Bash', input: { command }, isError })
 
 describe('mineCorrections', () => {
-  it('mines a file-path correction (same distinctive stem, different dir/ext)', () => {
+  it('mines a genuine wrong-path correction (same filename, wrong directory)', () => {
     const data = [session('s1', [
-      readCall('axion-formats/src/FirstClassEntity.java', true),
+      readCall('axion-formats/src/FirstClassEntity.scala', true),
       readCall('axion-scala-common/src/FirstClassEntity.scala', false),
     ])]
     expect(mineCorrections(data)).toEqual([
       {
         category: 'file-path',
         toolName: 'Read',
-        failed: 'axion-formats/src/FirstClassEntity.java',
+        failed: 'axion-formats/src/FirstClassEntity.scala',
         succeeded: 'axion-scala-common/src/FirstClassEntity.scala',
         succeededTimestamp: 't',
         sessionId: 's1',
       },
     ])
+  })
+
+  it('mines a relative-vs-absolute wrong-path retry (same basename)', () => {
+    const data = [session('s1', [
+      readCall('src/lib/UserService.ts', true),
+      readCall('/home/u/proj/src/lib/UserService.ts', false),
+    ])]
+    expect(mineCorrections(data)).toEqual([
+      {
+        category: 'file-path',
+        toolName: 'Read',
+        failed: 'src/lib/UserService.ts',
+        succeeded: '/home/u/proj/src/lib/UserService.ts',
+        succeededTimestamp: 't',
+        sessionId: 's1',
+      },
+    ])
+  })
+
+  it('does NOT pair same-stem files with a swapped extension (#3162)', () => {
+    // packages/a/UserService.ts (fail) → packages/b/UserService.js (success):
+    // a .ts and a .js are different files, so stem equality is not identity.
+    expect(mineCorrections([session('s', [
+      readCall('packages/a/UserService.ts', true),
+      readCall('packages/b/UserService.js', false),
+    ])])).toEqual([])
   })
 
   it('does NOT mine commands (command-variant category is deferred)', () => {
@@ -2915,13 +2941,13 @@ describe('mineCorrections', () => {
 describe('aggregateCorrections', () => {
   it('counts identical corrections and ranks by occurrences', () => {
     const facts = mineCorrections([
-      session('s1', [readCall('a/Entity.java', true), readCall('b/Entity.scala', false)]),
-      session('s2', [readCall('a/Entity.java', true), readCall('b/Entity.scala', false)]),
+      session('s1', [readCall('a/Entity.ts', true), readCall('b/Entity.ts', false)]),
+      session('s2', [readCall('a/Entity.ts', true), readCall('b/Entity.ts', false)]),
       session('s3', [readCall('x/Gadget.ts', true), readCall('y/Gadget.ts', false)]),
     ])
     const agg = aggregateCorrections(facts)
     expect(agg[0].occurrences).toBe(2) // Entity, seen twice, ranks first
-    expect(agg[0].failed).toBe('a/Entity.java')
+    expect(agg[0].failed).toBe('a/Entity.ts')
     expect(agg.find((a) => a.failed === 'x/Gadget.ts')?.occurrences).toBe(1)
   })
 })

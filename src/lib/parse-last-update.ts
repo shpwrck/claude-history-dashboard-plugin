@@ -108,8 +108,10 @@ export interface UpdateHealthReport {
    */
   versionDrift: string | null;
   /**
-   * Number of consecutive update pairs where the gap was under 1 hour — a
-   * failed attempt retried immediately.
+   * Number of chronologically consecutive `failure → success` pairs whose gap
+   * is finite, non-negative, and under one hour — a failed attempt that was
+   * retried immediately and then succeeded. A pair of two successes 30 minutes
+   * apart, or a failure followed by another failure, is NOT an immediate retry.
    */
   immediateRetries: number;
   /**
@@ -178,12 +180,26 @@ export function analyzeUpdateHealth(results: UpdateResult[]): UpdateHealthReport
     versionDrift = `${fromVer ?? '?'} -> ${toVer ?? '?'} (${bumps} patch bumps over ${spanDays}d)`;
   }
 
-  // immediate retries: two consecutive attempts within 1 hour
+  // immediate retries: a failed attempt retried within the hour and succeeded.
+  // #3143: the old check counted ANY consecutive pair under an hour, so two
+  // successes 30 min apart (or a failure→failure pair) inflated the metric.
+  // Increment only for a chronologically consecutive failure→success pair with
+  // finite timestamps and a non-negative, sub-hour gap.
+  const ONE_HOUR_MS = MS_PER_DAY / 24;
   let immediateRetries = 0;
   for (let i = 1; i < sorted.length; i++) {
-    const dt =
-      Date.parse(sorted[i].timestamp ?? '0') - Date.parse(sorted[i - 1].timestamp ?? '0');
-    if (dt < MS_PER_DAY / 24) immediateRetries++;
+    const prevMs = Date.parse(sorted[i - 1].timestamp ?? '');
+    const currMs = Date.parse(sorted[i].timestamp ?? '');
+    if (!Number.isFinite(prevMs) || !Number.isFinite(currMs)) continue;
+    const dt = currMs - prevMs;
+    if (
+      !isSuccess(sorted[i - 1]) &&
+      isSuccess(sorted[i]) &&
+      dt >= 0 &&
+      dt < ONE_HOUR_MS
+    ) {
+      immediateRetries++;
+    }
   }
 
   // error codes from failures

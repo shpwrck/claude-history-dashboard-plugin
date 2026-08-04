@@ -114,7 +114,16 @@ function peakContext(entries: TokenEntry[]): number {
 /**
  * Average per-turn token delta over the last `window` assistant entries.
  * Falls back to the full session if there are fewer than `window` entries.
- * Negative growth (a compaction landed in-window) is clamped to 0.
+ * Net-growth semantics: a compaction (a negative delta) reduces the total, so
+ * a window that net-shrank reports 0.
+ *
+ * #3139: the previous implementation summed only POSITIVE deltas, so a
+ * compaction drop inside the window did not pull the rate down at all. For a
+ * 100k → 120k → 20k → 40k series it reported (20k + 20k) / 3 ≈ 13.3k tokens/turn
+ * and could emit a "steady growth" suggestion immediately after a compaction —
+ * a claim not reproducible from the documented net-delta calculation. Summing
+ * the SIGNED aggregate delta and clamping the average to zero makes the reported
+ * value the net expansion the docstring promises.
  */
 function rollingGrowthPerTurn(entries: TokenEntry[], window: number): number {
   if (entries.length < 2) return 0;
@@ -122,12 +131,12 @@ function rollingGrowthPerTurn(entries: TokenEntry[], window: number): number {
   if (slice.length < 2) return 0;
   let delta = 0;
   for (let i = 1; i < slice.length; i++) {
-    const d = contextSize(slice[i]) - contextSize(slice[i - 1]);
-    if (d > 0) delta += d;
+    delta += contextSize(slice[i]) - contextSize(slice[i - 1]);
   }
-  // Average over the number of transitions, not entries.
+  // Average the SIGNED aggregate delta over the number of transitions, then
+  // clamp: a net-shrinking window is not "growth".
   const transitions = slice.length - 1;
-  return transitions > 0 ? delta / transitions : 0;
+  return transitions > 0 ? Math.max(0, delta / transitions) : 0;
 }
 
 function growthSeries(entries: TokenEntry[]): number[] {

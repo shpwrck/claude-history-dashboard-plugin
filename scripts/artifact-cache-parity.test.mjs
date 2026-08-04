@@ -76,17 +76,36 @@ function buildFixtureHome() {
   mk('sessions');
   wf('sessions/1234.json', JSON.stringify({ pid: 1234, cwd: '/tmp/proj', startTime: 1700000000000 }));
 
-  // telemetry/1p_failed_events*.json (NDJSON)
+  // telemetry/1p_failed_events*.json (NDJSON). The reliability parser keeps
+  // ONLY tengu_api_slow_first_byte events (#3159), so the fixture must carry at
+  // least one — shaped like the real artifact, with base64 additional_metadata
+  // holding attempt + elapsed_ms. The tengu_exit line proves mixed-event files
+  // still parse (it feeds the separate latency reader, not `telemetry`).
   mk('telemetry');
+  const b64meta = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64');
   wf(
     'telemetry/1p_failed_events_1.json',
     [
       JSON.stringify({
+        event_type: 'ClaudeCodeInternalEvent',
         event_data: {
-          event_name: 'tengu_api_error',
+          event_name: 'tengu_api_slow_first_byte',
           client_timestamp: '2026-01-01T00:00:00Z',
-          model: 'claude',
+          model: 'claude-sonnet-4-6',
           session_id: 'sess-a',
+          betas: 'claude-code-20250219',
+          env: { node_version: 'v24.3.0', terminal: 'xterm', arch: 'x64' },
+          additional_metadata: b64meta({ attempt: 4, elapsed_ms: 30001 }),
+        },
+      }),
+      JSON.stringify({
+        event_type: 'ClaudeCodeInternalEvent',
+        event_data: {
+          event_name: 'tengu_exit',
+          client_timestamp: '2026-01-01T00:05:00Z',
+          model: 'claude-sonnet-4-6',
+          session_id: 'sess-a',
+          additional_metadata: b64meta({ last_session_api_duration: 5000 }),
         },
       }),
     ].join('\n') + '\n'

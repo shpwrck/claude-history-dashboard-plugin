@@ -61,6 +61,50 @@ describe('computeAgentEffectiveness', () => {
     ]
     expect(compute(data).find((x) => x.agentType === 'Flaky')!.failureModes).toBe(1)
   })
+
+  it('attributes a chained parent follow-up to at most one spawn (#3138)', () => {
+    // Task(Superseded), Task(Active), Edit: only the most-recent active spawn
+    // can own the single Edit. The earlier spawn is superseded before the
+    // parent acts, so it gets NO attributable follow-up (a no-op) — never a
+    // shared artifact credit. Five chained runs each across two sessions.
+    const t0 = Date.UTC(2026, 0, 1, 0, 0, 0)
+    const seq = (base: number): ToolCall[] => [
+      task('Superseded', { ts: new Date(base).toISOString() }),
+      task('Active', { ts: new Date(base + 60_000).toISOString() }),
+      tc('Edit', { ts: new Date(base + 120_000).toISOString(), input: { file_path: '/a.ts' } }),
+    ]
+    const data = [
+      session('s1', [...seq(t0), ...seq(t0 + 600_000), ...seq(t0 + 1_200_000)]),
+      session('s2', [...seq(t0 + 1_800_000), ...seq(t0 + 2_400_000)]),
+    ]
+    const rows = computeAgentEffectiveness([], [], [], data, [])
+    const superseded = rows.find((x) => x.agentType === 'Superseded')!
+    const active = rows.find((x) => x.agentType === 'Active')!
+
+    expect(superseded.runs).toBe(5)
+    expect(active.runs).toBe(5)
+    expect(superseded.sessionCount).toBe(2)
+    expect(active.sessionCount).toBe(2)
+
+    // The Edit is credited only to the active spawn.
+    expect(active.produceArtifactRate).toBe(1)
+    expect(active.commonFollowUps).toEqual([{ toolName: 'Edit', count: 5 }])
+    // The superseded spawn's artifact rate is NOT inflated by the shared Edit.
+    expect(superseded.produceArtifactRate).toBe(0)
+    expect(superseded.noOpRate).toBe(1)
+    expect(superseded.commonFollowUps).toEqual([])
+
+    // No explorer-first suggestion is published for the unsupported spawn.
+    const pub = publishAgentTaskSuggestions(rows)
+    expect(pub.suggestions.find((s) => s.agentType === 'Active')?.message).toContain(
+      'explorer-first'
+    )
+    expect(
+      pub.suggestions.some(
+        (s) => s.agentType === 'Superseded' && s.message.includes('explorer-first')
+      )
+    ).toBe(false)
+  })
 })
 
 describe('suggestAgentWorkflows', () => {

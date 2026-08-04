@@ -2180,13 +2180,14 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
   },
 
   'workflow.correction-mining': () => {
-    // A Read that failed at one path then succeeded at another with the same
-    // (non-generic) filename stem — the mined failed->fixed pair.
+    // A Read that failed at one path then succeeded at the same (non-generic)
+    // filename in a different directory — the mined failed->fixed pair (#3162:
+    // basename identity, not a stem-only match across a swapped extension).
     const calls = [
       {
         timestamp: '2026-06-09T11:59:00.000Z',
         toolName: 'Read',
-        input: { file_path: 'axion-formats/src/FirstClassEntity.java' },
+        input: { file_path: 'axion-formats/src/FirstClassEntity.scala' },
         toolUseId: 'cm-1',
         isError: true,
         resultBytes: 0,

@@ -154,7 +154,7 @@ function failedThenSuccessFix(sessionId: string): ToolUsageData {
       {
         timestamp: '2026-06-12T10:05:00.000Z',
         toolName: 'Read',
-        input: { file_path: 'packages/core/src/FooType.java' },
+        input: { file_path: 'packages/core/src/FooType.scala' },
         toolUseId: 'u-fail',
         isError: true,
         resultBytes: 0,

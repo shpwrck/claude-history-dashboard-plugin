@@ -2052,7 +2052,7 @@ function fixtureBank(): Fixture[] {
         {
           sessionId: 'cm',
           calls: [
-            { timestamp: 't1', toolName: 'Read', input: { file_path: 'src/FirstClassEntity.java' }, toolUseId: 'cm1', isError: true, resultBytes: 0 },
+            { timestamp: 't1', toolName: 'Read', input: { file_path: 'src/FirstClassEntity.scala' }, toolUseId: 'cm1', isError: true, resultBytes: 0 },
             { timestamp: 't2', toolName: 'Read', input: { file_path: 'lib/FirstClassEntity.scala' }, toolUseId: 'cm2', isError: false, resultBytes: 10 },
           ],
         },

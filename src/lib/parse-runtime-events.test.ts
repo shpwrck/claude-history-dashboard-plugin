@@ -201,7 +201,11 @@ function referencePerTaskCost(
   for (const session of tokenData) {
     const stops = stopsBySession.get(session.sessionId)
     if (!stops || session.entries.length === 0) continue
+    // Mirror the production pre-init: one zero-cost bucket per stop boundary,
+    // the trailing span only when an entry lands after the final stop (#3149).
     const buckets = new Map<number, number>()
+    for (let index = 0; index < stops.length; index++) buckets.set(index, 0)
+    let placed = false
     for (const entry of session.entries) {
       const timestamp = Date.parse(entry.timestamp)
       if (!isFinite(timestamp)) continue
@@ -209,8 +213,9 @@ function referencePerTaskCost(
       let index = stops.findIndex((stop) => stop >= timestamp)
       if (index === -1) index = stops.length
       buckets.set(index, (buckets.get(index) ?? 0) + cost)
+      placed = true
     }
-    if (buckets.size === 0) continue
+    if (!placed) continue
     sessions += 1
     for (const cost of buckets.values()) taskCosts.push(cost)
   }
@@ -292,14 +297,49 @@ describe('aggregatePerTaskCost stop attribution (#3150)', () => {
     const small = measure(512)
     const large = measure(1_024)
 
-    expect(small.result.taskCount).toBe(1)
-    expect(large.result.taskCount).toBe(1)
+    // #3149: each stop boundary is its own zero-cost span, plus the trailing
+    // span that holds every entry here — size boundary spans + 1 trailing.
+    expect(small.result.taskCount).toBe(512 + 1)
+    expect(large.result.taskCount).toBe(1_024 + 1)
     expect(small.comparisons).toBeGreaterThanOrEqual(512)
     expect(large.comparisons).toBeGreaterThanOrEqual(1_024)
     expect(small.comparisons).toBeLessThanOrEqual(512 * 10)
     expect(large.comparisons).toBeLessThanOrEqual(1_024 * 11)
     expect(large.comparisons / small.comparisons).toBeLessThan(3)
     // The old linear scan performed 262,144 / 1,048,576 comparisons.
+  })
+
+  it('keeps a zero-cost bucket for every stop boundary span (#3149)', () => {
+    // Two stops → two boundary spans. Both entries fall in the FIRST interval,
+    // so the second span contributes zero cost — but it must still be counted,
+    // and the mean/median/p95 denominator must span both boundary spans.
+    const runtimeData = [runtimeWithStops('two', [10, 20])]
+    const tokenData = [tokenSession('two', [tokenEntry(5, 5, 1), tokenEntry(8, 3, 2)])]
+    const stats = aggregatePerTaskCost(runtimeData, tokenData)
+    expect(stats.taskCount).toBe(2)
+    expect(stats.sessions).toBe(1)
+    expect(stats.totalCost).toBeGreaterThan(0)
+    // One populated span (cost = totalCost) and one empty span (0): mean and
+    // median are therefore both totalCost/2 across the two boundary spans.
+    expect(stats.meanCost).toBeCloseTo(stats.totalCost / 2)
+    expect(stats.medianCost).toBeCloseTo(stats.totalCost / 2)
+  })
+
+  it('creates a trailing span only with a post-final-stop entry (#3149)', () => {
+    // One stop; one entry before it and one after → boundary span + trailing.
+    const withTrailing = aggregatePerTaskCost(
+      [runtimeWithStops('trail', [10])],
+      [tokenSession('trail', [tokenEntry(5), tokenEntry(20)])]
+    )
+    expect(withTrailing.taskCount).toBe(2)
+
+    // Same single stop, but every entry precedes it: one boundary span, no
+    // fabricated trailing span.
+    const beforeOnly = aggregatePerTaskCost(
+      [runtimeWithStops('trail2', [10])],
+      [tokenSession('trail2', [tokenEntry(5), tokenEntry(8)])]
+    )
+    expect(beforeOnly.taskCount).toBe(1)
   })
 })
 

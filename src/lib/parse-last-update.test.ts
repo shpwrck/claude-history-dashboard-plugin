@@ -184,4 +184,62 @@ describe('analyzeUpdateHealth', () => {
       expect(analyzeUpdateHealth(makeResults(13, 20)).grade).toBe('D');
     });
   });
+
+  describe('immediateRetries semantics (#3143)', () => {
+    it('counts ONLY a failure→success pair with a finite, sub-hour gap', () => {
+      const results = [
+        fail('2026-06-01T10:00:00.000Z', '1.0.0', '1.0.1', 'EACCES'),
+        ok('2026-06-01T10:30:00.000Z', '1.0.0', '1.0.1'), // 30 min later
+      ];
+      expect(analyzeUpdateHealth(results).immediateRetries).toBe(1);
+    });
+
+    it('does not count two successes 30 minutes apart', () => {
+      const results = [
+        ok('2026-06-01T10:00:00.000Z', '1.0.0', '1.0.1'),
+        ok('2026-06-01T10:30:00.000Z', '1.0.1', '1.0.2'),
+      ];
+      expect(analyzeUpdateHealth(results).immediateRetries).toBe(0);
+    });
+
+    it('does not count a failure followed by another failure', () => {
+      const results = [
+        fail('2026-06-01T10:00:00.000Z', '1.0.0', '1.0.1', 'EACCES'),
+        fail('2026-06-01T10:20:00.000Z', '1.0.0', '1.0.1', 'EACCES'),
+      ];
+      expect(analyzeUpdateHealth(results).immediateRetries).toBe(0);
+    });
+
+    it('does not count a success followed by a failure', () => {
+      const results = [
+        ok('2026-06-01T10:00:00.000Z', '1.0.0', '1.0.1'),
+        fail('2026-06-01T10:20:00.000Z', '1.0.1', '1.0.2', 'EACCES'),
+      ];
+      expect(analyzeUpdateHealth(results).immediateRetries).toBe(0);
+    });
+
+    it('does not count a failure→success pair an hour or more apart', () => {
+      const results = [
+        fail('2026-06-01T10:00:00.000Z', '1.0.0', '1.0.1', 'EACCES'),
+        ok('2026-06-01T11:05:00.000Z', '1.0.0', '1.0.1'), // 65 min
+      ];
+      expect(analyzeUpdateHealth(results).immediateRetries).toBe(0);
+    });
+
+    it('ignores pairs with an unparseable timestamp', () => {
+      const results = [
+        fail('bogus', '1.0.0', '1.0.1', 'EACCES'),
+        ok('2026-06-01T10:10:00.000Z', '1.0.0', '1.0.1'),
+      ];
+      expect(analyzeUpdateHealth(results).immediateRetries).toBe(0);
+    });
+
+    it('is order-independent — a failure→success pair given out of order still counts once', () => {
+      const results = [
+        ok('2026-06-01T10:30:00.000Z', '1.0.0', '1.0.1'),
+        fail('2026-06-01T10:00:00.000Z', '1.0.0', '1.0.1', 'EACCES'),
+      ];
+      expect(analyzeUpdateHealth(results).immediateRetries).toBe(1);
+    });
+  });
 });

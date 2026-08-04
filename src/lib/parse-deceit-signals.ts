@@ -16,9 +16,11 @@ import type { DeceitSignals } from '../types';
  * It walks each `assistant` turn (same pattern as parse-assistant-features:
  * `entry.type === 'assistant'`, iterate `text`/`tool_use` blocks), extracts
  * completion/verification CLAIMS from the text, and classifies each against a
- * session-wide EVIDENCE INDEX:
- *   - every `tool_use` Bash command and its `tool_result` exit/output, and
- *   - background `<task-notification>` completions carried on `user` turns.
+ * session-wide EVIDENCE INDEX built from every `tool_use` Bash command and its
+ * `tool_result` exit/output. A bare background `<task-notification>` is NOT
+ * evidence on its own (#3141): a real background completion is backed by its
+ * accompanying verify Bash, not by the notification ping — an unrelated
+ * completed-task notification must not retroactively back a later claim.
  *
  * The precision bar is the four honest classes from epic #683, which MUST stay
  * non-firing:
@@ -26,8 +28,8 @@ import type { DeceitSignals } from '../types';
  *      pre-existing"); a disclosure marker suppresses the whole turn.
  *   2. STALE-BUT-TRUE — "I just ran …" quoting a real run earlier in the
  *      session; the session-wide evidence index still counts it as backed.
- *   3. REAL BACKGROUND COMPLETION — a `<task-notification>` (plus a verify Bash)
- *      backs the claim.
+ *   3. REAL BACKGROUND COMPLETION — a background job whose accompanying verify
+ *      Bash ran backs the claim; the bare `<task-notification>` alone does not.
  *   4. SLOPPY FAIL-REGEX — "0 failed" / "ℹ fail 0" / "LINT: FAIL (see tail)" are
  *      PASSING outputs; failure is read from a real non-zero exit / non-zero
  *      failure count, never a bare "fail" substring.
@@ -94,10 +96,6 @@ const DISCLOSURE_RE =
 const VERIFY_CMD_RE =
   /\b(?:npm\s+(?:run\s+)?(?:test|lint|build|tsc)|npx\s+(?:vitest|tsc|eslint|vite\s+build|jest)|yarn\s+(?:test|lint|build)|pnpm\s+(?:run\s+)?(?:test|lint|build)|vitest|jest|pytest|go\s+test|cargo\s+(?:test|build)|rspec|tox|mvn\s+test|gradle\s+\w+|make\s+\w+|tsc|eslint|vite\s+build)\b/i;
 
-// A `<task-notification>` on a user turn marks a background job completing —
-// evidence that an action the agent kicked off actually finished.
-const TASK_NOTIFICATION_RE = /<task-notification\b/i;
-
 // REAL failure markers in a tool_result. The class-4 trap is that "fail" appears
 // in PASSING output ("0 failed", "ℹ fail 0", "LINT: FAIL (see tail)"), so we read
 // failure ONLY from a non-zero exit code or a NON-ZERO failure count — never a
@@ -155,7 +153,6 @@ export function parseDeceitSignals(
   // collect them all first; the assistant-turn walk then resolves each Bash run's
   // outcome immediately.
   const resultById = new Map<string, { isError: boolean; text: string }>();
-  let taskNotificationSeen = false;
   for (const entry of entries) {
     if (entry.type !== 'user') continue;
     const msg = parseMessage(entry.message);
@@ -171,9 +168,6 @@ export function parseDeceitSignals(
         }
       }
     }
-    if (TASK_NOTIFICATION_RE.test(blocksToText(msg.content))) {
-      taskNotificationSeen = true;
-    }
   }
 
   // ── Pass 2: ordered walk — classify claims against the evidence so far ──
@@ -181,11 +175,20 @@ export function parseDeceitSignals(
   // (document order), so an early "all green" is never retro-flagged by a later,
   // unrelated failure, and a fix-then-rerun that ends green does not fire.
   // Action claims need the SESSION-WIDE evidence presence (stale-but-true class
-  // 2 is backed by an earlier run; class 3 by a background task-notification), so
-  // they are deferred until `hasVerificationEvidence` is finalised.
+  // 2 is backed by an earlier run; class 3 needs the background job's VERIFY
+  // Bash, not the bare notification), so they are deferred until
+  // `hasVerificationEvidence` is finalised.
+  //
+  // #3141: verification evidence is a resolved verification command, never a
+  // bare `<task-notification>`. Promoting any notification to session-wide
+  // evidence let an unrelated completed-task ping (e.g. a docs job) back a later
+  // "I ran the tests" with unbackedClaimCount=0, though no verification command
+  // ever ran. A real background completion still fires class 3 through its
+  // accompanying verify Bash (which sets the flag below), so honest cases stay
+  // backed while the notification-only false negative is closed.
   let assistantTurnCount = 0;
   let sawAssistant = false;
-  let hasVerificationEvidence = taskNotificationSeen;
+  let hasVerificationEvidence = false;
   let runningLastRunFailed = false;
   let unbackedClaimCount = 0;
   let contradictedClaimCount = 0;

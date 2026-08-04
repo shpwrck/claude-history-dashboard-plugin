@@ -129,6 +129,15 @@ function num(v: unknown, fallback = 0): number {
   return typeof v === 'number' && isFinite(v) ? v : fallback
 }
 
+/**
+ * The only event type the reliability path is about: the 30s slow-first-byte
+ * timeout ceiling. The 1p_failed_events files also carry `tengu_exit`, retries,
+ * MCP results, etc.; those are NOT reliability failures and must not enter the
+ * retry-storm denominator (#3159). The `tengu_exit` latency path keys on its own
+ * event separately.
+ */
+export const SLOW_FIRST_BYTE_EVENT = 'tengu_api_slow_first_byte'
+
 function decodeMetadata(raw: unknown): RawAdditionalMetadata {
   if (typeof raw !== 'string' || !raw) return {}
   try {
@@ -170,7 +179,12 @@ export function parseTelemetryLine(line: string): TelemetryEvent | null {
   const meta = decodeMetadata(ed.additional_metadata)
 
   const event_name = str(ed.event_name)
-  if (!event_name) return null
+  // #3159: the reliability path is slow-first-byte failures only. Other
+  // `tengu_*` events (tengu_exit, retries, MCP) would default to attempt 1 /
+  // elapsed_ms 0 and dilute totalEvents + depress retryStormPct, so they are
+  // dropped before a TelemetryEvent is emitted. (This also rejects an empty
+  // event_name.) The tengu_exit latency reader is a separate parse path.
+  if (event_name !== SLOW_FIRST_BYTE_EVENT) return null
 
   const attempt = num(meta.attempt, 1)
   const elapsed_ms = num(meta.elapsed_ms, 0)

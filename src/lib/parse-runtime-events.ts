@@ -430,16 +430,28 @@ export function aggregatePerTaskCost(
     const stops = stopsBySession.get(td.sessionId);
     if (!stops || td.entries.length === 0) continue;
     // Task-span index per entry: 0..stops.length, where stops.length is the
-    // trailing span for entries after the final stop.
+    // trailing span for entries after the final stop. #3149: the public
+    // contract is one span per StopHook boundary, so pre-initialise a zero-cost
+    // bucket for EVERY boundary index (0..stops.length-1) before assigning
+    // entries. Otherwise a stop interval that no dated entry maps to is dropped
+    // from taskCount and from the mean/median/p95 denominator, understating the
+    // declared per-task span count. The trailing in-progress span
+    // (index stops.length) is created only when an entry actually falls after
+    // the final stop — never fabricated for a session with no post-final entry.
     const buckets = new Map<number, number>();
+    for (let idx = 0; idx < stops.length; idx++) buckets.set(idx, 0);
+    let placedEntry = false;
     for (const entry of td.entries) {
       const t = Date.parse(entry.timestamp);
       if (!isFinite(t)) continue; // undatable entry can't be placed in a span
       const cost = entryCostAtModel(entry, entry.model);
       const idx = firstStopAtOrAfter(stops, t, probe);
       buckets.set(idx, (buckets.get(idx) ?? 0) + cost);
+      placedEntry = true;
     }
-    if (buckets.size === 0) continue;
+    // A session all of whose entries are undatable contributes no span at all
+    // (there is no evidence any task ran), matching the pre-#3149 skip.
+    if (!placedEntry) continue;
     sessions += 1;
     for (const c of buckets.values()) taskCosts.push(c);
   }

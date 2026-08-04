@@ -145,6 +145,51 @@ describe('analyzeTeams — grace window discrimination', () => {
   });
 });
 
+describe('analyzeTeams — effective timestamp fallback (#3158)', () => {
+  const withPayloadTs = (
+    agent: string,
+    taskId: string,
+    envelopeTs: string,
+    payloadTs: string | undefined,
+    read: boolean
+  ): TeamAssignment => ({
+    agent,
+    from: 'team-lead',
+    timestamp: envelopeTs,
+    read,
+    payload: {
+      type: 'task_assignment',
+      taskId,
+      subject: `${taskId} subject`,
+      assignedBy: 'team-lead',
+      ...(payloadTs !== undefined ? { timestamp: payloadTs } : {}),
+    },
+  });
+
+  it('falls back to payload.timestamp when the envelope timestamp is missing (respects grace)', () => {
+    // Empty envelope timestamp but a recent payload timestamp inside grace. The
+    // old envelope-only read returned epoch age and dropped it as ancient.
+    const recent = msBefore(NOW, GRACE_MINUTES - 1);
+    const map = new Map<string, TeamAssignment[]>([
+      ['team-fallback', [withPayloadTs('agent-a', 'f1', '', recent, false)]],
+    ]);
+    const [s] = analyzeTeams(map, NOW);
+    expect(s.droppedCount).toBe(0);
+    expect(s.stalledAgents).toHaveLength(0);
+    expect(s.firstAssignmentAt).toBe(recent);
+  });
+
+  it('excludes assignments with no valid timestamp in either location from dropped/stalled', () => {
+    const map = new Map<string, TeamAssignment[]>([
+      ['team-invalid', [withPayloadTs('agent-b', 'i1', 'not-a-date', 'also-bad', false)]],
+    ]);
+    const [s] = analyzeTeams(map, NOW);
+    expect(s.droppedCount).toBe(0);
+    expect(s.droppedAssignments).toEqual([]);
+    expect(s.stalledAgents).toHaveLength(0);
+  });
+});
+
 describe('analyzeTeams — dropped percentage', () => {
   it('computes correct drop % for a mix of read and unread-stale assignments', () => {
     // Mirrors proto mock: team-billing-pipeline — 2/4 dropped (50%)

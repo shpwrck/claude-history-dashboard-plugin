@@ -100,9 +100,13 @@ function taskAgentType(call: ToolCall): string | null {
 /**
  * Scan one session's calls and update accumulators for each Task spawn.
  *
- * For every Task call we find the parent's first non-Task tool call that
- * occurred after it (timestamp-wise) and use that as the "follow-up". If
- * nothing within {@link FOLLOW_UP_WINDOW_MS} follows, the run counts as a no-op.
+ * The timeline is partitioned into agent-run intervals: for every Task call we
+ * look at the parent's next tool call in timestamp order. A non-agent call is
+ * that spawn's "follow-up"; another agent-spawn ends this spawn's interval —
+ * it was superseded before the parent acted, so it has no attributable
+ * follow-up (#3138). If nothing (or only a superseding spawn) precedes the
+ * parent's next non-agent move within {@link FOLLOW_UP_WINDOW_MS}, the run
+ * counts as a no-op.
  */
 function recordTaskRuns(
   session: ToolUsageData,
@@ -127,9 +131,15 @@ function recordTaskRuns(
     let followUpT = 0;
     for (let j = i + 1; j < sorted.length; j++) {
       const next = sorted[j];
-      // Skip chained agent-spawn calls (Task/Agent) when looking for the
-      // parent's next real follow-up tool (#452).
-      if (AGENT_SPAWN_TOOLS.has(next.call.toolName)) continue;
+      // #3138: a later agent-spawn (Task/Agent) supersedes this spawn's claim on
+      // the parent's next move, so it ENDS this spawn's interval — only the
+      // most-recent active spawn can own the single follow-up. Stop the scan at
+      // the next spawn and leave this run with no attributable follow-up
+      // (counted as a no-op). Skipping past the spawn instead (the prior #452
+      // behaviour) attributed one Edit after Task(A), Task(B) to BOTH A and B,
+      // inflating each agent's produceArtifactRate; the distilled data carries
+      // no explicit completion/parent correlation to attribute it otherwise.
+      if (AGENT_SPAWN_TOOLS.has(next.call.toolName)) break;
       followUp = next.call;
       followUpT = next.t;
       break;

@@ -4881,15 +4881,35 @@ function isDistinctiveStem(stem: string): boolean {
 }
 
 /**
+ * Whether a successful call's path is a genuine correction of the failed path:
+ * a DIFFERENT path that denotes the SAME file. #3162 requires basename identity
+ * — the filename INCLUDING its extension must match — so an extension swap
+ * (`packages/a/UserService.ts` → `packages/b/UserService.js`) or any other
+ * same-stem-but-different-file pair is suppressed. This keeps the cases the
+ * detector is for (the same filename found in the wrong directory,
+ * `pkg/foo.ts` → `other/foo.ts`; and a relative-vs-absolute wrong-path retry,
+ * `src/foo.ts` → `/repo/src/foo.ts`) while dropping pairs whose file identity
+ * cannot be established from the path alone.
+ */
+function isPathCorrection(failedArg: string, okArg: string): boolean {
+  return okArg !== failedArg && pathBasename(okArg) === pathBasename(failedArg);
+}
+
+/**
  * Extract file-path corrective facts from failed→fixed tool sequences within
  * each session.
  *
  * For each errored file-tool call (`isError === true`) with a `file_path`, scan
  * the next `window` calls for the FIRST same-tool success (`isError === false`)
- * whose path differs but shares a DISTINCTIVE stem — same file, different
- * dir/extension, e.g. `…/FirstClassEntity.java` → `…/FirstClassEntity.scala`.
- * Generic stems (`index`, `main`, …) and dotfiles are excluded so distinct files
- * that merely share a basename are never paired into a false correction.
+ * at a DIFFERENT path with the SAME basename (filename including extension) and
+ * a distinctive stem — the same file found in the wrong directory
+ * (`pkg/foo.ts` → `other/foo.ts`) or a relative-vs-absolute retry
+ * (`src/foo.ts` → `/repo/src/foo.ts`). #3162: basename identity is required, not
+ * mere stem equality — `packages/a/UserService.ts` → `packages/b/UserService.js`
+ * shares the stem `UserService` but a `.ts` and a `.js` are different files, so
+ * pairing them fabricated a correction with no reproducible evidence the second
+ * path fixed the first. Generic stems (`index`, `main`, …) and dotfiles are also
+ * excluded so distinct files that merely share a basename are never paired.
  *
  * Deterministic and transcript-free (reads only the distilled `toolData`), so it
  * runs on the free/local path per ADR 0005.
@@ -4914,8 +4934,7 @@ export function mineCorrections(
         const fix = calls[j];
         if (fix.toolName !== failed.toolName || fix.isError !== false) continue;
         const okArg = fix.input.file_path;
-        if (!okArg || okArg === failedArg) continue;
-        if (pathStem(okArg) !== stem) continue;
+        if (!okArg || !isPathCorrection(failedArg, okArg)) continue;
 
         facts.push({
           category: 'file-path',

@@ -233,6 +233,36 @@ describe('parseTelemetryDir', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('restricts the reliability path to slow-first-byte events, leaving tengu_exit to the latency reader (#3159)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'parse-telemetry-3159-'))
+    try {
+      writeFileSync(
+        join(dir, '1p_failed_events.mixed.json'),
+        [
+          makeLine('claude-opus-4-8[1m]', 4, 30001, 'mixed-session'),
+          makeExitLine('claude-opus-4-8[1m]', { last_session_api_duration: 12345 }, 'mixed-session'),
+        ].join('\n'),
+      )
+
+      // Reliability sees only the one attempt-4 slow-first-byte failure; the
+      // tengu_exit no longer dilutes totalEvents or depresses retryStormPct.
+      const events = parseTelemetryDir(dir)
+      expect(events).toHaveLength(1)
+      expect(events[0].event_name).toBe('tengu_api_slow_first_byte')
+      const reliability = analyzeReliability(events)
+      expect(reliability.totalEvents).toBe(1)
+      expect(reliability.totalStormEvents).toBe(1)
+      expect(reliability.retryStormPct).toBe(100)
+
+      // …while the separate latency reader still captures the tengu_exit sample.
+      const latency = parseTelemetryLatencyDir(dir)
+      expect(latency).toHaveLength(1)
+      expect(latency[0].apiDurationMs).toBe(12345)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---------- analyzeReliability ----------

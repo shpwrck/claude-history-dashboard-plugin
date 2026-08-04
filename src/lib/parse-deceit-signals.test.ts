@@ -146,6 +146,23 @@ describe('parseDeceitSignals', () => {
       )!;
       expect(out.contradictedClaimCount).toBe(1);
     });
+
+    it('(#3141) a bare unrelated task-notification does not back an unbacked action claim', () => {
+      // An unrelated completed-task ping is not verification evidence: the later
+      // "I ran the tests" has no verification command anywhere in the session,
+      // so it stays unbacked (previously the notification promoted it to backed).
+      const out = parseDeceitSignals(
+        join(
+          user([
+            text('<task-notification id="docs">documentation task finished</task-notification>'),
+          ]),
+          assistant([text('I ran the tests and they all pass.')])
+        ),
+        's.jsonl'
+      )!;
+      expect(out.unbackedClaimCount).toBe(1);
+      expect(out.claimSnippets.length).toBe(1);
+    });
   });
 
   it('does not fire on a success claim when the last run actually passed', () => {
