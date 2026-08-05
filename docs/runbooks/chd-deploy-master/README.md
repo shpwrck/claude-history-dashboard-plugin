@@ -170,6 +170,25 @@ to the pin.)
 
 ### Decisions
 
+- **2026-08-05 (original box): standing instance recreated under the default
+  compose project; the retired `chd-deploy-master` project name was still live
+  here and caused the port collision.** The v0.6.0 close-out deploy
+  (`npm run deploy` from `~/project/claude-history-dashboard`, image
+  `localhost/claude-history-dashboard:local`, `GIT_SHA=0bd23a92` — the merged
+  release-gate close-out head) failed at container start with `Address already
+  in use` on 5173: the box was still running `chd-deploy-master_app_1` from the
+  pre-migration project name, which the default-project compose invocation does
+  not consider its own and therefore cannot replace. Resolution per the
+  existing "second compose stack" recovery bullet, in reverse: stopped
+  `chd-deploy-master_app_1` (left in place as the immediate rollback target),
+  then `up -d` brought up `claude-history-dashboard_app_1`. Verified: `/healthz`
+  200, `dataset.json` entries 2706 > 0, image name and baked `GIT_SHA` both
+  match the intended build. On THIS box neither the `~/.local/share/chd`
+  box-override nor the claude-dir-shim exists or is needed (host uid 1000,
+  no SELinux denial); the two-file compose form works as committed. Future
+  deploys here: expect the default project name to be the live one now — a
+  recreate must NOT reintroduce `-p chd-deploy-master`.
+
 - **2026-08-03: box migration fixed with box-local artifacts, not repo
   edits.** Three independent breakages left the migrated container
   empty-but-healthy or unrunnable: (1) podman-compose 1.5.0 mangles the
