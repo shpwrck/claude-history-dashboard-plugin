@@ -169,6 +169,10 @@ export const PROVENANCE_DETECTORS: readonly string[] = [
   'security.model-deceit',
   'speed.model-latency',
   'workflow.tool-undo-rate',
+  // #3393 — the flag-gated git delivery-outcome consumer. The sample-corpus
+  // sweep can never cover it (`gitOutcomes` is empty without CHD_GIT_OUTCOMES),
+  // so the trigger fixture is the ONLY proof available and is mandatory here.
+  'reliability.post-shipment-rework',
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000;

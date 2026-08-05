@@ -673,9 +673,11 @@ const { buildMemoryStores } = await import(join(LIB, 'parse-memories.ts'));
 // in parse-git-outcome.ts (no network, so it stays safe under the zero-deps
 // runtime import guard); the live `gh`/GitHub-API fetch that feeds it happens
 // HERE, server-side, in readGitOutcomes() below.
-const { buildGitOutcomes, gitOutcomesReposFromEnv } = await import(
-  join(LIB, 'parse-git-outcome.ts')
-);
+const {
+  buildGitOutcomes,
+  gitOutcomesReposFromEnv,
+  collectGitOutcomePullRequests,
+} = await import(join(LIB, 'parse-git-outcome.ts'));
 // Tier B per-task-class calibration report (#2318). The parser is PURE (takes the
 // JSON text, no fs/network), safe under the zero-deps runtime import guard; the
 // local file read happens HERE, server-side, in readLocalCalibration() below.
@@ -1958,7 +1960,8 @@ export function readDocHygieneArtifact(
 // Git delivery-outcome signal (#1757, epic #1911). OPT-IN: the live `gh` fetch
 // only runs when CHD_GIT_OUTCOMES names a `owner/repo` (or a comma list), so the
 // default server path makes ZERO `gh` calls and ships an empty `gitOutcomes`
-// (the downstream detector, deferred to a Future child, then emits nothing).
+// (the `reliability.post-shipment-rework` detector then emits nothing at all —
+// it never infers shipment from local artifacts, #3393).
 // Opt-in because this is the one signal that shells out at ingest time — we keep
 // it off by default rather than firing `gh` on every assemble. Tolerant by
 // design: a missing `gh`, a network failure, or a malformed payload degrades to
@@ -1986,18 +1989,22 @@ function fetchPullRequestsForRepo(repo) {
       '--limit',
       '200',
       '--json',
-      'number,headRefName,title,body,state',
+      // mergedAt/mergeCommit/files added by #3393: they are the shipped-event
+      // timestamp, the shipped-artifact ref, and the touched paths a
+      // post-shipment rework claim must cite. Still ONE call per repo — the
+      // rework link is derived from this same pool, never from a second fetch.
+      'number,headRefName,title,body,state,mergedAt,mergeCommit,files',
     ],
     { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }
   );
   const list = JSON.parse(raw);
   if (!Array.isArray(list)) return [];
-  // `gh` exposes merge state via `state: 'MERGED'` / `OPEN` / `CLOSED`; the
-  // revert/fix-up signals are not on the list payload, so they stay undefined
-  // here. A later slice may enrich them by scanning merge-commit trailers —
-  // until then a merged PR with no later revert/fix reads as `merged-clean`,
-  // the honest default. OPEN PRs enter this pool (`--state all`) but the pure
-  // classifier skips them (#2510), so an in-flight PR is never labeled.
+  // `gh` exposes merge state via `state: 'MERGED'` / `OPEN` / `CLOSED`. The
+  // revert/fix-up links are derived from this pool by linkReworkMutations
+  // (called inside collectGitOutcomePullRequests), so a merged PR with no later
+  // revert/fix reads as `merged-clean`, the honest default. OPEN PRs enter this
+  // pool (`--state all`) but the pure classifier skips them (#2510), so an
+  // in-flight PR is never labeled.
   return list.map((pr) => ({
     number: pr.number,
     headRefName: pr.headRefName,
@@ -2005,19 +2012,24 @@ function fetchPullRequestsForRepo(repo) {
     body: pr.body,
     state: pr.state,
     merged: String(pr.state || '').toUpperCase() === 'MERGED',
+    mergedAt: pr.mergedAt ?? undefined,
+    mergeCommit: pr.mergeCommit?.oid ?? undefined,
+    files: Array.isArray(pr.files)
+      ? pr.files.map((f) => f?.path).filter((p) => typeof p === 'string')
+      : undefined,
   }));
 }
 
 function readGitOutcomes(sessions) {
-  if (GIT_OUTCOMES_REPOS.length === 0) return [];
-  const pullRequests = [];
-  for (const repo of GIT_OUTCOMES_REPOS) {
-    try {
-      pullRequests.push(...fetchPullRequestsForRepo(repo));
-    } catch {
-      /* `gh` missing / network / parse failure ⇒ skip this repo's PRs */
-    }
-  }
+  // THE flag gate, and the only place the `gh` shell-out can be reached: with
+  // CHD_GIT_OUTCOMES unset, GIT_OUTCOMES_REPOS is [] and
+  // collectGitOutcomePullRequests returns [] WITHOUT invoking the fetcher even
+  // once — zero spawns, zero network (#3393 makes that provable by owning the
+  // gate in the pure module; per-repo failures also degrade to skip there).
+  const pullRequests = collectGitOutcomePullRequests(
+    GIT_OUTCOMES_REPOS,
+    fetchPullRequestsForRepo
+  );
   if (pullRequests.length === 0) return [];
   // Stamp every row with the ISO `YYYY-MM-DD` fetch date so a snapshot classified
   // now is not asserted as the repo's current state months later (#2510). The

@@ -7,10 +7,14 @@
  * joins each session's `gitBranch` (already on `SessionDimensions`) to its pull
  * request and classifies a per-session delivery-outcome label.
  *
- * SIGNAL ONLY this release. There is NO user-facing detector yet — the
- * delivery-outcome detector and the autonomy-proxy validation harness are
- * deferred to a Future child of #1911. This module only produces the
- * `gitOutcomes` array carried on `RecommendationInput`.
+ * Its first consumer is the `reliability.post-shipment-rework` detector
+ * (#3393), which answers the question #3110 had to leave unanswered: do changes
+ * come back after they ship? That claim needs strictly more than a label — the
+ * shipped event, the later mutation, the affected artifact and both timestamps
+ * — so this module also links the rework mutation ({@link linkReworkMutations})
+ * and gates the evidence ({@link buildPostShipmentRework}), which returns
+ * nothing at all when any one of the four facts is missing. The autonomy-proxy
+ * validation harness remains deferred to a Future child of #1911.
  *
  * ── Network discipline ──────────────────────────────────────────────────────
  * This file is PURE: it takes the PR data as an argument and never touches the
@@ -95,6 +99,70 @@ export interface GitOutcomePullRequest {
    * references this PR/issue) WITHOUT a full revert? Set by the ingest step.
    */
   fixedUp?: boolean;
+  /**
+   * ISO instant this PR was merged — the SHIPPED EVENT (#3393). Only a merged
+   * PR has one, and only a PR that carries one can ground a post-shipment
+   * claim: "came back after it shipped" is unsayable without the moment it
+   * shipped. `gh pr list --json mergedAt`.
+   */
+  mergedAt?: string;
+  /** Merge commit oid, cited as the concrete shipped artifact reference. */
+  mergeCommit?: string;
+  /**
+   * Repo-relative paths this PR touched (`gh pr list --json files`, mapped to
+   * `files[].path`). The AFFECTED ARTIFACT half of a post-shipment claim: a
+   * mutation only counts as rework of THIS shipment when it re-touched a file
+   * this shipment touched.
+   */
+  files?: string[];
+  /** The later revert that undid this merge, with its own timestamp + files. */
+  revert?: GitReworkMutation;
+  /** The later follow-up fix that patched this merge, without a full revert. */
+  fixUp?: GitReworkMutation;
+}
+
+/**
+ * The LATER MUTATION that came back to an already-shipped PR (#3393) — either a
+ * revert or a follow-up fix — carrying the facts a post-shipment claim has to
+ * cite: what it was, when it landed, and which files it touched.
+ *
+ * Linked from the same PR pool the outcome labels are classified from
+ * ({@link linkReworkMutations}), so establishing it costs no extra fetch.
+ */
+export interface GitReworkMutation {
+  kind: 'revert' | 'fix-up';
+  /** Human-readable ref, e.g. `PR #1801`. */
+  ref: string;
+  /** PR number of the mutation. */
+  prNumber: number;
+  title?: string;
+  /** ISO instant the mutation landed (its own merge time). */
+  at?: string;
+  /** Repo-relative paths the mutation touched. */
+  files?: string[];
+}
+
+/**
+ * A COMPLETE post-shipment rework event (#3393): the four facts, all present,
+ * that let a claim say work came back after it shipped without inferring any of
+ * them. Built only by {@link buildPostShipmentRework}, which returns `undefined`
+ * the moment any one of them is missing — so a consumer that reads this field
+ * can cite every part of its own sentence.
+ */
+export interface GitPostShipmentRework {
+  kind: 'revert' | 'fix-up';
+  /** The shipped event: the merged PR (plus its merge commit when known). */
+  shippedRef: string;
+  /** ISO instant of the merge. */
+  shippedAt: string;
+  /** The later mutation that came back to it. */
+  mutationRef: string;
+  /** ISO instant the mutation landed. Always strictly after `shippedAt`. */
+  mutationAt: string;
+  /** Files touched by BOTH the shipment and the mutation. Never empty. */
+  artifacts: string[];
+  /** Whole days between the shipment and the mutation. */
+  daysAfterShipment: number;
 }
 
 export type GitOutcomeLabel =
@@ -147,6 +215,15 @@ export interface GitOutcome {
   gitBranch: string;
   label: GitOutcomeLabel;
   provenance: GitOutcomeProvenance;
+  /**
+   * Fully-evidenced post-shipment rework for this session's delivery (#3393),
+   * present ONLY when the shipped event, the later mutation, the affected
+   * artifact and BOTH timestamps are all grounded in the PR snapshot. A
+   * `merged-then-reverted`/`merged-then-fixed` LABEL is a weaker statement than
+   * this field: the label needs only the link, the claim needs the receipts.
+   * Absent ⇒ a consumer must make no post-shipment claim at all.
+   */
+  rework?: GitPostShipmentRework;
 }
 
 /** The session fields this parser reads. */
@@ -189,6 +266,10 @@ function bodyReferencesIssue(body: string | undefined, issueNumber: number): boo
  * Returns `undefined` for an OPEN, in-flight PR: it has no delivery outcome yet,
  * so the signal emits NO row rather than inventing `abandoned` for unfinished
  * work (#2510). A CLOSED-without-merge PR still classifies as `abandoned`.
+ *
+ * The linked {@link GitReworkMutation} objects (#3393) are the richer form of
+ * the `reverted`/`fixedUp` booleans and are read the same way, so a caller may
+ * supply either without changing a single label.
  */
 export function classifyPullRequestOutcome(
   pr: GitOutcomePullRequest
@@ -197,8 +278,8 @@ export function classifyPullRequestOutcome(
   const merged = pr.merged === true || state === 'MERGED';
   if (merged) {
     // A revert is the stronger statement than a follow-up fix, so it wins the tie.
-    if (pr.reverted) return 'merged-then-reverted';
-    if (pr.fixedUp) return 'merged-then-fixed';
+    if (pr.reverted || pr.revert) return 'merged-then-reverted';
+    if (pr.fixedUp || pr.fixUp) return 'merged-then-fixed';
     return 'merged-clean';
   }
   // OPEN, in-flight PR: not finished, not a delivery outcome — no label.
@@ -242,6 +323,298 @@ export function attributeBranchToPullRequest(
   return undefined;
 }
 
+/** GitHub's auto-generated revert PR title is `Revert "<original title>"`. */
+const REVERT_TITLE_RE = /^\s*revert\b/i;
+
+/** How many affected artifacts a rework event cites before it truncates. */
+const MAX_REWORK_ARTIFACTS = 5;
+
+/**
+ * Filler the cue verb may carry before it reaches the number and still be said
+ * to GOVERN it. Deliberately a closed set of connectors rather than "any
+ * characters": a wildcard gap lets the verb in one clause capture a number in
+ * the next, which is how `Reverts the flaky approach; closes #300` read as a
+ * revert of #300.
+ */
+const CUE_CONNECTORS = String.raw`(?:\s+(?:of|the|a|an|for|to|commit|commits|pr|prs|pull\s+request|pull\s+requests))*\s*:?\s*`;
+
+/** The mutation declares it reverts the reference that follows. */
+const REVERT_CUE = String.raw`\brevert(?:s|ed|ing)?\b` + CUE_CONNECTORS;
+
+/**
+ * The mutation declares it FIXES the reference that follows — either directly
+ * (`Fixes #N`) or by naming it as the cause being cleaned up (`a regression
+ * from #N`, `broken by #N`). A bare cross-reference is deliberately NOT a cue:
+ * `Part of #1911` on two sibling epic slices that touch one shared file is
+ * parallel work, not a change coming back.
+ */
+const FIX_CUES = [
+  String.raw`\b(?:fix(?:es|ed)?|hotfix(?:es|ed)?|patch(?:es|ed)?|correct(?:s|ed)?|repair(?:s|ed)?)\b` +
+    CUE_CONNECTORS,
+  String.raw`\b(?:regression|regressed|regressions|broke|broken|breakage)\b[^\n]{0,24}?\b(?:from|by|in)\s+(?:pr\s+)?`,
+];
+
+/**
+ * A negation immediately governing the cue, so `This does NOT revert #400` is
+ * not read as a revert. Anchored to the end of the text BEFORE the cue, with a
+ * two-word tolerance for `does not actually revert`. `n't` is intentionally
+ * un-anchored so it matches inside `doesn't`.
+ */
+const NEGATION_BEFORE_CUE_RE = /(?:\bnot|n't|\bnever|\bwithout|\bno)\s+(?:\w+\s+){0,2}$/i;
+
+/**
+ * True when `body` carries `cuePrefix` GOVERNING a reference to `#prNumber`.
+ *
+ * Two things this refuses, both reproduced as false links in review:
+ *  - A cross-repo reference. `Reverts otherorg/other-repo#42` names a DIFFERENT
+ *    repository's #42. A qualified reference counts only when the qualifier is
+ *    known to be this repo, so an unknown `repo` refuses it rather than
+ *    assuming local — the conservative direction for a claim of this weight.
+ *  - A negated cue (see {@link NEGATION_BEFORE_CUE_RE}).
+ */
+function bodyCueGovernsPullRequest(
+  body: string | undefined,
+  cuePrefix: string,
+  prNumber: number,
+  repo: string | undefined
+): boolean {
+  if (!body) return false;
+  const re = new RegExp(
+    `${cuePrefix}([\\w.-]+\\/[\\w.-]+)?#${prNumber}(?!\\d)`,
+    'gi'
+  );
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(body)) !== null) {
+    const qualifier = match[1];
+    if (
+      qualifier !== undefined &&
+      (repo === undefined || qualifier.toLowerCase() !== repo.toLowerCase())
+    ) {
+      continue;
+    }
+    if (NEGATION_BEFORE_CUE_RE.test(body.slice(0, match.index))) continue;
+    return true;
+  }
+  return false;
+}
+
+/** True when `body` says it reverts `#prNumber` (`Reverts owner/repo#1801`). */
+function bodyRevertsPullRequest(
+  body: string | undefined,
+  prNumber: number,
+  repo: string | undefined
+): boolean {
+  return bodyCueGovernsPullRequest(body, REVERT_CUE, prNumber, repo);
+}
+
+/** True when `body` says it fixes / cleans up after `#prNumber`. */
+function bodyFixesPullRequest(
+  body: string | undefined,
+  prNumber: number,
+  repo: string | undefined
+): boolean {
+  return FIX_CUES.some((cue) =>
+    bodyCueGovernsPullRequest(body, cue, prNumber, repo)
+  );
+}
+
+/**
+ * True when the mutation's title is GitHub's auto-generated revert of exactly
+ * this shipment: `Revert "<shipped title>"`, with the quotes.
+ *
+ * The quotes are load-bearing. A bare `includes(pr.title)` matched any shipment
+ * whose title was a substring of the reverted one, so a PR titled `Fix` linked
+ * to `Revert "Fix typo in the parser"`.
+ */
+function titleDeclaresRevertOf(
+  mutationTitle: string | undefined,
+  shippedTitle: string | undefined
+): boolean {
+  const shipped = shippedTitle?.trim();
+  if (!mutationTitle || !shipped) return false;
+  if (!REVERT_TITLE_RE.test(mutationTitle)) return false;
+  return mutationTitle.includes(`"${shipped}"`);
+}
+
+/** ISO instant → epoch ms, or `undefined` when it is not a readable instant. */
+function instantMs(value: string | undefined): number | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** Paths touched by BOTH sides, de-duplicated and stably ordered. */
+function sharedArtifacts(
+  shipped: string[] | undefined,
+  mutation: string[] | undefined
+): string[] {
+  if (!Array.isArray(shipped) || !Array.isArray(mutation)) return [];
+  // perf-index-contract: git-rework-shipped-paths always-consumed: past the array guards every call probes this shipped-path set once per mutation path
+  const shippedSet = new Set(
+    shipped.filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+  );
+  const out: string[] = [];
+  // perf-index-contract: git-rework-seen-paths always-consumed: every mutation path the loop visits is tested against this de-duplication set before it is kept
+  const seen = new Set<string>();
+  for (const path of mutation) {
+    if (typeof path !== 'string' || seen.has(path)) continue;
+    if (!shippedSet.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+  }
+  // perf-index-contract: git-rework-artifact-order always-consumed: the returned intersection is the cited artifact list and is always read in this deterministic order
+  return out.sort();
+}
+
+function mutationFrom(
+  pr: GitOutcomePullRequest,
+  kind: GitReworkMutation['kind']
+): GitReworkMutation {
+  return {
+    kind,
+    ref: `PR #${pr.number}`,
+    prNumber: pr.number,
+    ...(pr.title !== undefined ? { title: pr.title } : {}),
+    ...(pr.mergedAt !== undefined ? { at: pr.mergedAt } : {}),
+    ...(pr.files !== undefined ? { files: pr.files } : {}),
+  };
+}
+
+/**
+ * Link each merged PR to the LATER merged PR that came back to it (#3393),
+ * using only the pool already fetched for the outcome labels — so grounding a
+ * post-shipment claim costs ZERO extra network calls.
+ *
+ * Two links, in priority order, and both require the mutation to have merged
+ * STRICTLY LATER than the shipment (a "later mutation" that predates the
+ * shipment is not rework, it is unrelated history):
+ *
+ *  1. `revert` — the mutation's body says it reverts this PR, with the verb
+ *     GOVERNING the number and not negated, or its title is GitHub's exact
+ *     `Revert "<original title>"` form. An explicit revert is self-declaring,
+ *     so it needs no file corroboration to be believed; the title path is
+ *     dropped when the title does not identify one shipment.
+ *  2. `fix-up` — the mutation's body carries FIX language governing this PR's
+ *     number AND it re-touched at least one file this PR shipped. A bare
+ *     cross-reference is far too common to mean rework on its own
+ *     ("Follow-up to #N", "Part of #N"), so the cue plus the shared file is
+ *     what makes the link a claim rather than a guess.
+ *
+ * `options.repo` is this pool's `owner/repo`. A reference qualified to a
+ * different repository never links; see {@link bodyCueGovernsPullRequest}.
+ *
+ * A revert dominates a fix-up on the same shipment, matching
+ * {@link classifyPullRequestOutcome}'s tie-break. Input is never mutated —
+ * enriched COPIES are returned, so the caller's pool stays reusable.
+ *
+ * MUST be called per repository. PR numbers are repo-scoped, so a pooled
+ * multi-repo array would link `#42` in one repo to a `Reverts #42` in another;
+ * {@link collectGitOutcomePullRequests} is the seam that enforces this.
+ */
+export function linkReworkMutations(
+  pullRequests: GitOutcomePullRequest[],
+  options: { repo?: string } = {}
+): GitOutcomePullRequest[] {
+  const { repo } = options;
+  const merged = pullRequests.filter(
+    (pr) => pr.merged === true || pr.state?.toUpperCase() === 'MERGED'
+  );
+
+  // How many merged PRs share each exact title. A title-only revert link is
+  // only usable when the title identifies ONE shipment: `Revert "Bump deps"`
+  // against two shipments both titled `Bump deps` cannot say which it undid, so
+  // it must link neither rather than both.
+  // perf-index-contract: git-rework-title-multiplicity always-consumed: every titled shipment consults this count before it will accept a title-only revert link
+  const titleCounts = new Map<string, number>();
+  for (const candidate of merged) {
+    const title = candidate.title?.trim();
+    if (!title) continue;
+    titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1);
+  }
+
+  return pullRequests.map((pr) => {
+    const shippedMs = instantMs(pr.mergedAt);
+    if (shippedMs === undefined) return pr;
+    const titleIsAmbiguous = (titleCounts.get(pr.title?.trim() ?? '') ?? 0) > 1;
+
+    let revert: GitReworkMutation | undefined;
+    let fixUp: GitReworkMutation | undefined;
+    for (const other of merged) {
+      if (other.number === pr.number) continue;
+      const otherMs = instantMs(other.mergedAt);
+      if (otherMs === undefined || otherMs <= shippedMs) continue;
+
+      const declaresRevert =
+        bodyRevertsPullRequest(other.body, pr.number, repo) ||
+        (!titleIsAmbiguous && titleDeclaresRevertOf(other.title, pr.title));
+      if (declaresRevert) {
+        // Earliest revert wins: the first undo is the one that answers "did it hold".
+        if (!revert || (instantMs(revert.at) ?? Infinity) > otherMs) {
+          revert = mutationFrom(other, 'revert');
+        }
+        continue;
+      }
+
+      // A fix-up needs BOTH fix language governing this PR's number AND a file
+      // the shipment touched. The issue-number path is deliberately gone: it
+      // read sibling epic slices (`Part of #1911`) as rework of one another.
+      if (!bodyFixesPullRequest(other.body, pr.number, repo)) continue;
+      if (sharedArtifacts(pr.files, other.files).length === 0) continue;
+      if (!fixUp || (instantMs(fixUp.at) ?? Infinity) > otherMs) {
+        fixUp = mutationFrom(other, 'fix-up');
+      }
+    }
+
+    if (!revert && !fixUp) return pr;
+    return {
+      ...pr,
+      ...(revert ? { revert } : {}),
+      ...(fixUp ? { fixUp } : {}),
+    };
+  });
+}
+
+/**
+ * The four facts, or nothing (#3393). Returns a complete
+ * {@link GitPostShipmentRework} only when the PR grounds ALL of:
+ * the shipped event (a merged PR), WHEN it shipped, the later mutation with
+ * its OWN timestamp, and at least one artifact both of them touched.
+ *
+ * Any missing piece returns `undefined` — deliberately, and this is the whole
+ * point of the function. #3110 found the previous rework claim asserting
+ * post-shipment bounce-back from in-session churn alone; the lesson is that a
+ * partially-grounded claim of this shape must not degrade to a weaker sentence,
+ * it must not be made. A revert dominates a fix-up, as everywhere else here.
+ */
+export function buildPostShipmentRework(
+  pr: GitOutcomePullRequest
+): GitPostShipmentRework | undefined {
+  const merged = pr.merged === true || pr.state?.toUpperCase() === 'MERGED';
+  if (!merged) return undefined;
+  const mutation = pr.revert ?? pr.fixUp;
+  if (!mutation) return undefined;
+
+  const shippedAt = pr.mergedAt;
+  const mutationAt = mutation.at;
+  const shippedMs = instantMs(shippedAt);
+  const mutationMs = instantMs(mutationAt);
+  if (shippedMs === undefined || mutationMs === undefined) return undefined;
+  if (mutationMs <= shippedMs) return undefined;
+
+  const artifacts = sharedArtifacts(pr.files, mutation.files);
+  if (artifacts.length === 0) return undefined;
+
+  return {
+    kind: mutation.kind,
+    shippedRef: `PR #${pr.number}${pr.mergeCommit ? ` (merge ${pr.mergeCommit.slice(0, 8)})` : ''}`,
+    shippedAt: shippedAt as string,
+    mutationRef: mutation.ref,
+    mutationAt: mutationAt as string,
+    artifacts: artifacts.slice(0, MAX_REWORK_ARTIFACTS),
+    daysAfterShipment: Math.floor((mutationMs - shippedMs) / DAY_MS),
+  };
+}
+
 /**
  * Build the `gitOutcomes` signal: one delivery-outcome row per session whose
  * `gitBranch` grounds a PR. Sessions on a trunk branch, with no branch, or whose
@@ -279,11 +652,16 @@ export function buildGitOutcomes(
       `branch ${branch}`,
       `PR #${pr.number}${pr.title ? ` — ${pr.title}` : ''}`,
     ];
+    // Fully-evidenced post-shipment rework (#3393), or nothing. A row can be
+    // labeled `merged-then-reverted` and still carry NO `rework` — the label
+    // needs only the link, the claim needs all four receipts.
+    const rework = buildPostShipmentRework(pr);
     outcomes.push({
       sessionId: session.sessionId,
       project: session.project,
       gitBranch: branch,
       label,
+      ...(rework ? { rework } : {}),
       provenance: {
         gitBranch: branch,
         ...(issueNumber !== undefined ? { issueNumber } : {}),
@@ -314,6 +692,48 @@ export function gitOutcomesReposFromEnv(value: string | undefined): string[] {
     .split(/[,\s]+/)
     .map((part) => part.trim())
     .filter((part) => REPO_SLUG_RE.test(part));
+}
+
+/**
+ * THE FLAG GATE, as one testable pure function (#3393).
+ *
+ * `repos` is whatever {@link gitOutcomesReposFromEnv} made of
+ * `CHD_GIT_OUTCOMES`, and `fetchRepo` is the ONE side-effecting thing in the
+ * whole signal — the `gh` shell-out, injected by the ingest step. An empty
+ * `repos` returns `[]` WITHOUT calling `fetchRepo` even once, which is the
+ * local-first guarantee (repo AGENTS.md) in executable form: flag unset ⇒ no
+ * spawn, no network, no external call, and a `gitOutcomes` array byte-identical
+ * to the one the default deployment already ships.
+ *
+ * Keeping the gate here rather than inline in `scripts/ingest.mjs` is what
+ * makes it provable: a unit test can hand in a counting `fetchRepo` and assert
+ * the count is zero, which an env read buried in an un-importable ingest module
+ * cannot support.
+ *
+ * Per-repo failures degrade to "skip this repo" rather than sinking the signal
+ * (a missing `gh`, no auth, a network blip, a malformed payload), and each
+ * repo's pool is rework-linked ON ITS OWN via {@link linkReworkMutations},
+ * because PR numbers are repo-scoped.
+ */
+export function collectGitOutcomePullRequests(
+  repos: readonly string[],
+  fetchRepo: (repo: string) => GitOutcomePullRequest[]
+): GitOutcomePullRequest[] {
+  if (!Array.isArray(repos) || repos.length === 0) return [];
+  const pool: GitOutcomePullRequest[] = [];
+  for (const repo of repos) {
+    let fetched: GitOutcomePullRequest[];
+    try {
+      fetched = fetchRepo(repo);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(fetched) || fetched.length === 0) continue;
+    // The repo slug travels with its own pool so a reference qualified to a
+    // DIFFERENT repository (`Reverts otherorg/other-repo#42`) cannot link here.
+    pool.push(...linkReworkMutations(fetched, { repo }));
+  }
+  return pool;
 }
 
 /** ISO `YYYY-MM-DD`. Strict so a full timestamp or garbage is rejected. */

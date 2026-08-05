@@ -735,6 +735,40 @@ const ctxReads = (
   }) as unknown as RecommendationInput['toolData'][number];
 
 const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
+  // #3393. `gitOutcomes` is empty unless CHD_GIT_OUTCOMES names a repo, so this
+  // detector can never fire on the sample corpus — the fixture is its only
+  // compliance proof. The mutation is observed at CTX_ASOF while `now` is 11
+  // days later, which is what pins asOf to the data rather than the clock.
+  'reliability.post-shipment-rework': () => ({
+    input: baseInput({
+      gitOutcomes: [
+        {
+          sessionId: 'prov-post-shipment-rework',
+          project: '/repo',
+          gitBranch: 'feature/3393-git-outcome-rework',
+          label: 'merged-then-reverted',
+          provenance: {
+            gitBranch: 'feature/3393-git-outcome-rework',
+            issueNumber: 3393,
+            prNumber: 3393,
+            attribution: 'branch',
+            evidence: ['branch feature/3393-git-outcome-rework', 'PR #3393'],
+            asOf: CTX_ASOF,
+          },
+          rework: {
+            kind: 'revert',
+            shippedRef: 'PR #3393 (merge 0a1b2c3d)',
+            shippedAt: '2026-06-05T12:00:00.000Z',
+            mutationRef: 'PR #3401',
+            mutationAt: `${CTX_ASOF}T12:00:00.000Z`,
+            artifacts: ['src/lib/parse-git-outcome.ts'],
+            daysAfterShipment: 4,
+          },
+        },
+      ] as RecommendationInput['gitOutcomes'],
+    }),
+    now: Date.parse('2026-06-20T00:00:00.000Z'),
+  }),
   'safety.prompt-friction': () => ({
     input: baseInput({
       toolData: [
@@ -2758,6 +2792,9 @@ describe('migrated context/activity detectors date claims from observed data', (
     'workflow.runaway-workflow-cost',
     'workflow.shadow-axis-wins',
     'workflow.uncovered-shadow-axis',
+    // #3393 dates from the newest post-shipment mutation instant, so a
+    // clock-derived asOf would read 2026-06-20 rather than the observed day.
+    'reliability.post-shipment-rework',
   ])('%s anchors asOf to the newest observed datum, not today', (id) => {
     const rec = runAllowlistedDetector(id);
     expect(rec.provenance!.asOf).toBe(CTX_ASOF);

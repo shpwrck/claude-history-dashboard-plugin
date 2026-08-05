@@ -158,6 +158,14 @@ export const MARKERS_GHOST_SESSION: AppliedMarkers = {
   bodyPhrases: ['do not stop after discovery', 'state the concrete blocker explicitly'],
 };
 
+export const MARKERS_POST_SHIPMENT_REWORK: AppliedMarkers = {
+  headings: [/^##\s+Post-shipment verification\b/i],
+  bodyPhrases: [
+    'Before merging, re-run the test that covers every file the PR touches',
+    'A revert or follow-up fix on a file you just shipped is a verification gap',
+  ],
+};
+
 export const MARKERS_HUMAN_INPUT_LEVERAGE: AppliedMarkers = {
   headings: [/^##\s+(?:Ask(?:ing)? upfront|Human input|Value of human input|Upfront questions)\b/i],
   bodyPhrases: ['ask the human upfront'],
@@ -219,4 +227,5 @@ export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new M
   ['reliability.stale-state-assertion', MARKERS_STALE_STATE_ASSERTION],
   ['reliability.discovery-freshness', MARKERS_DISCOVERY_FRESHNESS],
   ['reliability.ghost-session', MARKERS_GHOST_SESSION],
+  ['reliability.post-shipment-rework', MARKERS_POST_SHIPMENT_REWORK],
 ]);

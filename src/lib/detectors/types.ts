@@ -684,11 +684,12 @@ export interface RecommendationInput {
    * `merged-then-reverted` / `merged-then-fixed` / `abandoned`, each carrying
    * `provenance`. Built at ingest time by `buildGitOutcomes` (parse-git-outcome)
    * from PR records the ingest step fetches via `gh`/GitHub API (network-side;
-   * zero Anthropic API egress). SIGNAL ONLY this release — NO detector
-   * reads it yet; the delivery-outcome detector + autonomy-proxy validation
-   * harness are deferred to a Future child of #1911. Optional:
-   * `undefined`/`null`/empty (no PR join, the SPA/upload dataset, or `gh`
-   * unavailable) means downstream detectors emit nothing.
+   * zero Anthropic API egress). Read by `reliability.post-shipment-rework`
+   * (#3393); the autonomy-proxy validation harness is still deferred to a
+   * Future child of #1911. Optional: `undefined`/`null`/empty (no PR join, the
+   * SPA/upload dataset, or `gh` unavailable) means downstream detectors emit
+   * nothing — and for the post-shipment claim that is the whole contract, since
+   * shipment is never inferred from a local artifact.
    *
    * AUDITABLE-CLAIMS CONTRACT for consumers (#2510):
    *  - An OPEN, in-flight PR yields NO row — `abandoned` is reserved for a PR
@@ -700,6 +701,11 @@ export interface RecommendationInput {
    *    demoted label "as of <date>", never as the repo's current state. This
    *    mirrors `RecommendationSavingsAttribution.stale` (#2142) and the generic
    *    `RecProvenance.asOf`/`stale` path (#1102), so #2044 reuses one rule.
+   *  - A `merged-then-reverted`/`merged-then-fixed` LABEL is NOT a licence to
+   *    claim post-shipment rework (#3393). Only `GitOutcome.rework` — present
+   *    when the shipped event, the later mutation, an artifact both touched and
+   *    both timestamps are all grounded — may back that sentence. Absent ⇒ make
+   *    no post-shipment claim, not a hedged one.
    */
   gitOutcomes?: GitOutcome[] | null;
   /**

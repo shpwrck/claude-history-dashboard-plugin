@@ -3721,6 +3721,38 @@ function fixtureBank(): Fixture[] {
     out.push({ now, input: bankBase({ toolData, timelines }) });
   }
 
+  // ── reliability.post-shipment-rework (#3393): a merged PR that a later merged
+  // PR reverted, with both timestamps and the file they share. Only reachable
+  // with CHD_GIT_OUTCOMES set, so the bank is the only place it can fire.
+  {
+    const gitOutcomes: RecommendationInput['gitOutcomes'] = [
+      {
+        sessionId: 'post-shipment-bank',
+        project: '/repo',
+        gitBranch: 'feature/900-shipped',
+        label: 'merged-then-reverted',
+        provenance: {
+          gitBranch: 'feature/900-shipped',
+          issueNumber: 900,
+          prNumber: 900,
+          attribution: 'branch',
+          evidence: ['branch feature/900-shipped', 'PR #900'],
+          asOf: '2026-05-30',
+        },
+        rework: {
+          kind: 'revert',
+          shippedRef: 'PR #900 (merge 1a2b3c4d)',
+          shippedAt: '2026-05-20T00:00:00Z',
+          mutationRef: 'PR #901',
+          mutationAt: '2026-05-24T00:00:00Z',
+          artifacts: ['src/lib/shipped.ts'],
+          daysAfterShipment: 4,
+        },
+      },
+    ];
+    out.push({ now, input: bankBase({ gitOutcomes }) });
+  }
+
   // ── context.reclaim-potential (#1758): a large NON-file Bash output
   // re-fetched 3x in one session — duplicate tool-output reclaim, distinct from
   // any file-Read re-ingestion the file detectors own.

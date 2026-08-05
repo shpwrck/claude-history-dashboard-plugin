@@ -149,6 +149,7 @@ import { detector as staleStateAssertion } from './reliability/stale-state-asser
 import { detector as discoveryFreshness } from './reliability/discovery-freshness';
 import { detector as ghostSession } from './reliability/ghost-session';
 import { detector as workflowRatelimitBurst } from './reliability/workflow-ratelimit-burst';
+import { detector as postShipmentRework } from './reliability/post-shipment-rework';
 
 // ── SPEED ───────────────────────────────────────────────────────────────
 // The clock (ADR 0006) — wall-clock/latency levers.
@@ -538,6 +539,12 @@ export const DETECTORS: Detector[] = [
   // subagents/workflows/<runId>/agent-*.jsonl rather than per-agent retry.
   // Reads `workflows`; dark on the SPA dataset.
   workflowRatelimitBurst,
+  // #3393 — the first consumer of the flag-gated git delivery-outcome signal
+  // (#1757). Answers the post-shipment question #3110 had to retire: a merged
+  // PR whose files a later merged PR reverted or patched. Emits NOTHING unless
+  // CHD_GIT_OUTCOMES is set, and never infers shipment from local artifacts;
+  // permanently dark on the default deployment and the SPA dataset.
+  postShipmentRework,
 ];
 
 /**
