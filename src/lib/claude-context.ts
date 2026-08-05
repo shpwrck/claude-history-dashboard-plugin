@@ -25,6 +25,7 @@ import {
   type ToolEffectivenessRow,
 } from './parse-tool-effectiveness';
 import type { SessionOverview } from './session-overview';
+import { EVIDENCE_CITATION_INSTRUCTION } from './evidence-citations';
 import type { Recommendation } from './recommendations';
 import type {
   RepoMapDataset,
@@ -688,8 +689,13 @@ const SESSION_SYSTEM =
 const PROJECT_SYSTEM =
   'You are a Claude Code workflow coach suggesting CLAUDE.md additions for one project. Use the JSON snapshot to ground every suggestion in the project\'s actual tooling, git activity, and bash patterns. Return ready-to-paste Markdown snippets, each preceded by a one-line "why".';
 
+// The recommendations payload is the one whose evidence list pools entries from
+// several independent findings, so it is the one whose answer must say which
+// entries it used (#3496). The instruction is imported rather than restated so
+// it cannot drift from the parser that reads the markers back out.
 const RECOMMENDATIONS_SYSTEM =
-  'You are explaining a list of dashboard-generated recommendations to the user in plain English. Group, prioritise, and translate each item; keep the answer skimmable. Use Markdown.';
+  'You are explaining a list of dashboard-generated recommendations to the user in plain English. Group, prioritise, and translate each item; keep the answer skimmable. Use Markdown. ' +
+  EVIDENCE_CITATION_INSTRUCTION;
 
 const TOOLS_SYSTEM =
   'You are advising on which Claude Code tools are worth pruning, based on an effectiveness summary. Recommend a short prune list with one-line justifications, plus tools that look fine. Use Markdown.';
