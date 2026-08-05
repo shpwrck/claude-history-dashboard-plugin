@@ -21,7 +21,7 @@ const DEFAULT_MAX_BYTES = 67_108_864;
 // forward-fence test fails if the output shape drifts without the bump. This is
 // the gate for the session_blob rows that feed the dataset + recommendations —
 // NOT ingest.mjs's PARSER_SIG_VERSION, which only keys the per-session
-// transcript cache (sigOf/getTranscript).
+// transcript cache (transcriptSigOf/getTranscript).
 //
 // Version history (rationale stays here; the live value lives in the seam):
 //   'project-backstop-v1' (#1765): parseSessionJsonl backstops tokenData.project

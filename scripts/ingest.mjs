@@ -2276,13 +2276,19 @@ const UPSERT_COLUMNS = blobCache.upsertColumns;
 export function getTranscript(sessionId) {
   const s = findSession(sessionId);
   if (!s) return null;
-  const currentSig = sigOf([s.topPath, ...s.subPaths]);
-  const row = blobCache.readSig(sessionId);
-  const cached = transcriptCache.getTranscript(sessionId);
-  if (cached && row?.sig === currentSig) return cached;
+  // #3634: gate on the signature this cache STAMPED, rebuilt by the same
+  // constructor. The old gate compared transcriptSigOf's ancestor against the
+  // session_blob row's sig — two different encodings of the same idea, so it
+  // could never be byte-equal and every call re-read and re-compressed the
+  // transcript. Signature first, BLOBs only once it matches.
+  const sig = transcriptSigOf(s);
+  if (transcriptCache.readTranscriptSig(sessionId) === sig) {
+    const cached = transcriptCache.getTranscript(sessionId);
+    if (cached) return cached;
+  }
 
   const merged = readMergedSessionSync(s);
-  persistTranscript(sessionId, merged);
+  persistTranscript(sessionId, merged, sig);
   return transcriptCache.getTranscript(sessionId);
 }
 
@@ -2391,8 +2397,8 @@ const DATASET_CACHE_KEEP = 3;
 // Exported so the dataset-cache-schema regression test can assert the dataset key
 // folds this in (the two cache gates must turn over together).
 //
-// SEAM NOTE (#2075): this gates the per-session TRANSCRIPT cache (sigOf) and is
-// folded into the dataset schema key — a DIFFERENT artifact from the
+// SEAM NOTE (#2075): this gates the per-session TRANSCRIPT cache (folded into
+// transcriptSigOf) and the dataset schema key — a DIFFERENT artifact from the
 // session_blob row cache, which is gated by SESSION_BLOB_OUTPUT.version in the
 // parser-output seam (scripts/lib/parser-output-versions.mjs). The seam lists
 // this knob under RELATED_INVALIDATION_KNOBS so the two are discoverable
@@ -2741,18 +2747,28 @@ export function saveDatasetCache(
 
 // PARSER_SIG_VERSION is defined above (next to DATASET_ASSEMBLY_SCHEMA_VERSION)
 // so the dataset-cache key can fold it in — the two must turn over together.
-function sigOf(paths) {
-  return paths
-    .map((p) => {
-      try {
-        const s = statSync(p);
-        return `${p}:${s.mtimeMs}:${s.size}`;
-      } catch {
-        return `${p}:0:0`;
-      }
-    })
-    .join('|')
-    .concat(`#${PARSER_SIG_VERSION}`);
+//
+// The ONE canonical transcript-cache signature (#3634). Both sides of the
+// getTranscript() gate go through here: the value stamped on the stored BLOBs
+// and the value recomputed on the next read. It layers the transcript knob over
+// the per-file identity `sessionFileSignature` already canonicalizes, so the
+// gate inherits that identity wholesale — including #3401's ctime discriminator,
+// which the hand-rolled mtime+size predecessor lacked — and adds
+// PARSER_SIG_VERSION on top, so a change to the transcript EXTRACTION still
+// invalidates BLOBs whose source files never moved.
+//
+// Be precise about how this relates to the session_blob row sig: it is that
+// exact string plus a `#<PARSER_SIG_VERSION>` suffix, NOT an independent
+// encoding. So the transcript sig also CARRIES `parser:<SESSION_BLOB_PARSER_-
+// VERSION>`, and bumping that session_blob knob invalidates every transcript
+// sig too. That coupling is deliberate and its cost is bounded — one source
+// re-read per session, after which the content_hash gate skips the brotli
+// rewrite for any transcript that re-extracted identically. The two caches
+// still gate different artifacts and keep separate keys: only the suffix makes
+// a transcript-extraction change invalidate transcripts WITHOUT forcing a
+// session_blob reparse.
+function transcriptSigOf(s, identities) {
+  return `${sessionFileSignature(s, identities)}#${PARSER_SIG_VERSION}`;
 }
 
 // ── Artifact-ingest cache (#624) ────────────────────────────────────────────
@@ -3058,7 +3074,7 @@ function listSessionsFromProjectsRoot(projectsRoot, source) {
           // transcripts (subagents/workflows/<runId>/agent-*.jsonl) so their
           // tokens/tool-use/failures merge into the parent and reconcile with the
           // Tokens/Cost tab. Appended after the one-level files; both flow into
-          // the merge AND the sig gate (sigOf([topPath, ...subPaths])).
+          // the merge AND the sig gates keyed on [topPath, ...subPaths].
           if (!partLimitExceeded) {
             const remainingSubPaths = Math.max(
               0,
@@ -3193,8 +3209,23 @@ function readUtf8FdCappedSync(fd, maxBytes, initialBytes = 0) {
   };
 }
 
+// Test seam (#3634): count the transcript source files opened for byte reads on
+// the getTranscript() path — this reader feeds readMergedSessionSync, which only
+// runs when the warm-cache gate MISSES. The gate's whole point is that an
+// unchanged transcript costs zero byte reads, so the test asserts that count
+// instead of assuming it. Mirrors _getArtifactParseCount and
+// session-blob-row.mjs's _getSessionFileReadCount. Never read in production.
+let _transcriptSourceReadCount = 0;
+export function _getTranscriptSourceReadCount() {
+  return _transcriptSourceReadCount;
+}
+export function _resetTranscriptSourceReadCount() {
+  _transcriptSourceReadCount = 0;
+}
+
 function readUtf8FileCappedSync(filePath, maxBytes, initialBytes = 0) {
   const fd = openSync(filePath, 'r');
+  _transcriptSourceReadCount += 1;
   try {
     return readUtf8FdCappedSync(fd, maxBytes, initialBytes);
   } finally {
@@ -3292,7 +3323,7 @@ function brotli(str) {
 // hash so an unchanged transcript skips compression and the write entirely.
 // Returns true when a BLOB was (re)written, false when the gate short-circuited
 // — the caller rolls these up into the ingest stats line.
-function persistTranscript(sessionId, mergedText) {
+function persistTranscript(sessionId, mergedText, sig) {
   const { content, thinking } = extractTranscript(mergedText);
   if (content.length === 0 && thinking.length === 0) {
     // Session with no assistant prose at all — nothing to store. Drop any
@@ -3310,13 +3341,21 @@ function persistTranscript(sessionId, mergedText) {
   h.update(thinkingJson);
   const contentHash = h.digest('hex');
   const prev = transcriptCache.readTranscriptHash(sessionId);
-  if (prev && prev.content_hash === contentHash) return false; // zero BLOB touch
+  if (prev && prev.content_hash === contentHash) {
+    // Zero BLOB touch — but the gate still has to advance (#3634). The source
+    // moved (that is why we re-read it) and re-extracted byte-identically; if
+    // the stale signature stayed, every later read would miss and re-read the
+    // file forever, which is exactly the cost this cache exists to avoid.
+    transcriptCache.updateTranscriptSig(sessionId, sig);
+    return false;
+  }
   transcriptCache.upsertTranscript(
     sessionId,
     brotli(contentJson),
     brotli(thinkingJson),
     contentHash,
-    Buffer.byteLength(contentJson, 'utf8')
+    Buffer.byteLength(contentJson, 'utf8'),
+    sig
   );
   return true;
 }

@@ -87,14 +87,22 @@ export interface TranscriptCache {
   // The content_hash gate row (or null) — reads only the hash so an unchanged
   // session skips brotli entirely.
   readTranscriptHash(sessionId: string): HashRow | null;
+  // The warm-cache gate (#3634): the signature the stored BLOBs were built
+  // from. `null` for no row and for a legacy row predating the column, so
+  // either way the caller misses and rebuilds from source.
+  readTranscriptSig(sessionId: string): string | null;
   // Upsert the gated BLOBs (positional args match the INSERT column order).
   upsertTranscript(
     sessionId: string,
     contentBr: unknown,
     thinkingBr: unknown,
     contentHash: string,
-    byteLen: number
+    byteLen: number,
+    sig: string
   ): void;
+  // Advance the gate signature alone, for a source change that re-extracted to
+  // a byte-identical transcript (the content_hash gate skipped the BLOB write).
+  updateTranscriptSig(sessionId: string, sig: string): void;
   // Drop a session's transcript row (prune / emptied-transcript cleanup).
   delTranscript(sessionId: string): void;
 }
@@ -113,29 +121,62 @@ export function initTranscriptCache(db: Db): TranscriptCache {
   // re-ingesting a session whose extracted transcript is byte-identical touches
   // zero BLOBs. `byte_len` is the uncompressed content JSON length, surfaced for
   // slice 3's thinking/size features without inflating it back out of brotli.
+  // `sig` (#3634) is the warm-cache gate: the transcript signature the stored
+  // BLOBs were built from, stamped on write and re-derived on read from ONE
+  // constructor (`transcriptSigOf` in ingest.mjs), so the two sides are
+  // comparable by construction rather than by coincidence.
   db.exec(`
   CREATE TABLE IF NOT EXISTS session_transcript (
     session_id   TEXT PRIMARY KEY,
     content_br   BLOB,
     thinking_br  BLOB,
     content_hash TEXT,
-    byte_len     INTEGER
+    byte_len     INTEGER,
+    sig          TEXT
   );
 `);
+
+  // Additive migration for DBs created before the gate column existed (the
+  // CREATE TABLE above is a no-op on those). Legacy rows read SQL NULL, which
+  // never equals a constructed signature, so they miss once and rebuild from
+  // source — the same clean-rebuild direction the dataset_cache columns take.
+  try {
+    db.exec('ALTER TABLE session_transcript ADD COLUMN sig TEXT');
+  } catch (e) {
+    // Same guard as the session_blob migration below: "duplicate column name"
+    // is the benign idempotent case (fresh schema above, or an earlier boot).
+    // Anything else — I/O, SQLITE_BUSY — is a real migration failure and must
+    // surface HERE, naming the migration, rather than resurfacing later as an
+    // inscrutable "no such column: sig" from the gate's SELECT.
+    const message = (e as { message?: string } | undefined)?.message ?? '';
+    if (!/duplicate column name/i.test(message)) throw e;
+  }
 
   // Transcript gate + upsert + delete. The gate reads only the hash so an
   // unchanged session skips brotli entirely.
   const selTranscriptHash = db.prepare(
     'SELECT content_hash FROM session_transcript WHERE session_id = ?'
   );
+  // The read-path gate (#3634): the stored signature alone, so a warm hit is
+  // decided without inflating (or even loading) the BLOB columns.
+  const selTranscriptSig = db.prepare(
+    'SELECT sig FROM session_transcript WHERE session_id = ?'
+  );
   const upsertTranscript = db.prepare(`
   INSERT INTO session_transcript
-    (session_id, content_br, thinking_br, content_hash, byte_len)
-  VALUES (?, ?, ?, ?, ?)
+    (session_id, content_br, thinking_br, content_hash, byte_len, sig)
+  VALUES (?, ?, ?, ?, ?, ?)
   ON CONFLICT(session_id) DO UPDATE SET
     content_br=excluded.content_br, thinking_br=excluded.thinking_br,
-    content_hash=excluded.content_hash, byte_len=excluded.byte_len
+    content_hash=excluded.content_hash, byte_len=excluded.byte_len,
+    sig=excluded.sig
 `);
+  // Re-stamp the gate without touching a BLOB — the source moved but
+  // re-extracted to a byte-identical transcript, so the content_hash gate
+  // skips the rewrite while the signature still has to advance.
+  const updTranscriptSig = db.prepare(
+    'UPDATE session_transcript SET sig = ? WHERE session_id = ?'
+  );
   const delTranscript = db.prepare(
     'DELETE FROM session_transcript WHERE session_id = ?'
   );
@@ -164,14 +205,22 @@ export function initTranscriptCache(db: Db): TranscriptCache {
       const row = selTranscriptHash.get(sessionId) as HashRow | undefined;
       return row ?? null;
     },
-    upsertTranscript(sessionId, contentBr, thinkingBr, contentHash, byteLen) {
+    readTranscriptSig(sessionId) {
+      const row = selTranscriptSig.get(sessionId) as SigRow | undefined;
+      return typeof row?.sig === 'string' ? row.sig : null;
+    },
+    upsertTranscript(sessionId, contentBr, thinkingBr, contentHash, byteLen, sig) {
       upsertTranscript.run(
         sessionId,
         contentBr,
         thinkingBr,
         contentHash,
-        byteLen
+        byteLen,
+        sig
       );
+    },
+    updateTranscriptSig(sessionId, sig) {
+      updTranscriptSig.run(sig, sessionId);
     },
     delTranscript(sessionId) {
       delTranscript.run(sessionId);

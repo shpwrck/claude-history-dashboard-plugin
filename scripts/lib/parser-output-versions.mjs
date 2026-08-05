@@ -125,7 +125,7 @@ export const REPO_MAP_OUTPUT = {
  */
 export const RELATED_INVALIDATION_KNOBS = Object.freeze({
   PARSER_SIG_VERSION:
-    'scripts/ingest.mjs — gates the per-session TRANSCRIPT cache (sigOf/getTranscript); also folded into the dataset schema key. NOT a parser-output-shape knob for the session_blob signal columns.',
+    'scripts/ingest.mjs — gates the per-session TRANSCRIPT cache (transcriptSigOf/getTranscript); also folded into the dataset schema key. NOT a parser-output-shape knob for the session_blob signal columns.',
   DATASET_ASSEMBLY_SCHEMA_VERSION:
     'scripts/ingest.mjs — gates the SERIALIZED DATASET contract from assembleDataset(); also bump it when a changed parser output alters the persisted body without changing source artifacts.',
 });
