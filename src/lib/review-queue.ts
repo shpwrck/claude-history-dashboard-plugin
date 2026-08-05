@@ -3,15 +3,19 @@ import type { ToolUsageData } from './parse-tools';
 import type { ApiErrorEvent } from './parse-errors';
 import type { SessionTimeline } from './parse-timeline';
 import type { DebugSessionMetrics } from './parse-debug';
-import type { TelemetryEvent } from './parse-telemetry';
 import { estimateCost } from './parse-sessions';
 import { topExpensiveSessions } from './cost-attribution';
 import { scoreSessionHealth, LOW_HEALTH_SCORE } from './context-health';
 import { computeSessionOutcomes } from './parse-timeline-success';
+// From the fs-free leaf, NOT `./parse-telemetry`: this module is bundled into
+// the browser ReviewQueuePf chunk, and a value import of the fs-touching
+// parser drags the node:fs graph into that chunk, which throws at module
+// scope in the SPA build (#3639, the #3613 failure mode).
 import {
   analyzeReliability,
   RETRY_STORM_THRESHOLD,
-} from './parse-telemetry';
+  type TelemetryEvent,
+} from './telemetry-analytics';
 import { MIN_SAVINGS_USD, fmtUsd } from './detectors/shared';
 import type {
   ClaimDerivation,

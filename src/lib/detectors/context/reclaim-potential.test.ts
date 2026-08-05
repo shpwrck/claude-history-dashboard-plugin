@@ -231,22 +231,38 @@ describe('context.reclaim-potential', () => {
       ])
     );
 
-    const started = performance.now();
     const workload = measureReclaimPasteWorkload(sessions);
-    const elapsedMs = performance.now() - started;
 
     expect(workload.blocks).toBe(blockCount);
     expect(workload.uniqueBlocks).toBe(blockCount);
+    // Exactly-once normalization, asserted as a deterministic BRACKET rather
+    // than the wall-clock bound this test used to carry (#3643 — elapsedMs
+    // tripped under concurrent build load while guarding nothing the counters
+    // below cannot). `normalizedCodeUnits` accumulates per fingerprint call,
+    // so the corpus being normalized once lands inside the bracket, while a
+    // regression that re-fingerprints blocks (per duplicate probe, per
+    // bucket, or per aggregate pass) at least doubles the count and fails the
+    // upper edge deterministically on any machine, however loaded.
     expect(workload.normalizedCodeUnits).toBeGreaterThan(
       blockCount * blockChars
     );
+    expect(workload.normalizedCodeUnits).toBeLessThanOrEqual(
+      blockCount * (blockChars + 64)
+    );
+    // The bracket DISCRIMINATES: the minimum regression (every block
+    // fingerprinted just twice) cannot fit under the upper edge, so the bound
+    // above is not vacuously wide.
+    expect(workload.normalizedCodeUnits * 2).toBeGreaterThan(
+      blockCount * (blockChars + 64)
+    );
     // Keys, independent collision discriminators, and the 40-character preview
     // stay below 250 UTF-16 code units per unique block; the ~4 MiB normalized
-    // corpus is streamed and never retained as Map keys or samples.
+    // corpus is streamed and never retained as Map keys or samples (the
+    // full-content-as-Map-key regression lands here, since the key's length is
+    // charged to this counter).
     expect(workload.retainedMetadataCodeUnits).toBeLessThanOrEqual(
       blockCount * 250
     );
-    expect(elapsedMs).toBeLessThan(750);
   });
 
   it('stays silent below the dollar floor (min-effect gate — no zero-impact findings)', () => {

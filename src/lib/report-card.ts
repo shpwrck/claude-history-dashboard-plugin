@@ -20,6 +20,11 @@
  * server-side (the consolidated detector) and client-side (the report-card view)
  * with no drift between the chart and the JSON export (the P10/Aya constraint).
  */
+// Both analysers are imported from their fs-free leaves, NOT from the
+// fs-touching parsers (`parse-session-registry`, `parse-telemetry`): this
+// module is bundled into the browser AgentReportCardPf chunk, and a value
+// import of either parser drags the node:fs graph into that chunk, which
+// throws at module scope in the SPA build (#3639, the #3613 failure mode).
 import {
   analyzeAttribution,
   type SessionRegistryEntry,
@@ -27,12 +32,12 @@ import {
   type AttributionBucket,
   type EntrypointCount,
   type VersionTimelineEntry,
-} from './parse-session-registry';
+} from './session-attribution';
 import {
   analyzeReliability,
   type TelemetryEvent,
   type SessionReliability,
-} from './parse-telemetry';
+} from './telemetry-analytics';
 import { isUnattendedEntrypoint } from './parse-sessions';
 import type { DebugSessionMetrics } from './parse-debug';
 import type {

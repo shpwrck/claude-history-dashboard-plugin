@@ -45,19 +45,24 @@ function withDist(assets, run) {
   }
 }
 
-// A faithful miniature of the CURRENT master SPA dist: the fs graph confined to
-// the allowlisted `bounded-fs` chunk, the four KNOWN_FS_REACHERS chunks holding
-// the edges they hold today, and a view chunk shipping `node:fs`/`readFileSync`
-// as recommendation COPY — which the real Recommendations chunk does. Mirroring
-// the real baseline is what lets the subprocess cases run the gate under its
-// SHIPPED policy (real allowlist, real debt list) instead of a test-only one.
+// A faithful miniature of the CURRENT master SPA dist after #3639: the pure
+// analytics live in fs-free leaves, so the former debt chunks hold NO edge
+// into the fs graph and `bounded-fs` is not emitted at all. The fixture still
+// ships a `bounded-fs` chunk (allowlisted container, zero reachers) so the
+// subprocess leak cases below can add edges INTO it — an allowlisted container
+// nothing imports must itself keep passing. A view chunk ships
+// `node:fs`/`readFileSync` as recommendation COPY — which the real
+// Recommendations chunk does. Mirroring the real baseline is what lets the
+// subprocess cases run the gate under its SHIPPED policy (real allowlist,
+// real — now empty — debt list) instead of a test-only one.
 const CLEAN_ASSETS = {
   'bounded-fs-CH76ajUM.js': `import{L as e,z as t}from"./Spinner-DTC27OcH.js";${FS_GRAPH_BODY}export{n as t};`,
   'Spinner-DTC27OcH.js': 'export const L=1,z=2;',
-  // The debt chunks (#3639), each reaching the fs graph exactly as on master.
-  'parse-telemetry-Do29yvEo.js': 'import{t as b}from"./bounded-fs-CH76ajUM.js";export{b};',
-  'AgentReportCardPf-B3LLViF9.js': 'import"./bounded-fs-CH76ajUM.js";export const A=1;',
-  'PlanShapesPf-CIZJDjZp.js': 'import{t as b}from"./bounded-fs-CH76ajUM.js";export{b};',
+  // The former debt chunks (#3639), each now edge-free into the fs graph:
+  // their shared values come from the fs-free leaves.
+  'parse-telemetry-Do29yvEo.js': 'import{L as b}from"./Spinner-DTC27OcH.js";export{b};',
+  'AgentReportCardPf-B3LLViF9.js': 'import"./Spinner-DTC27OcH.js";export const A=1;',
+  'PlanShapesPf-CIZJDjZp.js': 'import{L as b}from"./Spinner-DTC27OcH.js";export{b};',
   'ReviewQueuePf-DDu-zzYS.js': 'import{b}from"./parse-telemetry-Do29yvEo.js";export{b};',
   'Recommendations-DKfrBmLI.js':
     'import{L as a}from"./Spinner-DTC27OcH.js";' +
@@ -130,6 +135,43 @@ test('a TRANSITIVE static import edge FAILS the gate (exit 1)', () => {
       const r = runGate(GATE, ['--dist', dist]);
       assert.equal(r.code, 1, r.out);
       assert.match(r.out, /BackupsView-Zq2b8Lm3\.js/);
+    }
+  );
+});
+
+test('a chunk reaching the fs graph ONLY via bare export-star FAILS the gate (#3649)', () => {
+  // The discriminating case for the star-with-no-`as` clause: before #3649 the
+  // edge regex required braces, an identifier, or `* as`, so this exact shape
+  // was silently dropped and the gate passed.
+  withDist(
+    {
+      ...CLEAN_ASSETS,
+      'BarrelView-Ab1c2Dd3.js': 'export*from"./bounded-fs-CH76ajUM.js";',
+    },
+    (dist) => {
+      const r = runGate(GATE, ['--dist', dist]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /statically imports the node:fs graph/);
+      assert.match(r.out, /BarrelView-Ab1c2Dd3\.js/);
+    }
+  );
+});
+
+test('a wrong-flavor (server) dist is a usage error (exit 2), not a leak or a pass (#3650)', () => {
+  // Pointing the gate at a plain `npm run build` dist used to evaluate it:
+  // chunk names differ there, so the shrink-only ratchet fired a misleading
+  // "you fixed it, delete the entry". A server-only marker proves the flavor.
+  withDist(
+    {
+      'index-CuhiiY7w.js': 'export const load=()=>fetch("/api/recommendations.json");',
+      'Spinner-DTC27OcH.js': 'export const L=1,z=2;',
+    },
+    (dist) => {
+      const r = runGate(GATE, ['--dist', dist]);
+      assert.equal(r.code, 2, r.out);
+      assert.match(r.out, /wrong-flavor dist/);
+      assert.match(r.out, /build:spa/);
+      assert.doesNotMatch(r.out, /BLOCKED/);
     }
   );
 });

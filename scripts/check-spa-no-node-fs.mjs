@@ -67,7 +67,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { chunkBaseName } from './check-bundle-size.mjs';
+import { chunkBaseName, findServerMarkers } from './check-bundle-size.mjs';
 
 // Emitted evidence that a chunk carries the node:fs constants graph. See the
 // marker-choice note above for why these and not `readFileSync`/`node:fs`.
@@ -83,27 +83,18 @@ export const FS_GRAPH_MARKERS = ['O_RDONLY', 'O_NOFOLLOW'];
 // guard in main() rejects.
 export const ALLOWED_FS_GRAPH_CHUNKS = ['bounded-fs'];
 
-// SHRINK-ONLY debt list: logical chunk names that already reach the fs graph on
-// master and are therefore not treated as new regressions. Each is a live
-// crash of the #3613 class, tracked in #3639 — these three view chunks throw
-// `O_RDONLY` on import today, verified by evaluating the emitted chunks under
-// jsdom. They are recorded rather than fixed here so this gate can land green
-// and stop the NEXT leak; the fix is a separate change.
+// SHRINK-ONLY debt list: logical chunk names that already reach the fs graph
+// on master and are therefore not treated as new regressions. Emptied by
+// #3639: the pure analytics behind the last four reachers now live in fs-free
+// leaves (`telemetry-analytics`, `session-attribution`, `plan-clusters`), so
+// no browser chunk reaches the graph and `bounded-fs` stops being emitted
+// into the SPA bundle entirely. Any future entry is a NEW #3613-class crash;
+// fix the import edge instead of listing it here.
 //
 // The list is a ratchet: an entry that no longer reaches the fs graph FAILS the
 // gate asking to be removed, so fixing the debt cannot leave a stale exemption
 // behind that would quietly re-open the hole.
-export const KNOWN_FS_REACHERS = [
-  // src/lib/parse-telemetry.ts -> bounded-fs (shared lib chunk; pulls in the
-  // ReviewQueuePf view below).
-  'parse-telemetry',
-  // src/lib/parse-session-registry.ts + src/lib/report-card.ts -> bounded-fs.
-  'AgentReportCardPf',
-  // src/lib/parse-plans.ts (clusterPlans is a value import) -> bounded-fs.
-  'PlanShapesPf',
-  // reaches it transitively through the parse-telemetry chunk.
-  'ReviewQueuePf',
-];
+export const KNOWN_FS_REACHERS = [];
 
 // A STATIC edge to another emitted chunk. Every form below forces the target to
 // be evaluated before the importing module's own body runs:
@@ -115,19 +106,20 @@ export const KNOWN_FS_REACHERS = [
 //   import d, { x } from './chunk.js'       default + named
 //   export { x } from './chunk.js'          named re-export
 //   export * as ns from './chunk.js'        namespaced re-export
+//   export * from './chunk.js'              bare star re-export (#3649)
 //
 // Dynamic `import('./chunk.js')` is excluded ON PURPOSE, and that exclusion is
 // load-bearing: the `(` matches neither the optional clause nor the opening
 // quote, so lazy route loading — which DEFERS evaluation rather than forcing it
 // — stays out of the graph.
 //
-// Bare `export * from './chunk.js'` (star with no `as`) is NOT matched. That is
-// a genuine gap, not a design choice: the clause alternatives all require
-// braces, an identifier, or `* as`, so a lone `*` falls through. The current SPA
-// build emits zero of them, so today's graph is complete — widening the pattern
-// is tracked in #3649 rather than folded into this gate.
+// The lone `\*` alternative sits AFTER `\*\s*as\s+[\w$]+` so a namespaced
+// re-export consumes its `as ns` instead of stranding it before `from`. Today's
+// bundler emits zero bare star re-exports, but a barrel `export * from` in a
+// future emitted chunk would otherwise be a silent false negative in exactly
+// the gate meant to prevent them (#3649).
 const STATIC_EDGE_RE =
-  /\b(?:import|export)\s*(?:(?:\{[^}]*\}|\*\s*as\s+[\w$]+|[\w$]+)\s*(?:,\s*(?:\{[^}]*\}|\*\s*as\s+[\w$]+)\s*)?from\s*)?(["'])\.\/([^"']+)\1/g;
+  /\b(?:import|export)\s*(?:(?:\{[^}]*\}|\*\s*as\s+[\w$]+|\*|[\w$]+)\s*(?:,\s*(?:\{[^}]*\}|\*\s*as\s+[\w$]+)\s*)?from\s*)?(["'])\.\/([^"']+)\1/g;
 
 /** Emitted chunk filenames this chunk's source statically imports (or re-exports from). */
 export function parseStaticEdges(source) {
@@ -275,6 +267,21 @@ function main() {
   }
 
   const contentOf = (f) => readFileSync(join(assetsDir, f), 'utf8');
+
+  // Wrong-flavor preflight (#3650), same guard check-bundle-size grew after
+  // #1702: a real SPA build cannot contain SERVER_ONLY_MARKERS, so finding one
+  // means this dist came from a plain `npm run build` — its chunk names differ,
+  // and evaluating it would fire the shrink-only KNOWN_FS_REACHERS ratchet with
+  // a misleading "you fixed it, delete the entry". CI is safe by step ordering;
+  // this catches the local `npm run build && npm run gate:spa-no-node-fs` run.
+  const serverHit = findServerMarkers(files, contentOf);
+  if (serverHit) {
+    die(
+      `wrong-flavor dist: "${serverHit.file}" contains server-only marker "${serverHit.marker}", ` +
+        `so ${args.dist} is a SERVER build, not a SPA build. Re-run \`npm run build:spa\` and ` +
+        `point the gate at that dist.`,
+    );
+  }
   const { fsGraphChunks, reachers, failures } = evaluateFsLeak(files, contentOf);
 
   console.log(`\nSPA node:fs gate — ${assetsDir} (${files.length} chunks scanned)`);

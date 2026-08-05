@@ -35,6 +35,7 @@ import {
   estimateMonthlySavings,
 } from '../../parse-model-recommendation';
 import { fmtUsd, short } from '../shared';
+import { promptRegimeLabel, summarizePromptRegimes } from '../../prompt-regime';
 
 /** Stay quiet on sparse data: need a meaningful downgradable set AND dollars. */
 const MIN_DOWNGRADABLE_TURNS = 20;
@@ -100,7 +101,36 @@ export const detector: Detector = {
     if (downgradable < MIN_DOWNGRADABLE_TURNS || monthly < MIN_MONTHLY_USD) return null;
 
     const pct = summary.downgradablePct.toFixed(0);
-    const severity = monthly >= WARN_MONTHLY_USD ? 'warning' : 'info';
+
+    // Prompt-regime confounding (#3405, same treatment as activity-trend): the
+    // monthly figure extrapolates over the observed span, so when the
+    // contributing sessions straddle the Claude Code system-prompt cut the
+    // aggregate mixes two harness regimes — turn complexity and footprint under
+    // the short prompt are not comparable to the long-prompt baseline, so part
+    // of the projection is the harness change, not routable spend. Segment the
+    // contributing sessions by CLI version; on a confounded window, demote
+    // severity and say so instead of silently aggregating across the boundary.
+    // perf-index-contract: routing-regime-contributors always-consumed: built only after the non-empty rows guard, and drained by the summarize call two statements later
+    const contributingSessions = new Set(rows.map((r) => r.session.sessionId));
+    // perf-index-contract: routing-regime-session-version always-consumed: built only after the non-empty rows guard above, and immediately drained by the summarize call on the next statement
+    const versionBySession = new Map(input.tokenData.map((t) => [t.sessionId, t.version]));
+    const span = summarizePromptRegimes(
+      [...contributingSessions].map((id) => versionBySession.get(id))
+    );
+    const confounded = span.confounded;
+    const regimeNote = span.spansBoundary
+      ? `spans a Claude Code prompt-regime change (${span.regimes.map(promptRegimeLabel).join(' -> ')})`
+      : 'includes sessions on a Claude Code version too close to a prompt-regime change to place';
+    // Name every regime the window touched, including the unplaceable ones — a
+    // mixed window resolves one regime AND carries indeterminate sessions, so
+    // reporting only the resolved id would contradict the claim beside it.
+    const regimeValue =
+      [...span.regimes, ...(span.hasIndeterminate ? ['indeterminate'] : [])].join(',') ||
+      'indeterminate';
+
+    // Regime-spanning demotion (#3405): a confounded projection never escalates
+    // to `warning`, and the copy says why.
+    const severity = monthly >= WARN_MONTHLY_USD && !confounded ? 'warning' : 'info';
 
     return {
       id: 'cost.model-routing-rollup',
@@ -111,7 +141,11 @@ export const detector: Detector = {
         `${downgradable} of ${summary.totalTurns} turns (${pct}%) ran a heavier model ` +
         `than their complexity needed — ${summary.haikuTurns} fit Haiku, ` +
         `${summary.sonnetTurns} fit Sonnet. Routing them is worth ~${fmtUsd(monthly)}/mo ` +
-        `at the observed rate.`,
+        `at the observed rate.` +
+        (confounded
+          ? ` Treat the projection as indicative only: the contributing sessions' window ${regimeNote}, ` +
+            `so a change in the harness prompt cannot be separated from routable spend.`
+          : ''),
       action:
         'Run lightweight turns on a cheaper model — pin a smaller model for the simple ' +
         'phases, or split work so trivial turns do not run on Opus. The Model Routing ' +
@@ -142,11 +176,29 @@ export const detector: Detector = {
             field: 'estimateMonthlySavings()',
             value: Math.round(monthly * 100) / 100,
           },
+          ...(confounded
+            ? [
+                {
+                  claim: `The contributing sessions' window ${regimeNote}`,
+                  source: 'session transcripts',
+                  field: 'version (SessionTokenData) -> promptRegimeForVersion',
+                  value: regimeValue,
+                },
+              ]
+            : []),
         ],
         // Footprint-only heuristic: no structured quality-result provenance is
         // available here, so the wording is always the low-confidence candidate
         // form — never a "without quality loss" guarantee (#3199).
-        inference: routingInference(false),
+        inference:
+          routingInference(false) +
+          (confounded
+            ? ` Additionally, the contributing sessions' window ${regimeNote} ` +
+              `(${span.knownCount} versioned sessions, ${span.unknownCount} without a version), ` +
+              `so the sessions did not all run under the same Claude Code system prompt, a harness ` +
+              `contribution cannot be separated from routable spend, and the finding is reported ` +
+              `without escalation.`
+            : ''),
       },
     };
   },

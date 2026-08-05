@@ -29,7 +29,7 @@ function ts(i: number): string {
   return new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
 }
 
-function trivialFixture(sessionId: string, turns: number): {
+function trivialFixture(sessionId: string, turns: number, version?: string): {
   tokenData: SessionTokenData;
   timeline: SessionTimeline;
 } {
@@ -42,6 +42,7 @@ function trivialFixture(sessionId: string, turns: number): {
   }
   const tokenData = {
     sessionId,
+    version,
     totalInputTokens: 0,
     totalOutputTokens: 0,
     totalCacheCreationTokens: 0,
@@ -128,6 +129,67 @@ describe('cost.model-routing-rollup (#1165)', () => {
     expect(inference).toMatch(/replay|evaluat/i);
     expect(inference).toMatch(/quality/i);
     expect(inference).toMatch(/ceiling/i);
+  });
+
+  // ── #3405: no silent aggregation across the prompt-regime boundary ──
+  it('demotes and annotates when contributing sessions span the prompt-regime boundary (#3405)', () => {
+    const before = trivialFixture('s-before', 12, '2.1.217');
+    const after = trivialFixture('s-after', 12, '2.1.220');
+    const rec = detector.rule(
+      input({
+        tokenData: [before.tokenData, after.tokenData],
+        timelines: [before.timeline, after.timeline],
+      }),
+      0
+    )!;
+    expect(rec).not.toBeNull();
+    // Demoted: never a warning when the extrapolation mixes harness regimes.
+    expect(rec.severity).toBe('info');
+    // Annotated, not silent: the reader is told the projection crosses the cut.
+    expect(rec.detail).toMatch(/spans a Claude Code prompt-regime change/);
+    expect(rec.provenance!.inference).toMatch(/did not all run under the same Claude Code system prompt/);
+    const regimeObs = rec.provenance!.observations.find(
+      (o) => o.field === 'version (SessionTokenData) -> promptRegimeForVersion'
+    );
+    expect(regimeObs).toBeDefined();
+    expect(regimeObs!.value).toBe('pre-claude-5,claude-5-short');
+  });
+
+  it('flags a possible crossing when a bracket-interior version contributes (#3405)', () => {
+    const inside = trivialFixture('s-inside', 12, '2.1.218');
+    const after = trivialFixture('s-after', 12, '2.1.220');
+    const rec = detector.rule(
+      input({
+        tokenData: [inside.tokenData, after.tokenData],
+        timelines: [inside.timeline, after.timeline],
+      }),
+      0
+    )!;
+    expect(rec.severity).toBe('info');
+    expect(rec.detail).toMatch(/too close to a prompt-regime change to place/);
+    const regimeObs = rec.provenance!.observations.find(
+      (o) => o.field === 'version (SessionTokenData) -> promptRegimeForVersion'
+    );
+    expect(regimeObs!.value).toBe('claude-5-short,indeterminate');
+  });
+
+  it('leaves a single-regime window unannotated (#3405)', () => {
+    const a = trivialFixture('s-a', 12, '2.1.220');
+    const b = trivialFixture('s-b', 12, '2.1.221');
+    const rec = detector.rule(
+      input({
+        tokenData: [a.tokenData, b.tokenData],
+        timelines: [a.timeline, b.timeline],
+      }),
+      0
+    )!;
+    expect(rec).not.toBeNull();
+    expect(rec.detail).not.toMatch(/regime/i);
+    expect(
+      rec.provenance!.observations.some(
+        (o) => o.field === 'version (SessionTokenData) -> promptRegimeForVersion'
+      )
+    ).toBe(false);
   });
 
   it('permits stronger wording ONLY when structured quality-result provenance is present (#3199)', () => {

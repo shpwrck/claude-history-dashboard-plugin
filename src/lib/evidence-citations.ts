@@ -97,6 +97,69 @@ export function parseEvidenceCitationNumbers(text: string): number[] {
 }
 
 /**
+ * The reply text as it should be DISPLAYED, given how many evidence entries
+ * were supplied with the same request (#3647).
+ *
+ * The attach side already fails safe — a marker naming no supplied entry
+ * attaches nothing — but the raw text still showed the reader the dangling
+ * marker with no chip to resolve it, and the tolerated `\[Evidence 2\]` form
+ * rendered its backslashes raw. Display rules, mirroring the parser's grammar
+ * (same CITATION_MARKER, so the two cannot drift):
+ *
+ * - A marker whose numbers ALL name supplied entries is kept verbatim, minus
+ *   any Markdown escaping backslashes.
+ * - A mixed marker keeps only the supplied numbers (`[Evidence 2, 9]` with
+ *   three entries supplied renders as `[Evidence 2]`), matching what the
+ *   attach side actually resolved.
+ * - A marker naming NO supplied entry is stripped, along with one adjacent
+ *   space so prose does not gap. With zero entries supplied (a follow-up turn
+ *   on an unchanged slice) every marker is unresolvable by definition.
+ *
+ * Markers the grammar cannot read at all (`[Evidence 2-4]`, five-digit
+ * numbers) are untouched: their intent is unknown, so rewriting them would
+ * guess. They render as the model wrote them.
+ */
+export function formatEvidenceMarkersForDisplay(
+  text: string,
+  suppliedCount: number
+): string {
+  if (typeof text !== 'string' || text.length === 0) return text;
+  const supplied =
+    Number.isInteger(suppliedCount) && suppliedCount > 0 ? suppliedCount : 0;
+  // A private-use placeholder no model output contains (a control char would
+  // trip no-control-regex), so the whitespace cleanup below can find exactly
+  // the strip sites without touching any other text.
+  const STRIP = '\uE000';
+  const rewritten = text.replace(CITATION_MARKER, (marker, body: string) => {
+    const kept: number[] = [];
+    // perf-index-contract: evidence-display-dedupe always-consumed: built only inside a marker-match callback, and every token in the loop below both probes and inserts into it before the callback returns
+    const seen = new Set<number>();
+    let dropped = false;
+    for (const token of body.split(/[^0-9]+/)) {
+      if (!token) continue;
+      const n = Number.parseInt(token, 10);
+      if (!Number.isInteger(n) || n < 1) continue;
+      if (n > supplied) {
+        dropped = true;
+        continue;
+      }
+      if (seen.has(n)) continue;
+      seen.add(n);
+      kept.push(n);
+    }
+    if (kept.length === 0) return STRIP;
+    if (!dropped) return marker.replace(/\\/g, '');
+    return `[Evidence ${kept.join(', ')}]`;
+  });
+  // Collapse each strip site with at most one adjacent space: mid-sentence the
+  // surrounding spaces become one, at an edge (or before punctuation) the
+  // marker and its single leading space vanish together.
+  return rewritten.replace(/ ?\uE000 ?/g, (gap) =>
+    gap.startsWith(' ') && gap.endsWith(' ') ? ' ' : ''
+  );
+}
+
+/**
  * The subset of `refs` an answer actually cites, in the order they were supplied
  * (so a rendered chip's position still matches its `Evidence N` label).
  *

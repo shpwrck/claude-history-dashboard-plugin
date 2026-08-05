@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EVIDENCE_CITATION_INSTRUCTION,
   extractCitedEvidence,
+  formatEvidenceMarkersForDisplay,
   parseEvidenceCitationNumbers,
 } from './evidence-citations';
 
@@ -212,5 +213,58 @@ describe('zero work on the non-querying path', () => {
     // assertion above is about laziness rather than an unreachable path.
     expect(extractCitedEvidence('[Evidence 2]', watched)).toEqual(['b']);
     expect(elementReads).toBeGreaterThan(0);
+  });
+});
+
+describe('formatEvidenceMarkersForDisplay (#3647)', () => {
+  it('keeps a fully resolvable marker verbatim', () => {
+    expect(formatEvidenceMarkersForDisplay('See [Evidence 2] here.', 3)).toBe(
+      'See [Evidence 2] here.'
+    );
+    expect(
+      formatEvidenceMarkersForDisplay('Both [Evidence 2, 3] agree.', 3)
+    ).toBe('Both [Evidence 2, 3] agree.');
+    // Tolerated variants stay as written too — display does not normalize a
+    // marker the reader can already resolve.
+    expect(formatEvidenceMarkersForDisplay('see [evidence #2]', 3)).toBe(
+      'see [evidence #2]'
+    );
+  });
+
+  it('unescapes the tolerated backslash form instead of rendering it raw', () => {
+    expect(
+      formatEvidenceMarkersForDisplay('The retry \\[Evidence 2\\] shows it.', 3)
+    ).toBe('The retry [Evidence 2] shows it.');
+  });
+
+  it('strips a marker that resolves to no supplied entry, without gapping prose', () => {
+    expect(
+      formatEvidenceMarkersForDisplay('The retry [Evidence 7] proves it.', 3)
+    ).toBe('The retry proves it.');
+    // At end of sentence: the marker and its leading space vanish together.
+    expect(
+      formatEvidenceMarkersForDisplay('The retry storm recurred [Evidence 9].', 3)
+    ).toBe('The retry storm recurred.');
+  });
+
+  it('keeps only the supplied numbers of a mixed marker, matching the attach side', () => {
+    expect(
+      formatEvidenceMarkersForDisplay('Shown by [Evidence 2, 9].', 3)
+    ).toBe('Shown by [Evidence 2].');
+  });
+
+  it('treats every marker as unresolvable when no evidence was supplied', () => {
+    // A follow-up turn on an unchanged slice carries no evidence list at all.
+    expect(
+      formatEvidenceMarkersForDisplay('Echoing [Evidence 2] from before.', 0)
+    ).toBe('Echoing from before.');
+  });
+
+  it('leaves text the grammar cannot read untouched', () => {
+    const unreadable = '[Evidence 2-4] and [Evidence 2, 99999] stay as written.';
+    expect(formatEvidenceMarkersForDisplay(unreadable, 3)).toBe(unreadable);
+    expect(formatEvidenceMarkersForDisplay('No markers at all.', 3)).toBe(
+      'No markers at all.'
+    );
   });
 });
