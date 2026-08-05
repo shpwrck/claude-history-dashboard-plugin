@@ -1,5 +1,14 @@
 #!/usr/bin/env node
 // Fail-closed trust ceiling for PR workflows that schedule self-hosted ARC jobs.
+//
+// Runner placement policy: the repo runs zero GitHub-hosted minutes, so the
+// broker, resolver, and milestone guard are pinned to arc-runner-set. They are
+// base-controlled jobs that never execute PR head code, so ARC placement does
+// not weaken the fork ceiling itself. The one hosted rule that REMAINS is for
+// plain `pull_request` triggers, whose workflow definition is fork-controlled:
+// those must never reach ARC (the original #3313 finding) — the fix for such a
+// workflow is conversion to pull_request_target behind this trust ceiling, not
+// an ARC runs-on.
 
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -222,9 +231,9 @@ export function prWorkflowTrustReasons(root) {
         );
       }
       for (const [jobName, job] of Object.entries(jobs)) {
-        if (job?.['runs-on'] !== 'ubuntu-latest') {
+        if (job?.['runs-on'] !== 'arc-runner-set') {
           reasons.push(
-            `${entry.name}: job ${jobName} must remain permanently on the GitHub-hosted ubuntu-latest runner`
+            `${entry.name}: job ${jobName} must run on the self-hosted arc-runner-set scale set (zero hosted-minutes policy)`
           );
         }
       }
@@ -442,9 +451,9 @@ export function prWorkflowTrustReasons(root) {
           `${MERGE_RESOLVER_WORKFLOW}: resolver must contain exactly one resolve job`
         );
       }
-      if (resolverJob?.['runs-on'] !== 'ubuntu-latest') {
+      if (resolverJob?.['runs-on'] !== 'arc-runner-set') {
         reasons.push(
-          `${MERGE_RESOLVER_WORKFLOW}: resolve must use the GitHub-hosted ubuntu-latest runner`
+          `${MERGE_RESOLVER_WORKFLOW}: resolve must use the arc-runner-set scale set (zero hosted-minutes policy)`
         );
       }
       if (resolverJob?.['timeout-minutes'] !== 2) {
@@ -575,9 +584,9 @@ export function prWorkflowTrustReasons(root) {
         );
       }
       const brokerJob = broker?.jobs?.authorize;
-      if (brokerJob?.['runs-on'] !== 'ubuntu-latest') {
+      if (brokerJob?.['runs-on'] !== 'arc-runner-set') {
         reasons.push(
-          'pr-trust.yml: authorize must use the GitHub-hosted ubuntu-latest runner'
+          'pr-trust.yml: authorize must use the arc-runner-set scale set (zero hosted-minutes policy)'
         );
       }
       const brokerJobKeys = Object.keys(brokerJob ?? {});

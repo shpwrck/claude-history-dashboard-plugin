@@ -353,7 +353,7 @@ test('protected workflows must resolve one immutable merge SHA after authorizati
   );
 });
 
-test('the reusable merge resolver is hosted, read-only, and contract-closed', () => {
+test('the reusable merge resolver is ARC-pinned, read-only, and contract-closed', () => {
   withWorkflowFixture(
     {
       'pr-merge-sha.yml': [
@@ -375,7 +375,7 @@ test('the reusable merge resolver is hosted, read-only, and contract-closed', ()
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /pr-merge-sha\.yml.*workflow_call.*input.*output/i);
       assert.match(reasons, /pr-merge-sha\.yml.*workflow permissions.*\{\}/i);
-      assert.match(reasons, /pr-merge-sha\.yml.*ubuntu-latest/i);
+      assert.match(reasons, /pr-merge-sha\.yml.*arc-runner-set/i);
       assert.match(reasons, /pr-merge-sha\.yml.*timeout.*2/i);
       assert.match(reasons, /pr-merge-sha\.yml.*contents.*pull-requests.*read/i);
     }
@@ -463,7 +463,7 @@ test('protected workflows isolate concurrency and checkout the verified merge SH
   );
 });
 
-test('the reusable trust broker is hosted and has no token permissions', () => {
+test('the reusable trust broker is ARC-pinned and has no token permissions', () => {
   withWorkflowFixture(
     {
       'protected.yml': [
@@ -496,7 +496,7 @@ test('the reusable trust broker is hosted and has no token permissions', () => {
         'jobs:',
         '  authorize:',
         '    permissions: {}',
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: echo no',
         '',
@@ -505,7 +505,7 @@ test('the reusable trust broker is hosted and has no token permissions', () => {
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /pr-trust\.yml.*permissions.*\{\}/i);
-      assert.match(reasons, /pr-trust\.yml.*GitHub-hosted.*ubuntu-latest/i);
+      assert.match(reasons, /pr-trust\.yml.*arc-runner-set/i);
     }
   );
 });
@@ -790,7 +790,7 @@ test('canonical workflows cannot regress to pull_request or GitHub-hosted execut
   );
 });
 
-test('milestone guard remains permanently hosted', () => {
+test('milestone guard cannot drift off the pinned ARC scale set', () => {
   withWorkflowFixture(
     {
       'milestone-guard.yml': [
@@ -799,16 +799,16 @@ test('milestone guard remains permanently hosted', () => {
         '  pull_request_target:',
         'jobs:',
         '  ensure:',
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
-        '      - run: echo unsafe',
+        '      - run: echo drifted',
         '',
       ].join('\n'),
     },
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /milestone-guard\.yml.*permanently.*GitHub-hosted/i
+        /milestone-guard\.yml.*arc-runner-set/i
       );
     }
   );
