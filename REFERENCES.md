@@ -91,6 +91,65 @@ for your own `$HOME` and `$NVM_DIR`/global `node_modules` location.
     `SessionTimeline.tsx`. There is **no `cron` or `interactive` entrypoint
     value**: `cron` is only a scheduled-fire *content* marker in
     `parse-runtime-events.ts`, a separate concept.
+  - **`version` is also the prompt-regime key (#3405).** Anthropic removed over
+    80% of the Claude Code system prompt for the Claude 5 generation
+    ([announced 2026-07-24](https://claude.com/blog/the-new-rules-of-context-engineering-for-claude-5-generation-models)),
+    so sessions on either side ran under materially different harness
+    instructions and must not be pooled in a trendline, a before/after figure,
+    or a shadow/replay pair. `src/lib/prompt-regime.ts` derives a per-session
+    regime from `version` (`promptRegimeForVersion` /
+    `promptRegimeForSession`) against an ordered, append-only
+    `PROMPT_REGIME_BOUNDARIES` table; `summarizePromptRegimes` reports whether
+    a set of sessions is `confounded`. It is **derived, not persisted** — a pure
+    function of a field already stored, so the table can be corrected
+    retroactively without a re-ingest. First consumer:
+    `activity.activity-trend`, which annotates and refuses to escalate to
+    `warning` when its 14-day window is confounded.
+    - **Boundary: `(2.1.217, 2.1.220]`** — `lastKnownBefore: 2.1.217`,
+      `firstKnownAfter: 2.1.220`. Versions strictly inside derive
+      `indeterminate` rather than being forced to a side.
+    - **Counting method** (so every number below is reproducible): one
+      transcript **file** is one session; files are enumerated **recursively**
+      under `~/.claude/projects`, so nested subagent transcripts count too; a
+      session is attributed to the **first** top-level `version` value its lines
+      carry and dated by its first `timestamp`. On that basis 1539 of 1585
+      transcripts carry a version. A non-recursive glob undercounts badly —
+      roughly half this corpus is subagent transcripts.
+    - **How it was determined.** Empirically, over the local corpus (1585
+      transcripts, ~555 MB), and deliberately **not** from the blog date alone.
+      Two candidate discriminators were tested and ruled out. (1) *Prompt
+      content*: transcripts do not record the system prompt or any session-start
+      system injection at all — each of the three canonical injection strings
+      (`skills are available for use with the Skill tool`, `Here is useful
+      information about the environment you are running in`, `deferred tools are
+      now available via ToolSearch`) appears in exactly **one** file, and that
+      file is a session that quoted them while working on this issue. (2)
+      *Token counts*: the first assistant turn's cached prefix
+      (`input_tokens + cache_creation + cache_read`) bundles the system prompt
+      with tool definitions, CLAUDE.md/AGENTS.md, memory, and MCP schemas.
+      Grouped by version as a median, a low percentile, and a within-`cwd` floor
+      (the tightest estimator of fixed overhead, since every other component only
+      adds), it drifts by the same order as the expected signal and shows **no
+      step at any version**. What the corpus does resolve is a temporal bracket
+      against the announcement: `2.1.217` runs 2026-07-22..2026-07-23 (23
+      sessions, entirely before), `2.1.218` straddles 2026-07-23..2026-07-27 (15
+      sessions, 12 before / 3 after), `2.1.220` begins 2026-07-27 (213 sessions,
+      entirely after). Hence the range, and hence `indeterminate` for what falls
+      inside it.
+    - **Read `version` from `tokenData`, NOT from `Session.version`.** A
+      `Session` reaches detectors via `groupBySessions`
+      (`src/lib/parse-history.ts`), which builds it from `HistoryEntry` — a shape
+      that has no `version` field — so **`Session.version` is always `undefined`
+      in production** on both producer paths (`src/App.tsx`,
+      `scripts/ingest.mjs`). `SessionTokenData` is the shape that actually
+      carries the parsed transcript `version`. Join the two by `sessionId`:
+      `sessions` for timing, `tokenData` for the regime key. Keying a detector
+      off `Session.version` compiles, passes hand-written fixtures, and is dead
+      code at runtime — that exact trap was caught in review of #3405.
+    - **Keyed on version, never on wall-clock date**, because a stale CLI keeps
+      its old prompt: the corpus has a `2.1.177` session running 2026-08-03, ten
+      days after the announcement, from a machine that had not upgraded.
+      Date-bucketing would file it under the new regime.
 - **Runtime events ride on `type: "system"` lines.** `parse-runtime-events.ts`
   pulls four subtypes — `turn_duration`, `stop_hook_summary`,
   `afk_activity`, scheduled-wakeup telemetry — for measured per-turn

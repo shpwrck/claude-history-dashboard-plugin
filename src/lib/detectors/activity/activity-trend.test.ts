@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { detector, HOT_THRESHOLD_PCT } from './activity-trend';
 import type { RecommendationInput } from '../types';
 import type { StatsCache } from '../../parse-stats-cache';
+import type { Session, SessionTokenData } from '../../../types';
 
 // ── Fixture helpers ───────────────────────────────────────────────────────
 
@@ -40,16 +41,68 @@ function makeCache(
   };
 }
 
-function input(statsCache?: StatsCache | null): RecommendationInput & { statsCache?: StatsCache | null } {
+function input(
+  statsCache?: StatsCache | null,
+  ran: SessionRun[] = []
+): RecommendationInput & { statsCache?: StatsCache | null } {
   return {
-    tokenData: [],
+    tokenData: ran.map((r) => r.token),
     toolData: [],
-    sessions: [],
+    sessions: ran.map((r) => r.session),
     projects: [],
     permissionRows: [],
     apiErrors: [],
     statsCache,
   } as RecommendationInput & { statsCache?: StatsCache | null };
+}
+
+/** A session paired with the token row that carries its Claude Code version. */
+interface SessionRun {
+  session: Session;
+  token: SessionTokenData;
+}
+
+let sessionSeq = 0;
+
+/**
+ * A session that ran on `day` (YYYY-MM-DD) under Claude Code `version`.
+ *
+ * The version goes on the TOKEN row, not the Session: `Session` objects reach
+ * detectors via `groupBySessions`, which cannot populate `version` because
+ * `HistoryEntry` has no such field. Putting it on `Session` here would make the
+ * fixture pass while production never could (#3405 review blocker).
+ *
+ * `makeCache` records days 2026-05-21..2026-06-03, so a day in that set lands
+ * in the window the detector segments by.
+ */
+function sessionOn(day: string, version?: string): SessionRun {
+  const sessionId = `s-${day}-${sessionSeq++}`;
+  const startTime = new Date(`${day}T12:00:00Z`).getTime();
+  return {
+    session: {
+      sessionId,
+      project: '/repo',
+      projectShort: 'repo',
+      entries: [],
+      startTime,
+      endTime: startTime + 60_000,
+      duration: 60_000,
+      messageCount: 1,
+    },
+    token: {
+      sessionId,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      model: 'claude-opus-4-8',
+      messageCount: 1,
+      entries: [],
+      compactionEvents: [],
+      hasUnknownModel: false,
+      ...(version ? { version } : {}),
+    } as unknown as SessionTokenData,
+  };
 }
 
 // Reference timestamp: one day after lastComputedDate (fresh, not stale).
@@ -185,5 +238,129 @@ describe(`activity.activity-trend (threshold: +${HOT_THRESHOLD_PCT}% WoW)`, () =
       expect(rec!.provenance!.asOf).toBe('2026-05-01');
       expect(rec!.provenance!.stale).toBe(true);
     });
+  });
+});
+
+
+// ── Prompt-regime segmentation (#3405) ────────────────────────────────────
+//
+// `makeCache` records days 2026-05-21..2026-06-03 (every day has activity).
+// Fixture versions are real corpus values: 2.1.212/2.1.214 pre-cut, 2.1.220
+// post-cut, 2.1.218 straddles the announcement and is unplaceable.
+describe('activity.activity-trend prompt-regime awareness (#3405)', () => {
+  // >=200% WoW, which would be `warning` were the window not confounded.
+  const HOT = () => makeCache(12576, 2373);
+
+  it('does not annotate when the whole window ran on one prompt regime', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-06-01', '2.1.214')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    expect(rec!.title).not.toContain('confounded');
+    expect(rec!.severity).toBe('warning');
+    expect(rec!.evidence!.join(' ')).not.toContain('prompt regime');
+  });
+
+  it('annotates and demotes when the comparison window crosses the cut', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-06-01', '2.1.220')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    // Demoted: a >=200% jump that would otherwise be `warning` is not escalated.
+    expect(rec!.severity).toBe('info');
+    expect(rec!.title).toContain('confounded');
+    expect(rec!.title).toContain('prompt-regime change');
+    expect(rec!.detail).toContain('indicative only');
+    expect(rec!.action).toContain('same Claude Code prompt regime');
+  });
+
+  // The blocker this file previously missed: version lives on the token row,
+  // never on Session (groupBySessions cannot populate it). A fixture that sets
+  // Session.version would pass while production could never fire.
+  it('reads version from tokenData, not from Session', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-06-01', '2.1.220')];
+    for (const r of ran) {
+      expect((r.session as { version?: string }).version).toBeUndefined();
+    }
+    expect(detector.rule(input(HOT(), ran), NOW)!.title).toContain('confounded');
+  });
+
+  it('is unconfounded when tokenData is absent even though sessions exist', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-06-01', '2.1.220')];
+    const withoutTokens = {
+      ...input(HOT(), ran),
+      tokenData: [],
+    } as RecommendationInput & { statsCache?: StatsCache | null };
+    const rec = detector.rule(withoutTokens, NOW);
+    expect(rec!.title).not.toContain('confounded');
+    expect(rec!.severity).toBe('warning');
+  });
+
+  it('cites the regime span in evidence and provenance when confounded', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-06-01', '2.1.220')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    expect(rec!.evidence!.join(' ')).toContain('prompt regime');
+    const obs = rec!.provenance!.observations!;
+    const regimeObs = obs.find((o) => o.claim.includes('prompt-regime change'));
+    expect(regimeObs).toBeDefined();
+    expect(regimeObs!.field).toContain('version');
+    expect(regimeObs!.value).toBe('pre-claude-5,claude-5-short');
+  });
+
+  it('demotes when a session sits inside the unresolved bracket', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.218'), sessionOn('2026-06-01', '2.1.218')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    expect(rec!.severity).toBe('info');
+    expect(rec!.title).toContain('too close to a prompt-regime change');
+    const obs = rec!.provenance!.observations!.find((o) => o.claim.includes('too close'));
+    expect(obs!.value).toBe('indeterminate');
+  });
+
+  // Mixed case: one resolved regime AND an unplaceable session. Reporting only
+  // the resolved id would contradict the "too close to place" claim beside it.
+  it('names both the resolved regime and indeterminate in a mixed window', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-06-01', '2.1.218')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    expect(rec!.severity).toBe('info');
+    expect(rec!.title).toContain('too close to a prompt-regime change');
+    const obs = rec!.provenance!.observations!.find((o) => o.claim.includes('too close'));
+    expect(obs!.value).toBe('pre-claude-5,indeterminate');
+  });
+
+  // The 14 rows are the last 14 RECORDED days, which can span far more calendar
+  // time. A session on a gap day contributed to neither week's totals.
+  it('ignores sessions on gap days inside the recorded range', () => {
+    const cache = HOT();
+    // Punch a hole: drop 2026-05-28 from the recorded days, keeping the range.
+    cache.dailyActivity = cache.dailyActivity.filter((d) => d.date !== '2026-05-28');
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-05-28', '2.1.220')];
+    const rec = detector.rule(input(cache, ran), NOW);
+    expect(rec!.title).not.toContain('confounded');
+    expect(rec!.severity).toBe('warning');
+  });
+
+  it('ignores sessions outside the recorded window entirely', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-07-28', '2.1.220')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    expect(rec!.title).not.toContain('confounded');
+    expect(rec!.severity).toBe('warning');
+  });
+
+  it('does not confound a window whose sessions carry no version', () => {
+    const ran = [sessionOn('2026-05-23'), sessionOn('2026-06-01')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    expect(rec!.title).not.toContain('confounded');
+    expect(rec!.severity).toBe('warning');
+  });
+
+  it('behaves exactly as before when no sessions are supplied', () => {
+    const withNone = detector.rule(input(HOT()), NOW);
+    expect(withNone!.severity).toBe('warning');
+    expect(withNone!.title).not.toContain('confounded');
+  });
+
+  it('hedges rather than asserting the harness caused the change', () => {
+    const ran = [sessionOn('2026-05-23', '2.1.212'), sessionOn('2026-06-01', '2.1.220')];
+    const rec = detector.rule(input(HOT(), ran), NOW);
+    expect(rec!.detail).toContain('cannot be separated from');
+    expect(rec!.detail).toContain('last 14 recorded days');
+    expect(rec!.detail).not.toMatch(/changes tool-call volume on its own/);
+    expect(rec!.provenance!.inference).toContain('cannot be separated from');
   });
 });

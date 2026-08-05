@@ -404,8 +404,50 @@ function makeCache(
   };
 }
 
-function activityInput(statsCache: StatsCache): RecommendationInput {
-  return baseInput({ statsCache });
+/**
+ * #3405: `regimeSpanning` adds two sessions inside the recorded window
+ * (2026-05-21..2026-06-03) on either side of the prompt-regime boundary, so the
+ * detector emits its CONFOUNDED provenance shape — the extra observation and
+ * the reworded inference — and that shape reaches
+ * `validateRecommendationProvenance` in the registry sweep below. Version rides
+ * on `tokenData`, never on `Session`: `groupBySessions` cannot populate
+ * `Session.version`, so a fixture that set it would prove nothing.
+ */
+function activityInput(statsCache: StatsCache, regimeSpanning = false): RecommendationInput {
+  if (!regimeSpanning) return baseInput({ statsCache });
+  const runs = [
+    { sessionId: 'regime-pre', day: '2026-05-23', version: '2.1.212' },
+    { sessionId: 'regime-post', day: '2026-06-01', version: '2.1.220' },
+  ];
+  return baseInput({
+    statsCache,
+    sessions: runs.map(({ sessionId, day }) => {
+      const startTime = Date.parse(`${day}T12:00:00Z`);
+      return {
+        sessionId,
+        project: '/repo',
+        projectShort: 'repo',
+        entries: [],
+        startTime,
+        endTime: startTime + 60_000,
+        duration: 60_000,
+        messageCount: 1,
+      };
+    }) as unknown as RecommendationInput['sessions'],
+    tokenData: runs.map(({ sessionId, version }) => ({
+      sessionId,
+      version,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      model: 'claude-opus-4-8',
+      messageCount: 1,
+      entries: [],
+      compactionEvents: [],
+      hasUnknownModel: false,
+    })) as unknown as RecommendationInput['tokenData'],
+  });
 }
 
 const stopHookEvent = (hadErrors: boolean, prevented = false) => ({
@@ -1489,7 +1531,9 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
     now: Date.parse('2026-07-09T00:00:00Z'),
   }),
   'activity.activity-trend': () => ({
-    input: activityInput(makeCache(12576, 2373)),
+    // #3405: exercise the CONFOUNDED shape here — it carries an extra
+    // observation and a reworded inference the unconfounded path never emits.
+    input: activityInput(makeCache(12576, 2373), true),
     now: Date.parse('2026-06-04T00:00:00Z'),
   }),
   'reliability.hook-errors': () => ({

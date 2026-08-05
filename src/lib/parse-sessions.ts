@@ -11,6 +11,21 @@ import {
 } from './thinking-tokens';
 
 /**
+ * Prompt-regime derivation (#3405) keys off the `version` dimension this module
+ * parses below, but it lives in `./prompt-regime` and is imported from there
+ * directly — deliberately NOT re-exported here.
+ *
+ * A convenience pass-through on this module is not free: `parse-sessions` is
+ * bundled into the SPA upload-pipeline worker, so re-exporting dragged the
+ * boundary table into a bundle that never runs detectors (the engine-absent
+ * gate proves the catalog is excluded) and pushed that route 1,520 B over its
+ * size cap. The only consumer is server-side, so it imports
+ * `./prompt-regime` directly and the SPA pays nothing.
+ *
+ * @see ./prompt-regime.ts — `promptRegimeForSession` / `summarizePromptRegimes`
+ */
+
+/**
  * Chars/token density for `tool_result` PAYLOAD content (#1926 context
  * composition). Tool output (file contents, command logs, JSON) tokenizes
  * somewhat denser than prose but lighter than minified JSON: ~3.5 chars/token
