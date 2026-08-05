@@ -66,6 +66,13 @@ export const GATE_REGISTRY = [
     discriminatingTest: 'src/lib/check-bundle-size.test.ts',
   },
   {
+    // Drives the real gate over synthetic dists: both leak shapes fail (exit 1)
+    // and an empty/absent dist is "verified nothing" (exit 2), never a pass.
+    name: 'check-spa-no-node-fs',
+    script: 'scripts/check-spa-no-node-fs.mjs',
+    discriminatingTest: 'scripts/check-spa-no-node-fs.test.mjs',
+  },
+  {
     // Inspected for #3478: its runCli spawn tests assert status 1 for missing
     // gates / open work / unaudited deferrals — already discriminating.
     name: 'check-release-gate',
