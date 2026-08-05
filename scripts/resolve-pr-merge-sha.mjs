@@ -23,30 +23,41 @@ function requiredSha(value, name) {
   return sha;
 }
 
-function assertPullBinding(pull, expectedHeadSha, expectedBaseSha) {
+function assertPullBinding(pull, expectedHeadSha, expectedBaseRef) {
   const headSha = String(pull?.head?.sha ?? '').toLowerCase();
-  const baseSha = String(pull?.base?.sha ?? '').toLowerCase();
   if (headSha !== expectedHeadSha) {
     throw new Error('pull request head SHA changed while resolving its test merge');
   }
-  if (baseSha !== expectedBaseSha) {
-    throw new Error('pull request base SHA changed while resolving its test merge');
+  if (String(pull?.base?.ref ?? '') !== expectedBaseRef) {
+    throw new Error(
+      'pull request base branch changed after its triggering event; no test-merge SHA is safe to run'
+    );
   }
   if (pull?.mergeable === false) {
     throw new Error('pull request is not mergeable; no test-merge SHA is safe to run');
   }
 }
 
-function commitBindsExpectedParents(commit, mergeSha, headSha, baseSha) {
+// The event payload's base SHA is frozen at PR creation, while GitHub
+// recomputes merge_commit_sha against the CURRENT base branch head — so the
+// binding target is the non-head parent of the test merge, verified below
+// against a live read of the base branch ref. The branch NAME (unlike its
+// SHA) stays fixed under legitimate base advancement, so it is bound to the
+// base-controlled triggering event via expectedBaseRef: a PR retargeted
+// after authorization fails closed instead of adopting the new base.
+function mergeBaseParent(commit, mergeSha, headSha) {
   const parents = Array.isArray(commit?.parents)
     ? commit.parents.map((parent) => String(parent?.sha ?? '').toLowerCase())
     : [];
-  return (
-    String(commit?.sha ?? '').toLowerCase() === mergeSha &&
-    parents.length === 2 &&
-    parents.includes(headSha) &&
-    parents.includes(baseSha)
-  );
+  if (
+    String(commit?.sha ?? '').toLowerCase() !== mergeSha ||
+    parents.length !== 2 ||
+    !parents.includes(headSha)
+  ) {
+    return null;
+  }
+  const base = parents.find((parent) => parent !== headSha);
+  return base && FULL_SHA.test(base) ? base : null;
 }
 
 async function requestJson(
@@ -97,7 +108,7 @@ export async function resolvePrMergeSha({
   repository,
   prNumber,
   expectedHeadSha,
-  expectedBaseSha,
+  expectedBaseRef,
   token,
   fetchImpl = globalThis.fetch,
   sleep = (milliseconds) =>
@@ -121,7 +132,7 @@ export async function resolvePrMergeSha({
     throw new Error('prNumber must be a positive integer');
   }
   const headSha = requiredSha(expectedHeadSha, 'expectedHeadSha');
-  const baseSha = requiredSha(expectedBaseSha, 'expectedBaseSha');
+  const baseRef = requiredString(expectedBaseRef, 'expectedBaseRef');
   const bearerToken = requiredString(token, 'token');
   if (!Number.isSafeInteger(attempts) || attempts <= 0) {
     throw new Error('attempts must be a positive integer');
@@ -146,7 +157,7 @@ export async function resolvePrMergeSha({
       setTimeoutImpl,
       clearTimeoutImpl
     );
-    assertPullBinding(pull, headSha, baseSha);
+    assertPullBinding(pull, headSha, baseRef);
     const mergeSha = String(pull?.merge_commit_sha ?? '').toLowerCase();
 
     if (pull?.mergeable === true && FULL_SHA.test(mergeSha)) {
@@ -158,22 +169,41 @@ export async function resolvePrMergeSha({
         setTimeoutImpl,
         clearTimeoutImpl
       );
-      if (commitBindsExpectedParents(commit, mergeSha, headSha, baseSha)) {
-        const confirmation = await requestJson(
-          pullUrl,
+      const mergeBaseSha = mergeBaseParent(commit, mergeSha, headSha);
+      if (mergeBaseSha) {
+        const encodedBaseRef = baseRef
+          .split('/')
+          .map(encodeURIComponent)
+          .join('/');
+        const liveBase = await requestJson(
+          `${root}/repos/${owner}/${name}/git/ref/heads/${encodedBaseRef}`,
           bearerToken,
           fetchImpl,
           requestTimeoutMs,
           setTimeoutImpl,
           clearTimeoutImpl
         );
-        assertPullBinding(confirmation, headSha, baseSha);
+        const liveBaseSha = String(liveBase?.object?.sha ?? '').toLowerCase();
         if (
-          confirmation?.mergeable === true &&
-          String(confirmation?.merge_commit_sha ?? '').toLowerCase() ===
-            mergeSha
+          liveBase?.object?.type === 'commit' &&
+          liveBaseSha === mergeBaseSha
         ) {
-          return mergeSha;
+          const confirmation = await requestJson(
+            pullUrl,
+            bearerToken,
+            fetchImpl,
+            requestTimeoutMs,
+            setTimeoutImpl,
+            clearTimeoutImpl
+          );
+          assertPullBinding(confirmation, headSha, baseRef);
+          if (
+            confirmation?.mergeable === true &&
+            String(confirmation?.merge_commit_sha ?? '').toLowerCase() ===
+              mergeSha
+          ) {
+            return mergeSha;
+          }
         }
       }
     }
@@ -192,7 +222,7 @@ async function main() {
     repository: process.env.GITHUB_REPOSITORY,
     prNumber: process.env.PR_NUMBER,
     expectedHeadSha: process.env.EXPECTED_HEAD_SHA,
-    expectedBaseSha: process.env.EXPECTED_BASE_SHA,
+    expectedBaseRef: process.env.EXPECTED_BASE_REF,
     token: process.env.GITHUB_TOKEN,
   });
   const outputPath = requiredString(process.env.GITHUB_OUTPUT, 'GITHUB_OUTPUT');

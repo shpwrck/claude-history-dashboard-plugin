@@ -49,6 +49,7 @@ const MERGE_SHA_EXPRESSION =
 const PR_NUMBER_EXPRESSION = '${{ github.event.pull_request.number }}';
 const HEAD_SHA_EXPRESSION = '${{ github.event.pull_request.head.sha }}';
 const BASE_SHA_EXPRESSION = '${{ github.event.pull_request.base.sha }}';
+const BASE_REF_EXPRESSION = '${{ github.event.pull_request.base.ref }}';
 const BROKER_WORKFLOW_OUTPUT = '${{ jobs.authorize.outputs.trusted }}';
 const BROKER_JOB_OUTPUT = '${{ steps.same-repo.outputs.trusted }}';
 const BROKER_TRUST_EXPRESSION =
@@ -60,7 +61,7 @@ const RESOLVER_BASE_CHECKOUT = '${{ inputs.expected-base-sha }}';
 const RESOLVER_TOKEN_EXPRESSION = '${{ github.token }}';
 const RESOLVER_PR_INPUT = '${{ inputs.pr-number }}';
 const RESOLVER_HEAD_INPUT = '${{ inputs.expected-head-sha }}';
-const RESOLVER_BASE_INPUT = '${{ inputs.expected-base-sha }}';
+const RESOLVER_BASE_REF_INPUT = '${{ inputs.expected-base-ref }}';
 const RESOLVER_COMMAND = 'node scripts/resolve-pr-merge-sha.mjs';
 const CHECKOUT_ACTION =
   'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
@@ -284,14 +285,16 @@ export function prWorkflowTrustReasons(root) {
             'pr-number',
             'expected-head-sha',
             'expected-base-sha',
+            'expected-base-ref',
           ]) ||
-          Object.keys(resolver.with ?? {}).length !== 3 ||
+          Object.keys(resolver.with ?? {}).length !== 4 ||
           resolver?.with?.['pr-number'] !== PR_NUMBER_EXPRESSION ||
           resolver?.with?.['expected-head-sha'] !== HEAD_SHA_EXPRESSION ||
-          resolver?.with?.['expected-base-sha'] !== BASE_SHA_EXPRESSION
+          resolver?.with?.['expected-base-sha'] !== BASE_SHA_EXPRESSION ||
+          resolver?.with?.['expected-base-ref'] !== BASE_REF_EXPRESSION
         ) {
           reasons.push(
-            `${entry.name}: resolve-merge must receive only the event PR number, head SHA, and base SHA`
+            `${entry.name}: resolve-merge must receive only the event PR number, head SHA, base SHA, and base ref`
           );
         }
         if ('secrets' in resolver) {
@@ -400,6 +403,7 @@ export function prWorkflowTrustReasons(root) {
         ['pr-number', 'number'],
         ['expected-head-sha', 'string'],
         ['expected-base-sha', 'string'],
+        ['expected-base-ref', 'string'],
       ];
       const inputsValid =
         Object.keys(inputs).join(',') ===
@@ -493,13 +497,13 @@ export function prWorkflowTrustReasons(root) {
           'GITHUB_TOKEN',
           'PR_NUMBER',
           'EXPECTED_HEAD_SHA',
-          'EXPECTED_BASE_SHA',
+          'EXPECTED_BASE_REF',
         ]) ||
         Object.keys(resolverEnv).length !== 4 ||
         resolverEnv.GITHUB_TOKEN !== RESOLVER_TOKEN_EXPRESSION ||
         resolverEnv.PR_NUMBER !== RESOLVER_PR_INPUT ||
         resolverEnv.EXPECTED_HEAD_SHA !== RESOLVER_HEAD_INPUT ||
-        resolverEnv.EXPECTED_BASE_SHA !== RESOLVER_BASE_INPUT
+        resolverEnv.EXPECTED_BASE_REF !== RESOLVER_BASE_REF_INPUT
       ) {
         reasons.push(
           `${MERGE_RESOLVER_WORKFLOW}: resolve step must run only the canonical merge resolver with bound inputs`

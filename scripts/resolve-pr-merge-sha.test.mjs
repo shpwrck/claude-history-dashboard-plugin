@@ -6,7 +6,8 @@ import { resolvePrMergeSha } from './resolve-pr-merge-sha.mjs';
 const REPOSITORY = 'owner/repo';
 const PR_NUMBER = 42;
 const HEAD_SHA = 'a'.repeat(40);
-const BASE_SHA = 'b'.repeat(40);
+const CREATION_BASE_SHA = 'b'.repeat(40);
+const CURRENT_BASE_SHA = 'e'.repeat(40);
 const MERGE_SHA = 'c'.repeat(40);
 
 function response(body, status = 200) {
@@ -27,10 +28,13 @@ function queuedFetch(...responses) {
   };
 }
 
+// base.sha stays frozen at the PR-creation value in every payload GitHub
+// serves, so the fixtures pin it to a STALE sha on purpose: resolution must
+// succeed without ever matching it.
 function pull(overrides = {}) {
   return {
     head: { sha: HEAD_SHA },
-    base: { sha: BASE_SHA },
+    base: { ref: 'master', sha: CREATION_BASE_SHA, ...overrides.base },
     mergeable: true,
     merge_commit_sha: MERGE_SHA,
     ...overrides,
@@ -40,7 +44,15 @@ function pull(overrides = {}) {
 function mergeCommit(overrides = {}) {
   return {
     sha: MERGE_SHA,
-    parents: [{ sha: BASE_SHA }, { sha: HEAD_SHA }],
+    parents: [{ sha: CURRENT_BASE_SHA }, { sha: HEAD_SHA }],
+    ...overrides,
+  };
+}
+
+function baseRef(overrides = {}) {
+  return {
+    ref: 'refs/heads/master',
+    object: { sha: CURRENT_BASE_SHA, type: 'commit' },
     ...overrides,
   };
 }
@@ -51,7 +63,7 @@ function options(fetchImpl, overrides = {}) {
     repository: REPOSITORY,
     prNumber: PR_NUMBER,
     expectedHeadSha: HEAD_SHA,
-    expectedBaseSha: BASE_SHA,
+    expectedBaseRef: 'master',
     token: 'test-token',
     fetchImpl,
     sleep: async () => {},
@@ -61,12 +73,41 @@ function options(fetchImpl, overrides = {}) {
   };
 }
 
+test('a PR whose base branch advanced after creation still resolves its test merge', async () => {
+  // Regression fixture for #3635: the event/base payload sha is stale
+  // (CREATION_BASE_SHA) while the test merge binds head + CURRENT_BASE_SHA.
+  // The pre-fix resolver required parents to include the stale sha and could
+  // never resolve once the base branch moved.
+  const requestedUrls = [];
+  const responses = [
+    response(pull()),
+    response(mergeCommit()),
+    response(baseRef()),
+    response(pull()),
+  ];
+  const fetchImpl = async (url) => {
+    requestedUrls.push(String(url));
+    assert.notEqual(responses.length, 0, 'unexpected API request');
+    return responses.shift();
+  };
+
+  const mergeSha = await resolvePrMergeSha(options(fetchImpl));
+
+  assert.equal(mergeSha, MERGE_SHA);
+  assert.match(
+    requestedUrls[2],
+    /\/repos\/owner\/repo\/git\/ref\/heads\/master$/u,
+    'the base binding must come from a live base branch ref read'
+  );
+});
+
 test('a transient null merge SHA is polled until one immutable test merge is verified', async () => {
   let sleeps = 0;
   const fetchImpl = queuedFetch(
     response(pull({ mergeable: null, merge_commit_sha: null })),
     response(pull()),
     response(mergeCommit()),
+    response(baseRef()),
     response(pull())
   );
 
@@ -86,6 +127,7 @@ test('a head change during merge resolution fails closed without returning stale
   const fetchImpl = queuedFetch(
     response(pull()),
     response(mergeCommit()),
+    response(baseRef()),
     response(pull({ head: { sha: 'd'.repeat(40) } }))
   );
 
@@ -95,14 +137,91 @@ test('a head change during merge resolution fails closed without returning stale
   );
 });
 
-test('a stale merge commit whose parents do not bind the expected head and base is never emitted', async () => {
+test('a base branch retarget before resolution starts fails closed', async () => {
+  // The expected base ref comes from the base-controlled triggering event;
+  // a PR retargeted after authorization must never bind a merge at all.
+  const fetchImpl = queuedFetch(
+    response(pull({ base: { ref: 'release', sha: CREATION_BASE_SHA } }))
+  );
+
+  await assert.rejects(
+    resolvePrMergeSha(options(fetchImpl, { attempts: 1 })),
+    /base branch changed after its triggering event/i
+  );
+});
+
+test('a base branch retarget during merge resolution fails closed', async () => {
+  const fetchImpl = queuedFetch(
+    response(pull()),
+    response(mergeCommit()),
+    response(baseRef()),
+    response(pull({ base: { ref: 'release', sha: CREATION_BASE_SHA } }))
+  );
+
+  await assert.rejects(
+    resolvePrMergeSha(options(fetchImpl)),
+    /base branch changed after its triggering event/i
+  );
+});
+
+test('a pull payload without a base branch ref fails closed', async () => {
+  const fetchImpl = queuedFetch(response(pull({ base: { ref: '' } })));
+
+  await assert.rejects(
+    resolvePrMergeSha(options(fetchImpl, { attempts: 1 })),
+    /base branch changed after its triggering event/i
+  );
+});
+
+test('a stale merge commit whose parents do not bind the expected head is never emitted', async () => {
   const fetchImpl = queuedFetch(
     response(pull()),
     response(
       mergeCommit({
-        parents: [{ sha: BASE_SHA }, { sha: 'd'.repeat(40) }],
+        parents: [{ sha: CURRENT_BASE_SHA }, { sha: 'd'.repeat(40) }],
       })
     )
+  );
+
+  await assert.rejects(
+    resolvePrMergeSha(options(fetchImpl, { attempts: 1 })),
+    /no immutable test-merge SHA resolved/i
+  );
+});
+
+test('a merge whose base parent is not the live base branch head is never emitted', async () => {
+  // The merge was computed against a base state that is no longer (or never
+  // was) the base branch tip; the resolver must keep polling instead of
+  // trusting it.
+  const fetchImpl = queuedFetch(
+    response(pull()),
+    response(mergeCommit({ parents: [{ sha: 'f'.repeat(40) }, { sha: HEAD_SHA }] })),
+    response(baseRef())
+  );
+
+  await assert.rejects(
+    resolvePrMergeSha(options(fetchImpl, { attempts: 1 })),
+    /no immutable test-merge SHA resolved/i
+  );
+});
+
+test('a degenerate merge commit with two head parents is never emitted', async () => {
+  const fetchImpl = queuedFetch(
+    response(pull()),
+    response(mergeCommit({ parents: [{ sha: HEAD_SHA }, { sha: HEAD_SHA }] }))
+  );
+
+  await assert.rejects(
+    resolvePrMergeSha(options(fetchImpl, { attempts: 1 })),
+    /no immutable test-merge SHA resolved/i
+  );
+});
+
+test('a base ref that resolves to a non-commit object is never trusted', async () => {
+  const fetchImpl = queuedFetch(
+    response(pull()),
+    response(mergeCommit()),
+    response(baseRef({ object: { sha: CURRENT_BASE_SHA, type: 'tag' } }))
   );
 
   await assert.rejects(
@@ -120,6 +239,32 @@ test('an unresolved null merge SHA exhausts the bounded poll and fails closed', 
   await assert.rejects(
     resolvePrMergeSha(options(fetchImpl, { attempts: 2 })),
     /no immutable test-merge SHA resolved/i
+  );
+});
+
+test('a slashed base branch name is encoded per segment in the ref request', async () => {
+  const requestedUrls = [];
+  const responses = [
+    response(pull({ base: { ref: 'release/v0.6#x', sha: CREATION_BASE_SHA } })),
+    response(mergeCommit()),
+    response(baseRef({ ref: 'refs/heads/release/v0.6#x' })),
+    response(pull({ base: { ref: 'release/v0.6#x', sha: CREATION_BASE_SHA } })),
+  ];
+  const fetchImpl = async (url) => {
+    requestedUrls.push(String(url));
+    assert.notEqual(responses.length, 0, 'unexpected API request');
+    return responses.shift();
+  };
+
+  const mergeSha = await resolvePrMergeSha(
+    options(fetchImpl, { expectedBaseRef: 'release/v0.6#x' })
+  );
+
+  assert.equal(mergeSha, MERGE_SHA);
+  assert.match(
+    requestedUrls[2],
+    /\/git\/ref\/heads\/release\/v0\.6%23x$/u,
+    'ref path segments must be URI-encoded without encoding the separators'
   );
 });
 
