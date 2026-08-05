@@ -21,9 +21,12 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+  ADOPTION_SPOOL_ROTATION_LOCK_LEASE_INFIX,
   ADOPTION_SPOOL_ROTATION_LOCK_RECLAIM_INFIX,
+  ADOPTION_SPOOL_ROTATION_LOCK_STEAL_INFIX,
   ADOPTION_SPOOL_ROTATION_LOCK_SUFFIX,
   acquireAdoptionSpoolRotationLock,
+  adoptionSpoolRotationLockOwnerId,
   adoptionSpoolRotationLockPath,
 } from './adoption-spool-lock';
 import { drainAdoptionSpool } from './adoption-spool';
@@ -979,5 +982,515 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
       vi.doUnmock('node:fs/promises');
       vi.resetModules();
     }
+  });
+});
+
+// Protocol v2 (#3557): a claim carries a per-owner LEASE, created only once the
+// claim is held and removed before it is released, so a lease is POSITIVE PROOF
+// of who owns the claim. These tests inject syscall seams rather than racing
+// real processes, so every interleaving is deterministic; the last one is the
+// real SIGKILL proof. Several pin the #3651 review findings directly.
+describe('adoption-spool generation-claim lease (protocol v2)', () => {
+  const OWNER_FIELD = { pid: 0, boot: 1, ns: 2, start: 3, nonce: 4 } as const;
+
+  function withOwnerField(
+    ownerId: string,
+    field: keyof typeof OWNER_FIELD,
+    value: string
+  ): string {
+    const parts = ownerId.split('_');
+    parts[OWNER_FIELD[field]] = value;
+    return parts.join('_');
+  }
+
+  /** A pid whose process has exited and been reaped: provably not our owner. */
+  async function reapedPid(): Promise<number> {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const pid = child.pid!;
+    await new Promise((resolve) => child.on('exit', resolve));
+    return pid;
+  }
+
+  async function plantStaleLock(dir: string) {
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const lockPath = adoptionSpoolRotationLockPath(spool);
+    const content = `${JSON.stringify({
+      schemaVersion: '1',
+      kind: ADOPTION_SPOOL_ROTATION_LOCK_KIND,
+      role: 'producer',
+      pid: 999_999,
+      token: 'orphaned-holder',
+      createdAt: new Date(0).toISOString(),
+    })}\n`;
+    await writeFile(lockPath, content, 'utf8');
+    const past = new Date(Date.now() - 60_000);
+    await utimes(lockPath, past, past);
+    const generation = await lstat(lockPath, { bigint: true });
+    const claimPath = `${lockPath}${ADOPTION_SPOOL_ROTATION_LOCK_RECLAIM_INFIX}${generation.dev}-${generation.ino}`;
+    return { spool, lockPath, claimPath, content };
+  }
+
+  function leaseNameFor(claimPath: string, ownerId: string): string {
+    return `${claimPath}${ADOPTION_SPOOL_ROTATION_LOCK_LEASE_INFIX}${ownerId}`;
+  }
+
+  /**
+   * The exact on-disk state a claimant killed mid-hold leaves behind: the claim
+   * hard-linked from the lock, and the lease hard-linked from the claim.
+   */
+  async function plantOrphanedClaim(dir: string, ownerId: string) {
+    const planted = await plantStaleLock(dir);
+    await link(planted.lockPath, planted.claimPath);
+    const leasePath = leaseNameFor(planted.claimPath, ownerId);
+    await link(planted.claimPath, leasePath);
+    return { ...planted, leasePath };
+  }
+
+  function leaseEntries(names: string[]): string[] {
+    return names.filter((name) =>
+      name.includes(ADOPTION_SPOOL_ROTATION_LOCK_LEASE_INFIX)
+    );
+  }
+
+  it('takes the claim before recording its lease, and drops the lease first', async () => {
+    const dir = await makeDir();
+    const spool = join(dir, 'adoption-spool.jsonl');
+    const order: string[] = [];
+
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      const label = (path: string) =>
+        path.includes(ADOPTION_SPOOL_ROTATION_LOCK_LEASE_INFIX)
+          ? 'lease'
+          : path.includes(ADOPTION_SPOOL_ROTATION_LOCK_RECLAIM_INFIX)
+            ? 'claim'
+            : 'lock';
+      return {
+        ...actual,
+        link: async (...args: Parameters<typeof actual.link>) => {
+          const result = await actual.link(...args);
+          order.push(`link:${label(String(args[1]))}`);
+          return result;
+        },
+        unlink: async (...args: Parameters<typeof actual.unlink>) => {
+          const result = await actual.unlink(...args);
+          order.push(`unlink:${label(String(args[0]))}`);
+          return result;
+        },
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireWatched } = await import(
+        './adoption-spool-lock'
+      );
+      const lock = await acquireWatched(spool, { role: 'drain' });
+      expect(lock).not.toBeNull();
+      await lock!.release();
+
+      // L1 in both directions: the claim exists before any lease is recorded,
+      // and the lease is gone before the claim it attributes.
+      expect(order).toEqual([
+        'link:claim',
+        'link:lease',
+        'unlink:lock',
+        'unlink:lease',
+        'unlink:claim',
+      ]);
+      expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+    } finally {
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
+  it('leaves no lease behind when it loses the claim race (#3651 finding 1)', async () => {
+    // A stranded lease is what let a live claim be attributed to a dead owner.
+    // A contender that loses the link race must therefore write NOTHING.
+    const dir = await makeDir();
+    const ownerId = await adoptionSpoolRotationLockOwnerId();
+    const { spool, claimPath } = await plantOrphanedClaim(dir, ownerId);
+    const before = leaseEntries(await readdir(dir));
+    const leaseCreations: string[] = [];
+
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      const record = (path: string) => {
+        if (path.includes(ADOPTION_SPOOL_ROTATION_LOCK_LEASE_INFIX)) {
+          leaseCreations.push(path);
+        }
+      };
+      return {
+        ...actual,
+        open: async (...args: Parameters<typeof actual.open>) => {
+          record(String(args[0]));
+          return actual.open(...args);
+        },
+        link: async (...args: Parameters<typeof actual.link>) => {
+          record(String(args[1]));
+          return actual.link(...args);
+        },
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireLosing } = await import(
+        './adoption-spool-lock'
+      );
+      const lock = await acquireLosing(spool, {
+        role: 'drain',
+        budgetMs: 120,
+        retryDelayMs: 5,
+      });
+
+      expect(lock).toBeNull();
+      expect(await exists(claimPath)).toBe(true);
+      // Not merely cleaned up afterwards: a losing contender never creates a
+      // lease at all, so there is no window in which a kill could strand one.
+      expect(leaseCreations).toEqual([]);
+      expect(leaseEntries(await readdir(dir))).toEqual(before);
+    } finally {
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
+  it('never removes a live lease-less (v1 peer) claim (#3651 finding 1)', async () => {
+    const dir = await makeDir();
+    const { spool, lockPath, claimPath, content } = await plantStaleLock(dir);
+    await link(lockPath, claimPath);
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 120,
+      retryDelayMs: 5,
+    });
+
+    // No lease, no attribution, no recovery: exactly the pre-#3557 fail-closed
+    // behavior a not-yet-upgraded peer relies on.
+    expect(lock).toBeNull();
+    expect(await exists(claimPath)).toBe(true);
+    expect(await readFile(lockPath, 'utf8')).toBe(content);
+  });
+
+  it('ignores a candidate lease that is not a hard link to the claim', async () => {
+    const dir = await makeDir();
+    const ownerId = await adoptionSpoolRotationLockOwnerId(await reapedPid());
+    const { spool, lockPath, claimPath } = await plantStaleLock(dir);
+    await link(lockPath, claimPath);
+    // Correctly named, dead owner, but a plain file rather than a link to the
+    // claimed generation, so it is not this claim's ownership record (L3).
+    await writeFile(leaseNameFor(claimPath, ownerId), '{}\n', 'utf8');
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 120,
+      retryDelayMs: 5,
+    });
+
+    expect(lock).toBeNull();
+    expect(await exists(claimPath)).toBe(true);
+  });
+
+  it('recovers a claim orphaned by a provably dead owner and acquires', async () => {
+    const dir = await makeDir();
+    const ownerId = await adoptionSpoolRotationLockOwnerId(await reapedPid());
+    const { spool, lockPath, claimPath, leasePath } = await plantOrphanedClaim(
+      dir,
+      ownerId
+    );
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 2_000,
+      retryDelayMs: 5,
+    });
+
+    expect(lock).not.toBeNull();
+    expect(await exists(claimPath)).toBe(false);
+    expect(await exists(leasePath)).toBe(false);
+    expect(JSON.parse(await readFile(lockPath, 'utf8'))).toMatchObject({
+      token: lock!.token,
+    });
+    await lock!.release();
+    expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+  });
+
+  it('never removes a claim whose owner is still alive', async () => {
+    const dir = await makeDir();
+    const ownerId = withOwnerField(
+      await adoptionSpoolRotationLockOwnerId(),
+      'nonce',
+      'liveowner001'
+    );
+    const { spool, lockPath, claimPath, leasePath, content } =
+      await plantOrphanedClaim(dir, ownerId);
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 120,
+      retryDelayMs: 5,
+    });
+
+    expect(lock).toBeNull();
+    expect(await exists(claimPath)).toBe(true);
+    expect(await exists(leasePath)).toBe(true);
+    expect(await readFile(lockPath, 'utf8')).toBe(content);
+  });
+
+  it('stands down on an owner in another pid namespace instead of guessing', async () => {
+    const dir = await makeDir();
+    const ownerId = withOwnerField(
+      await adoptionSpoolRotationLockOwnerId(await reapedPid()),
+      'ns',
+      '4026539999'
+    );
+    const { spool, claimPath, leasePath } = await plantOrphanedClaim(
+      dir,
+      ownerId
+    );
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 120,
+      retryDelayMs: 5,
+    });
+
+    expect(lock).toBeNull();
+    expect(await exists(claimPath)).toBe(true);
+    expect(await exists(leasePath)).toBe(true);
+  });
+
+  it('checks the namespace before trusting a boot id (#3651 finding 3)', async () => {
+    const dir = await makeDir();
+    // A runtime that virtualizes boot_id per container gives a LIVE peer both a
+    // foreign namespace and a foreign boot id. Reading the boot id first called
+    // that peer definitively dead; the namespace check has to come first.
+    const ownerId = withOwnerField(
+      withOwnerField(
+        await adoptionSpoolRotationLockOwnerId(),
+        'ns',
+        '4026539999'
+      ),
+      'boot',
+      'ffffffffffffffff'
+    );
+    const { spool, claimPath, leasePath } = await plantOrphanedClaim(
+      dir,
+      ownerId
+    );
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 120,
+      retryDelayMs: 5,
+    });
+
+    expect(lock).toBeNull();
+    expect(await exists(claimPath)).toBe(true);
+    expect(await exists(leasePath)).toBe(true);
+  });
+
+  it('recovers a claim left by an earlier boot even when that pid is alive now', async () => {
+    const dir = await makeDir();
+    // Our own live pid in our own namespace, but a different kernel boot id:
+    // everything from that boot is definitively gone.
+    const ownerId = withOwnerField(
+      await adoptionSpoolRotationLockOwnerId(),
+      'boot',
+      'ffffffffffffffff'
+    );
+    const { spool, claimPath, leasePath } = await plantOrphanedClaim(
+      dir,
+      ownerId
+    );
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 2_000,
+      retryDelayMs: 5,
+    });
+
+    expect(lock).not.toBeNull();
+    expect(await exists(claimPath)).toBe(false);
+    expect(await exists(leasePath)).toBe(false);
+    await lock!.release();
+  });
+
+  it('stands down when a hardened /proc hides a live owner (#3651 finding 2)', async () => {
+    const dir = await makeDir();
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    children.push(holder);
+    const ownerId = await adoptionSpoolRotationLockOwnerId(holder.pid!);
+    const { spool, claimPath, leasePath } = await plantOrphanedClaim(
+      dir,
+      ownerId
+    );
+    const hiddenStat = `/proc/${holder.pid}/stat`;
+
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        // hidepid=2 / ProtectProc=invisible answer for another user's LIVE pid.
+        readFile: async (...args: Parameters<typeof actual.readFile>) => {
+          if (String(args[0]) === hiddenStat) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return actual.readFile(...args);
+        },
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireHidden } = await import(
+        './adoption-spool-lock'
+      );
+      const lock = await acquireHidden(spool, {
+        role: 'drain',
+        budgetMs: 120,
+        retryDelayMs: 5,
+      });
+
+      // kill(pid, 0) proved the process exists, so the hidden /proc entry must
+      // read as unverifiable, never as death.
+      expect(lock).toBeNull();
+      expect(await exists(claimPath)).toBe(true);
+      expect(await exists(leasePath)).toBe(true);
+    } finally {
+      holder.kill('SIGKILL');
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
+  it('elects exactly one winner when two recoveries reach the steal together', async () => {
+    const dir = await makeDir();
+    const ownerId = await adoptionSpoolRotationLockOwnerId(await reapedPid());
+    const { spool, claimPath } = await plantOrphanedClaim(dir, ownerId);
+
+    // Hold BOTH recoverers at the rename until each has decided to steal, so
+    // the check-then-act window r24-b calls irreducible is forced wide open.
+    let waiting = 0;
+    let releaseBarrier = () => {};
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    let stealsWon = 0;
+
+    vi.resetModules();
+    vi.doMock('node:fs/promises', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs/promises')>();
+      return {
+        ...actual,
+        rename: async (...args: Parameters<typeof actual.rename>) => {
+          waiting += 1;
+          if (waiting >= 2) releaseBarrier();
+          await barrier;
+          const result = await actual.rename(...args);
+          stealsWon += 1;
+          return result;
+        },
+      };
+    });
+
+    try {
+      const { acquireAdoptionSpoolRotationLock: acquireRacing } = await import(
+        './adoption-spool-lock'
+      );
+      const options = {
+        role: 'drain' as const,
+        budgetMs: 2_000,
+        retryDelayMs: 5,
+      };
+      const results = await Promise.all([
+        acquireRacing(spool, options),
+        acquireRacing(spool, options),
+      ]);
+
+      // The rename is the single-winner primitive: the loser saw ENOENT and
+      // stood down, so the orphan was removed exactly once and no live claim
+      // was ever taken away from anyone.
+      expect(stealsWon).toBe(1);
+      expect(results.filter((lock) => lock !== null)).toHaveLength(1);
+      expect(await exists(claimPath)).toBe(false);
+      for (const lock of results) await lock?.release();
+      expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
+    } finally {
+      releaseBarrier();
+      vi.doUnmock('node:fs/promises');
+      vi.resetModules();
+    }
+  });
+
+  it('collects a dead recoverer steal record without resurrecting it as a lease', async () => {
+    const dir = await makeDir();
+    const victimId = await adoptionSpoolRotationLockOwnerId(await reapedPid());
+    const recovererId = await adoptionSpoolRotationLockOwnerId(
+      await reapedPid()
+    );
+    const { spool, claimPath, lockPath } = await plantStaleLock(dir);
+    await link(lockPath, claimPath);
+    // A recoverer killed between its steal and its cleanup. The record may
+    // outlive its claim, so restoring it as a lease would let a later, live
+    // claim be attributed to the dead victim (L5).
+    const stealPath = `${leaseNameFor(claimPath, victimId)}${ADOPTION_SPOOL_ROTATION_LOCK_STEAL_INFIX}${recovererId}`;
+    await link(claimPath, stealPath);
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 200,
+      retryDelayMs: 5,
+    });
+
+    expect(lock).toBeNull();
+    expect(await exists(stealPath)).toBe(false);
+    // The claim is now lease-less, so it stays fail-closed rather than being
+    // recovered on the strength of a record that proves nothing.
+    expect(await exists(claimPath)).toBe(true);
+  });
+
+  it('recovers after a real claimant is SIGKILLed while holding its claim', async () => {
+    const dir = await makeDir();
+    const { spool, lockPath, claimPath } = await plantStaleLock(dir);
+    const ready = join(dir, 'holder-ready');
+
+    // The child takes the claim exactly as the protocol does — claim first,
+    // then the lease hard-linked from it — and is killed with no chance to
+    // clean up.
+    const holder = spawnLockChild(
+      `
+        const { link, writeFile } = await import('node:fs/promises');
+        const lock = await import(process.env.CHD_LOCK_MODULE_URL);
+        const ownerId = await lock.adoptionSpoolRotationLockOwnerId();
+        await link(process.env.LOCK_PATH, process.env.CLAIM_PATH);
+        await link(process.env.CLAIM_PATH, process.env.CLAIM_PATH + '.lease-' + ownerId);
+        await writeFile(process.env.READY_PATH, '');
+        await new Promise(() => {});
+      `,
+      { LOCK_PATH: lockPath, CLAIM_PATH: claimPath, READY_PATH: ready }
+    );
+
+    await waitFor(() => exists(ready), 'holder to take the claim');
+    holder.child.kill('SIGKILL');
+    await holder.exited;
+
+    const lock = await acquireAdoptionSpoolRotationLock(spool, {
+      role: 'drain',
+      budgetMs: 5_000,
+      retryDelayMs: 5,
+    });
+
+    expect(lock, holder.stderr()).not.toBeNull();
+    expect(await exists(claimPath)).toBe(false);
+    await lock!.release();
+    expect((await readdir(dir)).filter(isReclaimResidue)).toEqual([]);
   });
 });
