@@ -34,6 +34,12 @@
 //       still advance the stored signature, or the cache would re-read that
 //       session's file on every subsequent call forever (the original bug in
 //       miniature).
+//   (f) EMPTY EXTRACTIONS ARM THE GATE TOO (#3652). A session whose extracted
+//       transcript is empty (no assistant turns) used to delete the row and
+//       stamp nothing, so readTranscriptSig stayed null and EVERY later call
+//       re-read the source in full — the same bug through the empty branch.
+//       An empty extraction now stamps a NULL-BLOB tombstone carrying the sig:
+//       one source read, then every later call is free and still returns null.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -336,6 +342,58 @@ test('(e) a touch that re-extracts byte-identically re-arms the gate instead of 
       readsDuring(ingest, () => ingest.getTranscript(SESSION_ID)).reads,
       0,
       'the gate re-armed — no perpetual re-read after a zero-BLOB-touch persist'
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f): an empty extraction stamps a tombstone instead of leaving the gate
+//      unarmed (#3652).
+// ---------------------------------------------------------------------------
+test('(f) an empty-extraction session reads the source once, then serves null for free (#3652)', async () => {
+  await withFixture(({ ingest, dbPath, topPath }) => {
+    // Materialize the non-empty transcript first, then empty it on disk — the
+    // emptied-transcript cleanup path must also arm the gate, not just drop
+    // the stale BLOBs.
+    assert.ok(ingest.getTranscript(SESSION_ID));
+    writeFileSync(
+      topPath,
+      JSON.stringify({ type: 'user', message: { content: 'only a question' } }) + '\n'
+    );
+
+    const emptied = readsDuring(ingest, () => ingest.getTranscript(SESSION_ID));
+    assert.equal(emptied.reads, 1, 'the emptied transcript is re-read exactly once');
+    assert.equal(emptied.value, null, 'an empty extraction serves no transcript');
+
+    // The tombstone: no BLOBs, no hash, but a live signature from the one
+    // canonical constructor — the row exists purely to keep the gate armed.
+    const gate = storedGate(dbPath, SESSION_ID);
+    assert.ok(gate, 'a tombstone row survives the emptied-transcript cleanup');
+    assert.equal(gate.content_hash, null, 'the tombstone stores no content hash');
+    assert.equal(
+      gate.sig,
+      `${ingest.sessionFileSignature({ topPath, subPaths: [] })}#${ingest.PARSER_SIG_VERSION}`,
+      'the tombstone sig is canonical, same as a real row'
+    );
+
+    // The point of (f): three consecutive calls cost exactly the one source
+    // read above — the pre-fix behavior re-read on every single call.
+    for (const nth of ['second', 'third']) {
+      const later = readsDuring(ingest, () => ingest.getTranscript(SESSION_ID));
+      assert.equal(later.reads, 0, `the ${nth} call must not re-read the source`);
+      assert.equal(later.value, null, `the ${nth} call still reports no transcript`);
+    }
+
+    // And the tombstone still discriminates: content coming back misses once
+    // and serves the revived transcript.
+    writeFileSync(topPath, sessionJsonl('the answer returned'));
+    const revived = readsDuring(ingest, () => ingest.getTranscript(SESSION_ID));
+    assert.equal(revived.reads, 1, 'a revived transcript is re-read exactly once');
+    assert.equal(transcriptText(revived.value), 'the answer returned');
+    assert.equal(
+      readsDuring(ingest, () => ingest.getTranscript(SESSION_ID)).reads,
+      0,
+      'the revived transcript is warm again'
     );
   });
 });

@@ -35,7 +35,7 @@ import {
   estimateMonthlySavings,
 } from '../../parse-model-recommendation';
 import { fmtUsd, short } from '../shared';
-import { promptRegimeLabel, summarizePromptRegimes } from '../../prompt-regime';
+import { describeRegimeConfounding, summarizePromptRegimes } from '../../prompt-regime';
 
 /** Stay quiet on sparse data: need a meaningful downgradable set AND dollars. */
 const MIN_DOWNGRADABLE_TURNS = 20;
@@ -118,15 +118,9 @@ export const detector: Detector = {
       [...contributingSessions].map((id) => versionBySession.get(id))
     );
     const confounded = span.confounded;
-    const regimeNote = span.spansBoundary
-      ? `spans a Claude Code prompt-regime change (${span.regimes.map(promptRegimeLabel).join(' -> ')})`
-      : 'includes sessions on a Claude Code version too close to a prompt-regime change to place';
-    // Name every regime the window touched, including the unplaceable ones — a
-    // mixed window resolves one regime AND carries indeterminate sessions, so
-    // reporting only the resolved id would contradict the claim beside it.
-    const regimeValue =
-      [...span.regimes, ...(span.hasIndeterminate ? ['indeterminate'] : [])].join(',') ||
-      'indeterminate';
+    // One authoritative wording for the confounded-window annotation (#3661) —
+    // shared with every other regime-aware detector via prompt-regime.ts.
+    const { note: regimeNote, value: regimeValue } = describeRegimeConfounding(span);
 
     // Regime-spanning demotion (#3405): a confounded projection never escalates
     // to `warning`, and the copy says why.

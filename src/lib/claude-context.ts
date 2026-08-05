@@ -293,7 +293,11 @@ function buildSessionContext(p: SessionPayload): unknown {
     project: p.session.projectShort || p.session.project,
     title: p.session.title,
     ...(repoMap ? { repoMap } : {}),
-    version: p.session.version,
+    // #3653: groupBySessions never populates Session.version — the production
+    // source is the transcript-derived token row (the same join #3405's
+    // regime-aware detectors use). The session field stays as a fallback for
+    // callers that do populate it.
+    version: p.tokenData?.version ?? p.session.version,
     gitBranch: p.session.gitBranch,
     entrypoint: p.session.entrypoint,
     startTime: isoOrUndef(p.session.startTime),
@@ -345,6 +349,12 @@ function buildProjectContext(p: ProjectPayload): unknown {
   for (const s of p.project.sessions) {
     if (s.gitBranch) branches.add(s.gitBranch);
     if (s.version) versions.add(s.version);
+  }
+  // #3653: same as the session context — Session.version is never populated in
+  // production, so fold in the versions carried by this project's token rows
+  // (`tokens` is already filtered to the project's session ids above).
+  for (const t of tokens) {
+    if (t.version) versions.add(t.version);
   }
 
   const repoMap = buildRepoMapSlice(p.repoMap, p.project.project);

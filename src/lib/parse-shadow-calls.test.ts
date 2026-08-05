@@ -216,6 +216,65 @@ describe('parseShadowCalls', () => {
   });
 });
 
+describe('parseShadowCalls — prompt-regime pair gate (#3656)', () => {
+  // Fixture versions sit on both sides of the (2.1.217, 2.1.220] boundary
+  // bracket: 2.1.217 resolves pre-cut, 2.1.220 post-cut, 2.1.218 is inside the
+  // unresolved bracket (indeterminate).
+  const versionedLine = (
+    winner: 'main' | 'shadow' | 'tie',
+    mainVersion: string | undefined,
+    shadowVersion: string | undefined
+  ): string =>
+    JSON.stringify({
+      mode: 'replay',
+      axis: 'model',
+      judge: { winner },
+      main: { tokens: 1000, ...(mainVersion ? { cliVersion: mainVersion } : {}) },
+      shadow: { tokens: 400, ...(shadowVersion ? { cliVersion: shadowVersion } : {}) },
+    });
+
+  it('excludes a straddling pair from every tally and surfaces the exclusion', () => {
+    const jsonl = [
+      versionedLine('shadow', '2.1.217', '2.1.220'), // control pre-cut, variation post-cut
+      versionedLine('shadow', '2.1.220', '2.1.220'), // clean same-regime pair
+    ].join('\n');
+    const agg = parseShadowCalls(jsonl);
+    expect(agg.total).toBe(2);
+    expect(agg.counted).toBe(1); // the straddling pair never enters the tallies
+    expect(agg.skipped).toBe(1); // #2149 invariant unchanged: it lands in skipped
+    expect(agg.regimeStraddling).toBe(1); // ...and the exclusion is auditable
+    expect(agg.counted + agg.synthetic + agg.skipped).toBe(agg.total);
+    const model = agg.byAxis.find((a) => a.axis === 'model')!;
+    expect(model.samples).toBe(1);
+    expect(model.shadowWins).toBe(1);
+    expect(model.tokenDeltaCount).toBe(1); // only the clean pair's delta
+    // The (source, axis) cells re-derive from the same rule, so they agree.
+    expect(agg.bySourceAxis.reduce((n, c) => n + c.samples, 0)).toBe(1);
+  });
+
+  it('flags a pair with an indeterminate side as uncertain, never silently clean', () => {
+    // 2.1.218 sits strictly inside the unresolved bracket.
+    const agg = parseShadowCalls(versionedLine('shadow', '2.1.218', '2.1.220'));
+    expect(agg.counted).toBe(1); // stays counted — absence of certainty is not a straddle
+    expect(agg.regimeUncertain).toBe(1); // but it is flagged, per-aggregate...
+    expect(agg.byAxis[0].regimeUncertain).toBe(1); // ...and per-axis
+  });
+
+  it('treats a one-sided version as possibly straddling (uncertain) too', () => {
+    const agg = parseShadowCalls(versionedLine('shadow', undefined, '2.1.220'));
+    expect(agg.counted).toBe(1);
+    expect(agg.regimeUncertain).toBe(1);
+  });
+
+  it('leaves version-less records from older writers entirely unaffected', () => {
+    const agg = parseShadowCalls(line('model', 'replay', 'shadow', 1000, 400));
+    expect(agg.counted).toBe(1);
+    expect(agg.regimeStraddling).toBeUndefined();
+    expect(agg.regimeUncertain).toBeUndefined();
+    expect(agg.byAxis[0].regimeUncertain).toBeUndefined();
+  });
+});
+
 describe('parseShadowCalls — bounded per-variation receipts (#2643)', () => {
   const receipt = (overrides: Record<string, unknown>): string =>
     JSON.stringify({

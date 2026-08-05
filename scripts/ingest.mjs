@@ -2295,8 +2295,11 @@ export function getTranscript(sessionId) {
   // transcript. Signature first, BLOBs only once it matches.
   const sig = transcriptSigOf(s);
   if (transcriptCache.readTranscriptSig(sessionId) === sig) {
-    const cached = transcriptCache.getTranscript(sessionId);
-    if (cached) return cached;
+    // A matching sig means the stored row was built from exactly these source
+    // bytes, so it is authoritative either way: real BLOBs are served, and the
+    // #3652 empty-extraction tombstone reads back null WITHOUT re-reading the
+    // source (the old `if (cached)` fall-through re-read it on every call).
+    return transcriptCache.getTranscript(sessionId);
   }
 
   const merged = readMergedSessionSync(s);
@@ -3338,11 +3341,13 @@ function brotli(str) {
 function persistTranscript(sessionId, mergedText, sig) {
   const { content, thinking } = extractTranscript(mergedText);
   if (content.length === 0 && thinking.length === 0) {
-    // Session with no assistant prose at all — nothing to store. Drop any
-    // stale row (e.g. a transcript that was emptied) so the table stays exact.
-    // A delete is not a BLOB write, so it never counts toward transcriptsWritten.
-    const existed = transcriptCache.readTranscriptHash(sessionId);
-    if (existed) transcriptCache.delTranscript(sessionId);
+    // Session with no assistant prose at all — nothing to store. Replace any
+    // stale BLOBs (e.g. a transcript that was emptied) with a NULL-BLOB
+    // tombstone that still carries the sig (#3652): a bare delete left the
+    // gate unarmed, so every later getTranscript re-read the source in full.
+    // A tombstone is not a BLOB write, so it never counts toward
+    // transcriptsWritten.
+    transcriptCache.stampTranscriptTombstone(sessionId, sig);
     return false;
   }
   const contentJson = safeJsonStringify(content);

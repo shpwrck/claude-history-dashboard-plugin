@@ -9,7 +9,9 @@ import type { RecommendationInput } from '../types';
  * axis's newest dated record (the freshness anchor, #3246); omit it for the
  * undated case.
  */
-function shadowCalls(opts: { latestTs?: string } = {}): RecommendationInput['shadowCalls'] {
+function shadowCalls(
+  opts: { latestTs?: string; regimeUncertain?: number } = {}
+): RecommendationInput['shadowCalls'] {
   return {
     total: 6,
     counted: 6,
@@ -34,6 +36,9 @@ function shadowCalls(opts: { latestTs?: string } = {}): RecommendationInput['sha
         adherenceRegressionSum: 0,
         adherenceRegressionCount: 0,
         latestTs: opts.latestTs ?? null,
+        ...(opts.regimeUncertain !== undefined
+          ? { regimeUncertain: opts.regimeUncertain }
+          : {}),
       },
     ],
     bySourceAxis: [],
@@ -114,5 +119,34 @@ describe('workflow.shadow-axis-wins adopt-axis provenance (#3246)', () => {
     expect(rec.severity).toBe('info');
     expect(rec.title).not.toContain('Adopt');
     expect(rec.fix!.snippet).not.toContain('Default approach');
+  });
+});
+
+describe('workflow.shadow-axis-wins — possibly-straddling pairs are flagged (#3656)', () => {
+  it('surfaces the regime-uncertain count in evidence and provenance', () => {
+    const now = Date.parse(OBSERVED) + 5 * DAY;
+    const rec = detector.rule(
+      input(shadowCalls({ latestTs: OBSERVED, regimeUncertain: 2 })),
+      now
+    )!;
+    expect(validateRecommendationProvenance(rec)).toEqual([]);
+    expect(
+      rec.evidence!.some((e) =>
+        e.includes('2 of the 6 pair(s) may straddle a Claude Code prompt-regime change')
+      )
+    ).toBe(true);
+    const obs = rec.provenance!.observations.find(
+      (o) => o.field === 'regimeUncertain'
+    )!;
+    expect(obs.value).toBe(2);
+  });
+
+  it('adds nothing when every pair is regime-clean or version-less', () => {
+    const now = Date.parse(OBSERVED) + 5 * DAY;
+    const rec = detector.rule(input(shadowCalls({ latestTs: OBSERVED })), now)!;
+    expect(rec.evidence!.some((e) => e.includes('straddle'))).toBe(false);
+    expect(
+      rec.provenance!.observations.some((o) => o.field === 'regimeUncertain')
+    ).toBe(false);
   });
 });

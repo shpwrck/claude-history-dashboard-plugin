@@ -37,11 +37,20 @@ const FIX_UP: GitPostShipmentRework = {
 /**
  * The shipped PR number, read off the rework's own `shippedRef`. Rows are keyed
  * by `provenance.prNumber`, so a fixture whose provenance disagreed with its
- * evidence would silently mis-group — deriving it keeps the two in step.
+ * evidence would silently mis-group — deriving it keeps the two in step. A
+ * label-only row (no rework) gets a fixed number: nothing groups on it. A
+ * rework whose ref does NOT parse throws instead of silently defaulting (#3655)
+ * — a default would hide exactly the disagreement this helper exists to prevent.
  */
 function shippedPrNumber(rework: GitPostShipmentRework | undefined): number {
-  const m = /#(\d+)/.exec(rework?.shippedRef ?? '');
-  return m ? Number(m[1]) : 200;
+  if (!rework) return 200;
+  const m = /#(\d+)/.exec(rework.shippedRef);
+  if (!m) {
+    throw new Error(
+      `fixture rework carries no parseable PR number in shippedRef: ${rework.shippedRef}`
+    );
+  }
+  return Number(m[1]);
 }
 
 function row(
@@ -159,6 +168,40 @@ describe('reliability.post-shipment-rework — one event per shipment, not per s
       NOW
     )!;
     expect(two.affected).toBe(2);
+  });
+
+  it('counts same-numbered PRs from different repos as distinct shipments (#3655)', () => {
+    // PR numbers are repo-scoped: a/b#200 and c/d#200 are two shipments, and
+    // keying events by the bare number collapsed them into "1 merged change(s)
+    // across 2 session(s)".
+    const inRepo = (r: GitOutcome, repo: string): GitOutcome => ({
+      ...r,
+      provenance: { ...r.provenance, repo },
+    });
+    const twoRepos = detector.rule(
+      input({
+        gitOutcomes: [
+          inRepo(row('sA', REVERT), 'a/b'),
+          inRepo(row('sB', REVERT), 'c/d'),
+        ],
+      }),
+      NOW
+    )!;
+    expect(twoRepos.affected).toBe(2);
+    expect(twoRepos.detail).toContain('2 merged change(s)');
+  });
+
+  it('caps the cited session ids per evidence line (#3655)', () => {
+    const five = ['s1', 's2', 's3', 's4', 's5'].map((id) => row(id, REVERT));
+    const capped = detector.rule(input({ gitOutcomes: five }), NOW)!;
+    const line = capped.evidence!.find((e) => e.includes('PR #200'))!;
+    expect(line).toContain('sessions s1, s2, s3 +2 more');
+    expect(line).not.toContain('s4');
+  });
+
+  it('states that the shipment count is a lower bound, not a census (#3655)', () => {
+    const rec = detector.rule(input({ gitOutcomes: [row('a', REVERT)] }), NOW)!;
+    expect(rec.detail).toContain('lower bound on detected rework');
   });
 });
 

@@ -43,6 +43,10 @@ import {
   PROOF_REVALIDATION_STATUSES,
   type ProofRevalidationStatus,
 } from './proof-revalidation';
+import {
+  assessReplayPairRegimes,
+  type ReplayPairRegimeVerdict,
+} from './prompt-regime';
 
 export interface AxisAggregate {
   axis: string;
@@ -89,6 +93,13 @@ export interface AxisAggregate {
    * (`null` when the axis had no dated record).
    */
   latestTs?: string | null;
+  /**
+   * How many of this axis's counted rows carry a POSSIBLY-straddling regime
+   * pair (#3656) — see {@link ShadowCallAggregate.regimeUncertain}. The
+   * detectors flag an axis's evidence lower-confidence when this is non-zero.
+   * Absent (never 0) when none, so pre-#3656 fixtures compare unchanged.
+   */
+  regimeUncertain?: number;
   /**
    * Per-finding sub-aggregate, populated ONLY for the `recs` axis (#579, ADR 0005 Tier 2).
    * Keyed by `record.recs.findingId`; undefined for every other axis. Mirrors the per-axis
@@ -327,27 +338,56 @@ export function normalizeExperimentTimestamp(value: unknown): string | null {
 /** Strict proof-freshness allowlist; source/mode/judge basis never imply proof. */
 export const normalizeExperimentProofStatus = normalizeProofRevalidationStatus;
 
+/** The per-arm CLI version stamp, when a writer recorded one (#3656). */
+function armCliVersion(block: { cliVersion?: unknown } | null | undefined): string | undefined {
+  return block && typeof block.cliVersion === 'string' ? block.cliVersion : undefined;
+}
+
 /**
  * The ONE statement of the #2149 counting rule, shared by the aggregate parser
  * here and the per-row log parser (`shadow-experiments.ts`) so the drill-down
  * log can never silently disagree with the headline about which rows count.
+ *
+ * #3656 adds the prompt-regime pair gate to the same rule: a record whose
+ * `main.cliVersion` and `shadow.cliVersion` resolve to two DIFFERENT prompt
+ * regimes is not a valid comparison — part of its delta is the harness prompt
+ * cut, not the axis being trialed — so it is `skipped` with reason
+ * `regime-straddle`, the same fail-closed direction `summarizePromptRegimes`
+ * takes for windows. A pair with a present-but-unplaceable side (or only one
+ * versioned side) stays counted but carries `regimeVerdict: 'uncertain'` so
+ * consumers flag it lower-confidence; version-less records (older writers)
+ * report `no-version-data` and are unaffected.
  */
 export function classifyShadowRecord(rec: {
   synthetic?: unknown;
   axis?: unknown;
   mode?: unknown;
+  main?: { cliVersion?: unknown } | null;
+  shadow?: { cliVersion?: unknown } | null;
 }): {
   axis: string | null;
   mode: 'live' | 'replay' | null;
   disposition: 'counted' | 'synthetic' | 'skipped';
-  skipReason: 'no-axis' | 'bad-mode' | null;
+  skipReason: 'no-axis' | 'bad-mode' | 'regime-straddle' | null;
+  regimeVerdict: ReplayPairRegimeVerdict;
 } {
   const axis = typeof rec.axis === 'string' ? rec.axis : null;
   const mode = rec.mode === 'live' || rec.mode === 'replay' ? rec.mode : null;
-  if (rec.synthetic === true) return { axis, mode, disposition: 'synthetic', skipReason: null };
-  if (!axis) return { axis, mode, disposition: 'skipped', skipReason: 'no-axis' };
-  if (!mode) return { axis, mode, disposition: 'skipped', skipReason: 'bad-mode' };
-  return { axis, mode, disposition: 'counted', skipReason: null };
+  // main = control, shadow = variation (the ledger's two arms).
+  const regime = assessReplayPairRegimes(
+    armCliVersion(rec.main),
+    armCliVersion(rec.shadow)
+  );
+  const regimeVerdict = regime.verdict;
+  if (rec.synthetic === true)
+    return { axis, mode, disposition: 'synthetic', skipReason: null, regimeVerdict };
+  if (!axis)
+    return { axis, mode, disposition: 'skipped', skipReason: 'no-axis', regimeVerdict };
+  if (!mode)
+    return { axis, mode, disposition: 'skipped', skipReason: 'bad-mode', regimeVerdict };
+  if (regimeVerdict === 'straddles')
+    return { axis, mode, disposition: 'skipped', skipReason: 'regime-straddle', regimeVerdict };
+  return { axis, mode, disposition: 'counted', skipReason: null, regimeVerdict };
 }
 
 /**
@@ -441,6 +481,24 @@ export interface ShadowCallAggregate {
   live: number;
   /** `counted` rows that ran in `replay` mode. */
   replay: number;
+  /**
+   * Lines excluded because their control (`main.cliVersion`) and variation
+   * (`shadow.cliVersion`) ran under two DIFFERENT prompt regimes (#3656) —
+   * part of the delta is the harness prompt cut, so the pair is not a valid
+   * comparison. Included in `skipped` (the #2149 invariant is unchanged);
+   * surfaced separately so the exclusion is auditable, never silent. Absent
+   * (never 0) when no line straddled.
+   */
+  regimeStraddling?: number;
+  /**
+   * Counted rows whose pair POSSIBLY straddles a prompt-regime boundary
+   * (#3656): at least one side carried version data this module cannot place
+   * (unresolved bracket, unparseable), or only one side carried any. These
+   * rows stay in `counted` — absence of certainty is not proof of a straddle —
+   * but consumers must flag the evidence lower-confidence. Version-less rows
+   * from older writers are NOT counted here. Absent (never 0) when none.
+   */
+  regimeUncertain?: number;
   byAxis: AxisAggregate[];
   /**
    * Uniform (source, axis) provenance cells (#2150) — the one path every
@@ -496,8 +554,14 @@ interface ShadowRecord {
   /** Race-writer-only field (`finalizeRace`) — the unstamped race-live signature (#2151). */
   raceGoal?: unknown;
   judge?: { winner?: unknown; adherenceRegressions?: unknown } | null;
-  main?: { tokens?: unknown; costUsd?: unknown } | null;
-  shadow?: { tokens?: unknown; costUsd?: unknown } | null;
+  /**
+   * Per-arm run blocks. `cliVersion` (#3656) is the Claude Code version the arm
+   * ran under, when the writer stamped one — main = control, shadow = variation.
+   * A replay pair whose sides resolve to two different prompt regimes is not a
+   * valid comparison (see `classifyShadowRecord`). Absent on older writers.
+   */
+  main?: { tokens?: unknown; costUsd?: unknown; cliVersion?: unknown } | null;
+  shadow?: { tokens?: unknown; costUsd?: unknown; cliVersion?: unknown } | null;
   /** Recs-axis-only block written by the replay runner (`recsRecordFields()`). */
   recs?: {
     findingId?: unknown;
@@ -1125,6 +1189,10 @@ export function parseShadowCalls(
   let skipped = 0;
   let live = 0;
   let replay = 0;
+  // #3656 regime-pair buckets: straddling lines are a surfaced subset of
+  // `skipped`; uncertain lines are a surfaced subset of `counted`.
+  let regimeStraddling = 0;
+  let regimeUncertain = 0;
   const empty: ShadowCallAggregate = {
     total: 0,
     counted: 0,
@@ -1181,6 +1249,9 @@ export function parseShadowCalls(
     }
     if (cls.disposition === 'skipped') {
       skipped++;
+      // A regime-straddling pair (#3656) is excluded from every tally, but the
+      // exclusion is surfaced — silent dropping is the failure mode #2149 bans.
+      if (cls.skipReason === 'regime-straddle') regimeStraddling++;
       continue;
     }
     const axis = cls.axis!;
@@ -1202,6 +1273,13 @@ export function parseShadowCalls(
     if (!a) {
       a = emptyAxis(axis);
       byAxis.set(axis, a);
+    }
+    // A possibly-straddling pair stays counted but is flagged (#3656): one side
+    // carried version data that cannot be placed, so the comparison cannot be
+    // certified same-regime and must read as lower-confidence, never clean.
+    if (cls.regimeVerdict === 'uncertain') {
+      regimeUncertain++;
+      a.regimeUncertain = (a.regimeUncertain ?? 0) + 1;
     }
     // Source identity membership is selected now, then aggregated after the
     // bounded set is final so `(other)` assignment cannot depend on row order.
@@ -1420,6 +1498,8 @@ export function parseShadowCalls(
     skipped,
     live,
     replay,
+    ...(regimeStraddling > 0 ? { regimeStraddling } : {}),
+    ...(regimeUncertain > 0 ? { regimeUncertain } : {}),
     byAxis: sorted,
     bySourceAxis: sortedCells,
     byVariation: variationAggregate.byVariation,

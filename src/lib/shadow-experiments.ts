@@ -60,7 +60,7 @@ export interface ExperimentRow {
   /** Which #2149 counting bucket the line landed in — never hidden. */
   disposition: 'counted' | 'synthetic' | 'skipped';
   /** Why a `skipped` row skipped; null for counted/synthetic rows. */
-  skipReason: 'malformed' | 'no-axis' | 'bad-mode' | null;
+  skipReason: 'malformed' | 'no-axis' | 'bad-mode' | 'regime-straddle' | null;
   winner: 'main' | 'shadow' | 'tie' | null;
   /** Short human handle for the source task, when the record carried one. */
   task: string | null;
@@ -123,8 +123,8 @@ interface RawRecord {
   variation?: unknown;
   revalidationStatus?: unknown;
   judge?: { winner?: unknown; basis?: unknown; rationale?: unknown; reason?: unknown } | null;
-  main?: { tokens?: unknown; costUsd?: unknown } | null;
-  shadow?: { tokens?: unknown; costUsd?: unknown } | null;
+  main?: { tokens?: unknown; costUsd?: unknown; cliVersion?: unknown } | null;
+  shadow?: { tokens?: unknown; costUsd?: unknown; cliVersion?: unknown } | null;
 }
 
 /**

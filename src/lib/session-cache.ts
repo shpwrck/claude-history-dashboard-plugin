@@ -103,7 +103,12 @@ export interface TranscriptCache {
   // Advance the gate signature alone, for a source change that re-extracted to
   // a byte-identical transcript (the content_hash gate skipped the BLOB write).
   updateTranscriptSig(sessionId: string, sig: string): void;
-  // Drop a session's transcript row (prune / emptied-transcript cleanup).
+  // Record an empty extraction (#3652): a row with NULL BLOBs/hash but a live
+  // sig, replacing any stale BLOBs. getTranscript reads it back as null, and
+  // the armed sig lets the warm gate short-circuit instead of re-reading the
+  // source on every call (delTranscript alone left the gate unarmed forever).
+  stampTranscriptTombstone(sessionId: string, sig: string): void;
+  // Drop a session's transcript row (prune / removed-session cleanup).
   delTranscript(sessionId: string): void;
 }
 
@@ -193,7 +198,9 @@ export function initTranscriptCache(db: Db): TranscriptCache {
   return {
     getTranscript(sessionId) {
       const row = selTranscriptBlobs.get(sessionId) as BlobRow | undefined;
-      if (!row) return null;
+      // An empty-extraction tombstone (#3652) has NULL BLOBs — it exists only
+      // to keep the sig gate armed, and reads back as "no stored transcript".
+      if (!row || row.content_br == null) return null;
       return {
         contentBr: row.content_br,
         thinkingBr: row.thinking_br,
@@ -221,6 +228,9 @@ export function initTranscriptCache(db: Db): TranscriptCache {
     },
     updateTranscriptSig(sessionId, sig) {
       updTranscriptSig.run(sig, sessionId);
+    },
+    stampTranscriptTombstone(sessionId, sig) {
+      upsertTranscript.run(sessionId, null, null, null, null, sig);
     },
     delTranscript(sessionId) {
       delTranscript.run(sessionId);

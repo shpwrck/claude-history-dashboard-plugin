@@ -13,7 +13,7 @@
 
 import type { Detector, RecommendationInput } from '../types';
 import { analyzeActivityTrend } from '../../parse-stats-cache';
-import { promptRegimeLabel, summarizePromptRegimes } from '../../prompt-regime';
+import { describeRegimeConfounding, summarizePromptRegimes } from '../../prompt-regime';
 import type { PromptRegimeSpan } from '../../prompt-regime';
 import type { Session, SessionTokenData } from '../../../types';
 
@@ -95,15 +95,9 @@ export const detector: Detector = {
     const windowDates = sc.dailyActivity.slice(-14).map((d) => d.date);
     const span = regimeSpanForWindow(input.sessions ?? [], input.tokenData ?? [], windowDates);
     const confounded = span.confounded;
-    const regimeNote = span.spansBoundary
-      ? `spans a Claude Code prompt-regime change (${span.regimes.map(promptRegimeLabel).join(' -> ')})`
-      : 'includes sessions on a Claude Code version too close to a prompt-regime change to place';
-    // Name every regime the window touched, including the unplaceable ones — a
-    // mixed window resolves one regime AND carries indeterminate sessions, so
-    // reporting only the resolved id would contradict the claim beside it.
-    const regimeValue =
-      [...span.regimes, ...(span.hasIndeterminate ? ['indeterminate'] : [])].join(',') ||
-      'indeterminate';
+    // One authoritative wording for the confounded-window annotation (#3661) —
+    // shared with every other regime-aware detector via prompt-regime.ts.
+    const { note: regimeNote, value: regimeValue } = describeRegimeConfounding(span);
 
     // Stale-input demotion (#1102): when the stats cache is stale, "this week"
     // / "is running" / "at this pace" are no longer honestly present-tense —

@@ -289,6 +289,18 @@ describe('collectGitOutcomePullRequests — the flag gate makes ZERO calls (#339
     expect(pool.map((p) => p.number)).toEqual([7]);
   });
 
+  it('stamps every pooled record with its repo slug so attribution stays repo-scoped (#3655)', () => {
+    const pool = collectGitOutcomePullRequests(['a/b', 'c/d'], (repo) => [
+      {
+        number: repo === 'a/b' ? 1 : 2,
+        headRefName: `feature/${repo === 'a/b' ? 1 : 2}-x`,
+        state: 'MERGED',
+        merged: true,
+      },
+    ]);
+    expect(pool.map((p) => p.repo)).toEqual(['a/b', 'c/d']);
+  });
+
   it('links rework per repo, so a #42 in one repo cannot be reverted by another repo', () => {
     const shipped: GitOutcomePullRequest = {
       number: 42,
@@ -317,6 +329,90 @@ describe('collectGitOutcomePullRequests — the flag gate makes ZERO calls (#339
     // isolation above is the repo boundary, not a broken matcher.
     const linked = linkReworkMutations([shipped, foreignRevert]);
     expect(linked.find((p) => p.number === 42)?.revert?.ref).toBe('PR #99');
+  });
+});
+
+describe('buildGitOutcomes — multi-repo pools attribute within their own repo (#3655)', () => {
+  // Two repos, each carrying a PR numbered 42 with its own head branch. The
+  // pooled scan used to attach BOTH repos' sessions to whichever #42 pooled
+  // first, collapsing two shipments into one downstream.
+  const repoA42: GitOutcomePullRequest = {
+    number: 42,
+    repo: 'a/b',
+    headRefName: 'feature/42-alpha',
+    title: 'Alpha 42',
+    state: 'MERGED',
+    merged: true,
+  };
+  const repoB42: GitOutcomePullRequest = {
+    number: 42,
+    repo: 'c/d',
+    headRefName: 'feature/42-beta',
+    title: 'Beta 42',
+    state: 'MERGED',
+    merged: true,
+  };
+
+  it('attaches each session to its own repo\'s PR on an exact head-branch match', () => {
+    const outcomes = buildGitOutcomes(
+      [
+        { sessionId: 's-alpha', gitBranch: 'feature/42-alpha' },
+        { sessionId: 's-beta', gitBranch: 'feature/42-beta' },
+      ],
+      [repoA42, repoB42]
+    );
+    expect(outcomes).toHaveLength(2);
+    expect(
+      outcomes.find((o) => o.sessionId === 's-alpha')?.provenance.repo
+    ).toBe('a/b');
+    expect(
+      outcomes.find((o) => o.sessionId === 's-beta')?.provenance.repo
+    ).toBe('c/d');
+  });
+
+  it('lets a stronger match in one repo beat a weaker one earlier in the pool', () => {
+    // a/b only trailer-references #42; c/d's head matches exactly. The old
+    // flattened scan returned a/b's PR because it pooled first.
+    const trailerOnly: GitOutcomePullRequest = {
+      number: 7,
+      repo: 'a/b',
+      body: 'Closes #42',
+      state: 'MERGED',
+      merged: true,
+    };
+    const outcomes = buildGitOutcomes(
+      [{ sessionId: 's', gitBranch: 'feature/42-beta' }],
+      [trailerOnly, repoB42]
+    );
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].provenance.prNumber).toBe(42);
+    expect(outcomes[0].provenance.repo).toBe('c/d');
+  });
+
+  it('refuses an attribution that is equally grounded in two repos', () => {
+    // No exact head match anywhere, and both repos carry a PR on issue 42:
+    // nothing says which repo the branch lived in, so no row is invented.
+    const outcomes = buildGitOutcomes(
+      [{ sessionId: 's-ambiguous', gitBranch: 'feature/42-gamma' }],
+      [repoA42, repoB42]
+    );
+    expect(outcomes).toEqual([]);
+  });
+
+  it('names the repo in evidence and leaves single-pool rows unchanged', () => {
+    const multi = buildGitOutcomes(
+      [{ sessionId: 's-alpha', gitBranch: 'feature/42-alpha' }],
+      [repoA42, repoB42]
+    );
+    expect(multi[0].provenance.evidence).toContain('PR a/b#42 — Alpha 42');
+    // A pool with no repo slugs (pre-#3655 shape) keeps the bare-number form.
+    const single = buildGitOutcomes(SESSIONS, PULL_REQUESTS);
+    expect(
+      single.find((o) => o.sessionId === 's-clean')?.provenance.evidence
+    ).toContain('PR #1001 — Clean landing');
+    expect(
+      single.find((o) => o.sessionId === 's-clean')?.provenance.repo
+    ).toBeUndefined();
   });
 });
 

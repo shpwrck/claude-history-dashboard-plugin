@@ -83,6 +83,12 @@ interface ReworkEvent {
   stale: boolean;
 }
 
+/**
+ * How many contributing session ids one evidence line names before it
+ * truncates to `+N more` — the event is the claim, the sessions are context.
+ */
+const MAX_EVIDENCE_SESSIONS = 3;
+
 /** Epoch ms of a mutation, for ordering. Zero when unreadable. */
 function mutationMs(rework: GitPostShipmentRework): number {
   const ms = Date.parse(rework.mutationAt);
@@ -92,13 +98,18 @@ function mutationMs(rework: GitPostShipmentRework): number {
 /** Distinct rework events, newest mutation first. */
 function reworkEvents(rows: readonly GitOutcome[], now: number): ReworkEvent[] {
   // perf-index-contract: post-shipment-rework-by-pr always-consumed: every row past the rework guard is folded into this map, and the map is always drained into the returned events
-  const byPullRequest = new Map<number, ReworkEvent>();
+  const byPullRequest = new Map<string, ReworkEvent>();
   for (const raw of rows) {
     const row = demoteStaleGitOutcome(raw, now);
     if (!row.rework) continue;
     const prNumber = row.provenance.prNumber;
+    // PR numbers are repo-scoped (#3655): in a multi-repo CHD_GIT_OUTCOMES
+    // config, two same-numbered shipments from different repos are two events,
+    // so the identity is (repo, prNumber). Rows with no repo (single-repo
+    // pools, pre-#3655 data) share one implicit scope, as before.
+    const eventKey = `${row.provenance.repo ?? ''}#${prNumber}`;
     const stale = row.provenance.stale === true;
-    const existing = byPullRequest.get(prNumber);
+    const existing = byPullRequest.get(eventKey);
     if (existing) {
       if (!existing.sessionIds.includes(row.sessionId)) {
         existing.sessionIds.push(row.sessionId);
@@ -106,7 +117,7 @@ function reworkEvents(rows: readonly GitOutcome[], now: number): ReworkEvent[] {
       existing.stale = existing.stale && stale;
       continue;
     }
-    byPullRequest.set(prNumber, {
+    byPullRequest.set(eventKey, {
       prNumber,
       rework: row.rework,
       sessionIds: [row.sessionId],
@@ -156,10 +167,12 @@ export const detector: Detector = {
         e.daysAfterShipment === 0
           ? 'the same day'
           : `${e.daysAfterShipment}d later`;
+      const citedSessions = sessionIds.slice(0, MAX_EVIDENCE_SESSIONS);
+      const moreSessions = sessionIds.length - citedSessions.length;
       return (
         `${e.shippedRef} shipped ${e.shippedAt} -> ${e.mutationRef} ${e.kind === 'revert' ? 'reverted' : 'fixed'} it ${e.mutationAt}` +
         ` (${when}), both touching ${e.artifacts.join(', ')}` +
-        ` [${sessionIds.length === 1 ? 'session' : 'sessions'} ${sessionIds.join(', ')}]`
+        ` [${sessionIds.length === 1 ? 'session' : 'sessions'} ${citedSessions.join(', ')}${moreSessions > 0 ? ` +${moreSessions} more` : ''}]`
       );
     });
 
@@ -172,6 +185,7 @@ export const detector: Detector = {
       detail:
         `${tense}${events.length} merged change(s) across ${sessions.size} session(s) were re-touched after they shipped: ` +
         `${reverts.length} reverted, ${fixUps.length} patched by a follow-up fix. ` +
+        'The linking heuristics deliberately under-link, so the shipment count is a lower bound on detected rework, not a census. ' +
         `Each one is a merged PR whose files a later merged PR re-touched, over ${artifacts.size} distinct file(s) cited here — ` +
         'each event lists only the shared paths it could cite, so that is a floor, not the full blast radius. ' +
         'Joined from the git delivery-outcome signal (CHD_GIT_OUTCOMES); sessions with no PR of their own are not counted.',
@@ -198,8 +212,8 @@ export const detector: Detector = {
           },
           {
             claim: `the ${events.length} change(s) are counted once per shipped PR, across ${sessions.size} contributing session row(s)`,
-            source: 'gitOutcomes (per-session rows keyed by provenance.prNumber)',
-            field: 'provenance.prNumber',
+            source: 'gitOutcomes (per-session rows keyed by provenance.repo + provenance.prNumber)',
+            field: 'provenance.repo + provenance.prNumber',
             value: `shipments=${events.length},sessionRows=${sessions.size}`,
           },
           {

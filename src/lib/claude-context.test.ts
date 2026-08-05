@@ -18,7 +18,7 @@ import {
   type SessionPayload,
 } from './claude-context';
 import type { RepoMapDataset } from './parse-repo-map-join';
-import type { ProjectStats, Session } from '../types';
+import type { ProjectStats, Session, SessionTokenData } from '../types';
 import type { SessionOverview } from './session-overview';
 import type { Recommendation } from './detectors/types';
 
@@ -258,6 +258,78 @@ describe('buildContext repo-map injection', () => {
       unknown
     >;
     expect('repoMap' in out).toBe(false);
+  });
+});
+
+describe('buildContext version claims (#3653)', () => {
+  // groupBySessions never sets Session.version, so the context builders must
+  // source it from the transcript-derived token join (#3405's mechanism) or
+  // the claims silently vanish in production.
+  function makeTokenData(
+    sessionId: string,
+    version: string | undefined
+  ): SessionTokenData {
+    return {
+      sessionId,
+      version,
+      totalInputTokens: 10,
+      totalOutputTokens: 5,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      model: 'claude-sonnet-4-6',
+      messageCount: 2,
+      entries: [],
+      compactionEvents: [],
+    } as unknown as SessionTokenData;
+  }
+
+  it('session context takes version from the token join when Session.version is absent (production shape)', () => {
+    const payload: SessionPayload = {
+      session, // no version — matches groupBySessions output
+      overview,
+      tokenData: makeTokenData('s1', '2.1.230'),
+      apiErrors: [],
+    };
+    const out = buildContext({ view: 'sessions', data: payload }) as Record<
+      string,
+      unknown
+    >;
+    expect(out.version).toBe('2.1.230');
+  });
+
+  it('session context still honors an explicitly populated Session.version', () => {
+    const payload: SessionPayload = {
+      session: { ...session, version: '2.1.199' },
+      overview,
+      apiErrors: [],
+    };
+    const out = buildContext({ view: 'sessions', data: payload }) as Record<
+      string,
+      unknown
+    >;
+    expect(out.version).toBe('2.1.199');
+  });
+
+  it('project context folds token-row versions in for sessions of this project only', () => {
+    const payload: ProjectPayload = {
+      project: {
+        ...projectStats,
+        sessions: [session, { ...session, sessionId: 's2' }],
+      },
+      tokenData: [
+        makeTokenData('s1', '2.1.230'),
+        makeTokenData('s2', '2.1.199'),
+        makeTokenData('s-other-project', '9.9.9'),
+        makeTokenData('s2-noversion', undefined),
+      ],
+      toolData: [],
+    };
+    const out = buildContext({ view: 'projects', data: payload }) as {
+      versions: string[];
+    };
+    expect(out.versions).toContain('2.1.230');
+    expect(out.versions).toContain('2.1.199');
+    expect(out.versions).not.toContain('9.9.9');
   });
 });
 

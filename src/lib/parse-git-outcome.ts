@@ -119,6 +119,13 @@ export interface GitOutcomePullRequest {
   revert?: GitReworkMutation;
   /** The later follow-up fix that patched this merge, without a full revert. */
   fixUp?: GitReworkMutation;
+  /**
+   * `owner/repo` slug of the pool this PR came from, stamped by
+   * {@link collectGitOutcomePullRequests} (#3655). PR numbers are repo-scoped,
+   * so this is what keeps a multi-repo pool attributable: records with no slug
+   * (single-pool callers, pre-#3655 fixtures) share one implicit pool.
+   */
+  repo?: string;
 }
 
 /**
@@ -185,6 +192,12 @@ export interface GitOutcomeProvenance {
   issueNumber?: number;
   /** The PR number this session was attributed to. */
   prNumber: number;
+  /**
+   * `owner/repo` slug the attributed PR belongs to, when the pool carried one
+   * (#3655). PR numbers are repo-scoped, so consumers that group events by PR
+   * must key on (repo, prNumber), never the bare number.
+   */
+  repo?: string;
   /** How the branch → PR link was established. */
   attribution: GitOutcomeAttribution;
   /** Short human-readable evidence rows (branch, PR ref/title). */
@@ -288,39 +301,89 @@ export function classifyPullRequestOutcome(
   return 'abandoned';
 }
 
+/** A branch → PR attribution result. */
+interface BranchAttribution {
+  pr: GitOutcomePullRequest;
+  attribution: GitOutcomeAttribution;
+}
+
+/**
+ * Attribute `branch` across per-repo pools, one priority tier at a time
+ * (#3655). PR numbers are repo-scoped, so each tier is resolved against EVERY
+ * pool before the next is tried: a stronger match in one repo must not lose to
+ * a weaker one that happened to sit earlier in a flattened multi-repo array.
+ * A tier that matches in more than one pool identifies no single delivery
+ * vehicle, so it attributes nothing — the conservative direction; the signal
+ * never invents a link it cannot ground. With a single pool this is
+ * byte-identical to the pre-#3655 priority order.
+ */
+function attributeBranchAcrossPools(
+  branch: string,
+  pools: readonly (readonly GitOutcomePullRequest[])[]
+): BranchAttribution | undefined {
+  const trimmed = branch.trim();
+  const issueNumber = issueNumberFromBranch(trimmed);
+
+  const tiers: Array<{
+    attribution: GitOutcomeAttribution;
+    find: (
+      pool: readonly GitOutcomePullRequest[]
+    ) => GitOutcomePullRequest | undefined;
+  }> = [
+    {
+      // 1a. Exact head-branch match — the branch IS the PR's head.
+      attribution: 'branch',
+      find: (pool) => pool.find((pr) => pr.headRefName === trimmed),
+    },
+    ...(issueNumber === undefined
+      ? []
+      : [
+          {
+            // 1b. Head branch carries the same issue number under the convention.
+            attribution: 'branch' as const,
+            find: (pool: readonly GitOutcomePullRequest[]) =>
+              pool.find(
+                (pr) =>
+                  typeof pr.headRefName === 'string' &&
+                  issueNumberFromBranch(pr.headRefName) === issueNumber
+              ),
+          },
+          {
+            // 2. Trailer: the PR body references the issue (`Closes #NNN`).
+            //    This survives a deleted post-merge branch.
+            attribution: 'trailer' as const,
+            find: (pool: readonly GitOutcomePullRequest[]) =>
+              pool.find((pr) => bodyReferencesIssue(pr.body, issueNumber)),
+          },
+        ]),
+  ];
+
+  for (const tier of tiers) {
+    const hits = pools
+      .map((pool) => tier.find(pool))
+      .filter((pr): pr is GitOutcomePullRequest => pr !== undefined);
+    if (hits.length === 1) return { pr: hits[0], attribution: tier.attribution };
+    // Ambiguous across repos: the same tier grounds a PR in two different
+    // pools, and nothing in the local data says which repo the session's
+    // branch lived in. Refuse rather than guess.
+    if (hits.length > 1) return undefined;
+  }
+  return undefined;
+}
+
 /**
  * Find the PR that delivered `branch`, via the `feature/NNN-*` convention or an
  * exact head-branch match. Returns the PR plus how it was attributed, or
- * `undefined` when the branch grounds no PR.
+ * `undefined` when the branch grounds no PR. Single-pool form of
+ * {@link attributeBranchAcrossPools} — callers holding a multi-repo pool must
+ * group it by `repo` first (as {@link buildGitOutcomes} does), because PR
+ * numbers are repo-scoped (#3655).
  */
 export function attributeBranchToPullRequest(
   branch: string,
   pullRequests: GitOutcomePullRequest[]
-): { pr: GitOutcomePullRequest; attribution: GitOutcomeAttribution } | undefined {
-  const trimmed = branch.trim();
-  // 1a. Exact head-branch match — the branch IS the PR's head.
-  const byHead = pullRequests.find((pr) => pr.headRefName === trimmed);
-  if (byHead) return { pr: byHead, attribution: 'branch' };
-
-  const issueNumber = issueNumberFromBranch(trimmed);
-  if (issueNumber === undefined) return undefined;
-
-  // 1b. Head branch carries the same issue number under the convention.
-  const byConventionHead = pullRequests.find(
-    (pr) =>
-      typeof pr.headRefName === 'string' &&
-      issueNumberFromBranch(pr.headRefName) === issueNumber
-  );
-  if (byConventionHead) return { pr: byConventionHead, attribution: 'branch' };
-
-  // 2. Trailer: the PR body references the issue (`Closes #NNN`). This survives
-  //    a deleted post-merge branch.
-  const byTrailer = pullRequests.find((pr) =>
-    bodyReferencesIssue(pr.body, issueNumber)
-  );
-  if (byTrailer) return { pr: byTrailer, attribution: 'trailer' };
-
-  return undefined;
+): BranchAttribution | undefined {
+  return attributeBranchAcrossPools(branch, [pullRequests]);
 }
 
 /** GitHub's auto-generated revert PR title is `Revert "<original title>"`. */
@@ -635,12 +698,26 @@ export function buildGitOutcomes(
   options: { asOf?: string } = {}
 ): GitOutcome[] {
   const { asOf } = options;
+  // #3655: PR numbers are repo-scoped, so attribution scans each repo's own
+  // pool rather than the flattened multi-repo array — a session row must not
+  // attach to another repo's same-numbered PR just because it pooled earlier.
+  // Records with no `repo` (single-repo callers, pre-#3655 fixtures) share one
+  // implicit pool, which preserves the previous behavior exactly.
+  // perf-index-contract: git-outcome-repo-pools always-consumed: built unconditionally and scanned by the attribution call for every non-trunk session branch below
+  const poolsByRepo = new Map<string | undefined, GitOutcomePullRequest[]>();
+  for (const pr of pullRequests) {
+    const pool = poolsByRepo.get(pr.repo);
+    if (pool) pool.push(pr);
+    else poolsByRepo.set(pr.repo, [pr]);
+  }
+  const pools = [...poolsByRepo.values()];
+
   const outcomes: GitOutcome[] = [];
   for (const session of sessions) {
     const branch = session.gitBranch?.trim();
     if (!branch || TRUNK_BRANCHES.has(branch.toLowerCase())) continue;
 
-    const match = attributeBranchToPullRequest(branch, pullRequests);
+    const match = attributeBranchAcrossPools(branch, pools);
     if (!match) continue;
 
     const { pr, attribution } = match;
@@ -650,7 +727,9 @@ export function buildGitOutcomes(
     const issueNumber = issueNumberFromBranch(branch);
     const evidence = [
       `branch ${branch}`,
-      `PR #${pr.number}${pr.title ? ` — ${pr.title}` : ''}`,
+      // Name the repo when the pool carried one — a bare `#42` is ambiguous
+      // in a multi-repo config (#3655).
+      `PR ${pr.repo ? `${pr.repo}#${pr.number}` : `#${pr.number}`}${pr.title ? ` — ${pr.title}` : ''}`,
     ];
     // Fully-evidenced post-shipment rework (#3393), or nothing. A row can be
     // labeled `merged-then-reverted` and still carry NO `rework` — the label
@@ -666,6 +745,7 @@ export function buildGitOutcomes(
         gitBranch: branch,
         ...(issueNumber !== undefined ? { issueNumber } : {}),
         prNumber: pr.number,
+        ...(pr.repo !== undefined ? { repo: pr.repo } : {}),
         attribution,
         evidence,
         ...(asOf !== undefined ? { asOf } : {}),
@@ -730,8 +810,12 @@ export function collectGitOutcomePullRequests(
     }
     if (!Array.isArray(fetched) || fetched.length === 0) continue;
     // The repo slug travels with its own pool so a reference qualified to a
-    // DIFFERENT repository (`Reverts otherorg/other-repo#42`) cannot link here.
-    pool.push(...linkReworkMutations(fetched, { repo }));
+    // DIFFERENT repository (`Reverts otherorg/other-repo#42`) cannot link here
+    // — and is stamped on every record (#3655) so downstream attribution and
+    // event grouping stay repo-scoped after the pools are flattened.
+    pool.push(
+      ...linkReworkMutations(fetched, { repo }).map((pr) => ({ ...pr, repo }))
+    );
   }
   return pool;
 }

@@ -151,6 +151,19 @@ function adoptAxisRec(candidates: Cand[], now: number): Recommendation {
   // other axis. The cost row is the #726 realized-savings input.
   const configRows = a.axis === 'config-scoping' ? configScopingEvidence(a) : [];
 
+  // #3656: pairs whose control/variation CLI versions could not both be placed
+  // on one side of a prompt-regime boundary stay counted but must read as
+  // lower-confidence — part of their delta MAY be the harness prompt cut.
+  // (Definitely-straddling pairs never reach this aggregate at all; the parser
+  // excludes them as `regime-straddle`.)
+  const regimeUncertain = a.regimeUncertain ?? 0;
+  const regimeRows =
+    regimeUncertain > 0
+      ? [
+          `${regimeUncertain} of the ${a.samples} pair(s) may straddle a Claude Code prompt-regime change (a side's CLI version could not be placed) — lower-confidence evidence`,
+        ]
+      : [];
+
   // Structured provenance (#3246): each numeric claim cites the exact byAxis
   // field behind it, so the win rate and averages are reproducible without
   // re-deriving the detector. The paired cost/token SUM and COUNT are cited (not
@@ -238,6 +251,16 @@ function adoptAxisRec(candidates: Cand[], now: number): Recommendation {
         value: a.replay,
       },
       ...deltaObs,
+      ...(regimeUncertain > 0
+        ? [
+            {
+              claim: `${regimeUncertain} counted pair(s) may straddle a prompt-regime boundary (a side's CLI version is unplaceable), so the win rate is lower-confidence`,
+              source: 'parse-shadow-calls (byAxis[])',
+              field: 'regimeUncertain',
+              value: regimeUncertain,
+            },
+          ]
+        : []),
     ],
     // The win rate is Main-vs-Shadow VERDICT counts (shadowWins / decided), not a
     // controlled measurement of the axis's causal effect. It clears the evidence
@@ -273,6 +296,7 @@ function adoptAxisRec(candidates: Cand[], now: number): Recommendation {
         ? `avg $ delta (shadow−main): $${best.costDelta.toFixed(2)}`
         : best.tokenDelta !== null ? `avg token delta (shadow−main): ${Math.round(best.tokenDelta)}` : 'no paired cost/token data',
       ...configRows,
+      ...regimeRows,
       ...(other.length ? [`other promising axes: ${other.join(', ')}`] : []),
     ],
     fix: dated

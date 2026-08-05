@@ -290,3 +290,104 @@ export function promptRegimeLabel(id: PromptRegimeId): string {
   if (id === UNKNOWN_PROMPT_REGIME) return 'unknown Claude Code version';
   return PROMPT_REGIME_BOUNDARIES.find((b) => b.id === id)?.label ?? id;
 }
+
+/** The shared confounded-window annotation a regime-aware detector renders. */
+export interface RegimeConfounding {
+  /**
+   * Clause describing WHY the window is confounded, phrased to complete a
+   * sentence of the form "the window <note>": either it spans a regime change
+   * or it contains sessions too close to one to place.
+   */
+  note: string;
+  /**
+   * Compact provenance value naming every regime the window touched, including
+   * `indeterminate` when unplaceable sessions are present — a mixed window
+   * resolves one regime AND carries indeterminate sessions, so reporting only
+   * the resolved id would contradict the claim beside it.
+   */
+  value: string;
+}
+
+/**
+ * Render the ONE authoritative wording for a confounded window (#3661), shared
+ * by every regime-aware detector (`activity.activity-trend`,
+ * `cost.model-routing-rollup`, …). Detectors interpolate `note` into their
+ * detail/evidence/provenance copy and store `value` as the provenance
+ * observation value; keeping both here means a wording change is one edit, not
+ * shotgun surgery across detector suites. Only meaningful when
+ * `span.confounded` — callers gate on that flag as before.
+ */
+export function describeRegimeConfounding(span: PromptRegimeSpan): RegimeConfounding {
+  const note = span.spansBoundary
+    ? `spans a Claude Code prompt-regime change (${span.regimes.map(promptRegimeLabel).join(' -> ')})`
+    : 'includes sessions on a Claude Code version too close to a prompt-regime change to place';
+  const value =
+    [...span.regimes, ...(span.hasIndeterminate ? [INDETERMINATE_PROMPT_REGIME] : [])].join(',') ||
+    INDETERMINATE_PROMPT_REGIME;
+  return { note, value };
+}
+
+/**
+ * How a control/variation pair sits relative to the prompt-regime boundaries
+ * (#3656, the pair-level analogue of {@link summarizePromptRegimes}):
+ *
+ * - `same-regime`      — both sides resolve to ONE regime: a valid comparison.
+ * - `straddles`        — both sides resolve, to DIFFERENT regimes: part of the
+ *                        delta is the harness prompt cut, not the axis being
+ *                        trialed, so the pair is not a valid comparison.
+ * - `uncertain`        — at least one side carried version data this module
+ *                        cannot place (inside an unresolved bracket, or
+ *                        unparseable), or only one side carried any. The pair
+ *                        POSSIBLY straddles; it must be flagged
+ *                        lower-confidence, never silently counted as clean.
+ * - `no-version-data`  — neither side carried a version at all (pre-#3656
+ *                        writers). Mirrors {@link summarizePromptRegimes}'s
+ *                        absence rule: absence alone is not evidence of a
+ *                        straddle, so legacy pairs are left unflagged.
+ */
+export type ReplayPairRegimeVerdict =
+  | 'same-regime'
+  | 'straddles'
+  | 'uncertain'
+  | 'no-version-data';
+
+/** The per-side derivations behind a {@link ReplayPairRegimeVerdict}. */
+export interface ReplayPairRegimeAssessment {
+  controlRegime: PromptRegimeId;
+  variationRegime: PromptRegimeId;
+  verdict: ReplayPairRegimeVerdict;
+}
+
+/**
+ * Classify a control/variation pair by the prompt regime of each side (#3656).
+ * A shadow/replay comparison whose control ran under one harness prompt and
+ * whose variation ran under another is confounded the same way a spanning
+ * window is — fail-closed, in the same direction as
+ * {@link summarizePromptRegimes}: definite disagreement invalidates the pair,
+ * and a side that is present but unplaceable makes it `uncertain` rather than
+ * silently clean.
+ */
+export function assessReplayPairRegimes(
+  controlVersion: string | undefined | null,
+  variationVersion: string | undefined | null
+): ReplayPairRegimeAssessment {
+  const hasControl =
+    typeof controlVersion === 'string' && controlVersion.trim() !== '';
+  const hasVariation =
+    typeof variationVersion === 'string' && variationVersion.trim() !== '';
+  const controlRegime = promptRegimeForVersion(controlVersion);
+  const variationRegime = promptRegimeForVersion(variationVersion);
+  if (!hasControl && !hasVariation) {
+    return { controlRegime, variationRegime, verdict: 'no-version-data' };
+  }
+  const resolved = (r: PromptRegimeId) =>
+    r !== UNKNOWN_PROMPT_REGIME && r !== INDETERMINATE_PROMPT_REGIME;
+  if (resolved(controlRegime) && resolved(variationRegime)) {
+    return {
+      controlRegime,
+      variationRegime,
+      verdict: controlRegime === variationRegime ? 'same-regime' : 'straddles',
+    };
+  }
+  return { controlRegime, variationRegime, verdict: 'uncertain' };
+}

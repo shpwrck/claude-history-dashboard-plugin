@@ -12,7 +12,9 @@ import {
   INDETERMINATE_PROMPT_REGIME,
   PROMPT_REGIME_BOUNDARIES,
   UNKNOWN_PROMPT_REGIME,
+  assessReplayPairRegimes,
   compareCliVersions,
+  describeRegimeConfounding,
   parseCliVersion,
   promptRegimeForSession,
   promptRegimeForVersion,
@@ -180,5 +182,72 @@ describe('promptRegimeLabel', () => {
     expect(promptRegimeLabel(CLAUDE_5)).toMatch(/80%/);
     expect(promptRegimeLabel(INDETERMINATE_PROMPT_REGIME)).toMatch(/unresolved/);
     expect(promptRegimeLabel(UNKNOWN_PROMPT_REGIME)).toMatch(/unknown/);
+  });
+});
+
+describe('describeRegimeConfounding (#3661)', () => {
+  // The single source of the confounded-window wording every regime-aware
+  // detector interpolates. Detector suites assert their rendered copy; these
+  // pin the helper's own contract so a wording change is reviewed HERE.
+  it('describes a boundary-spanning window with the regime chain', () => {
+    const span = summarizePromptRegimes(['2.1.217', '2.1.220']);
+    const { note, value } = describeRegimeConfounding(span);
+    expect(note).toBe(
+      'spans a Claude Code prompt-regime change ' +
+        `(${promptRegimeLabel(BASE_PROMPT_REGIME)} -> ${promptRegimeLabel(CLAUDE_5)})`
+    );
+    expect(value).toBe(`${BASE_PROMPT_REGIME},${CLAUDE_5}`);
+  });
+
+  it('describes an indeterminate-only window without claiming a span', () => {
+    const span = summarizePromptRegimes(['2.1.218']);
+    const { note, value } = describeRegimeConfounding(span);
+    expect(note).toBe(
+      'includes sessions on a Claude Code version too close to a prompt-regime change to place'
+    );
+    expect(value).toBe(INDETERMINATE_PROMPT_REGIME);
+  });
+
+  it('names indeterminate alongside a resolved regime in a mixed window', () => {
+    const span = summarizePromptRegimes(['2.1.217', '2.1.220', '2.1.218']);
+    const { note, value } = describeRegimeConfounding(span);
+    expect(note).toMatch(/spans a Claude Code prompt-regime change/);
+    expect(value).toBe(
+      `${BASE_PROMPT_REGIME},${CLAUDE_5},${INDETERMINATE_PROMPT_REGIME}`
+    );
+  });
+});
+
+describe('assessReplayPairRegimes (#3656)', () => {
+  it('certifies a pair whose sides resolve to one regime', () => {
+    const pair = assessReplayPairRegimes('2.1.220', '2.1.221');
+    expect(pair.verdict).toBe('same-regime');
+    expect(pair.controlRegime).toBe(CLAUDE_5);
+    expect(pair.variationRegime).toBe(CLAUDE_5);
+  });
+
+  it('invalidates a pair whose sides resolve to different regimes', () => {
+    const pair = assessReplayPairRegimes('2.1.217', '2.1.220');
+    expect(pair.verdict).toBe('straddles');
+    expect(pair.controlRegime).toBe(BASE_PROMPT_REGIME);
+    expect(pair.variationRegime).toBe(CLAUDE_5);
+  });
+
+  it('marks a side inside the unresolved bracket as uncertain, never clean', () => {
+    expect(assessReplayPairRegimes('2.1.218', '2.1.220').verdict).toBe('uncertain');
+    expect(assessReplayPairRegimes('2.1.220', '2.1.218').verdict).toBe('uncertain');
+  });
+
+  it('marks an unparseable or one-sided version as uncertain (possibly straddling)', () => {
+    expect(assessReplayPairRegimes('garbage', '2.1.220').verdict).toBe('uncertain');
+    expect(assessReplayPairRegimes(undefined, '2.1.220').verdict).toBe('uncertain');
+    expect(assessReplayPairRegimes('2.1.217', null).verdict).toBe('uncertain');
+  });
+
+  it('reports no-version-data when neither side carries a version (older writers)', () => {
+    const pair = assessReplayPairRegimes(undefined, undefined);
+    expect(pair.verdict).toBe('no-version-data');
+    expect(pair.controlRegime).toBe(UNKNOWN_PROMPT_REGIME);
+    expect(pair.variationRegime).toBe(UNKNOWN_PROMPT_REGIME);
   });
 });
