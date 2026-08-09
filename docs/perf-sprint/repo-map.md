@@ -352,6 +352,25 @@ is unchanged.
 | localization recall (top 7% = 87) | 66.7% (2,262/3,390 edges) | >= 65%, baseline-anchored (#3510) |
 | reread tokens saved | 88,517 tok | >= 1,000 tok |
 
+### Baseline (2026-08-09, current open-PR batch, 1,284 source files)
+
+Ordinary repository growth consumed the Round 14 headroom: PR #3710 measured
+`1,924,988 B`, only 12 B below the `1,925,000 B` growth alarm, and the
+largest current stacked branch measured `1,928,379 B`. The ranking surface
+hash was unchanged and every retention, localization, and reread-value bound
+still passed. The ceiling is deliberately re-baselined to `2,025,000 B`, 5.0%
+above the largest measured natural serialization. The shipped 1 MiB persisted
+ceiling is unchanged.
+
+| Metric | Measured | Budget |
+|---|---|---|
+| payload (unbounded) | 1,928,379 B | <= 2,025,000 B |
+| files retained | 540 of 1,284 (42.1%) | >= 500 files |
+| persisted payload | 1,029,013 B | not gated (clamped) |
+| cold ingest | 7,769.9 ms | <= 30,000 ms |
+| localization recall (top 7% = 90) | 66.5% (2,313/3,480 edges) | >= 65%, baseline-anchored (#3510) |
+| reread tokens saved | 93,276 tok | >= 1,000 tok |
+
 Raise a ceiling/floor in `repo-map-budget.json` deliberately, with a note on
 why, when a change is a real win (a denser map, a legitimately larger root).
 Otherwise, trim the regression. The localization floor and slice are the
