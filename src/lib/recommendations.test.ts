@@ -25,6 +25,7 @@ import type { ToolCall, ToolUsageData } from './parse-tools';
 import type { SessionTokenData, TokenEntry } from '../types';
 import { isBackgroundableBashCommand, type SessionTimeline } from './parse-timeline';
 import { CHEAPEST_MODEL } from './pricing';
+import { DOWN_MODEL_PROOF_FRESHNESS_DAYS } from './detectors/cost/automation-share';
 
 const call = (command: string): ToolCall => ({
   timestamp: 't',
@@ -285,6 +286,8 @@ describe('safety.unattended-sessions collapses into dangerous-bypass (#2012)', (
 });
 
 describe('automationCostShare shared helper (#299)', () => {
+  const MODEL_PIN_FIXTURE_NOW = Date.parse('2026-05-16T00:00:00Z');
+  const MODEL_PIN_DAY_MS = 24 * 60 * 60 * 1000;
   const entry = (
     model: string,
     inputTokens: number,
@@ -512,13 +515,16 @@ describe('automationCostShare shared helper (#299)', () => {
       ]),
     ];
 
-    const rec = buildRecommendations(baseInput({
-      tokenData,
-      modelPinSavings: {
-        baseline: { start: '2026-05-01T00:00:00Z', end: '2026-05-08T00:00:00Z' },
-        comparison: { start: '2026-05-08T00:00:00Z', end: '2026-05-15T00:00:00Z' },
-      },
-    })).find((r) => r.id === 'cost.automation-share');
+    const rec = buildRecommendations(
+      baseInput({
+        tokenData,
+        modelPinSavings: {
+          baseline: { start: '2026-05-01T00:00:00Z', end: '2026-05-08T00:00:00Z' },
+          comparison: { start: '2026-05-08T00:00:00Z', end: '2026-05-15T00:00:00Z' },
+        },
+      }),
+      MODEL_PIN_FIXTURE_NOW
+    ).find((r) => r.id === 'cost.automation-share');
 
     expect(rec).toBeDefined();
     // Before/after is directional cost evidence, not completion/quality proof.
@@ -551,7 +557,7 @@ describe('automationCostShare shared helper (#299)', () => {
     ];
 
     const input = assembleRecommendationInput(baseInput({ tokenData }));
-    const rec = buildRecommendations(input).find(
+    const rec = buildRecommendations(input, MODEL_PIN_FIXTURE_NOW).find(
       (r) => r.id === 'cost.automation-share'
     );
 
@@ -605,7 +611,7 @@ describe('automationCostShare shared helper (#299)', () => {
         liveConfig: liveConfigShell({ settings: { model: 'claude-haiku-4-5' } }),
       })
     );
-    const rec = buildRecommendations(input).find(
+    const rec = buildRecommendations(input, MODEL_PIN_FIXTURE_NOW).find(
       (r) => r.id === 'cost.automation-share'
     );
 
@@ -617,6 +623,35 @@ describe('automationCostShare shared helper (#299)', () => {
     expect(rec?.estSavingsUsd).toBeUndefined();
     expect(rec?.reclaim).toBeUndefined();
     expect(rec?.fix).toBeUndefined();
+  });
+
+  it('demotes measured model-pin evidence after the 90-day freshness boundary', () => {
+    const comparisonAsOf = Date.parse('2026-05-09T12:00:00Z');
+    const tokenData = [
+      costingSession('baseline-auto', 'sdk-cli', [
+        entry('claude-opus-4-8', 5_000_000, 1_000_000, '2026-05-02T12:00:00Z'),
+      ]),
+      costingSession('comparison-auto', 'sdk-cli', [
+        entry(CHEAPEST_MODEL, 5_000_000, 1_000_000, '2026-05-09T12:00:00Z'),
+      ]),
+    ];
+    const input = assembleRecommendationInput(baseInput({ tokenData }));
+    const staleNow =
+      comparisonAsOf +
+      (DOWN_MODEL_PROOF_FRESHNESS_DAYS + 1) * MODEL_PIN_DAY_MS;
+
+    const rec = buildRecommendations(input, staleNow).find(
+      (candidate) => candidate.id === 'cost.automation-share'
+    );
+
+    expect(rec?.savingsAttribution).toMatchObject({
+      signatureId: 'automation-model-pin',
+      tier: 'tier-0-estimate',
+      stale: true,
+      asOf: '2026-05-09',
+    });
+    expect(rec?.savingsAttribution?.confidence).toBeUndefined();
+    expect(rec?.savingsAttribution?.realizedSavingsUsd).toBeUndefined();
   });
 
   it('keeps automation-share estimate-only when the measurement window is insufficient', () => {
