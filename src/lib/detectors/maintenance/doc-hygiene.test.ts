@@ -849,7 +849,7 @@ describe('evaluateDeclaredFreshness — verdict + suppression', () => {
   });
 
   it('suppresses non-authoritative or absent time provenance (never Docker mtime)', () => {
-    for (const provenance of ['filesystem', 'unavailable'] as const) {
+    for (const provenance of ['git-dirty', 'filesystem', 'unavailable'] as const) {
       expect(
         evaluateDeclaredFreshness(
           freshNode('docs/a', { error: '30d', ageDays: 400, provenance }),

@@ -79,6 +79,9 @@ function fullHistoryRepo() {
   git(root, ['add', '.']);
   commit(root, 'second', D2);
   writeFileSync(join(root, 'docs', 'dirty.md'), '# dirty v2 (uncommitted)\n');
+  // Porcelain hides this file once assume-unchanged is set. The producer must
+  // still omit it based on the bounded ls-files index-state probe.
+  git(root, ['update-index', '--assume-unchanged', 'docs/dirty.md']);
   writeFileSync(join(root, 'docs', 'untracked.md'), '# never added\n');
   return root;
 }

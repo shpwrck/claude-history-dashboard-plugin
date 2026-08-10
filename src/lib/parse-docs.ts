@@ -26,8 +26,9 @@
  * The walk is invoked from `scripts/ingest.mjs` (see `readDocGraph`).
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, posix, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { readTextFileCappedSync } from './capped-read';
 import {
   DOC_GIT_TIMES_EXPECTED_COMMIT_ENV,
@@ -87,9 +88,11 @@ export interface DocNode {
    */
   gitMtimeIso: string | null;
   /**
-   * How `gitMtimeIso` was derived (#2707): `git` (live non-shallow history) >
-   * `manifest` (valid commit-bound packaged manifest) > `filesystem` (stat
-   * mtime — never authoritative) > `unavailable` (`gitMtimeIso` is null).
+   * How `gitMtimeIso` was derived (#2707/#2743): a tracked dirty doc is
+   * `git-dirty` (stat mtime, never authoritative); otherwise `git` (live
+   * non-shallow history) > `manifest` (valid commit-bound packaged manifest) >
+   * `filesystem` (stat mtime — never authoritative) > `unavailable`
+   * (`gitMtimeIso` is null).
    * Always set by {@link buildDocGraph}; optional only so older serialized
    * graphs remain type-valid — an ABSENT provenance must be treated exactly
    * like `filesystem`/`unavailable` (never as Git history), so a stale
@@ -131,8 +134,9 @@ export interface DocGraph {
 // stably git-unavailable graph. It must never be inferred from node provenance:
 // manifest/filesystem nodes are legitimate stable results in gitless runtimes.
 const TRANSIENT_GIT_HISTORY_FAILURE = Symbol('transientGitHistoryFailure');
+const GIT_WORKING_TREE_SIGNATURE = Symbol('gitWorkingTreeSignature');
 
-/** Whether this exact graph fell back because its live bulk Git walk threw. */
+/** Whether this exact graph used Git state that cannot settle a cache entry. */
 export function docGraphHasTransientGitHistoryFailure(
   graph: DocGraph | null | undefined
 ): boolean {
@@ -141,6 +145,18 @@ export function docGraphHasTransientGitHistoryFailure(
       (graph as DocGraph & { [TRANSIENT_GIT_HISTORY_FAILURE]?: boolean })[
         TRANSIENT_GIT_HISTORY_FAILURE
       ]
+  );
+}
+
+/** Exact Git status identity observed while this graph was assembled. */
+export function docGraphGitWorkingTreeSignature(
+  graph: DocGraph | null | undefined
+): string | null {
+  if (!graph) return null;
+  return (
+    (graph as DocGraph & { [GIT_WORKING_TREE_SIGNATURE]?: string })[
+      GIT_WORKING_TREE_SIGNATURE
+    ] ?? null
   );
 }
 
@@ -187,6 +203,11 @@ export interface BuildDocGraphOptions {
    * buildDocGraph neither re-stats nor re-reads/re-parses the manifest.
    */
   docGitTimesSnapshot?: DocGitTimesSnapshot;
+  /**
+   * Candidate-bound status identity sampled by the content-hash gate. When it
+   * differs from assembly's observation, the graph is marked uncacheable.
+   */
+  expectedGitWorkingTreeSignature?: string | null;
 }
 
 export interface LoadedDocGitTimesSnapshot {
@@ -221,6 +242,36 @@ export function resetDocGitTimesSnapshotInstrumentation(): void {
   docGitTimesSnapshotIoCounts.reads = 0;
   docGitTimesSnapshotIoCounts.parses = 0;
 }
+
+export type GitHistoryAvailability = 'ok' | 'shallow' | 'unavailable';
+
+/** Candidate-bound Git state used by graph assembly and both cache identities. */
+export interface DocGraphGitWorkingTreeState {
+  availability: GitHistoryAvailability;
+  /** True only when the tracked-dirty set was observed completely. */
+  statusComplete: boolean;
+  /** A repository probe/status failure that may recover without source movement. */
+  transientFailure: boolean;
+  /** Graph-root-relative tracked paths whose working tree/index differs from HEAD. */
+  dirtyPaths: ReadonlySet<string>;
+  /** Graph-root-relative untracked paths, which must not inherit deleted history. */
+  untrackedPaths: ReadonlySet<string>;
+  /** Stable bounded identity: availability + digest of exact Git state bytes. */
+  signature: string;
+}
+
+interface DocGraphGitWorkingTreeObservation {
+  availability: GitHistoryAvailability;
+  transientFailure: boolean;
+  statusComplete: boolean;
+  prefix: string;
+  statusOutput: string;
+  indexOutput: string;
+  signature: string;
+}
+
+// perf-index-contract: doc-git-empty-path-set always-consumed: every graph-state caller queries both path sets while deriving every enumerated document node
+const EMPTY_DOC_PATHS: ReadonlySet<string> = new Set();
 
 // ── Pure extraction helpers (unit-tested off strings) ─────────────────────────
 
@@ -576,21 +627,244 @@ export function docGraphSourcePaths(
  *  - `'shallow'`     — shallow checkout; live history must NOT be used.
  *  - `'unavailable'` — not a git repo / git missing; live history cannot run.
  */
-export function gitHistoryAvailability(
-  root: string
-): 'ok' | 'shallow' | 'unavailable' {
+interface GitHistoryContext {
+  availability: GitHistoryAvailability;
+  /** Repository-root-relative prefix for `root`, including its trailing slash. */
+  prefix: string;
+  transientFailure: boolean;
+}
+
+function hasGitMarker(root: string): boolean {
+  let current = resolve(root);
+  for (;;) {
+    try {
+      statSync(join(current, '.git'));
+      return true;
+    } catch {
+      // Keep walking: graph roots may be nested below the repository toplevel.
+    }
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+function gitHistoryContext(root: string): GitHistoryContext {
   try {
     const out = execFileSync(
       'git',
-      ['-C', root, 'rev-parse', '--is-shallow-repository'],
+      ['-C', root, 'rev-parse', '--show-prefix', '--is-shallow-repository'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }
-    ).trim();
-    if (out === 'false') return 'ok';
-    if (out === 'true') return 'shallow';
-    return 'unavailable';
+    ).replace(/\r?\n$/, '');
+    const lines = out.split(/\r?\n/);
+    const shallow = lines.pop();
+    const prefix = lines.join('\n');
+    if (shallow === 'false') {
+      return { availability: 'ok', prefix, transientFailure: false };
+    }
+    if (shallow === 'true') {
+      return { availability: 'shallow', prefix, transientFailure: false };
+    }
+    return {
+      availability: 'unavailable',
+      prefix: '',
+      transientFailure: hasGitMarker(root),
+    };
   } catch {
-    return 'unavailable';
+    return {
+      availability: 'unavailable',
+      prefix: '',
+      transientFailure: hasGitMarker(root),
+    };
   }
+}
+
+export function gitHistoryAvailability(root: string): GitHistoryAvailability {
+  return gitHistoryContext(root).availability;
+}
+
+function graphRelativeStatusPath(path: string, prefix: string): string | null {
+  const normalizedPath = toPosix(path);
+  const normalizedPrefix = toPosix(prefix);
+  if (!normalizedPrefix) return normalizedPath;
+  if (!normalizedPath.startsWith(normalizedPrefix)) return null;
+  return normalizedPath.slice(normalizedPrefix.length);
+}
+
+/**
+ * Observe every dirty doc with bounded status + index-flag subprocesses (#2743).
+ * Porcelain v1 `-z` paths are repository-root-relative even when `root` is
+ * nested, so the prefix from the same rev-parse context probe is stripped.
+ * `ls-files -v --full-name` separately catches assume-unchanged/skip-worktree
+ * docs that porcelain intentionally hides while keeping its paths on the same
+ * repository-root-relative surface; those paths are conservatively
+ * non-authoritative.
+ * Untracked/ignored docs remain ordinary `filesystem` nodes: they have no HEAD
+ * time to demote. Rename/copy records carry a second NUL field; a rename's old
+ * path is dirty too, while a copy's unchanged source stays clean.
+ */
+function observeDocGraphGitWorkingTree(
+  root: string
+): DocGraphGitWorkingTreeObservation {
+  const context = gitHistoryContext(root);
+  if (context.availability === 'unavailable') {
+    return {
+      availability: context.availability,
+      statusComplete: false,
+      transientFailure: context.transientFailure,
+      prefix: context.prefix,
+      statusOutput: '',
+      indexOutput: '',
+      signature: context.transientFailure ? 'context-failed' : 'unavailable',
+    };
+  }
+
+  let output: string;
+  let indexOutput: string;
+  try {
+    output = execFileSync(
+      'git',
+      [
+        '-C',
+        root,
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--untracked-files=all',
+        // `matching` may collapse an ignored directory to `!! docs/`, which
+        // cannot identify ignored leaf docs. `traditional` reports every leaf
+        // selected by --untracked-files=all, so deleted history is never
+        // attributed to an ignored working-tree file.
+        '--ignored=traditional',
+        '--',
+        ...DOC_GRAPH_GIT_PATHS,
+      ],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 15_000,
+        maxBuffer: DOC_GRAPH_GIT_MAX_OUTPUT_BYTES,
+        env: {
+          ...process.env,
+          GIT_NO_LAZY_FETCH: '1',
+          GIT_OPTIONAL_LOCKS: '0',
+        },
+      }
+    );
+    indexOutput = execFileSync(
+      'git',
+      [
+        '-C',
+        root,
+        'ls-files',
+        '-v',
+        '-z',
+        '--full-name',
+        '--',
+        ...DOC_GRAPH_GIT_PATHS,
+      ],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 15_000,
+        maxBuffer: DOC_GRAPH_GIT_MAX_OUTPUT_BYTES,
+        env: {
+          ...process.env,
+          GIT_NO_LAZY_FETCH: '1',
+          GIT_OPTIONAL_LOCKS: '0',
+        },
+      }
+    );
+  } catch {
+    return {
+      availability: context.availability,
+      statusComplete: false,
+      transientFailure: true,
+      prefix: context.prefix,
+      statusOutput: '',
+      indexOutput: '',
+      signature: `${context.availability}:status-failed`,
+    };
+  }
+
+  const stateDigest = createHash('sha256')
+    .update(context.prefix)
+    .update('\0')
+    .update(output)
+    .update('\0')
+    .update(indexOutput)
+    .digest('hex');
+  return {
+    availability: context.availability,
+    statusComplete: true,
+    transientFailure: false,
+    prefix: context.prefix,
+    statusOutput: output,
+    indexOutput,
+    signature: `${context.availability}:state-sha256:${stateDigest}`,
+  };
+}
+
+/** Exact bounded Git identity without building per-path lookup sets. */
+export function docGraphGitWorkingTreeIdentity(root: string): string {
+  return observeDocGraphGitWorkingTree(root).signature;
+}
+
+export function docGraphGitWorkingTreeState(
+  root: string
+): DocGraphGitWorkingTreeState {
+  const observation = observeDocGraphGitWorkingTree(root);
+  if (!observation.statusComplete) {
+    return {
+      availability: observation.availability,
+      statusComplete: false,
+      transientFailure: observation.transientFailure,
+      dirtyPaths: EMPTY_DOC_PATHS,
+      untrackedPaths: EMPTY_DOC_PATHS,
+      signature: observation.signature,
+    };
+  }
+
+  // perf-index-contract: doc-git-path-state always-consumed: buildDocGraph queries both sets for every enumerated document before selecting its provenance
+  const dirtyPaths = new Set<string>();
+  const untrackedPaths = new Set<string>();
+  const fields = observation.statusOutput.split('\0').filter(Boolean);
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    if (!field) continue;
+    if (field.length < 4) continue;
+    const status = field.slice(0, 2);
+    const tracked = status !== '??' && status !== '!!';
+    const primary = graphRelativeStatusPath(field.slice(3), observation.prefix);
+    if (tracked && primary) dirtyPaths.add(primary);
+    if ((status === '??' || status === '!!') && primary) {
+      untrackedPaths.add(primary);
+    }
+    if (status.includes('R') || status.includes('C')) {
+      index += 1;
+      const secondaryField = fields[index];
+      const secondary = secondaryField
+        ? graphRelativeStatusPath(secondaryField, observation.prefix)
+        : null;
+      if (tracked && secondary && status.includes('R')) dirtyPaths.add(secondary);
+    }
+  }
+  // `-v` lowercases an assume-unchanged tag; skip-worktree is `S`. Treat any
+  // non-default `H` tag conservatively so less-common index states can never
+  // acquire an authoritative HEAD clock by omission.
+  for (const field of observation.indexOutput.split('\0').filter(Boolean)) {
+    if (field.length < 3 || field[1] !== ' ' || field[0] === 'H') continue;
+    const path = graphRelativeStatusPath(field.slice(2), observation.prefix);
+    if (path) dirtyPaths.add(path);
+  }
+  return {
+    availability: observation.availability,
+    statusComplete: true,
+    transientFailure: false,
+    dirtyPaths,
+    untrackedPaths,
+    signature: observation.signature,
+  };
 }
 
 /**
@@ -611,6 +885,7 @@ function gitMtimesByPath(
   root: string,
   relPaths: readonly string[]
 ): { mtimes: Map<string, string>; complete: boolean } {
+  // perf-index-contract: doc-git-mtimes always-consumed: every nonempty history walk queries the map once while deriving each enumerated document node
   const mtimes = new Map<string, string>();
   if (relPaths.length === 0) return { mtimes, complete: true };
   let output: string;
@@ -758,11 +1033,24 @@ export function captureDocGitTimesSnapshot(
  */
 function deriveDocTime(
   relPath: string,
-  gitMtimes: ReadonlyMap<string, string>,
+  dirtyPaths: ReadonlySet<string>,
+  untrackedPaths: ReadonlySet<string>,
+  gitMtimes: ReadonlyMap<string, string> | null,
   manifestTimes: ReadonlyMap<string, string> | null,
   filesystemMtimeIso: string | null
 ): { gitMtimeIso: string | null; gitMtimeProvenance: DocTimeProvenance } {
-  const gitMtime = gitMtimes.get(relPath);
+  if (dirtyPaths.has(relPath)) {
+    return {
+      gitMtimeIso: filesystemMtimeIso,
+      gitMtimeProvenance: 'git-dirty',
+    };
+  }
+  if (untrackedPaths.has(relPath)) {
+    return filesystemMtimeIso
+      ? { gitMtimeIso: filesystemMtimeIso, gitMtimeProvenance: 'filesystem' }
+      : { gitMtimeIso: null, gitMtimeProvenance: 'unavailable' };
+  }
+  const gitMtime = gitMtimes?.get(relPath);
   if (gitMtime) return { gitMtimeIso: gitMtime, gitMtimeProvenance: 'git' };
   const manifestTime = manifestTimes?.get(relPath);
   if (manifestTime) {
@@ -796,15 +1084,25 @@ export function buildDocGraph(
   // #2707: a shallow checkout's per-path history is fabricated (files graft
   // onto the boundary commit), so live git times are used only when the repo
   // provably has full history; otherwise fall through to the packaged manifest.
-  // perf-index-contract: doc-git-fallback-mtimes always-consumed: every enumerated document queries the selected history map while deriving provenance
+  const gitState = docGraphGitWorkingTreeState(resolvedRoot);
   const gitHistoryResult =
-    gitHistoryAvailability(resolvedRoot) === 'ok'
+    gitState.availability === 'ok' && gitState.statusComplete
       ? gitMtimesByPath(resolvedRoot, relPaths)
-      : { mtimes: new Map<string, string>(), complete: true };
-  const gitMtimes = gitHistoryResult.mtimes;
+      : { mtimes: null, complete: true };
+  // A bounded walk that exits early may expose a partial stdout prefix. Never
+  // promote that subset to authoritative per-file clocks; retrying callers may
+  // serve this graph uncached, so the fallback itself must be conservative.
+  const gitMtimes = gitHistoryResult.complete ? gitHistoryResult.mtimes : null;
   const manifestSnapshot =
     opts.docGitTimesSnapshot ?? captureDocGitTimesSnapshot(resolvedRoot, opts);
-  const manifestTimes = manifestSnapshot.load().times;
+  // A known repository whose status probe failed cannot prove that either its
+  // live log OR a same-HEAD manifest describes current working-tree bytes.
+  // Gitless runtimes still accept a valid producer manifest as before.
+  const manifestTimes =
+    (gitState.availability === 'unavailable' && !gitState.transientFailure) ||
+    gitState.statusComplete
+      ? manifestSnapshot.load().times
+      : null;
 
   const nodes: DocNode[] = [];
   const edgeKeys = new Set<string>();
@@ -834,6 +1132,8 @@ export function buildDocGraph(
     const { frontmatter, body } = parseFrontmatter(content);
     const { gitMtimeIso, gitMtimeProvenance } = deriveDocTime(
       rel,
+      gitState.dirtyPaths,
+      gitState.untrackedPaths,
       gitMtimes,
       manifestTimes,
       filesystemMtimeIso
@@ -878,7 +1178,18 @@ export function buildDocGraph(
       a.to.localeCompare(b.to)
   );
   const graph: DocGraph = { root: resolvedRoot, nodes, edges };
-  if (!gitHistoryResult.complete) {
+  Object.defineProperty(graph, GIT_WORKING_TREE_SIGNATURE, {
+    value: gitState.signature,
+    enumerable: false,
+  });
+  const expectedGitState = opts.expectedGitWorkingTreeSignature;
+  if (
+    gitState.transientFailure ||
+    !gitHistoryResult.complete ||
+    (expectedGitState !== undefined &&
+      expectedGitState !== null &&
+      expectedGitState !== gitState.signature)
+  ) {
     Object.defineProperty(graph, TRANSIENT_GIT_HISTORY_FAILURE, {
       value: true,
       enumerable: false,

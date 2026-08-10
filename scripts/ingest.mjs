@@ -693,9 +693,10 @@ const {
   buildDocGraph,
   captureDocGitTimesSnapshot,
   docGraphHasTransientGitHistoryFailure,
+  docGraphGitWorkingTreeSignature,
+  docGraphGitWorkingTreeIdentity,
   docGraphGitHistorySignature,
   docGraphSourcePaths,
-  gitHistoryAvailability,
   DOC_GRAPH_MAX_FILE_BYTES,
 } = await import(join(LIB, 'parse-docs.ts'));
 // Opt-in GitHub issue-state snapshot (#2710, epic #2256). Ingest only READS the
@@ -1232,12 +1233,34 @@ export function readMemoryStores() {
 // and this wrapper degrades any surprise to an empty graph so it never sinks the
 // dataset endpoint. Root is PROJECT_DIR (the dashboard repo), not ~/.claude.
 let warnedIncompleteBundledDocGraph = false;
+// The content-hash gate samples the exact Git status identity immediately
+// before assembly. buildDocGraph binds its candidate to this value so an A→B→A
+// index race cannot persist a graph assembled under B beneath A's cache key.
+let expectedDocGraphGitWorkingTreeSignature = null;
+let lastSourceSignatureDocGraphGitWorkingTreeSignature = null;
+
+/** Exact Git status identity observed while a dataset's graph was assembled. */
+export function datasetDocGraphGitWorkingTreeSignature(dataset) {
+  return docGraphGitWorkingTreeSignature(dataset?.docGraph);
+}
+
+/** Exact current Git status identity for server cache trust-state gates. */
+export function docGraphGitWorkingTreeSignatureForServer() {
+  return docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
+}
+
+/** Git status identity sampled inside the most recent sourceSignature() value. */
+export function docGraphGitWorkingTreeSignatureFromLastSourceGate() {
+  return lastSourceSignatureDocGraphGitWorkingTreeSignature;
+}
+
 function readDocGraph(docGitTimesSnapshot = null) {
   try {
-    const graph = buildDocGraph(
-      DOC_GRAPH_ROOT,
-      docGitTimesSnapshot ? { docGitTimesSnapshot } : undefined
-    );
+    const graph = buildDocGraph(DOC_GRAPH_ROOT, {
+      ...(docGitTimesSnapshot ? { docGitTimesSnapshot } : {}),
+      expectedGitWorkingTreeSignature:
+        expectedDocGraphGitWorkingTreeSignature,
+    });
     if (
       !process.env.CHD_DOC_GRAPH_ROOT &&
       !warnedIncompleteBundledDocGraph &&
@@ -1256,11 +1279,10 @@ function readDocGraph(docGitTimesSnapshot = null) {
   }
 }
 
-// Candidate-bound cache admission seam (#3711). The parser marks the exact
-// graph whose bulk live-history walk threw with a non-enumerable Symbol, so the
-// served JSON remains byte-identical while every server/worker cache can refuse
-// to memoize or persist that one transient fallback. Stable manifest/filesystem
-// graphs in shallow or gitless runtimes remain cacheable.
+// Candidate-bound cache admission seam (#3711/#2743). The parser marks an
+// exact graph whose history/status acquisition failed or whose status identity
+// differed from the content-hash gate. The Symbol is non-enumerable, so served
+// JSON stays byte-identical while every server/worker cache can refuse it.
 export function datasetHasTransientDocGraphFailure(dataset) {
   return docGraphHasTransientGitHistoryFailure(dataset?.docGraph);
 }
@@ -1499,14 +1521,18 @@ function docGitTimesIdentitySignature(docGitTimesSnapshot) {
   return docGitTimesSnapshot.identity;
 }
 
-function docGraphSourceSignature(docGitTimesSnapshot = newDocGitTimesSnapshot()) {
+function docGraphSourceSignature(
+  docGitTimesSnapshot = newDocGitTimesSnapshot(),
+  gitWorkingTreeSignature = null
+) {
   const hash = createHash('sha1');
   hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
-  // Live-history availability is a doc-graph INPUT (#2707): `git fetch
-  // --unshallow` in place changes node provenance (filesystem/manifest -> git)
-  // while the last doc-touching %H and every doc stat stay identical, so
-  // neither gate would otherwise turn over.
-  hash.update(`git-avail:${gitHistoryAvailability(DOC_GRAPH_ROOT)}\n`);
+  // Live-history availability AND status are doc-graph inputs (#2707, #2743).
+  // The status signature catches index-only dirty/clean transitions where doc
+  // bytes and filesystem stats are unchanged but provenance must turn over.
+  const observedGitWorkingTreeSignature =
+    gitWorkingTreeSignature ?? docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
+  hash.update(`git-state:${observedGitWorkingTreeSignature}\n`);
   hash.update(`git-times:${docGitTimesIdentitySignature(docGitTimesSnapshot)}\n`);
   let count = 0;
   for (const relPath of docGraphSourcePaths(DOC_GRAPH_ROOT)) {
@@ -1533,9 +1559,11 @@ function docGraphSourceSignature(docGitTimesSnapshot = newDocGitTimesSnapshot())
 
 function hashDocGraphContent(hash, docGitTimesSnapshot) {
   hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
-  // Same rationale as docGraphSourceSignature: unshallowing in place flips
-  // node provenance with no byte/stat change anywhere else.
-  hash.update(`git-avail:${gitHistoryAvailability(DOC_GRAPH_ROOT)}\n`);
+  // Same rationale as docGraphSourceSignature: unshallowing and index-only
+  // dirty/clean transitions flip provenance with no doc-byte/stat change.
+  const gitWorkingTreeSignature = docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
+  expectedDocGraphGitWorkingTreeSignature = gitWorkingTreeSignature;
+  hash.update(`git-state:${gitWorkingTreeSignature}\n`);
   // The packaged git-times manifest (#2707) is a doc-graph INPUT: same bytes,
   // different manifest -> different node provenance/times, so fold its full
   // CONTENT plus the commit binding in next to the doc bodies below. Bytes
@@ -1566,6 +1594,7 @@ function hashDocGraphContent(hash, docGitTimesSnapshot) {
     count += 1;
   }
   hash.update(`count:${count}\n`);
+  return gitWorkingTreeSignature;
 }
 
 // ── Versioned docs-map contract (#2709, epic #2256) ─────────────────────────
@@ -2392,6 +2421,15 @@ try {
   /* column already present (added on a prior boot) */
 }
 
+// #2743: bind persisted bodies to the exact bounded Git working-tree/index
+// observation that selected each doc node's time provenance. A legacy NULL row
+// is unknown and must hard-miss when the runtime can observe Git state.
+try {
+  db.exec('ALTER TABLE dataset_cache ADD COLUMN doc_graph_git_state TEXT');
+} catch {
+  /* column already present (added on a prior boot) */
+}
+
 // Keep the last few rows for rollback/debugging rather than just the live one —
 // a recently-superseded build can be inspected after a regression. Cheap: each
 // row is the compressed dataset (~2–3 MB), so a handful costs single-digit MB.
@@ -2586,13 +2624,16 @@ export const PARSER_SIG_VERSION = 'v6';
 // config may be unchanged while a persisted v32 body lacks that evidence and
 // therefore fails closed in the browser formatter, so both local dataset paths
 // advance together (flag-off 31 -> 32).
-// v35 (#3711): cache admission now rejects an exact dataset assembled while the
-// bounded doc-history Git walk was failing. Legacy v33 rows cannot prove that
-// they were not produced by that transient fallback. The enabled path skips to
-// v35 and flag-off advances 32 -> 34 so neither new key aliases a historical key
-// from the other mode.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 35;
-export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 34;
+// v35 (#3711): cache admission rejects an exact dataset assembled while the
+// bounded doc-history Git walk was failing. Enabled/flag-off used v35/v34 so
+// neither key aliased a historical key from the other mode.
+// v37 (#2743): doc-graph nodes distinguish dirty tracked files from clean git
+// history, and both cache identities include the batched working-tree state.
+// Both local paths advance together. Sibling PR #3713 owns enabled v35 /
+// flag-off v34; this later change uses fresh v37/v36 identities so its flag-off
+// key cannot alias that sibling's historical enabled key.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 37;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 36;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2609,20 +2650,21 @@ export function datasetAssemblySchemaKey() {
 }
 
 const selDatasetCache = db.prepare(
-  'SELECT etag, json_br, json_gz, doc_issue_state, recursive_removal_safety_state FROM dataset_cache WHERE content_hash = ?'
+  'SELECT etag, json_br, json_gz, doc_issue_state, recursive_removal_safety_state, doc_graph_git_state FROM dataset_cache WHERE content_hash = ?'
 );
 const selLatestDatasetCache = db.prepare(
-  'SELECT content_hash, etag, json_br, json_gz, doc_issue_state, recursive_removal_safety_state FROM dataset_cache WHERE schema_key = ? ORDER BY created_at DESC LIMIT 1'
+  'SELECT content_hash, etag, json_br, json_gz, doc_issue_state, recursive_removal_safety_state, doc_graph_git_state FROM dataset_cache WHERE schema_key = ? ORDER BY created_at DESC LIMIT 1'
 );
 const insDatasetCache = db.prepare(`
-  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state, recursive_removal_safety_state)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state, recursive_removal_safety_state, doc_graph_git_state)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(content_hash) DO UPDATE SET
     etag=excluded.etag, json_br=excluded.json_br,
     json_gz=excluded.json_gz, created_at=excluded.created_at,
     schema_key=excluded.schema_key,
     doc_issue_state=excluded.doc_issue_state,
-    recursive_removal_safety_state=excluded.recursive_removal_safety_state
+    recursive_removal_safety_state=excluded.recursive_removal_safety_state,
+    doc_graph_git_state=excluded.doc_graph_git_state
 `);
 const pruneDatasetCache = db.prepare(`
   DELETE FROM dataset_cache WHERE content_hash NOT IN (
@@ -2671,6 +2713,18 @@ function decodePersistedRecursiveRemovalSafetyState(raw) {
       };
 }
 
+function decodePersistedDocGraphGitWorkingTreeSignature(raw) {
+  return typeof raw === 'string'
+    ? {
+        docGraphGitWorkingTreeSignatureKnown: true,
+        docGraphGitWorkingTreeSignature: raw,
+      }
+    : {
+        docGraphGitWorkingTreeSignatureKnown: false,
+        docGraphGitWorkingTreeSignature: null,
+      };
+}
+
 // Load a persisted compressed dataset by its content fingerprint. Returns the
 // same shape the server's in-memory cache uses ({ etag, json, brBuf, gzBuf,
 // contentHash }), reconstructing the raw JSON string by gunzipping the stored
@@ -2705,6 +2759,9 @@ export function loadDatasetCache(contentHash) {
     ...decodePersistedRecursiveRemovalSafetyState(
       row.recursive_removal_safety_state
     ),
+    ...decodePersistedDocGraphGitWorkingTreeSignature(
+      row.doc_graph_git_state
+    ),
   };
 }
 
@@ -2736,6 +2793,9 @@ export function loadLatestDatasetCache() {
     ...decodePersistedRecursiveRemovalSafetyState(
       row.recursive_removal_safety_state
     ),
+    ...decodePersistedDocGraphGitWorkingTreeSignature(
+      row.doc_graph_git_state
+    ),
   };
 }
 
@@ -2752,6 +2812,7 @@ export function saveDatasetCache(
     gzBuf,
     docIssueCacheState = null,
     recursiveRemovalSafetyState,
+    docGraphGitWorkingTreeSignature,
   },
   createdAt
 ) {
@@ -2764,7 +2825,8 @@ export function saveDatasetCache(
       createdAt,
       datasetAssemblySchemaKey(),
       JSON.stringify(docIssueCacheState),
-      recursiveRemovalSafetyState ?? null
+      recursiveRemovalSafetyState ?? null,
+      docGraphGitWorkingTreeSignature ?? null
     );
     pruneDatasetCache.run(DATASET_CACHE_KEEP);
   } catch (err) {
@@ -3906,8 +3968,13 @@ export function sourceSignature(expectedSourceSignature = null) {
     sourceSignatureDocGitTimesSnapshot?.signature === expectedSourceSignature
       ? sourceSignatureDocGitTimesSnapshot.snapshot
       : newDocGitTimesSnapshot();
+  const docGraphGitWorkingTreeSignature =
+    docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
   parts.push(
-    `doc-graph:${DOC_GRAPH_ROOT}:${docGraphSourceSignature(docGitTimesSnapshot)}`
+    `doc-graph:${DOC_GRAPH_ROOT}:${docGraphSourceSignature(
+      docGitTimesSnapshot,
+      docGraphGitWorkingTreeSignature
+    )}`
   );
   // Docs-map contract (#2709): stat + identity. Without this a docs-map edit
   // (or a moved HEAD changing the wrapper identity) with no other source
@@ -3952,6 +4019,8 @@ export function sourceSignature(expectedSourceSignature = null) {
     }
   }
   const signature = parts.join('|');
+  lastSourceSignatureDocGraphGitWorkingTreeSignature =
+    docGraphGitWorkingTreeSignature;
   sourceSignatureDocGitTimesSnapshot = {
     signature,
     snapshot: docGitTimesSnapshot,
@@ -4227,7 +4296,10 @@ export function ingest(expectedSourceSignature = null) {
   hash.update('doc-graph\n');
   hash.update(DOC_GRAPH_ROOT);
   hash.update('\0');
-  hashDocGraphContent(hash, docGitTimesSnapshot);
+  const docGraphGitWorkingTreeSignature = hashDocGraphContent(
+    hash,
+    docGitTimesSnapshot
+  );
   // Docs-map contract (#2709): identity + stat + raw JSON bytes feed the
   // serialized `docsMap` wrapper, so the persisted dataset cache must turn
   // over when either the declaration or the checkout identity moves.
@@ -4263,6 +4335,7 @@ export function ingest(expectedSourceSignature = null) {
     transcriptsWritten,
     skippedSessions,
     contentHash,
+    docGraphGitWorkingTreeSignature,
   };
 }
 

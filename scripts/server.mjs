@@ -93,6 +93,9 @@ import {
   recursiveRemovalSafetyStateForServer,
   recursiveRemovalSafetyStateFromDataset,
   datasetHasTransientDocGraphFailure,
+  datasetDocGraphGitWorkingTreeSignature,
+  docGraphGitWorkingTreeSignatureForServer,
+  docGraphGitWorkingTreeSignatureFromLastSourceGate,
 } from './ingest.mjs';
 import {
   readWorkflows,
@@ -1294,12 +1297,53 @@ const GLOBAL_INGEST_API = {
   recursiveRemovalSafetyStateForServer,
   recursiveRemovalSafetyStateFromDataset,
   datasetHasTransientDocGraphFailure,
+  datasetDocGraphGitWorkingTreeSignature,
+  docGraphGitWorkingTreeSignatureForServer,
+  docGraphGitWorkingTreeSignatureFromLastSourceGate,
 };
 
 function hasTransientDocGraphFailure(api, dataset) {
   return (
     typeof api.datasetHasTransientDocGraphFailure === 'function' &&
     api.datasetHasTransientDocGraphFailure(dataset)
+  );
+}
+
+function currentDocGraphGitWorkingTreeSignature(api) {
+  return typeof api.docGraphGitWorkingTreeSignatureForServer === 'function'
+    ? api.docGraphGitWorkingTreeSignatureForServer()
+    : null;
+}
+
+function sourceBoundDocGraphGitWorkingTreeSignature(api) {
+  return typeof api.docGraphGitWorkingTreeSignatureFromLastSourceGate === 'function'
+    ? api.docGraphGitWorkingTreeSignatureFromLastSourceGate()
+    : currentDocGraphGitWorkingTreeSignature(api);
+}
+
+function builtDocGraphGitWorkingTreeSignature(api, dataset) {
+  return typeof api.datasetDocGraphGitWorkingTreeSignature === 'function'
+    ? api.datasetDocGraphGitWorkingTreeSignature(dataset)
+    : null;
+}
+
+function docGraphGitWorkingTreeSignaturesEqual(left, right) {
+  return left === null || right === null || left === right;
+}
+
+// Cache entries need a stronger contract than compatibility comparisons: when
+// the production ingest API can observe Git state, a legacy/unknown token is a
+// hard miss and may never flow into stale-while-revalidate.
+function datasetCacheEntryMatchesDocGraphGitWorkingTreeState(
+  entry,
+  api,
+  current = currentDocGraphGitWorkingTreeSignature(api)
+) {
+  if (!entry) return false;
+  if (current === null) return true;
+  return (
+    entry.docGraphGitWorkingTreeSignatureKnown === true &&
+    entry.docGraphGitWorkingTreeSignature === current
   );
 }
 
@@ -1505,6 +1549,43 @@ function currentDocIssueCacheState(api) {
   return api.docIssueSnapshotCacheStateForServer();
 }
 
+function currentDatasetTrustState(api) {
+  return {
+    docIssueCacheState: currentDocIssueCacheState(api),
+    docGraphGitWorkingTreeSignature:
+      currentDocGraphGitWorkingTreeSignature(api),
+  };
+}
+
+function sourceBoundDatasetTrustState(api) {
+  return {
+    docIssueCacheState: currentDocIssueCacheState(api),
+    docGraphGitWorkingTreeSignature:
+      sourceBoundDocGraphGitWorkingTreeSignature(api),
+  };
+}
+
+function builtDatasetTrustState(api, dataset) {
+  return {
+    docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(dataset),
+    docGraphGitWorkingTreeSignature:
+      builtDocGraphGitWorkingTreeSignature(api, dataset),
+  };
+}
+
+function datasetTrustStatesEqual(left, right) {
+  return (
+    docIssueCacheStatesEqual(
+      left?.docIssueCacheState ?? null,
+      right?.docIssueCacheState ?? null
+    ) &&
+    docGraphGitWorkingTreeSignaturesEqual(
+      left?.docGraphGitWorkingTreeSignature ?? null,
+      right?.docGraphGitWorkingTreeSignature ?? null
+    )
+  );
+}
+
 function docIssueCacheStatesEqual(left, right) {
   if (left === null || left === undefined) {
     return right === null || right === undefined;
@@ -1564,6 +1645,8 @@ function datasetCacheEntryMatchesRecursiveRemovalSafetyState(entry, api) {
 async function buildDatasetCache(api, contentHash) {
   const dataset = api.assembleDataset();
   const docGraphRetryRequired = hasTransientDocGraphFailure(api, dataset);
+  const docGraphGitWorkingTreeSignature =
+    builtDocGraphGitWorkingTreeSignature(api, dataset);
   const docIssueCacheState =
     api.docIssueSnapshotCacheStateFromDataset(dataset);
   const recursiveRemovalSafetyState =
@@ -1611,6 +1694,9 @@ async function buildDatasetCache(api, contentHash) {
     docIssueCacheStateKnown: true,
     recursiveRemovalSafetyState,
     recursiveRemovalSafetyStateKnown: recursiveRemovalSafetyState !== null,
+    docGraphGitWorkingTreeSignature,
+    docGraphGitWorkingTreeSignatureKnown:
+      typeof docGraphGitWorkingTreeSignature === 'string',
     docGraphRetryRequired,
   };
 }
@@ -2298,7 +2384,12 @@ async function rebuildDatasetCache(state, sig) {
   const api = await state.apiPromise;
   let buildSig = sig;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    // A deferred SWR build may start after the request-time signature moved.
+    // Re-sample one coherent source/status pair at the actual build boundary.
+    buildSig = api.sourceSignature();
     const buildDocIssueState = currentDocIssueCacheState(api);
+    const buildDocGraphGitState =
+      sourceBoundDocGraphGitWorkingTreeSignature(api);
     const stats = api.ingest(buildSig);
     let candidate = null;
     let cached = false;
@@ -2308,7 +2399,12 @@ async function rebuildDatasetCache(state, sig) {
       state.datasetCache?.contentHash === stats.contentHash &&
       state.datasetCache.docGraphRetryRequired !== true &&
       datasetCacheEntryMatchesDocIssueState(state.datasetCache, api) &&
-      datasetCacheEntryMatchesRecursiveRemovalSafetyState(state.datasetCache, api)
+      datasetCacheEntryMatchesRecursiveRemovalSafetyState(state.datasetCache, api) &&
+      datasetCacheEntryMatchesDocGraphGitWorkingTreeState(
+        state.datasetCache,
+        api,
+        stats.docGraphGitWorkingTreeSignature ?? null
+      )
     ) {
       candidate = state.datasetCache;
       cached = true;
@@ -2317,7 +2413,12 @@ async function rebuildDatasetCache(state, sig) {
       if (
         fromDisk &&
         datasetCacheEntryMatchesDocIssueState(fromDisk, api) &&
-        datasetCacheEntryMatchesRecursiveRemovalSafetyState(fromDisk, api)
+        datasetCacheEntryMatchesRecursiveRemovalSafetyState(fromDisk, api) &&
+        datasetCacheEntryMatchesDocGraphGitWorkingTreeState(
+          fromDisk,
+          api,
+          stats.docGraphGitWorkingTreeSignature ?? null
+        )
       ) {
         candidate = fromDisk;
         cached = true;
@@ -2333,12 +2434,40 @@ async function rebuildDatasetCache(state, sig) {
     // and recursive-removal containment claims are HARD gates and never relaxed.
     const completedSig = api.sourceSignature(buildSig);
     const completedDocIssueState = currentDocIssueCacheState(api);
+    const completedDocGraphGitState =
+      sourceBoundDocGraphGitWorkingTreeSignature(api);
     const docIssueStable =
       docIssueCacheStatesEqual(buildDocIssueState, completedDocIssueState) &&
       datasetCacheEntryMatchesDocIssueState(candidate, api);
     const recursiveRemovalSafetyStable =
       datasetCacheEntryMatchesRecursiveRemovalSafetyState(candidate, api);
     const sigStable = completedSig === buildSig;
+    const docGraphGitStateStable =
+      docGraphGitWorkingTreeSignaturesEqual(
+        buildDocGraphGitState,
+        stats.docGraphGitWorkingTreeSignature ?? null
+      ) &&
+      datasetCacheEntryMatchesDocGraphGitWorkingTreeState(
+        candidate,
+        api,
+        stats.docGraphGitWorkingTreeSignature ?? null
+      ) &&
+      docGraphGitWorkingTreeSignaturesEqual(
+        stats.docGraphGitWorkingTreeSignature ?? null,
+        completedDocGraphGitState
+      );
+    if (!docGraphGitStateStable) {
+      // Unlike an acquisition failure, an identity mismatch can be a healthy
+      // authoritative graph assembled under B while the request completed at
+      // A. Retry once, then fail hard; never serve it even uncached.
+      if (attempt === 0) {
+        buildSig = completedSig;
+        continue;
+      }
+      throw new Error(
+        'Doc-graph Git state changed across the bounded dataset rebuild retry'
+      );
+    }
     if (candidate.docGraphRetryRequired === true) {
       // Retry the exact acquisition once even though the filesystem signature
       // is unchanged. A second failure may still be served to a truly cold
@@ -2497,14 +2626,13 @@ function memoizedAssembleDataset(state, api, contentHash) {
   const resolved = resolveStateBoundMemo({
     memo: state.assembledMemo,
     key: contentHash,
-    sourceState: currentDocIssueCacheState(api),
-    sourceStatesEqual: docIssueCacheStatesEqual,
+    sourceState: currentDatasetTrustState(api),
+    sourceStatesEqual: datasetTrustStatesEqual,
     build: () => api.assembleDataset(),
     // Record what the assembled object ACTUALLY observed. If an A -> B -> A
     // file/clock race leaves B under A's content hash, the outer bounded retry
     // sees the mismatch and this memo refuses to replay B on its second pass.
-    builtSourceState: (dataset) =>
-      api.docIssueSnapshotCacheStateFromDataset(dataset),
+    builtSourceState: (dataset) => builtDatasetTrustState(api, dataset),
   });
   // A thrown bulk doc-history walk is a retryable acquisition failure, not a
   // stable graph state. Never pin that exact dataset under the otherwise healthy
@@ -2533,14 +2661,13 @@ function memoizedAssembleRecommendationDataset(
     // The hook bit is independently probed and result-affecting (#2554), so it
     // remains part of this light-dataset memo key alongside the content hash.
     key: JSON.stringify([contentHash, hookConfigState]),
-    sourceState: currentDocIssueCacheState(api),
-    sourceStatesEqual: docIssueCacheStatesEqual,
+    sourceState: currentDatasetTrustState(api),
+    sourceStatesEqual: datasetTrustStatesEqual,
     build: () => api.assembleRecommendationDataset(),
     // As with the full dataset memo, bind reuse to the snapshot state the light
     // dataset actually observed. Otherwise an A -> B -> A retry can replay B
     // forever while the surrounding content hash and hook bit remain A.
-    builtSourceState: (dataset) =>
-      api.docIssueSnapshotCacheStateFromDataset(dataset),
+    builtSourceState: (dataset) => builtDatasetTrustState(api, dataset),
   });
   state.assembledRecoMemo = hasTransientDocGraphFailure(api, resolved.value)
     ? null
@@ -2834,6 +2961,14 @@ function recommendationsCacheEntryIsCurrent(entry, api, now) {
     return false;
   }
   if (
+    !docGraphGitWorkingTreeSignaturesEqual(
+      entry.docGraphGitWorkingTreeSignature ?? null,
+      currentDocGraphGitWorkingTreeSignature(api)
+    )
+  ) {
+    return false;
+  }
+  if (
     !entry.guidanceCacheValidity ||
     !externalGuidanceCacheValidityContains(entry.guidanceCacheValidity, now)
   ) {
@@ -2888,6 +3023,8 @@ async function buildRecommendationsCacheEntryViaWorker(
     docIssueCacheState,
     recursiveRemovalSafetyState,
     docGraphRetryRequired,
+    buildDocGraphGitWorkingTreeSignature,
+    docGraphGitWorkingTreeSignature,
     acceptSuppressionTransitions,
     discardSuppressionTransitions,
   } = workerResult;
@@ -2907,6 +3044,12 @@ async function buildRecommendationsCacheEntryViaWorker(
     recursiveRemovalSafetyStateKnown:
       typeof recursiveRemovalSafetyState === 'string',
     docGraphRetryRequired: docGraphRetryRequired === true,
+    buildDocGraphGitWorkingTreeSignature:
+      buildDocGraphGitWorkingTreeSignature ?? null,
+    docGraphGitWorkingTreeSignature:
+      docGraphGitWorkingTreeSignature ?? null,
+    docGraphGitWorkingTreeSignatureKnown:
+      typeof docGraphGitWorkingTreeSignature === 'string',
     guidanceTransitions,
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
@@ -2932,6 +3075,8 @@ async function buildRecommendationsCacheEntry(
     surfaceRequest = null,
   } = {}
 ) {
+  const buildDocGraphGitWorkingTreeSignature =
+    currentDocGraphGitWorkingTreeSignature(api);
   const stats = api.ingest(sourceSig);
   // `ingest()` fingerprints settings by bounded stat metadata. Fold the cheap
   // detector-relevant state into this memo key as well: an equal-length rewrite
@@ -3037,6 +3182,11 @@ async function buildRecommendationsCacheEntry(
     skillHookIntegrityCacheValidity: skillHookCacheValidity,
     editFormatChurnCacheValidity: editChurnCacheValidity,
     docGraphRetryRequired,
+    buildDocGraphGitWorkingTreeSignature,
+    docGraphGitWorkingTreeSignature:
+      builtDocGraphGitWorkingTreeSignature(api, dataset),
+    docGraphGitWorkingTreeSignatureKnown:
+      typeof builtDocGraphGitWorkingTreeSignature(api, dataset) === 'string',
     emitAcceptedSuppressionTransitions,
     lastAccess: Date.now(),
   };
@@ -3140,6 +3290,8 @@ async function ensureCurrentRecommendationsCacheEntry(
 
     const completedSourceSig = api.sourceSignature(entry.sourceSig);
     const completedDocIssueState = currentDocIssueCacheState(api);
+    const completedDocGraphGitWorkingTreeSignature =
+      sourceBoundDocGraphGitWorkingTreeSignature(api);
     const sourceSigStable = entry.sourceSig === completedSourceSig;
     const docIssueStateStable = docIssueCacheStatesEqual(
       entry.docIssueCacheState,
@@ -3147,6 +3299,36 @@ async function ensureCurrentRecommendationsCacheEntry(
     );
     const recursiveRemovalSafetyStateStable =
       datasetCacheEntryMatchesRecursiveRemovalSafetyState(entry, api);
+    const docGraphGitWorkingTreeStateStable =
+      docGraphGitWorkingTreeSignaturesEqual(
+        entry.buildDocGraphGitWorkingTreeSignature ?? null,
+        entry.docGraphGitWorkingTreeSignature ?? null
+      ) &&
+      docGraphGitWorkingTreeSignaturesEqual(
+        entry.docGraphGitWorkingTreeSignature ?? null,
+        completedDocGraphGitWorkingTreeSignature
+      );
+    if (!docGraphGitWorkingTreeStateStable) {
+      if (docGraphRetriesRemaining <= 0) {
+        discardRecommendationsCacheEntry(entry);
+        throw new Error(
+          'Doc-graph Git state changed across the bounded recommendation rebuild retry'
+        );
+      }
+      docGraphRetriesRemaining -= 1;
+      const currentBuild = state.recommendationsBuilds.get(key);
+      if (currentBuild && currentBuild !== buildOwner) {
+        discardRecommendationsCacheEntry(entry);
+        return currentBuild.promise;
+      }
+      const retrySourceSig = api.sourceSignature();
+      if (currentBuild === buildOwner) buildOwner.sourceSig = retrySourceSig;
+      discardRecommendationsCacheEntry(entry);
+      entry = await retryBuild(retrySourceSig);
+      clockConfigRetriesRemaining = 1;
+      sourceRetriesRemaining = 1;
+      continue;
+    }
     if (
       !sourceSigStable ||
       !docIssueStateStable ||
@@ -3257,6 +3439,8 @@ async function recommendationsResponseCache(
   } = {}
 ) {
   const sourceSig = api.sourceSignature();
+  const sourceDocGraphGitWorkingTreeSignature =
+    sourceBoundDocGraphGitWorkingTreeSignature(api);
   const identityKey = recommendationIdentityCacheKey(organizationIdentity);
   // #2718: the surface + normalized filter tuple partitions the cache so scoped
   // bodies never alias the legacy raw array (or each other); null keeps the
@@ -3302,6 +3486,19 @@ async function recommendationsResponseCache(
   ) {
     // Issue-state mismatch/expiry can add or remove an auditable claim. It is a
     // hard miss: never take content-restamp or stale-while-revalidate paths.
+    state.recommendationsCache.delete(key);
+    cached = undefined;
+  }
+  if (
+    cached &&
+    !datasetCacheEntryMatchesDocGraphGitWorkingTreeState(
+      cached,
+      api,
+      sourceDocGraphGitWorkingTreeSignature
+    )
+  ) {
+    // A clean/dirty or index-flag transition changes whether doc freshness is
+    // authoritative. Never serve that recommendation body through SWR.
     state.recommendationsCache.delete(key);
     cached = undefined;
   }
@@ -3359,7 +3556,14 @@ async function recommendationsResponseCache(
       cached = undefined;
     }
   }
-  if (cached && cached.sourceSig === sourceSig) {
+  if (
+    cached &&
+    cached.sourceSig === sourceSig &&
+    docGraphGitWorkingTreeSignaturesEqual(
+      cached.docGraphGitWorkingTreeSignature ?? null,
+      sourceDocGraphGitWorkingTreeSignature
+    )
+  ) {
     cached.lastAccess = Date.now();
     return { entry: cached, cache: clockRefreshed ? 'hit-time' : 'hit' };
   }
@@ -3376,7 +3580,21 @@ async function recommendationsResponseCache(
   // request (#2184).
   if (cached) {
     const stats = api.ingest(sourceSig);
-    if (stats.contentHash === cached.contentHash) {
+    const completedSourceSig = api.sourceSignature(sourceSig);
+    const completedDocGraphGitWorkingTreeSignature =
+      sourceBoundDocGraphGitWorkingTreeSignature(api);
+    if (
+      stats.contentHash === cached.contentHash &&
+      sourceSig === completedSourceSig &&
+      docGraphGitWorkingTreeSignaturesEqual(
+        sourceDocGraphGitWorkingTreeSignature,
+        stats.docGraphGitWorkingTreeSignature ?? null
+      ) &&
+      docGraphGitWorkingTreeSignaturesEqual(
+        stats.docGraphGitWorkingTreeSignature ?? null,
+        completedDocGraphGitWorkingTreeSignature
+      )
+    ) {
       cached.sourceSig = sourceSig;
       cached.lastAccess = Date.now();
       return { entry: cached, cache: 'hit-content' };
@@ -3523,9 +3741,13 @@ async function statGatedResponseCache(api, { cacheMap, buildsMap, key, max, buil
   const resolved = await resolveStatGatedCache({
     sourceSignature: (expectedSourceSig) =>
       api.sourceSignature(expectedSourceSig),
-    sourceState: () => currentDocIssueCacheState(api),
-    builtSourceState: (built) => built.docIssueCacheState,
-    sourceStatesEqual: docIssueCacheStatesEqual,
+    sourceState: () => sourceBoundDatasetTrustState(api),
+    builtSourceState: (built) => ({
+      docIssueCacheState: built.docIssueCacheState,
+      docGraphGitWorkingTreeSignature:
+        built.docGraphGitWorkingTreeSignature ?? null,
+    }),
+    sourceStatesEqual: datasetTrustStatesEqual,
     cacheable: (built) => built.docGraphRetryRequired !== true,
     cacheMap,
     buildsMap,
@@ -3579,6 +3801,9 @@ function buildDigestPayload(state, api, date, sourceSig) {
       date
     ),
     docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+    docGraphGitWorkingTreeSignature:
+      builtDocGraphGitWorkingTreeSignature(api, ds),
+    docGraphRetryRequired: hasTransientDocGraphFailure(api, ds),
   };
 }
 
@@ -3631,6 +3856,9 @@ async function buildBootPayload(state, api, sourceSig) {
   return {
     value: await compressedPayload(boot, stats.contentHash),
     docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+    docGraphGitWorkingTreeSignature:
+      builtDocGraphGitWorkingTreeSignature(api, ds),
+    docGraphRetryRequired: hasTransientDocGraphFailure(api, ds),
     // Commit this side effect only AFTER the surrounding state-bound cache
     // accepts the build. A discarded A -> B -> A attempt must never leak B's
     // counts through the next static index.html response.
@@ -3656,6 +3884,8 @@ async function buildSlicePayload(state, api, key, sourceSig) {
   return {
     value: await compressedPayload(value, stats.contentHash),
     docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+    docGraphGitWorkingTreeSignature:
+      builtDocGraphGitWorkingTreeSignature(api, ds),
     // docGraph carries the transient fallback directly; repoMap carries
     // recommendation IDs derived from that graph. Other slices are independent
     // outputs and remain cacheable, while the shared assembled memo above has
@@ -3683,6 +3913,9 @@ function buildSearchPayload(state, api, q, project, limit, sourceSig) {
   return {
     value: { mode: 'hybrid', semanticAvailable: true, results },
     docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+    docGraphGitWorkingTreeSignature:
+      builtDocGraphGitWorkingTreeSignature(api, ds),
+    docGraphRetryRequired: hasTransientDocGraphFailure(api, ds),
   };
 }
 
@@ -5531,6 +5764,10 @@ function localAnalyzeBuildIsCurrent(build, now = Date.now()) {
   const currentDocIssueState = currentDocIssueCacheState(build.ingestApi);
   return (
     build.sourceSig === build.ingestApi.sourceSignature() &&
+    docGraphGitWorkingTreeSignaturesEqual(
+      build.docGraphGitWorkingTreeSignature ?? null,
+      sourceBoundDocGraphGitWorkingTreeSignature(build.ingestApi)
+    ) &&
     docIssueCacheStateIsUsable(build.docIssueCacheState, now) &&
     docIssueCacheStateIsUsable(currentDocIssueState, now) &&
     docIssueCacheStatesEqual(build.docIssueCacheState, currentDocIssueState)
@@ -5543,6 +5780,8 @@ async function buildLocalAnalyzeDeterministic(req, project) {
   });
   const organizationIdentity = enterpriseRecommendationIdentity(req);
   let expectedSourceSig = ingestApi.sourceSignature();
+  let expectedDocGraphGitWorkingTreeSignature =
+    sourceBoundDocGraphGitWorkingTreeSignature(ingestApi);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const docIssueCacheState = currentDocIssueCacheState(ingestApi);
     const stats = ingestApi.ingest(expectedSourceSig);
@@ -5555,6 +5794,8 @@ async function buildLocalAnalyzeDeterministic(req, project) {
       ingestApi,
       dataset
     );
+    const builtDocGraphGitWorkingTreeState =
+      builtDocGraphGitWorkingTreeSignature(ingestApi, dataset);
     const builtDocIssueCacheState =
       ingestApi.docIssueSnapshotCacheStateFromDataset(dataset);
     const rejectedFindingIds = await ingestApi.readRejectedFindingIds(
@@ -5566,8 +5807,23 @@ async function buildLocalAnalyzeDeterministic(req, project) {
       rejectedFindingIds,
     });
     const completedSourceSig = ingestApi.sourceSignature(expectedSourceSig);
+    const completedDocGraphGitWorkingTreeSignature =
+      sourceBoundDocGraphGitWorkingTreeSignature(ingestApi);
     const completedDocIssueState = currentDocIssueCacheState(ingestApi);
     const sourceSigStable = expectedSourceSig === completedSourceSig;
+    const docGraphGitWorkingTreeStateStable =
+      docGraphGitWorkingTreeSignaturesEqual(
+        expectedDocGraphGitWorkingTreeSignature,
+        stats.docGraphGitWorkingTreeSignature ?? null
+      ) &&
+      docGraphGitWorkingTreeSignaturesEqual(
+        stats.docGraphGitWorkingTreeSignature ?? null,
+        builtDocGraphGitWorkingTreeState
+      ) &&
+      docGraphGitWorkingTreeSignaturesEqual(
+        builtDocGraphGitWorkingTreeState,
+        completedDocGraphGitWorkingTreeSignature
+      );
     const docIssueStateStable =
       docIssueCacheStatesEqual(
         docIssueCacheState,
@@ -5581,6 +5837,7 @@ async function buildLocalAnalyzeDeterministic(req, project) {
       docIssueCacheStateIsUsable(completedDocIssueState, Date.now());
     if (
       !docGraphRetryRequired &&
+      docGraphGitWorkingTreeStateStable &&
       docIssueStateStable &&
       (sourceSigStable || attempt === 1)
     ) {
@@ -5591,19 +5848,30 @@ async function buildLocalAnalyzeDeterministic(req, project) {
         // unsettled so a later model result cannot be attached as though the
         // evidence were stable; ensureCurrentLocalAnalyzeBuild will recheck it.
         sourceSig: sourceSigStable ? completedSourceSig : null,
+        docGraphGitWorkingTreeSignature:
+          builtDocGraphGitWorkingTreeState,
         docIssueCacheState: builtDocIssueCacheState,
         recommendations: extractRecommendations(recs),
       };
     }
-    if (docGraphRetryRequired && docIssueStateStable && attempt === 1) {
+    if (
+      docGraphRetryRequired &&
+      docGraphGitWorkingTreeStateStable &&
+      docIssueStateStable &&
+      attempt === 1
+    ) {
       return {
         ingestApi,
         sourceSig: null,
+        docGraphGitWorkingTreeSignature:
+          builtDocGraphGitWorkingTreeState,
         docIssueCacheState: builtDocIssueCacheState,
         recommendations: extractRecommendations(recs),
       };
     }
     expectedSourceSig = completedSourceSig;
+    expectedDocGraphGitWorkingTreeSignature =
+      completedDocGraphGitWorkingTreeSignature;
   }
   throw new Error(
     'Recommendation source state changed across the bounded local-analysis retry'
@@ -9916,6 +10184,11 @@ async function handleDatasetJson(req, res) {
       !datasetCacheEntryMatchesRecursiveRemovalSafetyState(
         ingestState.datasetCache,
         ingestApi
+      ) ||
+      !datasetCacheEntryMatchesDocGraphGitWorkingTreeState(
+        ingestState.datasetCache,
+        ingestApi,
+        sourceBoundDocGraphGitWorkingTreeSignature(ingestApi)
       )
     )
   ) {

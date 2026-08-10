@@ -18,6 +18,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -610,18 +611,37 @@ describe('buildDocGraph', () => {
     write(root, 'README.md', '# Readme\n');
     write(root, 'docs/a.md', '# A\n');
     write(root, 'docs/untracked.md', '# Untracked\n');
-    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string =>
-      args?.includes('--is-shallow-repository')
-        ? 'false\n'
-        : 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
-          'CHD-DATE:2026-07-13T09:00:00-04:00\0\0\ndocs/a.md\0'
-    );
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'false\n';
+      if (args?.includes('status')) return '?? docs/untracked.md\0';
+      return (
+        'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
+        'CHD-DATE:2026-07-13T09:00:00-04:00\0\0\ndocs/a.md\0'
+      );
+    });
 
     const graph = buildDocGraph(root);
     const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
 
-    // Exactly two git children: the shallow probe (#2707), then ONE batched log.
-    expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+    // Context + bounded status + index flags + ONE batched history walk.
+    expect(execFileSyncMock).toHaveBeenCalledTimes(4);
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining(['-C', root, 'ls-files', '-v', '-z', '--full-name']),
+      expect.objectContaining({ encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+    );
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining([
+        '-C',
+        root,
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--ignored=traditional',
+      ]),
+      expect.objectContaining({ encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+    );
     expect(execFileSyncMock).toHaveBeenCalledWith(
       'git',
       expect.arrayContaining([
@@ -651,6 +671,214 @@ describe('buildDocGraph', () => {
     expect(docGraphHasTransientGitHistoryFailure(graph)).toBe(false);
   });
 
+  it('labels tracked worktree/index changes git-dirty and keeps untracked files non-authoritative', () => {
+    const COMMIT = 'c'.repeat(40);
+    write(root, 'README.md', '# Clean\n');
+    write(root, 'docs/dirty.md', '# Dirty\n');
+    write(root, 'docs/staged.md', '# Staged\n');
+    write(root, 'docs/untracked.md', '# Untracked\n');
+    write(root, 'docs/ignored.md', '# Ignored\n');
+    const dirtyMtime = statSync(join(root, 'docs/dirty.md')).mtime.toISOString();
+    const stagedMtime = statSync(join(root, 'docs/staged.md')).mtime.toISOString();
+    write(
+      root,
+      'data/doc-git-times.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        sourceCommit: COMMIT,
+        files: {
+          'docs/dirty.md': '2025-01-01T00:00:00+00:00',
+          'docs/staged.md': '2025-01-02T00:00:00+00:00',
+        },
+      })
+    );
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'false\n';
+      if (args?.includes('status')) {
+        return (
+          ' M docs/dirty.md\0M  docs/staged.md\0' +
+          '?? docs/untracked.md\0!! docs/ignored.md\0'
+        );
+      }
+      return (
+        'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
+        'CHD-DATE:2024-01-01T00:00:00+00:00\0\0\ndocs/dirty.md\0' +
+        'CHD-DATE:2024-01-02T00:00:00+00:00\0\0\ndocs/staged.md\0' +
+        // A path can have deleted history even though the current file is untracked.
+        'CHD-DATE:2024-01-03T00:00:00+00:00\0\0\ndocs/untracked.md\0' +
+        'CHD-DATE:2024-01-04T00:00:00+00:00\0\0\ndocs/ignored.md\0'
+      );
+    });
+
+    const graph = buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT });
+    const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
+
+    expect(byPath.get('README.md')?.gitMtimeProvenance).toBe('git');
+    expect(byPath.get('docs/dirty.md')).toMatchObject({
+      gitMtimeIso: dirtyMtime,
+      gitMtimeProvenance: 'git-dirty',
+    });
+    expect(byPath.get('docs/staged.md')).toMatchObject({
+      gitMtimeIso: stagedMtime,
+      gitMtimeProvenance: 'git-dirty',
+    });
+    expect(byPath.get('docs/untracked.md')?.gitMtimeProvenance).toBe('filesystem');
+    expect(byPath.get('docs/untracked.md')?.gitMtimeIso).not.toBe(
+      '2024-01-03T00:00:00+00:00'
+    );
+    expect(byPath.get('docs/ignored.md')?.gitMtimeProvenance).toBe('filesystem');
+    expect(byPath.get('docs/ignored.md')?.gitMtimeIso).not.toBe(
+      '2024-01-04T00:00:00+00:00'
+    );
+    expect(execFileSyncMock).toHaveBeenCalledTimes(4);
+    expect(
+      execFileSyncMock.mock.calls.filter(([, args]) => args?.includes('status'))
+    ).toHaveLength(1);
+  });
+
+  it('marks a copied destination dirty without demoting the unchanged source', () => {
+    write(root, 'docs/source.md', '# Source\n');
+    write(root, 'docs/copied.md', '# Source\n');
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'false\n';
+      if (args?.includes('status')) {
+        return 'C  docs/copied.md\0docs/source.md\0';
+      }
+      return (
+        'CHD-DATE:2024-01-01T00:00:00+00:00\0\0\ndocs/source.md\0' +
+        'CHD-DATE:2024-01-02T00:00:00+00:00\0\0\ndocs/copied.md\0'
+      );
+    });
+
+    const byPath = new Map(
+      buildDocGraph(root).nodes.map((candidate) => [candidate.path, candidate])
+    );
+
+    expect(byPath.get('docs/copied.md')?.gitMtimeProvenance).toBe('git-dirty');
+    expect(byPath.get('docs/source.md')?.gitMtimeProvenance).toBe('git');
+  });
+
+  it('demotes tracked docs hidden by assume-unchanged or skip-worktree flags', () => {
+    write(root, 'docs/assumed.md', '# Assumed\n');
+    write(root, 'docs/skipped.md', '# Skipped\n');
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'false\n';
+      if (args?.includes('status')) return '';
+      if (args?.includes('ls-files')) {
+        return 'h docs/assumed.md\0S docs/skipped.md\0';
+      }
+      return (
+        'CHD-DATE:2024-01-01T00:00:00+00:00\0\0\ndocs/assumed.md\0' +
+        'CHD-DATE:2024-01-02T00:00:00+00:00\0\0\ndocs/skipped.md\0'
+      );
+    });
+
+    const byPath = new Map(
+      buildDocGraph(root).nodes.map((candidate) => [candidate.path, candidate])
+    );
+
+    expect(byPath.get('docs/assumed.md')?.gitMtimeProvenance).toBe('git-dirty');
+    expect(byPath.get('docs/skipped.md')?.gitMtimeProvenance).toBe('git-dirty');
+  });
+
+  it('normalizes repo-root porcelain paths when the graph root is nested', () => {
+    write(root, 'docs/a.md', '# A\n');
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'package/\nfalse\n';
+      if (args?.includes('status')) return ' M package/docs/a.md\0';
+      return 'CHD-DATE:2024-01-01T00:00:00+00:00\0\0\ndocs/a.md\0';
+    });
+
+    const node = buildDocGraph(root).nodes.find((candidate) => candidate.path === 'docs/a.md');
+
+    expect(node?.gitMtimeProvenance).toBe('git-dirty');
+    expect(node?.gitMtimeIso).not.toBe('2024-01-01T00:00:00+00:00');
+  });
+
+  it('normalizes repo-root index-flag paths when the graph root is nested', () => {
+    write(root, 'docs/a.md', '# A\n');
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'package/\nfalse\n';
+      if (args?.includes('status')) return '';
+      if (args?.includes('ls-files')) return 'S package/docs/a.md\0';
+      return 'CHD-DATE:2024-01-01T00:00:00+00:00\0\0\ndocs/a.md\0';
+    });
+
+    const node = buildDocGraph(root).nodes.find(
+      (candidate) => candidate.path === 'docs/a.md'
+    );
+
+    expect(node?.gitMtimeProvenance).toBe('git-dirty');
+    expect(node?.gitMtimeIso).not.toBe('2024-01-01T00:00:00+00:00');
+  });
+
+  it('suppresses live and manifest authority when status fails in a known repo', () => {
+    const COMMIT = 'd'.repeat(40);
+    write(root, 'README.md', '# Readme\n');
+    write(
+      root,
+      'data/doc-git-times.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        sourceCommit: COMMIT,
+        files: { 'README.md': '2026-01-05T10:00:00+00:00' },
+      })
+    );
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'false\n';
+      if (args?.includes('status')) throw new Error('status failed');
+      return 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0';
+    });
+
+    const graph = buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT });
+    const node = graph.nodes[0];
+
+    expect(node?.gitMtimeProvenance).toBe('filesystem');
+    expect(node?.gitMtimeIso).not.toBe('2026-01-05T10:00:00+00:00');
+    expect(docGraphHasTransientGitHistoryFailure(graph)).toBe(true);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+    expect(execFileSyncMock.mock.calls.some(([, args]) => args?.includes('log'))).toBe(false);
+  });
+
+  it('rejects a same-HEAD manifest when Git probing fails inside a repository', () => {
+    const COMMIT = 'e'.repeat(40);
+    mkdirSync(join(root, '.git'), { recursive: true });
+    write(root, 'README.md', '# Dirty bytes\n');
+    write(
+      root,
+      'data/doc-git-times.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        sourceCommit: COMMIT,
+        files: { 'README.md': '2026-01-05T10:00:00+00:00' },
+      })
+    );
+
+    const graph = buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT });
+    const node = graph.nodes[0];
+
+    expect(node?.gitMtimeProvenance).toBe('filesystem');
+    expect(node?.gitMtimeIso).not.toBe('2026-01-05T10:00:00+00:00');
+    expect(docGraphHasTransientGitHistoryFailure(graph)).toBe(true);
+  });
+
+  it('marks a candidate uncacheable when assembly observes a different status identity', () => {
+    write(root, 'README.md', '# Readme\n');
+    execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+      if (args?.includes('--is-shallow-repository')) return 'false\n';
+      if (args?.includes('status')) return '';
+      return 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0';
+    });
+
+    const graph = buildDocGraph(root, {
+      expectedGitWorkingTreeSignature: 'ok:prefix::status: M README.md\0',
+    });
+
+    expect(graph.nodes[0]?.gitMtimeProvenance).toBe('git');
+    expect(docGraphHasTransientGitHistoryFailure(graph)).toBe(true);
+    expect(Object.keys(graph)).toEqual(['root', 'nodes', 'edges']);
+  });
+
   it('fails closed when a bounded history walk returns partial stdout', () => {
     const commit = 'c'.repeat(40);
     const filesystemTime = new Date('2026-01-06T11:00:00.000Z');
@@ -668,6 +896,8 @@ describe('buildDocGraph', () => {
     );
     execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
       if (args?.includes('--is-shallow-repository')) return 'false\n';
+      if (args?.includes('status')) return '';
+      if (args?.includes('ls-files')) return 'H README.md\0H docs/older.md\0';
       throw Object.assign(new Error('missing historical tree'), {
         stdout:
           'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
@@ -678,7 +908,7 @@ describe('buildDocGraph', () => {
     const graph = buildDocGraph(root, { docGitTimesExpectedCommit: commit });
     const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
 
-    expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(4);
     expect(byPath.get('README.md')).toMatchObject({
       gitMtimeIso: '2026-01-05T10:00:00+00:00',
       gitMtimeProvenance: 'manifest',
@@ -695,6 +925,7 @@ describe('buildDocGraph', () => {
     write(root, 'README.md', '# Readme\n');
     execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
       if (args?.includes('--is-shallow-repository')) return 'true\n';
+      if (args?.includes('status')) return '';
       // The batched log would happily return grafted boundary-commit times —
       // it must never be consulted.
       return 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0';
@@ -702,7 +933,7 @@ describe('buildDocGraph', () => {
 
     const graph = buildDocGraph(root);
 
-    expect(execFileSyncMock).toHaveBeenCalledTimes(1); // probe only, no log
+    expect(execFileSyncMock).toHaveBeenCalledTimes(3); // context + status + flags, no log
     const node = graph.nodes.find((n) => n.path === 'README.md');
     expect(node?.gitMtimeProvenance).toBe('filesystem');
     expect(node?.gitMtimeIso).not.toBe('2026-07-14T10:00:00-04:00');
@@ -734,6 +965,7 @@ describe('buildDocGraph', () => {
 
       expect(byPath.get('README.md')?.gitMtimeIso).toBe('2026-01-05T10:00:00+00:00');
       expect(byPath.get('README.md')?.gitMtimeProvenance).toBe('manifest');
+      expect(docGraphHasTransientGitHistoryFailure(graph)).toBe(false);
       // A doc absent from the manifest degrades honestly to filesystem.
       expect(byPath.get('docs/extra.md')?.gitMtimeProvenance).toBe('filesystem');
       // The manifest itself is not a doc node (data/ is outside the doc walk).
@@ -827,11 +1059,11 @@ describe('buildDocGraph', () => {
     it('prefers live non-shallow git history over a valid manifest', () => {
       write(root, 'README.md', '# Readme\n');
       writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
-      execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string =>
-        args?.includes('--is-shallow-repository')
-          ? 'false\n'
-          : 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0'
-      );
+      execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
+        if (args?.includes('--is-shallow-repository')) return 'false\n';
+        if (args?.includes('status')) return '';
+        return 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0';
+      });
 
       const graph = buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT });
       const node = graph.nodes.find((n) => n.path === 'README.md');

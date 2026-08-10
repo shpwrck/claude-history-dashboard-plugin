@@ -24,12 +24,19 @@
  * authoritative:
  *  - `git`         — live batched `git log` history in a NON-shallow checkout.
  *  - `manifest`    — packaged producer manifest, valid and commit-bound.
+ *  - `git-dirty`   — tracked content differs from HEAD; the carried clock is
+ *                    its filesystem mtime, never the older HEAD commit time.
  *  - `filesystem`  — stat mtime; available for non-claim uses but NEVER
  *                    acceptable as Git history (Docker COPY resets it).
  *  - `unavailable` — no clock at all (`gitMtimeIso` is null).
  * A freshness consumer (#2488) may accept only `git` or `manifest`.
  */
-export type DocTimeProvenance = 'git' | 'manifest' | 'filesystem' | 'unavailable';
+export type DocTimeProvenance =
+  | 'git'
+  | 'manifest'
+  | 'git-dirty'
+  | 'filesystem'
+  | 'unavailable';
 
 /** On-disk manifest shape written by scripts/doc-git-times-generate.mjs. */
 export interface DocGitTimesManifest {

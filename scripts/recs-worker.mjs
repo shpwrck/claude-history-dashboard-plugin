@@ -144,6 +144,8 @@ const {
   recursiveRemovalSafetyStateForServer,
   recursiveRemovalSafetyStateFromDataset,
   datasetHasTransientDocGraphFailure,
+  datasetDocGraphGitWorkingTreeSignature,
+  docGraphGitWorkingTreeSignatureFromLastSourceGate,
 } = ingestApi;
 const {
   docGitTimesSnapshotInstrumentation,
@@ -179,10 +181,13 @@ function sameDocIssueCacheState(a, b) {
 }
 
 function recommendationSourceState(expectedSourceSignature = null) {
+  const sourceSig = sourceSignature(expectedSourceSignature);
   return {
-    sourceSig: sourceSignature(expectedSourceSignature),
+    sourceSig,
     docIssueCacheState: docIssueSnapshotCacheStateForServer(),
     recursiveRemovalSafetyState: recursiveRemovalSafetyStateForServer(),
+    docGraphGitWorkingTreeSignature:
+      docGraphGitWorkingTreeSignatureFromLastSourceGate(),
   };
 }
 
@@ -250,6 +255,8 @@ async function buildRecommendationResult({
     recursiveRemovalSafetyState: recursiveRemovalSafetyStateFromDataset(dataset),
     json: safeJsonStringify(result),
     contentHash: stats.contentHash,
+    docGraphGitWorkingTreeSignature:
+      datasetDocGraphGitWorkingTreeSignature(dataset),
     guidanceTransitions,
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
@@ -285,14 +292,22 @@ async function buildStableRecommendationResult(params) {
         completedSourceState.recursiveRemovalSafetyState &&
       built.recursiveRemovalSafetyState ===
         completedSourceState.recursiveRemovalSafetyState;
+    const docGraphGitWorkingTreeStateStable =
+      expectedSourceState.docGraphGitWorkingTreeSignature ===
+        built.docGraphGitWorkingTreeSignature &&
+      built.docGraphGitWorkingTreeSignature ===
+        completedSourceState.docGraphGitWorkingTreeSignature;
     if (
       !built.docGraphRetryRequired &&
+      docGraphGitWorkingTreeStateStable &&
       docIssueStateStable &&
       recursiveRemovalSafetyStateStable &&
       (sourceSigStable || attempt === 1)
     ) {
       return {
         ...built,
+        buildDocGraphGitWorkingTreeSignature:
+          expectedSourceState.docGraphGitWorkingTreeSignature,
         sourceState: {
           ...completedSourceState,
           // A final source-racy build is safe to serve because its exact
@@ -307,6 +322,7 @@ async function buildStableRecommendationResult(params) {
     if (attempt === 1) {
       if (
         built.docGraphRetryRequired &&
+        docGraphGitWorkingTreeStateStable &&
         docIssueStateStable &&
         recursiveRemovalSafetyStateStable
       ) {
@@ -315,6 +331,9 @@ async function buildStableRecommendationResult(params) {
         // worker on the next request without requiring a source-stat change.
         return {
           ...built,
+          docGraphRetryRequired: true,
+          buildDocGraphGitWorkingTreeSignature:
+            expectedSourceState.docGraphGitWorkingTreeSignature,
           sourceState: { ...completedSourceState, sourceSig: null },
         };
       }
@@ -397,6 +416,10 @@ parentPort.on('message', async (msg) => {
       docIssueCacheState: built.docIssueCacheState,
       recursiveRemovalSafetyState: built.recursiveRemovalSafetyState,
       docGraphRetryRequired: built.docGraphRetryRequired,
+      buildDocGraphGitWorkingTreeSignature:
+        built.buildDocGraphGitWorkingTreeSignature,
+      docGraphGitWorkingTreeSignature:
+        built.docGraphGitWorkingTreeSignature,
       suppressionEmissionId,
       ...(process.env.CHD_RECS_CACHE_TEST_EVENTS === '1'
         ? { docGitTimesSnapshotIo: docGitTimesSnapshotInstrumentation() }

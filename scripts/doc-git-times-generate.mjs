@@ -120,14 +120,28 @@ export function assertRepoToplevel(root) {
   }
 }
 
-/** Tracked Markdown doc paths (repo-relative POSIX) under the doc pathspecs. */
-export function trackedDocPaths(root) {
+/** Tracked docs plus conservative assume-unchanged/skip-worktree exclusions. */
+export function trackedDocState(root) {
   const out = requiredGit(
     root,
-    ['ls-files', '-z', '--', ...DOC_GIT_PATHSPECS],
+    ['ls-files', '-v', '-z', '--', ...DOC_GIT_PATHSPECS],
     'enumerate tracked docs'
   );
-  return out.split('\0').filter(Boolean).sort();
+  // perf-index-contract: producer-index-flags always-consumed: every producer run filters each enumerated tracked document against the conservative index-flag set
+  const paths = [];
+  const indexFlagged = new Set();
+  for (const field of out.split('\0').filter(Boolean)) {
+    if (field.length < 3 || field[1] !== ' ') {
+      throw new ProducerError('doc-git-times: malformed ls-files index record');
+    }
+    const path = field.slice(2);
+    paths.push(path);
+    // Normal tracked entries are `H`. `-v` lowercases assume-unchanged tags;
+    // skip-worktree is `S`. Every non-H state is conservatively omitted.
+    if (field[0] !== 'H') indexFlagged.add(path);
+  }
+  // perf-index-contract: producer-doc-order always-consumed: every successful manifest build consumes the complete deterministic tracked-document order immediately
+  return { paths: paths.sort(), indexFlagged };
 }
 
 /**
@@ -218,7 +232,7 @@ export function buildManifest(root, { maxFiles = DOC_GIT_TIMES_MAX_FILES } = {})
   if (!/^[0-9a-f]{40,64}$/.test(sourceCommit)) {
     throw new ProducerError(`doc-git-times: unexpected HEAD commit: ${sourceCommit}`);
   }
-  const tracked = trackedDocPaths(root);
+  const { paths: tracked, indexFlagged } = trackedDocState(root);
   if (tracked.length > maxFiles) {
     throw new ProducerError(
       `doc-git-times: ${tracked.length} tracked docs exceed the ${maxFiles}-entry cap; ` +
@@ -226,6 +240,7 @@ export function buildManifest(root, { maxFiles = DOC_GIT_TIMES_MAX_FILES } = {})
     );
   }
   const dirty = dirtyDocPaths(root);
+  for (const path of indexFlagged) dirty.add(path);
   const clean = tracked.filter((path) => !dirty.has(path));
   const times = lastCommitTimes(root, new Set(clean));
   const files = {};

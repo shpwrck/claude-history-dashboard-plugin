@@ -91,8 +91,10 @@ if [ "$PUBLISHED" -eq 0 ]; then
   export CHD_APP_IMAGE="${CHD_APP_IMAGE:-localhost/claude-history-dashboard:local}"
 fi
 
-# Refresh host-side artifacts before deploying. Both are best-effort so an
-# optional checker or one malformed project cannot block the dashboard deploy.
+# Refresh host-side artifacts before deploying. Repo-map and doc-hygiene remain
+# best-effort. A source build must fail closed if its packaged doc git-times
+# manifest cannot refresh: an old same-HEAD manifest could otherwise be copied
+# into the image and overstate a dirty doc's commit time (#2743).
 if [ "$REFRESH" -eq 1 ]; then
   echo "deploy: refreshing repo-map artifacts (host-side)…"
   node "$DIR/scripts/repo-map-refresh.mjs" || \
@@ -103,12 +105,25 @@ if [ "$REFRESH" -eq 1 ]; then
     --artifact-key "$CHD_DOC_HYGIENE_ARTIFACT_KEY" || \
     echo "deploy: doc-hygiene refresh reported a problem — continuing with deploy" >&2
   # #2707: per-doc Git last-commit times, packaged into the image (data/ COPY)
-  # so the runtime never mistakes Docker COPY mtimes for Git history. Best-effort
-  # like its siblings: on failure a stale/absent manifest simply fails the
-  # runtime's commit binding and docs carry non-authoritative provenance.
+  # so the runtime never mistakes Docker COPY mtimes for Git history. A local
+  # source build packages this file and therefore fails closed on producer
+  # failure. Published pulls do not consume the checkout's manifest and remain
+  # usable with a best-effort warning.
   echo "deploy: refreshing doc git-times manifest (host-side)…"
-  node "$DIR/scripts/doc-git-times-generate.mjs" --root "$DIR" || \
-    echo "deploy: doc git-times refresh reported a problem — continuing with deploy" >&2
+  if ! node "$DIR/scripts/doc-git-times-generate.mjs" --root "$DIR"; then
+    if [ "$PUBLISHED" -eq 0 ]; then
+      # The producer intentionally preserves its prior output on failure. A
+      # later explicit --no-refresh build must not be able to package that
+      # known-stale file, so remove only the fixed generated artifact. Never
+      # follow a symlinked data/ parent outside the checkout.
+      if [ ! -L "$DIR/data" ]; then
+        rm -f -- "$DIR/data/doc-git-times.json"
+      fi
+      echo "deploy: doc git-times refresh failed — refusing source build with a potentially stale manifest" >&2
+      exit 1
+    fi
+    echo "deploy: doc git-times refresh reported a problem — continuing with published deploy" >&2
+  fi
 fi
 
 COMPOSE=("$ENGINE" compose -f "$DIR/docker-compose.yml" -f "$DIR/docker-compose.local.yml")

@@ -558,6 +558,173 @@ test('#2380 repo docs reach both datasets and invalidate both cache gates', asyn
       expectedGuideMtime,
       'a nested doc root keeps git history paths relative to that root'
     );
+
+    // A directory ignore must still enumerate the leaf selected by the doc
+    // pathspec. Otherwise the recreated ignored file can inherit its deleted
+    // historical commit and falsely present that time as current authority.
+    const ignoredGuidePath = join(gitRoot, 'package', 'docs', 'generated', 'old.md');
+    mkdirSync(join(gitRoot, 'package', 'docs', 'generated'), { recursive: true });
+    writeFileSync(ignoredGuidePath, '# Historical generated doc\n');
+    execFileSync('git', ['add', 'package/docs/generated/old.md'], { cwd: gitRoot });
+    execFileSync('git', ['commit', '-m', 'Track generated doc'], {
+      cwd: gitRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['rm', 'package/docs/generated/old.md'], {
+      cwd: gitRoot,
+      stdio: 'ignore',
+    });
+    writeFileSync(join(gitRoot, '.gitignore'), 'package/docs/generated/\n');
+    execFileSync('git', ['add', '.gitignore'], { cwd: gitRoot });
+    execFileSync('git', ['commit', '-m', 'Ignore generated docs'], {
+      cwd: gitRoot,
+      stdio: 'ignore',
+    });
+    mkdirSync(join(gitRoot, 'package', 'docs', 'generated'), { recursive: true });
+    writeFileSync(ignoredGuidePath, '# Current ignored doc\n');
+    const ignoredNode = ingest
+      .assembleDataset()
+      .docGraph.nodes.find((node) => node.path === 'docs/generated/old.md');
+    assert.equal(ignoredNode?.gitMtimeProvenance, 'filesystem');
+
+    // Prove both cache gates observe INDEX state, not just doc bytes/stats.
+    // Stage different same-length bytes, then restore the worktree to HEAD: the
+    // file is stat-identical across the reset below, while only the index flips.
+    const committedGuide = readFileSync(guidePath, 'utf8');
+    const cleanStat = statSync(guidePath);
+    const stagedGuide = committedGuide.replace('Other', 'Stage');
+    assert.equal(Buffer.byteLength(stagedGuide), Buffer.byteLength(committedGuide));
+    writeFileSync(guidePath, stagedGuide);
+    execFileSync('git', ['add', 'package/docs/guide.md'], { cwd: gitRoot });
+    writeFileSync(guidePath, committedGuide);
+    utimesSync(guidePath, cleanStat.atime, cleanStat.mtime);
+
+    const dirtySignature = ingest.sourceSignature();
+    const dirtyHash = ingest.ingest().contentHash;
+    const dirtyNode = ingest
+      .assembleDataset()
+      .docGraph.nodes.find((node) => node.path === 'docs/guide.md');
+    assert.equal(dirtyNode?.gitMtimeProvenance, 'git-dirty');
+    assert.notEqual(
+      dirtyNode?.gitMtimeIso,
+      expectedGuideMtime,
+      'a staged tracked doc never presents its old HEAD time as current authority'
+    );
+
+    execFileSync('git', ['reset', 'HEAD', '--', 'package/docs/guide.md'], {
+      cwd: gitRoot,
+      stdio: 'ignore',
+    });
+    assert.notEqual(
+      ingest.sourceSignature(),
+      dirtySignature,
+      'an index-only dirty-to-clean transition invalidates the cheap signature'
+    );
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      dirtyHash,
+      'an index-only dirty-to-clean transition invalidates the persisted cache key'
+    );
+    assert.equal(
+      ingest
+        .assembleDataset()
+        .docGraph.nodes.find((node) => node.path === 'docs/guide.md')
+        ?.gitMtimeProvenance,
+      'git'
+    );
+
+    // Candidate binding: the outer cache gates can observe dirty state A,
+    // assembly can briefly observe clean state B, and the next outer probe can
+    // return to A without any doc byte/stat change. That A→B→A candidate must
+    // be marked uncacheable in BOTH full and light dataset shapes.
+    const dirtyBytes = committedGuide.replace('Other', 'Dirty');
+    assert.equal(Buffer.byteLength(dirtyBytes), Buffer.byteLength(committedGuide));
+    writeFileSync(guidePath, dirtyBytes);
+    const raceSignature = ingest.sourceSignature();
+    const raceHash = ingest.ingest().contentHash;
+
+    execFileSync('git', ['update-index', '--assume-unchanged', 'package/docs/guide.md'], {
+      cwd: gitRoot,
+    });
+    const mismatchedFull = ingest.assembleDataset();
+    const mismatchedLight = ingest.assembleRecommendationDataset();
+    assert.notEqual(
+      ingest.datasetDocGraphGitWorkingTreeSignature(mismatchedFull),
+      ingest.docGraphGitWorkingTreeSignatureFromLastSourceGate(),
+      'fixture gives the full candidate a different status identity from the outer probe'
+    );
+    for (const [shape, candidate] of [
+      ['full', mismatchedFull],
+      ['light', mismatchedLight],
+    ]) {
+      assert.equal(
+        candidate.docGraph.nodes.find((node) => node.path === 'docs/guide.md')
+          ?.gitMtimeProvenance,
+        'git-dirty',
+        'index flags conservatively preserve dirty provenance even when porcelain hides it'
+      );
+      assert.equal(
+        ingest.datasetHasTransientDocGraphFailure(candidate),
+        true,
+        `${shape} graph assembled under a different status identity is never cacheable`
+      );
+    }
+    execFileSync(
+      'git',
+      ['update-index', '--no-assume-unchanged', 'package/docs/guide.md'],
+      { cwd: gitRoot }
+    );
+    assert.equal(ingest.sourceSignature(), raceSignature);
+    assert.equal(ingest.ingest().contentHash, raceHash);
+    const recovered = ingest.assembleDataset();
+    assert.equal(
+      recovered.docGraph.nodes.find((node) => node.path === 'docs/guide.md')
+        ?.gitMtimeProvenance,
+      'git-dirty'
+    );
+    assert.equal(ingest.datasetHasTransientDocGraphFailure(recovered), false);
+
+    // Stronger alias: both outer probes see dirty A, while ingest's content
+    // hash and assembly see hidden/clean B. Hash-to-assembly binding alone
+    // cannot reject B; the candidate must also carry and compare the outer A.
+    const outerRaceSignature = ingest.sourceSignature();
+    execFileSync('git', ['update-index', '--assume-unchanged', 'package/docs/guide.md'], {
+      cwd: gitRoot,
+    });
+    const aliasedBuildHash = ingest.ingest().contentHash;
+    const aliasedFull = ingest.assembleDataset();
+    const aliasedLight = ingest.assembleRecommendationDataset();
+    execFileSync(
+      'git',
+      ['update-index', '--no-assume-unchanged', 'package/docs/guide.md'],
+      { cwd: gitRoot }
+    );
+    assert.equal(ingest.sourceSignature(), outerRaceSignature);
+    assert.notEqual(
+      ingest.ingest().contentHash,
+      aliasedBuildHash,
+      'the hidden B candidate has a different exact content hash from current A'
+    );
+    for (const [shape, candidate] of [
+      ['full', aliasedFull],
+      ['light', aliasedLight],
+    ]) {
+      assert.equal(
+        candidate.docGraph.nodes.find((node) => node.path === 'docs/guide.md')
+          ?.gitMtimeProvenance,
+        'git-dirty'
+      );
+      assert.equal(
+        ingest.datasetHasTransientDocGraphFailure(candidate),
+        false,
+        `${shape} candidate is internally consistent under B`
+      );
+      assert.notEqual(
+        ingest.datasetDocGraphGitWorkingTreeSignature(candidate),
+        ingest.docGraphGitWorkingTreeSignatureFromLastSourceGate(),
+        `${shape} candidate carries B so the outer cache rejects it against completion A`
+      );
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(gitRoot, { recursive: true, force: true });

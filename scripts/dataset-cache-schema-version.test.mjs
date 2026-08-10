@@ -52,8 +52,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      35,
-      'enabled datasets reject legacy transient doc-history fallbacks (#3711)'
+      37,
+      'enabled datasets include git-dirty doc provenance and status-aware cache identities (#2743)'
     );
     // Pin the FLAG-OFF (local-first default) schema version as a LITERAL so a
     // regression that lowers it — e.g. back to v28 — fails here (#2955). The
@@ -63,8 +63,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION,
-      34,
-      'flag-off advances to a fresh v34 key to reject transient doc-history fallbacks (#3711)'
+      36,
+      'flag-off advances to fresh v36 because local doc graphs include git-dirty provenance (#2743)'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -76,17 +76,21 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       key,
       `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'flag-off uses the exact v34 cache key for transient doc-history cache admission'
+      'flag-off uses the exact v36 cache key for git-dirty provenance'
     );
+    assert.notEqual(
+      key,
+      `dataset-schema:v35:parser-${ingest.PARSER_SIG_VERSION}`,
+      'flag-off must not alias sibling #3713 historical enabled v35 data'
+    );
+    // The literal equal(FLAG_OFF, 36) pin above fixes the flag-off version
+    // exactly; the explicit v35 fence documents the cross-mode collision that
+    // ordinary preceding-version assertions cannot explain.
     assert.notEqual(
       key,
       `dataset-schema:v33:parser-${ingest.PARSER_SIG_VERSION}`,
       'flag-off must not alias the historical enabled v33 cache key'
     );
-    // The immediately-preceding flag-off v32 key needs no dedicated notEqual:
-    // the literal equal(FLAG_OFF, 34) pin above fixes the version exactly, so
-    // any regression (v32 included) fails there (#2709 review item; avoids
-    // accumulating one dead assertion per ordinary bump).
     assert.notEqual(
       key,
       `dataset-schema:v26:parser-${ingest.PARSER_SIG_VERSION}`,
@@ -149,7 +153,7 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       enabledKey,
       `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'an enabled snapshot turns over persisted v32 flag-off datasets'
+      'an enabled snapshot turns over persisted v36 flag-off datasets'
     );
     assert.notEqual(ingest.sourceSignature(), flagOffSourceSignature);
     assert.notEqual(ingest.ingest().contentHash, flagOffContentHash);
@@ -251,7 +255,7 @@ test('loadLatestDatasetCache fences on the schema key: a NEWER row from another 
   }
 });
 
-test('flag-off cache fencing rejects the historical enabled v33 key (#3711)', async () => {
+test('flag-off cache fencing rejects historical enabled v33/v35 keys (#3711/#2743)', async () => {
   const origHome = process.env.HOME;
   const origDb = process.env.CHD_DB_PATH;
   const origDocIssues = process.env.CHD_DOC_ISSUES;
@@ -263,26 +267,27 @@ test('flag-off cache fencing rejects the historical enabled v33 key (#3711)', as
     const ingest = await loadIngest(home);
     const body = '{"legacyTransientDocGraph":true}';
     const raw = new DatabaseSync(process.env.CHD_DB_PATH);
-    raw
-      .prepare(
-        'INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state, recursive_removal_safety_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      )
-      .run(
-        'legacy-v33',
-        '"legacy-v33"',
+    const insert = raw.prepare(
+      'INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state, recursive_removal_safety_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    for (const [version, createdAt] of [[33, 9_000], [35, 10_000]]) {
+      insert.run(
+        `legacy-v${version}`,
+        `"legacy-v${version}"`,
         brotliCompressSync(body),
         gzipSync(body),
-        9_000,
-        `dataset-schema:v33:parser-${ingest.PARSER_SIG_VERSION}`,
+        createdAt,
+        `dataset-schema:v${version}:parser-${ingest.PARSER_SIG_VERSION}`,
         'null',
         ingest.recursiveRemovalSafetyStateForServer()
       );
+    }
     raw.close();
 
     assert.equal(
       ingest.loadLatestDatasetCache(),
       null,
-      'disabling document issues must not reinterpret an old enabled v33 row as current flag-off data'
+      'flag-off must not reinterpret old enabled v33/v35 rows as current data'
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -295,7 +300,7 @@ test('flag-off cache fencing rejects the historical enabled v33 key (#3711)', as
   }
 });
 
-test('the real dataset cache never persists a transient doc-history fallback and recovers unchanged (#3711)', { timeout: 60_000 }, async () => {
+test('the real dataset cache never persists a transient doc-history fallback and recovers unchanged (#3711)', { timeout: 90_000 }, async () => {
   const testRoot = join(tmpdir(), `chd-3711-server-${randomUUID()}`);
   const claudeDir = join(testRoot, '.claude');
   const distDir = join(testRoot, 'dist');
@@ -466,6 +471,37 @@ exec "$CHD_TEST_REAL_GIT" "$@"
       callsAfterRecovery,
       'the admitted healthy candidate resumes the ordinary warm cache hit'
     );
+
+    const cleanRecommendations = await fetch(
+      `${base}/api/recommendations.json`
+    );
+    assert.equal(cleanRecommendations.status, 200);
+    await cleanRecommendations.arrayBuffer();
+
+    writeFileSync(join(gitRoot, 'README.md'), '# Readme\n\nDirty draft.\n');
+
+    const dirtyRecommendations = await fetch(
+      `${base}/api/recommendations.json`
+    );
+    assert.equal(dirtyRecommendations.status, 200);
+    assert.equal(
+      dirtyRecommendations.headers.get('x-recommendations-cache'),
+      'miss',
+      'a clean-to-dirty Git transition must hard-miss instead of SWR-serving authoritative recommendations'
+    );
+    await dirtyRecommendations.arrayBuffer();
+
+    const dirtyResponse = await fetch(`${base}/api/dataset.json`);
+    assert.equal(dirtyResponse.status, 200);
+    const dirtyDataset = await dirtyResponse.json();
+    const dirtyReadme = dirtyDataset.docGraph.nodes.find(
+      (node) => node.path === 'README.md'
+    );
+    assert.equal(
+      dirtyReadme?.gitMtimeProvenance,
+      'git-dirty',
+      'the full-dataset cache must hard-miss instead of SWR-serving its clean Git provenance'
+    );
   } finally {
     if (proc && proc.exitCode === null && proc.signalCode === null) {
       proc.kill('SIGTERM');
@@ -475,7 +511,7 @@ exec "$CHD_TEST_REAL_GIT" "$@"
   }
 });
 
-test('persisted dataset rows round-trip exact doc-issue identity and expiry metadata', async () => {
+test('persisted dataset rows round-trip exact trust-state metadata', async () => {
   const origHome = process.env.HOME;
   const origDb = process.env.CHD_DB_PATH;
   const home = join(tmpdir(), `chd-2710-state-home-${randomUUID()}`);
@@ -487,6 +523,8 @@ test('persisted dataset rows round-trip exact doc-issue identity and expiry meta
       identity: '{"repo":"acme/widgets","refs":[101]}',
       usableThrough: Date.parse('2026-07-21T12:00:00.000Z'),
     };
+    const docGraphGitWorkingTreeSignature =
+      ingest.docGraphGitWorkingTreeSignatureForServer();
     ingest.saveDatasetCache(
       {
         contentHash: 'doc-state-hash',
@@ -496,6 +534,7 @@ test('persisted dataset rows round-trip exact doc-issue identity and expiry meta
         docIssueCacheState: state,
         recursiveRemovalSafetyState:
           ingest.recursiveRemovalSafetyStateForServer(),
+        docGraphGitWorkingTreeSignature,
       },
       2_000
     );
@@ -508,6 +547,11 @@ test('persisted dataset rows round-trip exact doc-issue identity and expiry meta
     assert.equal(
       loaded.recursiveRemovalSafetyState,
       ingest.recursiveRemovalSafetyStateForServer()
+    );
+    assert.equal(loaded.docGraphGitWorkingTreeSignatureKnown, true);
+    assert.equal(
+      loaded.docGraphGitWorkingTreeSignature,
+      docGraphGitWorkingTreeSignature
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
