@@ -353,8 +353,7 @@ jobs:
           docker run --rm --env EXPECTED_COMMIT="$GIT_SHA" --entrypoint node "$FIRST_TAG" -e '
             const { readFileSync } = require("node:fs");
             const manifest = JSON.parse(readFileSync("/app/data/doc-git-times.json", "utf8"));
-            if (manifest.schemaVersion !== 1) throw new Error("unexpected schemaVersion: " + manifest.schemaVersion);
-            if (manifest.complete !== true) throw new Error("manifest is not complete");
+            if (manifest.schemaVersion !== 2) throw new Error("unexpected schemaVersion: " + manifest.schemaVersion);
             if (manifest.sourceCommit !== process.env.EXPECTED_COMMIT) {
               throw new Error("sourceCommit " + manifest.sourceCommit + " != expected " + process.env.EXPECTED_COMMIT);
             }

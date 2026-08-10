@@ -36,7 +36,7 @@ import {
   ensureContainedDirSync,
 } from './lib/safe-write.mjs';
 
-export const DOC_GIT_TIMES_SCHEMA_VERSION = 1;
+export const DOC_GIT_TIMES_SCHEMA_VERSION = 2;
 export const DOC_GIT_TIMES_RELPATH = 'data/doc-git-times.json';
 /** Mirrors the doc-graph walk cap (parse-docs DEFAULT_MAX_FILES). */
 export const DOC_GIT_TIMES_MAX_FILES = 5000;
@@ -224,7 +224,6 @@ export function buildManifest(root, { maxFiles = DOC_GIT_TIMES_MAX_FILES } = {})
   return {
     schemaVersion: DOC_GIT_TIMES_SCHEMA_VERSION,
     sourceCommit,
-    complete: true,
     files,
   };
 }
@@ -234,8 +233,8 @@ export function buildManifest(root, { maxFiles = DOC_GIT_TIMES_MAX_FILES } = {})
  * failed write never strands the temp file.
  *
  * Containment (#3079): the output directory must resolve to a real directory
- * beneath `root` with no symlinked component, so a `..`/absolute `--out` or a
- * repo-controlled `data -> /elsewhere` symlink is refused before any write. The
+ * beneath `root` with no symlinked component, so a repo-controlled
+ * `data -> /elsewhere` symlink is refused before any write. The
  * temp file is created with `wx` (exclusive), so a symlink pre-seeded at the
  * predictable `<out>.tmp-<pid>` path fails the open rather than redirecting the
  * write through the link. `root` is optional only for backward compatibility;
@@ -259,11 +258,10 @@ export function writeManifest(outFile, manifest, { root } = {}) {
 
 export function main(argv = process.argv.slice(2)) {
   let root = process.cwd();
-  let out = null;
   let maxFiles = DOC_GIT_TIMES_MAX_FILES;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--root' || arg === '--out' || arg === '--max-files') {
+    if (arg === '--root' || arg === '--max-files') {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith('--')) {
         console.error(`doc-git-times: ${arg} requires a value`);
@@ -271,7 +269,6 @@ export function main(argv = process.argv.slice(2)) {
       }
       i += 1;
       if (arg === '--root') root = value;
-      else if (arg === '--out') out = value;
       else maxFiles = Number(value);
     } else {
       console.error(`doc-git-times: unknown argument: ${arg}`);
@@ -283,7 +280,7 @@ export function main(argv = process.argv.slice(2)) {
     return 2;
   }
   root = resolve(root);
-  const outFile = out ? resolve(out) : join(root, DOC_GIT_TIMES_RELPATH);
+  const outFile = join(root, DOC_GIT_TIMES_RELPATH);
   try {
     const manifest = buildManifest(root, { maxFiles });
     writeManifest(outFile, manifest, { root });

@@ -8,7 +8,7 @@
  * NON-SHALLOW checkout and writes a bounded manifest of repo-relative Markdown
  * path -> last-commit ISO time, bound to the exact source commit. This module
  * is the fail-closed consumer side: schema, commit binding, path bounds, and
- * time validity. A missing, partial, over-cap, future-dated, malformed, or
+ * time validity. A missing, over-cap, future-dated, malformed, or
  * commit-mismatched manifest yields NO authoritative time — the caller then
  * carries `filesystem` provenance, which no freshness claim may treat as Git
  * history.
@@ -33,20 +33,14 @@ export type DocTimeProvenance = 'git' | 'manifest' | 'filesystem' | 'unavailable
 
 /** On-disk manifest shape written by scripts/doc-git-times-generate.mjs. */
 export interface DocGitTimesManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   /** Full commit hash the per-path history was resolved at. */
   sourceCommit: string;
-  /**
-   * True only when the producer proved full per-path coverage in a non-shallow
-   * repository. The producer never writes `false` (it fails closed instead),
-   * but the consumer still rejects anything but `true` — defense in depth.
-   */
-  complete: true;
   /** Repo-relative POSIX Markdown path -> last-commit ISO 8601 time. */
   files: Record<string, string>;
 }
 
-export const DOC_GIT_TIMES_SCHEMA_VERSION = 1;
+export const DOC_GIT_TIMES_SCHEMA_VERSION = 2;
 
 /**
  * Conventional manifest location relative to the doc-graph root. Lives under
@@ -140,9 +134,6 @@ export function parseDocGitTimesManifest(
   if (!manifest) return { ok: false, reason: 'manifest is not an object' };
   if (manifest.schemaVersion !== DOC_GIT_TIMES_SCHEMA_VERSION) {
     return { ok: false, reason: 'unsupported schemaVersion' };
-  }
-  if (manifest.complete !== true) {
-    return { ok: false, reason: 'manifest does not declare complete coverage' };
   }
   const sourceCommit =
     typeof manifest.sourceCommit === 'string'

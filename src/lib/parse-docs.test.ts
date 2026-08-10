@@ -668,9 +668,8 @@ describe('buildDocGraph', () => {
         root,
         'data/doc-git-times.json',
         JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
           sourceCommit: COMMIT,
-          complete: true,
           files,
           ...overrides,
         })
@@ -717,7 +716,7 @@ describe('buildDocGraph', () => {
       expect(node?.gitMtimeIso).not.toBe('2026-01-05T10:00:00+00:00');
     });
 
-    it('fails closed on an unbound (no runtime commit), partial, or malformed manifest', () => {
+    it('fails closed on an unbound, legacy-schema, or malformed manifest', () => {
       write(root, 'README.md', '# Readme\n');
 
       writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
@@ -726,7 +725,7 @@ describe('buildDocGraph', () => {
           ?.gitMtimeProvenance
       ).toBe('filesystem');
 
-      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' }, { complete: false });
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' }, { schemaVersion: 1 });
       expect(
         buildDocGraph(root, { docGitTimesExpectedCommit: COMMIT }).nodes[0]
           ?.gitMtimeProvenance

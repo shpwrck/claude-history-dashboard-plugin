@@ -1,8 +1,40 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import { DOC_GIT_TIMES_RELPATH } from './doc-git-times';
 import { DOCS_MAP_RELPATH } from './parse-docs-map';
+
+interface WorkflowStep {
+  name?: string;
+  uses?: string;
+  if?: string;
+  with?: Record<string, unknown>;
+  run?: string;
+}
+
+interface WorkflowDocument {
+  jobs?: Record<string, { steps?: WorkflowStep[] }>;
+}
+
+const SERVER_AWARE_FETCH_DEPTH = "${{ matrix.buildMode == 'server' && '0' || '1' }}";
+
+function publishSteps(source: string): WorkflowStep[] {
+  const parsed = parse(source) as WorkflowDocument;
+  const steps = parsed.jobs?.['build-and-push']?.steps;
+  if (!Array.isArray(steps)) throw new Error('build-and-push job has no steps');
+  return steps;
+}
+
+function publishCheckoutFetchDepth(source: string): unknown {
+  const checkouts = publishSteps(source).filter((step) =>
+    step.uses?.startsWith('actions/checkout@')
+  );
+  if (checkouts.length !== 1) {
+    throw new Error(`build-and-push job has ${checkouts.length} checkout steps`);
+  }
+  return checkouts[0].with?.['fetch-depth'];
+}
 
 describe('runtime image doc-graph inputs (#2380)', () => {
   it('copies root markdown and docs into the zero-node_modules runtime stage', () => {
@@ -53,19 +85,47 @@ describe('packaged doc git-times manifest (#2707)', () => {
       join(process.cwd(), '.github', 'workflows', 'docker-publish.yml'),
       'utf8'
     );
-    expect(workflow).toContain(
-      "fetch-depth: ${{ matrix.buildMode == 'server' && '0' || '1' }}"
+    const steps = publishSteps(workflow);
+    expect(publishCheckoutFetchDepth(workflow)).toBe(SERVER_AWARE_FETCH_DEPTH);
+
+    const generateIndex = steps.findIndex(
+      (step) =>
+        step.name === 'Generate doc git-times manifest' &&
+        step.if === "matrix.buildMode == 'server'" &&
+        step.run?.includes('doc-git-times-generate.mjs')
     );
-    expect(workflow).toMatch(
-      /name: Generate doc git-times manifest\n\s+if: matrix\.buildMode == 'server'/
+    const buildIndex = steps.findIndex(
+      (step) =>
+        step.name === 'Build and push declared image' && step.run?.includes('docker build')
     );
-    expect(workflow).toContain('doc-git-times-generate.mjs');
-    expect(
-      workflow.indexOf('doc-git-times-generate.mjs') < workflow.indexOf('docker build'),
-      'generation must precede the image build'
-    ).toBe(true);
+    expect(generateIndex).toBeGreaterThanOrEqual(0);
+    expect(buildIndex).toBeGreaterThan(generateIndex);
 
     const deploy = readFileSync(join(process.cwd(), 'scripts', 'deploy.sh'), 'utf8');
     expect(deploy).toContain('doc-git-times-generate.mjs');
+  });
+
+  it('cannot satisfy publish checkout depth with a comment or a different job', () => {
+    const commentDecoy = `
+# fetch-depth: \${{ matrix.buildMode == 'server' && '0' || '1' }}
+jobs:
+  build-and-push:
+    steps:
+      - uses: actions/checkout@pinned
+`;
+    expect(publishCheckoutFetchDepth(commentDecoy)).toBeUndefined();
+
+    const otherJobDecoy = `
+jobs:
+  plan:
+    steps:
+      - uses: actions/checkout@pinned
+        with:
+          fetch-depth: \${{ matrix.buildMode == 'server' && '0' || '1' }}
+  build-and-push:
+    steps:
+      - uses: actions/checkout@pinned
+`;
+    expect(publishCheckoutFetchDepth(otherJobDecoy)).toBeUndefined();
   });
 });

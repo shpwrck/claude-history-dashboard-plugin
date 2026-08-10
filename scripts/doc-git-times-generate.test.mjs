@@ -94,8 +94,8 @@ describe('doc-git-times producer (#2707)', () => {
       const bytes = readFileSync(outFile, 'utf8');
       const manifest = JSON.parse(bytes);
 
-      assert.equal(manifest.schemaVersion, 1);
-      assert.equal(manifest.complete, true);
+      assert.equal(manifest.schemaVersion, 2);
+      assert.equal(Object.hasOwn(manifest, 'complete'), false);
       assert.equal(manifest.sourceCommit, git(root, ['rev-parse', 'HEAD']));
       // Exactly the clean tracked docs — dirty/untracked/off-surface omitted.
       assert.deepEqual(Object.keys(manifest.files).sort(), [
@@ -177,9 +177,9 @@ describe('doc-git-times producer (#2707)', () => {
   test('rejects malformed arguments', () => {
     assert.equal(runProducer(['--bogus']).status, 2);
     assert.equal(runProducer(['--max-files', '0']).status, 2);
-    // A flag must not swallow the NEXT flag as its value (would e.g. write a
-    // file literally named "--max-files").
-    assert.equal(runProducer(['--out', '--max-files']).status, 2);
+    const removedOut = runProducer(['--out', 'elsewhere.json']);
+    assert.equal(removedOut.status, 2);
+    assert.match(removedOut.stderr, /unknown argument: --out/);
     assert.equal(runProducer(['--root']).status, 2);
   });
 
@@ -226,20 +226,6 @@ describe('doc-git-times producer (#2707)', () => {
 // containment failure must return a nonzero exit code and leave every external
 // target byte-identical, while a normal in-repo output still succeeds.
 describe('doc-git-times output containment (#3079)', () => {
-  test('rejects an --out that escapes the repo root via .. and never touches the external target', () => {
-    const root = fullHistoryRepo();
-    const evil = join(dirname(root), 'doc-git-times-evil.json');
-    writeFileSync(evil, 'original');
-    try {
-      const status = main(['--root', root, '--out', join(root, '..', 'doc-git-times-evil.json')]);
-      assert.notEqual(status, 0);
-      assert.equal(readFileSync(evil, 'utf8'), 'original');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-      rmSync(evil, { force: true });
-    }
-  });
-
   test('rejects a symlinked default output parent (data -> outside) and leaves it untouched', () => {
     const root = fullHistoryRepo();
     const outside = mkdtempSync(join(tmpdir(), 'doc-git-times-out-'));
@@ -285,8 +271,8 @@ describe('doc-git-times output containment (#3079)', () => {
       const outFile = join(root, 'data', 'doc-git-times.json');
       assert.equal(existsSync(outFile), true);
       const manifest = JSON.parse(readFileSync(outFile, 'utf8'));
-      assert.equal(manifest.schemaVersion, 1);
-      assert.equal(manifest.complete, true);
+      assert.equal(manifest.schemaVersion, 2);
+      assert.equal(Object.hasOwn(manifest, 'complete'), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

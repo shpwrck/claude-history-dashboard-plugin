@@ -16,9 +16,8 @@ const NOW_MS = Date.parse('2026-07-16T00:00:00Z');
 
 function valid(overrides: Record<string, unknown> = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceCommit: COMMIT,
-    complete: true,
     files: {
       'README.md': '2026-01-05T10:00:00+00:00',
       'docs/adr/0001-first.md': '2026-02-10T12:30:00Z',
@@ -54,13 +53,10 @@ describe('parseDocGitTimesManifest', () => {
     }
   });
 
-  it('rejects a wrong schemaVersion', () => {
-    expect(parseDocGitTimesManifest(valid({ schemaVersion: 2 }), opts).ok).toBe(false);
-  });
-
-  it('rejects a partial manifest (complete !== true)', () => {
-    expect(parseDocGitTimesManifest(valid({ complete: false }), opts).ok).toBe(false);
-    expect(parseDocGitTimesManifest(valid({ complete: 'true' }), opts).ok).toBe(false);
+  it('rejects a legacy schemaVersion even when it declares complete coverage', () => {
+    expect(
+      parseDocGitTimesManifest(valid({ schemaVersion: 1, complete: true }), opts).ok
+    ).toBe(false);
   });
 
   it('rejects a missing or short sourceCommit', () => {
