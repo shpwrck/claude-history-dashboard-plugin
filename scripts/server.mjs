@@ -92,6 +92,7 @@ import {
   docIssueSnapshotCacheStateFromDataset,
   recursiveRemovalSafetyStateForServer,
   recursiveRemovalSafetyStateFromDataset,
+  datasetHasTransientDocGraphFailure,
 } from './ingest.mjs';
 import {
   readWorkflows,
@@ -1292,7 +1293,15 @@ const GLOBAL_INGEST_API = {
   docIssueSnapshotCacheStateFromDataset,
   recursiveRemovalSafetyStateForServer,
   recursiveRemovalSafetyStateFromDataset,
+  datasetHasTransientDocGraphFailure,
 };
+
+function hasTransientDocGraphFailure(api, dataset) {
+  return (
+    typeof api.datasetHasTransientDocGraphFailure === 'function' &&
+    api.datasetHasTransientDocGraphFailure(dataset)
+  );
+}
 
 function datasetState(apiPromise, key = 'global') {
   return {
@@ -1554,6 +1563,7 @@ function datasetCacheEntryMatchesRecursiveRemovalSafetyState(entry, api) {
 
 async function buildDatasetCache(api, contentHash) {
   const dataset = api.assembleDataset();
+  const docGraphRetryRequired = hasTransientDocGraphFailure(api, dataset);
   const docIssueCacheState =
     api.docIssueSnapshotCacheStateFromDataset(dataset);
   const recursiveRemovalSafetyState =
@@ -1601,6 +1611,7 @@ async function buildDatasetCache(api, contentHash) {
     docIssueCacheStateKnown: true,
     recursiveRemovalSafetyState,
     recursiveRemovalSafetyStateKnown: recursiveRemovalSafetyState !== null,
+    docGraphRetryRequired,
   };
 }
 
@@ -2295,6 +2306,7 @@ async function rebuildDatasetCache(state, sig) {
 
     if (
       state.datasetCache?.contentHash === stats.contentHash &&
+      state.datasetCache.docGraphRetryRequired !== true &&
       datasetCacheEntryMatchesDocIssueState(state.datasetCache, api) &&
       datasetCacheEntryMatchesRecursiveRemovalSafetyState(state.datasetCache, api)
     ) {
@@ -2327,6 +2339,24 @@ async function rebuildDatasetCache(state, sig) {
     const recursiveRemovalSafetyStable =
       datasetCacheEntryMatchesRecursiveRemovalSafetyState(candidate, api);
     const sigStable = completedSig === buildSig;
+    if (candidate.docGraphRetryRequired === true) {
+      // Retry the exact acquisition once even though the filesystem signature
+      // is unchanged. A second failure may still be served to a truly cold
+      // caller as conservative fallback data, but it is never persisted,
+      // memoized, or allowed to settle the request-time stat gate. If a last-good
+      // dataset exists, retain it for stale-while-revalidate instead.
+      if (!docIssueStable || !recursiveRemovalSafetyStable) {
+        buildSig = completedSig;
+        continue;
+      }
+      if (attempt === 0) {
+        buildSig = completedSig;
+        continue;
+      }
+      if (!state.datasetCache) state.datasetCache = candidate;
+      state.lastSourceSig = null;
+      return { stats, cached: false };
+    }
     // Commit a fully stable candidate; on the FINAL bounded attempt commit the
     // freshest candidate even when only the coarse source signature moved. On a
     // busy multi-agent host, concurrent writers keep bumping the scanned-dir
@@ -2476,7 +2506,12 @@ function memoizedAssembleDataset(state, api, contentHash) {
     builtSourceState: (dataset) =>
       api.docIssueSnapshotCacheStateFromDataset(dataset),
   });
-  state.assembledMemo = resolved.memo;
+  // A thrown bulk doc-history walk is a retryable acquisition failure, not a
+  // stable graph state. Never pin that exact dataset under the otherwise healthy
+  // contentHash; the next build must call the parser again after Git recovers.
+  state.assembledMemo = hasTransientDocGraphFailure(api, resolved.value)
+    ? null
+    : resolved.memo;
   return resolved.value;
 }
 
@@ -2507,7 +2542,9 @@ function memoizedAssembleRecommendationDataset(
     builtSourceState: (dataset) =>
       api.docIssueSnapshotCacheStateFromDataset(dataset),
   });
-  state.assembledRecoMemo = resolved.memo;
+  state.assembledRecoMemo = hasTransientDocGraphFailure(api, resolved.value)
+    ? null
+    : resolved.memo;
   return resolved.value;
 }
 
@@ -2850,6 +2887,7 @@ async function buildRecommendationsCacheEntryViaWorker(
     sourceSig: workerSourceSig,
     docIssueCacheState,
     recursiveRemovalSafetyState,
+    docGraphRetryRequired,
     acceptSuppressionTransitions,
     discardSuppressionTransitions,
   } = workerResult;
@@ -2868,6 +2906,7 @@ async function buildRecommendationsCacheEntryViaWorker(
     recursiveRemovalSafetyState,
     recursiveRemovalSafetyStateKnown:
       typeof recursiveRemovalSafetyState === 'string',
+    docGraphRetryRequired: docGraphRetryRequired === true,
     guidanceTransitions,
     guidanceCacheValidity,
     hookOverheadCacheValidity: hookCacheValidity,
@@ -2908,6 +2947,7 @@ async function buildRecommendationsCacheEntry(
     api,
     stats.contentHash
   );
+  const docGraphRetryRequired = hasTransientDocGraphFailure(api, dataset);
   const docIssueCacheState =
     api.docIssueSnapshotCacheStateFromDataset(dataset);
   const recursiveRemovalSafetyState =
@@ -2996,6 +3036,7 @@ async function buildRecommendationsCacheEntry(
     hookOverheadConfigState: hookConfigState,
     skillHookIntegrityCacheValidity: skillHookCacheValidity,
     editFormatChurnCacheValidity: editChurnCacheValidity,
+    docGraphRetryRequired,
     emitAcceptedSuppressionTransitions,
     lastAccess: Date.now(),
   };
@@ -3003,6 +3044,10 @@ async function buildRecommendationsCacheEntry(
 }
 
 function commitRecommendationsCacheEntry(state, key, entry, buildOwner) {
+  if (entry.docGraphRetryRequired === true) {
+    discardRecommendationsCacheEntry(entry);
+    return entry;
+  }
   const emitAcceptedSuppressionTransitions =
     entry.emitAcceptedSuppressionTransitions;
   delete entry.emitAcceptedSuppressionTransitions;
@@ -3048,6 +3093,7 @@ async function ensureCurrentRecommendationsCacheEntry(
 ) {
   let clockConfigRetriesRemaining = 1;
   let sourceRetriesRemaining = 1;
+  let docGraphRetriesRemaining = 1;
   for (;;) {
     let newer = newerRecommendationsResult(state, key, buildOwner);
     if (newer) {
@@ -3137,7 +3183,37 @@ async function ensureCurrentRecommendationsCacheEntry(
       }
     }
 
-    if (recommendationsCacheEntryIsCurrent(entry, api, Date.now())) {
+    const entryIsCurrent = recommendationsCacheEntryIsCurrent(
+      entry,
+      api,
+      Date.now()
+    );
+    if (entryIsCurrent && entry.docGraphRetryRequired === true) {
+      if (docGraphRetriesRemaining <= 0) {
+        // Serve the second conservative fallback to a cold caller, but do not
+        // cache it or emit suppression-transition side effects. All hard trust
+        // and clock/config gates above have passed; only the transient doc walk
+        // remains unsettled, so the next request retries it under the same stats.
+        entry.sourceSig = null;
+        discardRecommendationsCacheEntry(entry);
+        return entry;
+      }
+      docGraphRetriesRemaining -= 1;
+      const currentBuild = state.recommendationsBuilds.get(key);
+      if (currentBuild && currentBuild !== buildOwner) {
+        discardRecommendationsCacheEntry(entry);
+        return currentBuild.promise;
+      }
+      const retrySourceSig = api.sourceSignature();
+      if (currentBuild === buildOwner) buildOwner.sourceSig = retrySourceSig;
+      discardRecommendationsCacheEntry(entry);
+      entry = await retryBuild(retrySourceSig);
+      clockConfigRetriesRemaining = 1;
+      sourceRetriesRemaining = 1;
+      continue;
+    }
+
+    if (entryIsCurrent) {
       newer = newerRecommendationsResult(state, key, buildOwner);
       if (newer) {
         discardRecommendationsCacheEntry(entry);
@@ -3450,6 +3526,7 @@ async function statGatedResponseCache(api, { cacheMap, buildsMap, key, max, buil
     sourceState: () => currentDocIssueCacheState(api),
     builtSourceState: (built) => built.docIssueCacheState,
     sourceStatesEqual: docIssueCacheStatesEqual,
+    cacheable: (built) => built.docGraphRetryRequired !== true,
     cacheMap,
     buildsMap,
     key,
@@ -3579,6 +3656,13 @@ async function buildSlicePayload(state, api, key, sourceSig) {
   return {
     value: await compressedPayload(value, stats.contentHash),
     docIssueCacheState: api.docIssueSnapshotCacheStateFromDataset(ds),
+    // docGraph carries the transient fallback directly; repoMap carries
+    // recommendation IDs derived from that graph. Other slices are independent
+    // outputs and remain cacheable, while the shared assembled memo above has
+    // already refused to pin the degraded dataset object.
+    docGraphRetryRequired:
+      (key === 'docGraph' || key === 'repoMap') &&
+      hasTransientDocGraphFailure(api, ds),
   };
 }
 
@@ -5467,6 +5551,10 @@ async function buildLocalAnalyzeDeterministic(req, project) {
       ingestApi,
       stats.contentHash
     );
+    const docGraphRetryRequired = hasTransientDocGraphFailure(
+      ingestApi,
+      dataset
+    );
     const builtDocIssueCacheState =
       ingestApi.docIssueSnapshotCacheStateFromDataset(dataset);
     const rejectedFindingIds = await ingestApi.readRejectedFindingIds(
@@ -5491,7 +5579,11 @@ async function buildLocalAnalyzeDeterministic(req, project) {
         completedDocIssueState
       ) &&
       docIssueCacheStateIsUsable(completedDocIssueState, Date.now());
-    if (docIssueStateStable && (sourceSigStable || attempt === 1)) {
+    if (
+      !docGraphRetryRequired &&
+      docIssueStateStable &&
+      (sourceSigStable || attempt === 1)
+    ) {
       return {
         ingestApi,
         // A deterministic final-attempt candidate remains safe to serve when
@@ -5499,6 +5591,14 @@ async function buildLocalAnalyzeDeterministic(req, project) {
         // unsettled so a later model result cannot be attached as though the
         // evidence were stable; ensureCurrentLocalAnalyzeBuild will recheck it.
         sourceSig: sourceSigStable ? completedSourceSig : null,
+        docIssueCacheState: builtDocIssueCacheState,
+        recommendations: extractRecommendations(recs),
+      };
+    }
+    if (docGraphRetryRequired && docIssueStateStable && attempt === 1) {
+      return {
+        ingestApi,
+        sourceSig: null,
         docIssueCacheState: builtDocIssueCacheState,
         recommendations: extractRecommendations(recs),
       };
@@ -9807,6 +9907,7 @@ async function handleDatasetJson(req, res) {
   if (
     ingestState.datasetCache &&
     (
+      ingestState.datasetCache.docGraphRetryRequired === true ||
       !datasetCacheEntryMatchesDocIssueState(
         ingestState.datasetCache,
         ingestApi,

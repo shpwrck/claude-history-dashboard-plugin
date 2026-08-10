@@ -56,6 +56,7 @@ vi.mock('node:fs', async (importOriginal) => {
 import {
   buildDocGraph,
   captureDocGitTimesSnapshot,
+  docGraphHasTransientGitHistoryFailure,
   classifyIndex,
   deriveCategory,
   extractHeadings,
@@ -647,6 +648,7 @@ describe('buildDocGraph', () => {
     expect(byPath.get('docs/a.md')?.gitMtimeProvenance).toBe('git');
     expect(Date.parse(byPath.get('docs/untracked.md')?.gitMtimeIso ?? '')).not.toBeNaN();
     expect(byPath.get('docs/untracked.md')?.gitMtimeProvenance).toBe('filesystem');
+    expect(docGraphHasTransientGitHistoryFailure(graph)).toBe(false);
   });
 
   it('fails closed when a bounded history walk returns partial stdout', () => {
@@ -685,6 +687,8 @@ describe('buildDocGraph', () => {
       gitMtimeIso: filesystemTime.toISOString(),
       gitMtimeProvenance: 'filesystem',
     });
+    expect(docGraphHasTransientGitHistoryFailure(graph)).toBe(true);
+    expect(Object.keys(graph)).toEqual(['root', 'nodes', 'edges']);
   });
 
   it('never trusts live history in a SHALLOW checkout (#2707)', () => {

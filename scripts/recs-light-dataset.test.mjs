@@ -28,8 +28,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import {
+  chmodSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -640,6 +641,114 @@ test('#2746 ingest hashes and joins one pinned doc-git-times snapshot', async ()
       delete process.env.CHD_DOC_GIT_TIMES_EXPECTED_COMMIT;
     } else {
       process.env.CHD_DOC_GIT_TIMES_EXPECTED_COMMIT = origExpectedCommit;
+    }
+  }
+});
+
+test('#3711 transient doc Git failure is candidate-bound and recovers unchanged', async () => {
+  const original = {
+    HOME: process.env.HOME,
+    CHD_DB_PATH: process.env.CHD_DB_PATH,
+    CHD_DOC_GRAPH_ROOT: process.env.CHD_DOC_GRAPH_ROOT,
+    PATH: process.env.PATH,
+    CHD_TEST_REAL_GIT: process.env.CHD_TEST_REAL_GIT,
+    CHD_TEST_GIT_FAIL: process.env.CHD_TEST_GIT_FAIL,
+    CHD_TEST_GIT_CALLS: process.env.CHD_TEST_GIT_CALLS,
+  };
+  const home = buildFixtureHome();
+  const gitRoot = join(tmpdir(), `chd-3711-docs-${randomUUID()}`);
+  const fakeBin = join(tmpdir(), `chd-3711-bin-${randomUUID()}`);
+  const failFlag = join(tmpdir(), `chd-3711-fail-${randomUUID()}`);
+  const callsPath = join(tmpdir(), `chd-3711-calls-${randomUUID()}`);
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim();
+  mkdirSync(join(gitRoot, 'docs'), { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(gitRoot, 'README.md'), '# Readme\n');
+  writeFileSync(join(gitRoot, 'docs', 'guide.md'), '# Guide\n');
+  execFileSync(realGit, ['init'], { cwd: gitRoot, stdio: 'ignore' });
+  execFileSync(realGit, ['config', 'user.email', 'test@example.com'], { cwd: gitRoot });
+  execFileSync(realGit, ['config', 'user.name', 'CHD Test'], { cwd: gitRoot });
+  execFileSync(realGit, ['add', 'README.md', 'docs/guide.md'], { cwd: gitRoot });
+  execFileSync(realGit, ['commit', '-m', 'Track docs'], {
+    cwd: gitRoot,
+    stdio: 'ignore',
+  });
+  const fakeGit = join(fakeBin, 'git');
+  writeFileSync(
+    fakeGit,
+    `#!/bin/sh
+bulk=0
+for arg in "$@"; do
+  if [ "$arg" = "--max-count=4096" ]; then bulk=1; fi
+done
+if [ "$bulk" = "1" ]; then
+  printf 'bulk\\n' >> "$CHD_TEST_GIT_CALLS"
+  if [ -f "$CHD_TEST_GIT_FAIL" ]; then exit 1; fi
+fi
+exec "$CHD_TEST_REAL_GIT" "$@"
+`
+  );
+  chmodSync(fakeGit, 0o755);
+
+  try {
+    process.env.CHD_DOC_GRAPH_ROOT = gitRoot;
+    process.env.CHD_TEST_REAL_GIT = realGit;
+    process.env.CHD_TEST_GIT_FAIL = failFlag;
+    process.env.CHD_TEST_GIT_CALLS = callsPath;
+    process.env.PATH = `${fakeBin}${delimiter}${original.PATH ?? ''}`;
+    const ingest = await loadIngest(home);
+    const healthyHash = ingest.ingest().contentHash;
+    const healthySignature = ingest.sourceSignature();
+    const healthy = ingest.assembleRecommendationDataset();
+    assert.equal(ingest.datasetHasTransientDocGraphFailure(healthy), false);
+    assert.equal(healthy.docGraph.nodes[0]?.gitMtimeProvenance, 'git');
+
+    writeFileSync(failFlag, 'fail\n');
+    const failed = ingest.assembleRecommendationDataset();
+    assert.equal(ingest.datasetHasTransientDocGraphFailure(failed), true);
+    assert.ok(
+      failed.docGraph.nodes.every((node) => node.gitMtimeProvenance !== 'git'),
+      'the failed bulk walk falls through instead of claiming live Git history'
+    );
+    assert.equal(
+      JSON.stringify(failed.docGraph).includes('transientGitHistoryFailure'),
+      false,
+      'candidate-bound cache metadata is never serialized'
+    );
+    assert.equal(ingest.ingest().contentHash, healthyHash);
+    assert.equal(ingest.sourceSignature(), healthySignature);
+
+    const bulkCallsBeforeSignatures = readFileSync(callsPath, 'utf8');
+    ingest.sourceSignature();
+    ingest.sourceSignature();
+    assert.equal(
+      readFileSync(callsPath, 'utf8'),
+      bulkCallsBeforeSignatures,
+      'the cheap source signature never runs the bulk Git walk'
+    );
+
+    rmSync(failFlag, { force: true });
+    const recovered = ingest.assembleRecommendationDataset();
+    assert.equal(ingest.datasetHasTransientDocGraphFailure(recovered), false);
+    assert.ok(
+      recovered.docGraph.nodes.every(
+        (node) => node.gitMtimeProvenance === 'git'
+      ),
+      'the next unchanged assembly restores live Git provenance'
+    );
+    assert.equal(ingest.ingest().contentHash, healthyHash);
+    assert.equal(ingest.sourceSignature(), healthySignature);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(gitRoot, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(failFlag, { force: true });
+    rmSync(callsPath, { force: true });
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
     }
   }
 });

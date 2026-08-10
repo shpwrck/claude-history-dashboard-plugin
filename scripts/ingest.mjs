@@ -692,6 +692,7 @@ const { parseLocalCalibration } = await import(
 const {
   buildDocGraph,
   captureDocGitTimesSnapshot,
+  docGraphHasTransientGitHistoryFailure,
   docGraphGitHistorySignature,
   docGraphSourcePaths,
   gitHistoryAvailability,
@@ -1253,6 +1254,15 @@ function readDocGraph(docGitTimesSnapshot = null) {
   } catch {
     return { root: DOC_GRAPH_ROOT, nodes: [], edges: [] };
   }
+}
+
+// Candidate-bound cache admission seam (#3711). The parser marks the exact
+// graph whose bulk live-history walk threw with a non-enumerable Symbol, so the
+// served JSON remains byte-identical while every server/worker cache can refuse
+// to memoize or persist that one transient fallback. Stable manifest/filesystem
+// graphs in shallow or gitless runtimes remain cacheable.
+export function datasetHasTransientDocGraphFailure(dataset) {
+  return docGraphHasTransientGitHistoryFailure(dataset?.docGraph);
 }
 
 // Opt-in GitHub issue-state snapshot (#2710, epic #2256). The cache dir shares
@@ -2576,8 +2586,13 @@ export const PARSER_SIG_VERSION = 'v6';
 // config may be unchanged while a persisted v32 body lacks that evidence and
 // therefore fails closed in the browser formatter, so both local dataset paths
 // advance together (flag-off 31 -> 32).
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 33;
-export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 32;
+// v35 (#3711): cache admission now rejects an exact dataset assembled while the
+// bounded doc-history Git walk was failing. Legacy v33 rows cannot prove that
+// they were not produced by that transient fallback. The enabled path skips to
+// v35 and flag-off advances 32 -> 34 so neither new key aliases a historical key
+// from the other mode.
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 35;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 34;
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the

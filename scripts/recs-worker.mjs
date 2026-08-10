@@ -29,6 +29,7 @@
 //     therefore surface-independent.
 //   worker -> parent: { id, ok:true, json, contentHash, sourceSig,
 //                       docIssueCacheState, recursiveRemovalSafetyState,
+//                       docGraphRetryRequired,
 //                       suppressionEmissionId,
 //                       guidanceTransitions, guidanceCacheValidity,
 //                       hookOverheadCacheValidity, hookOverheadConfigState,
@@ -142,6 +143,7 @@ const {
   docIssueSnapshotCacheStateFromDataset,
   recursiveRemovalSafetyStateForServer,
   recursiveRemovalSafetyStateFromDataset,
+  datasetHasTransientDocGraphFailure,
 } = ingestApi;
 const {
   docGitTimesSnapshotInstrumentation,
@@ -243,6 +245,7 @@ async function buildRecommendationResult({
       });
   return {
     dataset,
+    docGraphRetryRequired: datasetHasTransientDocGraphFailure(dataset),
     docIssueCacheState: docIssueSnapshotCacheStateFromDataset(dataset),
     recursiveRemovalSafetyState: recursiveRemovalSafetyStateFromDataset(dataset),
     json: safeJsonStringify(result),
@@ -283,6 +286,7 @@ async function buildStableRecommendationResult(params) {
       built.recursiveRemovalSafetyState ===
         completedSourceState.recursiveRemovalSafetyState;
     if (
+      !built.docGraphRetryRequired &&
       docIssueStateStable &&
       recursiveRemovalSafetyStateStable &&
       (sourceSigStable || attempt === 1)
@@ -301,6 +305,19 @@ async function buildStableRecommendationResult(params) {
       };
     }
     if (attempt === 1) {
+      if (
+        built.docGraphRetryRequired &&
+        docIssueStateStable &&
+        recursiveRemovalSafetyStateStable
+      ) {
+        // Return the second conservative fallback to the parent as explicitly
+        // uncacheable. The parent discards staged side effects and retries the
+        // worker on the next request without requiring a source-stat change.
+        return {
+          ...built,
+          sourceState: { ...completedSourceState, sourceSig: null },
+        };
+      }
       const err = new Error(
         'Recommendation source state changed across the bounded rebuild retry'
       );
@@ -379,6 +396,7 @@ parentPort.on('message', async (msg) => {
       sourceSig: built.sourceState.sourceSig,
       docIssueCacheState: built.docIssueCacheState,
       recursiveRemovalSafetyState: built.recursiveRemovalSafetyState,
+      docGraphRetryRequired: built.docGraphRetryRequired,
       suppressionEmissionId,
       ...(process.env.CHD_RECS_CACHE_TEST_EVENTS === '1'
         ? { docGitTimesSnapshotIo: docGitTimesSnapshotInstrumentation() }

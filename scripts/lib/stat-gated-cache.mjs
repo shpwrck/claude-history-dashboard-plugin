@@ -79,6 +79,8 @@ export function resolveStateBoundMemo({
 //   build(...args)     — runs the expensive work and returns the payload to cache.
 //   buildArgs          — extra args forwarded to build(), followed by the exact
 //                        source signature whose snapshot the build must consume.
+//   cacheable(value)   — optional candidate-bound admission check. A false
+//                        value retries once, then serves without caching.
 //
 // Concurrency contract: N concurrent requests with the SAME key and an unchanged
 // sourceSignature share ONE build (single-flight) — the first installs the
@@ -105,6 +107,7 @@ export async function resolveStatGatedCache({
   sourceState,
   builtSourceState,
   sourceStatesEqual = Object.is,
+  cacheable = () => true,
 }) {
   const sourceSig = sourceSignature();
   const stateGateEnabled = typeof sourceState === 'function';
@@ -156,7 +159,12 @@ export async function resolveStatGatedCache({
           (sourceStatesEqual(expectedSourceState, valueSourceState) &&
             sourceStatesEqual(expectedSourceState, completedSourceState) &&
             sourceStatesEqual(valueSourceState, completedSourceState));
-        if (completedSourceSig === expectedSourceSig && stableState) {
+        const candidateCacheable = cacheable(value);
+        if (
+          completedSourceSig === expectedSourceSig &&
+          stableState &&
+          candidateCacheable
+        ) {
           const entry = {
             value,
             sourceSig: completedSourceSig,
@@ -178,16 +186,11 @@ export async function resolveStatGatedCache({
             err.code = 'SOURCE_CHANGED_DURING_BUILD';
             throw err;
           }
-          // Bounded retries exhausted: the source kept moving across every
-          // build. On a busy multi-agent host, unrelated file creates/renames in
-          // the scanned dirs bump the coarse dir-mtime signature every few
-          // seconds, so no build ever observes a stable pre/post signature.
-          // Throwing here froze the dataset on a days-old last-good blob (#2874)
-          // and surfaced as a bare 500 on the digest/search/boot/slice routes
-          // (#2867) — the opposite of what a freshness cache should do. Serve the
-          // freshest trust-validated build instead, but do NOT cache it under an
-          // unsettled coarse key. Once the source settles, the stable branch
-          // above commits and fast hits resume.
+          // Bounded retries exhausted: either the source kept moving or the
+          // exact candidate remained temporarily inadmissible. Serve the
+          // freshest trust-validated build, but do NOT cache it under the
+          // settled coarse key. Once the source/acquisition settles, the stable
+          // branch above commits and fast hits resume.
           return value;
         }
 

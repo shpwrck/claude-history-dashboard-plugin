@@ -8,10 +8,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
+import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { delimiter, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  chmodSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -49,8 +52,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.DATASET_ASSEMBLY_SCHEMA_VERSION,
-      33,
-      'enabled datasets include canonical recursive-removal evidence (#3377)'
+      35,
+      'enabled datasets reject legacy transient doc-history fallbacks (#3711)'
     );
     // Pin the FLAG-OFF (local-first default) schema version as a LITERAL so a
     // regression that lowers it — e.g. back to v28 — fails here (#2955). The
@@ -60,8 +63,8 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(typeof ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION, 'number');
     assert.equal(
       ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION,
-      32,
-      'flag-off advances to v32 because local liveConfig carries recursive-removal evidence (#3377)'
+      34,
+      'flag-off advances to a fresh v34 key to reject transient doc-history fallbacks (#3711)'
     );
 
     const key = ingest.datasetAssemblySchemaKey();
@@ -73,12 +76,17 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     assert.equal(
       key,
       `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
-      'flag-off uses the exact v32 cache key for canonical recursive-removal evidence'
+      'flag-off uses the exact v34 cache key for transient doc-history cache admission'
     );
-    // The immediately-preceding v31 key needs no dedicated notEqual: the literal
-    // equal(FLAG_OFF, 32) pin above fixes the flag-off version exactly, so any
-    // regression (v31 included) fails there (#2709 review item; avoids
-    // accumulating one dead assertion per bump).
+    assert.notEqual(
+      key,
+      `dataset-schema:v33:parser-${ingest.PARSER_SIG_VERSION}`,
+      'flag-off must not alias the historical enabled v33 cache key'
+    );
+    // The immediately-preceding flag-off v32 key needs no dedicated notEqual:
+    // the literal equal(FLAG_OFF, 34) pin above fixes the version exactly, so
+    // any regression (v32 included) fails there (#2709 review item; avoids
+    // accumulating one dead assertion per ordinary bump).
     assert.notEqual(
       key,
       `dataset-schema:v26:parser-${ingest.PARSER_SIG_VERSION}`,
@@ -240,6 +248,230 @@ test('loadLatestDatasetCache fences on the schema key: a NEWER row from another 
     else process.env.HOME = origHome;
     if (origDb === undefined) delete process.env.CHD_DB_PATH;
     else process.env.CHD_DB_PATH = origDb;
+  }
+});
+
+test('flag-off cache fencing rejects the historical enabled v33 key (#3711)', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origDocIssues = process.env.CHD_DOC_ISSUES;
+  const home = join(tmpdir(), `chd-3711-schema-home-${randomUUID()}`);
+  mkdirSync(join(home, '.claude', 'projects'), { recursive: true });
+
+  try {
+    delete process.env.CHD_DOC_ISSUES;
+    const ingest = await loadIngest(home);
+    const body = '{"legacyTransientDocGraph":true}';
+    const raw = new DatabaseSync(process.env.CHD_DB_PATH);
+    raw
+      .prepare(
+        'INSERT INTO dataset_cache (content_hash, etag, json_br, json_gz, created_at, schema_key, doc_issue_state, recursive_removal_safety_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        'legacy-v33',
+        '"legacy-v33"',
+        brotliCompressSync(body),
+        gzipSync(body),
+        9_000,
+        `dataset-schema:v33:parser-${ingest.PARSER_SIG_VERSION}`,
+        'null',
+        ingest.recursiveRemovalSafetyStateForServer()
+      );
+    raw.close();
+
+    assert.equal(
+      ingest.loadLatestDatasetCache(),
+      null,
+      'disabling document issues must not reinterpret an old enabled v33 row as current flag-off data'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+    if (origDocIssues === undefined) delete process.env.CHD_DOC_ISSUES;
+    else process.env.CHD_DOC_ISSUES = origDocIssues;
+  }
+});
+
+test('the real dataset cache never persists a transient doc-history fallback and recovers unchanged (#3711)', { timeout: 60_000 }, async () => {
+  const testRoot = join(tmpdir(), `chd-3711-server-${randomUUID()}`);
+  const claudeDir = join(testRoot, '.claude');
+  const distDir = join(testRoot, 'dist');
+  const cacheDir = join(testRoot, 'cache');
+  const gitRoot = join(testRoot, 'repo');
+  const fakeBin = join(testRoot, 'bin');
+  const failFlag = join(testRoot, 'fail-git-log');
+  const callsPath = join(testRoot, 'git-calls');
+  const dbPath = join(cacheDir, 'dashboard.db');
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim();
+  let proc;
+
+  try {
+    mkdirSync(join(claudeDir, 'projects'), { recursive: true });
+    mkdirSync(distDir, { recursive: true });
+    mkdirSync(cacheDir, { recursive: true });
+    mkdirSync(join(gitRoot, 'docs'), { recursive: true });
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(join(claudeDir, 'history.jsonl'), '');
+    writeFileSync(join(testRoot, '.claude.json'), JSON.stringify({ projects: {} }));
+    writeFileSync(join(distDir, 'index.html'), '<!doctype html><main>ok</main>');
+    writeFileSync(join(gitRoot, 'README.md'), '# Readme\n');
+    writeFileSync(join(gitRoot, 'docs', 'guide.md'), '# Guide\n');
+    execFileSync(realGit, ['init'], { cwd: gitRoot, stdio: 'ignore' });
+    execFileSync(realGit, ['config', 'user.email', 'test@example.com'], { cwd: gitRoot });
+    execFileSync(realGit, ['config', 'user.name', 'CHD Test'], { cwd: gitRoot });
+    execFileSync(realGit, ['add', 'README.md', 'docs/guide.md'], { cwd: gitRoot });
+    execFileSync(realGit, ['commit', '-m', 'Track docs'], {
+      cwd: gitRoot,
+      stdio: 'ignore',
+    });
+    const fakeGit = join(fakeBin, 'git');
+    writeFileSync(
+      fakeGit,
+      `#!/bin/sh
+bulk=0
+for arg in "$@"; do
+  if [ "$arg" = "--max-count=4096" ]; then bulk=1; fi
+done
+if [ "$bulk" = "1" ]; then
+  printf 'bulk\\n' >> "$CHD_TEST_GIT_CALLS"
+  if [ -f "$CHD_TEST_GIT_FAIL" ]; then exit 1; fi
+fi
+exec "$CHD_TEST_REAL_GIT" "$@"
+`
+    );
+    chmodSync(fakeGit, 0o755);
+    writeFileSync(failFlag, 'fail\n');
+
+    const port = await new Promise((resolve, reject) => {
+      const probe = createNetServer();
+      probe.on('error', reject);
+      probe.listen(0, '127.0.0.1', () => {
+        const address = probe.address();
+        probe.close(() => resolve(address.port));
+      });
+    });
+    const base = `http://127.0.0.1:${port}`;
+    proc = spawn('node', ['--import', './scripts/register-ts.mjs', 'scripts/server.mjs'], {
+      cwd: join(HERE, '..'),
+      env: {
+        ...process.env,
+        HOME: testRoot,
+        PORT: String(port),
+        HOST: '127.0.0.1',
+        CLAUDE_DIR: claudeDir,
+        CLAUDE_HOME_DIR: testRoot,
+        DIST_DIR: distDir,
+        CHD_DB_PATH: dbPath,
+        CHD_CACHE_DIR: cacheDir,
+        CHD_DOC_GRAPH_ROOT: gitRoot,
+        CHD_TEST_REAL_GIT: realGit,
+        CHD_TEST_GIT_FAIL: failFlag,
+        CHD_TEST_GIT_CALLS: callsPath,
+        PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ''}`,
+        CHD_RECS_WORKER: '0',
+        CHD_DOC_ISSUES: '',
+        DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
+        DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
+        DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
+        ANTHROPIC_API_KEY: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    let ready = false;
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (proc.exitCode !== null) break;
+      try {
+        const response = await fetch(`${base}/healthz`);
+        if (response.status === 200) {
+          ready = true;
+          break;
+        }
+      } catch {
+        // Server is still starting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(ready, true, `fixture server failed to start: ${stderr}`);
+
+    const firstRepoMapResponse = await fetch(
+      `${base}/api/dataset/slice/repoMap`
+    );
+    assert.equal(firstRepoMapResponse.status, 200);
+    await firstRepoMapResponse.arrayBuffer();
+    const callsAfterFirstRepoMap = readFileSync(callsPath, 'utf8')
+      .trim()
+      .split('\n').length;
+    const secondRepoMapResponse = await fetch(
+      `${base}/api/dataset/slice/repoMap`
+    );
+    assert.equal(secondRepoMapResponse.status, 200);
+    await secondRepoMapResponse.arrayBuffer();
+    const callsAfterSecondRepoMap = readFileSync(callsPath, 'utf8')
+      .trim()
+      .split('\n').length;
+    assert.ok(
+      callsAfterSecondRepoMap > callsAfterFirstRepoMap,
+      'repoMap recommendations derived from a transient graph must not become a split-cache hit'
+    );
+
+    const firstResponse = await fetch(`${base}/api/dataset.json`);
+    assert.equal(firstResponse.status, 200);
+    const first = await firstResponse.json();
+    assert.ok(first.docGraph.nodes.length > 0);
+    assert.ok(
+      first.docGraph.nodes.every((node) => node.gitMtimeProvenance !== 'git'),
+      'the failed walk serves its conservative fallback to a cold caller'
+    );
+    let raw = new DatabaseSync(dbPath);
+    assert.equal(
+      raw.prepare('SELECT COUNT(*) AS count FROM dataset_cache').get().count,
+      0,
+      'the transient fallback must not enter the persisted dataset cache'
+    );
+    raw.close();
+
+    const callsBeforeRecovery = readFileSync(callsPath, 'utf8').trim().split('\n').length;
+    rmSync(failFlag, { force: true });
+    const recoveredResponse = await fetch(`${base}/api/dataset.json`);
+    assert.equal(recoveredResponse.status, 200);
+    const recovered = await recoveredResponse.json();
+    assert.ok(
+      recovered.docGraph.nodes.every((node) => node.gitMtimeProvenance === 'git'),
+      'the next unchanged request retries and restores live Git provenance'
+    );
+    const callsAfterRecovery = readFileSync(callsPath, 'utf8').trim().split('\n').length;
+    assert.ok(callsAfterRecovery > callsBeforeRecovery);
+    raw = new DatabaseSync(dbPath);
+    assert.equal(
+      raw.prepare('SELECT COUNT(*) AS count FROM dataset_cache').get().count,
+      1,
+      'only the recovered healthy candidate is persisted'
+    );
+    raw.close();
+
+    const warmResponse = await fetch(`${base}/api/dataset.json`);
+    assert.equal(warmResponse.status, 200);
+    assert.equal(warmResponse.headers.get('x-ingest'), 'skipped=true;cached=true');
+    assert.equal(
+      readFileSync(callsPath, 'utf8').trim().split('\n').length,
+      callsAfterRecovery,
+      'the admitted healthy candidate resumes the ordinary warm cache hit'
+    );
+  } finally {
+    if (proc && proc.exitCode === null && proc.signalCode === null) {
+      proc.kill('SIGTERM');
+      await new Promise((resolve) => proc.once('exit', resolve));
+    }
+    rmSync(testRoot, { recursive: true, force: true });
   }
 });
 

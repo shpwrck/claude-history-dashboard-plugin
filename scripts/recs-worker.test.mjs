@@ -12,11 +12,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { delimiter, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  chmodSync,
   mkdirSync,
   writeFileSync,
   rmSync,
@@ -255,6 +256,11 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
       'worker returns the source signature validated after the build'
     );
     assert.equal(
+      reply.docGraphRetryRequired,
+      false,
+      'a healthy worker result is cache-admissible'
+    );
+    assert.equal(
       reply.recursiveRemovalSafetyState,
       ingest.recursiveRemovalSafetyStateForServer(),
       'worker returns the canonical-containment state bound to its dataset'
@@ -351,6 +357,73 @@ test('#2746 worker rebuild shares one pinned doc-git-times snapshot', async () =
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(docRoot, { recursive: true, force: true });
+  }
+});
+
+test('worker marks repeated doc Git failures uncacheable and recovers unchanged (#3711)', async () => {
+  const home = buildFixtureHome();
+  const gitRoot = join(tmpdir(), `chd-3711-worker-docs-${randomUUID()}`);
+  const fakeBin = join(tmpdir(), `chd-3711-worker-bin-${randomUUID()}`);
+  const failFlag = join(tmpdir(), `chd-3711-worker-fail-${randomUUID()}`);
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim();
+  mkdirSync(join(gitRoot, 'docs'), { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(gitRoot, 'README.md'), '# Readme\n');
+  execFileSync(realGit, ['init'], { cwd: gitRoot, stdio: 'ignore' });
+  execFileSync(realGit, ['config', 'user.email', 'test@example.com'], { cwd: gitRoot });
+  execFileSync(realGit, ['config', 'user.name', 'CHD Test'], { cwd: gitRoot });
+  execFileSync(realGit, ['add', 'README.md'], { cwd: gitRoot });
+  execFileSync(realGit, ['commit', '-m', 'Track docs'], {
+    cwd: gitRoot,
+    stdio: 'ignore',
+  });
+  const fakeGit = join(fakeBin, 'git');
+  writeFileSync(
+    fakeGit,
+    `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--max-count=4096" ] && [ -f "$CHD_TEST_GIT_FAIL" ]; then
+    exit 1
+  fi
+done
+exec "$CHD_TEST_REAL_GIT" "$@"
+`
+  );
+  chmodSync(fakeGit, 0o755);
+  writeFileSync(failFlag, 'fail\n');
+  const env = {
+    CHD_DOC_GRAPH_ROOT: gitRoot,
+    CHD_TEST_REAL_GIT: realGit,
+    CHD_TEST_GIT_FAIL: failFlag,
+    PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ''}`,
+  };
+
+  try {
+    const failed = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-3711-worker-failed-${randomUUID()}.db`),
+      {},
+      { env }
+    );
+    assert.equal(failed.docGraphRetryRequired, true);
+    assert.equal(failed.sourceSig, null, 'the fallback cannot become a signature hit');
+
+    rmSync(failFlag, { force: true });
+    const recovered = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-3711-worker-recovered-${randomUUID()}.db`),
+      {},
+      { env }
+    );
+    assert.equal(recovered.docGraphRetryRequired, false);
+    assert.equal(typeof recovered.sourceSig, 'string');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(gitRoot, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(failFlag, { force: true });
   }
 });
 

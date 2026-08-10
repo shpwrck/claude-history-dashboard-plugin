@@ -125,6 +125,25 @@ export interface DocGraph {
   edges: DocEdge[];
 }
 
+// Server-only, candidate-bound cache admission metadata. A Symbol keeps the
+// transient child-process outcome out of the serialized DocGraph contract while
+// still letting ingest distinguish this exact fallback graph from a healthy or
+// stably git-unavailable graph. It must never be inferred from node provenance:
+// manifest/filesystem nodes are legitimate stable results in gitless runtimes.
+const TRANSIENT_GIT_HISTORY_FAILURE = Symbol('transientGitHistoryFailure');
+
+/** Whether this exact graph fell back because its live bulk Git walk threw. */
+export function docGraphHasTransientGitHistoryFailure(
+  graph: DocGraph | null | undefined
+): boolean {
+  return Boolean(
+    graph &&
+      (graph as DocGraph & { [TRANSIENT_GIT_HISTORY_FAILURE]?: boolean })[
+        TRANSIENT_GIT_HISTORY_FAILURE
+      ]
+  );
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /** Directory names never descended into during the walk. */
@@ -591,10 +610,11 @@ export function gitHistoryAvailability(
 function gitMtimesByPath(
   root: string,
   relPaths: readonly string[]
-): Map<string, string> {
+): { mtimes: Map<string, string>; complete: boolean } {
   const mtimes = new Map<string, string>();
-  if (relPaths.length === 0) return mtimes;
+  if (relPaths.length === 0) return { mtimes, complete: true };
   let output: string;
+  const complete = true;
   try {
     output = execFileSync(
       'git',
@@ -622,7 +642,7 @@ function gitMtimesByPath(
       }
     );
   } catch {
-    return mtimes;
+    return { mtimes, complete: false };
   }
   const wanted = new Set(relPaths);
   let commitTime: string | null = null;
@@ -636,7 +656,7 @@ function gitMtimesByPath(
       mtimes.set(path, commitTime);
     }
   }
-  return mtimes;
+  return { mtimes, complete };
 }
 
 /**
@@ -776,10 +796,12 @@ export function buildDocGraph(
   // #2707: a shallow checkout's per-path history is fabricated (files graft
   // onto the boundary commit), so live git times are used only when the repo
   // provably has full history; otherwise fall through to the packaged manifest.
-  const gitMtimes =
+  // perf-index-contract: doc-git-fallback-mtimes always-consumed: every enumerated document queries the selected history map while deriving provenance
+  const gitHistoryResult =
     gitHistoryAvailability(resolvedRoot) === 'ok'
       ? gitMtimesByPath(resolvedRoot, relPaths)
-      : new Map<string, string>();
+      : { mtimes: new Map<string, string>(), complete: true };
+  const gitMtimes = gitHistoryResult.mtimes;
   const manifestSnapshot =
     opts.docGitTimesSnapshot ?? captureDocGitTimesSnapshot(resolvedRoot, opts);
   const manifestTimes = manifestSnapshot.load().times;
@@ -855,5 +877,12 @@ export function buildDocGraph(
       a.kind.localeCompare(b.kind) ||
       a.to.localeCompare(b.to)
   );
-  return { root: resolvedRoot, nodes, edges };
+  const graph: DocGraph = { root: resolvedRoot, nodes, edges };
+  if (!gitHistoryResult.complete) {
+    Object.defineProperty(graph, TRANSIENT_GIT_HISTORY_FAILURE, {
+      value: true,
+      enumerable: false,
+    });
+  }
+  return graph;
 }

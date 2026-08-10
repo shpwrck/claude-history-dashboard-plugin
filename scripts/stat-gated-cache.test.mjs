@@ -204,6 +204,41 @@ test('a source that never settles serves the freshest build uncached instead of 
   assert.equal(buildsMap.has('q:racy'), false, 'the in-flight owner is cleared');
 });
 
+test('a candidate-bound transient failure retries and is never cached', async () => {
+  const { cacheMap, buildsMap } = newState();
+  let builds = 0;
+  const run = () =>
+    resolveStatGatedCache({
+      sourceSignature: () => 'unchanged-source',
+      cacheMap,
+      buildsMap,
+      key: 'slice:docGraph',
+      max: 1,
+      build: async () => ({
+        body: `fallback-${++builds}`,
+        retryRequired: true,
+      }),
+      cacheable: (value) => value.retryRequired !== true,
+    });
+
+  const first = await run();
+  assert.equal(builds, 2, 'the transient candidate receives one bounded retry');
+  assert.equal(first.value.body, 'fallback-2');
+  assert.equal(cacheMap.size, 0, 'the second fallback is served but never cached');
+
+  const recovered = await resolveStatGatedCache({
+    sourceSignature: () => 'unchanged-source',
+    cacheMap,
+    buildsMap,
+    key: 'slice:docGraph',
+    max: 1,
+    build: async () => ({ body: `healthy-${++builds}`, retryRequired: false }),
+    cacheable: (value) => value.retryRequired !== true,
+  });
+  assert.equal(recovered.value.body, 'healthy-3');
+  assert.equal(cacheMap.get('slice:docGraph').value.body, 'healthy-3');
+});
+
 test('retry exhaustion never serves a value built under a different trust state', async () => {
   const { cacheMap, buildsMap } = newState();
   cacheMap.set('q:trust-race', {
