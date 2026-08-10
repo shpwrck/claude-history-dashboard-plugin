@@ -92,19 +92,24 @@ export const SESSION_BLOB_OUTPUT = {
  * The persisted repo-map artifact (host-side Tree-sitter structural map; ADR
  * 0007). The cache key is the `version` field of the `PersistedRepoMap`
  * envelope, checked in `isCacheValid()` in src/lib/repo-map/cache.ts. The
- * `contract` is one qualified fingerprint of the envelope, inner `RepoMap`,
- * and per-file `RepoFile` key sets — the persisted output shape a stale-
- * artifact reader depends on. The fence reads the inner keys from their owning
- * TypeScript interfaces rather than trusting a possibly-incomplete sample.
+ * `contract` is one qualified fingerprint of the envelope, `RepoMapCacheKey`,
+ * inner `RepoMap`, and per-file `RepoFile` key sets — the persisted output shape
+ * a stale-artifact reader depends on. The fence reads nested keys from their
+ * owning TypeScript interfaces rather than trusting a possibly-incomplete
+ * JavaScript sample.
  *
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
+  // v9 (#3745): fingerprint the direct RepoMapCacheKey key set from its owning
+  // TypeScript interface. This turns over v8 so a future cache-identity field
+  // cannot remain invisible to the cache-invalidation seam.
+  //
   // v8 (#2740): the forward fence now includes the RepoMap and RepoFile key
   // sets, not only the five-field persisted envelope. This deliberately turns
   // over v7 so a future direct RepoMap or RepoFile key change cannot stay
-  // invisible to the cache-invalidation seam. Deeper RepoSymbol and cache-key
-  // fingerprints are intentionally separate follow-ups (#3744, #3745).
+  // invisible to the cache-invalidation seam. The deeper RepoSymbol fingerprint
+  // remains the intentionally separate follow-up #3744.
   //
   // v7 (#2741): the canonical artifact cache key now includes the normalized
   // `owner/repo` remote identity. A remote-only change at a stable HEAD must
@@ -123,10 +128,15 @@ export const REPO_MAP_OUTPUT = {
   // remote identity (`map.repository`) beside `generatedAtGitSha`; pre-field
   // v4 artifacts must regenerate so identity-bound consumers never read a
   // missing field as "no remote" on a root that has one.
-  version: 8,
+  version: 9,
   contract: [
     'envelope.version',
     'envelope.cacheKey',
+    'envelope.cacheKey.root',
+    'envelope.cacheKey.gitSha',
+    'envelope.cacheKey.repository',
+    'envelope.cacheKey.maxMtimeMs',
+    'envelope.cacheKey.structureSignature',
     'envelope.sizeBounded',
     'envelope.droppedFiles',
     'envelope.map',

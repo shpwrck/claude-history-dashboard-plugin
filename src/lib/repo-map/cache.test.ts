@@ -100,10 +100,13 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from before the complete output contract (#2740)', () => {
-    // v8 expands the forward-fence contract to the inner RepoMap / RepoFile
-    // shapes, so artifacts stamped under the envelope-only v7 contract retire.
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(8);
+  it('invalidates artifacts from before the complete output contract (#2740, #3745)', () => {
+    // v9 expands the forward-fence contract to the RepoMapCacheKey shape, so
+    // artifacts stamped under the v8 contract retire.
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(9);
+    expect(isCacheValid({ ...persisted, version: 8 }, base)).toBe(false);
+    // v8 covers the inner RepoMap / RepoFile shapes; its predecessor only
+    // fingerprinted the persisted envelope.
     expect(isCacheValid({ ...persisted, version: 7 }, base)).toBe(false);
     // v7 binds the normalized remote slug into the cache identity. A v6
     // artifact can otherwise survive a remote-only change until HEAD moves.
