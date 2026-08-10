@@ -93,6 +93,75 @@ export function requiredGit(
 }
 
 /**
+ * Read one optional repository-local Git config value.
+ *
+ * Git uses exit 1, with no diagnostic, for a missing key (and for a directory
+ * that is not a repository). That is the only absence shape converted to
+ * `null`; spawn failures, malformed config, and every other non-zero result are
+ * operational errors and remain fatal. Global/system config is masked because
+ * host-producer identity must describe the checkout, not a user-level key that
+ * happens to have the same name.
+ */
+export function optionalGitConfigValue(
+  root,
+  key,
+  {
+    label = `read Git config ${key}`,
+    prefix = 'host-producer',
+    spawn = spawnSync,
+    env = process.env,
+    timeout,
+    maxBuffer = GIT_MAX_BUFFER_BYTES,
+  } = {}
+) {
+  const result = spawn('git', ['config', '--get', key], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...env,
+      GIT_NO_LAZY_FETCH: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+    },
+    timeout,
+    maxBuffer,
+  });
+  const stderr = commandText(result.stderr).trim();
+  if (!result.error && result.status === 1 && !stderr) return null;
+  if (result.error || result.status !== 0) {
+    const detail = stderr || result.error?.message || 'unknown error';
+    throw new Error(`${prefix}: cannot ${label}: ${detail}`);
+  }
+  return commandText(result.stdout).trim() || null;
+}
+
+/**
+ * Resolve a named remote through Git's own URL semantics while retaining the
+ * optional/required distinction above. The config probe proves the remote is
+ * absent without treating an operational failure as absence; once present,
+ * `git remote get-url` applies `url.*.insteadOf` rewrites exactly as Git clients
+ * and the ingest/deploy identity paths do.
+ */
+export function resolvedGitRemoteUrl(
+  root,
+  remote = 'origin',
+  { label = `resolve ${remote} remote`, ...gitOptions } = {}
+) {
+  const configured = optionalGitConfigValue(root, `remote.${remote}.url`, {
+    ...gitOptions,
+    label: `inspect ${remote} remote config`,
+  });
+  if (configured === null) return null;
+  return (
+    requiredGit(root, ['remote', 'get-url', remote], {
+      ...gitOptions,
+      label,
+    }).trim() || null
+  );
+}
+
+/**
  * Resolve a canonical full HEAD object id. Optional callers receive `null` for
  * a missing/invalid repository; required callers receive the contextual Git
  * error. `requireClean` preserves repo-map's distinct dirty-tree contract: a

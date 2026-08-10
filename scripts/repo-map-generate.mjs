@@ -20,7 +20,11 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { envNumber, EnvNumberError } from './lib/env-number.mjs';
-import { atomicWrite, headSha, requiredGit } from './lib/host-producer.mjs';
+import {
+  atomicWrite,
+  headSha,
+  resolvedGitRemoteUrl,
+} from './lib/host-producer.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const {
@@ -47,15 +51,11 @@ const { normalizeGitRemoteUrl } = await import(
  *  normalizer keeps this identity byte-identical to the ingest-side docs-map
  *  wrapper derivation. */
 function repositoryOf(root) {
-  try {
-    const remote = requiredGit(root, ['remote', 'get-url', 'origin'], {
-      prefix: 'repo-map',
-      label: 'resolve origin remote',
-    }).trim();
-    return normalizeGitRemoteUrl(remote);
-  } catch {
-    return null;
-  }
+  const remote = resolvedGitRemoteUrl(root, 'origin', {
+    prefix: 'repo-map',
+    label: 'resolve origin remote',
+  });
+  return normalizeGitRemoteUrl(remote);
 }
 
 /** Read an existing persisted artifact, or null if absent/unparseable. */
@@ -96,6 +96,9 @@ const force = process.argv.includes('--force');
 // A dirty tree has no commit identity: its mtime watermark, not a stale HEAD,
 // drives repo-map cache invalidation.
 const gitSha = headSha(root, { requireClean: true, prefix: 'repo-map' });
+// Resolve the remote identity once so the map payload and its cache key cannot
+// disagree if the origin changes while this producer run is in flight.
+const repository = repositoryOf(root);
 
 /** Strict, fail-closed env override parsing (#3477). The old shape here —
  *  `Number(process.env.X) || DEFAULT` — silently discarded the operator's
@@ -173,7 +176,7 @@ const fileCache = createRepoMapFileCache({
 
 const map = await generateRepoMap(root, {
   gitSha,
-  repository: repositoryOf(root),
+  repository,
   tokenBudget,
   maxFiles,
   maxDirEntries,
@@ -187,7 +190,8 @@ const cacheKey = computeCacheKey(
   root,
   gitSha,
   absFiles,
-  fileCache.structureSignature()
+  fileCache.structureSignature(),
+  repository
 );
 const existing = readPersisted(outFile);
 // A grammar/content/path cohort change MUST refresh the canonical artifact even

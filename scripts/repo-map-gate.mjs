@@ -50,7 +50,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, resolve } from 'node:path';
 import { envNumber, EnvNumberError } from './lib/env-number.mjs';
-import { headSha, requiredGit } from './lib/host-producer.mjs';
+import {
+  headSha,
+  resolvedGitRemoteUrl,
+  requiredGit,
+} from './lib/host-producer.mjs';
 import { localizationProbe } from './lib/repo-map-probe.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -65,6 +69,9 @@ const {
   assertNoBodyLeakage,
   DEFAULT_MAX_PERSISTED_BYTES,
 } = await import(join(REPO_ROOT, 'src', 'lib', 'repo-map', 'index.ts'));
+const { normalizeGitRemoteUrl } = await import(
+  join(REPO_ROOT, 'src', 'lib', 'parse-docs-map.ts')
+);
 
 function parseArgs(argv) {
   const out = { root: REPO_ROOT, budget: join(REPO_ROOT, 'repo-map-budget.json') };
@@ -290,6 +297,12 @@ async function main() {
   }
 
   const gitSha = headSha(args.root, { prefix: 'repo-map gate' });
+  const repository = normalizeGitRemoteUrl(
+    resolvedGitRemoteUrl(args.root, 'origin', {
+      prefix: 'repo-map gate',
+      label: 'resolve origin remote',
+    })
+  );
   // Strict env parsing (#3477): a set-but-unusable override is an error, never
   // a silent fallback that measures something other than what was asked for —
   // the same shared #3076 parser the producer uses, so gate and producer agree.
@@ -309,6 +322,7 @@ async function main() {
   const t0 = hrMs();
   const map = await generateRepoMap(args.root, {
     gitSha,
+    repository,
     tokenBudget,
     maxFiles,
     maxDirEntries,
@@ -345,7 +359,7 @@ async function main() {
   const maxPersistedBytes =
     args.maxPersistedBytes ?? envIntOrDie('REPO_MAP_MAX_BYTES', DEFAULT_MAX_PERSISTED_BYTES);
   const absFiles = map.files.map((f) => join(args.root, f.path));
-  const cacheKey = computeCacheKey(args.root, gitSha, absFiles);
+  const cacheKey = computeCacheKey(args.root, gitSha, absFiles, null, repository);
   const render = (files) => renderRepoMap(files, tokenBudget);
   const persisted = enforceSizeLimit(map, cacheKey, render, maxPersistedBytes);
   const datasetPayloadBytes = serializedBytes(persisted);

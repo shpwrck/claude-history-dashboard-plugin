@@ -207,6 +207,46 @@ test('gate PASSES the same corpus when the payload budget is above its natural s
   }
 });
 
+test('gate measures the normalized repository fields in the production envelope', () => {
+  const root = makeRoot(4);
+  try {
+    const committedBudget = budgetObject();
+    gitCommitPriorBudget(root, committedBudget);
+    const budget = join(root, 'budget.json');
+
+    const withoutRemote = runGate(root, budget, ['--measure-only']);
+    assert.equal(withoutRemote.code, 0, withoutRemote.out);
+    const withoutBytes = Number(
+      /payload \(unbounded\)\s+(\d+)\s*B/.exec(withoutRemote.out)?.[1]
+    );
+
+    const slug = 'owner/repository-identity-budget-fixture';
+    execFileSync(
+      'git',
+      ['-C', root, 'remote', 'add', 'origin', 'corp:repository-identity-budget-fixture.git'],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    execFileSync(
+      'git',
+      ['-C', root, 'config', 'url.git@github.com:Owner/.insteadOf', 'corp:'],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    const withRemote = runGate(root, budget, ['--measure-only']);
+    assert.equal(withRemote.code, 0, withRemote.out);
+    const withBytes = Number(
+      /payload \(unbounded\)\s+(\d+)\s*B/.exec(withRemote.out)?.[1]
+    );
+
+    // The normalized slug is serialized once in map.repository and once in
+    // cacheKey.repository, exactly as it is by the host producer.
+    const expectedDelta =
+      2 * (Buffer.byteLength(JSON.stringify(slug), 'utf8') - Buffer.byteLength('null'));
+    assert.equal(withBytes - withoutBytes, expectedDelta);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('gate FAILS when the clamp sheds more ranked files than the floor allows', () => {
   const root = makeRoot();
   try {

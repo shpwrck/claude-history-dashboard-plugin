@@ -46,11 +46,28 @@ const renderText = (files: RepoMap['files']) => renderRepoMap(files, 8000);
 describe('computeCacheKey', () => {
   it('records the root, sha, and max source mtime', () => {
     const abs = [join(root, 'a.ts'), join(root, 'b.ts')];
-    const key = computeCacheKey(root, 'sha1', abs, 'a'.repeat(64));
+    const key = computeCacheKey(
+      root,
+      'sha1',
+      abs,
+      'a'.repeat(64),
+      'owner/repo'
+    );
     expect(key.root).toBe(root);
     expect(key.gitSha).toBe('sha1');
     expect(key.maxMtimeMs).toBeGreaterThan(0);
     expect(key.structureSignature).toBe('a'.repeat(64));
+    expect(key.repository).toBe('owner/repo');
+  });
+
+  it('changes when only the normalized remote slug changes', () => {
+    const abs = [join(root, 'a.ts'), join(root, 'b.ts')];
+    const first = computeCacheKey(root, 'sha1', abs, 'a'.repeat(64), 'owner/first');
+    const second = computeCacheKey(root, 'sha1', abs, 'a'.repeat(64), 'owner/second');
+
+    expect(first).not.toEqual(second);
+    expect(first.repository).toBe('owner/first');
+    expect(second.repository).toBe('owner/second');
   });
 
   it('advances the mtime watermark when a source file is touched', () => {
@@ -60,6 +77,8 @@ describe('computeCacheKey', () => {
     utimesSync(join(root, 'a.ts'), future, future);
     const after = computeCacheKey(root, null, abs);
     expect(after.maxMtimeMs).toBeGreaterThan(before.maxMtimeMs);
+    expect(before.repository).toBeNull();
+    expect(after.repository).toBeNull();
   });
 });
 
@@ -69,6 +88,7 @@ describe('isCacheValid', () => {
     gitSha: 'sha1',
     maxMtimeMs: 100,
     structureSignature: 'a'.repeat(64),
+    repository: 'owner/repo',
   };
   const persisted = { version: PERSISTED_REPO_MAP_VERSION, cacheKey: base };
 
@@ -80,17 +100,30 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from before literal-secret redaction (#3168)', () => {
-    // v6 changed signature GENERATION semantics: a v5 artifact can hold a
+  it('invalidates artifacts from before remote-key binding (#2741)', () => {
+    // v7 binds the normalized remote slug into the cache identity. A v6
+    // artifact can otherwise survive a remote-only change until HEAD moves.
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(7);
+    expect(isCacheValid({ ...persisted, version: 6 }, base)).toBe(false);
+    // v6 also changed signature GENERATION semantics: a v5 artifact can hold a
     // signature carrying a literal secret, so it must never be reused.
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(6);
     expect(isCacheValid({ ...persisted, version: 5 }, base)).toBe(false);
     // ...and the pre-remote-identity artifacts of #2709 stay invalid too.
     expect(isCacheValid({ ...persisted, version: 4 }, base)).toBe(false);
   });
 
-  it('is valid when the clean-repo sha matches (mtime ignored)', () => {
+  it('is valid when the clean-repo sha and repository match (mtime ignored)', () => {
     expect(isCacheValid(persisted, { ...base, maxMtimeMs: 999 })).toBe(true);
+  });
+
+  it('is invalid when only the normalized remote slug changes', () => {
+    expect(
+      isCacheValid(persisted, {
+        ...base,
+        repository: 'other/repo',
+      })
+    ).toBe(false);
+    expect(isCacheValid(persisted, { ...base, repository: null })).toBe(false);
   });
 
   it('is invalid when the clean-repo sha moved', () => {
@@ -177,7 +210,13 @@ describe('assertNoBodyLeakage (privacy invariant)', () => {
   it('reports a leak when a body sentinel survives into the artifact', () => {
     const leaky = {
       version: PERSISTED_REPO_MAP_VERSION,
-      cacheKey: { root, gitSha: null, maxMtimeMs: 1, structureSignature: null },
+      cacheKey: {
+        root,
+        gitSha: null,
+        maxMtimeMs: 1,
+        structureSignature: null,
+        repository: null,
+      },
       sizeBounded: false,
       droppedFiles: 0,
       map: {

@@ -49,6 +49,8 @@ export interface RepoMapCacheKey {
   root: string;
   /** Git sha the root was at, or null when the root is not a clean repo. */
   gitSha: string | null;
+  /** Normalized `owner/repo` slug of the root's origin remote, or null. */
+  repository: string | null;
   /**
    * Max source-file mtime (ms) at generation time. The fallback staleness
    * signal when `gitSha` is null (no repo) or the tree is dirty — a content
@@ -98,13 +100,15 @@ export const PERSISTED_REPO_MAP_VERSION: number = REPO_MAP_OUTPUT.version;
  * Compute the cache key for a generated map. `gitSha` is the caller-resolved
  * HEAD sha (null when the root is not a clean repo). `maxMtimeMs` is the max
  * mtime over the files actually in the map — the producer passes the absolute
- * paths it walked so we stat them once here.
+ * paths it walked so we stat them once here. `repository` is the already-
+ * normalized remote slug the producer records in the map itself.
  */
 export function computeCacheKey(
   root: string,
   gitSha: string | null,
   absFiles: string[],
-  structureSignature: string | null = null
+  structureSignature: string | null = null,
+  repository: string | null = null
 ): RepoMapCacheKey {
   let maxMtimeMs = 0;
   for (const abs of absFiles) {
@@ -116,7 +120,7 @@ export function computeCacheKey(
       // the signature — the next run will stat the surviving set.
     }
   }
-  return { root, gitSha, maxMtimeMs, structureSignature };
+  return { root, gitSha, repository, maxMtimeMs, structureSignature };
 }
 
 /**
@@ -137,6 +141,7 @@ export function isCacheValid(
   if (persisted.version !== PERSISTED_REPO_MAP_VERSION) return false;
   const cached = persisted.cacheKey;
   if (cached.root !== current.root) return false;
+  if (cached.repository !== current.repository) return false;
   if (cached.structureSignature !== current.structureSignature) return false;
   if (cached.gitSha !== null && current.gitSha !== null) {
     return cached.gitSha === current.gitSha;

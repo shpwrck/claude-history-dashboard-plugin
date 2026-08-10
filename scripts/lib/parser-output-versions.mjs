@@ -98,6 +98,11 @@ export const SESSION_BLOB_OUTPUT = {
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
+  // v7 (#2741): the canonical artifact cache key now includes the normalized
+  // `owner/repo` remote identity. A remote-only change at a stable HEAD must
+  // regenerate instead of reusing a map attributed to the previous origin.
+  // v6 artifacts lack that key field and therefore regenerate once.
+  //
   // v6 (#3168): signature generation semantics changed — literal nodes (string,
   // template, number, regex) and comments are now masked structurally out of a
   // declaration head, so default parameter values and literal type-alias RHSs
@@ -110,7 +115,7 @@ export const REPO_MAP_OUTPUT = {
   // remote identity (`map.repository`) beside `generatedAtGitSha`; pre-field
   // v4 artifacts must regenerate so identity-bound consumers never read a
   // missing field as "no remote" on a root that has one.
-  version: 6,
+  version: 7,
   contract: ['version', 'cacheKey', 'sizeBounded', 'droppedFiles', 'map'],
   consumedBy:
     'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version)',

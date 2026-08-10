@@ -222,3 +222,138 @@ test('clean repos stamp canonical HEAD while dirty repos retain the mtime fallba
     rmSync(fx.base, { recursive: true, force: true });
   }
 });
+
+test('a remote-only change rewrites the artifact with the new normalized repository', () => {
+  const fx = makeFixture();
+  try {
+    git(fx.root, ['init', '--quiet']);
+    git(fx.root, ['add', '.']);
+    git(fx.root, [
+      '-c',
+      'user.name=Repo Map Test',
+      '-c',
+      'user.email=repo-map@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'fixture',
+    ]);
+    const expectedHead = git(fx.root, ['rev-parse', 'HEAD']);
+    git(fx.root, ['remote', 'add', 'origin', 'git@github.com:Owner/First.git']);
+
+    const first = runProducer(fx);
+    assert.equal(first.code, 0, first.out);
+    assert.match(first.out, /wrote /);
+    let persisted = JSON.parse(readFileSync(artifacts(fx)[0], 'utf8'));
+    assert.equal(persisted.map.generatedAtGitSha, expectedHead);
+    assert.equal(persisted.cacheKey.gitSha, expectedHead);
+    assert.equal(persisted.map.repository, 'owner/first');
+    assert.equal(persisted.cacheKey.repository, 'owner/first');
+
+    const unchanged = runProducer(fx);
+    assert.equal(unchanged.code, 0, unchanged.out);
+    assert.match(unchanged.out, /cache hit/);
+
+    git(fx.root, [
+      'remote',
+      'set-url',
+      'origin',
+      'https://github.com/Other/Second.git',
+    ]);
+    assert.equal(git(fx.root, ['rev-parse', 'HEAD']), expectedHead);
+
+    const changed = runProducer(fx);
+    assert.equal(changed.code, 0, changed.out);
+    assert.doesNotMatch(changed.out, /cache hit/);
+    assert.match(changed.out, /wrote /);
+    persisted = JSON.parse(readFileSync(artifacts(fx)[0], 'utf8'));
+    assert.equal(persisted.map.generatedAtGitSha, expectedHead);
+    assert.equal(persisted.cacheKey.gitSha, expectedHead);
+    assert.equal(persisted.map.repository, 'other/second');
+    assert.equal(persisted.cacheKey.repository, 'other/second');
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test('a Git insteadOf rewrite change invalidates the resolved repository identity', () => {
+  const fx = makeFixture();
+  try {
+    git(fx.root, ['init', '--quiet']);
+    git(fx.root, ['add', '.']);
+    git(fx.root, [
+      '-c',
+      'user.name=Repo Map Test',
+      '-c',
+      'user.email=repo-map@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'fixture',
+    ]);
+    const expectedHead = git(fx.root, ['rev-parse', 'HEAD']);
+    git(fx.root, ['remote', 'add', 'origin', 'corp:Repository.git']);
+    git(fx.root, ['config', 'url.git@github.com:Owner/.insteadOf', 'corp:']);
+
+    const first = runProducer(fx);
+    assert.equal(first.code, 0, first.out);
+    let persisted = JSON.parse(readFileSync(artifacts(fx)[0], 'utf8'));
+    assert.equal(persisted.map.repository, 'owner/repository');
+    assert.equal(persisted.cacheKey.repository, 'owner/repository');
+
+    const unchanged = runProducer(fx);
+    assert.equal(unchanged.code, 0, unchanged.out);
+    assert.match(unchanged.out, /cache hit/);
+
+    git(fx.root, ['config', '--unset-all', 'url.git@github.com:Owner/.insteadOf']);
+    git(fx.root, ['config', 'url.git@github.com:Other/.insteadOf', 'corp:']);
+    assert.equal(git(fx.root, ['config', '--get', 'remote.origin.url']), 'corp:Repository.git');
+    assert.equal(git(fx.root, ['rev-parse', 'HEAD']), expectedHead);
+
+    const changed = runProducer(fx);
+    assert.equal(changed.code, 0, changed.out);
+    assert.doesNotMatch(changed.out, /cache hit/);
+    assert.match(changed.out, /wrote /);
+    persisted = JSON.parse(readFileSync(artifacts(fx)[0], 'utf8'));
+    assert.equal(persisted.map.repository, 'other/repository');
+    assert.equal(persisted.cacheKey.repository, 'other/repository');
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test('an indeterminate Git-config failure preserves the last attributed artifact', () => {
+  const fx = makeFixture();
+  try {
+    git(fx.root, ['init', '--quiet']);
+    git(fx.root, ['add', '.']);
+    git(fx.root, [
+      '-c',
+      'user.name=Repo Map Test',
+      '-c',
+      'user.email=repo-map@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'fixture',
+    ]);
+    git(fx.root, ['remote', 'add', 'origin', 'git@github.com:Owner/Stable.git']);
+
+    const first = runProducer(fx);
+    assert.equal(first.code, 0, first.out);
+    const artifact = artifacts(fx)[0];
+    const attributed = readFileSync(artifact, 'utf8');
+    assert.equal(JSON.parse(attributed).map.repository, 'owner/stable');
+
+    // A malformed local config models an operational Git failure, not a
+    // confirmed removal of origin. The producer must fail closed and leave the
+    // last known-good artifact untouched instead of rewriting it as anonymous.
+    writeFileSync(join(fx.root, '.git', 'config'), '[broken\n');
+    const failed = runProducer(fx);
+    assert.notEqual(failed.code, 0, failed.out);
+    assert.match(failed.out, /cannot inspect origin remote config/);
+    assert.equal(readFileSync(artifact, 'utf8'), attributed);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
