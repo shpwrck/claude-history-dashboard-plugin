@@ -1022,6 +1022,24 @@ describe('buildDocGraph', () => {
       }
     });
 
+    it('shares the empty feature-env to GIT_SHA fallback without bypassing explicit overrides', () => {
+      write(root, 'README.md', '# Readme\n');
+      writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });
+      vi.stubEnv('CHD_DOC_GIT_TIMES_EXPECTED_COMMIT', '');
+      vi.stubEnv('GIT_SHA', COMMIT);
+      try {
+        expect(buildDocGraph(root).nodes[0]?.gitMtimeProvenance).toBe(
+          'manifest'
+        );
+        expect(
+          buildDocGraph(root, { docGitTimesExpectedCommit: '' }).nodes[0]
+            ?.gitMtimeProvenance
+        ).toBe('filesystem');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('never promotes Docker mtime: a commit-mismatched manifest is ignored', () => {
       write(root, 'README.md', '# Readme\n');
       writeManifest({ 'README.md': '2026-01-05T10:00:00+00:00' });

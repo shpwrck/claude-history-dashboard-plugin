@@ -20,7 +20,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -51,6 +60,16 @@ function makeFixture() {
     );
   }
   return { base, home, root };
+}
+
+function git(root, args) {
+  const result = spawnSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
 }
 
 /** Run the producer with a sandboxed HOME. Strips any ambient REPO_MAP_* vars
@@ -158,6 +177,47 @@ test('unset overrides still mean the documented defaults (fallback path intact)'
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /12 files indexed/);
     assert.equal(artifacts(fx).length, 1);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test('clean repos stamp canonical HEAD while dirty repos retain the mtime fallback', () => {
+  const fx = makeFixture();
+  try {
+    git(fx.root, ['init', '--quiet']);
+    git(fx.root, ['add', '.']);
+    git(fx.root, [
+      '-c',
+      'user.name=Repo Map Test',
+      '-c',
+      'user.email=repo-map@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'fixture',
+    ]);
+    const expectedHead = git(fx.root, ['rev-parse', 'HEAD']);
+
+    const clean = runProducer(fx);
+    assert.equal(clean.code, 0, clean.out);
+    let persisted = JSON.parse(readFileSync(artifacts(fx)[0], 'utf8'));
+    assert.equal(persisted.map.generatedAtGitSha, expectedHead);
+    assert.equal(persisted.cacheKey.gitSha, expectedHead);
+
+    const artifact = artifacts(fx)[0];
+    chmodSync(artifact, 0o600);
+    writeFileSync(join(fx.root, 'src', 'mod0.ts'), '// dirty\n');
+    const dirty = runProducer(fx);
+    assert.equal(dirty.code, 0, dirty.out);
+    persisted = JSON.parse(readFileSync(artifact, 'utf8'));
+    assert.equal(persisted.map.generatedAtGitSha, null);
+    assert.equal(persisted.cacheKey.gitSha, null);
+    assert.equal(
+      statSync(artifact).mode & 0o777,
+      0o600,
+      'atomic refresh must not widen an existing private artifact mode'
+    );
   } finally {
     rmSync(fx.base, { recursive: true, force: true });
   }

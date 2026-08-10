@@ -27,14 +27,15 @@
  * runtime container.
  */
 
-import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  atomicWriteFileExclusiveSync,
+  atomicWrite,
   ensureContainedDirSync,
-} from './lib/safe-write.mjs';
+  headSha,
+  requiredGit,
+} from './lib/host-producer.mjs';
 
 export const DOC_GIT_TIMES_SCHEMA_VERSION = 2;
 export const DOC_GIT_TIMES_RELPATH = 'data/doc-git-times.json';
@@ -44,6 +45,11 @@ export const DOC_GIT_TIMES_MAX_FILES = 5000;
 export const DOC_GIT_TIMES_MAX_COMMITS = 65536;
 const MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 60_000;
+const GIT_OPTIONS = Object.freeze({
+  prefix: 'doc-git-times',
+  timeout: GIT_TIMEOUT_MS,
+  maxBuffer: MAX_BUFFER_BYTES,
+});
 
 /** Same doc surface as parse-docs' DOC_GRAPH_GIT_PATHS: root *.md + docs/**. */
 export const DOC_GIT_PATHSPECS = [':(glob)*.md', ':(glob)docs/**/*.md'];
@@ -59,36 +65,12 @@ export const DOC_GIT_STATUS_ARGS = [
 
 class ProducerError extends Error {}
 
-function git(root, args) {
-  return execFileSync('git', ['-C', root, ...args], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer: MAX_BUFFER_BYTES,
-    // Commit reads must never hydrate a partial clone over the network.
-    env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
-  });
-}
-
-function requiredGit(root, args, label) {
-  try {
-    return git(root, args);
-  } catch (error) {
-    const detail =
-      (typeof error?.stderr === 'string' && error.stderr.trim()) ||
-      error?.message ||
-      'unknown error';
-    throw new ProducerError(`doc-git-times: cannot ${label}: ${detail}`);
-  }
-}
-
 /** Fail closed unless `root` is a real repository with FULL (non-shallow) history. */
 export function assertFullHistory(root) {
-  const shallow = requiredGit(
-    root,
-    ['rev-parse', '--is-shallow-repository'],
-    'verify repository depth'
-  ).trim();
+  const shallow = requiredGit(root, ['rev-parse', '--is-shallow-repository'], {
+    ...GIT_OPTIONS,
+    label: 'verify repository depth',
+  }).trim();
   if (shallow !== 'false') {
     throw new ProducerError(
       'doc-git-times: repository is shallow (or depth is unverifiable) — ' +
@@ -106,11 +88,10 @@ export function assertFullHistory(root) {
  * the dirty-doc exclusion. Fail closed instead of mis-joining.
  */
 export function assertRepoToplevel(root) {
-  const prefix = requiredGit(
-    root,
-    ['rev-parse', '--show-prefix'],
-    'verify repository toplevel'
-  ).trim();
+  const prefix = requiredGit(root, ['rev-parse', '--show-prefix'], {
+    ...GIT_OPTIONS,
+    label: 'verify repository toplevel',
+  }).trim();
   if (prefix !== '') {
     throw new ProducerError(
       `doc-git-times: --root must be a repository toplevel (got subdirectory prefix "${prefix}"); ` +
@@ -122,11 +103,10 @@ export function assertRepoToplevel(root) {
 
 /** Tracked docs plus conservative assume-unchanged/skip-worktree exclusions. */
 export function trackedDocState(root) {
-  const out = requiredGit(
-    root,
-    ['ls-files', '-v', '-z', '--', ...DOC_GIT_PATHSPECS],
-    'enumerate tracked docs'
-  );
+  const out = requiredGit(root, ['ls-files', '-v', '-z', '--', ...DOC_GIT_PATHSPECS], {
+    ...GIT_OPTIONS,
+    label: 'enumerate tracked docs',
+  });
   // perf-index-contract: producer-index-flags always-consumed: every producer run filters each enumerated tracked document against the conservative index-flag set
   const paths = [];
   const indexFlagged = new Set();
@@ -146,14 +126,14 @@ export function trackedDocState(root) {
 
 /**
  * Tracked doc paths whose working tree differs from HEAD (modified, deleted,
- * renamed, or copied). Untracked files cannot intersect trackedDocPaths(), so
+ * renamed, or copied). Untracked files cannot intersect trackedDocState(), so
  * -uno avoids enumerating that irrelevant tree entirely.
  */
 export function dirtyDocPaths(root) {
   const out = requiredGit(
     root,
     DOC_GIT_STATUS_ARGS,
-    'inspect working-tree state'
+    { ...GIT_OPTIONS, label: 'inspect working-tree state' }
   );
   const dirty = new Set();
   // -z format: `XY <path>\0` with a SECOND `\0`-terminated field (the origin
@@ -192,7 +172,7 @@ export function lastCommitTimes(root, wanted) {
       '--',
       ...DOC_GIT_PATHSPECS,
     ],
-    'walk doc history'
+    { ...GIT_OPTIONS, label: 'walk doc history' }
   );
   let commitTime = null;
   let commits = 0;
@@ -228,10 +208,7 @@ export function lastCommitTimes(root, wanted) {
 export function buildManifest(root, { maxFiles = DOC_GIT_TIMES_MAX_FILES } = {}) {
   assertFullHistory(root);
   assertRepoToplevel(root);
-  const sourceCommit = requiredGit(root, ['rev-parse', 'HEAD'], 'resolve HEAD').trim();
-  if (!/^[0-9a-f]{40,64}$/.test(sourceCommit)) {
-    throw new ProducerError(`doc-git-times: unexpected HEAD commit: ${sourceCommit}`);
-  }
+  const sourceCommit = headSha(root, { ...GIT_OPTIONS, required: true });
   const { paths: tracked, indexFlagged } = trackedDocState(root);
   if (tracked.length > maxFiles) {
     throw new ProducerError(
@@ -270,7 +247,7 @@ export function writeManifest(outFile, manifest, { root } = {}) {
       ? ensureContainedDirSync(dirname(outFile), root)
       : dirname(outFile);
   const finalPath = join(destDir, basename(outFile));
-  atomicWriteFileExclusiveSync(
+  atomicWrite(
     finalPath,
     `${JSON.stringify(manifest, null, 2)}\n`,
     // Preserve the producer's historical file mode (umask-subject default) and
@@ -314,7 +291,10 @@ export function main(argv = process.argv.slice(2)) {
     );
     return 0;
   } catch (error) {
-    if (error instanceof ProducerError) {
+    if (
+      error instanceof ProducerError ||
+      error?.message?.startsWith('doc-git-times:')
+    ) {
       console.error(error.message);
       return 1;
     }

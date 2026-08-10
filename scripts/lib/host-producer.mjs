@@ -18,20 +18,144 @@
 // the discovery + capped-read + cap-constant seam lives, so every producer reads
 // `~/.claude` the same bounded, robust way.
 //
-// ZERO node_modules (ADR 0007): this module imports only `node:` builtins, so it
-// is safe in the server boot graph (ingest.mjs imports it through the register-ts
-// loader) AND in the plain-`node` deploy path (`repo-map-refresh.mjs` runs under
-// bare `node`, NOT register-ts, so it can only import `.mjs` — never a `.ts`).
+// ZERO node_modules (ADR 0007): this module's import graph contains only `node:`
+// builtins and dependency-free local `.mjs` helpers, so it is safe in the server
+// boot graph (ingest.mjs imports it through the register-ts loader) AND in the
+// plain-`node` deploy path (`repo-map-refresh.mjs` runs under bare `node`, NOT
+// register-ts, so it can only import `.mjs` — never a `.ts`).
 // That constraint is WHY this is `.mjs` and not `.ts`: it must load both ways.
 // The symmetric TS-typed CONSUMER contract (`HostProducedArtifact<T>`) lives in
 // `src/lib/artifact-source.ts`; this file is its runtime producer half and the
 // JSDoc `@typedef` below mirrors that type for the `.mjs` callers.
 
+import { spawnSync } from 'node:child_process';
 import { closeSync, fstatSync, opendirSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
+import { isFullGitHead } from './git-identity.mjs';
+export {
+  FULL_GIT_HEAD_RE,
+  GIT_COMMIT_PREFIX_RE,
+  isFullGitHead,
+  isGitCommitPrefix,
+} from './git-identity.mjs';
+export {
+  atomicWriteFileExclusiveSync as atomicWrite,
+  ensureContainedDirSync,
+} from './safe-write.mjs';
 
 /** Reader chunk size, matching ingest's streaming cap reader. */
 const READ_CHUNK_BYTES = 65_536;
+/** Shared ceiling for Git output retained in memory by host producers. */
+const GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+
+function commandText(value) {
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  return '';
+}
+
+/**
+ * Run one required, local-only Git command and return its RAW stdout.
+ *
+ * Raw output is load-bearing: callers consume NUL-delimited path streams, so
+ * trimming here would corrupt legal leading/trailing-whitespace filenames.
+ * Scalar callers trim at their own boundary. The injectable `spawn` keeps the
+ * doc-hygiene producer dependency-free and unit-testable.
+ */
+export function requiredGit(
+  root,
+  args,
+  {
+    label = 'run git',
+    prefix = 'host-producer',
+    spawn = spawnSync,
+    env = process.env,
+    timeout,
+    maxBuffer = GIT_MAX_BUFFER_BYTES,
+  } = {}
+) {
+  const result = spawn('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...env, GIT_NO_LAZY_FETCH: '1' },
+    timeout,
+    maxBuffer,
+  });
+  if (result.error || result.status !== 0) {
+    const detail =
+      commandText(result.stderr).trim() ||
+      result.error?.message ||
+      'unknown error';
+    throw new Error(`${prefix}: cannot ${label}: ${detail}`);
+  }
+  return commandText(result.stdout);
+}
+
+/**
+ * Resolve a canonical full HEAD object id. Optional callers receive `null` for
+ * a missing/invalid repository; required callers receive the contextual Git
+ * error. `requireClean` preserves repo-map's distinct dirty-tree contract: a
+ * dirty checkout has no commit identity and must use its mtime watermark.
+ */
+export function headSha(
+  root,
+  {
+    spawn = spawnSync,
+    env = process.env,
+    requireClean = false,
+    required = false,
+    prefix = 'host-producer',
+    timeout,
+    maxBuffer = GIT_MAX_BUFFER_BYTES,
+  } = {}
+) {
+  const gitOptions = { spawn, env, prefix, timeout, maxBuffer };
+  try {
+    if (
+      requireClean &&
+      requiredGit(root, ['status', '--porcelain'], {
+        ...gitOptions,
+        label: 'inspect working-tree state',
+      }).trim()
+    ) {
+      return null;
+    }
+    const sha = requiredGit(
+      root,
+      ['rev-parse', '--verify', 'HEAD^{commit}'],
+      { ...gitOptions, label: 'resolve HEAD' }
+    ).trim();
+    if (!isFullGitHead(sha)) {
+      throw new Error(`${prefix}: unexpected HEAD commit: ${sha || '<empty>'}`);
+    }
+    return sha.toLowerCase();
+  } catch (error) {
+    if (required) throw error;
+    return null;
+  }
+}
+
+/**
+ * Resolve the expected host-produced artifact commit from one feature-specific
+ * env seam followed by named fallbacks. Empty exported compose stamps count as
+ * unset; a non-empty candidate is returned verbatim for the consumer's own
+ * full-hash or prefix-binding validator to judge.
+ */
+export function resolveExpectedCommit(
+  primaryEnvName,
+  {
+    env = process.env,
+    fallbackEnvNames = ['GIT_SHA'],
+    fallback = null,
+  } = {}
+) {
+  for (const name of [primaryEnvName, ...fallbackEnvNames]) {
+    const value = env?.[name];
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return fallback;
+}
 
 /**
  * Parse a non-negative integer env override, falling back to `fallback` when the

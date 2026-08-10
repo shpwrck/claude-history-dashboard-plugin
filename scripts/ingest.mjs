@@ -46,6 +46,10 @@ import {
   readArtifactTextCappedSync,
   readArtifactJsonCappedSync,
   readJsonlTailCappedSync,
+  headSha,
+  isFullGitHead,
+  isGitCommitPrefix,
+  resolveExpectedCommit,
   claudeJsonProjectRoots as discoverClaudeJsonProjectRoots,
   repoMapArtifactRoots as discoverRepoMapArtifactRoots,
 } from './lib/host-producer.mjs';
@@ -1612,7 +1616,6 @@ function hashDocGraphContent(hash, docGitTimesSnapshot) {
 // uppercase stamp would pass a loose check yet can NEVER match — silent
 // permanent suppression. A shaped-but-short stamp (the published image-tag
 // convention) warns once instead: loud rejection beats silent suppression.
-const DOCS_MAP_FULL_COMMIT_RE = /^[0-9a-f]{40,64}$/;
 const DOCS_MAP_SHORT_COMMIT_RE = /^[0-9a-fA-F]{7,39}$/;
 
 // Per-cause warn latches (#2709 review): one latch per distinct failure so a
@@ -1629,7 +1632,7 @@ function docsMapCommitOrNull(value, source) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   const normalized = trimmed.toLowerCase();
-  if (DOCS_MAP_FULL_COMMIT_RE.test(normalized)) return normalized;
+  if (isFullGitHead(normalized)) return normalized;
   if (DOCS_MAP_SHORT_COMMIT_RE.test(trimmed)) {
     warnDocsMapOnce(
       `short-commit:${source}`,
@@ -1944,19 +1947,13 @@ export function readDocHygieneArtifact(
 
     let expectedCommit =
       options.expectedCommit ??
-      process.env[DOC_HYGIENE_EXPECTED_COMMIT_ENV] ??
-      null;
+      resolveExpectedCommit(DOC_HYGIENE_EXPECTED_COMMIT_ENV, {
+        // A keyed host artifact and the running image carry independent commit
+        // identities. GIT_SHA is the latter, never a substitute for the former.
+        fallbackEnvNames: [],
+      });
     if (!expectedCommit && !artifactKey) {
-      try {
-        expectedCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
-          cwd: root,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-          env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
-        }).trim();
-      } catch {
-        return null;
-      }
+      expectedCommit = headSha(root, { prefix: 'doc-hygiene ingest' });
     }
     if (!expectedCommit) return null;
 
@@ -1966,11 +1963,9 @@ export function readDocHygieneArtifact(
       // from the local checkout that produced the artifact; never merge that
       // artifact with `/app`'s graph from another commit.
       const runtimeCommit = options.runtimeCommit ?? process.env.GIT_SHA ?? null;
-      const validCommit = (value) =>
-        typeof value === 'string' && /^[0-9a-f]{7,64}$/i.test(value);
       if (
-        !validCommit(expectedCommit) ||
-        !validCommit(runtimeCommit) ||
+        !isGitCommitPrefix(expectedCommit) ||
+        !isGitCommitPrefix(runtimeCommit) ||
         !(
           expectedCommit.toLowerCase().startsWith(runtimeCommit.toLowerCase()) ||
           runtimeCommit.toLowerCase().startsWith(expectedCommit.toLowerCase())

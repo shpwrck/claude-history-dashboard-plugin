@@ -19,6 +19,8 @@
  * Browser code should only ever need {@link DocTimeProvenance} via `import type`.
  */
 
+import { isFullGitHead } from '../../scripts/lib/git-identity.mjs';
+
 /**
  * How a doc node's `gitMtimeIso` was derived, ordered from most to least
  * authoritative:
@@ -85,7 +87,6 @@ export const DOC_GIT_TIMES_EXPECTED_COMMIT_ENV =
   'CHD_DOC_GIT_TIMES_EXPECTED_COMMIT';
 
 const DOC_PATH_MAX_LENGTH = 1024;
-const FULL_COMMIT_RE = /^[0-9a-f]{40,64}$/;
 /** `git log --format=%cI` shape: date T time with offset (or Z). */
 const ISO_TIME_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -146,14 +147,14 @@ export function parseDocGitTimesManifest(
     typeof manifest.sourceCommit === 'string'
       ? manifest.sourceCommit.toLowerCase()
       : '';
-  if (!FULL_COMMIT_RE.test(sourceCommit)) {
+  if (!isFullGitHead(sourceCommit)) {
     return { ok: false, reason: 'missing or malformed sourceCommit' };
   }
   const expectedCommit =
     typeof options.expectedCommit === 'string'
       ? options.expectedCommit.trim().toLowerCase()
       : '';
-  if (!FULL_COMMIT_RE.test(expectedCommit)) {
+  if (!isFullGitHead(expectedCommit)) {
     return { ok: false, reason: 'no runtime commit to bind the manifest against' };
   }
   if (expectedCommit !== sourceCommit) {

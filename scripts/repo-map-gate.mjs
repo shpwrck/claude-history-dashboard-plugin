@@ -45,12 +45,12 @@
 // by the down tolerance (1 point) and always visible as a budget diff. See
 // docs/perf-sprint/repo-map.md.
 
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, resolve } from 'node:path';
 import { envNumber, EnvNumberError } from './lib/env-number.mjs';
+import { headSha, requiredGit } from './lib/host-producer.mjs';
 import { localizationProbe } from './lib/repo-map-probe.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -102,17 +102,6 @@ function die(msg) {
 function hrMs() {
   const [s, ns] = process.hrtime();
   return s * 1e3 + ns / 1e6;
-}
-
-function gitShaOf(root) {
-  try {
-    return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,15 +198,13 @@ function rankingSurfaceSha256() {
  *  reason so the skip is visible, never silent. */
 function priorLocalizationBudget(budgetPath) {
   const budgetDir = dirname(resolve(budgetPath));
-  const git = (...argv) =>
-    execFileSync('git', ['-C', budgetDir, ...argv], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
   const explicitRef = process.env.REPO_MAP_PRIOR_BUDGET_REF;
   let toplevel;
   try {
-    toplevel = git('rev-parse', '--show-toplevel');
+    toplevel = requiredGit(budgetDir, ['rev-parse', '--show-toplevel'], {
+      prefix: 'repo-map gate',
+      label: 'resolve budget repository',
+    }).trim();
   } catch {
     if (explicitRef) {
       return {
@@ -233,7 +220,10 @@ function priorLocalizationBudget(budgetPath) {
   for (const ref of candidates) {
     let raw;
     try {
-      raw = git('show', `${ref}:${rel}`);
+      raw = requiredGit(budgetDir, ['show', `${ref}:${rel}`], {
+        prefix: 'repo-map gate',
+        label: `read prior budget at ${ref}`,
+      }).trim();
     } catch {
       if (explicit) {
         return {
@@ -299,7 +289,7 @@ async function main() {
     die(`could not read budget file ${args.budget} (${err.message}).`);
   }
 
-  const gitSha = gitShaOf(args.root);
+  const gitSha = headSha(args.root, { prefix: 'repo-map gate' });
   // Strict env parsing (#3477): a set-but-unusable override is an error, never
   // a silent fallback that measures something other than what was asked for —
   // the same shared #3076 parser the producer uses, so gate and producer agree.

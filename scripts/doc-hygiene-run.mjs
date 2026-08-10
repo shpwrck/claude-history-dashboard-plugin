@@ -26,7 +26,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { atomicWriteFileExclusiveSync } from "./lib/safe-write.mjs";
+import {
+  atomicWrite,
+  headSha,
+  requiredGit,
+} from "./lib/host-producer.mjs";
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
@@ -76,31 +80,6 @@ function execute(spawn, command, args, cwd, env) {
   });
 }
 
-/** Commit reads must never hydrate a partial clone over the network. */
-function executeGit(spawn, args, cwd) {
-  return spawn("git", args, {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: MAX_BUFFER_BYTES,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, GIT_NO_LAZY_FETCH: "1" },
-  });
-}
-
-function rawGitOutput(spawn, root, args, label) {
-  const result = executeGit(spawn, args, root);
-  if (result.error || result.status !== 0) {
-    const detail =
-      text(result.stderr).trim() || result.error?.message || "unknown error";
-    throw new Error(`doc-hygiene: cannot ${label}: ${detail}`);
-  }
-  return text(result.stdout);
-}
-
-function requiredGitOutput(spawn, root, args, label) {
-  return rawGitOutput(spawn, root, args, label).trim();
-}
-
 /**
  * Git-tracked Markdown files at one immutable tree, including hidden dirs.
  *
@@ -116,11 +95,15 @@ export function trackedMarkdownFiles(
   spawn = spawnSync,
   treeish = "HEAD",
 ) {
-  const output = rawGitOutput(
-    spawn,
+  const output = requiredGit(
     root,
     ["ls-tree", "-rz", "--name-only", treeish],
-    "enumerate git-tracked Markdown",
+    {
+      spawn,
+      prefix: "doc-hygiene",
+      label: "enumerate git-tracked Markdown",
+      maxBuffer: MAX_BUFFER_BYTES,
+    },
   );
   return output
     .split("\0")
@@ -129,10 +112,6 @@ export function trackedMarkdownFiles(
     // pathname literally ending in "\n" would have passed as Markdown.
     .filter((path) => path.toLowerCase().endsWith(".md"))
     .sort();
-}
-
-function gitCommit(root, spawn) {
-  return requiredGitOutput(spawn, root, ["rev-parse", "HEAD"], "resolve HEAD");
 }
 
 function commandFailure(result, fallback) {
@@ -152,16 +131,16 @@ function materializeCommit(root, commit, spawn) {
   const emptyConfig = join(scratch, "lychee-empty.toml");
   mkdirSync(snapshot, { recursive: true, mode: 0o700 });
   try {
-    const archived = executeGit(
-      spawn,
-      ["archive", "--format=tar", `--output=${archive}`, commit],
+    requiredGit(
       root,
+      ["archive", "--format=tar", `--output=${archive}`, commit],
+      {
+        spawn,
+        prefix: "doc-hygiene",
+        label: "archive commit",
+        maxBuffer: MAX_BUFFER_BYTES,
+      },
     );
-    if (archived.error || archived.status !== 0) {
-      throw new Error(
-        `doc-hygiene: cannot archive commit: ${commandFailure(archived, "unknown error")}`,
-      );
-    }
     const extracted = execute(
       spawn,
       "tar",
@@ -742,7 +721,12 @@ export function runDocHygiene({
   agentsLintBinary,
 } = {}) {
   const repoRoot = resolve(root);
-  const commit = gitCommit(repoRoot, spawn);
+  const commit = headSha(repoRoot, {
+    spawn,
+    required: true,
+    prefix: "doc-hygiene",
+    maxBuffer: MAX_BUFFER_BYTES,
+  });
   const markdownFiles = trackedMarkdownFiles(repoRoot, spawn, commit);
   const checks = [];
   const findings = [];
@@ -858,7 +842,7 @@ export function writeDocHygieneArtifact(path, artifact) {
   // symlink pre-seeded at the formerly-predictable `<path>.tmp-<pid>` cannot be
   // followed, and set the 0600 mode on the descriptor (fchmod) rather than with
   // a second path-based chmod that could race a swapped-in link.
-  atomicWriteFileExclusiveSync(path, `${JSON.stringify(artifact, null, 2)}\n`, {
+  atomicWrite(path, `${JSON.stringify(artifact, null, 2)}\n`, {
     mode: 0o600,
     finalMode: 0o600,
   });

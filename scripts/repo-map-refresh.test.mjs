@@ -146,8 +146,8 @@ test('producer reuses per-file parses while keeping the sidecar out of artifacts
     // The old outer git-sha/mtime key is unchanged, but fresh parse misses must
     // still force the canonical artifact write so stale structures cannot win.
     rmSync(cacheDir, { recursive: true, force: true });
-    const artifactFile = join(artifactDirOf(home), onlyArtifact(home).files[0]);
-    chmodSync(artifactFile, 0o400);
+    const artifactDir = artifactDirOf(home);
+    chmodSync(artifactDir, 0o500);
     try {
       assert.throws(
         () => runProducer(home, project, cacheDir),
@@ -160,7 +160,7 @@ test('producer reuses per-file parses while keeping the sidecar out of artifacts
         'changed sidecar is not committed before the canonical write succeeds'
       );
     } finally {
-      chmodSync(artifactFile, 0o600);
+      chmodSync(artifactDir, 0o700);
     }
 
     const invalidated = runProducer(home, project, cacheDir);

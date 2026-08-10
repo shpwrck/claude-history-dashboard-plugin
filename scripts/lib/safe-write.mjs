@@ -127,6 +127,9 @@ function randomTempPath(finalPath) {
  * @param {number} [opts.mode=0o600]  creation mode for the temp descriptor
  * @param {number} [opts.finalMode]   if set, `fchmod` the descriptor to this
  *                                     before rename (race-free vs. path chmod)
+ * @param {boolean} [opts.preserveExistingMode=false] preserve the permission
+ *                                     bits of an existing regular destination;
+ *                                     `finalMode` wins when both are supplied
  * @param {string} [opts.tempPath]    explicit (predictable) temp path; when
  *                                     omitted an unguessable one is used
  * @returns {string} `finalPath`
@@ -134,8 +137,18 @@ function randomTempPath(finalPath) {
 export function atomicWriteFileExclusiveSync(
   finalPath,
   content,
-  { mode = 0o600, finalMode, tempPath } = {}
+  { mode = 0o600, finalMode, preserveExistingMode = false, tempPath } = {}
 ) {
+  let inheritedFinalMode;
+  if (preserveExistingMode && finalMode === undefined) {
+    try {
+      const existing = lstatSync(finalPath);
+      if (existing.isFile()) inheritedFinalMode = existing.mode & 0o777;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  const descriptorFinalMode = finalMode ?? inheritedFinalMode;
   const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
   const temp = tempPath ?? randomTempPath(finalPath);
   let fd;
@@ -151,7 +164,7 @@ export function atomicWriteFileExclusiveSync(
   }
   try {
     writeSync(fd, buf);
-    if (finalMode !== undefined) fchmodSync(fd, finalMode);
+    if (descriptorFinalMode !== undefined) fchmodSync(fd, descriptorFinalMode);
   } catch (err) {
     try {
       closeSync(fd);

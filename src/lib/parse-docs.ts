@@ -30,6 +30,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, posix, resolve } from 'node:path';
 import { readTextFileCappedSync } from './capped-read';
+import { resolveExpectedCommit } from '../../scripts/lib/host-producer.mjs';
 import {
   DOC_GIT_TIMES_EXPECTED_COMMIT_ENV,
   DOC_GIT_TIMES_MAX_FILE_BYTES,
@@ -972,9 +973,7 @@ export function captureDocGitTimesSnapshot(
   const expectedCommit =
     opts.docGitTimesExpectedCommit !== undefined
       ? opts.docGitTimesExpectedCommit
-      : (process.env[DOC_GIT_TIMES_EXPECTED_COMMIT_ENV] ||
-         process.env.GIT_SHA ||
-         null);
+      : resolveExpectedCommit(DOC_GIT_TIMES_EXPECTED_COMMIT_ENV);
 
   let identityStat = '0:0:0:0';
   let readable = false;

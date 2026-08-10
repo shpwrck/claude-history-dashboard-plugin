@@ -6,6 +6,8 @@
  * this module dependency-free: the zero-node_modules server imports it.
  */
 
+import { isGitCommitPrefix } from '../../scripts/lib/git-identity.mjs';
+
 export type DocHygieneSeverity = 'error' | 'warning' | 'info';
 
 export interface DocHygieneCheck {
@@ -237,7 +239,7 @@ export function parseDocHygieneArtifact(
     identity === null ||
     !/^(?:\/|[A-Za-z]:[\\/])/.test(root) ||
     !commit ||
-    !/^[0-9a-f]{7,64}$/i.test(commit) ||
+    !isGitCommitPrefix(commit) ||
     markdownFiles === null ||
     summaryScore === undefined ||
     findingCount === null ||
@@ -263,7 +265,7 @@ export function parseDocHygieneArtifact(
   // unbound acceptance.
   const expectedCommit =
     typeof options.expectedCommit === 'string' ? options.expectedCommit : null;
-  if (!expectedCommit || !/^[0-9a-f]{7,64}$/i.test(expectedCommit)) return null;
+  if (!isGitCommitPrefix(expectedCommit)) return null;
   if (!expectedCommit.toLowerCase().startsWith(commit.toLowerCase())) return null;
 
   const checks = checksRaw.map(parseCheck);

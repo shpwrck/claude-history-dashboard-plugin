@@ -15,12 +15,12 @@
  * The `.ts` generator is dynamic-imported so it resolves under the register-ts
  * loader, exactly like ingest.mjs loads the `parse-*.ts` modules.
  */
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { envNumber, EnvNumberError } from './lib/env-number.mjs';
+import { atomicWrite, headSha, requiredGit } from './lib/host-producer.mjs';
 
 const PROJECT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const {
@@ -40,41 +40,17 @@ const { normalizeGitRemoteUrl } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-docs-map.ts')
 );
 
-/** Best-effort git sha of the root for the staleness stamp; null if not a repo.
- *  A DIRTY tree returns null too, so the mtime watermark (not a stale sha)
- *  drives cache invalidation when there are uncommitted changes. */
-function gitShaOf(root) {
-  try {
-    const dirty = execFileSync('git', ['-C', root, 'status', '--porcelain'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    if (dirty) return null; // uncommitted changes — fall back to mtime watermark
-    return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
 /** Normalized `owner/repo` slug of the root's Git remote (#2709), or null when
  *  the root is not a repo / has no `origin` / the URL has no two-segment slug.
- *  Derived deterministically beside `gitShaOf` so the artifact's identity and
+ *  Derived deterministically beside `headSha` so the artifact's identity and
  *  staleness stamp always describe the same checkout; the shared pure
  *  normalizer keeps this identity byte-identical to the ingest-side docs-map
  *  wrapper derivation. */
 function repositoryOf(root) {
   try {
-    const remote = execFileSync('git', ['-C', root, 'remote', 'get-url', 'origin'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      // Match ingest's docsMapGitOutput probe environment: both sides derive
-      // "the SAME identity", so the probes must not diverge (a lazy-fetch
-      // side effect here could stall or alter the derivation). Full probe
-      // consolidation is tracked separately (#2745).
-      env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+    const remote = requiredGit(root, ['remote', 'get-url', 'origin'], {
+      prefix: 'repo-map',
+      label: 'resolve origin remote',
     }).trim();
     return normalizeGitRemoteUrl(remote);
   } catch {
@@ -117,7 +93,9 @@ function isWithin(parent, candidate) {
 
 const root = resolve(process.argv[2] ?? process.cwd());
 const force = process.argv.includes('--force');
-const gitSha = gitShaOf(root);
+// A dirty tree has no commit identity: its mtime watermark, not a stale HEAD,
+// drives repo-map cache invalidation.
+const gitSha = headSha(root, { requireClean: true, prefix: 'repo-map' });
 
 /** Strict, fail-closed env override parsing (#3477). The old shape here —
  *  `Number(process.env.X) || DEFAULT` — silently discarded the operator's
@@ -235,7 +213,10 @@ if (artifactCacheHit) {
   // size limit (#893) is enforced against this compact serialization — a
   // pretty-printed write would exceed the byte ceiling enforceSizeLimit() just
   // guaranteed.
-  writeFileSync(outFile, JSON.stringify(persisted));
+  atomicWrite(outFile, JSON.stringify(persisted), {
+    mode: 0o666,
+    preserveExistingMode: true,
+  });
 
   artifactSummary =
     `repo-map: ${persisted.map.fileCount} files indexed` +

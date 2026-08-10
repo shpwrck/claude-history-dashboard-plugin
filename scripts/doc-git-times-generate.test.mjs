@@ -157,6 +157,8 @@ describe('doc-git-times producer (#2707)', () => {
     try {
       const result = runProducer(['--root', root]);
       assert.equal(result.status, 1);
+      assert.match(result.stderr, /^doc-git-times: cannot verify repository depth:/);
+      assert.doesNotMatch(result.stderr, /unexpected failure/);
       assert.equal(existsSync(join(root, 'data', 'doc-git-times.json')), false);
     } finally {
       rmSync(root, { recursive: true, force: true });

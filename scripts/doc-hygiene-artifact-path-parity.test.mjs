@@ -118,6 +118,8 @@ test('stable repo key bridges a host checkout artifact into the /app runtime nam
   const expected = validArtifact(hostRoot, key);
   const previousHome = process.env.HOME;
   const previousDb = process.env.CHD_DB_PATH;
+  const previousExpectedCommit = process.env[EXPECTED_COMMIT_ENV];
+  const previousGitSha = process.env.GIT_SHA;
   mkdirSync(artifactDir, { recursive: true });
   mkdirSync(join(claude, 'projects'), { recursive: true });
 
@@ -154,6 +156,21 @@ test('stable repo key bridges a host checkout artifact into the /app runtime nam
       null,
       'a keyed cross-namespace read never runs without a commit bind'
     );
+    delete process.env[EXPECTED_COMMIT_ENV];
+    process.env.GIT_SHA = expected.repo.commit;
+    assert.equal(
+      ingest.readDocHygieneArtifact(runtimeRoot, artifactDir, {
+        artifactKey: key,
+        runtimeCommit: expected.repo.commit,
+      }),
+      null,
+      'the runtime image GIT_SHA never substitutes for the host artifact bind'
+    );
+    if (previousExpectedCommit === undefined)
+      delete process.env[EXPECTED_COMMIT_ENV];
+    else process.env[EXPECTED_COMMIT_ENV] = previousExpectedCommit;
+    if (previousGitSha === undefined) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = previousGitSha;
     assert.equal(
       ingest.readDocHygieneArtifact(runtimeRoot, artifactDir, {
         artifactKey: '../escape',
@@ -186,6 +203,11 @@ test('stable repo key bridges a host checkout artifact into the /app runtime nam
     else process.env.HOME = previousHome;
     if (previousDb === undefined) delete process.env.CHD_DB_PATH;
     else process.env.CHD_DB_PATH = previousDb;
+    if (previousExpectedCommit === undefined)
+      delete process.env[EXPECTED_COMMIT_ENV];
+    else process.env[EXPECTED_COMMIT_ENV] = previousExpectedCommit;
+    if (previousGitSha === undefined) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = previousGitSha;
   }
 });
 

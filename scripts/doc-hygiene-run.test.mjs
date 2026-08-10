@@ -54,7 +54,7 @@ function fakeSpawn({
       };
     }
     if (command === "git" && args[0] === "rev-parse") {
-      return { status: 0, stdout: "abcdef1234567890\n", stderr: "" };
+      return { status: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" };
     }
     if (command === "git" && args[0] === "archive") {
       return { status: 0, stdout: "", stderr: "" };

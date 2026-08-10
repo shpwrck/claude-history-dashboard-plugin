@@ -13,7 +13,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,6 +34,10 @@ const {
   repoMapArtifactRoots,
   resolveArtifactFileMaxBytes,
   resolveRepoMapArtifactMaxEntries,
+  requiredGit,
+  headSha,
+  resolveExpectedCommit,
+  atomicWrite,
 } = await import('./lib/host-producer.mjs');
 
 function withTmp(fn) {
@@ -164,4 +175,133 @@ test('resolvers clamp env overrides', () => {
     7
   );
   assert.equal(resolveRepoMapArtifactMaxEntries({}), 50_000); // default
+});
+
+test('requiredGit preserves raw path output and enforces the local-only runner contract', () => {
+  let call;
+  const raw = ' leading.md\0trailing.md \0\n';
+  const spawn = (command, args, options) => {
+    call = { command, args, options };
+    return { status: 0, stdout: raw, stderr: '' };
+  };
+  assert.equal(
+    requiredGit('/repo', ['ls-files', '-z'], {
+      spawn,
+      label: 'enumerate files',
+      env: { KEEP: 'yes' },
+    }),
+    raw
+  );
+  assert.equal(call.command, 'git');
+  assert.deepEqual(call.args, ['ls-files', '-z']);
+  assert.equal(call.options.cwd, '/repo');
+  assert.equal(call.options.env.KEEP, 'yes');
+  assert.equal(call.options.env.GIT_NO_LAZY_FETCH, '1');
+});
+
+test('requiredGit reports stderr before the spawn error detail', () => {
+  const spawn = () => ({
+    status: 128,
+    stdout: '',
+    stderr: 'fatal: fixture failed\n',
+    error: new Error('less useful spawn message'),
+  });
+  assert.throws(
+    () =>
+      requiredGit('/repo', ['rev-parse', 'HEAD'], {
+        spawn,
+        label: 'resolve HEAD',
+        prefix: 'fixture',
+      }),
+    /fixture: cannot resolve HEAD: fatal: fixture failed/
+  );
+});
+
+test('headSha accepts only full SHA-1/SHA-256 ids and preserves clean-only semantics', () => {
+  const sha1 = 'a'.repeat(40);
+  const sha256 = 'B'.repeat(64);
+  const returning = (stdout) => () => ({ status: 0, stdout: `${stdout}\n`, stderr: '' });
+  assert.equal(headSha('/repo', { spawn: returning(sha1) }), sha1);
+  assert.equal(headSha('/repo', { spawn: returning(sha256) }), sha256.toLowerCase());
+  assert.equal(headSha('/repo', { spawn: returning('c'.repeat(41)) }), null);
+  assert.equal(headSha('/repo', { spawn: returning('abc1234') }), null);
+  assert.throws(
+    () => headSha('/repo', { spawn: returning('abc1234'), required: true, prefix: 'fixture' }),
+    /fixture: unexpected HEAD commit: abc1234/
+  );
+
+  const dirtySpawn = (_command, args) =>
+    args[0] === 'status'
+      ? { status: 0, stdout: ' M README.md\n', stderr: '' }
+      : { status: 0, stdout: `${sha1}\n`, stderr: '' };
+  assert.equal(headSha('/repo', { spawn: dirtySpawn, requireClean: true }), null);
+});
+
+test('resolveExpectedCommit shares empty-env fallback without overriding a non-empty primary', () => {
+  assert.equal(
+    resolveExpectedCommit('CHD_EXPECTED', {
+      env: { CHD_EXPECTED: 'host-commit', GIT_SHA: 'image-commit' },
+    }),
+    'host-commit'
+  );
+  assert.equal(
+    resolveExpectedCommit('CHD_EXPECTED', {
+      env: { CHD_EXPECTED: '', GIT_SHA: 'image-commit' },
+    }),
+    'image-commit'
+  );
+  assert.equal(
+    resolveExpectedCommit('CHD_EXPECTED', {
+      env: { CHD_EXPECTED: 'not-a-sha', GIT_SHA: 'image-commit' },
+    }),
+    'not-a-sha',
+    'a malformed primary remains terminal for the consumer to reject'
+  );
+  assert.equal(
+    resolveExpectedCommit('CHD_EXPECTED', {
+      env: { GIT_SHA: 'image-commit' },
+      fallbackEnvNames: [],
+    }),
+    null,
+    'callers with an independent runtime-image identity can disable GIT_SHA fallback'
+  );
+});
+
+test('host-producer re-exports the hardened atomic writer without changing bytes', () => {
+  withTmp((dir) => {
+    const path = join(dir, 'artifact.json');
+    writeFileSync(path, 'old');
+    assert.equal(atomicWrite(path, '{"ok":true}\n'), path);
+    assert.equal(readArtifactTextCappedSync(path), '{"ok":true}\n');
+  });
+});
+
+test('atomic replacement can preserve a private destination mode', () => {
+  withTmp((dir) => {
+    const path = join(dir, 'private.json');
+    writeFileSync(path, 'old');
+    chmodSync(path, 0o600);
+    atomicWrite(path, 'new', { mode: 0o666, preserveExistingMode: true });
+    assert.equal(readFileSync(path, 'utf8'), 'new');
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  });
+});
+
+test('host producers keep Git and atomic-write plumbing on the shared seam (#2745)', () => {
+  for (const rel of [
+    './doc-git-times-generate.mjs',
+    './doc-hygiene-run.mjs',
+    './repo-map-generate.mjs',
+    './repo-map-gate.mjs',
+  ]) {
+    const src = readFileSync(new URL(rel, import.meta.url), 'utf8');
+    assert.match(src, /\.\/lib\/host-producer\.mjs/);
+    assert.doesNotMatch(
+      src,
+      /function\s+(?:requiredGit|requiredGitOutput|rawGitOutput|executeGit|gitShaOf|gitCommit)\b/
+    );
+    assert.doesNotMatch(src, /\bexecFileSync\(\s*['"]git['"]/);
+    assert.doesNotMatch(src, /\bspawn(?:Sync)?\(\s*['"]git['"]/);
+    assert.doesNotMatch(src, /from\s+['"].*safe-write\.mjs['"]/);
+  }
 });
