@@ -45,6 +45,7 @@ import { enforceSizeLimit } from '../src/lib/repo-map/cache.ts';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
 const REPO_MAP_CACHE_PATH = join(HERE, '../src/lib/repo-map/cache.ts');
+const REPO_MAP_FILE_CACHE_PATH = join(HERE, '../src/lib/repo-map/file-cache.ts');
 const REPO_MAP_TYPES_PATH = join(HERE, '../src/lib/repo-map/types.ts');
 const PARSER_OUTPUT_REGISTRY_PATH = 'scripts/lib/parser-output-versions.mjs';
 
@@ -163,7 +164,7 @@ function persistedRepoMapSample() {
   );
 }
 
-function directInterfaceKeys(sourceText, interfaceName, sourcePath) {
+function directInterfaceFields(sourceText, interfaceName, sourcePath) {
   const sourceFile = ts.createSourceFile(
     sourcePath,
     sourceText,
@@ -198,9 +199,15 @@ function directInterfaceKeys(sourceText, interfaceName, sourcePath) {
         ts.isIdentifier(member.name) || ts.isStringLiteral(member.name),
         `${interfaceName} property names must be static for the repo-map output fence`
       );
-      return member.name.text;
+      return { name: member.name.text, optional: Boolean(member.questionToken) };
     })
-    .sort();
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function directInterfaceKeys(sourceText, interfaceName, sourcePath) {
+  return directInterfaceFields(sourceText, interfaceName, sourcePath).map(
+    (field) => field.name
+  );
 }
 
 function assertDirectArrayElementType(
@@ -254,6 +261,86 @@ function assertDirectArrayElementType(
     elementType.typeName.text,
     expectedElementType,
     `${ownerInterfaceName}.${propertyName} must remain a direct ${expectedElementType}[] reference for the repo-map output fence`
+  );
+}
+
+function repoSymbolRuleFields(sourceText) {
+  const sourceFile = ts.createSourceFile(
+    REPO_MAP_FILE_CACHE_PATH,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const declarations = sourceFile.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .filter(
+      (declaration) =>
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === 'REPO_SYMBOL_FIELD_RULES'
+    );
+  assert.equal(
+    declarations.length,
+    1,
+    'file-cache.ts must declare REPO_SYMBOL_FIELD_RULES exactly once'
+  );
+  const initializer = declarations[0].initializer;
+  assert.ok(
+    initializer && ts.isObjectLiteralExpression(initializer),
+    'file-cache.ts REPO_SYMBOL_FIELD_RULES must remain a static object literal'
+  );
+  return initializer.properties
+    .map((property) => {
+      assert.ok(
+        ts.isPropertyAssignment(property),
+        'file-cache.ts REPO_SYMBOL_FIELD_RULES may only contain explicit property assignments'
+      );
+      const name = staticPropertyName(property);
+      assert.ok(
+        ts.isObjectLiteralExpression(property.initializer),
+        `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name} must remain a static rule object`
+      );
+      const rule = property.initializer;
+      const ruleKeys = rule.properties.map((ruleProperty) => {
+        assert.ok(
+          ts.isPropertyAssignment(ruleProperty),
+          `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name} may only contain explicit property assignments`
+        );
+        return staticPropertyName(ruleProperty);
+      });
+      assert.deepEqual(
+        [...ruleKeys].sort(),
+        ['optional', 'validate'],
+        `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name} must declare only optional and validate`
+      );
+      const optionalProperty = rule.properties.find(
+        (ruleProperty) => staticPropertyName(ruleProperty) === 'optional'
+      );
+      assert.ok(
+        ts.isPropertyAssignment(optionalProperty) &&
+          (optionalProperty.initializer.kind === ts.SyntaxKind.TrueKeyword ||
+            optionalProperty.initializer.kind === ts.SyntaxKind.FalseKeyword),
+        `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name}.optional must be a static boolean`
+      );
+      return {
+        name,
+        optional: optionalProperty.initializer.kind === ts.SyntaxKind.TrueKeyword,
+      };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function assertRepoSymbolNormalizerParity(typesSource, fileCacheSource) {
+  assert.deepEqual(
+    repoSymbolRuleFields(fileCacheSource),
+    directInterfaceFields(typesSource, 'RepoSymbol', REPO_MAP_TYPES_PATH),
+    'RepoSymbol fields/optionality and the typechecked file-cache rule allowlist diverged; add an exact rule for every direct RepoSymbol field'
+  );
+  assert.match(
+    fileCacheSource,
+    /Object\.entries\(REPO_SYMBOL_FIELD_RULES\)/,
+    'normalizeSymbol must validate and project through REPO_SYMBOL_FIELD_RULES'
   );
 }
 
@@ -424,6 +511,23 @@ function addInterfaceProbe(sourceText, interfaceName, propertyName) {
   );
 }
 
+function addRepoSymbolRuleProbe(sourceText, propertyName) {
+  const anchor =
+    'const REPO_SYMBOL_FIELD_RULES: RepoSymbolFieldRules = {\n';
+  assert.equal(
+    sourceText.split(anchor).length,
+    2,
+    'test fixture could not find RepoSymbol rule allowlist'
+  );
+  return sourceText.replace(
+    anchor,
+    `${anchor}  ${propertyName}: {\n` +
+      `    optional: true,\n` +
+      `    validate: (value): value is string => typeof value === 'string',\n` +
+      `  },\n`
+  );
+}
+
 function addedFields(candidate, baseline) {
   const baselineSet = new Set(baseline);
   return candidate.filter((field) => !baselineSet.has(field));
@@ -434,6 +538,45 @@ test('repo-map output contract === live envelope + cache key + RepoMap + RepoFil
   const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
   assertRegisteredRepoMapContract(
     recomputeRepoMapOutputContract(typesSource, cacheSource)
+  );
+});
+
+test('repo-map file cache validates and projects every direct RepoSymbol field through one exact rule', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  const fileCacheSource = readFileSync(REPO_MAP_FILE_CACHE_PATH, 'utf8');
+  assertRepoSymbolNormalizerParity(typesSource, fileCacheSource);
+});
+
+test('repo-map file-cache parity fence detects type-only drift and accepts a paired rule update', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  const fileCacheSource = readFileSync(REPO_MAP_FILE_CACHE_PATH, 'utf8');
+  const typesWithProbe = addInterfaceProbe(
+    typesSource,
+    'RepoSymbol',
+    'documentationProbe'
+  );
+
+  assert.throws(
+    () => assertRepoSymbolNormalizerParity(typesWithProbe, fileCacheSource),
+    /RepoSymbol fields\/optionality.*rule allowlist diverged/s
+  );
+  const rulesWithProbe = addRepoSymbolRuleProbe(
+    fileCacheSource,
+    'documentationProbe'
+  );
+  assert.doesNotThrow(() =>
+    assertRepoSymbolNormalizerParity(typesWithProbe, rulesWithProbe)
+  );
+  assert.throws(
+    () =>
+      assertRepoSymbolNormalizerParity(
+        typesWithProbe,
+        rulesWithProbe.replace(
+          '  documentationProbe: {\n    optional: true,',
+          '  documentationProbe: {\n    optional: false,'
+        )
+      ),
+    /RepoSymbol fields\/optionality.*rule allowlist diverged/s
   );
 });
 

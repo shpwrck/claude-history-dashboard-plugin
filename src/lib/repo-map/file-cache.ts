@@ -40,6 +40,44 @@ const SYMBOL_KINDS = new Set<RepoSymbolKind>([
 ]);
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 
+type RepoSymbolFieldRule<Field extends keyof RepoSymbol> = {
+  optional: Pick<RepoSymbol, Field> extends Required<Pick<RepoSymbol, Field>>
+    ? false
+    : true;
+  validate: (
+    value: unknown
+  ) => value is Exclude<RepoSymbol[Field], undefined>;
+};
+
+type RepoSymbolFieldRules = {
+  [Field in keyof Required<RepoSymbol>]: RepoSymbolFieldRule<Field>;
+};
+
+const REPO_SYMBOL_FIELD_RULES: RepoSymbolFieldRules = {
+  name: {
+    optional: false,
+    validate: (value): value is string => typeof value === 'string',
+  },
+  kind: {
+    optional: false,
+    validate: (value): value is RepoSymbolKind =>
+      typeof value === 'string' && SYMBOL_KINDS.has(value as RepoSymbolKind),
+  },
+  exported: {
+    optional: false,
+    validate: (value): value is boolean => typeof value === 'boolean',
+  },
+  signature: {
+    optional: false,
+    validate: (value): value is string => typeof value === 'string',
+  },
+  line: {
+    optional: false,
+    validate: (value): value is number =>
+      typeof value === 'number' && Number.isFinite(value),
+  },
+};
+
 interface PersistedRepoMapFileCache {
   version: number;
   salt: string;
@@ -108,24 +146,18 @@ function boundedPositiveInt(value: number | undefined, fallback: number): number
 function normalizeSymbol(value: unknown): RepoSymbol | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const symbol = value as Record<string, unknown>;
-  if (
-    typeof symbol.name !== 'string' ||
-    typeof symbol.kind !== 'string' ||
-    !SYMBOL_KINDS.has(symbol.kind as RepoSymbolKind) ||
-    typeof symbol.exported !== 'boolean' ||
-    typeof symbol.signature !== 'string' ||
-    typeof symbol.line !== 'number' ||
-    !Number.isFinite(symbol.line)
-  ) {
-    return null;
+  const normalized: Record<string, unknown> = {};
+  for (const [field, rule] of Object.entries(REPO_SYMBOL_FIELD_RULES)) {
+    if (!Object.hasOwn(symbol, field)) {
+      if (rule.optional) continue;
+      return null;
+    }
+    const fieldValue = symbol[field];
+    if (fieldValue === undefined && rule.optional) continue;
+    if (!rule.validate(fieldValue)) return null;
+    normalized[field] = fieldValue;
   }
-  return {
-    name: symbol.name,
-    kind: symbol.kind as RepoSymbolKind,
-    exported: symbol.exported,
-    signature: symbol.signature,
-    line: symbol.line,
-  };
+  return normalized as unknown as RepoSymbol;
 }
 
 /** Validate and project onto the exact privacy-safe FileStructure shape. */

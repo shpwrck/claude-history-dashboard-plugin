@@ -24,9 +24,33 @@ import {
 } from './file-cache';
 import { createTsParseFile } from './parser';
 import { RepoMapParserInitializationError } from './types';
-import type { ParseFile } from './types';
+import type { FileStructure, ParseFile, RepoSymbol } from './types';
 
 const roots: string[] = [];
+
+const INVALID_REPO_SYMBOL_FIELD_VALUES = {
+  name: [undefined, null, 42, false, {}, []],
+  kind: [undefined, null, 42, false, {}, [], 'not-a-repo-symbol-kind'],
+  exported: [undefined, null, 0, 'true', {}, []],
+  signature: [undefined, null, 42, false, {}, []],
+  line: [
+    undefined,
+    null,
+    false,
+    '37',
+    {},
+    [],
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ],
+} satisfies Record<keyof Required<RepoSymbol>, readonly unknown[]>;
+
+const MALFORMED_REPO_SYMBOL_CASES = Object.entries(
+  INVALID_REPO_SYMBOL_FIELD_VALUES
+).flatMap(([field, values]) =>
+  values.map((value, index) => [`${field} case ${index + 1}`, field, value] as const)
+);
 
 function tempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -72,6 +96,135 @@ function cacheFor(
 }
 
 describe('repo-map per-file cache', () => {
+  it('preserves every RepoSymbol field across a cold write and warm hit while stripping unknown keys', async () => {
+    const cacheFile = join(tempDir('repo-map-file-cache-store-'), 'cache.json');
+    const source = 'export interface CacheRoundTrip {}\n';
+    const path = 'round-trip.ts';
+    const symbol = {
+      name: 'CacheRoundTrip',
+      kind: 'interface',
+      exported: true,
+      signature: 'export interface CacheRoundTrip',
+      line: 37,
+    } satisfies Required<RepoSymbol>;
+    const expectedStructure = {
+      symbols: [symbol],
+      imports: ['./distinct-dependency'],
+    } satisfies FileStructure;
+    const coldParser: ParseFile = () => ({
+      symbols: [
+        {
+          ...symbol,
+          parserOnlyBody: 'must-not-enter-the-sidecar',
+        },
+      ],
+      imports: [...expectedStructure.imports],
+      parserOnlyState: 'must-not-enter-the-sidecar',
+    });
+    const cold = createRepoMapFileCache({
+      cacheFile,
+      salt: 'repo-symbol-parity',
+      parseFile: coldParser,
+    });
+
+    await cold.parseFile(source, path);
+    expect(cold.commit()).toMatchObject({ written: true, entryCount: 1 });
+
+    const persisted = JSON.parse(readFileSync(cacheFile, 'utf8')) as {
+      entries: Record<string, { structure: FileStructure }>;
+    };
+    expect(persisted.entries[path]?.structure).toStrictEqual(expectedStructure);
+    expect(persisted.entries[path]?.structure.symbols[0]).not.toHaveProperty(
+      'parserOnlyBody'
+    );
+    expect(persisted.entries[path]?.structure).not.toHaveProperty('parserOnlyState');
+
+    const fallbackParserFactory = vi.fn((): ParseFile => {
+      throw new Error('warm hit must not construct the parser');
+    });
+    const warm = createRepoMapFileCache({
+      cacheFile,
+      salt: 'repo-symbol-parity',
+      parseFileFactory: fallbackParserFactory,
+    });
+
+    const warmStructure = await warm.parseFile(source, path);
+    expect(warmStructure).toStrictEqual(expectedStructure);
+    expect(warm.stats).toEqual({ hits: 1, misses: 0 });
+    expect(fallbackParserFactory).not.toHaveBeenCalled();
+  });
+
+  it.each(MALFORMED_REPO_SYMBOL_CASES)(
+    'rejects the whole sidecar cohort for malformed %s',
+    async (_caseName, malformedField, malformedValue) => {
+      const cacheFile = join(tempDir('repo-map-file-cache-store-'), 'cache.json');
+      const sources = new Map([
+        ['a.ts', 'export const a = 1;\n'],
+        ['b.ts', 'export const b = 1;\n'],
+      ]);
+      const parser = (calls: string[]): ParseFile => (_source, path) => {
+        calls.push(path);
+        const name = path.replace('.ts', '');
+        return {
+          symbols: [
+            {
+              name,
+              kind: 'const',
+              exported: true,
+              signature: `export const ${name}`,
+              line: 1,
+            },
+          ],
+          imports: [],
+        };
+      };
+
+      const cold = createRepoMapFileCache({
+        cacheFile,
+        salt: 'malformed-symbol-cohort',
+        parseFile: parser([]),
+      });
+      for (const [path, source] of sources) await cold.parseFile(source, path);
+      expect(cold.commit()).toMatchObject({ written: true, entryCount: 2 });
+
+      const cleanWarmCalls: string[] = [];
+      const cleanWarm = createRepoMapFileCache({
+        cacheFile,
+        salt: 'malformed-symbol-cohort',
+        parseFile: parser(cleanWarmCalls),
+      });
+      for (const [path, source] of sources) {
+        await cleanWarm.parseFile(source, path);
+      }
+      expect(cleanWarmCalls).toEqual([]);
+      expect(cleanWarm.stats).toEqual({ hits: 2, misses: 0 });
+
+      const persisted = JSON.parse(readFileSync(cacheFile, 'utf8')) as {
+        entries: Record<
+          string,
+          { structure: { symbols: Array<Record<string, unknown>> } }
+        >;
+      };
+      const corruptedSymbol = persisted.entries['a.ts']?.structure.symbols[0];
+      expect(corruptedSymbol).toBeDefined();
+      if (corruptedSymbol) corruptedSymbol[malformedField] = malformedValue;
+      writeFileSync(cacheFile, JSON.stringify(persisted));
+
+      const rejectedCalls: string[] = [];
+      const rejected = createRepoMapFileCache({
+        cacheFile,
+        salt: 'malformed-symbol-cohort',
+        parseFile: parser(rejectedCalls),
+      });
+      for (const [path, source] of sources) {
+        await rejected.parseFile(source, path);
+      }
+
+      expect(rejectedCalls).toEqual(['a.ts', 'b.ts']);
+      expect(rejected.stats).toEqual({ hits: 0, misses: 2 });
+    }
+  );
+
   it('reuses unchanged structures and reparses only changed content', async () => {
     const root = tempDir('repo-map-file-cache-root-');
     const cacheFile = join(tempDir('repo-map-file-cache-store-'), 'cache.json');
