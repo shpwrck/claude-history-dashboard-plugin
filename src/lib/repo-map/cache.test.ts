@@ -100,10 +100,13 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from before remote-key binding (#2741)', () => {
+  it('invalidates artifacts from before the complete output contract (#2740)', () => {
+    // v8 expands the forward-fence contract to the inner RepoMap / RepoFile
+    // shapes, so artifacts stamped under the envelope-only v7 contract retire.
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(8);
+    expect(isCacheValid({ ...persisted, version: 7 }, base)).toBe(false);
     // v7 binds the normalized remote slug into the cache identity. A v6
     // artifact can otherwise survive a remote-only change until HEAD moves.
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(7);
     expect(isCacheValid({ ...persisted, version: 6 }, base)).toBe(false);
     // v6 also changed signature GENERATION semantics: a v5 artifact can hold a
     // signature carrying a literal secret, so it must never be reused.

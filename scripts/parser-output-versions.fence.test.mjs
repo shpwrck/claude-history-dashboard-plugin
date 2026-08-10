@@ -27,9 +27,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import {
   SESSION_BLOB_OUTPUT,
@@ -41,6 +43,9 @@ import { makeSessionSignals } from '../src/lib/signals/index.ts';
 import { enforceSizeLimit } from '../src/lib/repo-map/cache.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(HERE, '..');
+const REPO_MAP_TYPES_PATH = join(HERE, '../src/lib/repo-map/types.ts');
+const PARSER_OUTPUT_REGISTRY_PATH = 'scripts/lib/parser-output-versions.mjs';
 
 // Identity stubs: the session-blob output CONTRACT is the column set, which is
 // independent of what the parsers return. We only need makeSessionSignals to
@@ -118,51 +123,298 @@ test('session-blob version turns over for exact git undo path evidence (#3160)',
 });
 
 // ---------------------------------------------------------------------------
-// REPO_MAP: the output shape is the field set of the persisted envelope that
-// enforceSizeLimit() writes and isCacheValid() reads. A field added/removed is
-// an output-shape change that must move PERSISTED_REPO_MAP_VERSION.
+// REPO_MAP: the output shape includes both the persisted envelope and the
+// RepoMap / per-file structures nested under `map`. The envelope is sampled
+// from the real producer. The inner key sets are read from their owning
+// TypeScript interfaces so an optional field cannot disappear from the sample
+// and a field added to the type cannot remain invisible to this fence.
 // ---------------------------------------------------------------------------
-test('repo-map output contract === live PersistedRepoMap envelope fields (fence: an envelope change forces a version bump)', () => {
-  // Build a minimal persisted envelope through the real producer path so the
-  // field set is the LIVE one, not a hand-copied list.
-  const map = { root: '/repo', files: [], fileCount: 0, text: '' };
+function persistedRepoMapSample() {
+  const map = {
+    root: '/repo',
+    generatedAtGitSha: null,
+    repository: null,
+    files: [
+      {
+        path: 'sample.ts',
+        mtimeMs: 0,
+        symbols: [],
+        imports: [],
+      },
+    ],
+    fileCount: 1,
+    text: '',
+    truncated: false,
+  };
   const cacheKey = {
     root: '/repo',
     gitSha: null,
     maxMtimeMs: 0,
     structureSignature: null,
   };
-  const persisted = enforceSizeLimit(
+  return enforceSizeLimit(
     map,
     cacheKey,
     () => ({ text: '', truncated: false }),
     1_000_000
   );
-  const liveFields = Object.keys(persisted);
+}
+
+function directInterfaceKeys(sourceText, interfaceName) {
+  const sourceFile = ts.createSourceFile(
+    REPO_MAP_TYPES_PATH,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const declarations = sourceFile.statements.filter(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) && statement.name.text === interfaceName
+  );
+  assert.equal(
+    declarations.length,
+    1,
+    `${interfaceName} must remain one direct interface declaration for the repo-map output fence`
+  );
+
+  const declaration = declarations[0];
+  assert.equal(
+    declaration.heritageClauses?.length ?? 0,
+    0,
+    `${interfaceName} must not extend an interface without teaching the repo-map output fence to traverse it`
+  );
+
+  return declaration.members
+    .map((member) => {
+      assert.ok(
+        ts.isPropertySignature(member),
+        `${interfaceName} may only contain property signatures unless the repo-map output fence is updated`
+      );
+      assert.ok(
+        ts.isIdentifier(member.name) || ts.isStringLiteral(member.name),
+        `${interfaceName} property names must be static for the repo-map output fence`
+      );
+      return member.name.text;
+    })
+    .sort();
+}
+
+function recomputeRepoMapOutputContract(typesSource) {
+  const persisted = persistedRepoMapSample();
+  return [
+    ...Object.keys(persisted).map((field) => `envelope.${field}`),
+    ...directInterfaceKeys(typesSource, 'RepoMap').map((field) => `map.${field}`),
+    ...directInterfaceKeys(typesSource, 'RepoFile').map(
+      (field) => `map.files[].${field}`
+    ),
+  ].sort();
+}
+
+function staticPropertyName(property) {
+  if (
+    ts.isIdentifier(property.name) ||
+    ts.isStringLiteral(property.name) ||
+    ts.isNumericLiteral(property.name)
+  ) {
+    return property.name.text;
+  }
+  assert.fail('REPO_MAP_OUTPUT property names must remain static');
+}
+
+function parseRepoMapOutputRegistry(sourceText, sourceName) {
+  const sourceFile = ts.createSourceFile(
+    sourceName,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS
+  );
+  const declarations = sourceFile.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .filter(
+      (declaration) =>
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === 'REPO_MAP_OUTPUT'
+    );
+  assert.equal(
+    declarations.length,
+    1,
+    `${sourceName} must declare REPO_MAP_OUTPUT exactly once`
+  );
+  const initializer = declarations[0].initializer;
+  assert.ok(
+    initializer && ts.isObjectLiteralExpression(initializer),
+    `${sourceName} REPO_MAP_OUTPUT must remain a static object literal for the version fence`
+  );
+
+  const property = (name) => {
+    const matches = initializer.properties.filter(
+      (candidate) =>
+        ts.isPropertyAssignment(candidate) && staticPropertyName(candidate) === name
+    );
+    assert.equal(
+      matches.length,
+      1,
+      `${sourceName} REPO_MAP_OUTPUT.${name} must be declared exactly once`
+    );
+    return matches[0].initializer;
+  };
+
+  const versionNode = property('version');
+  assert.ok(
+    ts.isNumericLiteral(versionNode) || ts.isStringLiteral(versionNode),
+    `${sourceName} REPO_MAP_OUTPUT.version must remain a static number or string`
+  );
+  const contractNode = property('contract');
+  assert.ok(
+    ts.isArrayLiteralExpression(contractNode),
+    `${sourceName} REPO_MAP_OUTPUT.contract must remain a static array`
+  );
+  const contract = contractNode.elements.map((element) => {
+    assert.ok(
+      ts.isStringLiteral(element),
+      `${sourceName} REPO_MAP_OUTPUT.contract entries must remain static strings`
+    );
+    return element.text;
+  });
+
+  return {
+    version: ts.isNumericLiteral(versionNode)
+      ? Number(versionNode.text)
+      : versionNode.text,
+    contract,
+  };
+}
+
+function assertVersionMovesWithContract(candidate, baseline) {
+  const candidateContract = [...candidate.contract].sort();
+  const baselineContract = [...baseline.contract].sort();
+  if (JSON.stringify(candidateContract) !== JSON.stringify(baselineContract)) {
+    assert.ok(
+      Number.isInteger(candidate.version) &&
+        Number.isInteger(baseline.version) &&
+        candidate.version > baseline.version,
+      'REPO_MAP_OUTPUT.contract changed from origin/master without a strictly ' +
+        'higher integer REPO_MAP_OUTPUT.version; existing or retired artifacts ' +
+        'could remain reusable.'
+    );
+  }
+}
+
+function originMasterRepoMapOutputRegistry() {
+  let sourceText;
+  try {
+    sourceText = execFileSync(
+      'git',
+      ['show', `origin/master:${PARSER_OUTPUT_REGISTRY_PATH}`],
+      { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+  } catch {
+    assert.fail(
+      'origin/master is required for the repo-map contract/version fence; ' +
+        'fetch origin/master and rerun the test.'
+    );
+  }
+  return parseRepoMapOutputRegistry(sourceText, `origin/master:${PARSER_OUTPUT_REGISTRY_PATH}`);
+}
+
+function assertRegisteredRepoMapContract(liveContract) {
   assert.deepEqual(
     [...REPO_MAP_OUTPUT.contract].sort(),
-    [...liveFields].sort(),
-    'repo-map persisted envelope shape drifted from the registered contract. ' +
-      'If you changed PersistedRepoMap in src/lib/repo-map/cache.ts, update ' +
+    liveContract,
+    `repo-map output shape drifted from the contract registered at ` +
+      `REPO_MAP_OUTPUT.version=${REPO_MAP_OUTPUT.version}. If you changed ` +
+      'PersistedRepoMap in src/lib/repo-map/cache.ts or RepoMap / RepoFile in ' +
+      'src/lib/repo-map/types.ts, update ' +
       'REPO_MAP_OUTPUT.contract in scripts/lib/parser-output-versions.mjs AND ' +
       'bump REPO_MAP_OUTPUT.version — otherwise stale artifacts are reused.'
+  );
+}
+
+function addInterfaceProbe(sourceText, interfaceName, propertyName) {
+  const declaration = `export interface ${interfaceName} {`;
+  assert.ok(
+    sourceText.includes(declaration),
+    `test fixture could not find ${interfaceName}`
+  );
+  return sourceText.replace(
+    declaration,
+    `${declaration}\n  ${propertyName}?: string;`
+  );
+}
+
+function addedFields(candidate, baseline) {
+  const baselineSet = new Set(baseline);
+  return candidate.filter((field) => !baselineSet.has(field));
+}
+
+test('repo-map output contract === live envelope + RepoMap + RepoFile fields', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  assertRegisteredRepoMapContract(recomputeRepoMapOutputContract(typesSource));
+});
+
+test('repo-map contract changes from origin/master require a version rollover', () => {
+  assertVersionMovesWithContract(
+    REPO_MAP_OUTPUT,
+    originMasterRepoMapOutputRegistry()
+  );
+});
+
+test('repo-map fence rejects inner map or per-file shape drift at the registered version', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  const baseline = recomputeRepoMapOutputContract(typesSource);
+  const mapDrift = recomputeRepoMapOutputContract(
+    addInterfaceProbe(typesSource, 'RepoMap', 'repositoryIdentityProbe')
+  );
+  const fileDrift = recomputeRepoMapOutputContract(
+    addInterfaceProbe(typesSource, 'RepoFile', 'probeField')
+  );
+
+  assert.deepEqual(addedFields(mapDrift, baseline), [
+    'map.repositoryIdentityProbe',
+  ]);
+  assert.deepEqual(addedFields(fileDrift, baseline), [
+    'map.files[].probeField',
+  ]);
+  assert.throws(
+    () => assertRegisteredRepoMapContract(mapDrift),
+    /REPO_MAP_OUTPUT\.version=.*bump REPO_MAP_OUTPUT\.version/s
+  );
+  assert.throws(
+    () => assertRegisteredRepoMapContract(fileDrift),
+    /REPO_MAP_OUTPUT\.version=.*bump REPO_MAP_OUTPUT\.version/s
+  );
+
+  // Prove the less-obvious bypass too: even if an author updates the contract
+  // for the new key, retaining the old cache version must still fail.
+  assert.throws(
+    () =>
+      assertVersionMovesWithContract(
+        { version: REPO_MAP_OUTPUT.version, contract: mapDrift },
+        { version: REPO_MAP_OUTPUT.version, contract: baseline }
+      ),
+    /contract changed.*without a strictly higher integer.*version/s
+  );
+  assert.throws(
+    () =>
+      assertVersionMovesWithContract(
+        { version: REPO_MAP_OUTPUT.version - 1, contract: mapDrift },
+        { version: REPO_MAP_OUTPUT.version, contract: baseline }
+      ),
+    /contract changed.*without a strictly higher integer.*version/s
+  );
+  assert.doesNotThrow(() =>
+    assertVersionMovesWithContract(
+      { version: REPO_MAP_OUTPUT.version + 1, contract: mapDrift },
+      { version: REPO_MAP_OUTPUT.version, contract: baseline }
+    )
   );
 });
 
 test('repo-map version is the value the persisted envelope actually stamps', () => {
-  const map = { root: '/repo', files: [], fileCount: 0, text: '' };
-  const cacheKey = {
-    root: '/repo',
-    gitSha: null,
-    maxMtimeMs: 0,
-    structureSignature: null,
-  };
-  const persisted = enforceSizeLimit(
-    map,
-    cacheKey,
-    () => ({ text: '', truncated: false }),
-    1_000_000
-  );
+  const persisted = persistedRepoMapSample();
   assert.equal(
     persisted.version,
     REPO_MAP_OUTPUT.version,

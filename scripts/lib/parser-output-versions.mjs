@@ -92,12 +92,20 @@ export const SESSION_BLOB_OUTPUT = {
  * The persisted repo-map artifact (host-side Tree-sitter structural map; ADR
  * 0007). The cache key is the `version` field of the `PersistedRepoMap`
  * envelope, checked in `isCacheValid()` in src/lib/repo-map/cache.ts. The
- * `contract` is the envelope's own field set — the persisted output shape a
- * stale-artifact reader depends on.
+ * `contract` is one qualified fingerprint of the envelope, inner `RepoMap`,
+ * and per-file `RepoFile` key sets — the persisted output shape a stale-
+ * artifact reader depends on. The fence reads the inner keys from their owning
+ * TypeScript interfaces rather than trusting a possibly-incomplete sample.
  *
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
+  // v8 (#2740): the forward fence now includes the RepoMap and RepoFile key
+  // sets, not only the five-field persisted envelope. This deliberately turns
+  // over v7 so a future direct RepoMap or RepoFile key change cannot stay
+  // invisible to the cache-invalidation seam. Deeper RepoSymbol and cache-key
+  // fingerprints are intentionally separate follow-ups (#3744, #3745).
+  //
   // v7 (#2741): the canonical artifact cache key now includes the normalized
   // `owner/repo` remote identity. A remote-only change at a stable HEAD must
   // regenerate instead of reusing a map attributed to the previous origin.
@@ -115,8 +123,25 @@ export const REPO_MAP_OUTPUT = {
   // remote identity (`map.repository`) beside `generatedAtGitSha`; pre-field
   // v4 artifacts must regenerate so identity-bound consumers never read a
   // missing field as "no remote" on a root that has one.
-  version: 7,
-  contract: ['version', 'cacheKey', 'sizeBounded', 'droppedFiles', 'map'],
+  version: 8,
+  contract: [
+    'envelope.version',
+    'envelope.cacheKey',
+    'envelope.sizeBounded',
+    'envelope.droppedFiles',
+    'envelope.map',
+    'map.root',
+    'map.generatedAtGitSha',
+    'map.repository',
+    'map.fileCount',
+    'map.files',
+    'map.text',
+    'map.truncated',
+    'map.files[].path',
+    'map.files[].mtimeMs',
+    'map.files[].symbols',
+    'map.files[].imports',
+  ],
   consumedBy:
     'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version)',
   bumpWhen:
