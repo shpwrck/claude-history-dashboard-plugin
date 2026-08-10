@@ -57,7 +57,9 @@ vi.mock('node:fs', async (importOriginal) => {
 import {
   buildDocGraph,
   captureDocGitTimesSnapshot,
+  DOC_GRAPH_GIT_IDENTITY_TTL_MS,
   docGraphHasTransientGitHistoryFailure,
+  docGraphGitIdentity,
   classifyIndex,
   deriveCategory,
   extractHeadings,
@@ -66,6 +68,7 @@ import {
   extractSrcRefs,
   parseFrontmatter,
   resolveDocLink,
+  resetDocGraphGitIdentityCache,
   slugForPath,
   type DocCategory,
   type DocGraph,
@@ -460,6 +463,114 @@ describe('slugForPath', () => {
   it('drops the .md suffix and normalises separators', () => {
     expect(slugForPath('docs/adr/0001-x.md')).toBe('docs/adr/0001-x');
     expect(slugForPath('docs\\a\\b.md')).toBe('docs/a/b');
+  });
+});
+
+describe('request-time doc-graph Git identity cache (#2742)', () => {
+  let root: string;
+  let historySignature: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'parse-docs-git-identity-'));
+    historySignature = 'a'.repeat(40);
+    resetDocGraphGitIdentityCache();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-10T12:00:00.000Z'));
+    execFileSyncMock.mockReset();
+    execFileSyncMock.mockImplementation(
+      (_command, args?: readonly string[]): string => {
+        if (args?.includes('log')) return `${historySignature}\n`;
+        if (args?.includes('--is-shallow-repository')) return 'false\n';
+        if (args?.includes('status') || args?.includes('ls-files')) return '';
+        throw new Error(`unexpected git arguments: ${args?.join(' ')}`);
+      }
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetDocGraphGitIdentityCache();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('samples subprocess-backed identity once within the TTL and again after expiry', () => {
+    const first = docGraphGitIdentity(root);
+    const second = docGraphGitIdentity(root);
+
+    expect(second).toBe(first);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(4);
+
+    historySignature = 'b'.repeat(40);
+    vi.advanceTimersByTime(DOC_GRAPH_GIT_IDENTITY_TTL_MS);
+    const expired = docGraphGitIdentity(root);
+
+    expect(expired).not.toBe(first);
+    expect(expired.historySignature).toBe(historySignature);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(8);
+  });
+
+  it('keys the memoized snapshot by the resolved probe root', () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), 'parse-docs-git-identity-other-'));
+    try {
+      docGraphGitIdentity(root);
+      docGraphGitIdentity(otherRoot);
+      expect(execFileSyncMock).toHaveBeenCalledTimes(8);
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not memoize a transient history failure on a real repository', () => {
+    mkdirSync(join(root, '.git'));
+    let logCalls = 0;
+    execFileSyncMock.mockImplementation(
+      (_command, args?: readonly string[]): string => {
+        if (args?.includes('log')) {
+          logCalls += 1;
+          if (logCalls === 1) throw new Error('one-shot history failure');
+          return `${historySignature}\n`;
+        }
+        if (args?.includes('--is-shallow-repository')) return 'false\n';
+        if (args?.includes('status') || args?.includes('ls-files')) return '';
+        throw new Error(`unexpected git arguments: ${args?.join(' ')}`);
+      }
+    );
+
+    const failed = docGraphGitIdentity(root);
+    const recovered = docGraphGitIdentity(root);
+    const cached = docGraphGitIdentity(root);
+
+    expect(failed.historySignature).toBe('none');
+    expect(recovered.historySignature).toBe(historySignature);
+    expect(cached).toBe(recovered);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(8);
+  });
+
+  it('does not memoize a transient working-tree status failure', () => {
+    mkdirSync(join(root, '.git'));
+    let statusCalls = 0;
+    execFileSyncMock.mockImplementation(
+      (_command, args?: readonly string[]): string => {
+        if (args?.includes('log')) return `${historySignature}\n`;
+        if (args?.includes('--is-shallow-repository')) return 'false\n';
+        if (args?.includes('status')) {
+          statusCalls += 1;
+          if (statusCalls === 1) throw new Error('one-shot status failure');
+          return '';
+        }
+        if (args?.includes('ls-files')) return '';
+        throw new Error(`unexpected git arguments: ${args?.join(' ')}`);
+      }
+    );
+
+    const failed = docGraphGitIdentity(root);
+    const recovered = docGraphGitIdentity(root);
+    const cached = docGraphGitIdentity(root);
+
+    expect(failed.workingTreeSignature).toContain('status-failed');
+    expect(recovered.workingTreeSignature).not.toContain('status-failed');
+    expect(cached).toBe(recovered);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(7);
   });
 });
 

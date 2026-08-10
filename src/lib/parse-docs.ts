@@ -178,6 +178,13 @@ export const DOC_GRAPH_MAX_FILE_BYTES = 512 * 1024;
 export const DOC_GRAPH_DEFAULT_MAX_FILES = 5000;
 const DOC_GRAPH_GIT_MAX_COMMITS = 4096;
 const DOC_GRAPH_GIT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+/**
+ * Request-time Git identity is allowed to lag the checkout by at most this
+ * short warm-window interval. The next probe still observes the exact bounded
+ * history/status surface, while clustered cache checks avoid four synchronous
+ * child processes apiece.
+ */
+export const DOC_GRAPH_GIT_IDENTITY_TTL_MS = 2_000;
 /** Exported for the parity fence: the producer must query the SAME surface. */
 export const DOC_GRAPH_GIT_PATHS = [
   ':(glob)*.md',
@@ -259,6 +266,12 @@ export interface DocGraphGitWorkingTreeState {
   untrackedPaths: ReadonlySet<string>;
   /** Stable bounded identity: availability + digest of exact Git state bytes. */
   signature: string;
+}
+
+/** One coherent request-time snapshot of every Git-backed doc-graph identity. */
+export interface DocGraphGitIdentity {
+  readonly historySignature: string;
+  readonly workingTreeSignature: string;
 }
 
 interface DocGraphGitWorkingTreeObservation {
@@ -808,7 +821,7 @@ function observeDocGraphGitWorkingTree(
 
 /** Exact bounded Git identity without building per-path lookup sets. */
 export function docGraphGitWorkingTreeIdentity(root: string): string {
-  return observeDocGraphGitWorkingTree(root).signature;
+  return docGraphGitIdentity(root).workingTreeSignature;
 }
 
 export function docGraphGitWorkingTreeState(
@@ -940,18 +953,197 @@ function gitMtimesByPath(
  * A doc can move from untracked to committed without changing its working-tree
  * bytes or stat metadata, so dataset cache keys must cover this separately.
  */
-export function docGraphGitHistorySignature(root: string): string {
+interface DocGraphGitHistoryObservation {
+  signature: string;
+  transientFailure: boolean;
+}
+
+function observeDocGraphGitHistorySignature(
+  root: string
+): DocGraphGitHistoryObservation {
   try {
-    return (
-      execFileSync(
-        'git',
-        ['-C', root, 'log', '-1', '--format=%H', '--', ...DOC_GRAPH_GIT_PATHS],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }
-      ).trim() || 'none'
-    );
+    return {
+      signature:
+        execFileSync(
+          'git',
+          ['-C', root, 'log', '-1', '--format=%H', '--', ...DOC_GRAPH_GIT_PATHS],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }
+        ).trim() || 'none',
+      transientFailure: false,
+    };
   } catch {
-    return 'none';
+    return {
+      signature: 'none',
+      // Gitless runtimes are a stable supported state. A repository marker
+      // means this failure may recover without any input marker changing, so
+      // it must bypass the warm-window memo and be retried immediately.
+      transientFailure: hasGitMarker(root),
+    };
   }
+}
+
+interface DocGraphGitIdentityMemo {
+  key: string;
+  capturedAt: number;
+  expiresAt: number;
+  value: DocGraphGitIdentity;
+}
+
+let docGraphGitIdentityMemo: DocGraphGitIdentityMemo | null = null;
+
+const DOC_GRAPH_GIT_MARKER_MAX_BYTES = 4 * 1024;
+
+function docGraphGitMarkerStat(path: string): string {
+  try {
+    const stat = statSync(path);
+    return `${stat.mtimeMs}:${stat.size}:${stat.ctimeMs}:${stat.ino}`;
+  } catch {
+    return 'absent';
+  }
+}
+
+function readDocGraphGitMarker(path: string): string | null {
+  try {
+    return readTextFileCappedSync(path, DOC_GRAPH_GIT_MARKER_MAX_BYTES).trim();
+  } catch {
+    return null;
+  }
+}
+
+function findDocGraphGitMarker(root: string): string | null {
+  let current = resolve(root);
+  for (;;) {
+    const marker = join(current, '.git');
+    try {
+      statSync(marker);
+      return marker;
+    } catch {
+      // A nested graph root inherits the nearest ancestor repository marker.
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function validSymbolicHeadRef(value: string): boolean {
+  return (
+    value.startsWith('refs/') &&
+    !value.includes('..') &&
+    !value.includes('//') &&
+    !value.includes('\\') &&
+    !value.endsWith('/')
+  );
+}
+
+/**
+ * Cheap inputs that move on ordinary Git identity transitions. Repo-doc file
+ * stats already cover working-tree byte/membership changes in the surrounding
+ * source signature; these markers add commit, index-flag, shallow, and config
+ * transitions without launching Git. TTL expiry remains the backstop for raw
+ * ref surgery that bypasses the normal files.
+ */
+function docGraphGitMarkerInputs(root: string): string {
+  const marker = findDocGraphGitMarker(root);
+  if (!marker) return 'git:absent';
+
+  let gitDir = marker;
+  const markerText = readDocGraphGitMarker(marker);
+  if (markerText?.startsWith('gitdir:')) {
+    const configured = markerText.slice('gitdir:'.length).trim();
+    if (!configured) return `marker:${docGraphGitMarkerStat(marker)}:invalid`;
+    gitDir = resolve(dirname(marker), configured);
+  }
+
+  const commonDirText = readDocGraphGitMarker(join(gitDir, 'commondir'));
+  const commonDir = commonDirText
+    ? resolve(gitDir, commonDirText)
+    : gitDir;
+  const headPath = join(gitDir, 'HEAD');
+  const head = readDocGraphGitMarker(headPath) ?? '';
+  const symbolicRef = head.startsWith('ref:')
+    ? head.slice('ref:'.length).trim()
+    : '';
+  const parts = [
+    `marker:${docGraphGitMarkerStat(marker)}`,
+    `head:${docGraphGitMarkerStat(headPath)}:${head}`,
+    `index:${docGraphGitMarkerStat(join(gitDir, 'index'))}`,
+    `packed-refs:${docGraphGitMarkerStat(join(commonDir, 'packed-refs'))}`,
+    `shallow:${docGraphGitMarkerStat(join(commonDir, 'shallow'))}`,
+    `config:${docGraphGitMarkerStat(join(commonDir, 'config'))}`,
+  ];
+  if (validSymbolicHeadRef(symbolicRef)) {
+    parts.push(
+      `ref:${symbolicRef}:${docGraphGitMarkerStat(join(commonDir, symbolicRef))}`
+    );
+  }
+  return parts.join('|');
+}
+
+function docGraphWorkingTreeInputs(root: string): string {
+  const hash = createHash('sha1');
+  let count = 0;
+  for (const relPath of docGraphSourcePaths(root)) {
+    hash.update(relPath);
+    hash.update('\0');
+    hash.update(docGraphGitMarkerStat(join(root, relPath)));
+    hash.update('\n');
+    count += 1;
+  }
+  return `${count}:${hash.digest('hex')}`;
+}
+
+function docGraphGitIdentityKey(root: string): string {
+  return (
+    `${resolve(root)}\0${DOC_GRAPH_GIT_PATHS.join('\0')}\0` +
+    `${docGraphGitMarkerInputs(root)}\0${docGraphWorkingTreeInputs(root)}`
+  );
+}
+
+/** Test-only reset for deterministic subprocess-count and expiry assertions. */
+export function resetDocGraphGitIdentityCache(): void {
+  docGraphGitIdentityMemo = null;
+}
+
+/**
+ * Capture every Git-backed identity used by the request-time doc-graph gate.
+ *
+ * The root plus the fixed bounded pathspec surface forms the cache key. Both
+ * history and working-tree state are sampled into one short-lived value, so a
+ * caller cannot combine identities from different warm windows. Clock rollback
+ * also forces a fresh sample instead of extending an entry accidentally.
+ */
+export function docGraphGitIdentity(root: string): DocGraphGitIdentity {
+  const now = Date.now();
+  const key = docGraphGitIdentityKey(root);
+  if (
+    docGraphGitIdentityMemo?.key === key &&
+    now >= docGraphGitIdentityMemo.capturedAt &&
+    now < docGraphGitIdentityMemo.expiresAt
+  ) {
+    return docGraphGitIdentityMemo.value;
+  }
+
+  const history = observeDocGraphGitHistorySignature(root);
+  const workingTree = observeDocGraphGitWorkingTree(root);
+  const value = Object.freeze({
+    historySignature: history.signature,
+    workingTreeSignature: workingTree.signature,
+  });
+  docGraphGitIdentityMemo =
+    history.transientFailure || workingTree.transientFailure
+      ? null
+      : {
+          key,
+          capturedAt: now,
+          expiresAt: now + DOC_GRAPH_GIT_IDENTITY_TTL_MS,
+          value,
+        };
+  return value;
+}
+
+export function docGraphGitHistorySignature(root: string): string {
+  return docGraphGitIdentity(root).historySignature;
 }
 
 /**

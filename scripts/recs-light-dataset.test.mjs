@@ -812,6 +812,102 @@ test('#2746 ingest hashes and joins one pinned doc-git-times snapshot', async ()
   }
 });
 
+test('#2742 sourceSignature shares one warm-window Git identity snapshot', async () => {
+  const original = {
+    HOME: process.env.HOME,
+    CHD_DB_PATH: process.env.CHD_DB_PATH,
+    CHD_DOC_GRAPH_ROOT: process.env.CHD_DOC_GRAPH_ROOT,
+    PATH: process.env.PATH,
+    CHD_TEST_REAL_GIT: process.env.CHD_TEST_REAL_GIT,
+    CHD_TEST_GIT_IDENTITY_CALLS: process.env.CHD_TEST_GIT_IDENTITY_CALLS,
+  };
+  const home = buildFixtureHome();
+  const gitRoot = join(tmpdir(), `chd-2742-docs-${randomUUID()}`);
+  const fakeBin = join(tmpdir(), `chd-2742-bin-${randomUUID()}`);
+  const callsPath = join(tmpdir(), `chd-2742-calls-${randomUUID()}`);
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+  }).trim();
+  mkdirSync(join(gitRoot, 'docs'), { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(gitRoot, 'README.md'), '# Readme\n');
+  writeFileSync(join(gitRoot, 'docs', 'guide.md'), '# Guide\n');
+  execFileSync(realGit, ['init'], { cwd: gitRoot, stdio: 'ignore' });
+  execFileSync(realGit, ['config', 'user.email', 'test@example.com'], { cwd: gitRoot });
+  execFileSync(realGit, ['config', 'user.name', 'CHD Test'], { cwd: gitRoot });
+  execFileSync(realGit, ['add', 'README.md', 'docs/guide.md'], { cwd: gitRoot });
+  execFileSync(realGit, ['commit', '-m', 'Track docs'], {
+    cwd: gitRoot,
+    stdio: 'ignore',
+  });
+  const fakeGit = join(fakeBin, 'git');
+  writeFileSync(
+    fakeGit,
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$CHD_TEST_GIT_IDENTITY_CALLS"
+exec "$CHD_TEST_REAL_GIT" "$@"
+`
+  );
+  chmodSync(fakeGit, 0o755);
+
+  try {
+    process.env.CHD_DOC_GRAPH_ROOT = gitRoot;
+    process.env.CHD_TEST_REAL_GIT = realGit;
+    process.env.CHD_TEST_GIT_IDENTITY_CALLS = callsPath;
+    process.env.PATH = `${fakeBin}${delimiter}${original.PATH ?? ''}`;
+    const ingest = await loadIngest(home);
+    const parseDocs = await import('../src/lib/parse-docs.ts');
+
+    // Warm the independent docs-map stat fingerprint, then isolate the shared
+    // doc-graph identity cost for the two request-time gate evaluations.
+    ingest.sourceSignature();
+    parseDocs.resetDocGraphGitIdentityCache();
+    writeFileSync(callsPath, '');
+
+    const first = ingest.sourceSignature();
+    const second = ingest.sourceSignature();
+    const calls = readFileSync(callsPath, 'utf8').trim().split('\n').filter(Boolean);
+
+    assert.equal(second, first, 'unchanged source identity remains byte-identical');
+    assert.equal(
+      calls.length,
+      4,
+      'two warm sourceSignature evaluations run one history/context/status/index probe set, not two'
+    );
+    assert.equal(calls.filter((call) => call.includes(' log ')).length, 1);
+    assert.equal(
+      calls.filter((call) => call.includes('--is-shallow-repository')).length,
+      1
+    );
+    assert.equal(calls.filter((call) => call.includes(' status ')).length, 1);
+    assert.equal(calls.filter((call) => call.includes(' ls-files ')).length, 1);
+
+    await new Promise((resolve) =>
+      setTimeout(resolve, parseDocs.DOC_GRAPH_GIT_IDENTITY_TTL_MS)
+    );
+    const afterExpiry = ingest.sourceSignature();
+    const callsAfterExpiry = readFileSync(callsPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    assert.equal(afterExpiry, first, 'a fresh unchanged probe preserves identity output');
+    assert.equal(
+      callsAfterExpiry.length,
+      8,
+      'the first sourceSignature evaluation at the TTL boundary re-runs the four-command probe set'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(gitRoot, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(callsPath, { force: true });
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
 test('#3711 transient doc Git failure is candidate-bound and recovers unchanged', async () => {
   const original = {
     HOME: process.env.HOME,

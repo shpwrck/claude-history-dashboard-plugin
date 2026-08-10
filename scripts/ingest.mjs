@@ -697,9 +697,8 @@ const {
   buildDocGraph,
   captureDocGitTimesSnapshot,
   docGraphHasTransientGitHistoryFailure,
+  docGraphGitIdentity,
   docGraphGitWorkingTreeSignature,
-  docGraphGitWorkingTreeIdentity,
-  docGraphGitHistorySignature,
   docGraphSourcePaths,
   DOC_GRAPH_MAX_FILE_BYTES,
 } = await import(join(LIB, 'parse-docs.ts'));
@@ -1250,7 +1249,7 @@ export function datasetDocGraphGitWorkingTreeSignature(dataset) {
 
 /** Exact current Git status identity for server cache trust-state gates. */
 export function docGraphGitWorkingTreeSignatureForServer() {
-  return docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
+  return docGraphGitIdentity(DOC_GRAPH_ROOT).workingTreeSignature;
 }
 
 /** Git status identity sampled inside the most recent sourceSignature() value. */
@@ -1511,9 +1510,9 @@ function docIssueSourceSignature() {
 // The graph reader and both cache gates share this exact bounded source list.
 // Include ctime/inode as well as mtime/size: a caller can restore mtime and byte
 // length after an in-place rewrite, but cannot restore ctime, while an atomic
-// replacement changes inode identity. The hot signature path adds one bounded
-// Git-history probe but still avoids reading doc bodies; graph assembly remains
-// the only path that reads them.
+// replacement changes inode identity. The hot signature path reads no doc
+// bodies. Its bounded Git identity probes share one seconds-scale snapshot, so
+// clustered request gates pay the child-process cost once per warm window.
 // Manifest identity for the cheap stat gate (#2707): replacement-safe stat
 // surface (mtime+size+ctime+ino) plus the expected-commit binding env — the
 // SAME manifest bytes validate differently under a different runtime commit,
@@ -1527,16 +1526,16 @@ function docGitTimesIdentitySignature(docGitTimesSnapshot) {
 
 function docGraphSourceSignature(
   docGitTimesSnapshot = newDocGitTimesSnapshot(),
-  gitWorkingTreeSignature = null
+  gitIdentity = null
 ) {
   const hash = createHash('sha1');
-  hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
+  const observedGitIdentity =
+    gitIdentity ?? docGraphGitIdentity(DOC_GRAPH_ROOT);
+  hash.update(`git:${observedGitIdentity.historySignature}\n`);
   // Live-history availability AND status are doc-graph inputs (#2707, #2743).
   // The status signature catches index-only dirty/clean transitions where doc
   // bytes and filesystem stats are unchanged but provenance must turn over.
-  const observedGitWorkingTreeSignature =
-    gitWorkingTreeSignature ?? docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
-  hash.update(`git-state:${observedGitWorkingTreeSignature}\n`);
+  hash.update(`git-state:${observedGitIdentity.workingTreeSignature}\n`);
   hash.update(`git-times:${docGitTimesIdentitySignature(docGitTimesSnapshot)}\n`);
   let count = 0;
   for (const relPath of docGraphSourcePaths(DOC_GRAPH_ROOT)) {
@@ -1562,10 +1561,11 @@ function docGraphSourceSignature(
 }
 
 function hashDocGraphContent(hash, docGitTimesSnapshot) {
-  hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
+  const gitIdentity = docGraphGitIdentity(DOC_GRAPH_ROOT);
+  hash.update(`git:${gitIdentity.historySignature}\n`);
   // Same rationale as docGraphSourceSignature: unshallowing and index-only
   // dirty/clean transitions flip provenance with no doc-byte/stat change.
-  const gitWorkingTreeSignature = docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
+  const gitWorkingTreeSignature = gitIdentity.workingTreeSignature;
   expectedDocGraphGitWorkingTreeSignature = gitWorkingTreeSignature;
   hash.update(`git-state:${gitWorkingTreeSignature}\n`);
   // The packaged git-times manifest (#2707) is a doc-graph INPUT: same bytes,
@@ -1650,7 +1650,13 @@ function docsMapGitOutput(args) {
     // repository" from a genuine git failure on a real repo.
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 10 * 1024 * 1024,
-    env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+    env: {
+      ...process.env,
+      GIT_NO_LAZY_FETCH: '1',
+      // Identity probes must not refresh the index and thereby invalidate the
+      // shared doc-graph identity snapshot they run beside (#2742).
+      GIT_OPTIONAL_LOCKS: '0',
+    },
   }).trim();
 }
 
@@ -3963,12 +3969,11 @@ export function sourceSignature(expectedSourceSignature = null) {
     sourceSignatureDocGitTimesSnapshot?.signature === expectedSourceSignature
       ? sourceSignatureDocGitTimesSnapshot.snapshot
       : newDocGitTimesSnapshot();
-  const docGraphGitWorkingTreeSignature =
-    docGraphGitWorkingTreeIdentity(DOC_GRAPH_ROOT);
+  const docGraphGitIdentitySnapshot = docGraphGitIdentity(DOC_GRAPH_ROOT);
   parts.push(
     `doc-graph:${DOC_GRAPH_ROOT}:${docGraphSourceSignature(
       docGitTimesSnapshot,
-      docGraphGitWorkingTreeSignature
+      docGraphGitIdentitySnapshot
     )}`
   );
   // Docs-map contract (#2709): stat + identity. Without this a docs-map edit
@@ -4015,7 +4020,7 @@ export function sourceSignature(expectedSourceSignature = null) {
   }
   const signature = parts.join('|');
   lastSourceSignatureDocGraphGitWorkingTreeSignature =
-    docGraphGitWorkingTreeSignature;
+    docGraphGitIdentitySnapshot.workingTreeSignature;
   sourceSignatureDocGitTimesSnapshot = {
     signature,
     snapshot: docGitTimesSnapshot,
