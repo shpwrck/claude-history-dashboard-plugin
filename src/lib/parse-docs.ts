@@ -549,28 +549,6 @@ export function docGraphSourcePaths(
 }
 
 /**
- * Resolve the newest commit touching each current doc path with ONE git child
- * process. `git log --name-only -z` emits commits newest-first, so the first
- * occurrence of a path owns its last-commit timestamp. A marker prefixes the
- * pretty-format record so filenames cannot be mistaken for dates. The pathspecs
- * are relative to `git -C root` (and `--relative` keeps emitted names on that
- * same surface), so an overridden root nested inside a larger repository does
- * not accidentally query the repository top level.
- *
- * Both history depth and captured stdout are capped. If a partial clone, timeout,
- * or output cap terminates the walk after Git has emitted newer commits, Node's
- * child-process error retains that partial stdout; parse it instead of dropping
- * every valid mtime and making the whole graph fall back to checkout mtimes.
- */
-function partialGitStdout(error: unknown): string {
-  if (!error || typeof error !== 'object' || !('stdout' in error)) return '';
-  const stdout = (error as { stdout?: unknown }).stdout;
-  if (typeof stdout === 'string') return stdout;
-  if (stdout instanceof Uint8Array) return Buffer.from(stdout).toString('utf8');
-  return '';
-}
-
-/**
  * Whether live `git log` history under `root` may be trusted as authoritative
  * (#2707). A SHALLOW checkout grafts old files onto the shallow-boundary
  * commit, so its per-path "last commit" times are fabrications — exactly the
@@ -596,6 +574,20 @@ export function gitHistoryAvailability(
   }
 }
 
+/**
+ * Resolve the newest commit touching each current doc path with ONE git child
+ * process. `git log --name-only -z` emits commits newest-first, so the first
+ * occurrence of a path owns its last-commit timestamp. A marker prefixes the
+ * pretty-format record so filenames cannot be mistaken for dates. The pathspecs
+ * are relative to `git -C root` (and `--relative` keeps emitted names on that
+ * same surface), so an overridden root nested inside a larger repository does
+ * not accidentally query the repository top level.
+ *
+ * Both history depth and captured stdout are capped. A thrown walk is
+ * incomplete even when Node retains partial stdout, so none of that output is
+ * eligible for authoritative `git` provenance. Returning no live times lets
+ * the caller fail closed through the manifest/filesystem tiers.
+ */
 function gitMtimesByPath(
   root: string,
   relPaths: readonly string[]
@@ -629,8 +621,8 @@ function gitMtimesByPath(
         env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
       }
     );
-  } catch (error) {
-    output = partialGitStdout(error);
+  } catch {
+    return mtimes;
   }
   const wanted = new Set(relPaths);
   let commitTime: string | null = null;

@@ -14,7 +14,13 @@
  * The pure extractors are exercised off plain strings (parse-memories style);
  * `buildDocGraph` is exercised end-to-end over a temp fixture tree.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -643,28 +649,42 @@ describe('buildDocGraph', () => {
     expect(byPath.get('docs/untracked.md')?.gitMtimeProvenance).toBe('filesystem');
   });
 
-  it('preserves git mtimes emitted before a bounded history walk fails', () => {
+  it('fails closed when a bounded history walk returns partial stdout', () => {
+    const commit = 'c'.repeat(40);
+    const filesystemTime = new Date('2026-01-06T11:00:00.000Z');
     write(root, 'README.md', '# Readme\n');
     write(root, 'docs/older.md', '# Older\n');
+    utimesSync(join(root, 'docs/older.md'), filesystemTime, filesystemTime);
+    write(
+      root,
+      'data/doc-git-times.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        sourceCommit: commit,
+        files: { 'README.md': '2026-01-05T10:00:00+00:00' },
+      })
+    );
     execFileSyncMock.mockImplementation((_cmd, args?: readonly string[]): string => {
       if (args?.includes('--is-shallow-repository')) return 'false\n';
       throw Object.assign(new Error('missing historical tree'), {
-        stdout: 'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0',
+        stdout:
+          'CHD-DATE:2026-07-14T10:00:00-04:00\0\0\nREADME.md\0' +
+          'CHD-DATE:2026-07-13T09:00:00-04:00\0\0\ndocs/older.md\0',
       });
     });
 
-    const graph = buildDocGraph(root);
+    const graph = buildDocGraph(root, { docGitTimesExpectedCommit: commit });
     const byPath = new Map(graph.nodes.map((node) => [node.path, node]));
 
     expect(execFileSyncMock).toHaveBeenCalledTimes(2);
-    expect(byPath.get('README.md')?.gitMtimeIso).toBe(
-      '2026-07-14T10:00:00-04:00'
-    );
-    expect(byPath.get('README.md')?.gitMtimeProvenance).toBe('git');
-    expect(
-      Date.parse(byPath.get('docs/older.md')?.gitMtimeIso ?? '')
-    ).not.toBeNaN();
-    expect(byPath.get('docs/older.md')?.gitMtimeProvenance).toBe('filesystem');
+    expect(byPath.get('README.md')).toMatchObject({
+      gitMtimeIso: '2026-01-05T10:00:00+00:00',
+      gitMtimeProvenance: 'manifest',
+    });
+    expect(byPath.get('docs/older.md')).toMatchObject({
+      gitMtimeIso: filesystemTime.toISOString(),
+      gitMtimeProvenance: 'filesystem',
+    });
   });
 
   it('never trusts live history in a SHALLOW checkout (#2707)', () => {
