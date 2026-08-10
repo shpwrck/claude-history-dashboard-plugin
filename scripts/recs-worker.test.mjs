@@ -314,6 +314,46 @@ test('worker rebuild is byte-identical to the inline build (#2196)', async () =>
   }
 });
 
+test('#2746 worker rebuild shares one pinned doc-git-times snapshot', async () => {
+  const home = buildFixtureHome();
+  const docRoot = join(tmpdir(), `chd-2746-worker-docs-${randomUUID()}`);
+  const commit = 'c'.repeat(40);
+  try {
+    mkdirSync(join(docRoot, 'data'), { recursive: true });
+    writeFileSync(join(docRoot, 'README.md'), '# Readme\n');
+    writeFileSync(
+      join(docRoot, 'data', 'doc-git-times.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        sourceCommit: commit,
+        files: { 'README.md': '2026-01-05T10:00:00+00:00' },
+      })
+    );
+
+    const reply = await workerRebuild(
+      home,
+      join(tmpdir(), `chd-2746-worker-${randomUUID()}.db`),
+      {},
+      {
+        env: {
+          CHD_DOC_GRAPH_ROOT: docRoot,
+          CHD_DOC_GIT_TIMES_EXPECTED_COMMIT: commit,
+          CHD_RECS_CACHE_TEST_EVENTS: '1',
+        },
+      }
+    );
+
+    assert.deepEqual(
+      reply.docGitTimesSnapshotIo,
+      { stats: 1, reads: 1, parses: 1 },
+      'the starting source signature, ingest, graph join, and completion gate share one manifest IO pass'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(docRoot, { recursive: true, force: true });
+  }
+});
+
 test('worker returns the validated opt-in snapshot cache identity and expiry boundary', async () => {
   const home = buildFixtureHome();
   const docsRoot = join(home, 'docs-root');

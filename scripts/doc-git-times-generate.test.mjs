@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathToFileURL } from 'node:url';
-import { main } from './doc-git-times-generate.mjs';
+import { DOC_GIT_STATUS_ARGS, main } from './doc-git-times-generate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'doc-git-times-generate.mjs');
@@ -84,6 +84,10 @@ function fullHistoryRepo() {
 }
 
 describe('doc-git-times producer (#2707)', () => {
+  test('uses a tracked-only status query instead of enumerating untracked files', () => {
+    assert.equal(DOC_GIT_STATUS_ARGS.includes('-uno'), true);
+  });
+
   test('writes distinct per-file last-commit times from full history, deterministically', () => {
     const root = fullHistoryRepo();
     try {

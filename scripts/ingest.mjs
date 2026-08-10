@@ -691,6 +691,7 @@ const { parseLocalCalibration } = await import(
 // zero-deps runtime import guard (node:fs/child_process only, like parse-tasks).
 const {
   buildDocGraph,
+  captureDocGitTimesSnapshot,
   docGraphGitHistorySignature,
   docGraphSourcePaths,
   gitHistoryAvailability,
@@ -714,16 +715,18 @@ const {
   docIssueSnapshotIdentity,
   docIssueSnapshotUsableThroughMs,
 } = await import(join(LIB, 'doc-issue-snapshot.ts'));
-// Packaged per-doc Git-time manifest (#2707): buildDocGraph joins it into node
-// gitMtimeIso/gitMtimeProvenance, so its identity/content must feed the same
-// cache gates as the docs themselves (see docGraphSourceSignature /
-// hashDocGraphContent below).
-const {
-  DOC_GIT_TIMES_EXPECTED_COMMIT_ENV,
-  DOC_GIT_TIMES_MAX_FILE_BYTES,
-  DOC_GIT_TIMES_RELPATH,
-} = await import(join(LIB, 'doc-git-times.ts'));
-const DOC_GIT_TIMES_PATH = join(DOC_GRAPH_ROOT, DOC_GIT_TIMES_RELPATH);
+// Packaged per-doc Git-time manifest (#2707/#2746): capture one lazy snapshot
+// and thread its identity/raw bytes/parsed join through each rebuild. The
+// ordinary source gate remains stat-only because snapshot loading is lazy.
+let nextAssemblyDocGitTimesSnapshot = null;
+// One bounded handoff keyed by the exact coarse signature that captured it.
+// Callers must supply that signature to ingest/completion checks; an unrelated
+// or direct ingest always captures fresh state, so cache hits cannot leak a
+// stale snapshot into later work.
+let sourceSignatureDocGitTimesSnapshot = null;
+function newDocGitTimesSnapshot() {
+  return captureDocGitTimesSnapshot(DOC_GRAPH_ROOT, {});
+}
 const {
   DOC_HYGIENE_ARTIFACT_KEY_ENV,
   DOC_HYGIENE_EXPECTED_COMMIT_ENV,
@@ -1228,9 +1231,12 @@ export function readMemoryStores() {
 // and this wrapper degrades any surprise to an empty graph so it never sinks the
 // dataset endpoint. Root is PROJECT_DIR (the dashboard repo), not ~/.claude.
 let warnedIncompleteBundledDocGraph = false;
-function readDocGraph() {
+function readDocGraph(docGitTimesSnapshot = null) {
   try {
-    const graph = buildDocGraph(DOC_GRAPH_ROOT);
+    const graph = buildDocGraph(
+      DOC_GRAPH_ROOT,
+      docGitTimesSnapshot ? { docGitTimesSnapshot } : undefined
+    );
     if (
       !process.env.CHD_DOC_GRAPH_ROOT &&
       !warnedIncompleteBundledDocGraph &&
@@ -1278,20 +1284,26 @@ function docIssueRefsFromGraph(graph) {
   return canonicalRefSet(nums);
 }
 
-function docIssueRefStateFromGraph(graph) {
+function docIssueRefStateFromGraph(graph, docGitTimesSnapshot) {
   return {
     refs: docIssueRefsFromGraph(graph),
-    graphSourceSignature: docGraphSourceSignature(),
+    graphSourceSignature: docGraphSourceSignature(docGitTimesSnapshot),
   };
 }
 
 // Build the graph only under one stable source signature. A bounded retry keeps
 // a concurrent doc edit from binding old parsed refs to a newer stat identity.
-function readStableDocIssueRefState() {
+function readStableDocIssueRefState(initialDocGitTimesSnapshot = null) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const before = docGraphSourceSignature();
-    const graph = readDocGraph();
-    const after = docGraphSourceSignature();
+    const docGitTimesSnapshot =
+      attempt === 0 && initialDocGitTimesSnapshot
+        ? initialDocGitTimesSnapshot
+        : newDocGitTimesSnapshot();
+    const before = docGraphSourceSignature(docGitTimesSnapshot);
+    const graph = readDocGraph(docGitTimesSnapshot);
+    // Reuse only the manifest identity: graph/hash consumers are pinned to its
+    // exact bytes, while the fresh doc/Git stats still detect ref-set races.
+    const after = docGraphSourceSignature(docGitTimesSnapshot);
     if (before === after) {
       return {
         refs: docIssueRefsFromGraph(graph),
@@ -1307,11 +1319,14 @@ function readStableDocIssueRefState() {
 // while it is still usable (<=24h) and its fingerprint matches the current ref
 // set; otherwise null — flag unset, SPA/upload, ref-set changed, stale, or
 // absent all keep the #2711 issue-reference signals silent.
-function readDocIssueSnapshot(graph) {
+function readDocIssueSnapshot(graph, docGitTimesSnapshot) {
   const config = docIssueConfig();
   if (!config.enabled) return null;
   const refs = docIssueRefsFromGraph(graph);
-  docIssueExpectedRefState = docIssueRefStateFromGraph(graph);
+  docIssueExpectedRefState = docIssueRefStateFromGraph(
+    graph,
+    docGitTimesSnapshot
+  );
   const cached = readDocIssueCache(config, refs);
   if (!cached) return null;
   return docIssueSnapshotUsableForIngest(config, cached.snapshot, Date.now())
@@ -1343,13 +1358,16 @@ export async function refreshDocIssueSnapshotForServer() {
     // on every dataset slice adds substantial synchronous boot cost; the cheap
     // signature still makes a doc edit invalidate immediately, while the
     // refresh helper owns the separate 15-minute snapshot reuse decision.
-    const currentGraphSourceSignature = docGraphSourceSignature();
+    const docGitTimesSnapshot = newDocGitTimesSnapshot();
+    const currentGraphSourceSignature = docGraphSourceSignature(
+      docGitTimesSnapshot
+    );
     let refState = docIssueExpectedRefState;
     if (
       !refState ||
       refState.graphSourceSignature !== currentGraphSourceSignature
     ) {
-      refState = readStableDocIssueRefState();
+      refState = readStableDocIssueRefState(docGitTimesSnapshot);
     }
     if (!refState) {
       docIssueExpectedRefState = null;
@@ -1460,17 +1478,6 @@ function docIssueSourceSignature() {
 // replacement changes inode identity. The hot signature path adds one bounded
 // Git-history probe but still avoids reading doc bodies; graph assembly remains
 // the only path that reads them.
-// Expected-commit binding for the packaged git-times manifest (#2707). `||`
-// (not `??`): a SET-BUT-EMPTY env var means "unset" here — compose files export
-// empty stamps (e.g. `GIT_SHA: ${GIT_SHA:-}`), and an empty override must fall
-// through instead of masking the real value. Keep in lock-step with
-// readDocGitTimes in parse-docs.ts.
-function docGitTimesExpectedCommit() {
-  return (
-    process.env[DOC_GIT_TIMES_EXPECTED_COMMIT_ENV] || process.env.GIT_SHA || ''
-  );
-}
-
 // Manifest identity for the cheap stat gate (#2707): replacement-safe stat
 // surface (mtime+size+ctime+ino) plus the expected-commit binding env — the
 // SAME manifest bytes validate differently under a different runtime commit,
@@ -1478,18 +1485,11 @@ function docGitTimesExpectedCommit() {
 // STAT-GATE ONLY: this inode-bearing identity must never reach ingest()'s
 // contentHash, or every deploy's regenerated byte-identical manifest (fresh
 // inode) would force a full dataset re-assembly.
-function docGitTimesIdentitySignature() {
-  let stat = '0:0:0:0';
-  try {
-    const s = statSync(DOC_GIT_TIMES_PATH);
-    stat = `${Math.floor(s.mtimeMs)}:${s.size}:${Math.floor(s.ctimeMs)}:${s.ino}`;
-  } catch {
-    /* absent manifest — contributes the zero identity */
-  }
-  return `${DOC_GIT_TIMES_PATH}:${stat}:expected=${docGitTimesExpectedCommit()}`;
+function docGitTimesIdentitySignature(docGitTimesSnapshot) {
+  return docGitTimesSnapshot.identity;
 }
 
-function docGraphSourceSignature() {
+function docGraphSourceSignature(docGitTimesSnapshot = newDocGitTimesSnapshot()) {
   const hash = createHash('sha1');
   hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
   // Live-history availability is a doc-graph INPUT (#2707): `git fetch
@@ -1497,7 +1497,7 @@ function docGraphSourceSignature() {
   // while the last doc-touching %H and every doc stat stay identical, so
   // neither gate would otherwise turn over.
   hash.update(`git-avail:${gitHistoryAvailability(DOC_GRAPH_ROOT)}\n`);
-  hash.update(`git-times:${docGitTimesIdentitySignature()}\n`);
+  hash.update(`git-times:${docGitTimesIdentitySignature(docGitTimesSnapshot)}\n`);
   let count = 0;
   for (const relPath of docGraphSourcePaths(DOC_GRAPH_ROOT)) {
     hash.update(relPath);
@@ -1521,7 +1521,7 @@ function docGraphSourceSignature() {
   return `${count}:${hash.digest('hex')}`;
 }
 
-function hashDocGraphContent(hash) {
+function hashDocGraphContent(hash, docGitTimesSnapshot) {
   hash.update(`git:${docGraphGitHistorySignature(DOC_GRAPH_ROOT)}\n`);
   // Same rationale as docGraphSourceSignature: unshallowing in place flips
   // node provenance with no byte/stat change anywhere else.
@@ -1531,12 +1531,9 @@ function hashDocGraphContent(hash) {
   // CONTENT plus the commit binding in next to the doc bodies below. Bytes
   // only — the stat/inode identity stays in the cheap gate, where a deploy's
   // regenerated byte-identical manifest (fresh inode) belongs.
-  hash.update(`git-times-expected:${docGitTimesExpectedCommit()}\n`);
-  try {
-    hash.update(readTextFileCappedSync(DOC_GIT_TIMES_PATH, DOC_GIT_TIMES_MAX_FILE_BYTES));
-  } catch {
-    hash.update('git-times-absent');
-  }
+  hash.update(`git-times-expected:${docGitTimesSnapshot.expectedCommit ?? ''}\n`);
+  const { raw } = docGitTimesSnapshot.load();
+  hash.update(raw ?? 'git-times-absent');
   hash.update('\n');
   let count = 0;
   for (const relPath of docGraphSourcePaths(DOC_GRAPH_ROOT)) {
@@ -3717,7 +3714,11 @@ function transcriptRewriteSignature() {
 // The transcript-rewrites part below observes exactly that case through the
 // ctime discriminator, so the gate schedules an ingest instead of skip-serving
 // claims derived from the rewritten transcript.
-export function sourceSignature() {
+// `expectedSourceSignature` pins only the manifest component to the snapshot
+// already hashed/joined for that build. Every other source is probed fresh, so
+// completion gates still detect concurrent corpus changes without re-statting
+// the manifest that defines the atomic graph snapshot.
+export function sourceSignature(expectedSourceSignature = null) {
   const parts = [];
   parts.push(datasetAssemblySchemaKey());
   for (const projectsRoot of PROJECT_ROOTS) {
@@ -3885,7 +3886,14 @@ export function sourceSignature() {
   parts.push(
     `external-guidance:${EXTERNAL_GUIDANCE_DIR}:${externalGuidanceSourceSignature()}`
   );
-  parts.push(`doc-graph:${DOC_GRAPH_ROOT}:${docGraphSourceSignature()}`);
+  const docGitTimesSnapshot =
+    expectedSourceSignature &&
+    sourceSignatureDocGitTimesSnapshot?.signature === expectedSourceSignature
+      ? sourceSignatureDocGitTimesSnapshot.snapshot
+      : newDocGitTimesSnapshot();
+  parts.push(
+    `doc-graph:${DOC_GRAPH_ROOT}:${docGraphSourceSignature(docGitTimesSnapshot)}`
+  );
   // Docs-map contract (#2709): stat + identity. Without this a docs-map edit
   // (or a moved HEAD changing the wrapper identity) with no other source
   // change would early-hit both response caches forever.
@@ -3928,7 +3936,12 @@ export function sourceSignature() {
       }
     }
   }
-  return parts.join('|');
+  const signature = parts.join('|');
+  sourceSignatureDocGitTimesSnapshot = {
+    signature,
+    snapshot: docGitTimesSnapshot,
+  };
+  return signature;
 }
 
 // Re-parse only changed/new sessions; forget deleted ones. Returns counts
@@ -3938,7 +3951,14 @@ export function sourceSignature() {
 //   - mtime/size signature for history.jsonl
 // Callers can skip downstream work (e.g. rebuilding the compressed dataset
 // cache) when this hash matches the prior call.
-export function ingest() {
+// A caller that just sampled sourceSignature may pass it here to consume that
+// exact lazy manifest snapshot; direct callers omit it and capture fresh state.
+export function ingest(expectedSourceSignature = null) {
+  const docGitTimesSnapshot =
+    expectedSourceSignature &&
+    sourceSignatureDocGitTimesSnapshot?.signature === expectedSourceSignature
+      ? sourceSignatureDocGitTimesSnapshot.snapshot
+      : newDocGitTimesSnapshot();
   const sessions = listSessions();
   const seen = new Set();
   let reparsed = 0;
@@ -4192,7 +4212,7 @@ export function ingest() {
   hash.update('doc-graph\n');
   hash.update(DOC_GRAPH_ROOT);
   hash.update('\0');
-  hashDocGraphContent(hash);
+  hashDocGraphContent(hash, docGitTimesSnapshot);
   // Docs-map contract (#2709): identity + stat + raw JSON bytes feed the
   // serialized `docsMap` wrapper, so the persisted dataset cache must turn
   // over when either the declaration or the checkout identity moves.
@@ -4216,6 +4236,7 @@ export function ingest() {
     }
   }
   const contentHash = hash.digest('hex');
+  nextAssemblyDocGitTimesSnapshot = docGitTimesSnapshot;
   if (contentHash !== datasetSnapshotContentHash) {
     datasetSnapshotContentHash = contentHash;
     datasetSnapshotCapturedAt = new Date(Date.now()).toISOString();
@@ -4805,9 +4826,15 @@ function assembleDatasetCore() {
     configBackups,
   } = assembleArtifacts();
   const externalGuidance = readExternalGuidance();
-  const docGraph = readDocGraph();
+  const docGitTimesSnapshot =
+    nextAssemblyDocGitTimesSnapshot ?? newDocGitTimesSnapshot();
+  nextAssemblyDocGitTimesSnapshot = null;
+  const docGraph = readDocGraph(docGitTimesSnapshot);
   const docsMap = readDocsMap();
-  const docIssueSnapshot = readDocIssueSnapshot(docGraph);
+  const docIssueSnapshot = readDocIssueSnapshot(
+    docGraph,
+    docGitTimesSnapshot
+  );
 
   // Artifact-derived experiment sources (#2151): proof receipts + model-eval
   // batches join the ledger's uniform (source, axis) cells so every experiment

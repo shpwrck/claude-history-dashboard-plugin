@@ -24,10 +24,32 @@ const { execFileSyncMock } = vi.hoisted(() => ({
     throw new Error('not a git repository');
   }),
 }));
+const fsCalls = vi.hoisted(() => ({
+  statPaths: [] as string[],
+  openPaths: [] as string[],
+}));
 
 vi.mock('node:child_process', () => ({ execFileSync: execFileSyncMock }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const statSync = (...args: unknown[]) => {
+    fsCalls.statPaths.push(String(args[0]));
+    return (actual.statSync as unknown as (...values: unknown[]) => unknown)(...args);
+  };
+  const openSync = (...args: unknown[]) => {
+    fsCalls.openPaths.push(String(args[0]));
+    return (actual.openSync as unknown as (...values: unknown[]) => unknown)(...args);
+  };
+  return {
+    ...actual,
+    default: { ...actual, statSync, openSync },
+    statSync,
+    openSync,
+  };
+});
 import {
   buildDocGraph,
+  captureDocGitTimesSnapshot,
   classifyIndex,
   deriveCategory,
   extractHeadings,
@@ -446,6 +468,8 @@ describe('buildDocGraph', () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'parse-docs-'));
+    fsCalls.statPaths.length = 0;
+    fsCalls.openPaths.length = 0;
     execFileSyncMock.mockReset();
     execFileSyncMock.mockImplementation((): string => {
       throw new Error('not a git repository');
@@ -690,6 +714,44 @@ describe('buildDocGraph', () => {
       expect(byPath.get('docs/extra.md')?.gitMtimeProvenance).toBe('filesystem');
       // The manifest itself is not a doc node (data/ is outside the doc walk).
       expect(byPath.has('data/doc-git-times.json')).toBe(false);
+    });
+
+    it('stats, reads, and parses one pinned manifest once across identity and graph join', () => {
+      const manifestPath = join(root, 'data/doc-git-times.json');
+      const originalTime = '2026-01-05T10:00:00+00:00';
+      const replacementTime = '2026-02-06T11:00:00+00:00';
+      write(root, 'README.md', '# Readme\n');
+      writeManifest({ 'README.md': originalTime });
+
+      const jsonParse = vi.spyOn(JSON, 'parse');
+      try {
+        const snapshot = captureDocGitTimesSnapshot(root, {
+          docGitTimesExpectedCommit: COMMIT,
+        });
+
+        expect(fsCalls.statPaths.filter((path) => path === manifestPath)).toHaveLength(1);
+        expect(fsCalls.openPaths.filter((path) => path === manifestPath)).toHaveLength(0);
+
+        const loaded = snapshot.load();
+        expect(loaded.raw).toContain(originalTime);
+        expect(snapshot.load()).toBe(loaded);
+        expect(jsonParse).toHaveBeenCalledTimes(1);
+
+        // A replacement after the load cannot split the content hash's bytes
+        // from the graph join: both later consumers stay pinned to `loaded`.
+        writeManifest({ 'README.md': replacementTime });
+        const graph = buildDocGraph(root, { docGitTimesSnapshot: snapshot });
+        const node = graph.nodes.find((candidate) => candidate.path === 'README.md');
+
+        expect(node?.gitMtimeIso).toBe(originalTime);
+        expect(node?.gitMtimeProvenance).toBe('manifest');
+        expect(fsCalls.statPaths.filter((path) => path === manifestPath)).toHaveLength(1);
+        expect(fsCalls.openPaths.filter((path) => path === manifestPath)).toHaveLength(1);
+        expect(jsonParse).toHaveBeenCalledTimes(1);
+        expect(fsCalls.statPaths.filter((path) => path === join(root, 'README.md'))).toHaveLength(1);
+      } finally {
+        jsonParse.mockRestore();
+      }
     });
 
     it('binds via the CHD_DOC_GIT_TIMES_EXPECTED_COMMIT env seam', () => {

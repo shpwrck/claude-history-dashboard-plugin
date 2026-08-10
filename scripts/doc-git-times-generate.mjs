@@ -47,6 +47,15 @@ const GIT_TIMEOUT_MS = 60_000;
 
 /** Same doc surface as parse-docs' DOC_GRAPH_GIT_PATHS: root *.md + docs/**. */
 export const DOC_GIT_PATHSPECS = [':(glob)*.md', ':(glob)docs/**/*.md'];
+/** Tracked-only porcelain query; exported so the no-untracked cost fence is testable. */
+export const DOC_GIT_STATUS_ARGS = [
+  'status',
+  '--porcelain',
+  '-z',
+  '-uno',
+  '--',
+  ...DOC_GIT_PATHSPECS,
+];
 
 class ProducerError extends Error {}
 
@@ -122,14 +131,14 @@ export function trackedDocPaths(root) {
 }
 
 /**
- * Doc paths whose working tree differs from HEAD (modified, deleted, renamed,
- * or untracked). No commit time can be asserted for these — they are omitted
- * from the manifest and carry `filesystem` provenance at runtime.
+ * Tracked doc paths whose working tree differs from HEAD (modified, deleted,
+ * renamed, or copied). Untracked files cannot intersect trackedDocPaths(), so
+ * -uno avoids enumerating that irrelevant tree entirely.
  */
 export function dirtyDocPaths(root) {
   const out = requiredGit(
     root,
-    ['status', '--porcelain', '-z', '--', ...DOC_GIT_PATHSPECS],
+    DOC_GIT_STATUS_ARGS,
     'inspect working-tree state'
   );
   const dirty = new Set();

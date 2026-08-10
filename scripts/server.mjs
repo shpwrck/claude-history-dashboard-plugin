@@ -2288,7 +2288,7 @@ async function rebuildDatasetCache(state, sig) {
   let buildSig = sig;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const buildDocIssueState = currentDocIssueCacheState(api);
-    const stats = api.ingest();
+    const stats = api.ingest(buildSig);
     let candidate = null;
     let cached = false;
     let persist = false;
@@ -2319,7 +2319,7 @@ async function rebuildDatasetCache(state, sig) {
     // candidate built under one stable source+trust state; if only the coarse
     // signature moved, retry once against the completed state. GitHub snapshot
     // and recursive-removal containment claims are HARD gates and never relaxed.
-    const completedSig = api.sourceSignature();
+    const completedSig = api.sourceSignature(buildSig);
     const completedDocIssueState = currentDocIssueCacheState(api);
     const docIssueStable =
       docIssueCacheStatesEqual(buildDocIssueState, completedDocIssueState) &&
@@ -2893,7 +2893,7 @@ async function buildRecommendationsCacheEntry(
     surfaceRequest = null,
   } = {}
 ) {
-  const stats = api.ingest();
+  const stats = api.ingest(sourceSig);
   // `ingest()` fingerprints settings by bounded stat metadata. Fold the cheap
   // detector-relevant state into this memo key as well: an equal-length rewrite
   // with restored/coarse mtime can still remove the current Stop hook, and that
@@ -3092,7 +3092,7 @@ async function ensureCurrentRecommendationsCacheEntry(
       continue;
     }
 
-    const completedSourceSig = api.sourceSignature();
+    const completedSourceSig = api.sourceSignature(entry.sourceSig);
     const completedDocIssueState = currentDocIssueCacheState(api);
     const sourceSigStable = entry.sourceSig === completedSourceSig;
     const docIssueStateStable = docIssueCacheStatesEqual(
@@ -3299,7 +3299,7 @@ async function recommendationsResponseCache(
   // same churn while the un-gated recs route paid the full recompute every
   // request (#2184).
   if (cached) {
-    const stats = api.ingest();
+    const stats = api.ingest(sourceSig);
     if (stats.contentHash === cached.contentHash) {
       cached.sourceSig = sourceSig;
       cached.lastAccess = Date.now();
@@ -3445,7 +3445,8 @@ async function recommendationsResponseCache(
 // supplies the ingest API's signature getter and the build invocation.
 async function statGatedResponseCache(api, { cacheMap, buildsMap, key, max, build }) {
   const resolved = await resolveStatGatedCache({
-    sourceSignature: () => api.sourceSignature(),
+    sourceSignature: (expectedSourceSig) =>
+      api.sourceSignature(expectedSourceSig),
     sourceState: () => currentDocIssueCacheState(api),
     builtSourceState: (built) => built.docIssueCacheState,
     sourceStatesEqual: docIssueCacheStatesEqual,
@@ -3484,8 +3485,8 @@ function searchCacheKey(q, project, limit) {
 // contentHash via memoizedAssembleDataset (#2071) so concurrent dates on the same
 // corpus assemble once. ingest() is required to learn contentHash; on an unchanged
 // source it is the same cheap stat-walk the stat-gate already accounts for.
-function buildDigestPayload(state, api, date) {
-  const stats = api.ingest();
+function buildDigestPayload(state, api, date, sourceSig) {
+  const stats = api.ingest(sourceSig);
   const ds = memoizedAssembleDataset(state, api, stats.contentHash);
   return {
     value: buildDailyDigest(
@@ -3545,8 +3546,8 @@ async function compressedPayload(value, version) {
 // suppresses the upgrade under scope enforcement. null until the first boot build.
 let lastInstantShell = null;
 
-async function buildBootPayload(state, api) {
-  const stats = api.ingest();
+async function buildBootPayload(state, api, sourceSig) {
+  const stats = api.ingest(sourceSig);
   const ds = memoizedAssembleDataset(state, api, stats.contentHash);
   const boot = splitDataset(ds).boot;
   boot.version = stats.contentHash;
@@ -3564,8 +3565,8 @@ async function buildBootPayload(state, api) {
 
 // Build one /api/dataset/slice/<key> payload — a single heavy dataset array,
 // fetched only when its view is opened. Same per-contentHash assembly reuse.
-async function buildSlicePayload(state, api, key) {
-  const stats = api.ingest();
+async function buildSlicePayload(state, api, key, sourceSig) {
+  const stats = api.ingest(sourceSig);
   const ds = memoizedAssembleDataset(state, api, stats.contentHash);
   const raw = ds && typeof ds === 'object' ? ds[key] ?? [] : [];
   // Ship each slice in the SAME wire shape /api/dataset.json uses: slimDataset
@@ -3584,8 +3585,8 @@ async function buildSlicePayload(state, api, key) {
 // Build the /api/search payload for one (query, project, limit), reusing the
 // assembled dataset per contentHash (#2071); the per-query score+embed is the
 // expensive part the cache exists to collapse.
-function buildSearchPayload(state, api, q, project, limit) {
-  const stats = api.ingest();
+function buildSearchPayload(state, api, q, project, limit, sourceSig) {
+  const stats = api.ingest(sourceSig);
   const ds = memoizedAssembleDataset(state, api, stats.contentHash);
   const results = hybridSearchEntries(ds.entries || [], q, {
     project,
@@ -5460,7 +5461,7 @@ async function buildLocalAnalyzeDeterministic(req, project) {
   let expectedSourceSig = ingestApi.sourceSignature();
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const docIssueCacheState = currentDocIssueCacheState(ingestApi);
-    const stats = ingestApi.ingest();
+    const stats = ingestApi.ingest(expectedSourceSig);
     const dataset = memoizedAssembleRecommendationDataset(
       ingestState,
       ingestApi,
@@ -5476,7 +5477,7 @@ async function buildLocalAnalyzeDeterministic(req, project) {
       dataset,
       rejectedFindingIds,
     });
-    const completedSourceSig = ingestApi.sourceSignature();
+    const completedSourceSig = ingestApi.sourceSignature(expectedSourceSig);
     const completedDocIssueState = currentDocIssueCacheState(ingestApi);
     const sourceSigStable = expectedSourceSig === completedSourceSig;
     const docIssueStateStable =
@@ -9936,7 +9937,8 @@ async function handleDatasetBoot(req, res) {
       buildsMap: ingestState.bootBuilds,
       key: 'boot',
       max: 1,
-      build: (api) => buildBootPayload(ingestState, api),
+      build: (api, sourceSig) =>
+        buildBootPayload(ingestState, api, sourceSig),
     }));
   } catch (err) {
     if (isDatasetResponseTooLargeError(err)) return sendDatasetResponseTooLarge(res, err);
@@ -9970,7 +9972,8 @@ async function handleDatasetSlice(req, res) {
       buildsMap: ingestState.sliceBuilds,
       key: `slice:${key}`,
       max: 32,
-      build: (api) => buildSlicePayload(ingestState, api, key),
+      build: (api, sourceSig) =>
+        buildSlicePayload(ingestState, api, key, sourceSig),
     }));
   } catch (err) {
     if (isDatasetResponseTooLargeError(err)) return sendDatasetResponseTooLarge(res, err);
@@ -10002,7 +10005,8 @@ async function handleDigest(req, res) {
     buildsMap: ingestState.digestBuilds,
     key: digestCacheKey(date),
     max: DASHBOARD_DIGEST_CACHE_MAX_ENTRIES,
-    build: (api) => buildDigestPayload(ingestState, api, date),
+    build: (api, sourceSig) =>
+      buildDigestPayload(ingestState, api, date, sourceSig),
   });
   res.setHeader('X-Source', 'live');
   res.setHeader('Cache-Control', 'no-store');
@@ -10036,7 +10040,8 @@ async function handleSearch(req, res) {
     buildsMap: ingestState.searchBuilds,
     key: searchCacheKey(q, project, limit),
     max: DASHBOARD_SEARCH_CACHE_MAX_ENTRIES,
-    build: (api) => buildSearchPayload(ingestState, api, q, project, limit),
+    build: (api, sourceSig) =>
+      buildSearchPayload(ingestState, api, q, project, limit, sourceSig),
   });
   res.setHeader('X-Source', 'live');
   res.setHeader('Cache-Control', 'no-store');

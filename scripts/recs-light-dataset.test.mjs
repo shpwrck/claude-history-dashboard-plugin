@@ -569,6 +569,81 @@ test('#2380 repo docs reach both datasets and invalidate both cache gates', asyn
   }
 });
 
+test('#2746 ingest hashes and joins one pinned doc-git-times snapshot', async () => {
+  const origHome = process.env.HOME;
+  const origDb = process.env.CHD_DB_PATH;
+  const origDocRoot = process.env.CHD_DOC_GRAPH_ROOT;
+  const origExpectedCommit = process.env.CHD_DOC_GIT_TIMES_EXPECTED_COMMIT;
+  const home = buildFixtureHome();
+  const docRoot = join(tmpdir(), `chd-2746-docs-${randomUUID()}`);
+  const manifestPath = join(docRoot, 'data', 'doc-git-times.json');
+  const commit = 'c'.repeat(40);
+  const firstTime = '2026-01-05T10:00:00+00:00';
+  const secondTime = '2026-02-06T11:00:00+00:00';
+  mkdirSync(join(docRoot, 'data'), { recursive: true });
+  writeFileSync(join(docRoot, 'README.md'), '# Readme\n');
+
+  const writeManifest = (time) => {
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        sourceCommit: commit,
+        files: { 'README.md': time },
+      })
+    );
+  };
+
+  try {
+    process.env.CHD_DOC_GRAPH_ROOT = docRoot;
+    process.env.CHD_DOC_GIT_TIMES_EXPECTED_COMMIT = commit;
+    writeManifest(firstTime);
+    const ingest = await loadIngest(home);
+    const parseDocs = await import('../src/lib/parse-docs.ts');
+    parseDocs.resetDocGitTimesSnapshotInstrumentation();
+
+    const firstSourceSig = ingest.sourceSignature();
+    const first = ingest.ingest(firstSourceSig);
+    writeManifest(secondTime);
+    const firstGraph = ingest.assembleDataset().docGraph;
+    assert.equal(
+      firstGraph.nodes.find((node) => node.path === 'README.md')?.gitMtimeIso,
+      firstTime,
+      'assembly stays pinned to the exact manifest bytes hashed by ingest'
+    );
+    assert.deepEqual(
+      parseDocs.docGitTimesSnapshotInstrumentation(),
+      { stats: 1, reads: 1, parses: 1 },
+      'source signature, content hash, and graph join share one manifest IO pass'
+    );
+
+    const secondSourceSig = ingest.sourceSignature();
+    const second = ingest.ingest(secondSourceSig);
+    assert.notEqual(second.contentHash, first.contentHash);
+    assert.equal(
+      ingest
+        .assembleDataset()
+        .docGraph.nodes.find((node) => node.path === 'README.md')?.gitMtimeIso,
+      secondTime,
+      'the next ingest captures the replacement as one new snapshot'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(docRoot, { recursive: true, force: true });
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origDb === undefined) delete process.env.CHD_DB_PATH;
+    else process.env.CHD_DB_PATH = origDb;
+    if (origDocRoot === undefined) delete process.env.CHD_DOC_GRAPH_ROOT;
+    else process.env.CHD_DOC_GRAPH_ROOT = origDocRoot;
+    if (origExpectedCommit === undefined) {
+      delete process.env.CHD_DOC_GIT_TIMES_EXPECTED_COMMIT;
+    } else {
+      process.env.CHD_DOC_GIT_TIMES_EXPECTED_COMMIT = origExpectedCommit;
+    }
+  }
+});
+
 test('#2309 external-guidance cache gates share one bounded top-level JSON surface', async () => {
   const origHome = process.env.HOME;
   const origDb = process.env.CHD_DB_PATH;

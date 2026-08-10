@@ -14,7 +14,7 @@
  * history.
  *
  * PURE + browser-safe: no node imports. The bounded file READ stays server-side
- * (`readDocGitTimes` in parse-docs.ts), mirroring the external-guidance split
+ * (`captureDocGitTimesSnapshot` in parse-docs.ts), mirroring the external-guidance split
  * (`external-guidance.ts` pure vs `parse-external-guidance.ts` node reader).
  * Browser code should only ever need {@link DocTimeProvenance} via `import type`.
  */

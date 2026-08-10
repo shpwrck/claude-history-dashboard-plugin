@@ -60,9 +60,11 @@ export function resolveStateBoundMemo({
 
 // Resolve one request through the stat-gated cache.
 //
-//   sourceSignature()  — cheap stat signature of the source; when it matches a
-//                        cached entry's signature, the cached payload is served
-//                        with no ingest/assemble/score work.
+//   sourceSignature(expected?) — cheap stat signature of the source; when it
+//                        matches a cached entry's signature, the cached payload
+//                        is served with no ingest/assemble/score work. Completion
+//                        passes the build's expected signature so a source may
+//                        retain an atomic component snapshot across the build.
 //   sourceState()      — optional exact trust-bearing state sampled alongside
 //                        the coarse signature (for example, a bounded external
 //                        snapshot identity). When supplied, `builtSourceState`
@@ -75,7 +77,8 @@ export function resolveStateBoundMemo({
 //                        for digest; query+project+limit for search).
 //   max                — LRU bound for both maps.
 //   build(...args)     — runs the expensive work and returns the payload to cache.
-//   buildArgs          — extra args forwarded to build() after no implicit args.
+//   buildArgs          — extra args forwarded to build(), followed by the exact
+//                        source signature whose snapshot the build must consume.
 //
 // Concurrency contract: N concurrent requests with the SAME key and an unchanged
 // sourceSignature share ONE build (single-flight) — the first installs the
@@ -140,8 +143,8 @@ export async function resolveStatGatedCache({
       let expectedSourceSig = sourceSig;
       let expectedSourceState = initialSourceState;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const value = await build(...buildArgs);
-        const completedSourceSig = sourceSignature();
+        const value = await build(...buildArgs, expectedSourceSig);
+        const completedSourceSig = sourceSignature(expectedSourceSig);
         const completedSourceState = stateGateEnabled
           ? sourceState()
           : undefined;

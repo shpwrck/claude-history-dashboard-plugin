@@ -72,6 +72,31 @@ test('a warm cache hit serves without rebuilding (no ingest/score work)', async 
   assert.equal(second.value, 'd1');
 });
 
+test('#2746 forwards the exact build signature to the build and completion gate', async () => {
+  const { cacheMap, buildsMap } = newState();
+  const signatureArgs = [];
+  const buildArgs = [];
+
+  const result = await resolveStatGatedCache({
+    sourceSignature: (expectedSourceSig) => {
+      signatureArgs.push(expectedSourceSig);
+      return 'sig-A';
+    },
+    cacheMap,
+    buildsMap,
+    key: 'doc-snapshot',
+    max: 1,
+    build: async (sourceSig) => {
+      buildArgs.push(sourceSig);
+      return 'payload';
+    },
+  });
+
+  assert.equal(result.value, 'payload');
+  assert.deepEqual(buildArgs, ['sig-A']);
+  assert.deepEqual(signatureArgs, [undefined, 'sig-A']);
+});
+
 test('a source-signature change invalidates the cache (rebuild)', async () => {
   const { cacheMap, buildsMap } = newState();
   const counter = { count: 0 };

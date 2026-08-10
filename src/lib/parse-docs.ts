@@ -28,6 +28,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix, resolve } from 'node:path';
+import { readTextFileCappedSync } from './capped-read';
 import {
   DOC_GIT_TIMES_EXPECTED_COMMIT_ENV,
   DOC_GIT_TIMES_MAX_FILE_BYTES,
@@ -161,6 +162,45 @@ export interface BuildDocGraphOptions {
    * a value the manifest is rejected (fail closed), never trusted unbound.
    */
   docGitTimesExpectedCommit?: string | null;
+  /**
+   * One pinned manifest identity/content snapshot shared by the cache hash and
+   * graph join. Callers that already captured the input should pass it here so
+   * buildDocGraph neither re-stats nor re-reads/re-parses the manifest.
+   */
+  docGitTimesSnapshot?: DocGitTimesSnapshot;
+}
+
+export interface LoadedDocGitTimesSnapshot {
+  /** Exact bounded bytes folded into the content hash; null when unreadable. */
+  raw: string | null;
+  /** Strictly validated path -> time join, or null when the bytes fail closed. */
+  times: ReadonlyMap<string, string> | null;
+}
+
+/**
+ * A replacement-safe manifest identity with a lazy, memoized bounded load.
+ * Capturing it performs one stat and zero byte reads. The first load performs
+ * at most one capped read + JSON parse; every later consumer sees those exact
+ * bytes and parsed times, closing the hash-vs-join TOCTOU window.
+ */
+export interface DocGitTimesSnapshot {
+  path: string;
+  expectedCommit: string | null;
+  identity: string;
+  load(): LoadedDocGitTimesSnapshot;
+}
+
+// Test-only cost observable (#2746). It never affects snapshot behavior/output.
+const docGitTimesSnapshotIoCounts = { stats: 0, reads: 0, parses: 0 };
+export function docGitTimesSnapshotInstrumentation(): Readonly<
+  typeof docGitTimesSnapshotIoCounts
+> {
+  return { ...docGitTimesSnapshotIoCounts };
+}
+export function resetDocGitTimesSnapshotInstrumentation(): void {
+  docGitTimesSnapshotIoCounts.stats = 0;
+  docGitTimesSnapshotIoCounts.reads = 0;
+  docGitTimesSnapshotIoCounts.parses = 0;
 }
 
 // ── Pure extraction helpers (unit-tested off strings) ─────────────────────────
@@ -627,15 +667,16 @@ export function docGraphGitHistorySignature(root: string): string {
 }
 
 /**
- * Server-side bounded read + fail-closed validation of the packaged git-times
- * manifest (#2707). Returns the per-path time map, or `null` when the manifest
- * is missing, oversized, unparseable, unbound, or fails ANY strictness check in
- * {@link parseDocGitTimesManifest} — a rejected manifest contributes nothing.
+ * Capture the packaged git-times manifest once for the cheap identity gate and
+ * the later content-hash/graph-join consumers (#2707/#2746). The byte load is
+ * lazy so a sourceSignature cache hit remains stat-only. Repeated load() calls
+ * return one memoized raw/parsed pair; malformed bytes remain available to the
+ * content hash while contributing no trusted times to the graph.
  */
-function readDocGitTimes(
+export function captureDocGitTimesSnapshot(
   root: string,
   opts: Pick<BuildDocGraphOptions, 'docGitTimesPath' | 'docGitTimesExpectedCommit'>
-): Map<string, string> | null {
+): DocGitTimesSnapshot {
   const path = opts.docGitTimesPath ?? join(root, DOC_GIT_TIMES_RELPATH);
   // `||` (not `??`): a SET-BUT-EMPTY env var means "unset" here — compose files
   // export empty stamps (e.g. `GIT_SHA: ${GIT_SHA:-}`), and an empty override
@@ -647,17 +688,55 @@ function readDocGitTimes(
       : (process.env[DOC_GIT_TIMES_EXPECTED_COMMIT_ENV] ||
          process.env.GIT_SHA ||
          null);
+
+  let identityStat = '0:0:0:0';
+  let readable = false;
+  docGitTimesSnapshotIoCounts.stats += 1;
   try {
     const st = statSync(path);
-    if (!st.isFile() || st.size > DOC_GIT_TIMES_MAX_FILE_BYTES) return null;
-    const parsed = parseDocGitTimesManifest(
-      JSON.parse(readFileSync(path, 'utf8')),
-      { expectedCommit }
-    );
-    return parsed.ok ? parsed.times : null;
+    identityStat =
+      `${Math.floor(st.mtimeMs)}:${st.size}:` +
+      `${Math.floor(st.ctimeMs)}:${st.ino}`;
+    readable = st.isFile() && st.size <= DOC_GIT_TIMES_MAX_FILE_BYTES;
   } catch {
-    return null; // absent/unreadable/malformed JSON — fail closed
+    // Missing/unstatable manifests retain the zero identity and fail closed.
   }
+
+  let loaded: LoadedDocGitTimesSnapshot | null = null;
+  return {
+    path,
+    expectedCommit,
+    identity: `${path}:${identityStat}:expected=${expectedCommit ?? ''}`,
+    load(): LoadedDocGitTimesSnapshot {
+      if (loaded) return loaded;
+      if (!readable) {
+        loaded = { raw: null, times: null };
+        return loaded;
+      }
+
+      let raw: string;
+      try {
+        docGitTimesSnapshotIoCounts.reads += 1;
+        raw = readTextFileCappedSync(path, DOC_GIT_TIMES_MAX_FILE_BYTES);
+      } catch {
+        loaded = { raw: null, times: null };
+        return loaded;
+      }
+
+      let times: ReadonlyMap<string, string> | null = null;
+      try {
+        docGitTimesSnapshotIoCounts.parses += 1;
+        const parsed = parseDocGitTimesManifest(JSON.parse(raw), {
+          expectedCommit,
+        });
+        if (parsed.ok) times = parsed.times;
+      } catch {
+        // Malformed JSON remains hash-visible but is never trusted by the join.
+      }
+      loaded = { raw, times };
+      return loaded;
+    },
+  };
 }
 
 /**
@@ -666,10 +745,10 @@ function readDocGitTimes(
  * authoritative), then nothing.
  */
 function deriveDocTime(
-  root: string,
   relPath: string,
   gitMtimes: ReadonlyMap<string, string>,
-  manifestTimes: ReadonlyMap<string, string> | null
+  manifestTimes: ReadonlyMap<string, string> | null,
+  filesystemMtimeIso: string | null
 ): { gitMtimeIso: string | null; gitMtimeProvenance: DocTimeProvenance } {
   const gitMtime = gitMtimes.get(relPath);
   if (gitMtime) return { gitMtimeIso: gitMtime, gitMtimeProvenance: 'git' };
@@ -677,14 +756,13 @@ function deriveDocTime(
   if (manifestTime) {
     return { gitMtimeIso: manifestTime, gitMtimeProvenance: 'manifest' };
   }
-  try {
+  if (filesystemMtimeIso) {
     return {
-      gitMtimeIso: statSync(join(root, relPath)).mtime.toISOString(),
+      gitMtimeIso: filesystemMtimeIso,
       gitMtimeProvenance: 'filesystem',
     };
-  } catch {
-    return { gitMtimeIso: null, gitMtimeProvenance: 'unavailable' };
   }
+  return { gitMtimeIso: null, gitMtimeProvenance: 'unavailable' };
 }
 
 /**
@@ -710,7 +788,9 @@ export function buildDocGraph(
     gitHistoryAvailability(resolvedRoot) === 'ok'
       ? gitMtimesByPath(resolvedRoot, relPaths)
       : new Map<string, string>();
-  const manifestTimes = readDocGitTimes(resolvedRoot, opts);
+  const manifestSnapshot =
+    opts.docGitTimesSnapshot ?? captureDocGitTimesSnapshot(resolvedRoot, opts);
+  const manifestTimes = manifestSnapshot.load().times;
 
   const nodes: DocNode[] = [];
   const edgeKeys = new Set<string>();
@@ -725,9 +805,11 @@ export function buildDocGraph(
 
   for (const rel of relPaths) {
     let content: string;
+    let filesystemMtimeIso: string;
     try {
       const st = statSync(join(resolvedRoot, rel));
       if (!st.isFile() || st.size > maxFileBytes) continue;
+      filesystemMtimeIso = st.mtime.toISOString();
       content = readFileSync(join(resolvedRoot, rel), 'utf8');
     } catch {
       continue; // unreadable — skip
@@ -737,10 +819,10 @@ export function buildDocGraph(
     const category = deriveCategory(rel);
     const { frontmatter, body } = parseFrontmatter(content);
     const { gitMtimeIso, gitMtimeProvenance } = deriveDocTime(
-      resolvedRoot,
       rel,
       gitMtimes,
-      manifestTimes
+      manifestTimes,
+      filesystemMtimeIso
     );
     const node: DocNode = {
       slug,

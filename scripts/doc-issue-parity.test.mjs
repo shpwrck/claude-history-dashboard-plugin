@@ -78,7 +78,11 @@ test('assembleDataset never fetches: the network refresh is preamble-only', () =
   const src = readFileSync(join(ROOT, 'scripts', 'ingest.mjs'), 'utf8');
   // readDocIssueSnapshot (the sync ingest read) must use the cache reader, and
   // the ONLY refresh call must be inside the server-preamble export.
-  assert.match(src, /function readDocIssueSnapshot\(graph\)/);
+  assert.match(
+    src,
+    /function readDocIssueSnapshot\(graph(?:,|\))/,
+    'the synchronous cache reader must remain separate from the network refresh'
+  );
   assert.match(src, /export async function refreshDocIssueSnapshotForServer\(\)/);
   const refreshCalls = src.match(/await refreshDocIssueSnapshot\(/g) ?? [];
   assert.equal(refreshCalls.length, 1, 'exactly one network refresh call, in the server-preamble export');

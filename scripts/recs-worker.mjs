@@ -143,6 +143,10 @@ const {
   recursiveRemovalSafetyStateForServer,
   recursiveRemovalSafetyStateFromDataset,
 } = ingestApi;
+const {
+  docGitTimesSnapshotInstrumentation,
+  resetDocGitTimesSnapshotInstrumentation,
+} = await import(join(projectDir, 'src', 'lib', 'parse-docs.ts'));
 const { safeJsonStringify } = await import(
   join(projectDir, 'src', 'lib', 'json-safe.ts')
 );
@@ -172,9 +176,9 @@ function sameDocIssueCacheState(a, b) {
   return a.identity === b.identity && a.usableThrough === b.usableThrough;
 }
 
-function recommendationSourceState() {
+function recommendationSourceState(expectedSourceSignature = null) {
   return {
-    sourceSig: sourceSignature(),
+    sourceSig: sourceSignature(expectedSourceSignature),
     docIssueCacheState: docIssueSnapshotCacheStateForServer(),
     recursiveRemovalSafetyState: recursiveRemovalSafetyStateForServer(),
   };
@@ -186,8 +190,9 @@ async function buildRecommendationResult({
   filters,
   organizationIdentity,
   adoptionReceiptsPath,
+  expectedSourceSignature,
 }) {
-  const stats = ingest();
+  const stats = ingest(expectedSourceSignature);
   // #2182: assemble ONLY the fields the recs input needs (not the full
   // /api/dataset.json payload). The accepted stable dataset is also reused by
   // suppression-transition emission after the source-state validation below.
@@ -254,8 +259,13 @@ async function buildRecommendationResult({
 async function buildStableRecommendationResult(params) {
   let expectedSourceState = recommendationSourceState();
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const built = await buildRecommendationResult(params);
-    const completedSourceState = recommendationSourceState();
+    const built = await buildRecommendationResult({
+      ...params,
+      expectedSourceSignature: expectedSourceState.sourceSig,
+    });
+    const completedSourceState = recommendationSourceState(
+      expectedSourceState.sourceSig
+    );
     const sourceSigStable =
       expectedSourceState.sourceSig === completedSourceState.sourceSig;
     const docIssueStateStable =
@@ -335,6 +345,9 @@ parentPort.on('message', async (msg) => {
     shadowCallsDir,
   } = msg;
   try {
+    if (process.env.CHD_RECS_CACHE_TEST_EVENTS === '1') {
+      resetDocGitTimesSnapshotInstrumentation();
+    }
     const built = await buildStableRecommendationResult({
       project,
       surface,
@@ -367,6 +380,9 @@ parentPort.on('message', async (msg) => {
       docIssueCacheState: built.docIssueCacheState,
       recursiveRemovalSafetyState: built.recursiveRemovalSafetyState,
       suppressionEmissionId,
+      ...(process.env.CHD_RECS_CACHE_TEST_EVENTS === '1'
+        ? { docGitTimesSnapshotIo: docGitTimesSnapshotInstrumentation() }
+        : {}),
     });
   } catch (err) {
     parentPort.postMessage({ id, ok: false, error: err?.message || String(err) });
