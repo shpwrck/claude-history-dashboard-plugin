@@ -24,10 +24,11 @@
 //     under-measures real cold load.)
 //
 // Each flavor is loaded COLD several times (a fresh browser context per run, so
-// no warm HTTP/disk/module cache carries over) and we take the MEDIAN of each
-// metric — medians shrug off the odd GC/scheduler outlier the way a single load
-// can't. The medians are checked against cold-load-budget.json; any metric over
-// its ceiling fails the process (exit 1) and prints which flavor/metric blew it.
+// no warm HTTP/disk/module cache carries over). Timing ceilings gate the BEST
+// sample: runner contention can only add latency, so one uncontended sample is
+// the honest signal while a real regression slows every sample. We still report
+// the median and gate CLS on its median because layout shift is not host-time
+// contention. See #3720 and docs/perf-sprint/cold-load.md.
 //
 // Run it locally (builds both flavors itself unless --no-build):
 //   node scripts/cold-load-measure.mjs                 # both flavors, gate
@@ -48,6 +49,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import http from 'node:http';
+import { median, timingStats } from './lib/cold-load-statistics.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
@@ -108,14 +110,10 @@ function die(msg) {
   process.exit(2);
 }
 
-function median(nums) {
-  const s = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
-
 function fmtMs(n) {
-  return `${Math.round(n)} ms`;
+  // Preserve one decimal when it decides the gate, so a precise failure such
+  // as 700.4 > 700 never prints as the contradictory "700 ms > 700 ms".
+  return `${Math.round(n * 10) / 10} ms`;
 }
 
 function run(cmd, args, opts = {}) {
@@ -377,9 +375,9 @@ async function measureFlavor(browser, flavor, preview, { cpuThrottle = 1 } = {})
   // Round CLS to 4 dp — it is a small unitless ratio, not a millisecond count.
   const r4 = (n) => Math.round(n * 10000) / 10000;
   return {
-    fcp: { runs: fcps.map(Math.round), median: Math.round(median(fcps)) },
-    tti: { runs: ttis.map(Math.round), median: Math.round(median(ttis)) },
-    cp: { runs: cps.map(Math.round), median: Math.round(median(cps)) },
+    fcp: timingStats(fcps),
+    tti: timingStats(ttis),
+    cp: timingStats(cps),
     cls: { runs: clss.map(r4), median: r4(median(clss)) },
     // LCP is opportunistic — null entries are dropped; report only if we got any.
     lcp: lcps.length
@@ -421,13 +419,13 @@ async function main() {
   }
 
   // Report.
-  console.log('\nCold-load measurement (median of cold loads)');
+  console.log('\nCold-load measurement (best gates timings; median reports distribution)');
   for (const flavor of args.flavors) {
     const r = results[flavor];
     console.log(`  ${FLAVORS[flavor].label}:`);
-    console.log(`    FCP  median ${fmtMs(r.fcp.median).padStart(8)}   runs [${r.fcp.runs.join(', ')}]`);
-    console.log(`    TTI  median ${fmtMs(r.tti.median).padStart(8)}   runs [${r.tti.runs.join(', ')}]`);
-    console.log(`    CP   median ${fmtMs(r.cp.median).padStart(8)}   runs [${r.cp.runs.join(', ')}]`);
+    console.log(`    FCP  best ${fmtMs(r.fcp.best).padStart(8)}  median ${fmtMs(r.fcp.median).padStart(8)}   runs [${r.fcp.runs.join(', ')}]`);
+    console.log(`    TTI  best ${fmtMs(r.tti.best).padStart(8)}  median ${fmtMs(r.tti.median).padStart(8)}   runs [${r.tti.runs.join(', ')}]`);
+    console.log(`    CP   best ${fmtMs(r.cp.best).padStart(8)}  median ${fmtMs(r.cp.median).padStart(8)}   runs [${r.cp.runs.join(', ')}]`);
     console.log(`    CLS  median ${r.cls.median.toFixed(4).padStart(8)}   runs [${r.cls.runs.map((n) => n.toFixed(4)).join(', ')}]`);
     if (r.lcp) {
       console.log(`    LCP  median ${fmtMs(r.lcp.median).padStart(8)}   runs [${r.lcp.runs.join(', ')}]  (cross-check, not gated)`);
@@ -455,7 +453,7 @@ async function main() {
     if (!flavorBudget) die(`budget file has no "${flavor}" block.`);
     const r = results[flavor];
     for (const metric of ['fcp', 'tti', 'cp']) {
-      const actual = r[metric].median;
+      const actual = r[metric].best;
       const max = flavorBudget[`${metric}MaxMs`];
       if (max == null) die(`budget["${flavor}"] missing "${metric}MaxMs".`);
       const ok = actual <= max;

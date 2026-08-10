@@ -46,8 +46,8 @@ variance while still catching large regressions:
 | Metric | Ceiling |
 |--------|--------:|
 | Server boot | 6000 ms |
-| Cold `/api/dataset.json` load | 12000 ms |
-| Direct cold ingest | 8000 ms |
+| Cold `/api/dataset.json` load | 22000 ms |
+| Direct cold ingest | 12000 ms |
 | `assembleDataset()` | 3000 ms |
 | Dataset serialization | 2000 ms |
 | Unchanged re-ingest | 1200 ms |

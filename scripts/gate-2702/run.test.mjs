@@ -604,7 +604,10 @@ function parseStatus(result) {
   return JSON.parse(lines[0]);
 }
 
-async function waitForTerminals(fixture, trialId, timeoutMs = 60_000) {
+// Multi-arm fixtures have taken 64-66 s on contended ARC runners even while
+// continuing to produce receipts. Keep a bounded timeout that still detects a
+// real hang without treating ordinary shared-runner scheduling as one (#3720).
+async function waitForTerminals(fixture, trialId, timeoutMs = 90_000) {
   const trialRoot = fixture.trialRoot(trialId);
   await waitFor(
     () => filesNamed(trialRoot, "terminal.json").length === ARM_COUNT,

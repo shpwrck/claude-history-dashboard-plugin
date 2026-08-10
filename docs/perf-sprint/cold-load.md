@@ -76,7 +76,16 @@ Each flavor is loaded several times in a **fresh browser context per run** (no
 warm HTTP/disk/module cache carried over), with **one discarded warmup load**
 first — the very first navigation after a browser launch pays a one-time
 JIT/first-compositor-frame cost that is not representative of a steady cold load.
-The **median** of the remaining runs is the reported number.
+The median of the remaining runs is reported to expose the distribution. Timing
+ceilings (FCP, TTI, and CP) gate the **best** sample, while CLS continues to gate
+its median. This is deliberate runner-contention control (#3720): host load can
+only add latency, so the minimum is the sample least polluted by scheduling
+delay, while a real boot-path regression raises every sample and still fails.
+On 2026-08-09 unchanged branches produced upload-SPA FCP series of
+`[1040, 796, 1208, 1520, 552]` and `[360, 656, 976, 1992, 3580]`; both
+median-gated runs failed, and the unchanged rerun passed. The gate keeps all
+samples visible so sustained slowness remains diagnosable rather than moving a
+ceiling to hide the spread.
 
 The two flavors build into separate outDirs (`dist-server`, `dist-spa`) so the
 builds don't clobber each other, and preview on fixed, distinct ports (server →
@@ -173,10 +182,11 @@ node scripts/cold-load-measure.mjs --flavor spa --measure-only --cpu-throttle 6
 
 ## CI
 
-`.github/workflows/cold-load.yml` runs the gate on every PR push and on `master`.
-It mirrors `ci.yml`/`test.yml` (checkout, `setup-node@v4` node 22 + npm cache,
+`.github/workflows/cold-load.yml` runs the gate on every PR push.
+It mirrors `ci.yml`/`test.yml` (checkout, Node 22 + npm cache,
 `npm ci`) plus one step to install the Chromium browser
-(`npx playwright install --with-deps chromium`). A median over a flavor's ceiling
-— FCP, TTI, or CP — fails the job and names which flavor/metric regressed. Like the lint/build/test
+(`npx playwright install --with-deps chromium`). A median over a flavor's CLS
+ceiling, or a best timing sample over its FCP, TTI, or CP ceiling, fails the job
+and names which flavor/metric regressed. Like the lint/build/test
 checks it is advisory until merge-gating is enabled on the repo (see the note in
 `ci.yml`).
