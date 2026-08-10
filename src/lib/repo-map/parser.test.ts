@@ -6,6 +6,8 @@ import {
   repoMapParserCacheSalt,
   REDACTED_LITERAL,
 } from './parser';
+// @ts-expect-error - plain ESM constant registry, no .d.ts (same as parser.ts).
+import { REPO_MAP_OUTPUT } from '../../../scripts/lib/parser-output-versions.mjs';
 
 // Exercises the REAL WASM Tree-sitter grammar (web-tree-sitter@0.20.8 +
 // tree-sitter-wasms@0.1.13). Confirms the pinned pair loads under vitest and
@@ -245,7 +247,9 @@ const localConst = 2;
 
   it('exposes a stable cache salt fingerprinting grammar + extraction semantics', () => {
     const first = repoMapParserCacheSalt();
-    expect(first).toMatch(/^repo-map-output-v\d+:[a-f0-9]{64}$/);
+    expect(first).toMatch(
+      new RegExp(`^repo-map-output-v${REPO_MAP_OUTPUT.version}:[a-f0-9]{64}$`)
+    );
     expect(repoMapParserCacheSalt()).toBe(first);
   });
 });

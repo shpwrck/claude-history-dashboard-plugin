@@ -93,14 +93,18 @@ export const SESSION_BLOB_OUTPUT = {
  * 0007). The cache key is the `version` field of the `PersistedRepoMap`
  * envelope, checked in `isCacheValid()` in src/lib/repo-map/cache.ts. The
  * `contract` is one qualified fingerprint of the envelope, `RepoMapCacheKey`,
- * inner `RepoMap`, and per-file `RepoFile` key sets — the persisted output shape
- * a stale-artifact reader depends on. The fence reads nested keys from their
- * owning TypeScript interfaces rather than trusting a possibly-incomplete
- * JavaScript sample.
+ * inner `RepoMap`, per-file `RepoFile`, and per-symbol `RepoSymbol` key sets —
+ * the persisted output shape a stale-artifact reader depends on. The fence reads
+ * nested keys from their owning TypeScript interfaces rather than trusting a
+ * possibly-incomplete JavaScript sample.
  *
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
+  // v10 (#3744): fingerprint the direct RepoSymbol key set from its owning
+  // TypeScript interface. This turns over v9 so a future per-symbol output field
+  // cannot remain invisible to either canonical or per-file cache invalidation.
+  //
   // v9 (#3745): fingerprint the direct RepoMapCacheKey key set from its owning
   // TypeScript interface. This turns over v8 so a future cache-identity field
   // cannot remain invisible to the cache-invalidation seam.
@@ -108,8 +112,7 @@ export const REPO_MAP_OUTPUT = {
   // v8 (#2740): the forward fence now includes the RepoMap and RepoFile key
   // sets, not only the five-field persisted envelope. This deliberately turns
   // over v7 so a future direct RepoMap or RepoFile key change cannot stay
-  // invisible to the cache-invalidation seam. The deeper RepoSymbol fingerprint
-  // remains the intentionally separate follow-up #3744.
+  // invisible to the cache-invalidation seam.
   //
   // v7 (#2741): the canonical artifact cache key now includes the normalized
   // `owner/repo` remote identity. A remote-only change at a stable HEAD must
@@ -128,7 +131,7 @@ export const REPO_MAP_OUTPUT = {
   // remote identity (`map.repository`) beside `generatedAtGitSha`; pre-field
   // v4 artifacts must regenerate so identity-bound consumers never read a
   // missing field as "no remote" on a root that has one.
-  version: 9,
+  version: 10,
   contract: [
     'envelope.version',
     'envelope.cacheKey',
@@ -150,10 +153,15 @@ export const REPO_MAP_OUTPUT = {
     'map.files[].path',
     'map.files[].mtimeMs',
     'map.files[].symbols',
+    'map.files[].symbols[].name',
+    'map.files[].symbols[].kind',
+    'map.files[].symbols[].exported',
+    'map.files[].symbols[].signature',
+    'map.files[].symbols[].line',
     'map.files[].imports',
   ],
   consumedBy:
-    'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version)',
+    'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version) and src/lib/repo-map/parser.ts repoMapParserCacheSalt() (per-file cache salt)',
   bumpWhen:
     'the persisted repo-map envelope/structural-map shape changes, or generation semantics change persisted structure, ranking, or rendered text',
 };

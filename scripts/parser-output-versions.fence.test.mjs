@@ -125,10 +125,11 @@ test('session-blob version turns over for exact git undo path evidence (#3160)',
 
 // ---------------------------------------------------------------------------
 // REPO_MAP: the output shape includes both the persisted envelope and the
-// RepoMapCacheKey plus the RepoMap / per-file structures nested under `map`.
-// The envelope is sampled from the real producer. The nested key sets are read
-// from their owning TypeScript interfaces so an optional field cannot disappear
-// from the sample and a field added to the type cannot remain invisible here.
+// RepoMapCacheKey plus the RepoMap / per-file / per-symbol structures nested
+// under `map`. The envelope is sampled from the real producer. The nested key
+// sets are read from their owning TypeScript interfaces so an optional field
+// cannot disappear from the sample and a field added to the type cannot remain
+// invisible here.
 // ---------------------------------------------------------------------------
 function persistedRepoMapSample() {
   const map = {
@@ -202,8 +203,76 @@ function directInterfaceKeys(sourceText, interfaceName, sourcePath) {
     .sort();
 }
 
+function assertDirectArrayElementType(
+  sourceText,
+  ownerInterfaceName,
+  propertyName,
+  expectedElementType,
+  sourcePath
+) {
+  const sourceFile = ts.createSourceFile(
+    sourcePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const owners = sourceFile.statements.filter(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) &&
+      statement.name.text === ownerInterfaceName
+  );
+  assert.equal(
+    owners.length,
+    1,
+    `${ownerInterfaceName} must remain one direct interface declaration for the repo-map output fence`
+  );
+  const properties = owners[0].members.filter(
+    (member) =>
+      ts.isPropertySignature(member) &&
+      (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) &&
+      member.name.text === propertyName
+  );
+  assert.equal(
+    properties.length,
+    1,
+    `${ownerInterfaceName}.${propertyName} must remain one direct property for the repo-map output fence`
+  );
+  const propertyType = properties[0].type;
+  assert.ok(
+    propertyType && ts.isArrayTypeNode(propertyType),
+    `${ownerInterfaceName}.${propertyName} must remain a direct ${expectedElementType}[] reference for the repo-map output fence`
+  );
+  const elementType = propertyType.elementType;
+  assert.ok(
+    ts.isTypeReferenceNode(elementType) &&
+      ts.isIdentifier(elementType.typeName) &&
+      (elementType.typeArguments?.length ?? 0) === 0,
+    `${ownerInterfaceName}.${propertyName} must remain a direct ${expectedElementType}[] reference for the repo-map output fence`
+  );
+  assert.equal(
+    elementType.typeName.text,
+    expectedElementType,
+    `${ownerInterfaceName}.${propertyName} must remain a direct ${expectedElementType}[] reference for the repo-map output fence`
+  );
+}
+
 function recomputeRepoMapOutputContract(typesSource, cacheSource) {
   const persisted = persistedRepoMapSample();
+  assertDirectArrayElementType(
+    typesSource,
+    'RepoMap',
+    'files',
+    'RepoFile',
+    REPO_MAP_TYPES_PATH
+  );
+  assertDirectArrayElementType(
+    typesSource,
+    'RepoFile',
+    'symbols',
+    'RepoSymbol',
+    REPO_MAP_TYPES_PATH
+  );
   return [
     ...Object.keys(persisted).map((field) => `envelope.${field}`),
     ...directInterfaceKeys(cacheSource, 'RepoMapCacheKey', REPO_MAP_CACHE_PATH).map(
@@ -214,6 +283,9 @@ function recomputeRepoMapOutputContract(typesSource, cacheSource) {
     ),
     ...directInterfaceKeys(typesSource, 'RepoFile', REPO_MAP_TYPES_PATH).map(
       (field) => `map.files[].${field}`
+    ),
+    ...directInterfaceKeys(typesSource, 'RepoSymbol', REPO_MAP_TYPES_PATH).map(
+      (field) => `map.files[].symbols[].${field}`
     ),
   ].sort();
 }
@@ -334,7 +406,7 @@ function assertRegisteredRepoMapContract(liveContract) {
     `repo-map output shape drifted from the contract registered at ` +
       `REPO_MAP_OUTPUT.version=${REPO_MAP_OUTPUT.version}. If you changed ` +
       'PersistedRepoMap / RepoMapCacheKey in src/lib/repo-map/cache.ts or ' +
-      'RepoMap / RepoFile in src/lib/repo-map/types.ts, update ' +
+      'RepoMap / RepoFile / RepoSymbol in src/lib/repo-map/types.ts, update ' +
       'REPO_MAP_OUTPUT.contract in scripts/lib/parser-output-versions.mjs AND ' +
       'bump REPO_MAP_OUTPUT.version — otherwise stale artifacts are reused.'
   );
@@ -357,7 +429,7 @@ function addedFields(candidate, baseline) {
   return candidate.filter((field) => !baselineSet.has(field));
 }
 
-test('repo-map output contract === live envelope + cache key + RepoMap + RepoFile fields', () => {
+test('repo-map output contract === live envelope + cache key + RepoMap + RepoFile + RepoSymbol fields', () => {
   const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
   const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
   assertRegisteredRepoMapContract(
@@ -372,7 +444,7 @@ test('repo-map contract changes from origin/master require a version rollover', 
   );
 });
 
-test('repo-map fence rejects cache-key, inner-map, or per-file shape drift at the registered version', () => {
+test('repo-map fence rejects cache-key, map, file, or symbol shape drift at the registered version', () => {
   const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
   const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
   const baseline = recomputeRepoMapOutputContract(typesSource, cacheSource);
@@ -388,6 +460,18 @@ test('repo-map fence rejects cache-key, inner-map, or per-file shape drift at th
     addInterfaceProbe(typesSource, 'RepoFile', 'probeField'),
     cacheSource
   );
+  const symbolDrift = recomputeRepoMapOutputContract(
+    addInterfaceProbe(typesSource, 'RepoSymbol', 'documentationProbe'),
+    cacheSource
+  );
+  const symbolReferenceDrift = `${typesSource.replace(
+    '  symbols: RepoSymbol[];',
+    '  symbols: AlternateRepoSymbol[];'
+  )}\n\nexport type AlternateRepoSymbol = RepoSymbol & { documentationProbe?: string };\n`;
+  const fileReferenceDrift = `${typesSource.replace(
+    '  files: RepoFile[];',
+    '  files: AlternateRepoFile[];'
+  )}\n\nexport type AlternateRepoFile = RepoFile & { documentationProbe?: string };\n`;
 
   assert.deepEqual(addedFields(cacheKeyDrift, baseline), [
     'envelope.cacheKey.probeField',
@@ -398,6 +482,17 @@ test('repo-map fence rejects cache-key, inner-map, or per-file shape drift at th
   assert.deepEqual(addedFields(fileDrift, baseline), [
     'map.files[].probeField',
   ]);
+  assert.deepEqual(addedFields(symbolDrift, baseline), [
+    'map.files[].symbols[].documentationProbe',
+  ]);
+  assert.throws(
+    () => recomputeRepoMapOutputContract(symbolReferenceDrift, cacheSource),
+    /RepoFile\.symbols must remain a direct RepoSymbol\[\] reference/
+  );
+  assert.throws(
+    () => recomputeRepoMapOutputContract(fileReferenceDrift, cacheSource),
+    /RepoMap\.files must remain a direct RepoFile\[\] reference/
+  );
   assert.throws(
     () => assertRegisteredRepoMapContract(cacheKeyDrift),
     /REPO_MAP_OUTPUT\.version=.*bump REPO_MAP_OUTPUT\.version/s
@@ -410,13 +505,17 @@ test('repo-map fence rejects cache-key, inner-map, or per-file shape drift at th
     () => assertRegisteredRepoMapContract(fileDrift),
     /REPO_MAP_OUTPUT\.version=.*bump REPO_MAP_OUTPUT\.version/s
   );
+  assert.throws(
+    () => assertRegisteredRepoMapContract(symbolDrift),
+    /REPO_MAP_OUTPUT\.version=.*bump REPO_MAP_OUTPUT\.version/s
+  );
 
   // Prove the less-obvious bypass too: even if an author updates the contract
   // for the new key, retaining the old cache version must still fail.
   assert.throws(
     () =>
       assertVersionMovesWithContract(
-        { version: REPO_MAP_OUTPUT.version, contract: cacheKeyDrift },
+        { version: REPO_MAP_OUTPUT.version, contract: symbolDrift },
         { version: REPO_MAP_OUTPUT.version, contract: baseline }
       ),
     /contract changed.*without a strictly higher integer.*version/s
@@ -431,7 +530,7 @@ test('repo-map fence rejects cache-key, inner-map, or per-file shape drift at th
   );
   assert.doesNotThrow(() =>
     assertVersionMovesWithContract(
-      { version: REPO_MAP_OUTPUT.version + 1, contract: mapDrift },
+      { version: REPO_MAP_OUTPUT.version + 1, contract: symbolDrift },
       { version: REPO_MAP_OUTPUT.version, contract: baseline }
     )
   );
