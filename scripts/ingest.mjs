@@ -65,49 +65,7 @@ const DOC_GRAPH_ROOT = resolve(process.env.CHD_DOC_GRAPH_ROOT || PROJECT_DIR);
 const LIB = join(PROJECT_DIR, 'src', 'lib');
 const { resolveSources } = await import(join(LIB, 'sources.ts'));
 const { filesystemArtifactSource } = await import(join(LIB, 'artifact-source.ts'));
-const DEFAULT_INGEST_CONFIG = resolveIngestConfig(process.env, homedir());
-const {
-  defaultSource: DEFAULT_SOURCE,
-  projects: PROJECTS,
-  claude: CLAUDE,
-  defaultSourceProvenance: DEFAULT_SOURCE_PROVENANCE,
-  claudeJson: CLAUDE_JSON,
-  claudeHome: CLAUDE_HOME,
-  scoped: SCOPED_INGEST,
-  projectConfigRoots: PROJECT_CONFIG_ROOTS,
-  projectSources: PROJECT_SOURCES,
-} = DEFAULT_INGEST_CONFIG;
-export const CHD_CACHE_DIR = DEFAULT_INGEST_CONFIG.cacheDir;
-export const PROJECT_ROOTS = DEFAULT_INGEST_CONFIG.projectRoots;
-const SOURCE_DECORATED_SIGNAL_KEYS = new Set([
-  'tokenData',
-  'toolData',
-  'toolInventories',
-  'timelines',
-  'apiErrors',
-  'agentSettings',
-  'attribution',
-  'runtimeEvents',
-  'churnGeometry',
-  'assistantFeatures',
-  'deceitSignals',
-  'valueFlow',
-]);
-
-function withSourceProvenance(value, provenance = DEFAULT_SOURCE_PROVENANCE) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  return {
-    ...value,
-    sourceId: value.sourceId || provenance.sourceId,
-    harness: value.harness || provenance.harness,
-  };
-}
-
-function maybeDecorateSignalValue(datasetKey, value, provenance = DEFAULT_SOURCE_PROVENANCE) {
-  return SOURCE_DECORATED_SIGNAL_KEYS.has(datasetKey)
-    ? withSourceProvenance(value, provenance)
-    : value;
-}
+const MODULE_DEFAULT_INGEST_CONFIG = resolveIngestConfig(process.env, homedir());
 function splitPathList(raw) {
   if (!raw) return [];
   return String(raw)
@@ -283,6 +241,230 @@ function resolveIngestConfig(env = process.env, homeDir = homedir()) {
     docIssueCacheDir: join(cacheDir, 'doc-issues'),
   });
 }
+
+const _INGEST_MODULE_SLIM_SESSION_TIMELINE = await import(
+  join(LIB, 'parse-timeline.ts')
+);
+const _INGEST_MODULE_LIVE_SESSION_MODULE = await import(join(LIB, 'live-session.ts'));
+const _INGEST_MODULE_PARSE_HISTORY_JSONL = await import(
+  join(LIB, 'parse-history.ts')
+);
+const _INGEST_MODULE_PARSE_PROMPT_ANALYSIS = await import(join(LIB, 'parse-prompt-analysis.ts'));
+const _INGEST_MODULE_COMPUTE_TASK_STEERING = await import(join(LIB, 'parse-steering.ts'));
+const _INGEST_MODULE_SAFE_JSON_STRINGIFY = await import(join(LIB, 'json-safe.ts'));
+const _INGEST_MODULE_BUILD_RECOMMENDATIONS = await import(join(LIB, 'recommendations.ts'));
+const _INGEST_MODULE_APPEND_ADOPTION_RECEIPT = await import(join(LIB, 'adoption-receipts.ts'));
+const _INGEST_MODULE_FILTER_VIEW_DATA_BY_TIME = await import(
+  join(LIB, 'view-scope.ts')
+);
+const _INGEST_MODULE_FILTER_COST_DATA_BY_ROUTE = await import(
+  join(LIB, 'cost-scope.ts')
+);
+const _INGEST_MODULE_RECOMMENDATION_VIEWS_FROM_VIEW_DATA = await import(
+  join(LIB, 'recommendation-view-data.ts')
+);
+const _INGEST_MODULE_ALL_PROJECTS = await import(
+  join(LIB, 'routing-core.ts')
+);
+const _INGEST_MODULE_READ_CHECKPOINT_ANSWER_EFFICACY = await import(
+  join(LIB, 'checkpoint-answer-store.ts')
+);
+const _INGEST_MODULE_PARSE_SHADOW_CALLS = await import(join(LIB, 'parse-shadow-calls.ts'));
+const _INGEST_MODULE_PARSE_WORKFLOWS = await import(join(LIB, 'parse-workflows.ts'));
+const _INGEST_MODULE_EXTERNAL_GUIDANCE_SNAPSHOT_PATHS = await import(
+  join(LIB, 'parse-external-guidance.ts')
+);
+const _INGEST_MODULE_BUILD_MEMORY_STORES = await import(join(LIB, 'parse-memories.ts'));
+const _INGEST_MODULE_BUILD_GIT_OUTCOMES = await import(join(LIB, 'parse-git-outcome.ts'));
+const _INGEST_MODULE_PARSE_LOCAL_CALIBRATION = await import(
+  join(LIB, 'parse-local-calibration.ts')
+);
+const _INGEST_MODULE_BUILD_DOC_GRAPH = await import(join(LIB, 'parse-docs.ts'));
+const _INGEST_MODULE_PARSE_DOC_ISSUE_CONFIG = await import(join(LIB, 'doc-issue-fetch.ts'));
+const _INGEST_MODULE_IS_DOC_ISSUE_SNAPSHOT_USABLE = await import(join(LIB, 'doc-issue-snapshot.ts'));
+const _INGEST_MODULE_DOC_HYGIENE_ARTIFACT_KEY_ENV = await import(join(LIB, 'doc-hygiene-artifact.ts'));
+const _INGEST_MODULE_PARSE_DOCS_MAP = await import(join(LIB, 'parse-docs-map.ts'));
+const _INGEST_MODULE_PARSE_TASKS_DIR = await import(join(LIB, 'parse-tasks.ts'));
+const _INGEST_MODULE_PARSE_TEAMS_DIR = await import(join(LIB, 'parse-teams.ts'));
+const _INGEST_MODULE_PARSE_SESSION_REGISTRY_DIR = await import(
+  join(LIB, 'parse-session-registry.ts')
+);
+const _INGEST_MODULE_PARSE_TELEMETRY_DIR = await import(
+  join(LIB, 'parse-telemetry.ts')
+);
+const _INGEST_MODULE_PARSE_DEBUG_DIR = await import(join(LIB, 'parse-debug.ts'));
+const _INGEST_MODULE_PARSE_STATS_CACHE = await import(join(LIB, 'parse-stats-cache.ts'));
+const _INGEST_MODULE_PARSE_FILE_HISTORY_DIR = await import(join(LIB, 'parse-file-history.ts'));
+const _INGEST_MODULE_PARSE_PLANS_DIR = await import(join(LIB, 'parse-plans.ts'));
+const _INGEST_MODULE_INGEST_MODEL_EVAL_RESULTS = await import(
+  join(LIB, 'model-eval-ingest.ts')
+);
+const _INGEST_MODULE_INGEST_SEMANTIC_INTENT = await import(join(LIB, 'semantic-intent.ts'));
+const _INGEST_MODULE_PARSE_LAST_UPDATE = await import(join(LIB, 'parse-last-update.ts'));
+const _INGEST_MODULE_PARSE_MCP_AUTH_CACHE = await import(join(LIB, 'parse-mcp-auth.ts'));
+const _INGEST_MODULE_PARSE_BACKUPS_DIR = await import(
+  join(LIB, 'parse-backups.ts')
+);
+const _INGEST_MODULE_PARSE_GIT_HUB_REVIEW_SYNC_CONFIG = await import(join(LIB, 'github-review-sync.ts'));
+const _INGEST_MODULE_PARSE_CONFIG_SET = await import(join(LIB, 'parse-config-sections.ts'));
+const _INGEST_MODULE_ATTRIBUTE_CONFIG_SECTIONS = await import(
+  join(LIB, 'parse-config-attribution.ts')
+);
+const _INGEST_MODULE_PARSE_FILE_REREAD = await import(join(LIB, 'parse-file-reread.ts'));
+const _INGEST_MODULE_TOP_CHURN_FILES = await import(join(LIB, 'parse-files.ts'));
+const _INGEST_MODULE_BUILD_REPO_MAP_DATASET = await import(join(LIB, 'parse-repo-map-join.ts'));
+const _INGEST_MODULE_ARTIFACT_PATH_FOR = await import(join(LIB, 'repo-map/cache.ts'));
+const _INGEST_MODULE_CONFIG_LOADER_MODULE = await import(join(LIB, 'config-loader.ts'));
+const _INGEST_MODULE_INIT_TRANSCRIPT_CACHE = await import(
+  join(LIB, 'session-cache.ts')
+);
+const _INGEST_MODULE_SCRUB_VALUE = await import(join(LIB, 'transcript-hygiene.ts'));
+const _INGEST_MODULE_STRIP_TOOL_COMMAND_BODIES = await import(join(LIB, 'parse-tools.ts'));
+const _INGEST_MODULE_SESSION_SIGNALS = await import('./session-blob-row.mjs');
+const _INGEST_MODULE_BUILD_CREATE_INDEX_SQL = await import(join(LIB, 'signals/schema.ts'));
+
+function parseNonNegativeIntEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+export const INGEST_SESSION_MAX_BYTES = Math.max(
+  65_536,
+  Math.min(
+    536_870_912,
+    parseNonNegativeIntEnv('DASHBOARD_INGEST_SESSION_MAX_BYTES', 67_108_864)
+  )
+);
+export const INGEST_SESSION_MAX_PARTS = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_INGEST_SESSION_MAX_PARTS', 10_000)
+  )
+);
+export const INGEST_PROJECT_MAX_DIRS = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_INGEST_PROJECT_MAX_DIRS', 50_000)
+  )
+);
+export const MEMORY_FILE_MAX_BYTES = Math.max(
+  256,
+  Math.min(
+    16_777_216,
+    parseNonNegativeIntEnv('DASHBOARD_MEMORY_FILE_MAX_BYTES', 262_144)
+  )
+);
+export const MEMORY_DIR_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_MEMORY_DIR_MAX_ENTRIES', 50_000)
+  )
+);
+export const INGEST_SESSION_DISCOVERY_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_INGEST_SESSION_DISCOVERY_MAX_ENTRIES', 250_000)
+  )
+);
+export const ARTIFACT_FILE_MAX_BYTES = resolveArtifactFileMaxBytes();
+export const REPO_MAP_ARTIFACT_MAX_ENTRIES = resolveRepoMapArtifactMaxEntries();
+export const ARTIFACT_DIR_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_ARTIFACT_DIR_MAX_ENTRIES', 50_000)
+  )
+);
+export const ARTIFACT_CACHE_JSON_MAX_BYTES = Math.max(
+  1_024,
+  Math.min(
+    536_870_912,
+    parseNonNegativeIntEnv('DASHBOARD_ARTIFACT_CACHE_JSON_MAX_BYTES', 67_108_864)
+  )
+);
+export const DATASET_RESPONSE_MAX_BYTES = Math.max(
+  1_024,
+  Math.min(
+    2_147_483_647,
+    parseNonNegativeIntEnv('DASHBOARD_DATASET_RESPONSE_MAX_BYTES', 536_870_912)
+  )
+);
+export const SIGNATURE_TREE_MAX_ENTRIES = Math.max(
+  1,
+  Math.min(
+    1_000_000,
+    parseNonNegativeIntEnv('DASHBOARD_SIGNATURE_TREE_MAX_ENTRIES', 250_000)
+  )
+);
+export const LIVE_SESSION_MAX_BYTES = _INGEST_MODULE_LIVE_SESSION_MODULE.LIVE_SESSION_MAX_BYTES;
+export const readRejectedFindingIds = _INGEST_MODULE_APPEND_ADOPTION_RECEIPT.readRejectedFindingIds;
+export const readCheckpointAnswerEfficacy = _INGEST_MODULE_READ_CHECKPOINT_ANSWER_EFFICACY.readCheckpointAnswerEfficacy;
+export const CONFIG_FILE_MAX_BYTES = _INGEST_MODULE_CONFIG_LOADER_MODULE.CONFIG_FILE_MAX_BYTES;
+export const CONFIG_RESOURCE_MAX_ENTRIES =
+  _INGEST_MODULE_CONFIG_LOADER_MODULE.CONFIG_RESOURCE_MAX_ENTRIES;
+export const SESSION_SIGNALS = _INGEST_MODULE_SESSION_SIGNALS.SESSION_SIGNALS;
+export const PARSER_SIG_VERSION = 'v6';
+export const DATASET_ASSEMBLY_SCHEMA_VERSION = 37;
+export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 36;
+
+function createIngestInstance({ config = MODULE_DEFAULT_INGEST_CONFIG } = {}) {
+  if (!config || typeof config !== 'object') {
+    throw new TypeError('createIngest requires a resolved config object');
+  }
+  const DEFAULT_INGEST_CONFIG = config;
+  const {
+    defaultSource: DEFAULT_SOURCE,
+    projects: PROJECTS,
+    claude: CLAUDE,
+    defaultSourceProvenance: DEFAULT_SOURCE_PROVENANCE,
+    claudeJson: CLAUDE_JSON,
+    claudeHome: CLAUDE_HOME,
+    scoped: SCOPED_INGEST,
+    projectConfigRoots: PROJECT_CONFIG_ROOTS,
+    projectSources: PROJECT_SOURCES,
+  } = DEFAULT_INGEST_CONFIG;
+  const CHD_CACHE_DIR = DEFAULT_INGEST_CONFIG.cacheDir;
+  const PROJECT_ROOTS = DEFAULT_INGEST_CONFIG.projectRoots;
+
+  // Deliberately preserve the legacy body's original indentation. Reindenting
+  // 5,000+ unchanged lines would hide the state-ownership move in review.
+// perf-index-contract: source-decorated-signal-keys always-consumed: every signal decoration tests this fixed key set before returning its value
+const SOURCE_DECORATED_SIGNAL_KEYS = new Set([
+  'tokenData',
+  'toolData',
+  'toolInventories',
+  'timelines',
+  'apiErrors',
+  'agentSettings',
+  'attribution',
+  'runtimeEvents',
+  'churnGeometry',
+  'assistantFeatures',
+  'deceitSignals',
+  'valueFlow',
+]);
+
+function withSourceProvenance(value, provenance = DEFAULT_SOURCE_PROVENANCE) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return {
+    ...value,
+    sourceId: value.sourceId || provenance.sourceId,
+    harness: value.harness || provenance.harness,
+  };
+}
+
+function maybeDecorateSignalValue(datasetKey, value, provenance = DEFAULT_SOURCE_PROVENANCE) {
+  return SOURCE_DECORATED_SIGNAL_KEYS.has(datasetKey)
+    ? withSourceProvenance(value, provenance)
+    : value;
+}
+
 
 // Per-source member attribution (#1999). The push-ingest endpoint stamps the shipper's
 // member/displayName/repo out of band at `<root>/.sources/<sourceId>/_source.json` (root =
@@ -538,56 +720,14 @@ const DB_DIR_MODE = 0o700;
 const DB_FILE_MODE = 0o600;
 const READ_CHUNK_BYTES = 65_536;
 
-function parseNonNegativeIntEnv(name, fallback) {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
-  return parsed;
-}
+// Process-wide cap parsing is declared above the instance boundary.
 
-export const INGEST_SESSION_MAX_BYTES = Math.max(
-  65_536,
-  Math.min(
-    536_870_912,
-    parseNonNegativeIntEnv('DASHBOARD_INGEST_SESSION_MAX_BYTES', 67_108_864)
-  )
-);
-export const INGEST_SESSION_MAX_PARTS = Math.max(
-  1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_INGEST_SESSION_MAX_PARTS', 10_000)
-  )
-);
-export const INGEST_PROJECT_MAX_DIRS = Math.max(
-  1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_INGEST_PROJECT_MAX_DIRS', 50_000)
-  )
-);
-export const MEMORY_FILE_MAX_BYTES = Math.max(
-  256,
-  Math.min(
-    16_777_216,
-    parseNonNegativeIntEnv('DASHBOARD_MEMORY_FILE_MAX_BYTES', 262_144)
-  )
-);
-export const MEMORY_DIR_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_MEMORY_DIR_MAX_ENTRIES', 50_000)
-  )
-);
-export const INGEST_SESSION_DISCOVERY_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_INGEST_SESSION_DISCOVERY_MAX_ENTRIES', 250_000)
-  )
-);
+// INGEST_SESSION_MAX_BYTES is a process-wide exported constant declared above.
+// INGEST_SESSION_MAX_PARTS is a process-wide exported constant declared above.
+// INGEST_PROJECT_MAX_DIRS is a process-wide exported constant declared above.
+// MEMORY_FILE_MAX_BYTES is a process-wide exported constant declared above.
+// MEMORY_DIR_MAX_ENTRIES is a process-wide exported constant declared above.
+// INGEST_SESSION_DISCOVERY_MAX_ENTRIES is a process-wide exported constant declared above.
 // ARTIFACT_FILE_MAX_BYTES + REPO_MAP_ARTIFACT_MAX_ENTRIES are owned by the
 // host-producer seam (./lib/host-producer.mjs) so every producer (ingest,
 // repo-map-refresh, the #280 bridge) shares one cap + clamp. Evaluated through
@@ -595,36 +735,12 @@ export const INGEST_SESSION_DISCOVERY_MAX_ENTRIES = Math.max(
 // fresh `?fixture=` re-import of ingest picks up an env override — the
 // env-override test contract (#2077). server.mjs's existing imports of these
 // names are unchanged.
-export const ARTIFACT_FILE_MAX_BYTES = resolveArtifactFileMaxBytes();
-export const REPO_MAP_ARTIFACT_MAX_ENTRIES = resolveRepoMapArtifactMaxEntries();
-export const ARTIFACT_DIR_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_ARTIFACT_DIR_MAX_ENTRIES', 50_000)
-  )
-);
-export const ARTIFACT_CACHE_JSON_MAX_BYTES = Math.max(
-  1_024,
-  Math.min(
-    536_870_912,
-    parseNonNegativeIntEnv('DASHBOARD_ARTIFACT_CACHE_JSON_MAX_BYTES', 67_108_864)
-  )
-);
-export const DATASET_RESPONSE_MAX_BYTES = Math.max(
-  1_024,
-  Math.min(
-    2_147_483_647,
-    parseNonNegativeIntEnv('DASHBOARD_DATASET_RESPONSE_MAX_BYTES', 536_870_912)
-  )
-);
-export const SIGNATURE_TREE_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('DASHBOARD_SIGNATURE_TREE_MAX_ENTRIES', 250_000)
-  )
-);
+// ARTIFACT_FILE_MAX_BYTES is a process-wide exported constant declared above.
+// REPO_MAP_ARTIFACT_MAX_ENTRIES is a process-wide exported constant declared above.
+// ARTIFACT_DIR_MAX_ENTRIES is a process-wide exported constant declared above.
+// ARTIFACT_CACHE_JSON_MAX_BYTES is a process-wide exported constant declared above.
+// DATASET_RESPONSE_MAX_BYTES is a process-wide exported constant declared above.
+// SIGNATURE_TREE_MAX_ENTRIES is a process-wide exported constant declared above.
 // Live config inputs assembled into the `liveConfig` dataset bundle. Every
 // file/dir below is optional — assembleLiveConfig() degrades to empty values
 // when a source is missing or malformed, so a partial config never sinks the
@@ -660,22 +776,18 @@ const MCP_AUTH = DEFAULT_INGEST_CONFIG.mcpAuth;
 const BACKUPS_DIR = DEFAULT_INGEST_CONFIG.backupsDir;
 const REVIEW_EVENTS_CACHE = DEFAULT_INGEST_CONFIG.reviewEventsCache;
 
-const { slimSessionTimeline } = await import(
-  join(LIB, 'parse-timeline.ts')
-);
+const { slimSessionTimeline } = _INGEST_MODULE_SLIM_SESSION_TIMELINE;
 // Pure Live Session compute (#627 slice 2) — file-based, server+client
 // importable. computeLiveSession() below is a thin wrapper that injects the
 // session-discovery dependency (listSessionsCached) so this module never has to
 // import ingest.mjs (no cycle).
-const liveSessionModule = await import(join(LIB, 'live-session.ts'));
+const liveSessionModule = _INGEST_MODULE_LIVE_SESSION_MODULE;
 const { liveSession } = liveSessionModule;
-export const LIVE_SESSION_MAX_BYTES = liveSessionModule.LIVE_SESSION_MAX_BYTES;
-const { parseHistoryJsonl, unionHistoryParts, groupBySessions, groupByProjects } = await import(
-  join(LIB, 'parse-history.ts')
-);
-const { parsePromptAnalysis } = await import(join(LIB, 'parse-prompt-analysis.ts'));
-const { computeTaskSteering } = await import(join(LIB, 'parse-steering.ts'));
-const { safeJsonStringify } = await import(join(LIB, 'json-safe.ts'));
+// LIVE_SESSION_MAX_BYTES is a process-wide exported constant declared above.
+const { parseHistoryJsonl, unionHistoryParts, groupBySessions, groupByProjects } = _INGEST_MODULE_PARSE_HISTORY_JSONL;
+const { parsePromptAnalysis } = _INGEST_MODULE_PARSE_PROMPT_ANALYSIS;
+const { computeTaskSteering } = _INGEST_MODULE_COMPUTE_TASK_STEERING;
+const { safeJsonStringify } = _INGEST_MODULE_SAFE_JSON_STRINGIFY;
 // Pure recommendation engine (no DOM/React) — server-importable so the
 // /api/recommendations.json route can mirror the UI's recs (#126).
 const {
@@ -686,38 +798,28 @@ const {
   backfillReclaimSavings,
   computeSuppressionTransitions,
   suppressRejectedRecommendations,
-} = await import(join(LIB, 'recommendations.ts'));
+} = _INGEST_MODULE_BUILD_RECOMMENDATIONS;
 // Recs adoption-receipt store (#575/#576): reader for the prior SURFACED/
 // SUPPRESSED index and the allowlist-drop, killswitch-aware appender.
 // `readRejectedFindingIds` (#2206) is the user-reject suppression query,
 // re-exported below so the off-main-thread recs worker can read it too.
 const { appendAdoptionReceipt, readAdoptionReceiptIndex, readRejectedFindingIds } =
-  await import(join(LIB, 'adoption-receipts.ts'));
-export { readRejectedFindingIds };
+  _INGEST_MODULE_APPEND_ADOPTION_RECEIPT;
+// readRejectedFindingIds is re-exported from the shared parser dependency above.
 // #2718: server-safe masthead + Cost-route filter boundary (extracted from the
 // React view layer into a React-free module) and the canonical ViewData -> engine
 // input mapping. The scoped recommendation surfaces reproduce the browser's exact
 // global-masthead-then-route filter semantics by running the SAME pure code the
 // UI does — parity is structural, not a hand-kept reimplementation.
-const { filterViewDataByTime, filterViewDataByProject } = await import(
-  join(LIB, 'view-scope.ts')
-);
-const { filterCostDataByRoute, reclaimScopedInput } = await import(
-  join(LIB, 'cost-scope.ts')
-);
-const { recommendationViewsFromViewData } = await import(
-  join(LIB, 'recommendation-view-data.ts')
-);
-const { ALL_PROJECTS, DEFAULT_TIME_PRESET } = await import(
-  join(LIB, 'routing-core.ts')
-);
+const { filterViewDataByTime, filterViewDataByProject } = _INGEST_MODULE_FILTER_VIEW_DATA_BY_TIME;
+const { filterCostDataByRoute, reclaimScopedInput } = _INGEST_MODULE_FILTER_COST_DATA_BY_ROUTE;
+const { recommendationViewsFromViewData } = _INGEST_MODULE_RECOMMENDATION_VIEWS_FROM_VIEW_DATA;
+const { ALL_PROJECTS, DEFAULT_TIME_PRESET } = _INGEST_MODULE_ALL_PROJECTS;
 // Durable checkpoint answer-time efficacy reader (#2519). Kept outside the
 // dataset/hash path: this dashboard-owned telemetry is queried explicitly and
 // never changes transcript-derived dataset freshness.
-const { readCheckpointAnswerEfficacy } = await import(
-  join(LIB, 'checkpoint-answer-store.ts')
-);
-export { readCheckpointAnswerEfficacy };
+const { readCheckpointAnswerEfficacy } = _INGEST_MODULE_READ_CHECKPOINT_ANSWER_EFFICACY;
+// readCheckpointAnswerEfficacy is re-exported from the shared parser dependency above.
 // Shadow-calls experiment ledger (epic #513) — per-axis aggregate feeds the
 // workflow.shadow-axis-wins detector (#518/#523).
 const {
@@ -725,22 +827,20 @@ const {
   parseProofReceiptCells,
   modelEvalSourceCell,
   mergeExternalSourceCells,
-} = await import(join(LIB, 'parse-shadow-calls.ts'));
-const { parseWorkflows } = await import(join(LIB, 'parse-workflows.ts'));
+} = _INGEST_MODULE_PARSE_SHADOW_CALLS;
+const { parseWorkflows } = _INGEST_MODULE_PARSE_WORKFLOWS;
 // External guidance snapshots (#1302, epic #656) — repo-committed, static
 // reference docs the engine attaches to fired recs as "Learn More" links.
 // Read from the repo's data dir (NOT ~/.claude); never fetched at runtime.
 const {
   externalGuidanceSnapshotPaths,
   readExternalGuidanceSnapshots,
-} = await import(
-  join(LIB, 'parse-external-guidance.ts')
-);
+} = _INGEST_MODULE_EXTERNAL_GUIDANCE_SNAPSHOT_PATHS;
 // Per-project agent memory store + MEMORY.md index (#1965/#1990). Built fresh
 // per recs assemble from a local memory walk and threaded into
 // `RecommendationInput.memoryStores` so the #1779 memory-hygiene detector fires
 // on the real local store instead of staying dark in production.
-const { buildMemoryStores } = await import(join(LIB, 'parse-memories.ts'));
+const { buildMemoryStores } = _INGEST_MODULE_BUILD_MEMORY_STORES;
 // Git delivery-outcome signal (#1757, epic #1911). Pure label/parse logic lives
 // in parse-git-outcome.ts (no network, so it stays safe under the zero-deps
 // runtime import guard); the live `gh`/GitHub-API fetch that feeds it happens
@@ -749,13 +849,11 @@ const {
   buildGitOutcomes,
   gitOutcomesReposFromEnv,
   collectGitOutcomePullRequests,
-} = await import(join(LIB, 'parse-git-outcome.ts'));
+} = _INGEST_MODULE_BUILD_GIT_OUTCOMES;
 // Tier B per-task-class calibration report (#2318). The parser is PURE (takes the
 // JSON text, no fs/network), safe under the zero-deps runtime import guard; the
 // local file read happens HERE, server-side, in readLocalCalibration() below.
-const { parseLocalCalibration } = await import(
-  join(LIB, 'parse-local-calibration.ts')
-);
+const { parseLocalCalibration } = _INGEST_MODULE_PARSE_LOCAL_CALIBRATION;
 // Repo doc graph (#2257, epic #2256). buildDocGraph walks this repo's own
 // Markdown (root *.md + docs/**) into a SCIP-style node/edge graph the
 // doc-hygiene detector reads off `RecommendationInput.docGraph`. Pure over the
@@ -769,7 +867,7 @@ const {
   docGraphGitWorkingTreeSignature,
   docGraphSourcePaths,
   DOC_GRAPH_MAX_FILE_BYTES,
-} = await import(join(LIB, 'parse-docs.ts'));
+} = _INGEST_MODULE_BUILD_DOC_GRAPH;
 // Opt-in GitHub issue-state snapshot (#2710, epic #2256). Ingest only READS the
 // validated cache the server preamble refreshes — it NEVER makes a network call.
 // With CHD_DOC_ISSUES unset the config is disabled and the read returns null, so
@@ -780,14 +878,14 @@ const {
   refreshDocIssueSnapshot,
   isDocIssueSnapshotRetired,
   retireDocIssueSnapshot,
-} = await import(join(LIB, 'doc-issue-fetch.ts'));
+} = _INGEST_MODULE_PARSE_DOC_ISSUE_CONFIG;
 const {
   isDocIssueSnapshotUsable,
   canonicalRefSet,
   docIssueSnapshotFreshnessBoundaryMs,
   docIssueSnapshotIdentity,
   docIssueSnapshotUsableThroughMs,
-} = await import(join(LIB, 'doc-issue-snapshot.ts'));
+} = _INGEST_MODULE_IS_DOC_ISSUE_SNAPSHOT_USABLE;
 // Packaged per-doc Git-time manifest (#2707/#2746): capture one lazy snapshot
 // and thread its identity/raw bytes/parsed join through each rebuild. The
 // ordinary source gate remains stat-only because snapshot loading is lazy.
@@ -805,7 +903,7 @@ const {
   DOC_HYGIENE_EXPECTED_COMMIT_ENV,
   docHygieneArtifactFilename,
   parseDocHygieneArtifact,
-} = await import(join(LIB, 'doc-hygiene-artifact.ts'));
+} = _INGEST_MODULE_DOC_HYGIENE_ARTIFACT_KEY_ENV;
 // Versioned docs-map contract (#2709, epic #2256). parseDocsMap is the PURE,
 // browser-safe strict validator (whole-map reject to null); the bounded read
 // and the Git identity wrap live HERE, server-side, mirroring the
@@ -818,7 +916,7 @@ const {
   isRepositorySlug,
   DOCS_MAP_MAX_FILE_BYTES,
   DOCS_MAP_RELPATH,
-} = await import(join(LIB, 'parse-docs-map.ts'));
+} = _INGEST_MODULE_PARSE_DOCS_MAP;
 // The source-bound declaration rides the SAME corpus root as the doc graph,
 // so its wrapper identity always describes the checkout whose docs are being
 // analyzed. Location comes from the exported seam constant (parity-fenced).
@@ -944,14 +1042,16 @@ function pathInsideReal(parent, child) {
   return child === parent || child.startsWith(parent + sep);
 }
 
-export function memoryOpenCapabilities(constants = fsConstants) {
+// Default-instance source marker: export function memoryOpenCapabilities(
+function memoryOpenCapabilities(constants = fsConstants) {
   return {
     noFollow: Number.isInteger(constants.O_NOFOLLOW),
     nonBlocking: Number.isInteger(constants.O_NONBLOCK),
   };
 }
 
-export function memoryOpenFlags(constants = fsConstants) {
+// Default-instance source marker: export function memoryOpenFlags(
+function memoryOpenFlags(constants = fsConstants) {
   const capabilities = memoryOpenCapabilities(constants);
   return (
     constants.O_RDONLY |
@@ -960,7 +1060,8 @@ export function memoryOpenFlags(constants = fsConstants) {
   );
 }
 
-export function memoryOpenedPathMatches(
+// Default-instance source marker: export function memoryOpenedPathMatches(
+function memoryOpenedPathMatches(
   realParent,
   selectedPath,
   openedPath,
@@ -1236,7 +1337,8 @@ function readSelectedMemoryFileCappedSync(selected) {
 // Walk every <PROJECTS>/<slug>/memory/ dir and build the per-project store,
 // including the fixed-depth archive tier. Read fresh per assemble; the same
 // selection feeds sourceSignature() and ingest().contentHash.
-export function readMemoryStores() {
+// Default-instance source marker: export function readMemoryStores(
+function readMemoryStores() {
   const projects = [];
   let realProjectsRoot;
   try {
@@ -1311,17 +1413,20 @@ let expectedDocGraphGitWorkingTreeSignature = null;
 let lastSourceSignatureDocGraphGitWorkingTreeSignature = null;
 
 /** Exact Git status identity observed while a dataset's graph was assembled. */
-export function datasetDocGraphGitWorkingTreeSignature(dataset) {
+// Default-instance source marker: export function datasetDocGraphGitWorkingTreeSignature(
+function datasetDocGraphGitWorkingTreeSignature(dataset) {
   return docGraphGitWorkingTreeSignature(dataset?.docGraph);
 }
 
 /** Exact current Git status identity for server cache trust-state gates. */
-export function docGraphGitWorkingTreeSignatureForServer() {
+// Default-instance source marker: export function docGraphGitWorkingTreeSignatureForServer(
+function docGraphGitWorkingTreeSignatureForServer() {
   return docGraphGitIdentity(DOC_GRAPH_ROOT).workingTreeSignature;
 }
 
 /** Git status identity sampled inside the most recent sourceSignature() value. */
-export function docGraphGitWorkingTreeSignatureFromLastSourceGate() {
+// Default-instance source marker: export function docGraphGitWorkingTreeSignatureFromLastSourceGate(
+function docGraphGitWorkingTreeSignatureFromLastSourceGate() {
   return lastSourceSignatureDocGraphGitWorkingTreeSignature;
 }
 
@@ -1354,7 +1459,8 @@ function readDocGraph(docGitTimesSnapshot = null) {
 // exact graph whose history/status acquisition failed or whose status identity
 // differed from the content-hash gate. The Symbol is non-enumerable, so served
 // JSON stays byte-identical while every server/worker cache can refuse it.
-export function datasetHasTransientDocGraphFailure(dataset) {
+// Default-instance source marker: export function datasetHasTransientDocGraphFailure(
+function datasetHasTransientDocGraphFailure(dataset) {
   return docGraphHasTransientGitHistoryFailure(dataset?.docGraph);
 }
 
@@ -1452,7 +1558,8 @@ function docIssueSnapshotUsableForIngest(config, snapshot, now) {
 // the subsequent SYNCHRONOUS assembleDataset() read sees a fresh snapshot. It is
 // NEVER called by assembleDataset itself, so the dataset assembly path stays
 // network-free. No-op (null) when CHD_DOC_ISSUES is unset or on any failure.
-export async function refreshDocIssueSnapshotForServer() {
+// Default-instance source marker: export async function refreshDocIssueSnapshotForServer()
+async function refreshDocIssueSnapshotForServer() {
   const config = docIssueConfig();
   if (!config.enabled) return null;
   try {
@@ -1547,7 +1654,8 @@ function docIssueCacheDescriptorForServer(now = Date.now()) {
   };
 }
 
-export function docIssueSnapshotCacheStateForServer() {
+// Default-instance source marker: export function docIssueSnapshotCacheStateForServer(
+function docIssueSnapshotCacheStateForServer() {
   return docIssueCacheDescriptorForServer().state;
 }
 
@@ -1555,7 +1663,8 @@ export function docIssueSnapshotCacheStateForServer() {
 // from a pre-build cache probe. Every server cache gate compares this state to
 // both its start/completion state, closing A -> B -> A clock/file races where
 // the surrounding signatures match but the serialized body observed B.
-export function docIssueSnapshotCacheStateFromDataset(dataset) {
+// Default-instance source marker: export function docIssueSnapshotCacheStateFromDataset(
+function docIssueSnapshotCacheStateFromDataset(dataset) {
   const snapshot = dataset?.docIssueSnapshot;
   if (!snapshot) return null;
   const usableThrough = docIssueSnapshotUsableThroughMs(snapshot);
@@ -1812,6 +1921,8 @@ function docsMapHasDuplicateDocumentKeys(raw, map) {
   return false;
 }
 
+// #3678 factory note: "Process-level" below now means one memo per ingest
+// instance; the legacy default still owns exactly one instance per process.
 // Process-level memo (the stat-gated-cache pattern, #1573): identity, bytes,
 // and parse recompute only when the observable fingerprint moves. The
 // fingerprint is statSync-only — the docs-map file stat, the checkout's git
@@ -1997,7 +2108,8 @@ function hashDocsMapContent(hash) {
 // intentionally carries no .git), so that explicit locator bridges namespaces
 // without weakening identity/freshness validation. Missing/malformed/stale
 // artifacts are null and never sink the recommendations endpoint.
-export function readDocHygieneArtifact(
+// Default-instance source marker: export function readDocHygieneArtifact(
+function readDocHygieneArtifact(
   root = PROJECT_DIR,
   artifactDir = DOC_HYGIENE_DIR,
   options = {}
@@ -2172,45 +2284,35 @@ function readLocalCalibration() {
 // #539 artifact parsers (server-only; each uses node:fs to walk a top-level
 // ~/.claude path). Imported here so assembleDataset can fold them into the
 // dataset like liveConfig/shadowCalls.
-const { parseTasksDir } = await import(join(LIB, 'parse-tasks.ts'));
-const { parseTeamsDir, analyzeTeams } = await import(join(LIB, 'parse-teams.ts'));
-const { parseSessionRegistryDir } = await import(
-  join(LIB, 'parse-session-registry.ts')
-);
-const { parseTelemetryDir, parseTelemetryLatencyDir } = await import(
-  join(LIB, 'parse-telemetry.ts')
-);
-const { parseDebugDir } = await import(join(LIB, 'parse-debug.ts'));
-const { parseStatsCache } = await import(join(LIB, 'parse-stats-cache.ts'));
-const { parseFileHistoryDir } = await import(join(LIB, 'parse-file-history.ts'));
-const { parsePlansDir } = await import(join(LIB, 'parse-plans.ts'));
-const { ingestModelEvalResults } = await import(
-  join(LIB, 'model-eval-ingest.ts')
-);
+const { parseTasksDir } = _INGEST_MODULE_PARSE_TASKS_DIR;
+const { parseTeamsDir, analyzeTeams } = _INGEST_MODULE_PARSE_TEAMS_DIR;
+const { parseSessionRegistryDir } = _INGEST_MODULE_PARSE_SESSION_REGISTRY_DIR;
+const { parseTelemetryDir, parseTelemetryLatencyDir } = _INGEST_MODULE_PARSE_TELEMETRY_DIR;
+const { parseDebugDir } = _INGEST_MODULE_PARSE_DEBUG_DIR;
+const { parseStatsCache } = _INGEST_MODULE_PARSE_STATS_CACHE;
+const { parseFileHistoryDir } = _INGEST_MODULE_PARSE_FILE_HISTORY_DIR;
+const { parsePlansDir } = _INGEST_MODULE_PARSE_PLANS_DIR;
+const { ingestModelEvalResults } = _INGEST_MODULE_INGEST_MODEL_EVAL_RESULTS;
 // #2574 semantic-intent receipts. Imported alongside its model-eval sibling:
 // the module is pure, dependency-free, and side-effect-free, so importing it
 // costs nothing and changes no output. The OPT-IN gate that matters is on the
 // I/O — with CHD_SEMANTIC_INTENT unset nothing here is ever called, no path is
 // stat'ed or read, and `semanticIntent` ships null.
-const { ingestSemanticIntent } = await import(join(LIB, 'semantic-intent.ts'));
-const { parseLastUpdate } = await import(join(LIB, 'parse-last-update.ts'));
-const { parseMcpAuthCache } = await import(join(LIB, 'parse-mcp-auth.ts'));
-const { parseBackupsDir, diffConfigDrift } = await import(
-  join(LIB, 'parse-backups.ts')
-);
+const { ingestSemanticIntent } = _INGEST_MODULE_INGEST_SEMANTIC_INTENT;
+const { parseLastUpdate } = _INGEST_MODULE_PARSE_LAST_UPDATE;
+const { parseMcpAuthCache } = _INGEST_MODULE_PARSE_MCP_AUTH_CACHE;
+const { parseBackupsDir, diffConfigDrift } = _INGEST_MODULE_PARSE_BACKUPS_DIR;
 const {
   parseGitHubReviewSyncConfig,
   readGitHubReviewEventsCache,
   refreshGitHubReviewEvents,
   gitHubReviewEventsCacheSignature,
-} = await import(join(LIB, 'github-review-sync.ts'));
-const { parseConfigSet } = await import(join(LIB, 'parse-config-sections.ts'));
-const { attributeConfigSections } = await import(
-  join(LIB, 'parse-config-attribution.ts')
-);
-const { parseFileReread } = await import(join(LIB, 'parse-file-reread.ts'));
-const { topChurnFiles } = await import(join(LIB, 'parse-files.ts'));
-const { buildRepoMapDataset } = await import(join(LIB, 'parse-repo-map-join.ts'));
+} = _INGEST_MODULE_PARSE_GIT_HUB_REVIEW_SYNC_CONFIG;
+const { parseConfigSet } = _INGEST_MODULE_PARSE_CONFIG_SET;
+const { attributeConfigSections } = _INGEST_MODULE_ATTRIBUTE_CONFIG_SECTIONS;
+const { parseFileReread } = _INGEST_MODULE_PARSE_FILE_REREAD;
+const { topChurnFiles } = _INGEST_MODULE_TOP_CHURN_FILES;
+const { buildRepoMapDataset } = _INGEST_MODULE_BUILD_REPO_MAP_DATASET;
 // Canonical artifact-path encoding (ADR 0007 producer/consumer seam): share the
 // exact helper the producer (scripts/repo-map-generate.mjs) writes through, so the
 // consumer can't drift from it. #719/#1004.
@@ -2219,11 +2321,11 @@ const { buildRepoMapDataset } = await import(join(LIB, 'parse-repo-map-join.ts')
 // `web-tree-sitter` devDependency. The server runtime image ships no
 // node_modules, so pulling the barrel here crash-loops boot (ERR_MODULE_NOT_FOUND).
 // artifactPathFor lives in cache.ts (node builtins + a type only). #1013.
-const { artifactPathFor, unwrapPersistedRepoMap } = await import(join(LIB, 'repo-map/cache.ts'));
+const { artifactPathFor, unwrapPersistedRepoMap } = _INGEST_MODULE_ARTIFACT_PATH_FOR;
 // Live-config assembly (#627 slice 1) — extracted into src/lib/config-loader.ts.
 // It owns the settings.json validator wiring (#167) and the settings/MCP/
 // plugins/resources readers; ingest.mjs just calls assembleLiveConfig().
-const configLoaderModule = await import(join(LIB, 'config-loader.ts'));
+const configLoaderModule = _INGEST_MODULE_CONFIG_LOADER_MODULE;
 const {
   assembleLiveConfig,
   readTextFileCappedSync,
@@ -2234,9 +2336,8 @@ const {
   hostEnvironmentObservation,
   hostEnvironmentObservationSignature,
 } = configLoaderModule;
-export const CONFIG_FILE_MAX_BYTES = configLoaderModule.CONFIG_FILE_MAX_BYTES;
-export const CONFIG_RESOURCE_MAX_ENTRIES =
-  configLoaderModule.CONFIG_RESOURCE_MAX_ENTRIES;
+// CONFIG_FILE_MAX_BYTES is a process-wide exported constant declared above.
+// CONFIG_RESOURCE_MAX_ENTRIES is a process-wide exported constant declared above.
 // Capture once: server-side scoped imports temporarily mutate process.env, and
 // the content hash must use the exact same launch snapshot as assembly.
 const LIVE_CONFIG_ENVIRONMENT_OBSERVATION = SCOPED_INGEST
@@ -2262,22 +2363,26 @@ const workflowFreshnessTracker = createWorkflowFreshnessTracker(PROJECT_ROOTS);
 // instants when a manifest changes between ingest() and assembleDataset().
 let datasetSnapshotWorkflowProjection = null;
 
-/** Test-only lifecycle/state seam; production owns one tracker for module life. */
-export function workflowFreshnessStateForTests() {
+/** Test-only lifecycle/state seam; each ingest instance owns one tracker. */
+// Default-instance source marker: export function workflowFreshnessStateForTests(
+function workflowFreshnessStateForTests() {
   return workflowFreshnessTracker.debugState();
 }
 
-export function disposeWorkflowFreshnessForTests() {
+// Default-instance source marker: export function disposeWorkflowFreshnessForTests(
+function disposeWorkflowFreshnessForTests() {
   workflowFreshnessTracker.dispose();
 }
 
 /** Release scoped-ingest watcher/timer resources when its server state is evicted. */
-export function suspendWorkflowFreshnessForServer() {
+// Default-instance source marker: export function suspendWorkflowFreshnessForServer(
+function suspendWorkflowFreshnessForServer() {
   workflowFreshnessTracker.dispose();
 }
 
 /** Cheap current-state gate for the recommendations response cache (#2554). */
-export function stopHookConfigState() {
+// Default-instance source marker: export function stopHookConfigState(
+function stopHookConfigState() {
   return readStopHookConfigState({
     claudeDir: CLAUDE,
     homeDir: CLAUDE_HOME,
@@ -2288,7 +2393,8 @@ export function stopHookConfigState() {
 }
 
 /** Current bounded canonical-containment state for cache hard-gating. */
-export function recursiveRemovalSafetyStateForServer() {
+// Default-instance source marker: export function recursiveRemovalSafetyStateForServer(
+function recursiveRemovalSafetyStateForServer() {
   return recursiveRemovalSafetySignature({
     claudeDir: CLAUDE,
     homeDir: CLAUDE_HOME,
@@ -2298,7 +2404,8 @@ export function recursiveRemovalSafetyStateForServer() {
 }
 
 /** Exact canonical-containment state serialized in an assembled dataset. */
-export function recursiveRemovalSafetyStateFromDataset(dataset) {
+// Default-instance source marker: export function recursiveRemovalSafetyStateFromDataset(
+function recursiveRemovalSafetyStateFromDataset(dataset) {
   return recursiveRemovalSafetySignatureFromLiveConfig(dataset.liveConfig);
 }
 
@@ -2324,22 +2431,20 @@ const GITHUB_REVIEW_SYNC_CONFIG = parseGitHubReviewSyncConfig(process.env, {
 let reviewEventsRefreshPromise = null;
 // Session-transcript BLOB cache (#627 slice 3) — the session_transcript schema
 // + its four prepared statements, extracted into src/lib/session-cache.ts.
-// initTranscriptCache(db) prepares them against THIS module's shared db handle
+// initTranscriptCache(db) prepares them against THIS instance's db handle
 // (DI on the existing connection) and owns the CREATE TABLE. SQL + logic are
 // byte-identical; the dataset read path (session_blob) is untouched.
 // #627 slice 4 adds the session_blob per-session signal cache to the same
 // module (persistence kept together): initSessionBlobCache(db, SESSION_SIGNALS)
 // owns the generated session_blob schema + additive migration loop and prepares
 // its six statements (selSig/allIds/del/allContentHashes/upsert/selAll) against
-// THIS module's shared db handle. ingestOne/assembleDataset/the prune loop call
+// THIS instance's db handle. ingestOne/assembleDataset/the prune loop call
 // blobCache.* instead of inline statements. SQL + arg order are byte-identical.
-const { initTranscriptCache, initSessionBlobCache } = await import(
-  join(LIB, 'session-cache.ts')
-);
+const { initTranscriptCache, initSessionBlobCache } = _INGEST_MODULE_INIT_TRANSCRIPT_CACHE;
 // Transcript secret-scrubber (#204) — distinct from config-hygiene.ts; redacts
 // credential-shaped substrings out of assistant prose before it is persisted.
-const { scrubValue } = await import(join(LIB, 'transcript-hygiene.ts'));
-const { stripToolCommandBodies } = await import(join(LIB, 'parse-tools.ts'));
+const { scrubValue } = _INGEST_MODULE_SCRUB_VALUE;
+const { stripToolCommandBodies } = _INGEST_MODULE_STRIP_TOOL_COMMAND_BODIES;
 // Session-signal descriptor (#524, slice 1) + pure row parser (#855 prototype).
 // `session-blob-row.mjs` owns the read/parse/stringify/content_hash row builder
 // without opening SQLite, so the worker prototype can reuse the exact parser
@@ -2349,14 +2454,14 @@ const {
   parseSessionBlobRowFromDisk: parseSessionBlobRowFromDiskPure,
   sessionFileIdentities,
   sessionFileSignature: sessionFileSignaturePure,
-} = await import('./session-blob-row.mjs');
-export { SESSION_SIGNALS };
+} = _INGEST_MODULE_SESSION_SIGNALS;
+// SESSION_SIGNALS is re-exported from the shared parser dependency above.
 // Session-blob schema generation (#524, slice 2). The session_blob CREATE
 // TABLE, additive ALTER migration list, and INSERT/upsert SQL (+ canonical
 // upsert column order) now live behind initSessionBlobCache() in
 // src/lib/session-cache.ts (#627 slice 4); ingest.mjs only still needs the
 // project-index DDL here (the index create stays in this module).
-const { buildCreateIndexSql } = await import(join(LIB, 'signals/schema.ts'));
+const { buildCreateIndexSql } = _INGEST_MODULE_BUILD_CREATE_INDEX_SQL;
 
 function tightenDbPath(path) {
   if (!path || path === ':memory:') return;
@@ -2381,7 +2486,7 @@ function tightenDbFile(path) {
 tightenDbPath(DB_PATH);
 const db = new DatabaseSync(DB_PATH);
 tightenDbFile(DB_PATH);
-// #627 slice 3: the session_transcript BLOB cache, bound to the shared `db`
+// #627 slice 3: the session_transcript BLOB cache, bound to the instance `db`
 // handle above. initTranscriptCache runs its CREATE TABLE IF NOT EXISTS and
 // prepares the four statements (gate/upsert/delete/read); persistTranscript()
 // and the prune loop call transcriptCache.* instead of inline statements.
@@ -2395,7 +2500,7 @@ const transcriptCache = initTranscriptCache(db);
 // The project index DDL stays in this module; the session_blob CREATE TABLE,
 // additive migration loop, and the six session_blob prepared statements now
 // live behind initSessionBlobCache() in src/lib/session-cache.ts (#627 slice
-// 4). It is dependency-injected on this module's shared `db` handle and the
+// 4). It is dependency-injected on this ingest instance's `db` handle and the
 // SESSION_SIGNALS descriptor above (which drives both its generated DDL and its
 // upsert column order), so the schema/SQL/arg order are byte-identical to the
 // previous inline code. ingestOne/assembleDataset/the prune loop call
@@ -2413,7 +2518,8 @@ const UPSERT_COLUMNS = blobCache.upsertColumns;
 // content_hash ETag. Missing/stale BLOBs are generated lazily from the source
 // transcript so /api/dataset.json does not precompress every transcript during
 // cold ingest.
-export function getTranscript(sessionId) {
+// Default-instance source marker: export function getTranscript(
+function getTranscript(sessionId) {
   const s = findSession(sessionId);
   if (!s) return null;
   // #3634: gate on the signature this cache STAMPED, rebuilt by the same
@@ -2443,7 +2549,8 @@ export function getTranscript(sessionId) {
 // content_hash for the ETag. Freshness matches the bulk dataset's: both are
 // refreshed by the same ingest() pass, so the client never sees detail older
 // than the dataset it navigated from.
-export function getSessionTimelineDetail(sessionId) {
+// Default-instance source marker: export function getSessionTimelineDetail(
+function getSessionTimelineDetail(sessionId) {
   const row = blobCache.readRow(sessionId);
   if (!row || !row.timeline_json) return null;
   const timeline = row.timeline_json;
@@ -2451,7 +2558,8 @@ export function getSessionTimelineDetail(sessionId) {
   return { json: timeline, contentHash: row.content_hash };
 }
 
-export function getSessionToolDetail(sessionId) {
+// Default-instance source marker: export function getSessionToolDetail(
+function getSessionToolDetail(sessionId) {
   const row = blobCache.readRow(sessionId);
   if (!row || !row.tool_json) return null;
   const tools = row.tool_json;
@@ -2555,7 +2663,7 @@ const DATASET_CACHE_KEEP = 3;
 // parser-output seam (scripts/lib/parser-output-versions.mjs). The seam lists
 // this knob under RELATED_INVALIDATION_KNOBS so the two are discoverable
 // together but NOT collapsed — they invalidate distinct caches.
-export const PARSER_SIG_VERSION = 'v6';
+// PARSER_SIG_VERSION is a process-wide exported constant declared above.
 
 // Bump when assembleDataset() or an upstream parser changes the serialized
 // dataset's shape or meaning without necessarily changing any ~/.claude source
@@ -2724,8 +2832,8 @@ export const PARSER_SIG_VERSION = 'v6';
 // Both local paths advance together. Sibling PR #3713 owns enabled v35 /
 // flag-off v34; this later change uses fresh v37/v36 identities so its flag-off
 // key cannot alias that sibling's historical enabled key.
-export const DATASET_ASSEMBLY_SCHEMA_VERSION = 37;
-export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 36;
+// DATASET_ASSEMBLY_SCHEMA_VERSION is a process-wide exported constant declared above.
+// FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION is a process-wide exported constant declared above.
 
 // The dataset-cache gate (sourceSignature) must also turn over when upstream
 // per-session parsed output changes, because that output is folded into the
@@ -2734,7 +2842,8 @@ export const FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION = 36;
 // separate SESSION_BLOB_OUTPUT version gates parsed signal rows; when its output
 // meaning changes without a source-file change, pair that bump with this dataset
 // schema version so a restart cannot serve an old assembled body while reparsing.
-export function datasetAssemblySchemaKey() {
+// Default-instance source marker: export function datasetAssemblySchemaKey(
+function datasetAssemblySchemaKey() {
   const version = docIssueConfig().enabled
     ? DATASET_ASSEMBLY_SCHEMA_VERSION
     : FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION;
@@ -2823,7 +2932,8 @@ function decodePersistedDocGraphGitWorkingTreeSignature(raw) {
 // gzip blob (the rare no-encoding client path needs it; br/gz clients are
 // served the stored buffers directly). Returns null on miss or a corrupt blob
 // so the caller falls back to a fresh rebuild. Best-effort: never throws.
-export function loadDatasetCache(contentHash) {
+// Default-instance source marker: export function loadDatasetCache(
+function loadDatasetCache(contentHash) {
   let row;
   try {
     row = selDatasetCache.get(contentHash);
@@ -2857,7 +2967,8 @@ export function loadDatasetCache(contentHash) {
   };
 }
 
-export function loadLatestDatasetCache() {
+// Default-instance source marker: export function loadLatestDatasetCache(
+function loadLatestDatasetCache() {
   let row;
   try {
     row = selLatestDatasetCache.get(datasetAssemblySchemaKey());
@@ -2896,7 +3007,8 @@ export function loadLatestDatasetCache() {
 // serves this process, so a read-only/full volume degrades to today's behaviour
 // rather than failing the request. `createdAt` is injected by the caller (the
 // server) to keep this module free of wall-clock reads.
-export function saveDatasetCache(
+// Default-instance source marker: export function saveDatasetCache(
+function saveDatasetCache(
   {
     contentHash,
     etag,
@@ -3100,10 +3212,12 @@ function artifactSignature(path) {
 // so an instrumentation test can prove a second assembleDataset() over an
 // unchanged corpus does zero artifact reparses. Never read in production paths.
 let _artifactParseCount = 0;
-export function _getArtifactParseCount() {
+// Default-instance source marker: export function _getArtifactParseCount(
+function _getArtifactParseCount() {
   return _artifactParseCount;
 }
-export function _resetArtifactParseCount() {
+// Default-instance source marker: export function _resetArtifactParseCount(
+function _resetArtifactParseCount() {
   _artifactParseCount = 0;
 }
 
@@ -3153,7 +3267,8 @@ function reviewEventsSourceSignature() {
     : gitHubReviewEventsCacheSignature(GITHUB_REVIEW_SYNC_CONFIG);
 }
 
-export async function refreshReviewEvents() {
+// Default-instance source marker: export async function refreshReviewEvents(
+async function refreshReviewEvents() {
   if (SCOPED_INGEST || !GITHUB_REVIEW_SYNC_CONFIG.enabled) return null;
   if (!reviewEventsRefreshPromise) {
     reviewEventsRefreshPromise = refreshGitHubReviewEvents(GITHUB_REVIEW_SYNC_CONFIG)
@@ -3326,7 +3441,8 @@ function shouldReplaceSessionCandidate(candidate, existing) {
 // native projects/<slug>/<sessionId>.jsonl layout. Dedupe is by sessionId; when
 // the same session exists in more than one source, the larger merged snapshot
 // wins, with mtime as the deterministic tie-break.
-export function listSessions() {
+// Default-instance source marker: export function listSessions(
+function listSessions() {
   const bySessionId = new Map();
   for (const { projectsRoot, source } of PROJECT_SOURCES) {
     for (const s of listSessionsFromProjectsRoot(projectsRoot, source)) {
@@ -3397,10 +3513,12 @@ function readUtf8FdCappedSync(fd, maxBytes, initialBytes = 0) {
 // instead of assuming it. Mirrors _getArtifactParseCount and
 // session-blob-row.mjs's _getSessionFileReadCount. Never read in production.
 let _transcriptSourceReadCount = 0;
-export function _getTranscriptSourceReadCount() {
+// Default-instance source marker: export function _getTranscriptSourceReadCount(
+function _getTranscriptSourceReadCount() {
   return _transcriptSourceReadCount;
 }
-export function _resetTranscriptSourceReadCount() {
+// Default-instance source marker: export function _resetTranscriptSourceReadCount(
+function _resetTranscriptSourceReadCount() {
   _transcriptSourceReadCount = 0;
 }
 
@@ -3543,11 +3661,13 @@ function persistTranscript(sessionId, mergedText, sig) {
   return true;
 }
 
-export function sessionFileSignature(s, identities) {
+// Default-instance source marker: export function sessionFileSignature(
+function sessionFileSignature(s, identities) {
   return sessionFileSignaturePure(s, identities);
 }
 
-export function parseSessionBlobRowFromDisk(s, sig = sessionFileSignature(s)) {
+// Default-instance source marker: export function parseSessionBlobRowFromDisk(
+function parseSessionBlobRowFromDisk(s, sig = sessionFileSignature(s)) {
   return parseSessionBlobRowFromDiskPure(s, sig, {
     maxBytes: INGEST_SESSION_MAX_BYTES,
   });
@@ -3887,7 +4007,8 @@ function transcriptRewriteSignature() {
 // already hashed/joined for that build. Every other source is probed fresh, so
 // completion gates still detect concurrent corpus changes without re-statting
 // the manifest that defines the atomic graph snapshot.
-export function sourceSignature(expectedSourceSignature = null) {
+// Default-instance source marker: export function sourceSignature(
+function sourceSignature(expectedSourceSignature = null) {
   const parts = [];
   parts.push(datasetAssemblySchemaKey());
   for (const projectsRoot of PROJECT_ROOTS) {
@@ -4134,7 +4255,8 @@ export function sourceSignature(expectedSourceSignature = null) {
 // cache) when this hash matches the prior call.
 // A caller that just sampled sourceSignature may pass it here to consume that
 // exact lazy manifest snapshot; direct callers omit it and capture fresh state.
-export function ingest(expectedSourceSignature = null) {
+// Default-instance source marker: export function ingest(
+function ingest(expectedSourceSignature = null) {
   const docGitTimesSnapshot =
     expectedSourceSignature &&
     sourceSignatureDocGitTimesSnapshot?.signature === expectedSourceSignature
@@ -4474,7 +4596,8 @@ export function ingest(expectedSourceSignature = null) {
 //     concatenated/merged without changing the underlying parsers.
 // Single-file artifacts (updateResults, mcpAuth) are cheap single reads, not
 // tree walks, so they stay uncached — same behaviour as before.
-export function assembleArtifacts() {
+// Default-instance source marker: export function assembleArtifacts(
+function assembleArtifacts() {
   let tasks = [];
   let teams = [];
   let reviewEvents = null;
@@ -4789,7 +4912,8 @@ export function assembleArtifacts() {
 // path assembles the LIGHT recommendation dataset and never triggers the full
 // assembleDataset() build. Test-only observable; never affects output.
 const assemblyCallCounts = { full: 0, recommendation: 0 };
-export function assemblyInstrumentation() {
+// Default-instance source marker: export function assemblyInstrumentation(
+function assemblyInstrumentation() {
   return { ...assemblyCallCounts };
 }
 
@@ -5165,7 +5289,8 @@ function assembleDatasetCore() {
 // Assemble the normalized payload the client consumes. Transcript-derived
 // entries are authoritative; history.d parts override history.jsonl for the
 // same session before history-only sessions are unioned in.
-export function assembleDataset() {
+// Default-instance source marker: export function assembleDataset(
+function assembleDataset() {
   assemblyCallCounts.full += 1;
   const {
     tokenData,
@@ -5380,7 +5505,8 @@ export function assembleDataset() {
 // `recordSuppressionTransitions` exactly like the full dataset — but without
 // building the ~132 MB serialized payload's dataset-only extras. Full
 // `assembleDataset()` (for /api/dataset.json and its embedded recs) is unchanged.
-export function assembleRecommendationDataset() {
+// Default-instance source marker: export function assembleRecommendationDataset(
+function assembleRecommendationDataset() {
   assemblyCallCounts.recommendation += 1;
   const core = assembleDatasetCore();
   // Compact numeric rows only: parsePromptAnalysis retains no prompt prose.
@@ -5578,11 +5704,13 @@ function assembleRecommendationContext(options = {}) {
   return { input, sessions };
 }
 
-export function assembleRecommendations(project, options = {}) {
+// Default-instance source marker: export function assembleRecommendations(
+function assembleRecommendations(project, options = {}) {
   return assembleRecommendationResult(project, options).recommendations;
 }
 
-export function assembleRecommendationResult(project, options = {}) {
+// Default-instance source marker: export function assembleRecommendationResult(
+function assembleRecommendationResult(project, options = {}) {
   const { input, sessions } = assembleRecommendationContext(options);
   // Back-fill each rec's `estSavingsUsd` from its booked cascade marginal so the
   // served per-card dollar figure is the deduped, residual-guarded slice of the
@@ -5645,7 +5773,8 @@ function recommendationDatasetToViewData(dataset, sessions, projects) {
 // The masthead/route filter code is the SAME pure code the UI runs, so parity is
 // structural. This path never emits suppression-transition receipts — that
 // canonical side effect belongs only to the unfiltered global legacy route.
-export function assembleScopedRecommendationResult(
+// Default-instance source marker: export function assembleScopedRecommendationResult(
+function assembleScopedRecommendationResult(
   surface,
   filters = {},
   options = {}
@@ -5735,7 +5864,8 @@ export function assembleScopedRecommendationResult(
  * logging; never throws on a write error (best-effort, like the rest of the
  * recs route's side effects).
  */
-export async function recordSuppressionTransitions(receiptsFile, opts = {}) {
+// Default-instance source marker: export async function recordSuppressionTransitions(
+async function recordSuppressionTransitions(receiptsFile, opts = {}) {
   const { organizationIdentity = null, dataset = undefined, ...receiptOpts } = opts;
   const prior = await readAdoptionReceiptIndex(receiptsFile);
   const { input } = assembleRecommendationContext({ organizationIdentity, dataset });
@@ -5790,6 +5920,145 @@ function listSessionsCached() {
 // src/lib/live-session.ts as liveSession(sessions, now). Here we just inject the
 // session-discovery dependency (the memoized listSessionsCached) and the clock,
 // keeping computeLiveSession's signature/export surface intact for server.mjs.
-export function computeLiveSession(now = Date.now()) {
+// Default-instance source marker: export function computeLiveSession(
+function computeLiveSession(now = Date.now()) {
   return liveSession(listSessionsCached(), now);
 }
+
+
+  return {
+    CHD_CACHE_DIR,
+    PROJECT_ROOTS,
+    memoryOpenCapabilities,
+    memoryOpenFlags,
+    memoryOpenedPathMatches,
+    readMemoryStores,
+    datasetDocGraphGitWorkingTreeSignature,
+    docGraphGitWorkingTreeSignatureForServer,
+    docGraphGitWorkingTreeSignatureFromLastSourceGate,
+    datasetHasTransientDocGraphFailure,
+    refreshDocIssueSnapshotForServer,
+    docIssueSnapshotCacheStateForServer,
+    docIssueSnapshotCacheStateFromDataset,
+    readDocHygieneArtifact,
+    workflowFreshnessStateForTests,
+    disposeWorkflowFreshnessForTests,
+    suspendWorkflowFreshnessForServer,
+    stopHookConfigState,
+    recursiveRemovalSafetyStateForServer,
+    recursiveRemovalSafetyStateFromDataset,
+    getTranscript,
+    getSessionTimelineDetail,
+    getSessionToolDetail,
+    datasetAssemblySchemaKey,
+    loadDatasetCache,
+    loadLatestDatasetCache,
+    saveDatasetCache,
+    _getArtifactParseCount,
+    _resetArtifactParseCount,
+    refreshReviewEvents,
+    listSessions,
+    _getTranscriptSourceReadCount,
+    _resetTranscriptSourceReadCount,
+    sessionFileSignature,
+    parseSessionBlobRowFromDisk,
+    sourceSignature,
+    ingest,
+    assembleArtifacts,
+    assemblyInstrumentation,
+    assembleDataset,
+    assembleRecommendationDataset,
+    assembleRecommendations,
+    assembleRecommendationResult,
+    assembleScopedRecommendationResult,
+    recordSuppressionTransitions,
+    computeLiveSession,
+    readRejectedFindingIds,
+    readCheckpointAnswerEfficacy,
+  };
+}
+
+/** Construct one isolated ingest state owner behind the server's existing API. */
+export function createIngest(options = {}) {
+  const instance = createIngestInstance(options);
+  return Object.freeze({
+    ingest: instance.ingest,
+    assembleDataset: instance.assembleDataset,
+    assembleRecommendationDataset: instance.assembleRecommendationDataset,
+    assembleRecommendations: instance.assembleRecommendations,
+    assembleScopedRecommendationResult: instance.assembleScopedRecommendationResult,
+    loadDatasetCache: instance.loadDatasetCache,
+    loadLatestDatasetCache: instance.loadLatestDatasetCache,
+    saveDatasetCache: instance.saveDatasetCache,
+    sourceSignature: instance.sourceSignature,
+    stopHookConfigState: instance.stopHookConfigState,
+    getTranscript: instance.getTranscript,
+    getSessionTimelineDetail: instance.getSessionTimelineDetail,
+    getSessionToolDetail: instance.getSessionToolDetail,
+    computeLiveSession: instance.computeLiveSession,
+    recordSuppressionTransitions: instance.recordSuppressionTransitions,
+    readRejectedFindingIds: instance.readRejectedFindingIds,
+    readCheckpointAnswerEfficacy: instance.readCheckpointAnswerEfficacy,
+    refreshReviewEvents: instance.refreshReviewEvents,
+    refreshDocIssueSnapshotForServer: instance.refreshDocIssueSnapshotForServer,
+    docIssueSnapshotCacheStateForServer: instance.docIssueSnapshotCacheStateForServer,
+    docIssueSnapshotCacheStateFromDataset: instance.docIssueSnapshotCacheStateFromDataset,
+    recursiveRemovalSafetyStateForServer: instance.recursiveRemovalSafetyStateForServer,
+    recursiveRemovalSafetyStateFromDataset: instance.recursiveRemovalSafetyStateFromDataset,
+    datasetHasTransientDocGraphFailure: instance.datasetHasTransientDocGraphFailure,
+    datasetDocGraphGitWorkingTreeSignature: instance.datasetDocGraphGitWorkingTreeSignature,
+    docGraphGitWorkingTreeSignatureForServer: instance.docGraphGitWorkingTreeSignatureForServer,
+    docGraphGitWorkingTreeSignatureFromLastSourceGate: instance.docGraphGitWorkingTreeSignatureFromLastSourceGate,
+  });
+}
+
+const DEFAULT_INGEST = createIngestInstance({
+  config: MODULE_DEFAULT_INGEST_CONFIG,
+});
+
+export const CHD_CACHE_DIR = DEFAULT_INGEST.CHD_CACHE_DIR;
+export const PROJECT_ROOTS = DEFAULT_INGEST.PROJECT_ROOTS;
+export const memoryOpenCapabilities = DEFAULT_INGEST.memoryOpenCapabilities;
+export const memoryOpenFlags = DEFAULT_INGEST.memoryOpenFlags;
+export const memoryOpenedPathMatches = DEFAULT_INGEST.memoryOpenedPathMatches;
+export const readMemoryStores = DEFAULT_INGEST.readMemoryStores;
+export const datasetDocGraphGitWorkingTreeSignature = DEFAULT_INGEST.datasetDocGraphGitWorkingTreeSignature;
+export const docGraphGitWorkingTreeSignatureForServer = DEFAULT_INGEST.docGraphGitWorkingTreeSignatureForServer;
+export const docGraphGitWorkingTreeSignatureFromLastSourceGate = DEFAULT_INGEST.docGraphGitWorkingTreeSignatureFromLastSourceGate;
+export const datasetHasTransientDocGraphFailure = DEFAULT_INGEST.datasetHasTransientDocGraphFailure;
+export const refreshDocIssueSnapshotForServer = DEFAULT_INGEST.refreshDocIssueSnapshotForServer;
+export const docIssueSnapshotCacheStateForServer = DEFAULT_INGEST.docIssueSnapshotCacheStateForServer;
+export const docIssueSnapshotCacheStateFromDataset = DEFAULT_INGEST.docIssueSnapshotCacheStateFromDataset;
+export const readDocHygieneArtifact = DEFAULT_INGEST.readDocHygieneArtifact;
+export const workflowFreshnessStateForTests = DEFAULT_INGEST.workflowFreshnessStateForTests;
+export const disposeWorkflowFreshnessForTests = DEFAULT_INGEST.disposeWorkflowFreshnessForTests;
+export const suspendWorkflowFreshnessForServer = DEFAULT_INGEST.suspendWorkflowFreshnessForServer;
+export const stopHookConfigState = DEFAULT_INGEST.stopHookConfigState;
+export const recursiveRemovalSafetyStateForServer = DEFAULT_INGEST.recursiveRemovalSafetyStateForServer;
+export const recursiveRemovalSafetyStateFromDataset = DEFAULT_INGEST.recursiveRemovalSafetyStateFromDataset;
+export const getTranscript = DEFAULT_INGEST.getTranscript;
+export const getSessionTimelineDetail = DEFAULT_INGEST.getSessionTimelineDetail;
+export const getSessionToolDetail = DEFAULT_INGEST.getSessionToolDetail;
+export const datasetAssemblySchemaKey = DEFAULT_INGEST.datasetAssemblySchemaKey;
+export const loadDatasetCache = DEFAULT_INGEST.loadDatasetCache;
+export const loadLatestDatasetCache = DEFAULT_INGEST.loadLatestDatasetCache;
+export const saveDatasetCache = DEFAULT_INGEST.saveDatasetCache;
+export const _getArtifactParseCount = DEFAULT_INGEST._getArtifactParseCount;
+export const _resetArtifactParseCount = DEFAULT_INGEST._resetArtifactParseCount;
+export const refreshReviewEvents = DEFAULT_INGEST.refreshReviewEvents;
+export const listSessions = DEFAULT_INGEST.listSessions;
+export const _getTranscriptSourceReadCount = DEFAULT_INGEST._getTranscriptSourceReadCount;
+export const _resetTranscriptSourceReadCount = DEFAULT_INGEST._resetTranscriptSourceReadCount;
+export const sessionFileSignature = DEFAULT_INGEST.sessionFileSignature;
+export const parseSessionBlobRowFromDisk = DEFAULT_INGEST.parseSessionBlobRowFromDisk;
+export const sourceSignature = DEFAULT_INGEST.sourceSignature;
+export const ingest = DEFAULT_INGEST.ingest;
+export const assembleArtifacts = DEFAULT_INGEST.assembleArtifacts;
+export const assemblyInstrumentation = DEFAULT_INGEST.assemblyInstrumentation;
+export const assembleDataset = DEFAULT_INGEST.assembleDataset;
+export const assembleRecommendationDataset = DEFAULT_INGEST.assembleRecommendationDataset;
+export const assembleRecommendations = DEFAULT_INGEST.assembleRecommendations;
+export const assembleRecommendationResult = DEFAULT_INGEST.assembleRecommendationResult;
+export const assembleScopedRecommendationResult = DEFAULT_INGEST.assembleScopedRecommendationResult;
+export const recordSuppressionTransitions = DEFAULT_INGEST.recordSuppressionTransitions;
+export const computeLiveSession = DEFAULT_INGEST.computeLiveSession;
