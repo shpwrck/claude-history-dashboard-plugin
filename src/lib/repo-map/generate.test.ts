@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateRepoMap, renderRepoMap } from './generate';
 import { createTsParseFile } from './parser';
+import { normalizeFileStructure } from './parser-output';
 import type { ParseFile, RepoFile } from './types';
 
 // A deterministic fake parser: regex out `export <kind> <name>` + `from '<spec>'`.
@@ -119,6 +120,172 @@ describe('generateRepoMap', () => {
     const serialized = JSON.stringify(map);
     expect(serialized).not.toContain(BODY_SECRET);
     expect(map.text).not.toContain(BODY_SECRET);
+  });
+
+  it('projects injected parser output onto the exact declared artifact shape', async () => {
+    const exactRoot = mkdtempSync(join(tmpdir(), 'repomap-exact-output-'));
+    const parserOnlySentinel = 'parser_only_source_body_sentinel';
+    try {
+      writeFileSync(join(exactRoot, 'exact.ts'), 'export const exact = 1;\n');
+      const parseWithExtras: ParseFile = () => ({
+        symbols: [
+          {
+            name: 'exact',
+            kind: 'const',
+            exported: true,
+            signature: 'const exact',
+            line: 17,
+            parserOnlyBody: parserOnlySentinel,
+          },
+        ],
+        imports: ['./dependency'],
+        parserOnlySource: parserOnlySentinel,
+      });
+
+      const map = await generateRepoMap(exactRoot, {
+        parseFile: parseWithExtras,
+        tokenBudget: 5000,
+      });
+
+      expect(map.files[0]?.symbols[0]).toStrictEqual({
+        name: 'exact',
+        kind: 'const',
+        exported: true,
+        signature: 'const exact',
+        line: 17,
+      });
+      expect(map.files[0]?.imports).toStrictEqual(['./dependency']);
+      expect(JSON.stringify(map)).not.toContain(parserOnlySentinel);
+    } finally {
+      rmSync(exactRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('still awaits a native asynchronous parser result', async () => {
+    const asyncRoot = mkdtempSync(join(tmpdir(), 'repomap-async-output-'));
+    try {
+      writeFileSync(join(asyncRoot, 'async.ts'), 'export const asyncValue = 1;\n');
+      const map = await generateRepoMap(asyncRoot, {
+        parseFile: async () => ({
+          symbols: [
+            {
+              name: 'asyncValue',
+              kind: 'const',
+              exported: true,
+              signature: 'const asyncValue',
+              line: 1,
+            },
+          ],
+          imports: [],
+        }),
+        tokenBudget: 5000,
+      });
+
+      expect(map.files[0]?.symbols[0]?.name).toBe('asyncValue');
+    } finally {
+      rmSync(asyncRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a kind accessor without executing its prototype-poisoning code', async () => {
+    const poisonedRoot = mkdtempSync(join(tmpdir(), 'repomap-kind-poison-'));
+    const originalIncludes = Array.prototype.includes;
+    const parserOnlyKind = 'parser-only-secret-sentinel';
+    let poisonGetterRan = false;
+    try {
+      writeFileSync(join(poisonedRoot, 'a.ts'), 'export const a = 1;\n');
+      writeFileSync(join(poisonedRoot, 'b.ts'), 'export const b = 1;\n');
+      const poisonedParse = ((_source: string, path: string) => {
+        const symbol =
+          path === 'a.ts'
+            ? {
+                name: path,
+                get kind() {
+                  poisonGetterRan = true;
+                  Array.prototype.includes = function (candidate: unknown) {
+                    this.push(candidate);
+                    return true;
+                  };
+                  return parserOnlyKind;
+                },
+                exported: true,
+                signature: `const ${path}`,
+                line: 1,
+              }
+            : {
+                name: path,
+                kind: parserOnlyKind,
+                exported: true,
+                signature: `const ${path}`,
+                line: 1,
+              };
+        return {
+          symbols: [symbol],
+          imports: [],
+        };
+      }) as unknown as ParseFile;
+
+      const map = await generateRepoMap(poisonedRoot, {
+        parseFile: poisonedParse,
+        tokenBudget: 5000,
+      });
+
+      expect(map.files).toEqual([]);
+      expect(JSON.stringify(map)).not.toContain(parserOnlyKind);
+      expect(poisonGetterRan).toBe(false);
+      expect(Array.prototype.includes).toBe(originalIncludes);
+    } finally {
+      Array.prototype.includes = originalIncludes;
+      rmSync(poisonedRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects accessors before they can replace global intrinsics', () => {
+    const originalArrayIsArray = Array.isArray;
+    const originalNumberIsFinite = Number.isFinite;
+    const originalObjectDefineProperty = Object.defineProperty;
+    const originalObjectHasOwn = Object.hasOwn;
+    const originalObjectKeys = Object.keys;
+    let poisonGetterRan = false;
+    let result: ReturnType<typeof normalizeFileStructure>;
+    try {
+      result = normalizeFileStructure({
+        get symbols() {
+          poisonGetterRan = true;
+          Array.isArray = () => false;
+          Number.isFinite = () => true;
+          Object.defineProperty = (() => {
+            throw new Error('poisoned Object.defineProperty');
+          }) as typeof Object.defineProperty;
+          Object.hasOwn = () => true;
+          Object.keys = (() => []) as typeof Object.keys;
+          return [
+            {
+              name: 'poisoned',
+              kind: 'const',
+              exported: true,
+              signature: 'const poisoned',
+              line: Number.POSITIVE_INFINITY,
+            },
+          ];
+        },
+        imports: [],
+      });
+    } finally {
+      Array.isArray = originalArrayIsArray;
+      Number.isFinite = originalNumberIsFinite;
+      Object.defineProperty = originalObjectDefineProperty;
+      Object.hasOwn = originalObjectHasOwn;
+      Object.keys = originalObjectKeys;
+    }
+
+    expect(result).toBeNull();
+    expect(poisonGetterRan).toBe(false);
+    expect(Array.isArray).toBe(originalArrayIsArray);
+    expect(Number.isFinite).toBe(originalNumberIsFinite);
+    expect(Object.defineProperty).toBe(originalObjectDefineProperty);
+    expect(Object.hasOwn).toBe(originalObjectHasOwn);
+    expect(Object.keys).toBe(originalObjectKeys);
   });
 
   it('token-budgets the text without truncating the structured index', async () => {

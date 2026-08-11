@@ -100,10 +100,13 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from before the complete output contract (#2740, #3744, #3745)', () => {
+  it('invalidates artifacts from before exact parser-output projection and the complete output contract', () => {
+    // v11 projects every live parser result before canonical construction, so
+    // v10 artifacts that may retain parser-only symbol keys must regenerate.
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(11);
+    expect(isCacheValid({ ...persisted, version: 10 }, base)).toBe(false);
     // v10 expands the forward-fence contract to the RepoSymbol shape, so
     // artifacts stamped under the v9 contract retire.
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(10);
     expect(isCacheValid({ ...persisted, version: 9 }, base)).toBe(false);
     // v9 covers the RepoMapCacheKey shape; its predecessor did not.
     expect(isCacheValid({ ...persisted, version: 8 }, base)).toBe(false);

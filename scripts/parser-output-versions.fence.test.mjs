@@ -45,7 +45,10 @@ import { enforceSizeLimit } from '../src/lib/repo-map/cache.ts';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
 const REPO_MAP_CACHE_PATH = join(HERE, '../src/lib/repo-map/cache.ts');
-const REPO_MAP_FILE_CACHE_PATH = join(HERE, '../src/lib/repo-map/file-cache.ts');
+const REPO_MAP_PARSER_OUTPUT_PATH = join(
+  HERE,
+  '../src/lib/repo-map/parser-output.ts'
+);
 const REPO_MAP_TYPES_PATH = join(HERE, '../src/lib/repo-map/types.ts');
 const PARSER_OUTPUT_REGISTRY_PATH = 'scripts/lib/parser-output-versions.mjs';
 
@@ -210,6 +213,110 @@ function directInterfaceKeys(sourceText, interfaceName, sourcePath) {
   );
 }
 
+function directStringUnionMembers(sourceText, typeName, sourcePath) {
+  const sourceFile = ts.createSourceFile(
+    sourcePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const declarations = sourceFile.statements.filter(
+    (statement) =>
+      ts.isTypeAliasDeclaration(statement) && statement.name.text === typeName
+  );
+  assert.equal(
+    declarations.length,
+    1,
+    `${typeName} must remain one direct type alias for the repo-map parser-output fence`
+  );
+  const type = declarations[0].type;
+  assert.ok(
+    ts.isUnionTypeNode(type),
+    `${typeName} must remain a direct string-literal union for the repo-map parser-output fence`
+  );
+  return type.types
+    .map((member) => {
+      assert.ok(
+        ts.isLiteralTypeNode(member) && ts.isStringLiteral(member.literal),
+        `${typeName} may contain only string literals unless the repo-map parser-output fence is updated`
+      );
+      return member.literal.text;
+    })
+    .sort();
+}
+
+function repoSymbolKindSwitchCases(sourceText) {
+  const sourceFile = ts.createSourceFile(
+    REPO_MAP_PARSER_OUTPUT_PATH,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const functions = sourceFile.statements.filter(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === 'normalizeRepoSymbolKind'
+  );
+  assert.equal(
+    functions.length,
+    1,
+    'parser-output.ts must declare normalizeRepoSymbolKind exactly once'
+  );
+  const switches = functions[0].body?.statements.filter(ts.isSwitchStatement) ?? [];
+  assert.equal(
+    switches.length,
+    1,
+    'normalizeRepoSymbolKind must contain one static switch'
+  );
+  assert.ok(
+    ts.isIdentifier(switches[0].expression) &&
+      switches[0].expression.text === 'value',
+    'normalizeRepoSymbolKind must switch directly on value'
+  );
+
+  const cases = [];
+  let defaults = 0;
+  for (const clause of switches[0].caseBlock.clauses) {
+    assert.equal(
+      clause.statements.length,
+      1,
+      'every normalizeRepoSymbolKind clause must return directly'
+    );
+    const statement = clause.statements[0];
+    assert.ok(
+      ts.isReturnStatement(statement) && statement.expression,
+      'every normalizeRepoSymbolKind clause must return a value'
+    );
+    if (ts.isDefaultClause(clause)) {
+      defaults += 1;
+      assert.ok(
+        ts.isIdentifier(statement.expression) &&
+          statement.expression.text === 'INVALID_RESULT',
+        'normalizeRepoSymbolKind default must fail closed'
+      );
+      continue;
+    }
+    assert.ok(
+      ts.isStringLiteral(clause.expression),
+      'normalizeRepoSymbolKind cases must be static strings'
+    );
+    assert.ok(
+      ts.isCallExpression(statement.expression) &&
+        ts.isIdentifier(statement.expression.expression) &&
+        statement.expression.expression.text === 'normalized' &&
+        statement.expression.arguments.length === 1 &&
+        ts.isIdentifier(statement.expression.arguments[0]) &&
+        statement.expression.arguments[0].text === 'value',
+      'every normalizeRepoSymbolKind case must return normalized(value)'
+    );
+    cases.push(clause.expression.text);
+  }
+  assert.equal(defaults, 1, 'normalizeRepoSymbolKind must have one fail-closed default');
+  return cases.sort();
+}
+
 function assertDirectArrayElementType(
   sourceText,
   ownerInterfaceName,
@@ -264,9 +371,9 @@ function assertDirectArrayElementType(
   );
 }
 
-function repoSymbolRuleFields(sourceText) {
+function exactRuleFields(sourceText, declarationName) {
   const sourceFile = ts.createSourceFile(
-    REPO_MAP_FILE_CACHE_PATH,
+    REPO_MAP_PARSER_OUTPUT_PATH,
     sourceText,
     ts.ScriptTarget.Latest,
     true,
@@ -278,41 +385,41 @@ function repoSymbolRuleFields(sourceText) {
     .filter(
       (declaration) =>
         ts.isIdentifier(declaration.name) &&
-        declaration.name.text === 'REPO_SYMBOL_FIELD_RULES'
+        declaration.name.text === declarationName
     );
   assert.equal(
     declarations.length,
     1,
-    'file-cache.ts must declare REPO_SYMBOL_FIELD_RULES exactly once'
+    `parser-output.ts must declare ${declarationName} exactly once`
   );
   const initializer = declarations[0].initializer;
   assert.ok(
     initializer && ts.isObjectLiteralExpression(initializer),
-    'file-cache.ts REPO_SYMBOL_FIELD_RULES must remain a static object literal'
+    `parser-output.ts ${declarationName} must remain a static object literal`
   );
   return initializer.properties
     .map((property) => {
       assert.ok(
         ts.isPropertyAssignment(property),
-        'file-cache.ts REPO_SYMBOL_FIELD_RULES may only contain explicit property assignments'
+        `parser-output.ts ${declarationName} may only contain explicit property assignments`
       );
       const name = staticPropertyName(property);
       assert.ok(
         ts.isObjectLiteralExpression(property.initializer),
-        `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name} must remain a static rule object`
+        `parser-output.ts ${declarationName}.${name} must remain a static rule object`
       );
       const rule = property.initializer;
       const ruleKeys = rule.properties.map((ruleProperty) => {
         assert.ok(
           ts.isPropertyAssignment(ruleProperty),
-          `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name} may only contain explicit property assignments`
+          `parser-output.ts ${declarationName}.${name} may only contain explicit property assignments`
         );
         return staticPropertyName(ruleProperty);
       });
       assert.deepEqual(
         [...ruleKeys].sort(),
-        ['optional', 'validate'],
-        `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name} must declare only optional and validate`
+        ['normalize', 'optional'],
+        `parser-output.ts ${declarationName}.${name} must declare only optional and normalize`
       );
       const optionalProperty = rule.properties.find(
         (ruleProperty) => staticPropertyName(ruleProperty) === 'optional'
@@ -321,7 +428,7 @@ function repoSymbolRuleFields(sourceText) {
         ts.isPropertyAssignment(optionalProperty) &&
           (optionalProperty.initializer.kind === ts.SyntaxKind.TrueKeyword ||
             optionalProperty.initializer.kind === ts.SyntaxKind.FalseKeyword),
-        `file-cache.ts REPO_SYMBOL_FIELD_RULES.${name}.optional must be a static boolean`
+        `parser-output.ts ${declarationName}.${name}.optional must be a static boolean`
       );
       return {
         name,
@@ -331,16 +438,50 @@ function repoSymbolRuleFields(sourceText) {
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function assertRepoSymbolNormalizerParity(typesSource, fileCacheSource) {
+function assertParserOutputNormalizerParity(typesSource, parserOutputSource) {
   assert.deepEqual(
-    repoSymbolRuleFields(fileCacheSource),
+    exactRuleFields(parserOutputSource, 'REPO_SYMBOL_FIELD_RULES'),
     directInterfaceFields(typesSource, 'RepoSymbol', REPO_MAP_TYPES_PATH),
-    'RepoSymbol fields/optionality and the typechecked file-cache rule allowlist diverged; add an exact rule for every direct RepoSymbol field'
+    'RepoSymbol fields/optionality and the typechecked parser-output rule allowlist diverged; add an exact rule for every direct RepoSymbol field'
+  );
+  assert.deepEqual(
+    exactRuleFields(parserOutputSource, 'FILE_STRUCTURE_FIELD_RULES'),
+    directInterfaceFields(typesSource, 'FileStructure', REPO_MAP_TYPES_PATH),
+    'FileStructure fields/optionality and the typechecked parser-output rule allowlist diverged; add an exact rule for every direct FileStructure field'
+  );
+  assert.deepEqual(
+    repoSymbolKindSwitchCases(parserOutputSource),
+    directStringUnionMembers(
+      typesSource,
+      'RepoSymbolKind',
+      REPO_MAP_TYPES_PATH
+    ),
+    'RepoSymbolKind union literals and normalizeRepoSymbolKind switch cases diverged; update the fail-closed runtime vocabulary with the type'
   );
   assert.match(
-    fileCacheSource,
-    /Object\.entries\(REPO_SYMBOL_FIELD_RULES\)/,
-    'normalizeSymbol must validate and project through REPO_SYMBOL_FIELD_RULES'
+    parserOutputSource,
+    /const objectKeys = Object\.keys;/,
+    'parser-output normalization must capture Object.keys before reading untrusted getters'
+  );
+  assert.match(
+    parserOutputSource,
+    /objectKeys\(rules\)/,
+    'normalizeExactObject must validate and project through its exact field rules'
+  );
+  assert.match(
+    parserOutputSource,
+    /kind:\s*{\s*optional:\s*false,\s*normalize:\s*normalizeRepoSymbolKind,\s*}/,
+    'RepoSymbol.kind must use the fenced static normalizeRepoSymbolKind switch'
+  );
+  assert.match(
+    parserOutputSource,
+    /normalizeExactObject\(value, REPO_SYMBOL_FIELD_RULES\)/,
+    'normalizeRepoSymbol must consume REPO_SYMBOL_FIELD_RULES'
+  );
+  assert.match(
+    parserOutputSource,
+    /normalizeExactObject\(value, FILE_STRUCTURE_FIELD_RULES\)/,
+    'normalizeFileStructure must consume FILE_STRUCTURE_FIELD_RULES'
   );
 }
 
@@ -511,20 +652,43 @@ function addInterfaceProbe(sourceText, interfaceName, propertyName) {
   );
 }
 
-function addRepoSymbolRuleProbe(sourceText, propertyName) {
+function addExactRuleProbe(sourceText, declarationName, shapeName, propertyName) {
   const anchor =
-    'const REPO_SYMBOL_FIELD_RULES: RepoSymbolFieldRules = {\n';
+    `const ${declarationName}: ExactFieldRules<${shapeName}> = {\n`;
   assert.equal(
     sourceText.split(anchor).length,
     2,
-    'test fixture could not find RepoSymbol rule allowlist'
+    `test fixture could not find ${declarationName} allowlist`
   );
   return sourceText.replace(
     anchor,
     `${anchor}  ${propertyName}: {\n` +
       `    optional: true,\n` +
-      `    validate: (value): value is string => typeof value === 'string',\n` +
+      `    normalize: (value) => typeof value === 'string' ? normalized(value) : INVALID_RESULT,\n` +
       `  },\n`
+  );
+}
+
+function addRepoSymbolKindUnionProbe(sourceText, member) {
+  const anchor = "  | 'variable';";
+  assert.equal(
+    sourceText.split(anchor).length,
+    2,
+    'test fixture could not find RepoSymbolKind union tail'
+  );
+  return sourceText.replace(anchor, `  | 'variable'\n  | '${member}';`);
+}
+
+function addRepoSymbolKindSwitchProbe(sourceText, member) {
+  const anchor = '    default:\n      return INVALID_RESULT;';
+  assert.equal(
+    sourceText.split(anchor).length,
+    2,
+    'test fixture could not find normalizeRepoSymbolKind default'
+  );
+  return sourceText.replace(
+    anchor,
+    `    case '${member}':\n      return normalized(value);\n${anchor}`
   );
 }
 
@@ -541,15 +705,15 @@ test('repo-map output contract === live envelope + cache key + RepoMap + RepoFil
   );
 });
 
-test('repo-map file cache validates and projects every direct RepoSymbol field through one exact rule', () => {
+test('repo-map parser output validates and projects every direct FileStructure and RepoSymbol field through exact rules', () => {
   const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
-  const fileCacheSource = readFileSync(REPO_MAP_FILE_CACHE_PATH, 'utf8');
-  assertRepoSymbolNormalizerParity(typesSource, fileCacheSource);
+  const parserOutputSource = readFileSync(REPO_MAP_PARSER_OUTPUT_PATH, 'utf8');
+  assertParserOutputNormalizerParity(typesSource, parserOutputSource);
 });
 
-test('repo-map file-cache parity fence detects type-only drift and accepts a paired rule update', () => {
+test('repo-map parser-output parity fence detects type-only drift and accepts paired rule updates', () => {
   const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
-  const fileCacheSource = readFileSync(REPO_MAP_FILE_CACHE_PATH, 'utf8');
+  const parserOutputSource = readFileSync(REPO_MAP_PARSER_OUTPUT_PATH, 'utf8');
   const typesWithProbe = addInterfaceProbe(
     typesSource,
     'RepoSymbol',
@@ -557,26 +721,74 @@ test('repo-map file-cache parity fence detects type-only drift and accepts a pai
   );
 
   assert.throws(
-    () => assertRepoSymbolNormalizerParity(typesWithProbe, fileCacheSource),
+    () => assertParserOutputNormalizerParity(typesWithProbe, parserOutputSource),
     /RepoSymbol fields\/optionality.*rule allowlist diverged/s
   );
-  const rulesWithProbe = addRepoSymbolRuleProbe(
-    fileCacheSource,
+  const rulesWithProbe = addExactRuleProbe(
+    parserOutputSource,
+    'REPO_SYMBOL_FIELD_RULES',
+    'RepoSymbol',
     'documentationProbe'
   );
   assert.doesNotThrow(() =>
-    assertRepoSymbolNormalizerParity(typesWithProbe, rulesWithProbe)
+    assertParserOutputNormalizerParity(typesWithProbe, rulesWithProbe)
   );
   assert.throws(
     () =>
-      assertRepoSymbolNormalizerParity(
+      assertParserOutputNormalizerParity(
         typesWithProbe,
         rulesWithProbe.replace(
           '  documentationProbe: {\n    optional: true,',
           '  documentationProbe: {\n    optional: false,'
         )
-      ),
+    ),
     /RepoSymbol fields\/optionality.*rule allowlist diverged/s
+  );
+
+  const structureTypesWithProbe = addInterfaceProbe(
+    typesSource,
+    'FileStructure',
+    'metadataProbe'
+  );
+  assert.throws(
+    () =>
+      assertParserOutputNormalizerParity(
+        structureTypesWithProbe,
+        parserOutputSource
+      ),
+    /FileStructure fields\/optionality.*rule allowlist diverged/s
+  );
+  const structureRulesWithProbe = addExactRuleProbe(
+    parserOutputSource,
+    'FILE_STRUCTURE_FIELD_RULES',
+    'FileStructure',
+    'metadataProbe'
+  );
+  assert.doesNotThrow(() =>
+    assertParserOutputNormalizerParity(
+      structureTypesWithProbe,
+      structureRulesWithProbe
+    )
+  );
+
+  const kindTypesWithProbe = addRepoSymbolKindUnionProbe(
+    typesSource,
+    'namespace'
+  );
+  assert.throws(
+    () =>
+      assertParserOutputNormalizerParity(
+        kindTypesWithProbe,
+        parserOutputSource
+      ),
+    /RepoSymbolKind union literals.*switch cases diverged/s
+  );
+  const kindSwitchWithProbe = addRepoSymbolKindSwitchProbe(
+    parserOutputSource,
+    'namespace'
+  );
+  assert.doesNotThrow(() =>
+    assertParserOutputNormalizerParity(kindTypesWithProbe, kindSwitchWithProbe)
   );
 });
 
@@ -584,6 +796,14 @@ test('repo-map contract changes from origin/master require a version rollover', 
   assertVersionMovesWithContract(
     REPO_MAP_OUTPUT,
     originMasterRepoMapOutputRegistry()
+  );
+});
+
+test('repo-map version retires artifacts built before exact parser-output projection (#3750)', () => {
+  assert.equal(
+    REPO_MAP_OUTPUT.version,
+    11,
+    'v10 artifacts may retain parser-only symbol keys; exact parser-output projection must keep the canonical and per-file cache keys on v11'
   );
 });
 

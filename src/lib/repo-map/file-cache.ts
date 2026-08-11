@@ -23,60 +23,20 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { RepoMapParserInitializationError } from './types';
-import type { FileStructure, ParseFile, RepoSymbol, RepoSymbolKind } from './types';
+import type { FileStructure, ParseFile } from './types';
+import {
+  classifyParserResult,
+  normalizeFileStructure,
+} from './parser-output';
 
+// Exact parser-output projection does not change this sidecar envelope. The
+// canonical REPO_MAP_OUTPUT v11 bump is already embedded in the parser salt,
+// so old cohorts retire without a redundant sidecar-schema version change.
 export const REPO_MAP_FILE_CACHE_VERSION = 2;
 export const DEFAULT_REPO_MAP_FILE_CACHE_MAX_ENTRIES = 4000;
 export const DEFAULT_REPO_MAP_FILE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 
-const SYMBOL_KINDS = new Set<RepoSymbolKind>([
-  'function',
-  'class',
-  'interface',
-  'type',
-  'enum',
-  'const',
-  'variable',
-]);
 const SHA256_HEX = /^[a-f0-9]{64}$/;
-
-type RepoSymbolFieldRule<Field extends keyof RepoSymbol> = {
-  optional: Pick<RepoSymbol, Field> extends Required<Pick<RepoSymbol, Field>>
-    ? false
-    : true;
-  validate: (
-    value: unknown
-  ) => value is Exclude<RepoSymbol[Field], undefined>;
-};
-
-type RepoSymbolFieldRules = {
-  [Field in keyof Required<RepoSymbol>]: RepoSymbolFieldRule<Field>;
-};
-
-const REPO_SYMBOL_FIELD_RULES: RepoSymbolFieldRules = {
-  name: {
-    optional: false,
-    validate: (value): value is string => typeof value === 'string',
-  },
-  kind: {
-    optional: false,
-    validate: (value): value is RepoSymbolKind =>
-      typeof value === 'string' && SYMBOL_KINDS.has(value as RepoSymbolKind),
-  },
-  exported: {
-    optional: false,
-    validate: (value): value is boolean => typeof value === 'boolean',
-  },
-  signature: {
-    optional: false,
-    validate: (value): value is string => typeof value === 'string',
-  },
-  line: {
-    optional: false,
-    validate: (value): value is number =>
-      typeof value === 'number' && Number.isFinite(value),
-  },
-};
 
 interface PersistedRepoMapFileCache {
   version: number;
@@ -143,42 +103,6 @@ function boundedPositiveInt(value: number | undefined, fallback: number): number
   return Math.floor(value);
 }
 
-function normalizeSymbol(value: unknown): RepoSymbol | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const symbol = value as Record<string, unknown>;
-  const normalized: Record<string, unknown> = {};
-  for (const [field, rule] of Object.entries(REPO_SYMBOL_FIELD_RULES)) {
-    if (!Object.hasOwn(symbol, field)) {
-      if (rule.optional) continue;
-      return null;
-    }
-    const fieldValue = symbol[field];
-    if (fieldValue === undefined && rule.optional) continue;
-    if (!rule.validate(fieldValue)) return null;
-    normalized[field] = fieldValue;
-  }
-  return normalized as unknown as RepoSymbol;
-}
-
-/** Validate and project onto the exact privacy-safe FileStructure shape. */
-function normalizeStructure(value: unknown): FileStructure | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const structure = value as Record<string, unknown>;
-  if (!Array.isArray(structure.symbols) || !Array.isArray(structure.imports)) {
-    return null;
-  }
-  const symbols: RepoSymbol[] = [];
-  for (const valueSymbol of structure.symbols) {
-    const symbol = normalizeSymbol(valueSymbol);
-    if (!symbol) return null;
-    symbols.push(symbol);
-  }
-  if (!structure.imports.every((specifier) => typeof specifier === 'string')) {
-    return null;
-  }
-  return { symbols, imports: [...structure.imports] as string[] };
-}
-
 function readCache(
   cacheFile: string,
   salt: string,
@@ -229,7 +153,7 @@ function readCache(
         return emptyLoadedFileCache();
       }
       const cached = value as Record<string, unknown>;
-      const structure = normalizeStructure(cached.structure);
+      const structure = normalizeFileStructure(cached.structure);
       // One malformed row rejects the whole salt/schema cohort. Mixing trusted
       // and untrusted structures would make cache correctness non-auditable.
       if (
@@ -382,15 +306,28 @@ export function createRepoMapFileCache(
 
     stats.misses += 1;
     const parser = await parserForMiss();
-    const parsed = await parser(source, path);
-    const normalized = normalizeStructure(parsed);
-    // The parser contract already promises FileStructure. If a future injected
-    // parser violates it, preserve generation behavior but do not persist the
-    // malformed result as trusted cache state.
-    if (normalized) {
-      activeEntries.set(path, { contentHash: hash, structure: normalized });
+    const parserResult = parser(source, path);
+    const classified = classifyParserResult(parserResult);
+    if (classified.kind === 'invalid-promise') {
+      throw new RepoMapParserInitializationError(classified.cause);
     }
-    return parsed;
+    let parsed: unknown;
+    if (classified.kind === 'promise') {
+      const settlement = await classified.promise;
+      if (!settlement.fulfilled) throw settlement.cause;
+      parsed = settlement.value;
+    } else {
+      parsed = classified.value;
+    }
+    const normalized = normalizeFileStructure(parsed);
+    if (!normalized) {
+      // generateRepoMap treats a parser throw as one unparseable file and keeps
+      // building the rest of the map. Throwing here gives cached misses that
+      // same behavior without returning an invalid value from a ParseFile.
+      throw new TypeError('repo-map parser returned malformed FileStructure');
+    }
+    activeEntries.set(path, { contentHash: hash, structure: normalized });
+    return normalized;
   };
 
   const commit = (): RepoMapFileCacheCommit => {

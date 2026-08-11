@@ -33,6 +33,11 @@ import { localizationProbe } from './lib/repo-map-probe.mjs';
 
 const GATE = join(PROJECT_DIR, 'scripts', 'repo-map-gate.mjs');
 
+test('ranking surface includes the parser-output admission boundary', () => {
+  const source = readFileSync(GATE, 'utf8');
+  assert.match(source, /'src\/lib\/repo-map\/parser-output\.ts'/);
+});
+
 /** A throwaway source root big enough to serialize past a small ceiling. */
 function makeRoot(fileCount = 24) {
   const root = mkdtempSync(join(tmpdir(), 'repo-map-gate-'));

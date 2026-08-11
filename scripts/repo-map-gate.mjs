@@ -178,6 +178,7 @@ const FLOOR_MAX_SLACK_PCT = 5.0; // floor may trail the recorded baseline by at 
 const RANKING_SURFACE = [
   'src/lib/repo-map/generate.ts',
   'src/lib/repo-map/parser.ts',
+  'src/lib/repo-map/parser-output.ts',
   'src/lib/repo-map/types.ts',
   'src/lib/bounded-fs.ts',
   'src/lib/secret-redaction.ts',

@@ -133,7 +133,7 @@ measurement — `recallPct`, `topKPct`, `rankingCodeSha256`, `date`, plus
 informational provenance (`denominator`, `rankedFiles`, `measuredAtCommit` —
 recorded, not validated). The hash covers the gate's `RANKING_SURFACE`: the
 ranking/extraction sources (`src/lib/repo-map/generate.ts`, `parser.ts`,
-`types.ts`), their local behavior-bearing dependencies
+`parser-output.ts`, `types.ts`), their local behavior-bearing dependencies
 (`src/lib/bounded-fs.ts` — the walk determines the ranked file *set* and
 therefore every in-degree — and `src/lib/secret-redaction.ts`), and the probe
 definition itself (`scripts/lib/repo-map-probe.mjs`). Not covered: the

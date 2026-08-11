@@ -9,6 +9,10 @@ import type {
 } from './types';
 import { RepoMapParserInitializationError } from './types';
 import { createTsParseFile } from './parser';
+import {
+  classifyParserResult,
+  normalizeFileStructure,
+} from './parser-output';
 import { readDirentsBoundedSync } from '../bounded-fs';
 import { redactSecrets } from '../secret-redaction';
 
@@ -294,7 +298,24 @@ export async function generateRepoMap(
     }
     let structure;
     try {
-      structure = await parseFile(source, relPosix(root, abs));
+      const parserResult = parseFile(source, relPosix(root, abs));
+      const classified = classifyParserResult(parserResult);
+      if (classified.kind === 'invalid-promise') {
+        throw new RepoMapParserInitializationError(classified.cause);
+      }
+      let parsed: unknown;
+      if (classified.kind === 'promise') {
+        const settlement = await classified.promise;
+        if (!settlement.fulfilled) throw settlement.cause;
+        parsed = settlement.value;
+      } else {
+        parsed = classified.value;
+      }
+      structure = normalizeFileStructure(parsed);
+      // Runtime parser values are untrusted even though ParseFile describes the
+      // compile-time contract. Treat a malformed return exactly like a parser
+      // throw: skip only this file and keep the rest of the map.
+      if (!structure) continue;
     } catch (error) {
       // Missing/incompatible WASM is a producer failure, not an unparseable
       // source file. Preserve the fail-loud behavior the eager parser had so a

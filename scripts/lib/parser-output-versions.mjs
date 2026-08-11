@@ -101,6 +101,12 @@ export const SESSION_BLOB_OUTPUT = {
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
+  // v11 (#3750): normalize and exactly project every live parser result before
+  // canonical Repo Map construction, not only when the per-file sidecar stores
+  // or replays it. A v10 canonical artifact may retain parser-only symbol keys,
+  // so both the artifact and the sidecar salt must turn over once even though
+  // the declared output key set is unchanged.
+  //
   // v10 (#3744): fingerprint the direct RepoSymbol key set from its owning
   // TypeScript interface. This turns over v9 so a future per-symbol output field
   // cannot remain invisible to either canonical or per-file cache invalidation.
@@ -131,7 +137,7 @@ export const REPO_MAP_OUTPUT = {
   // remote identity (`map.repository`) beside `generatedAtGitSha`; pre-field
   // v4 artifacts must regenerate so identity-bound consumers never read a
   // missing field as "no remote" on a root that has one.
-  version: 10,
+  version: 11,
   contract: [
     'envelope.version',
     'envelope.cacheKey',

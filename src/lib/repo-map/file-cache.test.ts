@@ -22,7 +22,7 @@ import {
   DEFAULT_REPO_MAP_FILE_CACHE_MAX_BYTES,
   REPO_MAP_FILE_CACHE_VERSION,
 } from './file-cache';
-import { createTsParseFile } from './parser';
+import { createTsParseFile, repoMapParserCacheSalt } from './parser';
 import { RepoMapParserInitializationError } from './types';
 import type { FileStructure, ParseFile, RepoSymbol } from './types';
 
@@ -51,6 +51,104 @@ const MALFORMED_REPO_SYMBOL_CASES = Object.entries(
 ).flatMap(([field, values]) =>
   values.map((value, index) => [`${field} case ${index + 1}`, field, value] as const)
 );
+
+const SPARSE_IMPORTS: string[] = [];
+SPARSE_IMPORTS.length = 1;
+
+const ACCESSOR_IMPORTS: string[] = [];
+Object.defineProperty(ACCESSOR_IMPORTS, 0, {
+  configurable: true,
+  enumerable: true,
+  get: () => 'must-not-execute-array-accessor',
+});
+
+const PROXIED_IMPORTS = new Proxy([] as string[], {});
+const PROXIED_STRUCTURE = new Proxy(
+  { symbols: [] as RepoSymbol[], imports: [] as string[] },
+  {}
+);
+
+let thenAccessorReads = 0;
+const THEN_ACCESSOR_OUTPUT = {
+  symbols: [] as RepoSymbol[],
+  imports: [] as string[],
+  get then(): undefined {
+    thenAccessorReads += 1;
+    throw new RepoMapParserInitializationError(
+      new Error('returned then accessor is not parser initialization')
+    );
+  },
+};
+
+let proxyThenReads = 0;
+const THEN_TRAP_PROXY = new Proxy(
+  { symbols: [] as RepoSymbol[], imports: [] as string[] },
+  {
+    get: (target, property, receiver) => {
+      if (property === 'then') {
+        proxyThenReads += 1;
+        throw new RepoMapParserInitializationError(
+          new Error('proxy then trap is not parser initialization')
+        );
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }
+);
+
+let unknownAccessorReads = 0;
+const UNKNOWN_ACCESSOR_OUTPUT = {
+  symbols: [] as RepoSymbol[],
+  imports: [] as string[],
+  get toJSON(): () => string {
+    unknownAccessorReads += 1;
+    return () => 'must-not-run-to-json';
+  },
+};
+
+class ParserPromiseSubclass extends Promise<FileStructure> {}
+let promiseSubclassThenReads = 0;
+
+function parserPromiseSubclass(
+  executor: (
+    resolve: (value: FileStructure) => void,
+    reject: (reason: unknown) => void
+  ) => void
+): Promise<FileStructure> {
+  const promise = new ParserPromiseSubclass(executor);
+  Object.defineProperty(promise, 'then', {
+    configurable: true,
+    get: () => {
+      promiseSubclassThenReads += 1;
+      return Promise.prototype.then;
+    },
+  });
+  return promise;
+}
+
+const INHERITED_SPARSE_SYMBOLS: RepoSymbol[] = [];
+INHERITED_SPARSE_SYMBOLS.length = 1;
+const inheritedSymbolPrototype = Object.create(Array.prototype) as Record<
+  number,
+  RepoSymbol
+>;
+inheritedSymbolPrototype[0] = {
+  name: 'inherited',
+  kind: 'const',
+  exported: true,
+  signature: 'const inherited',
+  line: 1,
+};
+Object.setPrototypeOf(INHERITED_SPARSE_SYMBOLS, inheritedSymbolPrototype);
+
+const INITIALIZATION_ERROR_ACCESSOR_OUTPUT = {
+  imports: [] as string[],
+  get symbols(): RepoSymbol[] {
+    throw new RepoMapParserInitializationError(
+      new Error('returned object accessor is not parser initialization')
+    );
+  },
+};
 
 function tempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -96,10 +194,13 @@ function cacheFor(
 }
 
 describe('repo-map per-file cache', () => {
-  it('preserves every RepoSymbol field across a cold write and warm hit while stripping unknown keys', async () => {
+  it('keeps uncached, cold, warm, and sidecar parser output exact and privacy-safe', async () => {
+    const root = tempDir('repo-map-file-cache-root-');
     const cacheFile = join(tempDir('repo-map-file-cache-store-'), 'cache.json');
     const source = 'export interface CacheRoundTrip {}\n';
     const path = 'round-trip.ts';
+    const parserOnlySentinel = 'must-not-cross-the-parser-output-boundary';
+    writeFileSync(join(root, path), source);
     const symbol = {
       name: 'CacheRoundTrip',
       kind: 'interface',
@@ -115,19 +216,35 @@ describe('repo-map per-file cache', () => {
       symbols: [
         {
           ...symbol,
-          parserOnlyBody: 'must-not-enter-the-sidecar',
+          parserOnlyBody: parserOnlySentinel,
         },
       ],
       imports: [...expectedStructure.imports],
-      parserOnlyState: 'must-not-enter-the-sidecar',
+      parserOnlyState: parserOnlySentinel,
     });
+
+    const uncachedMap = await generateRepoMap(root, {
+      parseFile: coldParser,
+      tokenBudget: 5000,
+    });
+    expect(uncachedMap.files[0]?.symbols[0]).toStrictEqual(symbol);
+    expect(JSON.stringify(uncachedMap)).not.toContain(parserOnlySentinel);
+
     const cold = createRepoMapFileCache({
       cacheFile,
       salt: 'repo-symbol-parity',
       parseFile: coldParser,
     });
 
-    await cold.parseFile(source, path);
+    const coldStructure = await cold.parseFile(source, path);
+    expect(coldStructure).toStrictEqual(expectedStructure);
+    const coldMap = await generateRepoMap(root, {
+      parseFile: cold.parseFile,
+      tokenBudget: 5000,
+    });
+    expect(coldMap.files).toStrictEqual(uncachedMap.files);
+    expect(coldMap.text).toBe(uncachedMap.text);
+    expect(JSON.stringify(coldMap)).not.toContain(parserOnlySentinel);
     expect(cold.commit()).toMatchObject({ written: true, entryCount: 1 });
 
     const persisted = JSON.parse(readFileSync(cacheFile, 'utf8')) as {
@@ -138,6 +255,7 @@ describe('repo-map per-file cache', () => {
       'parserOnlyBody'
     );
     expect(persisted.entries[path]?.structure).not.toHaveProperty('parserOnlyState');
+    expect(JSON.stringify(persisted)).not.toContain(parserOnlySentinel);
 
     const fallbackParserFactory = vi.fn((): ParseFile => {
       throw new Error('warm hit must not construct the parser');
@@ -152,6 +270,372 @@ describe('repo-map per-file cache', () => {
     expect(warmStructure).toStrictEqual(expectedStructure);
     expect(warm.stats).toEqual({ hits: 1, misses: 0 });
     expect(fallbackParserFactory).not.toHaveBeenCalled();
+    const warmMap = await generateRepoMap(root, {
+      parseFile: warm.parseFile,
+      tokenBudget: 5000,
+    });
+    expect(warmMap.files).toStrictEqual(uncachedMap.files);
+    expect(warmMap.text).toBe(uncachedMap.text);
+    expect(JSON.stringify(warmMap)).not.toContain(parserOnlySentinel);
+    expect(fallbackParserFactory).not.toHaveBeenCalled();
+  });
+
+  it('bridges Promise subclasses without reading own then accessors', async () => {
+    const root = tempDir('repo-map-promise-subclass-root-');
+    const cacheFile = join(
+      tempDir('repo-map-promise-subclass-cache-'),
+      'cache.json'
+    );
+    writeFileSync(join(root, 'async.ts'), 'export const asyncValue = 1;\n');
+    const sentinel = 'promise-subclass-parser-only-sentinel';
+    promiseSubclassThenReads = 0;
+    const parseFile = (): Promise<FileStructure> =>
+      parserPromiseSubclass((resolve) =>
+        resolve({
+          symbols: [
+            {
+              name: 'asyncValue',
+              kind: 'const',
+              exported: true,
+              signature: 'const asyncValue',
+              line: 1,
+              parserOnlyBody: sentinel,
+            } as RepoSymbol,
+          ],
+          imports: [],
+        })
+      );
+
+    const direct = await generateRepoMap(root, {
+      parseFile,
+      tokenBudget: 5000,
+    });
+    expect(direct.files[0]?.symbols[0]?.name).toBe('asyncValue');
+    expect(JSON.stringify(direct)).not.toContain(sentinel);
+
+    const cold = createRepoMapFileCache({
+      cacheFile,
+      salt: 'promise-subclass',
+      parseFile,
+    });
+    const coldMap = await generateRepoMap(root, {
+      parseFile: cold.parseFile,
+      tokenBudget: 5000,
+    });
+    expect(coldMap.files).toStrictEqual(direct.files);
+    expect(cold.commit()).toMatchObject({ written: true, entryCount: 1 });
+
+    const warmFactory = vi.fn((): ParseFile => {
+      throw new Error('warm Promise-subclass hit must not construct a parser');
+    });
+    const warm = createRepoMapFileCache({
+      cacheFile,
+      salt: 'promise-subclass',
+      parseFileFactory: warmFactory,
+    });
+    const warmMap = await generateRepoMap(root, {
+      parseFile: warm.parseFile,
+      tokenBudget: 5000,
+    });
+    expect(warmMap.files).toStrictEqual(direct.files);
+    expect(warm.stats).toEqual({ hits: 1, misses: 0 });
+    expect(warmFactory).not.toHaveBeenCalled();
+    expect(promiseSubclassThenReads).toBe(0);
+  });
+
+  it('does not re-assimilate an already-fulfilled parser value', async () => {
+    const root = tempDir('repo-map-fulfilled-then-root-');
+    writeFileSync(join(root, 'fulfilled.ts'), 'export const fulfilled = 1;\n');
+    let thenReads = 0;
+    const output = { symbols: [] as RepoSymbol[], imports: [] as string[] };
+    const fulfilled = Promise.resolve(output);
+    Object.defineProperty(output, 'then', {
+      configurable: true,
+      get: () => {
+        thenReads += 1;
+        throw new Error('fulfilled parser value then getter must not execute');
+      },
+    });
+
+    const map = await generateRepoMap(root, {
+      parseFile: () => fulfilled,
+      tokenBudget: 5000,
+    });
+
+    // The normalizer rejects the unknown accessor as malformed, but neither
+    // the bridge nor `await` may execute it first.
+    expect(map.files).toEqual([]);
+    expect(thenReads).toBe(0);
+  });
+
+  it('observes rejected fully frozen standard Promise subclasses', async () => {
+    const root = tempDir('repo-map-frozen-promise-root-');
+    writeFileSync(join(root, 'rejected.ts'), 'export const rejected = 1;\n');
+    let thenReads = 0;
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    class FrozenParserPromise extends Promise<FileStructure> {}
+    const rejected = new FrozenParserPromise((_resolve, reject) =>
+      reject(new Error('frozen parser rejection'))
+    );
+    Object.defineProperty(rejected, 'then', {
+      configurable: true,
+      get: () => {
+        thenReads += 1;
+        return Promise.prototype.then;
+      },
+    });
+    Object.freeze(FrozenParserPromise.prototype);
+    Object.freeze(FrozenParserPromise);
+    Object.preventExtensions(rejected);
+
+    try {
+      const map = await generateRepoMap(root, {
+        parseFile: () => rejected,
+        tokenBudget: 5000,
+      });
+      expect(map.files).toEqual([]);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(thenReads).toBe(0);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('fails before executing a fully locked custom Promise species hook', async () => {
+    const root = tempDir('repo-map-locked-species-root-');
+    const cacheFile = join(
+      tempDir('repo-map-locked-species-cache-'),
+      'cache.json'
+    );
+    writeFileSync(join(root, 'locked.ts'), 'export const locked = 1;\n');
+    let speciesReads = 0;
+
+    class LockedSpeciesPromise extends Promise<FileStructure> {}
+    Object.defineProperty(LockedSpeciesPromise, Symbol.species, {
+      configurable: false,
+      get: () => {
+        speciesReads += 1;
+        return Promise;
+      },
+    });
+    const locked = new LockedSpeciesPromise((resolve) =>
+      resolve({ symbols: [], imports: [] })
+    );
+    Object.freeze(LockedSpeciesPromise.prototype);
+    Object.preventExtensions(locked);
+
+    await expect(
+      generateRepoMap(root, {
+        parseFile: () => locked,
+        tokenBudget: 5000,
+      })
+    ).rejects.toBeInstanceOf(RepoMapParserInitializationError);
+    const cold = createRepoMapFileCache({
+      cacheFile,
+      salt: 'locked-species',
+      parseFile: () => locked,
+    });
+    await expect(
+      generateRepoMap(root, {
+        parseFile: cold.parseFile,
+        tokenBudget: 5000,
+      })
+    ).rejects.toBeInstanceOf(RepoMapParserInitializationError);
+    expect(() => readFileSync(cacheFile, 'utf8')).toThrow();
+    expect(speciesReads).toBe(0);
+  });
+
+  it('observes rejected decorated promises and non-extensible subclasses before artifact construction', async () => {
+    const root = tempDir('repo-map-rejected-promise-root-');
+    const cacheFile = join(
+      tempDir('repo-map-rejected-promise-cache-'),
+      'cache.json'
+    );
+    writeFileSync(join(root, 'a.ts'), 'export const a = 1;\n');
+    writeFileSync(join(root, 'b.ts'), 'export const b = 1;\n');
+    writeFileSync(join(root, 'c.ts'), 'export const c = 1;\n');
+    promiseSubclassThenReads = 0;
+    const parseFile = ((_source: string, path: string) => {
+      if (path === 'a.ts') {
+        const decorated = Promise.reject(
+          new Error('decorated-parser-promise-rejected')
+        ) as Promise<FileStructure> & FileStructure;
+        Object.defineProperties(decorated, {
+          symbols: { configurable: true, value: [], writable: true },
+          imports: { configurable: true, value: [], writable: true },
+        });
+        return decorated;
+      }
+      if (path === 'b.ts') {
+        const subclass = parserPromiseSubclass((_resolve, reject) =>
+          reject(new Error('parser-promise-subclass-rejected'))
+        );
+        Object.preventExtensions(subclass);
+        return subclass;
+      }
+      return {
+        symbols: [
+          {
+            name: 'c',
+            kind: 'const',
+            exported: true,
+            signature: 'const c',
+            line: 1,
+          },
+        ],
+        imports: [],
+      };
+    }) as ParseFile;
+
+    const direct = await generateRepoMap(root, {
+      parseFile,
+      tokenBudget: 5000,
+    });
+    expect(direct.files.map((file) => file.path)).toEqual(['c.ts']);
+
+    const cold = createRepoMapFileCache({
+      cacheFile,
+      salt: 'rejected-parser-promises',
+      parseFile,
+    });
+    const coldMap = await generateRepoMap(root, {
+      parseFile: cold.parseFile,
+      tokenBudget: 5000,
+    });
+    expect(coldMap.files).toStrictEqual(direct.files);
+    expect(cold.commit()).toMatchObject({ written: true, entryCount: 1 });
+
+    const warm = createRepoMapFileCache({
+      cacheFile,
+      salt: 'rejected-parser-promises',
+      parseFile,
+    });
+    const warmMap = await generateRepoMap(root, {
+      parseFile: warm.parseFile,
+      tokenBudget: 5000,
+    });
+    expect(warmMap.files).toStrictEqual(direct.files);
+    expect(warm.stats).toEqual({ hits: 1, misses: 2 });
+    expect(promiseSubclassThenReads).toBe(0);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
+
+  it.each([
+    ['a non-object result', null],
+    ['a non-array symbols field', { symbols: 'invalid', imports: [] }],
+    ['a non-string import', { symbols: [], imports: [42] }],
+    ['a sparse imports array', { symbols: [], imports: SPARSE_IMPORTS }],
+    ['an accessor import', { symbols: [], imports: ACCESSOR_IMPORTS }],
+    ['a proxied imports array', { symbols: [], imports: PROXIED_IMPORTS }],
+    ['a proxied structure', PROXIED_STRUCTURE],
+    ['an unknown then accessor', THEN_ACCESSOR_OUTPUT],
+    ['a proxy with a then trap', THEN_TRAP_PROXY],
+    ['an unknown serialization accessor', UNKNOWN_ACCESSOR_OUTPUT],
+    [
+      'an inherited sparse symbol',
+      { symbols: INHERITED_SPARSE_SYMBOLS, imports: [] },
+    ],
+    ['an accessor that throws the fatal parser error class', INITIALIZATION_ERROR_ACCESSOR_OUTPUT],
+    [
+      'a malformed nested symbol',
+      {
+        symbols: [
+          {
+            name: 'a',
+            kind: 'const',
+            exported: true,
+            signature: 'const a',
+            line: 'not-a-number',
+          },
+        ],
+        imports: [],
+      },
+    ],
+  ] as const)(
+    'skips only the malformed file for uncached and cold-cache generation: %s',
+    async (_caseName, malformedOutput) => {
+      if (_caseName === 'an unknown then accessor') thenAccessorReads = 0;
+      if (_caseName === 'a proxy with a then trap') proxyThenReads = 0;
+      if (_caseName === 'an unknown serialization accessor') {
+        unknownAccessorReads = 0;
+      }
+      const root = tempDir('repo-map-malformed-parser-root-');
+      const cacheFile = join(tempDir('repo-map-malformed-parser-cache-'), 'cache.json');
+      writeFileSync(join(root, 'a.ts'), 'export const a = 1;\n');
+      writeFileSync(join(root, 'b.ts'), 'export const b = 1;\n');
+      const parseFile = ((_source: string, path: string) =>
+        path === 'a.ts'
+          ? malformedOutput
+          : {
+              symbols: [
+                {
+                  name: 'b',
+                  kind: 'const' as const,
+                  exported: true,
+                  signature: 'const b',
+                  line: 1,
+                },
+              ],
+              imports: [],
+            }) as unknown as ParseFile;
+
+      const uncachedMap = await generateRepoMap(root, {
+        parseFile,
+        tokenBudget: 5000,
+      });
+      expect(uncachedMap.files.map((file) => file.path)).toEqual(['b.ts']);
+
+      const cold = createRepoMapFileCache({
+        cacheFile,
+        salt: 'malformed-parser-output',
+        parseFile,
+      });
+      const coldMap = await generateRepoMap(root, {
+        parseFile: cold.parseFile,
+        tokenBudget: 5000,
+      });
+      expect(coldMap.files).toStrictEqual(uncachedMap.files);
+      expect(coldMap.text).toBe(uncachedMap.text);
+      expect(cold.commit()).toMatchObject({ written: true, entryCount: 1 });
+
+      const warmCalls: string[] = [];
+      const warm = createRepoMapFileCache({
+        cacheFile,
+        salt: 'malformed-parser-output',
+        parseFile: (source, path) => {
+          warmCalls.push(path);
+          return parseFile(source, path);
+        },
+      });
+      const warmMap = await generateRepoMap(root, {
+        parseFile: warm.parseFile,
+        tokenBudget: 5000,
+      });
+      expect(warmMap.files).toStrictEqual(uncachedMap.files);
+      expect(warmMap.text).toBe(uncachedMap.text);
+      expect(warm.stats).toEqual({ hits: 1, misses: 1 });
+      expect(warmCalls).toEqual(['a.ts']);
+      if (_caseName === 'an unknown then accessor') {
+        expect(thenAccessorReads).toBe(0);
+      }
+      if (_caseName === 'a proxy with a then trap') {
+        expect(proxyThenReads).toBe(0);
+      }
+      if (_caseName === 'an unknown serialization accessor') {
+        expect(unknownAccessorReads).toBe(0);
+      }
+    }
+  );
+
+  it('keeps sidecar schema v2 while the v11 parser salt retires old cohorts', () => {
+    expect(REPO_MAP_FILE_CACHE_VERSION).toBe(2);
+    expect(repoMapParserCacheSalt()).toMatch(/^repo-map-output-v11:[a-f0-9]{64}$/);
   });
 
   it.each(MALFORMED_REPO_SYMBOL_CASES)(
