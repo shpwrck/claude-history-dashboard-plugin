@@ -124,7 +124,7 @@ export const detector: Detector = {
 
 Rules:
 
-- **Respect the [`/doctor` boundary](./doctor-vs-recs.md).** Do not add detectors that reimplement Claude Code `/doctor`'s live host probes or self-fix surface; keep recommendations artifact-backed and recommend-only.
+- **Respect the [`/doctor` boundary](./doctor-vs-recs.md).** `/doctor` also reads local artifacts and cross-project transcripts, so artifact access is not an exclusive `/recs` boundary. Do not reimplement `/doctor`'s live host probes or self-fix surface. Any intentional overlap must add a durable `/recs` advantage (such as longitudinal evidence, receipts and decay, measured cost, or cross-harness coverage), and recommendations remain recommend-only.
 - **Return `null` for "nothing worth saying"** — never a zero-impact finding.
 - **Gate on a minimum effect size** (`MIN_SAVINGS_USD`, an affected count, …).
 - **Use `estSavingsUsd` for ranking; use `savingsAttribution` for calibration.**

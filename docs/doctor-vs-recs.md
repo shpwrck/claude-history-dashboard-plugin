@@ -1,14 +1,15 @@
 # `/doctor` and `/recs`: two layers
 
-> `/doctor` = install health with fixes; `/recs` = behavioural coaching with
-> auditable, recommend-only claims.
+> `/doctor` = a point-in-time Claude Code maintenance pass with confirmed
+> edits; `/recs` = longitudinal, cross-harness coaching with auditable,
+> recommend-only claims.
 
 They answer different questions and work best together:
 
 | Surface | Question | Evidence | Action posture |
 | --- | --- | --- | --- |
-| Claude Code `/doctor` | Is this installation healthy right now? | Live host and runtime checks | Diagnoses installation problems and can apply fixes |
-| Dashboard `/recs` | How could this work improve? | Local `~/.claude` artifacts and opt-in `~/.codex` artifacts | Makes reproducible recommendations; never applies them |
+| Claude Code `/doctor` | What should I fix in this Claude Code installation and its loaded configuration now? | Local settings, configuration, usage counters, loaded `CLAUDE.md` files, and a bounded cross-project transcript scan, plus selected live install/version checks | Proposes changes, asks for confirmation, and can apply them |
+| Dashboard `/recs` | Which recurring patterns in retained work merit an auditable recommendation? | Longitudinal local `~/.claude` artifacts and opt-in `~/.codex` artifacts | Makes reproducible recommendations with evidence receipts; never applies them |
 
 Run `/doctor` after an install or update, or when authentication, networking,
 or editor integration is failing. Run `/recs` regularly to improve cost,
@@ -16,15 +17,34 @@ context use, workflow, reliability, and speed based on recorded work.
 
 ## Point-in-time comparison
 
-A [July 9, 2026 audit](https://github.com/shpwrck/claude-history-dashboard/issues/2423)
-compared Claude Code `/doctor` v2.1.205 with the dashboard's then-current catalog
-of 91 registered detectors. About 10 detectors (roughly 11%) touched the same
-settings, configuration, MCP, or update-health band. The audit also counted 61
-cost, context, workflow, and speed detectors with no `/doctor` counterpart.
+An August 11, 2026 audit compared Claude Code `/doctor` v2.1.227 (which retains
+the expanded surface introduced in v2.1.220) with the dashboard's catalog of 106
+registered detectors. The comparison counted overlap only when the two surfaces
+addressed substantially the same user concern or remediation; reading the same
+artifact was not enough. On that basis, 11 detectors (about 10%) overlap:
 
-Those figures describe that dated snapshot, not the current inventory or an
-ongoing compatibility promise. Re-run the comparison before quoting them as
-current.
+- setup and updates: `reliability.settings-json-invalid` and
+  `reliability.self-update-health`;
+- unused or context-heavy extensions: `cost.idle-mcp-tools`,
+  `context.mcp-schema-tax`, `safety.config-hygiene-rollup`,
+  `workflow.unused-installed-skills`, and
+  `workflow.unused-installed-plugins`;
+- always-loaded guidance and hooks: `context.bloated-claude-md`,
+  `context.over-scoped-config-section`, and `speed.hook-overhead`; and
+- permission friction: `safety.prompt-friction`.
+
+This is not a count of shared inputs. For example,
+`context.reclaim-potential` analyzes repeated tool output and re-pasted context,
+while `/doctor` restricts transcript use to specific counts and aggregates;
+`reliability.config-drift` reconstructs configuration history from backups; and
+`safety.allow-rule-overlaps-deny` diagnoses shadowed rules that `/doctor` merely
+respects while proposing other changes. `maintenance.skill-hook-integrity`
+finds missing file references, which is different from `/doctor`'s slow-hook
+timing check. None addresses the same concern or remediation, so none is in the
+overlap count.
+
+These figures describe that dated snapshot, not an ongoing compatibility
+promise. Re-run the comparison before quoting them as current.
 
 ## Ownership boundary
 
@@ -40,8 +60,25 @@ self-fix surface. That surface includes:
   and run-method detection.
 
 `/doctor` owns the live runtime authority and the path that changes the
-installation. `/recs` owns artifact-backed claims that remain auditable and
-recommend-only. A proposed detector on the live-probe surface is presumed
+installation. Artifact access alone no longer separates the products: current
+`/doctor` scans roughly 50 recently modified transcript files across all Claude
+Code projects, along with settings, extension usage counters, hook records, and
+loaded `CLAUDE.md` files.
+
+The durable boundary is what happens around that evidence:
+
+- `/doctor` takes a bounded point-in-time snapshot, keeps no memory between
+  runs, and can apply changes after confirmation. Its report does not provide
+  durable per-finding receipts or decay old claims.
+- `/recs` reasons across retained history, covers Claude and opt-in Codex data,
+  and keeps every finding recommend-only. Detector claims must expose
+  reproducible evidence and provenance, and stale signals must decay or be
+  dated.
+- `/doctor` estimates resident context size, but it does not analyze observed
+  model selection, token usage, or dollar cost. `/recs` covers those measured
+  usage and cost dimensions.
+
+A proposed detector on the live-probe or self-fix surface is still presumed
 redundant and needs an explicit product justification before implementation.
 
 Any approved exception must be opt-in behind an explicit environment flag and
@@ -53,9 +90,9 @@ The gate is necessary, not sufficient: it does not by itself justify duplicating
 
 ## Recommended-posture stance
 
-`/doctor` (v2.1.220) actively recommends permissive posture: check 8 writes
-`permissions.defaultMode: auto` and check 9 mints transcript-mined
-`permissions.allow` rules. Per
+`/doctor` v2.1.227 (with this behaviour already present in v2.1.220) actively
+recommends permissive posture: check 8 writes `permissions.defaultMode: auto`
+and check 9 mints transcript-mined `permissions.allow` rules. Per
 [ADR 0021](./adr/0021-doctor-recommended-posture-safety-stance.md) (#3408),
 the safety category **differentiates and reconciles** rather than conceding or
 re-alarming: posture at or below that `/doctor` baseline is not alarm-grade on
