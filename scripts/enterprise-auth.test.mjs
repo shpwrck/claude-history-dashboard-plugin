@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { createCipheriv, createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +40,35 @@ async function fileMode(path) {
     if (err?.code === 'ENOENT') return -1;
     throw err;
   }
+}
+
+async function processHasOpenFile(pid, path) {
+  if (process.platform !== 'linux') return null;
+  const fdDir = `/proc/${pid}/fd`;
+  let entries;
+  try {
+    entries = await readdir(fdDir);
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    try {
+      const target = await readlink(join(fdDir, entry));
+      if (target === path || target === `${path} (deleted)`) return true;
+    } catch {
+      // File descriptors can disappear between readdir and readlink.
+    }
+  }
+  return false;
+}
+
+async function waitForOpenFileState(pid, path, expected) {
+  let observed = await processHasOpenFile(pid, path);
+  for (let attempt = 0; observed !== null && observed !== expected && attempt < 50; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    observed = await processHasOpenFile(pid, path);
+  }
+  return observed;
 }
 
 function scopedCacheDbPath(dataRoot, cacheDir = join(PROJECT_DIR, '.cache')) {
@@ -204,6 +233,7 @@ async function startServer(extraEnv = {}) {
   check('server came up', up);
   return {
     base,
+    pid: proc.pid,
     claudeDir,
     distDir,
     auditLog,
@@ -2304,6 +2334,11 @@ try {
     'enterprise scoped cache db is private',
     (await fileMode(scopedCacheDbPath(scopedRootA))) === 0o600
   );
+  check(
+    'enterprise scoped cache member A owns an open DB handle',
+    process.platform !== 'linux' ||
+      (await waitForOpenFileState(server.pid, scopedCacheDbPath(scopedRootA), true)) === true
+  );
 
   r = await fetch(`${server.base}/api/dataset.json`, {
     headers: { Authorization: 'Bearer enterprise-member-b-token' },
@@ -2311,6 +2346,16 @@ try {
   bodyText = await r.text();
   check('enterprise scoped cache member B dataset -> 200', r.status === 200, `got ${r.status}`);
   check('enterprise scoped cache member B reads root B', bodyText.includes('/tenant/b'));
+  check(
+    'enterprise scoped cache eviction closes member A DB handle',
+    process.platform !== 'linux' ||
+      (await waitForOpenFileState(server.pid, scopedCacheDbPath(scopedRootA), false)) === false
+  );
+  check(
+    'enterprise scoped cache member B owns the remaining DB handle',
+    process.platform !== 'linux' ||
+      (await waitForOpenFileState(server.pid, scopedCacheDbPath(scopedRootB), true)) === true
+  );
 
   r = await fetch(`${server.base}/api/dataset.json`, {
     headers: { Authorization: 'Bearer enterprise-member-a-token' },

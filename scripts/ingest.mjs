@@ -5925,6 +5925,12 @@ function computeLiveSession(now = Date.now()) {
   return liveSession(listSessionsCached(), now);
 }
 
+/** Release every process resource owned by this ingest instance. */
+function close() {
+  workflowFreshnessTracker.dispose();
+  if (db.isOpen) db.close();
+}
+
 
   return {
     CHD_CACHE_DIR,
@@ -5975,12 +5981,41 @@ function computeLiveSession(now = Date.now()) {
     computeLiveSession,
     readRejectedFindingIds,
     readCheckpointAnswerEfficacy,
+    close,
   };
+}
+
+function configForCreateIngest(options) {
+  if (!options || typeof options !== 'object') {
+    throw new TypeError('createIngest options must be an object');
+  }
+  if (options.config !== undefined) return options.config;
+
+  const hasRootOverrides = [
+    'claudeDir',
+    'claudeHomeDir',
+    'dbPath',
+    'scoped',
+  ].some((key) => Object.prototype.hasOwnProperty.call(options, key));
+  if (!hasRootOverrides) return MODULE_DEFAULT_INGEST_CONFIG;
+
+  const env = { ...process.env };
+  if (options.claudeDir !== undefined) env.CLAUDE_DIR = options.claudeDir;
+  if (options.claudeHomeDir !== undefined) {
+    env.CLAUDE_HOME_DIR = options.claudeHomeDir;
+  }
+  if (options.dbPath !== undefined) env.CHD_DB_PATH = options.dbPath;
+  if (options.scoped !== undefined) {
+    env.CHD_SCOPED_INGEST = options.scoped ? '1' : '0';
+  }
+  return resolveIngestConfig(env, options.claudeHomeDir ?? homedir());
 }
 
 /** Construct one isolated ingest state owner behind the server's existing API. */
 export function createIngest(options = {}) {
-  const instance = createIngestInstance(options);
+  const instance = createIngestInstance({
+    config: configForCreateIngest(options),
+  });
   return Object.freeze({
     ingest: instance.ingest,
     assembleDataset: instance.assembleDataset,
@@ -6009,6 +6044,7 @@ export function createIngest(options = {}) {
     datasetDocGraphGitWorkingTreeSignature: instance.datasetDocGraphGitWorkingTreeSignature,
     docGraphGitWorkingTreeSignatureForServer: instance.docGraphGitWorkingTreeSignatureForServer,
     docGraphGitWorkingTreeSignatureFromLastSourceGate: instance.docGraphGitWorkingTreeSignatureFromLastSourceGate,
+    close: instance.close,
   });
 }
 

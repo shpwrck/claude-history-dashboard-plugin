@@ -170,7 +170,10 @@ describe('createIngest instance isolation (#3678)', () => {
         });
       }
 
-      const expectedApi = JSON.parse(process.env.CHD_EXPECTED_INGEST_API);
+      const expectedApi = [
+        ...JSON.parse(process.env.CHD_EXPECTED_INGEST_API),
+        'close',
+      ].sort();
 
       const a = createIngest({ config: config(rootA, 'fixture-a') });
       const b = createIngest({ config: config(rootB, 'fixture-b') });
@@ -237,7 +240,8 @@ describe('createIngest instance isolation (#3678)', () => {
       if (buildB2.contentHash !== buildB1.contentHash) {
         throw new Error('instance A mutation changed instance B content hash');
       }
-      if (a.assembleDataset().entries.length !== 2) {
+      const aSessionCount = a.assembleDataset().entries.length;
+      if (aSessionCount !== 2) {
         throw new Error('instance A did not assemble its second session');
       }
       const datasetB2 = b.assembleDataset();
@@ -255,12 +259,23 @@ describe('createIngest instance isolation (#3678)', () => {
       if (!existsSync(dbA) || !existsSync(dbB) || statSync(dbA).ino === statSync(dbB).ino) {
         throw new Error('instances did not own distinct SQLite files');
       }
+      a.close();
+      a.close();
+      let closedDbHandle = false;
+      try {
+        a.getSessionTimelineDetail('session-a');
+      } catch (error) {
+        closedDbHandle = /not open|closed|finalized/i.test(String(error?.message || error));
+      }
+      if (!closedDbHandle) throw new Error('close() left the SQLite handle usable');
+      b.close();
       console.log(JSON.stringify({
         apiMembers: Object.keys(a).length,
-        aSessions: a.assembleDataset().entries.length,
+        aSessions: aSessionCount,
         bSessions: datasetB2.entries.length,
         independentContentHashes: true,
         independentDbFiles: true,
+        closedDbHandle,
       }));
     `;
 
@@ -292,11 +307,12 @@ describe('createIngest instance isolation (#3678)', () => {
       expect(result.status, result.stderr).toBe(0);
       const summary = JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{}');
       expect(summary).toEqual({
-        apiMembers: 27,
+        apiMembers: 28,
         aSessions: 2,
         bSessions: 1,
         independentContentHashes: true,
         independentDbFiles: true,
+        closedDbHandle: true,
       });
       expect(statSync(join(rootA, '.cache', 'dashboard.db')).size).toBeGreaterThan(0);
       expect(statSync(join(rootB, '.cache', 'dashboard.db')).size).toBeGreaterThan(0);
@@ -304,4 +320,19 @@ describe('createIngest instance isolation (#3678)', () => {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it('constructs scoped server instances without env mutation or ESM cache busting', () => {
+    const source = readFileSync(join(repoRoot, 'scripts', 'server.mjs'), 'utf8');
+    expect(source).toContain('createIngest({');
+    expect(source).toContain('claudeDir: dataRoot');
+    expect(source).toContain('dbPath: scopedIngestDbPath(dataRoot)');
+    expect(source).not.toContain('scopedIngestImportQueue');
+    expect(source).not.toContain('restoreEnvValue');
+    expect(source).not.toContain('enterpriseRoot=');
+    expect(source).not.toMatch(/process\.env\.(?:CLAUDE_DIR|CLAUDE_HOME_DIR|CHD_DB_PATH|CHD_SCOPED_INGEST)\s*=/);
+    expect(source).toContain('!lease.handlerDone || !lease.responseDone');
+    expect(source).toContain('finishScopedDatasetRequest(req);');
+    expect(source).toContain('state.activeRequests === 0');
+    expect(source).toContain('...(state.detachedBuilds ?? [])');
+  });
 });

@@ -97,6 +97,7 @@ import {
   docGraphGitWorkingTreeSignatureForServer,
   docGraphGitWorkingTreeSignatureFromLastSourceGate,
   PROJECT_ROOTS,
+  createIngest,
 } from './ingest.mjs';
 import {
   readWorkflows,
@@ -318,9 +319,10 @@ const { computeSessionOutcomes } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-timeline-success.ts')
 );
 // DIST_DIR lets route tests point at throwaway bundles. CLAUDE_DIR also supports
-// those tests, while enterprise scoped ingest temporarily repoints it at each
-// principal's configured data root. In the ordinary local container neither is
-// set, so these resolve to bundled dist/ and the bind-mounted ~/.claude.
+// those tests. Enterprise scoped ingest receives each principal's data root as
+// an explicit factory option and never mutates this process-wide setting. In the
+// ordinary local container neither is set, so these resolve to bundled dist/
+// and the bind-mounted ~/.claude.
 const DIST = process.env.DIST_DIR || join(PROJECT_DIR, 'dist');
 const SHADOW_CALLS_DIR = join(CLAUDE, 'shadow-calls');
 // Shadow-calls experiment ledger (#2152): the append-only JSONL the shadow
@@ -1313,6 +1315,8 @@ function datasetState(apiPromise, key = 'global') {
     key,
     apiPromise,
     lastAccess: Date.now(),
+    activeRequests: 0,
+    closePromise: null,
     datasetCache: null, // { etag, json, brBuf, gzBuf, contentHash }
     datasetRefresh: null,
     // Single-flight guard for the truly-cold (no cache at all) build path so
@@ -1323,6 +1327,10 @@ function datasetState(apiPromise, key = 'global') {
     // expensive enough to avoid repeat ingest+assemble work under org traffic.
     recommendationsCache: new Map(),
     recommendationsBuilds: new Map(),
+    // Detached stale-while-revalidate builds remain lifecycle-owned even if
+    // their bounded LRU map entry is pruned while the work is still running.
+    // Allocate the ownership set only when a detached build actually exists.
+    detachedBuilds: null,
     recommendationsBuildGeneration: 0,
     // Receipt writes are outside sourceSignature/contentHash. Every reject bumps
     // this epoch so a build that captured older receipt state cannot be joined or
@@ -1368,7 +1376,8 @@ function datasetState(apiPromise, key = 'global') {
 
 const globalDatasetState = datasetState(Promise.resolve(GLOBAL_INGEST_API));
 const scopedDatasetStates = new Map();
-let scopedIngestImportQueue = Promise.resolve();
+const REQUEST_DATASET_RESPONSE = Symbol('requestDatasetResponse');
+const REQUEST_SCOPED_DATASET_LEASE = Symbol('requestScopedDatasetLease');
 
 function enterpriseDataRootKey(dataRoot) {
   return createHash('sha256').update(dataRoot).digest('hex').slice(0, 24);
@@ -1399,35 +1408,13 @@ function scopedIngestDbPath(dataRoot) {
   return destinationPath;
 }
 
-function restoreEnvValue(name, value) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
-
-function importScopedIngest(dataRoot) {
-  const key = enterpriseDataRootKey(dataRoot);
-  const next = scopedIngestImportQueue
-    .catch(() => {})
-    .then(async () => {
-      const prevClaudeDir = process.env.CLAUDE_DIR;
-      const prevClaudeHomeDir = process.env.CLAUDE_HOME_DIR;
-      const prevDbPath = process.env.CHD_DB_PATH;
-      const prevScopedIngest = process.env.CHD_SCOPED_INGEST;
-      process.env.CLAUDE_DIR = dataRoot;
-      process.env.CLAUDE_HOME_DIR = dirname(dataRoot);
-      process.env.CHD_DB_PATH = scopedIngestDbPath(dataRoot);
-      process.env.CHD_SCOPED_INGEST = '1';
-      try {
-        return await import(`./ingest.mjs?enterpriseRoot=${key}`);
-      } finally {
-        restoreEnvValue('CLAUDE_DIR', prevClaudeDir);
-        restoreEnvValue('CLAUDE_HOME_DIR', prevClaudeHomeDir);
-        restoreEnvValue('CHD_DB_PATH', prevDbPath);
-        restoreEnvValue('CHD_SCOPED_INGEST', prevScopedIngest);
-      }
-    });
-  scopedIngestImportQueue = next.catch(() => {});
-  return next;
+function createScopedIngest(dataRoot) {
+  return createIngest({
+    claudeDir: dataRoot,
+    claudeHomeDir: dirname(dataRoot),
+    dbPath: scopedIngestDbPath(dataRoot),
+    scoped: true,
+  });
 }
 
 function enterpriseRequestUsesGlobalIngest(req) {
@@ -1435,22 +1422,94 @@ function enterpriseRequestUsesGlobalIngest(req) {
   return !ENTERPRISE_AUTH_ON || principal?.role === 'admin' || !principal?.dataRoot;
 }
 
-function pruneScopedDatasetStates(activeKey) {
+function pendingScopedDatasetWork(state) {
+  const values = [
+    state.datasetRefresh,
+    state.datasetColdBuild,
+    ...(state.detachedBuilds ?? []),
+    ...state.recommendationsBuilds.values(),
+    ...state.digestBuilds.values(),
+    ...state.searchBuilds.values(),
+    ...state.bootBuilds.values(),
+    ...state.sliceBuilds.values(),
+  ];
+  return values
+    .map((value) => value?.promise ?? value)
+    .filter((value) => value && typeof value.then === 'function');
+}
+
+function closeScopedDatasetState(state) {
+  if (state.closePromise) return state.closePromise;
+  state.closePromise = (async () => {
+    // A stale response may schedule its background refresh from the response's
+    // `finish` event. The request lease is released by that same event, so keep
+    // sampling until all work registered by either listener has settled.
+    for (;;) {
+      await Promise.resolve();
+      const pending = pendingScopedDatasetWork(state);
+      if (pending.length === 0) break;
+      await Promise.allSettled(pending);
+    }
+    const api = await state.apiPromise;
+    api.close();
+  })();
+  state.closePromise.catch((error) => {
+    console.error('scoped ingest close failed:', error?.message ?? error);
+  });
+  return state.closePromise;
+}
+
+function pruneScopedDatasetStates(activeKey = null) {
   if (scopedDatasetStates.size <= ENTERPRISE_SCOPED_DATASET_MAX_STATES) return;
   const candidates = [...scopedDatasetStates.entries()]
-    .filter(([key]) => key !== activeKey)
+    .filter(([key, state]) => key !== activeKey && state.activeRequests === 0)
     .sort((a, b) => (a[1].lastAccess || 0) - (b[1].lastAccess || 0));
   for (const [key] of candidates) {
     if (scopedDatasetStates.size <= ENTERPRISE_SCOPED_DATASET_MAX_STATES) return;
     const evicted = scopedDatasetStates.get(key);
     scopedDatasetStates.delete(key);
-    // Dynamic imports remain module-cached after state eviction. Explicitly
-    // release that module's workflow watcher/timer; if this root returns later,
-    // its tracker restarts from a fresh exact baseline (#2706).
-    void evicted?.apiPromise
-      .then((api) => api.suspendWorkflowFreshnessForServer?.())
-      .catch(() => {});
+    void closeScopedDatasetState(evicted);
   }
+}
+
+function retainScopedDatasetStateForRequest(req, state) {
+  if (state === globalDatasetState) return;
+  const existingLease = req[REQUEST_SCOPED_DATASET_LEASE];
+  if (existingLease) {
+    if (existingLease.state === state) return;
+    throw new Error('One request cannot retain multiple scoped ingest states');
+  }
+  const res = req[REQUEST_DATASET_RESPONSE];
+  if (!res) throw new Error('Scoped dataset request is missing its response owner');
+
+  state.activeRequests += 1;
+  const lease = {
+    state,
+    handlerDone: false,
+    responseDone: res.writableFinished || res.destroyed,
+    released: false,
+    maybeRelease: null,
+  };
+  lease.maybeRelease = () => {
+    if (lease.released || !lease.handlerDone || !lease.responseDone) return;
+    lease.released = true;
+    state.activeRequests = Math.max(0, state.activeRequests - 1);
+    pruneScopedDatasetStates();
+  };
+  req[REQUEST_SCOPED_DATASET_LEASE] = lease;
+  const responseDone = () => {
+    lease.responseDone = true;
+    lease.maybeRelease();
+  };
+  res.once('finish', responseDone);
+  res.once('close', responseDone);
+}
+
+function finishScopedDatasetRequest(req) {
+  const lease = req[REQUEST_SCOPED_DATASET_LEASE];
+  if (!lease) return;
+  lease.handlerDone = true;
+  lease.maybeRelease();
 }
 
 function enterpriseRequestDatasetState(req) {
@@ -1459,10 +1518,11 @@ function enterpriseRequestDatasetState(req) {
   const key = enterpriseDataRootKey(principal.dataRoot);
   let state = scopedDatasetStates.get(key);
   if (!state) {
-    state = datasetState(importScopedIngest(principal.dataRoot), key);
+    state = datasetState(Promise.resolve(createScopedIngest(principal.dataRoot)), key);
     scopedDatasetStates.set(key, state);
   }
   state.lastAccess = Date.now();
+  retainScopedDatasetStateForRequest(req, state);
   pruneScopedDatasetStates(key);
   return state;
 }
@@ -3613,6 +3673,13 @@ async function recommendationsResponseCache(
       }
     });
     buildOwner.promise = promise;
+    // perf-index-contract: detached-recommendation-build-ownership always-consumed: every allocation immediately records this build and its settlement callback removes that same promise
+    state.detachedBuilds ??= new Set();
+    state.detachedBuilds.add(promise);
+    promise.then(
+      () => state.detachedBuilds.delete(promise),
+      () => state.detachedBuilds.delete(promise)
+    );
     // Mark the reserved promise handled so a failed background rebuild never
     // becomes an unhandled rejection (the cold path below awaits its own build
     // and still surfaces errors through the route try/catch).
@@ -10812,6 +10879,7 @@ const DATASET_ROUTES = new Map([
 
 const server = createServer(async (req, res) => {
   try {
+    req[REQUEST_DATASET_RESPONSE] = res;
     applySecurityHeaders(res);
     res.setHeader('X-Request-Id', enterpriseRequestId(req));
     const pathname = requestPathname(req);
@@ -11478,6 +11546,8 @@ const server = createServer(async (req, res) => {
     res.statusCode = 500;
     res.end('server error');
     console.error(err);
+  } finally {
+    finishScopedDatasetRequest(req);
   }
 });
 
