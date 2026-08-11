@@ -94,6 +94,7 @@ function createEvidenceFixture({
   typecheckExit = 0,
   vitestBytes = 0,
   vitestDelayMs = 0,
+  pauseVitestBeforeLog = false,
   installDelayMs = 0,
   installDescendant = false,
   slowInstallTreatment = null,
@@ -116,6 +117,7 @@ function createEvidenceFixture({
   const trialRoot = join(stateRoot, DEFINITION_DIRECTORY, trialId);
   const tools = join(root, "bin");
   const toolLog = join(root, "tools.log");
+  const vitestBeforeLog = join(root, "vitest-before-log");
   const installDescendants = join(root, "install-descendants.log");
   const installInvocations = join(root, "install-invocations.log");
   mkdirSync(tools, { recursive: true });
@@ -125,7 +127,7 @@ function createEvidenceFixture({
     : `process.stdout.write(${vitestBytes} > 0 ? 'x'.repeat(${vitestBytes}) : 'one fixture test failed\\n', () => process.exit(${vitestExit}));`;
   writeExecutable(
     join(tools, "npx"),
-    `#!${process.execPath}\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nconst joined = args.join(' ');\nfs.appendFileSync(${JSON.stringify(toolLog)}, 'npx ' + joined + '\\n');\nif (process.env.GATE2702_BREAK_TREATMENT_TOOLS === '1' && process.cwd().includes('haiku-sonnet-sidekick') && joined.includes('--version')) process.exit(90);\nif (joined === '--no-install vitest --version') { process.stdout.write('vitest/3.2.4 linux-x64 node-v22\\n'); process.exit(0); }\nif (joined === '--no-install tsc --version') { process.stdout.write('Version 5.8.3\\n'); process.exit(0); }\nsetTimeout(() => { ${vitestCompletion} }, ${vitestDelayMs});\n`,
+    `#!${process.execPath}\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nconst joined = args.join(' ');\nif (${pauseVitestBeforeLog} && joined === 'vitest run') {\n  fs.writeFileSync(${JSON.stringify(vitestBeforeLog)}, 'ready\\n');\n  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n}\nfs.appendFileSync(${JSON.stringify(toolLog)}, 'npx ' + joined + '\\n');\nif (process.env.GATE2702_BREAK_TREATMENT_TOOLS === '1' && process.cwd().includes('haiku-sonnet-sidekick') && joined.includes('--version')) process.exit(90);\nif (joined === '--no-install vitest --version') { process.stdout.write('vitest/3.2.4 linux-x64 node-v22\\n'); process.exit(0); }\nif (joined === '--no-install tsc --version') { process.stdout.write('Version 5.8.3\\n'); process.exit(0); }\nsetTimeout(() => { ${vitestCompletion} }, ${vitestDelayMs});\n`,
   );
   writeExecutable(
     join(tools, "npm"),
@@ -564,6 +566,7 @@ function createEvidenceFixture({
     trialRoot,
     baseSha,
     toolLog,
+    vitestBeforeLog,
     installDescendants,
     installInvocations,
     env: {
@@ -596,6 +599,13 @@ async function waitFor(predicate, label, timeoutMs = 10_000) {
       throw new Error(`timed out waiting for ${label}`);
     await new Promise((resolveWait) => setTimeout(resolveWait, 20));
   }
+}
+
+function toolCallCount(toolLog, expectedLine) {
+  if (!existsSync(toolLog)) return 0;
+  return readFileSync(toolLog, "utf8")
+    .split("\n")
+    .filter((line) => line === expectedLine).length;
 }
 
 function processIsActive(pid) {
@@ -905,11 +915,15 @@ test("classification resumes from immutable completed check receipts", () => {
   }
 });
 
-test("classification kills and excludes an orphaned active check without duplication", async () => {
+async function assertOrphanedCheckRecovery({
+  pauseVitestBeforeLog,
+  expectedVitestCalls,
+}) {
   const fixture = createEvidenceFixture({
     vitestExit: 0,
     typecheckExit: 0,
     vitestDelayMs: 5_000,
+    pauseVitestBeforeLog,
   });
   const args = [
     "classify",
@@ -930,10 +944,21 @@ test("classification kills and excludes an orphaned active check without duplica
     CHD_EXPERIMENT_2702_TEST_PROCESS_GRACE_MS: "5000",
   };
   let child;
+  let processReceipt;
+  let childStdout = "";
+  let childStderr = "";
   try {
     child = spawn(process.execPath, [CLASSIFIER, ...args], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      childStdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      childStderr += chunk;
     });
     const processPath = join(
       fixture.trialRoot,
@@ -944,11 +969,30 @@ test("classification kills and excludes an orphaned active check without duplica
       "checks",
       "checks_gate-2702-vitest.process.json",
     );
-    await waitFor(
-      () => existsSync(processPath),
-      "the durable check process receipt",
+    await waitFor(() => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(
+          `classifier exited before the process receipt: ${childStdout}\n${childStderr}`,
+        );
+      }
+      return existsSync(processPath);
+    }, "the durable check process receipt");
+    processReceipt = JSON.parse(readFileSync(processPath, "utf8"));
+    if (pauseVitestBeforeLog) {
+      await waitFor(
+        () => existsSync(fixture.vitestBeforeLog),
+        "the paused vitest process before its tool-log append",
+      );
+    } else {
+      await waitFor(
+        () => toolCallCount(fixture.toolLog, "npx vitest run") === 1,
+        "the active vitest tool-log append",
+      );
+    }
+    assert.equal(
+      toolCallCount(fixture.toolLog, "npx vitest run"),
+      expectedVitestCalls,
     );
-    const processReceipt = JSON.parse(readFileSync(processPath, "utf8"));
     child.kill("SIGKILL");
     await waitFor(
       () => child.exitCode !== null || child.signalCode !== null,
@@ -968,18 +1012,42 @@ test("classification kills and excludes an orphaned active check without duplica
     assert.equal(classification.checkResults[0].interrupted, true);
     assert.equal(classification.checkResults[0].processGroupQuiescent, true);
     assert.equal(
-      readFileSync(fixture.toolLog, "utf8")
-        .split("\n")
-        .filter((line) => line === "npx vitest run").length,
-      1,
+      toolCallCount(fixture.toolLog, "npx vitest run"),
+      expectedVitestCalls,
     );
     assert.equal(processIsActive(processReceipt.pid), false);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill("SIGKILL");
     }
+    if (processReceipt && processIsActive(processReceipt.pid)) {
+      try {
+        process.kill(
+          process.platform === "win32"
+            ? processReceipt.pid
+            : -processReceipt.pid,
+          "SIGKILL",
+        );
+      } catch {
+        // Best effort: recovery may have made the exact process group quiescent.
+      }
+    }
     fixture.cleanup();
   }
+}
+
+test("classification recovers a process receipt killed before the tool-log append without dispatching", async () => {
+  await assertOrphanedCheckRecovery({
+    pauseVitestBeforeLog: true,
+    expectedVitestCalls: 0,
+  });
+});
+
+test("classification recovers an active logged check without dispatching a duplicate", async () => {
+  await assertOrphanedCheckRecovery({
+    pauseVitestBeforeLog: false,
+    expectedVitestCalls: 1,
+  });
 });
 
 test("a worker timeout is cancelled, excluded, and does not run checks", () => {
