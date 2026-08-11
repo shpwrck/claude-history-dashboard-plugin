@@ -348,6 +348,10 @@ paths:
           headers:
             ETag:
               $ref: '#/components/headers/ETag'
+            X-Dataset-Version:
+              schema:
+                type: string
+              description: Dataset split version.
           content:
             application/json:
               schema:
