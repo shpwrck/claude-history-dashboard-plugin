@@ -222,6 +222,37 @@ test('specializeReceiptSchema narrows gates and files to the exact dispatched ba
     subtractionRule.then.required,
     ['cut', 'blastRadius', 'keepIf', 'reversibility'],
   );
+
+  const subtractionOnly = specializeReceiptSchema(generic, {
+    ...batch,
+    gates: ['subtraction'],
+  });
+  const subtractionFinding = subtractionOnly.properties.findings.items;
+  assert.equal(subtractionFinding.allOf, undefined);
+  assert.deepEqual(subtractionFinding.properties.lens.enum, ['subtraction']);
+  assert.deepEqual(
+    subtractionFinding.required.slice(-4),
+    ['cut', 'blastRadius', 'keepIf', 'reversibility'],
+  );
+  assert.equal(subtractionFinding.properties.cut.uniqueItems, undefined);
+  assert.equal(subtractionFinding.properties.blastRadius.uniqueItems, undefined);
+
+  const mixed = specializeReceiptSchema(generic, {
+    ...batch,
+    gates: ['security', 'subtraction'],
+  });
+  const [additiveFinding, mixedSubtractionFinding] = mixed.properties.findings.items.anyOf;
+  assert.deepEqual(additiveFinding.properties.lens.enum, ['security']);
+  assert.equal(additiveFinding.properties.cut, undefined);
+  assert.deepEqual(mixedSubtractionFinding.properties.lens.enum, ['subtraction']);
+  assert.deepEqual(
+    mixedSubtractionFinding.required.slice(-4),
+    ['cut', 'blastRadius', 'keepIf', 'reversibility'],
+  );
+  assert.equal(
+    new RegExp(mixedSubtractionFinding.properties.files.items.pattern).test('a.ts:4'),
+    true,
+  );
 });
 
 test('buildDispatchArgv: per-harness command; unknown throws', () => {
@@ -543,6 +574,20 @@ test('buildPrompt defines subtraction as a bounded, evidence-backed removal deci
   assert.match(prompt, /unreferenced/i);
   assert.match(prompt, /do not run a\s+repo-wide reachability search/i);
   assert.match(prompt, /load-bearing surface\s+is clean/i);
+  assert.match(prompt, /audit inputs, not conclusions/i);
+  assert.match(prompt, /docs\/audits\/v060-file-audit\.md:92/);
+  assert.match(prompt, /zero Caddy containers/);
+  assert.match(prompt, /hosted\/self-hoster tier ships/);
+
+  const liveOnly = buildPrompt({
+    section: 'root',
+    gates: ['subtraction'],
+    baseline: SHA,
+    repoDir: '/repo',
+    auditDate: '2026-08-11',
+    files: ['Dockerfile', 'docker-compose.tls.yml'],
+  });
+  assert.doesNotMatch(liveOnly, /v060-file-audit/);
 });
 
 test('buildPrompt JSON-encodes hostile tracked filenames instead of adding prompt lines', () => {

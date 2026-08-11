@@ -235,6 +235,19 @@ export function buildPrompt({ section, gates, baseline, repoDir, auditDate, file
         `and reversibility states how git history restores the cut.`,
       ]
     : [];
+  const boundedEvidence = gates.flatMap((gate) =>
+    (GATES[gate]?.boundedEvidence || [])
+      .filter((entry) => entry.triggerFiles.some((file) => (files || []).includes(file)))
+      .map((entry) => ({ gate, ...entry })));
+  const evidenceInstructions = boundedEvidence.length
+    ? [
+        `Bounded provenance candidate(s) are supplied below as audit inputs, not conclusions. Adversarially re-check`,
+        `each candidate against the immutable baseline and reject it if the named observation is stale, incomplete,`,
+        `or contradicted. For this check only, you may inspect the exact source reference and named companion surface`,
+        `files as the smallest directly related baseline evidence. findings[].files must still cite dispatched files.`,
+        ...boundedEvidence.map((entry) => `- ${JSON.stringify(entry)}`),
+      ]
+    : [];
   return [
     `Perform a release-gate audit of EXACTLY these ${(files || []).length} file(s) in the "${section}" section.`,
     `Your working directory is a clean detached checkout of immutable origin/master ${baseline}.`,
@@ -261,6 +274,7 @@ export function buildPrompt({ section, gates, baseline, repoDir, auditDate, file
     `emitting a fixture finding, inspect the nearest manifest, README, or task instruction and reject behavior that is`,
     `explicitly the controlled task input.`,
     ...(subtractionInstructions.length ? ['', ...subtractionInstructions] : []),
+    ...(evidenceInstructions.length ? ['', ...evidenceInstructions] : []),
     ``,
     `For each file, return one verdict for EACH active gate:`,
     `- "n/a": the file does not participate in that gate's concern; give a concrete short reason.`,
@@ -305,13 +319,56 @@ export function specializeReceiptSchema(baseSchema, batch) {
   verdictGates.minItems = batch.gates.length;
   verdictGates.maxItems = batch.gates.length;
   verdictGates.items.properties.gate.enum = [...batch.gates];
-  const finding = properties.findings.items.properties;
-  finding.lens.enum = [...batch.gates];
   const regexMeta = '\\^$.*+?()[]{}|';
   const escapedPaths = batch.auditedFiles.map((file) => [...file]
     .map((char) => (regexMeta.includes(char) ? `\\${char}` : char))
     .join(''));
-  finding.files.items.pattern = `^(?:${escapedPaths.join('|')}):[1-9]\\d*(?:-[1-9]\\d*)?$`;
+  const evidencePattern = `^(?:${escapedPaths.join('|')}):[1-9]\\d*(?:-[1-9]\\d*)?$`;
+
+  // The durable schema uses an if/then/else discriminator so Ajv can reject a
+  // subtraction finding without its decision fields (and reject those fields on
+  // additive findings). Codex structured outputs deliberately supports a smaller
+  // JSON-Schema subset and rejects that schema's `allOf`. Compile the exact batch
+  // into one strict object or an `anyOf` discriminated pair before dispatch. The
+  // independent receipt validator still applies the durable schema after output.
+  const findingTemplate = properties.findings.items;
+  const subtractionFields = ['cut', 'blastRadius', 'keepIf', 'reversibility'];
+  const findingObject = (gates, includeSubtractionFields) => {
+    const findingProperties = JSON.parse(JSON.stringify(findingTemplate.properties));
+    findingProperties.lens.enum = [...gates];
+    findingProperties.files.items.pattern = evidencePattern;
+    if (!includeSubtractionFields) {
+      for (const field of subtractionFields) delete findingProperties[field];
+    } else {
+      // Codex's response-format subset also excludes uniqueItems. Duplicate cuts
+      // and consumers remain fail-closed in validateFinding after generation.
+      delete findingProperties.cut.uniqueItems;
+      delete findingProperties.blastRadius.uniqueItems;
+    }
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        ...findingTemplate.required,
+        ...(includeSubtractionFields ? subtractionFields : []),
+      ],
+      properties: findingProperties,
+    };
+  };
+  const additiveGates = batch.gates.filter((gate) => gate !== 'subtraction');
+  if (batch.gates.includes('subtraction') && additiveGates.length) {
+    properties.findings.items = {
+      anyOf: [
+        findingObject(additiveGates, false),
+        findingObject(['subtraction'], true),
+      ],
+    };
+  } else {
+    properties.findings.items = findingObject(
+      batch.gates,
+      batch.gates.includes('subtraction'),
+    );
+  }
   return schema;
 }
 

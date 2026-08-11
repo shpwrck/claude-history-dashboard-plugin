@@ -48,6 +48,16 @@ export const GATES = {
       'surface is never exercised or is superseded. Name the exact cut, affected consumers, the condition ' +
       'that would justify keeping it, and git-history reversibility. Do not infer that a surface is ' +
       'unreferenced; repo-wide reachability is a separate mechanical pre-pass.',
+    boundedEvidence: [
+      {
+        triggerFiles: ['Caddyfile'],
+        surface: ['Caddyfile', 'docker-compose.tls.yml'],
+        source: 'docs/audits/v060-file-audit.md:92',
+        observation:
+          'The completed v0.6 file audit records zero Caddy containers on the known operator host and no CI exercise.',
+        keepIf: 'The hosted/self-hoster tier ships; otherwise demote the TLS flavor to a documentation recipe.',
+      },
+    ],
   },
   // Architecture (#1931) is already CLOSED for v0.6.0 — kept here so the harness can
   // re-run it or apply it to a future release. Not in DEFAULT_GATES; filing to it
