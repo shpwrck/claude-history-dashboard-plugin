@@ -29,9 +29,9 @@ import {
   normalizeFileStructure,
 } from './parser-output';
 
-// Exact parser-output projection does not change this sidecar envelope. The
-// canonical REPO_MAP_OUTPUT v11 bump is already embedded in the parser salt,
-// so old cohorts retire without a redundant sidecar-schema version change.
+// Canonical REPO_MAP_OUTPUT rollovers are embedded in the parser salt, so old
+// cohorts retire without a redundant sidecar-schema version change. Output
+// contract fencing and exact projection do not change this sidecar envelope.
 export const REPO_MAP_FILE_CACHE_VERSION = 2;
 export const DEFAULT_REPO_MAP_FILE_CACHE_MAX_ENTRIES = 4000;
 export const DEFAULT_REPO_MAP_FILE_CACHE_MAX_BYTES = 8 * 1024 * 1024;

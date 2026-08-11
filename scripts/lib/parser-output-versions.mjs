@@ -43,9 +43,11 @@
  *   artifact this contract gates. Bump deliberately on an output-shape or
  *   generation-semantics change.
  * @property {string[]} contract  A stable, order-independent fingerprint of the
- *   parser's OUTPUT SHAPE: the field/column names the cache consumer depends on.
- *   The forward-fence test recomputes this from the live code and asserts a
- *   match, so a drift here without a version bump fails CI.
+ *   parser's OUTPUT SHAPE: the fields/columns the cache consumer depends on,
+ *   including explicit required/optional descriptors where presence is part of
+ *   the TypeScript contract. The forward-fence test recomputes this from the
+ *   live code and asserts a match, so a drift here without a version bump fails
+ *   CI.
  * @property {string} consumedBy  Where the cache key that uses `version` lives.
  * @property {string} bumpWhen  Plain-English trigger for bumping `version`.
  */
@@ -93,14 +95,23 @@ export const SESSION_BLOB_OUTPUT = {
  * 0007). The cache key is the `version` field of the `PersistedRepoMap`
  * envelope, checked in `isCacheValid()` in src/lib/repo-map/cache.ts. The
  * `contract` is one qualified fingerprint of the envelope, `RepoMapCacheKey`,
- * inner `RepoMap`, per-file `RepoFile`, and per-symbol `RepoSymbol` key sets —
- * the persisted output shape a stale-artifact reader depends on. The fence reads
- * nested keys from their owning TypeScript interfaces rather than trusting a
- * possibly-incomplete JavaScript sample.
+ * inner `RepoMap`, per-file `RepoFile`, and per-symbol `RepoSymbol` fields — the
+ * persisted output shape a stale-artifact reader depends on. Every interface
+ * field carries an explicit `|required` or `|optional` descriptor. The fence
+ * reads fields and requiredness from their owning TypeScript interfaces and
+ * separately checks the top-level envelope against the real producer sample.
  *
  * @type {ParserOutputContract}
  */
 export const REPO_MAP_OUTPUT = {
+  // v12 (#3751): fingerprint whether every PersistedRepoMap, RepoMapCacheKey,
+  // RepoMap, RepoFile, and RepoSymbol field is required or optional. The v11
+  // key-only contract cannot distinguish `field?: T` from `field: T`, so an
+  // artifact allowed to omit a newly required field could otherwise remain
+  // reusable. Interface-derived entries use explicit `|required` / `|optional`
+  // suffixes; the one-time rollover also retires the shared per-file
+  // parser-salt cohort.
+  //
   // v11 (#3750): normalize and exactly project every live parser result before
   // canonical Repo Map construction, not only when the per-file sidecar stores
   // or replays it. A v10 canonical artifact may retain parser-only symbol keys,
@@ -137,34 +148,34 @@ export const REPO_MAP_OUTPUT = {
   // remote identity (`map.repository`) beside `generatedAtGitSha`; pre-field
   // v4 artifacts must regenerate so identity-bound consumers never read a
   // missing field as "no remote" on a root that has one.
-  version: 11,
+  version: 12,
   contract: [
-    'envelope.version',
-    'envelope.cacheKey',
-    'envelope.cacheKey.root',
-    'envelope.cacheKey.gitSha',
-    'envelope.cacheKey.repository',
-    'envelope.cacheKey.maxMtimeMs',
-    'envelope.cacheKey.structureSignature',
-    'envelope.sizeBounded',
-    'envelope.droppedFiles',
-    'envelope.map',
-    'map.root',
-    'map.generatedAtGitSha',
-    'map.repository',
-    'map.fileCount',
-    'map.files',
-    'map.text',
-    'map.truncated',
-    'map.files[].path',
-    'map.files[].mtimeMs',
-    'map.files[].symbols',
-    'map.files[].symbols[].name',
-    'map.files[].symbols[].kind',
-    'map.files[].symbols[].exported',
-    'map.files[].symbols[].signature',
-    'map.files[].symbols[].line',
-    'map.files[].imports',
+    'envelope.version|required',
+    'envelope.cacheKey|required',
+    'envelope.cacheKey.root|required',
+    'envelope.cacheKey.gitSha|required',
+    'envelope.cacheKey.repository|required',
+    'envelope.cacheKey.maxMtimeMs|required',
+    'envelope.cacheKey.structureSignature|required',
+    'envelope.sizeBounded|required',
+    'envelope.droppedFiles|required',
+    'envelope.map|required',
+    'map.root|required',
+    'map.generatedAtGitSha|required',
+    'map.repository|optional',
+    'map.fileCount|required',
+    'map.files|required',
+    'map.text|required',
+    'map.truncated|required',
+    'map.files[].path|required',
+    'map.files[].mtimeMs|optional',
+    'map.files[].symbols|required',
+    'map.files[].symbols[].name|required',
+    'map.files[].symbols[].kind|required',
+    'map.files[].symbols[].exported|required',
+    'map.files[].symbols[].signature|required',
+    'map.files[].symbols[].line|required',
+    'map.files[].imports|required',
   ],
   consumedBy:
     'src/lib/repo-map/cache.ts isCacheValid() (PersistedRepoMap.version) and src/lib/repo-map/parser.ts repoMapParserCacheSalt() (per-file cache salt)',

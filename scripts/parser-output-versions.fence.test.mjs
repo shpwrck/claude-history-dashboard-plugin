@@ -50,6 +50,10 @@ const REPO_MAP_PARSER_OUTPUT_PATH = join(
   '../src/lib/repo-map/parser-output.ts'
 );
 const REPO_MAP_TYPES_PATH = join(HERE, '../src/lib/repo-map/types.ts');
+const HOST_PRODUCED_ARTIFACT_PATH = join(
+  HERE,
+  '../src/lib/artifact-source.ts'
+);
 const PARSER_OUTPUT_REGISTRY_PATH = 'scripts/lib/parser-output-versions.mjs';
 
 // Identity stubs: the session-blob output CONTRACT is the column set, which is
@@ -167,7 +171,7 @@ function persistedRepoMapSample() {
   );
 }
 
-function directInterfaceFields(sourceText, interfaceName, sourcePath) {
+function directInterfaceDeclaration(sourceText, interfaceName, sourcePath) {
   const sourceFile = ts.createSourceFile(
     sourcePath,
     sourceText,
@@ -186,12 +190,10 @@ function directInterfaceFields(sourceText, interfaceName, sourcePath) {
   );
 
   const declaration = declarations[0];
-  assert.equal(
-    declaration.heritageClauses?.length ?? 0,
-    0,
-    `${interfaceName} must not extend an interface without teaching the repo-map output fence to traverse it`
-  );
+  return { declaration, sourceFile };
+}
 
+function directPropertyFields(declaration, interfaceName) {
   return declaration.members
     .map((member) => {
       assert.ok(
@@ -199,17 +201,120 @@ function directInterfaceFields(sourceText, interfaceName, sourcePath) {
         `${interfaceName} may only contain property signatures unless the repo-map output fence is updated`
       );
       assert.ok(
-        ts.isIdentifier(member.name) || ts.isStringLiteral(member.name),
-        `${interfaceName} property names must be static for the repo-map output fence`
+        ts.isIdentifier(member.name),
+        `${interfaceName} property names must remain identifiers so qualified repo-map contract descriptors stay unambiguous`
       );
       return { name: member.name.text, optional: Boolean(member.questionToken) };
     })
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function directInterfaceKeys(sourceText, interfaceName, sourcePath) {
+function directInterfaceFields(sourceText, interfaceName, sourcePath) {
+  const { declaration } = directInterfaceDeclaration(
+    sourceText,
+    interfaceName,
+    sourcePath
+  );
+  assert.equal(
+    declaration.heritageClauses?.length ?? 0,
+    0,
+    `${interfaceName} must not extend an interface without teaching the repo-map output fence to traverse it`
+  );
+
+  return directPropertyFields(declaration, interfaceName);
+}
+
+function persistedRepoMapFields(
+  sourceText,
+  hostArtifactSource = readFileSync(HOST_PRODUCED_ARTIFACT_PATH, 'utf8')
+) {
+  const { declaration } = directInterfaceDeclaration(
+    sourceText,
+    'PersistedRepoMap',
+    REPO_MAP_CACHE_PATH
+  );
+  const heritageClauses = declaration.heritageClauses ?? [];
+  assert.equal(
+    heritageClauses.length,
+    1,
+    "PersistedRepoMap must retain exactly one extends Pick<HostProducedArtifact<RepoMap>, 'version'> clause"
+  );
+  const heritage = heritageClauses[0];
+  assert.equal(
+    heritage.token,
+    ts.SyntaxKind.ExtendsKeyword,
+    'PersistedRepoMap heritage must remain an extends clause'
+  );
+  assert.equal(
+    heritage.types.length,
+    1,
+    "PersistedRepoMap must extend only Pick<HostProducedArtifact<RepoMap>, 'version'>"
+  );
+  const pick = heritage.types[0];
+  assert.ok(
+    ts.isIdentifier(pick.expression) && pick.expression.text === 'Pick',
+    "PersistedRepoMap must extend Pick<HostProducedArtifact<RepoMap>, 'version'>"
+  );
+  assert.equal(
+    pick.typeArguments?.length ?? 0,
+    2,
+    "PersistedRepoMap Pick must select only HostProducedArtifact<RepoMap>'s version"
+  );
+  const hostArtifact = pick.typeArguments[0];
+  assert.ok(
+    ts.isTypeReferenceNode(hostArtifact) &&
+      ts.isIdentifier(hostArtifact.typeName) &&
+      hostArtifact.typeName.text === 'HostProducedArtifact' &&
+      hostArtifact.typeArguments?.length === 1 &&
+      ts.isTypeReferenceNode(hostArtifact.typeArguments[0]) &&
+      ts.isIdentifier(hostArtifact.typeArguments[0].typeName) &&
+      hostArtifact.typeArguments[0].typeName.text === 'RepoMap',
+    'PersistedRepoMap must inherit version from HostProducedArtifact<RepoMap>'
+  );
+  const selectedKey = pick.typeArguments[1];
+  assert.ok(
+    ts.isLiteralTypeNode(selectedKey) &&
+      ts.isStringLiteral(selectedKey.literal) &&
+      selectedKey.literal.text === 'version',
+    'PersistedRepoMap must inherit exactly the required version field'
+  );
+
+  const inheritedVersion = directInterfaceFields(
+    hostArtifactSource,
+    'HostProducedArtifact',
+    HOST_PRODUCED_ARTIFACT_PATH
+  ).filter((field) => field.name === 'version');
+  assert.equal(
+    inheritedVersion.length,
+    1,
+    'HostProducedArtifact must declare exactly one direct version field inherited by PersistedRepoMap'
+  );
+
+  return [
+    inheritedVersion[0],
+    ...directPropertyFields(declaration, 'PersistedRepoMap'),
+  ].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function qualifiedInterfaceFieldContracts(
+  sourceText,
+  interfaceName,
+  sourcePath,
+  ownerPath
+) {
   return directInterfaceFields(sourceText, interfaceName, sourcePath).map(
-    (field) => field.name
+    (field) =>
+      `${ownerPath}.${field.name}|${field.optional ? 'optional' : 'required'}`
+  );
+}
+
+function qualifiedPersistedRepoMapFieldContracts(
+  sourceText,
+  hostArtifactSource
+) {
+  return persistedRepoMapFields(sourceText, hostArtifactSource).map(
+    (field) =>
+      `envelope.${field.name}|${field.optional ? 'optional' : 'required'}`
   );
 }
 
@@ -371,6 +476,44 @@ function assertDirectArrayElementType(
   );
 }
 
+function assertDirectPropertyType(
+  sourceText,
+  ownerInterfaceName,
+  propertyName,
+  expectedType,
+  sourcePath
+) {
+  const { declaration } = directInterfaceDeclaration(
+    sourceText,
+    ownerInterfaceName,
+    sourcePath
+  );
+  const properties = declaration.members.filter(
+    (member) =>
+      ts.isPropertySignature(member) &&
+      ts.isIdentifier(member.name) &&
+      member.name.text === propertyName
+  );
+  assert.equal(
+    properties.length,
+    1,
+    `${ownerInterfaceName}.${propertyName} must remain one direct property for the repo-map output fence`
+  );
+  const propertyType = properties[0].type;
+  assert.ok(
+    propertyType &&
+      ts.isTypeReferenceNode(propertyType) &&
+      ts.isIdentifier(propertyType.typeName) &&
+      (propertyType.typeArguments?.length ?? 0) === 0,
+    `${ownerInterfaceName}.${propertyName} must remain a direct ${expectedType} reference for the repo-map output fence`
+  );
+  assert.equal(
+    propertyType.typeName.text,
+    expectedType,
+    `${ownerInterfaceName}.${propertyName} must remain a direct ${expectedType} reference for the repo-map output fence`
+  );
+}
+
 function exactRuleFields(sourceText, declarationName) {
   const sourceFile = ts.createSourceFile(
     REPO_MAP_PARSER_OUTPUT_PATH,
@@ -485,8 +628,25 @@ function assertParserOutputNormalizerParity(typesSource, parserOutputSource) {
   );
 }
 
-function recomputeRepoMapOutputContract(typesSource, cacheSource) {
-  const persisted = persistedRepoMapSample();
+function recomputeRepoMapOutputContract(
+  typesSource,
+  cacheSource,
+  hostArtifactSource = readFileSync(HOST_PRODUCED_ARTIFACT_PATH, 'utf8')
+) {
+  assertDirectPropertyType(
+    cacheSource,
+    'PersistedRepoMap',
+    'cacheKey',
+    'RepoMapCacheKey',
+    REPO_MAP_CACHE_PATH
+  );
+  assertDirectPropertyType(
+    cacheSource,
+    'PersistedRepoMap',
+    'map',
+    'RepoMap',
+    REPO_MAP_CACHE_PATH
+  );
   assertDirectArrayElementType(
     typesSource,
     'RepoMap',
@@ -502,18 +662,30 @@ function recomputeRepoMapOutputContract(typesSource, cacheSource) {
     REPO_MAP_TYPES_PATH
   );
   return [
-    ...Object.keys(persisted).map((field) => `envelope.${field}`),
-    ...directInterfaceKeys(cacheSource, 'RepoMapCacheKey', REPO_MAP_CACHE_PATH).map(
-      (field) => `envelope.cacheKey.${field}`
+    ...qualifiedPersistedRepoMapFieldContracts(cacheSource, hostArtifactSource),
+    ...qualifiedInterfaceFieldContracts(
+      cacheSource,
+      'RepoMapCacheKey',
+      REPO_MAP_CACHE_PATH,
+      'envelope.cacheKey'
     ),
-    ...directInterfaceKeys(typesSource, 'RepoMap', REPO_MAP_TYPES_PATH).map(
-      (field) => `map.${field}`
+    ...qualifiedInterfaceFieldContracts(
+      typesSource,
+      'RepoMap',
+      REPO_MAP_TYPES_PATH,
+      'map'
     ),
-    ...directInterfaceKeys(typesSource, 'RepoFile', REPO_MAP_TYPES_PATH).map(
-      (field) => `map.files[].${field}`
+    ...qualifiedInterfaceFieldContracts(
+      typesSource,
+      'RepoFile',
+      REPO_MAP_TYPES_PATH,
+      'map.files[]'
     ),
-    ...directInterfaceKeys(typesSource, 'RepoSymbol', REPO_MAP_TYPES_PATH).map(
-      (field) => `map.files[].symbols[].${field}`
+    ...qualifiedInterfaceFieldContracts(
+      typesSource,
+      'RepoSymbol',
+      REPO_MAP_TYPES_PATH,
+      'map.files[].symbols[]'
     ),
   ].sort();
 }
@@ -652,6 +824,129 @@ function addInterfaceProbe(sourceText, interfaceName, propertyName) {
   );
 }
 
+function setInterfaceFieldOptionality(
+  sourceText,
+  interfaceName,
+  propertyName,
+  optional,
+  sourcePath
+) {
+  const sourceFile = ts.createSourceFile(
+    sourcePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const declarations = sourceFile.statements.filter(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) && statement.name.text === interfaceName
+  );
+  assert.equal(
+    declarations.length,
+    1,
+    `test fixture must find one ${interfaceName} declaration`
+  );
+  const fields = declarations[0].members.filter(
+    (member) =>
+      ts.isPropertySignature(member) &&
+      ts.isIdentifier(member.name) &&
+      member.name.text === propertyName
+  );
+  assert.equal(
+    fields.length,
+    1,
+    `test fixture must find one ${interfaceName}.${propertyName} property`
+  );
+  const field = fields[0];
+  assert.notEqual(
+    Boolean(field.questionToken),
+    optional,
+    `test fixture ${interfaceName}.${propertyName} must change optionality`
+  );
+  if (optional) {
+    return `${sourceText.slice(0, field.name.end)}?${sourceText.slice(field.name.end)}`;
+  }
+  return (
+    sourceText.slice(0, field.questionToken.getStart(sourceFile)) +
+    sourceText.slice(field.questionToken.end)
+  );
+}
+
+function setExactRuleOptionality(
+  sourceText,
+  declarationName,
+  propertyName,
+  optional
+) {
+  const sourceFile = ts.createSourceFile(
+    REPO_MAP_PARSER_OUTPUT_PATH,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const declarations = sourceFile.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .filter(
+      (declaration) =>
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === declarationName
+    );
+  assert.equal(
+    declarations.length,
+    1,
+    `test fixture must find one ${declarationName} declaration`
+  );
+  const initializer = declarations[0].initializer;
+  assert.ok(
+    initializer && ts.isObjectLiteralExpression(initializer),
+    `test fixture ${declarationName} must remain a static object literal`
+  );
+  const fieldRules = initializer.properties.filter(
+    (property) =>
+      ts.isPropertyAssignment(property) &&
+      staticPropertyName(property) === propertyName
+  );
+  assert.equal(
+    fieldRules.length,
+    1,
+    `test fixture must find one ${declarationName}.${propertyName} rule`
+  );
+  const rule = fieldRules[0].initializer;
+  assert.ok(
+    ts.isObjectLiteralExpression(rule),
+    `test fixture ${declarationName}.${propertyName} must remain a static rule`
+  );
+  const optionalRules = rule.properties.filter(
+    (property) =>
+      ts.isPropertyAssignment(property) &&
+      staticPropertyName(property) === 'optional'
+  );
+  assert.equal(
+    optionalRules.length,
+    1,
+    `test fixture must find one ${declarationName}.${propertyName}.optional rule`
+  );
+  const value = optionalRules[0].initializer;
+  assert.ok(
+    value.kind === ts.SyntaxKind.TrueKeyword ||
+      value.kind === ts.SyntaxKind.FalseKeyword,
+    `test fixture ${declarationName}.${propertyName}.optional must be boolean`
+  );
+  assert.notEqual(
+    value.kind === ts.SyntaxKind.TrueKeyword,
+    optional,
+    `test fixture ${declarationName}.${propertyName}.optional must change`
+  );
+  return (
+    sourceText.slice(0, value.getStart(sourceFile)) +
+    String(optional) +
+    sourceText.slice(value.end)
+  );
+}
+
 function addExactRuleProbe(sourceText, declarationName, shapeName, propertyName) {
   const anchor =
     `const ${declarationName}: ExactFieldRules<${shapeName}> = {\n`;
@@ -703,6 +998,138 @@ test('repo-map output contract === live envelope + cache key + RepoMap + RepoFil
   assertRegisteredRepoMapContract(
     recomputeRepoMapOutputContract(typesSource, cacheSource)
   );
+});
+
+test('repo-map persisted envelope producer supplies exactly the fenced interface fields', () => {
+  const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
+  assert.deepEqual(
+    Object.keys(persistedRepoMapSample()).sort(),
+    persistedRepoMapFields(cacheSource).map((field) => field.name),
+    'the real PersistedRepoMap producer sample and its fenced TypeScript interface diverged'
+  );
+});
+
+test('repo-map output contract represents every direct field as required or optional', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
+  const liveContract = recomputeRepoMapOutputContract(typesSource, cacheSource);
+  const directFields = liveContract.filter(
+    (field) => field.endsWith('|required') || field.endsWith('|optional')
+  );
+
+  assert.deepEqual(
+    directFields.filter((field) => field.endsWith('|optional')),
+    ['map.files[].mtimeMs|optional', 'map.repository|optional']
+  );
+  assert.deepEqual(
+    directFields.filter((field) => field.endsWith('|required')),
+    [
+      'envelope.cacheKey|required',
+      'envelope.cacheKey.gitSha|required',
+      'envelope.cacheKey.maxMtimeMs|required',
+      'envelope.cacheKey.repository|required',
+      'envelope.cacheKey.root|required',
+      'envelope.cacheKey.structureSignature|required',
+      'envelope.droppedFiles|required',
+      'envelope.map|required',
+      'envelope.sizeBounded|required',
+      'envelope.version|required',
+      'map.fileCount|required',
+      'map.files|required',
+      'map.files[].imports|required',
+      'map.files[].path|required',
+      'map.files[].symbols|required',
+      'map.files[].symbols[].exported|required',
+      'map.files[].symbols[].kind|required',
+      'map.files[].symbols[].line|required',
+      'map.files[].symbols[].name|required',
+      'map.files[].symbols[].signature|required',
+      'map.generatedAtGitSha|required',
+      'map.root|required',
+      'map.text|required',
+      'map.truncated|required',
+    ].sort()
+  );
+});
+
+test('repo-map output contract changes when persisted envelope requiredness changes', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
+  const hostArtifactSource = readFileSync(HOST_PRODUCED_ARTIFACT_PATH, 'utf8');
+  const baseline = recomputeRepoMapOutputContract(typesSource, cacheSource);
+  const requiredToOptional = recomputeRepoMapOutputContract(
+    typesSource,
+    setInterfaceFieldOptionality(
+      cacheSource,
+      'PersistedRepoMap',
+      'sizeBounded',
+      true,
+      REPO_MAP_CACHE_PATH
+    )
+  );
+  const inheritedRequiredToOptional = recomputeRepoMapOutputContract(
+    typesSource,
+    cacheSource,
+    setInterfaceFieldOptionality(
+      hostArtifactSource,
+      'HostProducedArtifact',
+      'version',
+      true,
+      HOST_PRODUCED_ARTIFACT_PATH
+    )
+  );
+
+  assert.deepEqual(addedFields(requiredToOptional, baseline), [
+    'envelope.sizeBounded|optional',
+  ]);
+  assert.deepEqual(addedFields(baseline, requiredToOptional), [
+    'envelope.sizeBounded|required',
+  ]);
+  assert.deepEqual(addedFields(inheritedRequiredToOptional, baseline), [
+    'envelope.version|optional',
+  ]);
+  assert.deepEqual(addedFields(baseline, inheritedRequiredToOptional), [
+    'envelope.version|required',
+  ]);
+});
+
+test('repo-map output contract changes in both requiredness directions', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
+  const baseline = recomputeRepoMapOutputContract(typesSource, cacheSource);
+  const optionalToRequired = recomputeRepoMapOutputContract(
+    setInterfaceFieldOptionality(
+      typesSource,
+      'RepoMap',
+      'repository',
+      false,
+      REPO_MAP_TYPES_PATH
+    ),
+    cacheSource
+  );
+  const requiredToOptional = recomputeRepoMapOutputContract(
+    setInterfaceFieldOptionality(
+      typesSource,
+      'RepoSymbol',
+      'signature',
+      true,
+      REPO_MAP_TYPES_PATH
+    ),
+    cacheSource
+  );
+
+  assert.deepEqual(addedFields(optionalToRequired, baseline), [
+    'map.repository|required',
+  ]);
+  assert.deepEqual(addedFields(baseline, optionalToRequired), [
+    'map.repository|optional',
+  ]);
+  assert.deepEqual(addedFields(requiredToOptional, baseline), [
+    'map.files[].symbols[].signature|optional',
+  ]);
+  assert.deepEqual(addedFields(baseline, requiredToOptional), [
+    'map.files[].symbols[].signature|required',
+  ]);
 });
 
 test('repo-map parser output validates and projects every direct FileStructure and RepoSymbol field through exact rules', () => {
@@ -792,6 +1219,55 @@ test('repo-map parser-output parity fence detects type-only drift and accepts pa
   );
 });
 
+test('a paired RepoSymbol requiredness and serializer-rule change still requires a higher output version', () => {
+  const typesSource = readFileSync(REPO_MAP_TYPES_PATH, 'utf8');
+  const cacheSource = readFileSync(REPO_MAP_CACHE_PATH, 'utf8');
+  const parserOutputSource = readFileSync(REPO_MAP_PARSER_OUTPUT_PATH, 'utf8');
+  const pairedTypes = setInterfaceFieldOptionality(
+    typesSource,
+    'RepoSymbol',
+    'signature',
+    true,
+    REPO_MAP_TYPES_PATH
+  );
+  const pairedRules = setExactRuleOptionality(
+    parserOutputSource,
+    'REPO_SYMBOL_FIELD_RULES',
+    'signature',
+    true
+  );
+  const baselineContract = recomputeRepoMapOutputContract(
+    typesSource,
+    cacheSource
+  );
+  const pairedContract = recomputeRepoMapOutputContract(
+    pairedTypes,
+    cacheSource
+  );
+
+  assert.doesNotThrow(() =>
+    assertParserOutputNormalizerParity(pairedTypes, pairedRules)
+  );
+  assert.throws(
+    () => assertRegisteredRepoMapContract(pairedContract),
+    /REPO_MAP_OUTPUT\.version=.*bump REPO_MAP_OUTPUT\.version/s
+  );
+  assert.throws(
+    () =>
+      assertVersionMovesWithContract(
+        { version: REPO_MAP_OUTPUT.version, contract: pairedContract },
+        { version: REPO_MAP_OUTPUT.version, contract: baselineContract }
+      ),
+    /contract changed.*without a strictly higher integer.*version/s
+  );
+  assert.doesNotThrow(() =>
+    assertVersionMovesWithContract(
+      { version: REPO_MAP_OUTPUT.version + 1, contract: pairedContract },
+      { version: REPO_MAP_OUTPUT.version, contract: baselineContract }
+    )
+  );
+});
+
 test('repo-map contract changes from origin/master require a version rollover', () => {
   assertVersionMovesWithContract(
     REPO_MAP_OUTPUT,
@@ -799,11 +1275,11 @@ test('repo-map contract changes from origin/master require a version rollover', 
   );
 });
 
-test('repo-map version retires artifacts built before exact parser-output projection (#3750)', () => {
+test('repo-map version retires artifacts built before requiredness-aware contracts (#3751)', () => {
   assert.equal(
     REPO_MAP_OUTPUT.version,
-    11,
-    'v10 artifacts may retain parser-only symbol keys; exact parser-output projection must keep the canonical and per-file cache keys on v11'
+    12,
+    'v11 contracts do not encode optional versus required fields; canonical artifacts and per-file cache cohorts must turn over on v12'
   );
 });
 
@@ -837,16 +1313,16 @@ test('repo-map fence rejects cache-key, map, file, or symbol shape drift at the 
   )}\n\nexport type AlternateRepoFile = RepoFile & { documentationProbe?: string };\n`;
 
   assert.deepEqual(addedFields(cacheKeyDrift, baseline), [
-    'envelope.cacheKey.probeField',
+    'envelope.cacheKey.probeField|optional',
   ]);
   assert.deepEqual(addedFields(mapDrift, baseline), [
-    'map.repositoryIdentityProbe',
+    'map.repositoryIdentityProbe|optional',
   ]);
   assert.deepEqual(addedFields(fileDrift, baseline), [
-    'map.files[].probeField',
+    'map.files[].probeField|optional',
   ]);
   assert.deepEqual(addedFields(symbolDrift, baseline), [
-    'map.files[].symbols[].documentationProbe',
+    'map.files[].symbols[].documentationProbe|optional',
   ]);
   assert.throws(
     () => recomputeRepoMapOutputContract(symbolReferenceDrift, cacheSource),

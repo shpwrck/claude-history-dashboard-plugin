@@ -100,10 +100,13 @@ describe('isCacheValid', () => {
     expect(isCacheValid({ ...persisted, version: 0 }, base)).toBe(false);
   });
 
-  it('invalidates artifacts from before exact parser-output projection and the complete output contract', () => {
+  it('invalidates artifacts from before requiredness-aware output contracts', () => {
+    // v12 fingerprints optional versus required fields, so v11 artifacts made
+    // under a requiredness-blind contract must regenerate.
+    expect(PERSISTED_REPO_MAP_VERSION).toBe(12);
+    expect(isCacheValid({ ...persisted, version: 11 }, base)).toBe(false);
     // v11 projects every live parser result before canonical construction, so
-    // v10 artifacts that may retain parser-only symbol keys must regenerate.
-    expect(PERSISTED_REPO_MAP_VERSION).toBe(11);
+    // v10 artifacts that may retain parser-only symbol keys stay retired.
     expect(isCacheValid({ ...persisted, version: 10 }, base)).toBe(false);
     // v10 expands the forward-fence contract to the RepoSymbol shape, so
     // artifacts stamped under the v9 contract retire.

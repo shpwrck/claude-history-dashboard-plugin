@@ -633,9 +633,9 @@ describe('repo-map per-file cache', () => {
     }
   );
 
-  it('keeps sidecar schema v2 while the v11 parser salt retires old cohorts', () => {
+  it('keeps sidecar schema v2 while the v12 parser salt retires old cohorts', () => {
     expect(REPO_MAP_FILE_CACHE_VERSION).toBe(2);
-    expect(repoMapParserCacheSalt()).toMatch(/^repo-map-output-v11:[a-f0-9]{64}$/);
+    expect(repoMapParserCacheSalt()).toMatch(/^repo-map-output-v12:[a-f0-9]{64}$/);
   });
 
   it.each(MALFORMED_REPO_SYMBOL_CASES)(
