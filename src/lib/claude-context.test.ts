@@ -333,6 +333,107 @@ describe('buildContext version claims (#3653)', () => {
   });
 });
 
+describe('buildContext transcript dimensions (#3665)', () => {
+  it('session context takes gitBranch and entrypoint from the token join when Session fields are absent', () => {
+    const payload: SessionPayload = {
+      session, // production-shaped groupBySessions output has no dimensions
+      overview,
+      tokenData: {
+        sessionId: 's1',
+        gitBranch: 'feature/3665-context-dimensions',
+        entrypoint: 'sdk-cli',
+        totalInputTokens: 10,
+        totalOutputTokens: 5,
+        totalCacheCreationTokens: 0,
+        totalCacheReadTokens: 0,
+        model: 'claude-sonnet-4-6',
+        messageCount: 2,
+        entries: [],
+        compactionEvents: [],
+      } as unknown as SessionTokenData,
+      apiErrors: [],
+    };
+
+    const out = buildContext({ view: 'sessions', data: payload }) as {
+      gitBranch?: string;
+      entrypoint?: string;
+    };
+
+    expect(out.gitBranch).toBe('feature/3665-context-dimensions');
+    expect(out.entrypoint).toBe('sdk-cli');
+  });
+
+  it('session context falls back to populated Session dimensions when no token row exists', () => {
+    const payload: SessionPayload = {
+      session: {
+        ...session,
+        gitBranch: 'legacy-session-branch',
+        entrypoint: 'cli',
+      },
+      overview,
+      apiErrors: [],
+    };
+
+    const out = buildContext({ view: 'sessions', data: payload }) as {
+      gitBranch?: string;
+      entrypoint?: string;
+    };
+
+    expect(out.gitBranch).toBe('legacy-session-branch');
+    expect(out.entrypoint).toBe('cli');
+  });
+
+  it('project context folds token-row branches in for sessions of this project only', () => {
+    const makeTokenRow = (
+      sessionId: string,
+      gitBranch: string | undefined
+    ): SessionTokenData =>
+      ({
+        sessionId,
+        gitBranch,
+        totalInputTokens: 10,
+        totalOutputTokens: 5,
+        totalCacheCreationTokens: 0,
+        totalCacheReadTokens: 0,
+        model: 'claude-sonnet-4-6',
+        messageCount: 2,
+        entries: [],
+        compactionEvents: [],
+      }) as unknown as SessionTokenData;
+    const payload: ProjectPayload = {
+      project: {
+        ...projectStats,
+        sessions: [
+          { ...session, gitBranch: 'stale-session-branch' },
+          { ...session, sessionId: 's2' },
+          {
+            ...session,
+            sessionId: 's3',
+            gitBranch: 'legacy-project-branch',
+          },
+        ],
+      },
+      tokenData: [
+        makeTokenRow('s1', 'feature/3665-context-dimensions'),
+        makeTokenRow('s2', 'main'),
+        makeTokenRow('s3', undefined),
+        makeTokenRow('s-other-project', 'unrelated-branch'),
+      ],
+      toolData: [],
+    };
+
+    const out = buildContext({ view: 'projects', data: payload }) as {
+      gitBranches: string[];
+    };
+
+    expect(out.gitBranches).toContain('feature/3665-context-dimensions');
+    expect(out.gitBranches).toContain('main');
+    expect(out.gitBranches).toContain('legacy-project-branch');
+    expect(out.gitBranches).not.toContain('stale-session-branch');
+    expect(out.gitBranches).not.toContain('unrelated-branch');
+  });
+});
+
 describe('buildContext recommendations (viewer-only, #2719)', () => {
   // Ask Claude no longer runs the engine — the recommendations context is built
   // from the SAME server-computed findings the Recommendations page shows, passed

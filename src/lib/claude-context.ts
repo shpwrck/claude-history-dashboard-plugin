@@ -293,13 +293,12 @@ function buildSessionContext(p: SessionPayload): unknown {
     project: p.session.projectShort || p.session.project,
     title: p.session.title,
     ...(repoMap ? { repoMap } : {}),
-    // #3653: groupBySessions never populates Session.version — the production
-    // source is the transcript-derived token row (the same join #3405's
-    // regime-aware detectors use). The session field stays as a fallback for
-    // callers that do populate it.
+    // #3653/#3665: groupBySessions never populates transcript dimensions. The
+    // token row is the production source; Session fields remain fallbacks for
+    // callers that populate them directly.
     version: p.tokenData?.version ?? p.session.version,
-    gitBranch: p.session.gitBranch,
-    entrypoint: p.session.entrypoint,
+    gitBranch: p.tokenData?.gitBranch ?? p.session.gitBranch,
+    entrypoint: p.tokenData?.entrypoint ?? p.session.entrypoint,
     startTime: isoOrUndef(p.session.startTime),
     endTime: isoOrUndef(p.session.endTime),
     messageCount: p.session.messageCount,
@@ -346,9 +345,17 @@ function buildProjectContext(p: ProjectPayload): unknown {
 
   const branches = new Set<string>();
   const versions = new Set<string>();
-  for (const s of p.project.sessions) {
-    if (s.gitBranch) branches.add(s.gitBranch);
-    if (s.version) versions.add(s.version);
+  if (p.project.sessions.length > 0) {
+    // #3665: resolve each branch from its transcript token row first so a stale
+    // Session fallback cannot consume one of the bounded rollup's eight slots.
+    // perf-index-contract: claude-context-token-by-session always-consumed: construction requires a nonempty session list whose loop immediately queries every session identity
+    const tokenBySessionId = new Map(tokens.map((t) => [t.sessionId, t]));
+    for (const s of p.project.sessions) {
+      const gitBranch =
+        tokenBySessionId.get(s.sessionId)?.gitBranch ?? s.gitBranch;
+      if (gitBranch) branches.add(gitBranch);
+      if (s.version) versions.add(s.version);
+    }
   }
   // #3653: same as the session context — Session.version is never populated in
   // production, so fold in the versions carried by this project's token rows
