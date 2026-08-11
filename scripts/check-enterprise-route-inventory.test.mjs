@@ -64,6 +64,32 @@ check('collector inventories double-quoted exact and prefix handlers', () => {
   );
 });
 
+check('collector follows route tables actually dispatched by pathname', () => {
+  const source = `
+    const PATH_METADATA = new Map([
+      ['/api/not-dispatched', describeRoute],
+    ]);
+    const DATASET_ROUTES = new Map([
+      ['/api/table-only', handleTableOnly],
+      ['/api/second-table-only', handleSecondTableOnly],
+    ]);
+    const route = DATASET_ROUTES.get(pathname);
+  `;
+
+  const routes = collectEnterpriseRouteKeys(source);
+  assert.deepEqual(routes.map(routeKey), [
+    'exact:/api/second-table-only',
+    'exact:/api/table-only',
+  ]);
+  assert.deepEqual(
+    validateEnterpriseRouteInventory(routes, [], {}),
+    [
+      'exact:/api/second-table-only is handled by scripts/server.mjs but missing from ENTERPRISE_ROUTE_INVENTORY',
+      'exact:/api/table-only is handled by scripts/server.mjs but missing from ENTERPRISE_ROUTE_INVENTORY',
+    ]
+  );
+});
+
 check('inventory covers the current server route surface', () => {
   const source = readFileSync(new URL('./server.mjs', import.meta.url), 'utf8');
   const routes = collectEnterpriseRouteKeys(source);

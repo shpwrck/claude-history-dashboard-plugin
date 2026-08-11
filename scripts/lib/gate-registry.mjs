@@ -125,7 +125,11 @@ export const GATE_REGISTRY = [
   { name: 'ensure-pr-milestone', script: 'scripts/ensure-pr-milestone.mjs', discriminatingTest: null },
   { name: 'seed-release-gates', script: 'scripts/seed-release-gates.mjs', discriminatingTest: null },
   { name: 'enterprise-posture-gate', script: 'scripts/enterprise-posture-gate.mjs', discriminatingTest: null },
-  { name: 'check-enterprise-route-inventory', script: 'scripts/check-enterprise-route-inventory.mjs', discriminatingTest: null },
+  {
+    name: 'check-enterprise-route-inventory',
+    script: 'scripts/check-enterprise-route-inventory.mjs',
+    discriminatingTest: 'scripts/check-enterprise-route-inventory.test.mjs',
+  },
   {
     // The CONFIG path is discriminating-tested (scripts/server-scale-budget.test.mjs,
     // #3478) but the budget-BREACH path (a slow run must exit 1) needs a built
@@ -160,7 +164,6 @@ export const LEGACY_NULL_GATES = [
   'ensure-pr-milestone',
   'seed-release-gates',
   'enterprise-posture-gate',
-  'check-enterprise-route-inventory',
   'server-scale-budget',
   'cold-load-measure',
   'measure-sessions-scale',

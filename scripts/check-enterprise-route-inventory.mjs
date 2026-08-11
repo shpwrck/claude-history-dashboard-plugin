@@ -281,11 +281,70 @@ export function routeKey(route) {
   return `${route.kind}:${route.value}`;
 }
 
+/** Identifiers the server dispatches on: `IDENT.get(pathname)`. */
+export function collectPathnameQueriedMaps(source) {
+  const names = [];
+  for (const match of source.matchAll(
+    /\b([A-Za-z_$][\w$]*)\s*\.get\(\s*pathname\s*[,)]/g
+  )) {
+    names.push(match[1]);
+  }
+  return names;
+}
+
+/**
+ * Path keys from dispatched `Map([['/path', handler], ...])` declarations
+ * whose identifier is actually queried with `.get(pathname)`. Parenthesis
+ * matching bounds the Map argument so unrelated slash-keyed tuples elsewhere
+ * in the server cannot become routes by shape alone.
+ */
+export function collectRouteTablePaths(source) {
+  const queried = collectPathnameQueriedMaps(source);
+  const paths = [];
+  const declaration =
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Map\(/g;
+  for (const match of source.matchAll(declaration)) {
+    if (!queried.includes(match[1])) continue;
+    const open = match.index + match[0].length - 1;
+    const body = balancedSlice(source, open);
+    if (body === null) continue;
+    for (const entry of body.matchAll(
+      /\[\s*'(\/[^']*)'\s*,\s*[A-Za-z_$][\w$]*\s*[,\]]/g
+    )) {
+      paths.push(entry[1]);
+    }
+  }
+  return paths;
+}
+
+/** Text inside `source[open]`'s balanced parentheses, or null. */
+function balancedSlice(source, open) {
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '(') depth += 1;
+    else if (character === ')') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, index);
+    }
+  }
+  return null;
+}
+
 export function collectEnterpriseRouteKeys(source) {
   const routes = new Map();
 
   for (const match of source.matchAll(/pathname\s*===\s*(['"])([^'"]+)\1/g)) {
     const value = match[2];
+    if (isEnterpriseDataRoute(value)) {
+      routes.set(routeKey({ kind: 'exact', value }), {
+        kind: 'exact',
+        value,
+      });
+    }
+  }
+
+  for (const value of collectRouteTablePaths(source)) {
     if (isEnterpriseDataRoute(value)) {
       routes.set(routeKey({ kind: 'exact', value }), {
         kind: 'exact',
