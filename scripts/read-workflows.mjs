@@ -248,7 +248,7 @@ function workflowResult(runs, skippedManifests, truncated, discovery) {
 // O(log maxRuns) and memory never exceeds the declared response cap. Ordinals
 // preserve stable discovery order when timestamps tie or are unavailable.
 function createRunRetention() {
-  return { heap: [], nextOrdinal: 0 };
+  return { heap: [], nextOrdinal: 0, byRunId: null };
 }
 
 function compareRetainedRuns(a, b) {
@@ -260,27 +260,38 @@ function retainedRunIsWorse(a, b) {
   return compareRetainedRuns(a, b) > 0;
 }
 
-function retainWorkflowRun(retention, run) {
-  const entry = { run, ordinal: retention.nextOrdinal };
-  retention.nextOrdinal += 1;
-  const heap = retention.heap;
-  if (heap.length < WORKFLOW_RUN_MAX_ENTRIES) {
-    heap.push(entry);
-    let index = heap.length - 1;
-    while (index > 0) {
-      const parent = Math.floor((index - 1) / 2);
-      if (!retainedRunIsWorse(heap[index], heap[parent])) break;
-      [heap[index], heap[parent]] = [heap[parent], heap[index]];
-      index = parent;
-    }
-    return false;
-  }
+function logicalWorkflowRunId(run) {
+  return typeof run.runId === 'string' && run.runId.length > 0 ? run.runId : null;
+}
 
-  // The response is capped whether this candidate displaces the current
-  // oldest entry or is itself discarded.
-  if (!retainedRunIsWorse(heap[0], entry)) return true;
-  heap[0] = entry;
-  let index = 0;
+function preferWorkflowRunConflict(candidate, retained) {
+  const byStart = byStartDesc(candidate, retained);
+  if (byStart !== 0) return byStart < 0;
+  // The projection has a fixed property order, so code-unit comparison of its
+  // JSON is a stable, root-order-independent tie-breaker. This deliberately
+  // avoids physical paths and mtimes: copied roots can change both without
+  // changing the logical run.
+  return JSON.stringify(candidate) < JSON.stringify(retained);
+}
+
+function swapRetainedRuns(heap, left, right) {
+  [heap[left], heap[right]] = [heap[right], heap[left]];
+  heap[left].index = left;
+  heap[right].index = right;
+}
+
+function siftRetainedRunUp(heap, startIndex) {
+  let index = startIndex;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (!retainedRunIsWorse(heap[index], heap[parent])) break;
+    swapRetainedRuns(heap, index, parent);
+    index = parent;
+  }
+}
+
+function siftRetainedRunDown(heap, startIndex) {
+  let index = startIndex;
   while (true) {
     const left = index * 2 + 1;
     const right = left + 1;
@@ -288,9 +299,46 @@ function retainWorkflowRun(retention, run) {
     if (left < heap.length && retainedRunIsWorse(heap[left], heap[worse])) worse = left;
     if (right < heap.length && retainedRunIsWorse(heap[right], heap[worse])) worse = right;
     if (worse === index) break;
-    [heap[index], heap[worse]] = [heap[worse], heap[index]];
+    swapRetainedRuns(heap, index, worse);
     index = worse;
   }
+}
+
+function retainWorkflowRun(retention, run) {
+  const runId = logicalWorkflowRunId(run);
+  if (runId !== null) {
+    // perf-index-contract: workflow-logical-run-dedupe always-consumed: the map is created only for a projected non-empty runId, then immediately queried and updated by bounded retention
+    retention.byRunId ??= new Map();
+    const existing = retention.byRunId.get(runId);
+    if (existing) {
+      if (!preferWorkflowRunConflict(run, existing.run)) return false;
+      const rankingChanged = byStartDesc(run, existing.run) !== 0;
+      existing.run = run;
+      if (rankingChanged) siftRetainedRunDown(retention.heap, existing.index);
+      return false;
+    }
+  }
+
+  const entry = { run, runId, ordinal: retention.nextOrdinal, index: -1 };
+  retention.nextOrdinal += 1;
+  const heap = retention.heap;
+  if (heap.length < WORKFLOW_RUN_MAX_ENTRIES) {
+    entry.index = heap.length;
+    heap.push(entry);
+    if (runId !== null) retention.byRunId.set(runId, entry);
+    siftRetainedRunUp(heap, entry.index);
+    return false;
+  }
+
+  // The response is capped whether this candidate displaces the current
+  // oldest entry or is itself discarded.
+  if (!retainedRunIsWorse(heap[0], entry)) return true;
+  const evicted = heap[0];
+  if (evicted.runId !== null) retention.byRunId.delete(evicted.runId);
+  entry.index = 0;
+  heap[0] = entry;
+  if (runId !== null) retention.byRunId.set(runId, entry);
+  siftRetainedRunDown(heap, 0);
   return true;
 }
 

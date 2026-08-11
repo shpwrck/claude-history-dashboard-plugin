@@ -71,6 +71,15 @@ function singleWorkflowRoot(runId, startTime) {
   return { root, projectsRoot };
 }
 
+function workflowManifestRoot(label, manifest) {
+  const root = join(tmpdir(), `chd-workflow-copy-${label}-${randomUUID()}`);
+  const projectsRoot = join(root, 'projects');
+  const workflows = join(projectsRoot, 'proj-a', 'shared-session', 'workflows');
+  mkdirSync(workflows, { recursive: true });
+  writeFileSync(join(workflows, 'wf_shared.json'), JSON.stringify(manifest));
+  return { root, projectsRoot };
+}
+
 test('multi-root readers dedupe physical aliases and share ordering and discovery limits (#2713)', async () => {
   const older = singleWorkflowRoot('older-root', 1767225600000);
   const newer = singleWorkflowRoot('newer-root', 1767225600001);
@@ -116,6 +125,162 @@ test('multi-root readers dedupe physical aliases and share ordering and discover
     rmSync(alias, { force: true });
     rmSync(older.root, { recursive: true, force: true });
     rmSync(newer.root, { recursive: true, force: true });
+  }
+});
+
+test('multi-root readers dedupe copied logical runs before the global cap (#3757)', async () => {
+  const copiedManifest = {
+    runId: 'copied-run',
+    workflowName: 'Copied run',
+    status: 'completed',
+    startTime: 1767225600002,
+  };
+  const firstCopy = workflowManifestRoot('first', copiedManifest);
+  const secondCopy = workflowManifestRoot('second', copiedManifest);
+  const distinct = workflowManifestRoot('distinct', {
+    runId: 'distinct-run',
+    workflowName: 'Distinct run',
+    status: 'completed',
+    startTime: 1767225600001,
+  });
+  const origCap = process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
+  try {
+    process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES = '2';
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    for (const [label, result] of [
+      [
+        'async',
+        await workflows.readWorkflows([
+          firstCopy.projectsRoot,
+          secondCopy.projectsRoot,
+          distinct.projectsRoot,
+        ]),
+      ],
+      [
+        'sync',
+        workflows.readWorkflowsSync([
+          firstCopy.projectsRoot,
+          secondCopy.projectsRoot,
+          distinct.projectsRoot,
+        ]),
+      ],
+    ]) {
+      assert.deepEqual(
+        result.runs.map((run) => run.runId),
+        ['copied-run', 'distinct-run'],
+        `${label}: a copied run must consume one slot before the global cap`
+      );
+      assert.equal(result.truncated, false, `${label}: no logical run was omitted`);
+    }
+  } finally {
+    if (origCap === undefined) delete process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
+    else process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES = origCap;
+    rmSync(firstCopy.root, { recursive: true, force: true });
+    rmSync(secondCopy.root, { recursive: true, force: true });
+    rmSync(distinct.root, { recursive: true, force: true });
+  }
+});
+
+test('copied-run conflicts resolve deterministically without cross-read tenant state (#3757)', async () => {
+  const running = workflowManifestRoot('running', {
+    runId: 'conflicting-run',
+    workflowName: 'Conflicting run',
+    status: 'running',
+    startTime: 1767225600000,
+    totalTokens: 10,
+  });
+  const completed = workflowManifestRoot('completed', {
+    runId: 'conflicting-run',
+    workflowName: 'Conflicting run',
+    status: 'completed',
+    startTime: 1767225600000,
+    totalTokens: 20,
+  });
+  try {
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    for (const [label, read] of [
+      ['async', (roots) => workflows.readWorkflows(roots)],
+      ['sync', (roots) => workflows.readWorkflowsSync(roots)],
+    ]) {
+      for (const roots of [
+        [running.projectsRoot, completed.projectsRoot],
+        [completed.projectsRoot, running.projectsRoot],
+      ]) {
+        const result = await read(roots);
+        assert.equal(result.runs.length, 1, `${label}: conflicting copies dedupe`);
+        assert.equal(
+          result.runs[0].status,
+          'completed',
+          `${label}: equal-time conflicts have one root-order-independent winner`
+        );
+        assert.equal(result.runs[0].totalTokens, 20);
+      }
+
+      const runningTenant = await read(running.projectsRoot);
+      const completedTenant = await read(completed.projectsRoot);
+      assert.equal(runningTenant.runs[0].status, 'running');
+      assert.equal(completedTenant.runs[0].status, 'completed');
+    }
+  } finally {
+    rmSync(running.root, { recursive: true, force: true });
+    rmSync(completed.root, { recursive: true, force: true });
+  }
+});
+
+test('a newer conflicting copy reorders bounded retention before later candidates (#3757)', async () => {
+  const sharedOlder = workflowManifestRoot('shared-older', {
+    runId: 'shared-run',
+    workflowName: 'Shared run',
+    status: 'running',
+    startTime: 1767225600000,
+  });
+  const steady = workflowManifestRoot('steady', {
+    runId: 'steady-run',
+    workflowName: 'Steady run',
+    status: 'completed',
+    startTime: 1767225600002,
+  });
+  const sharedNewer = workflowManifestRoot('shared-newer', {
+    runId: 'shared-run',
+    workflowName: 'Shared run',
+    status: 'completed',
+    startTime: 1767225600004,
+  });
+  const laterCandidate = workflowManifestRoot('later-candidate', {
+    runId: 'later-candidate',
+    workflowName: 'Later candidate',
+    status: 'completed',
+    startTime: 1767225600003,
+  });
+  const origCap = process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
+  try {
+    process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES = '2';
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    const roots = [
+      sharedOlder.projectsRoot,
+      steady.projectsRoot,
+      sharedNewer.projectsRoot,
+      laterCandidate.projectsRoot,
+    ];
+    for (const [label, result] of [
+      ['async', await workflows.readWorkflows(roots)],
+      ['sync', workflows.readWorkflowsSync(roots)],
+    ]) {
+      assert.deepEqual(
+        result.runs.map((run) => run.runId),
+        ['shared-run', 'later-candidate'],
+        `${label}: the improved shared entry cannot hide the actual oldest retained run`
+      );
+      assert.equal(result.runs[0].status, 'completed');
+      assert.equal(result.truncated, true, `${label}: steady-run was omitted by the cap`);
+    }
+  } finally {
+    if (origCap === undefined) delete process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
+    else process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES = origCap;
+    rmSync(sharedOlder.root, { recursive: true, force: true });
+    rmSync(steady.root, { recursive: true, force: true });
+    rmSync(sharedNewer.root, { recursive: true, force: true });
+    rmSync(laterCandidate.root, { recursive: true, force: true });
   }
 });
 
