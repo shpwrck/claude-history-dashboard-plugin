@@ -4,7 +4,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +24,25 @@ import {
 } from './check-test-suite-coverage.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+function workflowJobBlock(yamlText, jobName) {
+  const lines = yamlText.split('\n');
+  const start = lines.findIndex((line) => line === `  ${jobName}:`);
+  assert.notEqual(start, -1, `workflow job ${jobName} must exist`);
+  const end = lines.findIndex(
+    (line, index) => index > start && /^  [A-Za-z0-9_-]+:$/.test(line)
+  );
+  return ['jobs:', ...lines.slice(start, end === -1 ? undefined : end)].join('\n');
+}
+
+function testScriptsInJob(yamlText, jobName) {
+  const commands = extractRunCommands(workflowJobBlock(yamlText, jobName));
+  return commands.flatMap((command) =>
+    [...command.matchAll(/\bnpm\s+run\s+(test:[^\s&|;()]+)/g)].map(
+      (match) => match[1]
+    )
+  );
+}
 
 test('extractSuiteRefs picks literal paths, globs, and multi-file commands', () => {
   assert.deepEqual(
@@ -209,4 +234,26 @@ test('the live repo has zero unwired scripts/**/*.test.mjs suites', () => {
       '\n'
     )}`
   );
+});
+
+// #3739: the production build used to serialize 61 distinct test:* roots after
+// emitting dist, making test process startup + execution 73% of the build job.
+// Keep the one package-surface test that consumes dist beside the build, and
+// run the remaining roots in a sibling job. The exact count turns a dropped or
+// duplicated invocation into a reviewable failure; the zero-unwired assertion
+// above independently proves that the underlying scripts/*.test.mjs files stay
+// reachable from some workflow.
+test('the build test tail runs in the parallel gates job without losing a root', () => {
+  const ci = readFileSync(join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const buildScripts = testScriptsInJob(ci, 'build');
+  const gateScripts = testScriptsInJob(ci, 'gates');
+
+  assert.deepEqual(buildScripts, ['test:package-surface']);
+  assert.equal(gateScripts.length, 60, gateScripts.join('\n'));
+  assert.equal(new Set(gateScripts).size, 60, 'gates must not duplicate a test:* root');
+  assert.equal(new Set([...buildScripts, ...gateScripts]).size, 61);
+
+  const gatesJob = workflowJobBlock(ci, 'gates');
+  assert.match(gatesJob, /\n    needs: \[resolve-merge, changes\]\n/);
+  assert.doesNotMatch(gatesJob, /\bneeds:[^\n]*\bbuild\b/);
 });
