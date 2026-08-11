@@ -840,9 +840,10 @@ export async function fetchMemories(): Promise<MemoriesResponse> {
 
 /**
  * Fetch the Workflow-tool run ledger (#435). Resolves the raw `/api/workflows`
- * payload (server-projected runs); never rejects. A transient HTTP/network
- * failure returns null so callers can preserve their last-good ledger, while a
- * successful `{ runs: [] }` remains a genuine empty result.
+ * payload (server-projected runs); never rejects. A transient HTTP/network/JSON
+ * failure or a response without the required runs array returns null so callers
+ * can preserve their last-good ledger, while a successful `{ runs: [] }`
+ * remains a genuine empty result.
  */
 export async function fetchWorkflows(
   signal?: AbortSignal
@@ -850,7 +851,15 @@ export async function fetchWorkflows(
   try {
     const res = await serverFetch('/api/workflows', { signal });
     if (!res.ok) return null;
-    return (await res.json()) as WorkflowsResponse;
+    const payload: unknown = await res.json();
+    if (
+      payload === null ||
+      typeof payload !== 'object' ||
+      !Array.isArray((payload as { runs?: unknown }).runs)
+    ) {
+      return null;
+    }
+    return payload as WorkflowsResponse;
   } catch {
     return null;
   }

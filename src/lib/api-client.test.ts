@@ -57,6 +57,34 @@ describe('fetchWorkflows cancellation boundary', () => {
     }));
     await expect(fetchWorkflows()).resolves.toBeNull();
   });
+
+  it('rejects a successful response that omits the runs ledger', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ truncated: false }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    await expect(fetchWorkflows()).resolves.toBeNull();
+  });
+
+  it('rejects a successful response whose runs member is not an array', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ runs: null }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    await expect(fetchWorkflows()).resolves.toBeNull();
+  });
 });
 
 describe('fetchAuthSession', () => {
