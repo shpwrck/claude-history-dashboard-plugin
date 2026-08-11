@@ -7,39 +7,59 @@
  * (recommendations.test.ts) and the guidance target-resolution test
  * (external-guidance-registry.test.ts) — a hand-copied map in either test can
  * silently drift and either re-open the #1401 dangling-target hole or fail a
- * valid guidance target.
+ * valid guidance target. Each dual emitter also declares exactly which emitted
+ * ids carry its detector-level `appliedMarkers`, so adoption receipts cannot be
+ * stranded under the registry id when the fix is emitted under another id
+ * (#2965/#2996). A branch with `carriesMarkers: false` is the explicit
+ * markerless declaration.
  */
-export const DUAL_EMIT: Record<string, string[]> = {
-  'safety.dangerous-bypass': ['safety.dangerous-bypass', 'safety.dangerous-commands'],
-  'reliability.api-errors': ['reliability.api-errors', 'reliability.rate-limits'],
-  'workflow.value-of-agent-handoff': [
-    'workflow.value-of-agent-handoff',
-    'workflow.leave-behind-candidate-verification',
-  ],
+export interface DualEmitBranch {
+  readonly id: string;
+  readonly carriesMarkers: boolean;
+}
+
+export interface DualEmitContract {
+  readonly branches: readonly DualEmitBranch[];
+}
+
+export const DUAL_EMIT: Readonly<Record<string, DualEmitContract>> = {
+  'safety.dangerous-bypass': {
+    branches: [
+      { id: 'safety.dangerous-bypass', carriesMarkers: false },
+      { id: 'safety.dangerous-commands', carriesMarkers: false },
+    ],
+  },
+  'reliability.api-errors': {
+    branches: [
+      { id: 'reliability.api-errors', carriesMarkers: false },
+      { id: 'reliability.rate-limits', carriesMarkers: true },
+    ],
+  },
+  'workflow.value-of-agent-handoff': {
+    branches: [
+      { id: 'workflow.value-of-agent-handoff', carriesMarkers: true },
+      {
+        id: 'workflow.leave-behind-candidate-verification',
+        carriesMarkers: false,
+      },
+    ],
+  },
 };
 
 /** Every rec id the detector catalog can emit for a given detector id. */
-export function emittableIdsFor(detectorId: string): string[] {
-  return DUAL_EMIT[detectorId] ?? [detectorId];
+export function emittableIdsFor(detectorId: string): readonly string[] {
+  return DUAL_EMIT[detectorId]?.branches.map((branch) => branch.id) ?? [detectorId];
 }
 
 /**
- * For a dual-emit detector whose FIX-carrying branch emits an id other than
- * the detector id, the id that fix (and its `appliedMarkers`) is actually
- * emitted under (#2965). Adoption receipts store EMITTED finding ids, so the
- * marker catalogs must key markers by this id — keying by detector id left a
- * SURFACED-only `reliability.rate-limits` receipt unable to reach the #1785
- * "fix landed, awaiting quiet" MARKER-CONFIRMED state (marker lookup missed).
- *
- * Only detectors whose fix rides a non-detector-id branch belong here:
- * `safety.dangerous-bypass`'s branches carry no appliedMarkers, and
- * `workflow.value-of-agent-handoff`'s fix rides its detector-id emission.
+ * Every emitted id under which a detector's `appliedMarkers` can ride. Normal
+ * detectors use their own id. Dual emitters must declare the marker-bearing
+ * branch ids in `DUAL_EMIT`, including the detector id when that is the branch
+ * carrying the fix. This explicit declaration is what makes adding a new dual
+ * emitter fail the marker contract until adoption resolution is considered.
  */
-export const MARKER_FINDING_ID: Record<string, string> = {
-  'reliability.api-errors': 'reliability.rate-limits',
-};
-
-/** The finding id a detector's `appliedMarkers` should be cataloged under. */
-export function markerFindingIdFor(detectorId: string): string {
-  return MARKER_FINDING_ID[detectorId] ?? detectorId;
+export function markerFindingIdsFor(detectorId: string): readonly string[] {
+  return DUAL_EMIT[detectorId]?.branches
+    .filter((branch) => branch.carriesMarkers)
+    .map((branch) => branch.id) ?? [detectorId];
 }

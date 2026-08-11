@@ -187,10 +187,10 @@ export const MARKERS_EDIT_FORMAT_CHURN: AppliedMarkers = {
 
 /**
  * Canonical finding-id -> markers map, client-safe (no detector logic pulled in).
- * Keys are EMITTED finding ids (for a dual-emit detector whose fix rides a
- * non-detector-id branch, that branch's id — #2965); each value mirrors the
- * owning detector's `Detector.appliedMarkers`. Kept in sync with the detector
- * catalog by `applied-markers.contract.test.ts`.
+ * Keys are EMITTED finding ids (for a dual-emit detector, every branch declared
+ * marker-bearing by its dual-emit contract — #2965/#2996); each value mirrors
+ * the owning detector's `Detector.appliedMarkers`. Kept in sync with the
+ * detector catalog by `applied-markers.contract.test.ts`.
  */
 export const FINDING_MARKER_CATALOG: ReadonlyMap<string, AppliedMarkers> = new Map([
   ['context.low-cache-hit', MARKERS_LOW_CACHE_HIT],
