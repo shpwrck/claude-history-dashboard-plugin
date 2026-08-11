@@ -213,7 +213,15 @@ test('specializeReceiptSchema narrows gates and files to the exact dispatched ba
     'data-integrity',
     'performance',
     'architecture',
+    'subtraction',
   ]);
+  const subtractionRule = generic.properties.findings.items.allOf.find(
+    (rule) => rule.if?.properties?.lens?.const === 'subtraction',
+  );
+  assert.deepEqual(
+    subtractionRule.then.required,
+    ['cut', 'blastRadius', 'keepIf', 'reversibility'],
+  );
 });
 
 test('buildDispatchArgv: per-harness command; unknown throws', () => {
@@ -518,6 +526,23 @@ test('buildPrompt: names only the active gates, pins the baseline, lists the exp
   assert.match(prompt, /bounded to the dispatched files/);
   assert.match(prompt, /no more than 12 shell calls/);
   assert.match(prompt, /clean comparison\/reference file/);
+});
+
+test('buildPrompt defines subtraction as a bounded, evidence-backed removal decision', () => {
+  const prompt = buildPrompt({
+    section: 'root',
+    gates: ['subtraction'],
+    baseline: SHA,
+    repoDir: '/repo',
+    auditDate: '2026-08-11',
+    files: ['Caddyfile', 'Dockerfile'],
+  });
+  assert.match(prompt, /wired and reachable but dormant/i);
+  assert.match(prompt, /CI-dark pilots|superseded tools|one-shot harnesses|abandoned experiments/);
+  assert.match(prompt, /cut, blastRadius, keepIf, and reversibility/);
+  assert.match(prompt, /unreferenced/i);
+  assert.match(prompt, /do not run a\s+repo-wide reachability search/i);
+  assert.match(prompt, /load-bearing surface\s+is clean/i);
 });
 
 test('buildPrompt JSON-encodes hostile tracked filenames instead of adding prompt lines', () => {

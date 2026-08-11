@@ -223,6 +223,18 @@ export function buildPrompt({ section, gates, baseline, repoDir, auditDate, file
   // JSON string literals keep control characters inside a hostile tracked
   // filename from becoming new prompt lines while preserving the exact path.
   const fileList = (files || []).map((f) => `  ${JSON.stringify(f)}`).join('\n');
+  const subtractionInstructions = gates.includes('subtraction')
+    ? [
+        `For subtraction, a finding is a removal proposal, not additive work. The only class in scope here is`,
+        `UNEARNED surface that is wired and reachable but dormant, supported by bounded provenance such as a CI-dark`,
+        `pilot, a superseded tool, a completed one-shot harness, or an abandoned experiment. A live load-bearing surface`,
+        `is clean. Do not nominate a surface merely because no reference is visible in this batch, and do not run a`,
+        `repo-wide reachability search: mechanically unreferenced surface belongs to the separate pre-pass. Every`,
+        `subtraction finding must include cut, blastRadius, keepIf, and reversibility. cut names exactly what is deleted;`,
+        `blastRadius names each consumer that would break (or is [] when none); keepIf states the survival condition;`,
+        `and reversibility states how git history restores the cut.`,
+      ]
+    : [];
   return [
     `Perform a release-gate audit of EXACTLY these ${(files || []).length} file(s) in the "${section}" section.`,
     `Your working directory is a clean detached checkout of immutable origin/master ${baseline}.`,
@@ -248,11 +260,12 @@ export function buildPrompt({ section, gates, baseline, repoDir, auditDate, file
     `For fixtures, distinguish intentional negative cases and frozen pre-task subjects from product defects. Before`,
     `emitting a fixture finding, inspect the nearest manifest, README, or task instruction and reject behavior that is`,
     `explicitly the controlled task input.`,
+    ...(subtractionInstructions.length ? ['', ...subtractionInstructions] : []),
     ``,
     `For each file, return one verdict for EACH active gate:`,
     `- "n/a": the file does not participate in that gate's concern; give a concrete short reason.`,
     `- "clean": the concern applies and you inspected it, but found no current defect; say what was checked.`,
-    `- "finding": a real defect survived verification and has a matching finding object.`,
+    `- "finding": a real additive defect or subtraction proposal survived verification and has a matching finding object.`,
     `Most file/gate pairs should be n/a or clean. Do not invent findings to look productive.`,
     ``,
     `For every candidate finding, do a separate adversarial second pass against ${baseline}. Re-read the cited lines and`,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// v0.6.0 review-phase audit — stage 2 (FILE): route verified findings JSON into
-// specced sub-issues on the three gate epics, idempotently. Both Claude and Codex
+// Review-phase audit — stage 2 (FILE): route verified findings JSON into
+// specced sub-issues on the configured gate epics, idempotently. Both Claude and Codex
 // invoke this identically. See docs/audits/v060-review-phase-audit.md.
 //
 // Idempotency: each issue body carries `<!-- audit-finding: <key> -->`; the router
@@ -153,6 +153,35 @@ export function validateFinding(finding) {
   if (!finding || !['critical', 'high', 'medium', 'low'].includes(String(finding.severity).toLowerCase()))
     errs.push('missing/invalid severity (critical|high|medium|low)');
   if (!finding || finding.verified !== true) errs.push('not verified (verified !== true)');
+  const subtractionFields = ['cut', 'blastRadius', 'keepIf', 'reversibility'];
+  if (finding && finding.lens === 'subtraction') {
+    if (
+      !Array.isArray(finding.cut)
+      || finding.cut.length === 0
+      || finding.cut.some((item) => typeof item !== 'string' || !item.trim())
+      || finding.cut.some((item, index, items) => items.indexOf(item) !== index)
+    ) {
+      errs.push('subtraction cut must be a nonempty array of unique nonempty strings');
+    }
+    if (
+      !Array.isArray(finding.blastRadius)
+      || finding.blastRadius.some((item) => typeof item !== 'string' || !item.trim())
+      || finding.blastRadius.some((item, index, items) => items.indexOf(item) !== index)
+    ) {
+      errs.push('subtraction blastRadius must be an array of unique nonempty strings (or [] for none)');
+    }
+    for (const field of ['keepIf', 'reversibility']) {
+      if (typeof finding[field] !== 'string' || !finding[field].trim()) {
+        errs.push(`subtraction ${field} must be a nonempty string`);
+      }
+    }
+  } else if (finding) {
+    for (const field of subtractionFields) {
+      if (Object.hasOwn(finding, field)) {
+        errs.push(`${field} is only valid for the subtraction lens`);
+      }
+    }
+  }
   return errs;
 }
 
@@ -161,13 +190,30 @@ export function labelsFor(finding, { handoff = false } = {}) {
   return handoff ? [...base, 'groomed', 'for-agent'] : base;
 }
 
+function subtractionBodyLines(finding) {
+  if (finding.lens !== 'subtraction') return [];
+  return [
+    '**Cut.**',
+    ...finding.cut.map((item) => `- \`${sanitizeIssueText(String(item).trim())}\``),
+    '',
+    '**Blast radius.**',
+    ...(finding.blastRadius.length
+      ? finding.blastRadius.map((item) => `- ${sanitizeIssueText(String(item).trim())}`)
+      : ['- None named.']),
+    '',
+    `**Keep if.** ${sanitizeIssueText(String(finding.keepIf).trim())}`,
+    '',
+    `**Reversibility.** ${sanitizeIssueText(String(finding.reversibility).trim())}`,
+  ];
+}
+
 export function buildBody(finding, { baseline, auditDate, key, sig }) {
-  const { epic } = lensConfig(finding.lens);
+  const { epic, milestone } = lensConfig(finding.lens);
   const where = finding.files
     .map((fileRef) => `- \`${sanitizeIssueText(fileRef)}\``).join('\n');
   const priority = finding.priority || severityToPriority(finding.severity);
   const lines = [
-    `Found by the v0.6.0 review-phase audit (${finding.lens} lens) — origin/master \`${baseline}\`, ${auditDate}.`,
+    `Found by the ${milestone} review-phase audit (${finding.lens} lens) — origin/master \`${baseline}\`, ${auditDate}.`,
     '',
     '**Where.**',
     where,
@@ -175,6 +221,10 @@ export function buildBody(finding, { baseline, auditDate, key, sig }) {
   ];
   if (finding.what && String(finding.what).trim()) {
     lines.push(`**What.** ${sanitizeIssueText(String(finding.what).trim())}`, '');
+  }
+  const subtractionLines = subtractionBodyLines(finding);
+  if (subtractionLines.length) {
+    lines.push(...subtractionLines, '');
   }
   lines.push(
     `**Fix.** ${sanitizeIssueText(String(finding.fix).trim())}`,
@@ -190,16 +240,21 @@ export function buildBody(finding, { baseline, auditDate, key, sig }) {
   return lines.join('\n');
 }
 export function buildRegressionComment(finding, { baseline, auditDate, sig }) {
+  const { milestone } = lensConfig(finding.lens);
   const where = finding.files
     .map((fileRef) => `- \`${sanitizeIssueText(fileRef)}\``).join('\n');
   const lines = [
-    `Reproduced by the v0.6.0 review-phase audit at origin/master \`${baseline}\` on ${auditDate}.`,
+    `Reproduced by the ${milestone} review-phase audit at origin/master \`${baseline}\` on ${auditDate}.`,
     '',
     '**Where.**',
     where,
   ];
   if (finding.what && String(finding.what).trim()) {
     lines.push('', `**What.** ${sanitizeIssueText(String(finding.what).trim())}`);
+  }
+  const subtractionLines = subtractionBodyLines(finding);
+  if (subtractionLines.length) {
+    lines.push('', ...subtractionLines);
   }
   lines.push(
     '',
@@ -218,9 +273,9 @@ export function auditRollupMarker(lens, baseline) {
 }
 
 export function buildAuditRollupBody(lens, { baseline, auditDate, sig }) {
-  const { epic } = lensConfig(lens);
+  const { epic, milestone } = lensConfig(lens);
   return [
-    `Continuation container for verified v0.6.0 ${lens} audit findings at origin/master \`${baseline}\` (${auditDate}).`,
+    `Continuation container for verified ${milestone} ${lens} audit findings at origin/master \`${baseline}\` (${auditDate}).`,
     '',
     `GitHub permits at most ${SUB_ISSUE_LIMIT} direct sub-issues per parent. Individual findings nested here remain under the #${epic} release-gate hierarchy and keep the \`epic-${epic}\` label.`,
     '',
@@ -517,7 +572,7 @@ export function resolveFindingParent({
 
   const part = rollups.length + 1;
   const number = createIssueFn({
-    title: `${lens} audit findings continuation ${part} for v0.6.0`,
+    title: `${lens} audit findings continuation ${part} for ${gate.milestone}`,
     body: buildAuditRollupBody(lens, { baseline, auditDate, sig }),
     labels: [gate.label, 'backlog', epicLabel(lens), 'meta'],
     milestone: gate.milestone,

@@ -38,6 +38,17 @@ export const GATES = {
       'hot-path code: bundle weight; wasteful re-render / re-compute (N× per request); ingest/assemble ' +
       'memory or latency hotspots; a new surface shipped without a probe/budget.',
   },
+  subtraction: {
+    epic: 2994,
+    label: 'tech-debt',
+    milestone: 'v0.7.0',
+    spec:
+      'unearned surface that is wired and reachable but dormant: CI-dark pilots, superseded tools, ' +
+      'completed one-shot harnesses, and abandoned experiments. Require bounded provenance that the ' +
+      'surface is never exercised or is superseded. Name the exact cut, affected consumers, the condition ' +
+      'that would justify keeping it, and git-history reversibility. Do not infer that a surface is ' +
+      'unreferenced; repo-wide reachability is a separate mechanical pre-pass.',
+  },
   // Architecture (#1931) is already CLOSED for v0.6.0 — kept here so the harness can
   // re-run it or apply it to a future release. Not in DEFAULT_GATES; filing to it
   // requires `--gates architecture` explicitly.
@@ -50,9 +61,10 @@ export const GATES = {
   },
 };
 
-// The active default set when no explicit subset is given: v0.6.0's three
-// remaining (non-architecture) gates.
-export const DEFAULT_GATES = ['security', 'data-integrity', 'performance'];
+// The standing set when no explicit subset is given. Architecture remains an
+// opt-in historical lens; subtraction recurs so every review can remove as well
+// as add surface.
+export const DEFAULT_GATES = ['security', 'data-integrity', 'performance', 'subtraction'];
 
 export function gateNames() {
   return Object.keys(GATES);

@@ -7,7 +7,9 @@
 // See docs/audits/v060-review-phase-audit.md.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import Ajv from 'ajv';
 
 import {
   lensConfig,
@@ -62,10 +64,32 @@ const validFinding = {
   verifyNote: 'read anthropic-egress.ts at ff8d83b4',
 };
 
-test('lensConfig maps the three lenses to their gate epics', () => {
+const validSubtractionFinding = {
+  lens: 'subtraction',
+  severity: 'low',
+  title: 'Retire the dormant TLS deployment flavor unless the hosted tier ships',
+  files: ['Caddyfile:1', 'docker-compose.tls.yml:1'],
+  where: 'The root deployment configuration.',
+  what: 'The TLS flavor is wired but has never been exercised on the known operator host or in CI.',
+  cut: ['Caddyfile', 'docker-compose.tls.yml'],
+  blastRadius: [
+    'README.md TLS setup instructions',
+    'compose users that explicitly select docker-compose.tls.yml',
+  ],
+  keepIf: 'Keep only if the hosted/self-hoster tier is committed for this release.',
+  reversibility: 'Both files and their setup history remain recoverable from git history.',
+  fix: 'Delete the dormant flavor or demote it to a non-shipped documentation recipe.',
+  acceptance: 'The selected disposition is reflected in deployment files and documentation.',
+  priority: 'Low',
+  verified: true,
+  verifyNote: 'The v0.6 file audit records zero known Caddy container runs and no CI exercise.',
+};
+
+test('lensConfig maps the standing lenses to their gate epics', () => {
   assert.equal(lensConfig('security').epic, 1932);
   assert.equal(lensConfig('data-integrity').epic, 2133);
   assert.equal(lensConfig('performance').epic, 1930);
+  assert.equal(lensConfig('subtraction').epic, 2994);
   assert.throws(() => lensConfig('nope'), /unknown lens/);
 });
 
@@ -155,6 +179,66 @@ test('validateFinding accepts a good finding and flags each missing piece', () =
   assert.ok(validateFinding({ ...validFinding, severity: undefined }).some((e) => /severity/.test(e)));
 });
 
+test('validateFinding requires the complete subtraction decision shape', () => {
+  assert.deepEqual(validateFinding(validSubtractionFinding), []);
+  for (const field of ['cut', 'blastRadius', 'keepIf', 'reversibility']) {
+    const candidate = { ...validSubtractionFinding };
+    delete candidate[field];
+    assert.ok(
+      validateFinding(candidate).some((error) => error.includes(field)),
+      `missing ${field} must fail closed`,
+    );
+  }
+  assert.ok(
+    validateFinding({ ...validSubtractionFinding, cut: [] }).some((error) => /cut/.test(error)),
+  );
+  assert.ok(
+    validateFinding({ ...validSubtractionFinding, blastRadius: [''] })
+      .some((error) => /blastRadius/.test(error)),
+  );
+  assert.ok(
+    validateFinding({ ...validSubtractionFinding, cut: ['Caddyfile', 'Caddyfile'] })
+      .some((error) => /cut/.test(error)),
+  );
+  assert.ok(
+    validateFinding({ ...validSubtractionFinding, blastRadius: [{}] })
+      .some((error) => /blastRadius/.test(error)),
+  );
+  assert.ok(
+    validateFinding({ ...validSubtractionFinding, keepIf: {} })
+      .some((error) => /keepIf/.test(error)),
+  );
+});
+
+test('the receipt schema accepts only the gate-appropriate finding shape', () => {
+  const schema = JSON.parse(
+    readFileSync(new URL('./audit-receipt.schema.json', import.meta.url), 'utf8'),
+  );
+  const validate = new Ajv().compile(schema);
+  const receiptFor = (finding) => ({
+    baseline: BASELINE,
+    auditDate: '2026-08-11',
+    section: 'root',
+    gates: [finding.lens],
+    auditedFiles: finding.files.map(normalizePath),
+    verdicts: finding.files.map((fileRef) => ({
+      file: normalizePath(fileRef),
+      gates: [{ gate: finding.lens, status: 'finding', reason: 'Verified candidate.' }],
+    })),
+    findings: [finding],
+  });
+
+  assert.equal(validate(receiptFor(validFinding)), true, JSON.stringify(validate.errors));
+  assert.equal(validate(receiptFor(validSubtractionFinding)), true, JSON.stringify(validate.errors));
+
+  const incomplete = { ...validSubtractionFinding };
+  delete incomplete.keepIf;
+  assert.equal(validate(receiptFor(incomplete)), false);
+  assert.match(JSON.stringify(validate.errors), /keepIf/);
+
+  assert.equal(validate(receiptFor({ ...validFinding, cut: ['src/lib/anthropic-egress.ts'] })), false);
+});
+
 test('labelsFor includes domain+backlog+epic, and for-agent/groomed only with handoff', () => {
   assert.deepEqual(labelsFor(validFinding), ['security', 'backlog', 'epic-1932']);
   const h = labelsFor(validFinding, { handoff: true });
@@ -181,6 +265,36 @@ test('buildBody falls back to files[] bullets when where is absent', () => {
     { baseline: 'b', auditDate: 'd', key: 'k', sig: 's' },
   );
   assert.match(body, /- `src\/lib\/anthropic-egress\.ts:220-253`/);
+});
+
+test('buildBody renders a standalone subtraction proposal', () => {
+  const key = dedupKey(validSubtractionFinding);
+  const body = buildBody(validSubtractionFinding, {
+    baseline: BASELINE,
+    auditDate: '2026-08-11',
+    key,
+    sig: signature({ vendor: 'codex', role: 'coder', instance: 'audit-1' }),
+  });
+  assert.match(body, /v0\.7\.0 review-phase audit \(subtraction lens\)/);
+  assert.match(body, /\*\*Cut\.\*\*[\s\S]*- `Caddyfile`[\s\S]*- `docker-compose\.tls\.yml`/);
+  assert.match(body, /\*\*Blast radius\.\*\*/);
+  assert.match(body, /README\.md TLS setup instructions/);
+  assert.match(body, /\*\*Keep if\.\*\* Keep only if the hosted\/self-hoster tier/);
+  assert.match(body, /\*\*Reversibility\.\*\* Both files and their setup history remain recoverable from git history/);
+  assert.match(body, /Part of the #2994 review gate\./);
+});
+
+test('buildRegressionComment keeps the subtraction release and decision shape', () => {
+  const comment = buildRegressionComment(validSubtractionFinding, {
+    baseline: BASELINE,
+    auditDate: '2026-08-11',
+    sig: signature({ vendor: 'codex', role: 'coder', instance: 'audit-1' }),
+  });
+  assert.match(comment, /Reproduced by the v0\.7\.0 review-phase audit/);
+  assert.match(comment, /\*\*Cut\.\*\*/);
+  assert.match(comment, /\*\*Blast radius\.\*\*/);
+  assert.match(comment, /\*\*Keep if\.\*\*/);
+  assert.match(comment, /\*\*Reversibility\.\*\*/);
 });
 
 test('parseArgs requires --findings and parses flags incl --gates and --result', () => {
@@ -228,17 +342,20 @@ test("gh wrapper raises the child-process buffer above GitHub's 100-sub-issue re
 test('LENS is the shared gate registry (alias of GATES)', () => {
   assert.equal(LENS, GATES);
   assert.equal(LENS.security.epic, 1932);
+  assert.equal(LENS.subtraction.epic, 2994);
 });
 
-test('DEFAULT_GATES is the v0.6.0 remaining three; GATES also carries architecture', () => {
-  assert.deepEqual([...DEFAULT_GATES].sort(), ['data-integrity', 'performance', 'security']);
+test('DEFAULT_GATES includes the standing subtraction lens; architecture remains opt-in', () => {
+  assert.deepEqual([...DEFAULT_GATES].sort(), ['data-integrity', 'performance', 'security', 'subtraction']);
   assert.ok(GATES.architecture, 'architecture gate available for reuse');
   assert.equal(GATES.architecture.closed, true);
   assert.ok(GATES.security.milestone && GATES.security.epic === 1932);
+  assert.equal(GATES.subtraction.closed, undefined);
+  assert.equal(GATES.subtraction.milestone, 'v0.7.0');
 });
 
-test('resolveGates selects a subset, defaults to the three, and rejects unknowns', () => {
-  assert.deepEqual(resolveGates().sort(), ['data-integrity', 'performance', 'security']);
+test('resolveGates selects a subset, defaults to the standing four, and rejects unknowns', () => {
+  assert.deepEqual(resolveGates().sort(), ['data-integrity', 'performance', 'security', 'subtraction']);
   assert.deepEqual(resolveGates('security,performance'), ['security', 'performance']);
   assert.deepEqual(resolveGates(['performance']), ['performance']);
   assert.deepEqual(resolveGates('architecture'), ['architecture']);
@@ -490,6 +607,59 @@ test('runFileFindings returns and writes created/existing/skipped issue identiti
   assert.ok(reconciled[0].labels.includes('epic-1932'));
   assert.equal(written.path, 'result.json');
   assert.deepEqual(written.value, summary);
+});
+
+test('subtraction routing files the dormant TLS fixture and leaves a load-bearing batch empty', () => {
+  const created = [];
+  const dependencies = {
+    readFindings: () => ({
+      baseline: BASELINE,
+      auditDate: '2026-08-11',
+      section: 'root',
+      auditedFiles: ['Caddyfile', 'docker-compose.tls.yml'],
+      findings: [validSubtractionFinding],
+    }),
+    verifyFindingAtBaseline: () => [],
+    findExistingIssue: () => null,
+    ensureEpicLabelForFinding: () => {},
+    createFindingIssue: (issue) => {
+      created.push(issue);
+      return 4001;
+    },
+    linkFindingIssue: ({ lens }) => lensConfig(lens).epic,
+    log: () => {},
+  };
+  const options = {
+    findings: 'tls-receipt.json',
+    dryRun: false,
+    handoff: false,
+    repo: 'o/r',
+    vendor: 'codex',
+    role: 'main',
+    instance: 'audit-1',
+    gates: 'subtraction',
+  };
+
+  const dormant = runFileFindings(options, dependencies);
+  assert.deepEqual(dormant.created.map(({ number }) => number), [4001]);
+  assert.equal(created[0].milestone, 'v0.7.0');
+  assert.ok(created[0].labels.includes('epic-2994'));
+  assert.match(created[0].body, /\*\*Cut\.\*\*/);
+  assert.match(created[0].body, /\*\*Blast radius\.\*\*/);
+  assert.match(created[0].body, /\*\*Keep if\.\*\*/);
+
+  const live = runFileFindings(options, {
+    ...dependencies,
+    readFindings: () => ({
+      baseline: BASELINE,
+      auditDate: '2026-08-11',
+      section: 'root',
+      auditedFiles: ['Dockerfile'],
+      findings: [],
+    }),
+  });
+  assert.deepEqual(live.created, []);
+  assert.equal(created.length, 1);
 });
 
 test('runFileFindings dry-run reports would-be issues as skipped and never as created', () => {
