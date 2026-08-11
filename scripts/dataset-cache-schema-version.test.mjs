@@ -73,9 +73,11 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     // dataset, so a parser bump must invalidate the persisted dataset_cache too.
     // Before this, the two gates were decoupled and a parser bump served stale JSON.
     assert.equal(typeof ingest.PARSER_SIG_VERSION, 'string');
+    assert.equal(typeof ingest.workflowLimitsSignature, 'function');
+    const workflowSalt = `|wf-proj:${ingest.workflowLimitsSignature()}`;
     assert.equal(
       key,
-      `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
+      `dataset-schema:v${ingest.FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}${workflowSalt}`,
       'flag-off uses the exact v36 cache key for git-dirty provenance'
     );
     assert.notEqual(
@@ -152,7 +154,7 @@ test('dataset assembly schema key feeds sourceSignature and ingest content hash 
     const enabledKey = ingest.datasetAssemblySchemaKey();
     assert.equal(
       enabledKey,
-      `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}`,
+      `dataset-schema:v${ingest.DATASET_ASSEMBLY_SCHEMA_VERSION}:parser-${ingest.PARSER_SIG_VERSION}${workflowSalt}`,
       'an enabled snapshot turns over persisted v36 flag-off datasets'
     );
     assert.notEqual(ingest.sourceSignature(), flagOffSourceSignature);

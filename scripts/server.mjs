@@ -1442,7 +1442,14 @@ function pruneScopedDatasetStates(activeKey) {
     .sort((a, b) => (a[1].lastAccess || 0) - (b[1].lastAccess || 0));
   for (const [key] of candidates) {
     if (scopedDatasetStates.size <= ENTERPRISE_SCOPED_DATASET_MAX_STATES) return;
+    const evicted = scopedDatasetStates.get(key);
     scopedDatasetStates.delete(key);
+    // Dynamic imports remain module-cached after state eviction. Explicitly
+    // release that module's workflow watcher/timer; if this root returns later,
+    // its tracker restarts from a fresh exact baseline (#2706).
+    void evicted?.apiPromise
+      .then((api) => api.suspendWorkflowFreshnessForServer?.())
+      .catch(() => {});
   }
 }
 
@@ -2957,6 +2964,7 @@ function recommendationsCacheEntryIsCurrent(entry, api, now) {
 async function buildRecommendationsCacheEntryViaWorker(
   state,
   key,
+  parentSourceSig,
   project,
   {
     emitSuppressionTransitions = false,
@@ -2999,7 +3007,12 @@ async function buildRecommendationsCacheEntryViaWorker(
     etag: datasetEtagFrom(json),
     json,
     contentHash,
-    sourceSig: workerSourceSig,
+    // Watcher epochs are process-local. The worker proves its own source was
+    // stable around ingest/assembly, then the parent binds that accepted result
+    // to the parent token sampled for this build. Parent completion re-samples
+    // that same namespace, avoiding false perpetual retries after either process
+    // observed a workflow event first (#2706).
+    sourceSig: workerSourceSig === null ? null : parentSourceSig,
     docIssueCacheState,
     recursiveRemovalSafetyState,
     recursiveRemovalSafetyStateKnown:
@@ -3422,6 +3435,7 @@ async function recommendationsResponseCache(
     return buildRecommendationsCacheEntryViaWorker(
       state,
       key,
+      buildSourceSig,
       project,
       { emitSuppressionTransitions, organizationIdentity, surfaceRequest }
     ).catch((err) => {

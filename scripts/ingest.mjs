@@ -33,7 +33,13 @@ import { basename, delimiter, join, dirname, resolve, sep, win32 } from 'node:pa
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { gunzipSync, brotliCompressSync, constants as zlibConstants } from 'node:zlib';
-import { readWorkflowsSync } from './read-workflows.mjs';
+import {
+  createWorkflowFreshnessTracker,
+  readWorkflowProjectionSync,
+  readWorkflowsSync,
+  workflowLimitsSignature,
+} from './read-workflows.mjs';
+export { workflowLimitsSignature };
 import { listNestedWorkflowAgentTranscripts } from './workflow-transcripts.mjs';
 // The host-producer seam (#2077, ADR 0007): shared root discovery + capped
 // artifact reads + their cap constants, dependency-free so the zero-node_modules
@@ -2184,6 +2190,29 @@ const LIVE_CONFIG_ENVIRONMENT_OBSERVATION = SCOPED_INGEST
 // observes a different source fingerprint.
 let datasetSnapshotContentHash = null;
 let datasetSnapshotCapturedAt = new Date(Date.now()).toISOString();
+// Workflow manifests sit below the shallow request-time stat surface. A recursive
+// watcher provides the fast invalidation path; an unref'd stat-only reconciliation
+// bounds missed events to 60 seconds. The first signature call performs the one
+// allowed exact cold scan, while every warm request reads only this token (#2706).
+const workflowFreshnessTracker = createWorkflowFreshnessTracker(PROJECT_ROOTS);
+// The producer hands the exact projected response to assembly so contentHash and
+// workflow-derived recommendations can never describe two different filesystem
+// instants when a manifest changes between ingest() and assembleDataset().
+let datasetSnapshotWorkflowProjection = null;
+
+/** Test-only lifecycle/state seam; production owns one tracker for module life. */
+export function workflowFreshnessStateForTests() {
+  return workflowFreshnessTracker.debugState();
+}
+
+export function disposeWorkflowFreshnessForTests() {
+  workflowFreshnessTracker.dispose();
+}
+
+/** Release scoped-ingest watcher/timer resources when its server state is evicted. */
+export function suspendWorkflowFreshnessForServer() {
+  workflowFreshnessTracker.dispose();
+}
 
 /** Cheap current-state gate for the recommendations response cache (#2554). */
 export function stopHookConfigState() {
@@ -2647,7 +2676,7 @@ export function datasetAssemblySchemaKey() {
   const version = docIssueConfig().enabled
     ? DATASET_ASSEMBLY_SCHEMA_VERSION
     : FLAG_OFF_DATASET_ASSEMBLY_SCHEMA_VERSION;
-  return `dataset-schema:v${version}:parser-${PARSER_SIG_VERSION}`;
+  return `dataset-schema:v${version}:parser-${PARSER_SIG_VERSION}|wf-proj:${workflowLimitsSignature()}`;
 }
 
 const selDatasetCache = db.prepare(
@@ -3836,6 +3865,12 @@ export function sourceSignature(expectedSourceSignature = null) {
     }
     parts.push(`projects:${projectsRoot}:${Math.floor(maxDirMtime)}`);
   }
+  // #2706: workflow manifests are grandchildren of the project dirs above, so
+  // their in-place edits do not move that shallow POSIX mtime surface. The token
+  // is watcher-driven in the healthy case and reconciled by a background bounded
+  // stat walk at least every 60 seconds. Its first call performs an exact cold
+  // baseline; later request-time reads are constant-time and never walk sessions.
+  parts.push(`workflows:${workflowFreshnessTracker.signature()}`);
   // #3401: the in-place-rewrite discriminator. The `projects:` dir parts above
   // cannot see a rewrite that keeps a transcript's path, length, and mtime, so
   // without this part the gate would skip-serve the stale cached parse forever.
@@ -4307,6 +4342,26 @@ export function ingest(expectedSourceSignature = null) {
   hash.update(DOCS_MAP_PATH);
   hash.update('\0');
   hashDocsMapContent(hash);
+  // Workflow-derived recommendations are assembled from manifests outside the
+  // session blob cache. Capture their bounded projection once, hash that exact
+  // value, and hand the same response to assembleDatasetCore(). This both turns
+  // over persisted rows on edit/add/remove and closes the ingest->assembly race
+  // where the hash previously described different bytes than the response.
+  let workflowProjection = null;
+  try {
+    workflowProjection = readWorkflowProjectionSync(PROJECT_ROOTS);
+  } catch {
+    /* an unreadable walk degrades to no workflow recs, never sinks ingest */
+  }
+  hash.update('workflow-projection\n');
+  hash.update(workflowProjection?.projectionSignature ?? 'unavailable');
+  hash.update('\n');
+  datasetSnapshotWorkflowProjection = workflowProjection?.result ?? null;
+  if (workflowProjection?.sourceIdentity) {
+    workflowFreshnessTracker.observeSourceIdentity(
+      workflowProjection.sourceIdentity
+    );
+  }
   // Opt-in issue state is detector-visible input assembled outside the local
   // source tree. Hash the canonical validated identity plus its asOf-derived
   // freshness phase so a state-only refresh, same-stat replacement, 15-minute
@@ -4881,9 +4936,12 @@ function assembleDatasetCore() {
   // — not in the SPA upload bundle, so the SPA dataset simply ships [].
   let workflows = [];
   try {
-    // One multi-root read keeps the published run/discovery limits global and
-    // matches the live /api/workflows route's configured-root semantics (#2713).
-    workflows = parseWorkflows(readWorkflowsSync(PROJECT_ROOTS));
+    // ingest() normally supplies the exact response whose projection signature
+    // it put in contentHash. Direct assembly callers without a preceding ingest
+    // retain the historical fresh-read fallback.
+    workflows = parseWorkflows(
+      datasetSnapshotWorkflowProjection ?? readWorkflowsSync(PROJECT_ROOTS)
+    );
   } catch {
     /* ignore — a malformed walk degrades to no workflow recs, never sinks ingest */
   }

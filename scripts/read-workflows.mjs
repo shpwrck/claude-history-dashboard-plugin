@@ -17,8 +17,18 @@
 // reads share one discovery budget, run cap, canonical-root dedupe, and final
 // sort so adding a hub cannot multiply the declared response limits (#2713).
 
-import { open, opendir, realpath } from 'node:fs/promises';
-import { closeSync, existsSync, opendirSync, openSync, readSync, realpathSync } from 'node:fs';
+import { open, opendir, realpath, stat } from 'node:fs/promises';
+import {
+  closeSync,
+  existsSync,
+  opendirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  statSync,
+  watch,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, normalize, resolve, sep } from 'node:path';
 
 const PREVIEW_CAP = 280;
@@ -198,6 +208,21 @@ function workflowLimits(maxDiscoveryEntries = WORKFLOW_DISCOVERY_MAX_ENTRIES) {
     maxProgressEntriesPerRun: WORKFLOW_PROGRESS_MAX_ENTRIES,
     fieldMaxChars: WORKFLOW_FIELD_MAX_CHARS,
   };
+}
+
+/** Stable cache salt for every cap that can change the projected workflow data. */
+export function workflowLimitsSignature(
+  maxDiscoveryEntries = WORKFLOW_DISCOVERY_MAX_ENTRIES
+) {
+  const limits = workflowLimits(maxDiscoveryEntries);
+  return [
+    `manifestMaxBytes=${limits.manifestMaxBytes}`,
+    `maxRuns=${limits.maxRuns}`,
+    `maxDiscoveryEntries=${limits.maxDiscoveryEntries}`,
+    `maxPhasesPerRun=${limits.maxPhasesPerRun}`,
+    `maxProgressEntriesPerRun=${limits.maxProgressEntriesPerRun}`,
+    `fieldMaxChars=${limits.fieldMaxChars}`,
+  ].join(',');
 }
 
 function discoverySnapshot(discovery) {
@@ -635,4 +660,386 @@ export function readWorkflowsSync(projectsRootOrRoots, options = {}) {
     truncated,
     discovery
   );
+}
+
+function hashStatIdentity(hash, value) {
+  hash.update(String(value.dev ?? 0));
+  hash.update('\0');
+  hash.update(String(value.ino ?? 0));
+  hash.update('\0');
+  hash.update(String(value.size ?? 0));
+  hash.update('\0');
+  hash.update(String(value.mtimeMs ?? 0));
+  hash.update('\0');
+  hash.update(String(value.ctimeMs ?? 0));
+  hash.update('\n');
+}
+
+function identityHeader(hash, projectsRootOrRoots, discovery) {
+  hash.update('workflow-source-v1\n');
+  hash.update(workflowLimitsSignature(discovery.limit));
+  hash.update('\n');
+  for (const configuredRoot of projectsRootList(projectsRootOrRoots)) {
+    hash.update('configured-root\0');
+    hash.update(resolve(configuredRoot));
+    hash.update('\n');
+  }
+}
+
+function identityFooter(hash, discovery) {
+  hash.update('discovery\0');
+  hash.update(String(discovery.entriesExamined));
+  hash.update('\0');
+  hash.update(String(discovery.directoriesOpened));
+  hash.update('\0');
+  hash.update(discovery.exhausted ? 'exhausted' : 'complete');
+  hash.update('\n');
+  return {
+    signature: hash.digest('hex'),
+    discovery: discoverySnapshot(discovery),
+    truncated: discovery.exhausted,
+  };
+}
+
+function sortedIdentityDirents(entries) {
+  // perf-index-contract: workflow-identity-order always-consumed: every reconciliation immediately hashes the complete selected entry set in deterministic path order
+  return [...entries].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Stat-only identity of the exact bounded workflow discovery surface.
+ *
+ * This deliberately reads no manifest bodies. It is used only by the background
+ * reconciliation backstop; request-time freshness uses the tracker token below.
+ */
+export async function workflowSourceIdentity(projectsRootOrRoots, options = {}) {
+  const discovery = createDiscoveryBudget(options.discoveryMaxEntries);
+  const hash = createHash('sha1');
+  identityHeader(hash, projectsRootOrRoots, discovery);
+  const roots = await resolveProjectsRoots(
+    projectsRootOrRoots,
+    options.allowRootSymlinks
+  );
+  for (let rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
+    if (discovery.remaining <= 0) {
+      discovery.exhausted = true;
+      break;
+    }
+    const { projectsRoot, realProjectsRoot } = roots[rootIndex];
+    hash.update('root\0');
+    hash.update(realProjectsRoot);
+    hash.update('\0');
+    try {
+      hashStatIdentity(hash, await stat(realProjectsRoot));
+    } catch {
+      hash.update('unstatable\n');
+    }
+    const rootDiscovery = rootDiscoveryBudget(discovery, roots.length - rootIndex);
+    const projectRead = await readDirentsBounded(projectsRoot, rootDiscovery);
+    for (const proj of sortedIdentityDirents(projectRead.entries)) {
+      if (!proj.isDirectory()) continue;
+      const projPath = join(projectsRoot, proj.name);
+      const realProjPath = await realpathOrNull(projPath);
+      if (!realProjPath || !pathInside(realProjectsRoot, realProjPath)) continue;
+      const sessionRead = await readDirentsBounded(projPath, rootDiscovery);
+      for (const sess of sortedIdentityDirents(sessionRead.entries)) {
+        if (!sess.isDirectory()) continue;
+        const wfDir = join(projPath, sess.name, 'workflows');
+        const realWfDir = await realpathOrNull(wfDir);
+        if (!realWfDir || !pathInside(realProjPath, realWfDir)) continue;
+        const wfRead = await readDirentsBounded(wfDir, rootDiscovery);
+        for (const entry of sortedIdentityDirents(wfRead.entries)) {
+          if (!entry.isFile() || !isWfManifest(entry.name)) continue;
+          const realFull = await realpathOrNull(join(wfDir, entry.name));
+          if (!realFull || !pathInside(realWfDir, realFull)) continue;
+          hash.update('manifest\0');
+          hash.update(realFull);
+          hash.update('\0');
+          try {
+            hashStatIdentity(hash, await stat(realFull));
+          } catch {
+            hash.update('unstatable\n');
+          }
+        }
+      }
+    }
+    mergeRootDiscovery(discovery, rootDiscovery);
+  }
+  return identityFooter(hash, discovery);
+}
+
+/** Synchronous cold-start/ingest mirror of workflowSourceIdentity(). */
+export function workflowSourceIdentitySync(projectsRootOrRoots, options = {}) {
+  const discovery = createDiscoveryBudget(options.discoveryMaxEntries);
+  const hash = createHash('sha1');
+  identityHeader(hash, projectsRootOrRoots, discovery);
+  const roots = resolveProjectsRootsSync(
+    projectsRootOrRoots,
+    options.allowRootSymlinks
+  );
+  for (let rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
+    if (discovery.remaining <= 0) {
+      discovery.exhausted = true;
+      break;
+    }
+    const { projectsRoot, realProjectsRoot } = roots[rootIndex];
+    hash.update('root\0');
+    hash.update(realProjectsRoot);
+    hash.update('\0');
+    try {
+      hashStatIdentity(hash, statSync(realProjectsRoot));
+    } catch {
+      hash.update('unstatable\n');
+    }
+    const rootDiscovery = rootDiscoveryBudget(discovery, roots.length - rootIndex);
+    const projectRead = readDirentsBoundedSync(projectsRoot, rootDiscovery);
+    for (const proj of sortedIdentityDirents(projectRead.entries)) {
+      if (!proj.isDirectory()) continue;
+      const projPath = join(projectsRoot, proj.name);
+      const realProjPath = realpathOrNullSync(projPath);
+      if (!realProjPath || !pathInside(realProjectsRoot, realProjPath)) continue;
+      const sessionRead = readDirentsBoundedSync(projPath, rootDiscovery);
+      for (const sess of sortedIdentityDirents(sessionRead.entries)) {
+        if (!sess.isDirectory()) continue;
+        const wfDir = join(projPath, sess.name, 'workflows');
+        const realWfDir = realpathOrNullSync(wfDir);
+        if (!realWfDir || !pathInside(realProjPath, realWfDir)) continue;
+        const wfRead = readDirentsBoundedSync(wfDir, rootDiscovery);
+        for (const entry of sortedIdentityDirents(wfRead.entries)) {
+          if (!entry.isFile() || !isWfManifest(entry.name)) continue;
+          const realFull = realpathOrNullSync(join(wfDir, entry.name));
+          if (!realFull || !pathInside(realWfDir, realFull)) continue;
+          hash.update('manifest\0');
+          hash.update(realFull);
+          hash.update('\0');
+          try {
+            hashStatIdentity(hash, statSync(realFull));
+          } catch {
+            hash.update('unstatable\n');
+          }
+        }
+      }
+    }
+    mergeRootDiscovery(discovery, rootDiscovery);
+  }
+  return identityFooter(hash, discovery);
+}
+
+function projectionSignature(result) {
+  return createHash('sha1')
+    .update('workflow-projection-v1\n')
+    .update(JSON.stringify(result))
+    .digest('hex');
+}
+
+/** One producer snapshot: the exact projected value plus identities for both gates. */
+export function readWorkflowProjectionSync(projectsRootOrRoots, options = {}) {
+  const result = readWorkflowsSync(projectsRootOrRoots, options);
+  const source = workflowSourceIdentitySync(projectsRootOrRoots, options);
+  return {
+    result,
+    projectionSignature: projectionSignature(result),
+    sourceIdentity: source.signature,
+  };
+}
+
+function rootWatchIdentity(pathname) {
+  try {
+    const real = realpathSync(pathname);
+    const value = statSync(real);
+    return `${real}\0${value.dev ?? 0}\0${value.ino ?? 0}`;
+  } catch {
+    return null;
+  }
+}
+
+function relevantWorkflowWatchEvent(filename) {
+  if (filename == null) return true;
+  const normalized = String(filename).replaceAll('\\', '/');
+  const segments = normalized.split('/');
+  const leaf = segments.at(-1) ?? '';
+  // Recursive-watch filename detail varies by platform: some report a path from
+  // the watched root, others only the changed basename. Either shape must keep
+  // the healthy manifest fast path under one second.
+  return segments.includes('workflows') || isWfManifest(leaf);
+}
+
+/**
+ * Fast watcher token with a bounded stat-only reconciliation backstop.
+ *
+ * The first signature call performs the one exact cold scan. Later signature
+ * calls are constant-time; recursive traversal happens only on the unref'd
+ * background interval or as part of an ingest that already needs the data.
+ */
+export function createWorkflowFreshnessTracker(projectsRootOrRoots, options = {}) {
+  const roots = projectsRootList(projectsRootOrRoots).map((value) => resolve(value));
+  const reconcileIntervalMs = Math.max(
+    10,
+    Math.min(options.reconcileIntervalMs ?? 60_000, 60_000)
+  );
+  const identityOptions = {
+    allowRootSymlinks: options.allowRootSymlinks,
+    discoveryMaxEntries: options.discoveryMaxEntries,
+  };
+  // perf-index-contract: workflow-watchers always-consumed: every tracker lifecycle queries this root-keyed registry to replace, close, report, and dispose active watchers
+  const watchers = new Map();
+  let baselineIdentity = null;
+  let coldIdentity = null;
+  let epoch = 0;
+  let syncScans = 0;
+  let asyncScans = 0;
+  let interval = null;
+  let reconcilePromise = null;
+  let debounce = null;
+  let active = false;
+  let lifecycle = 0;
+
+  const markDirty = () => {
+    if (!active || debounce) return;
+    epoch += 1;
+    debounce = setTimeout(() => {
+      debounce = null;
+    }, 25);
+    debounce.unref?.();
+  };
+
+  const closeWatcher = (root) => {
+    const record = watchers.get(root);
+    if (!record) return;
+    record.closing = true;
+    watchers.delete(root);
+    try {
+      record.watcher.close();
+    } catch {
+      /* already closed */
+    }
+  };
+
+  const syncWatchers = () => {
+    if (!active || options.watch === false) return;
+    for (const root of roots) {
+      const identity = rootWatchIdentity(root);
+      const current = watchers.get(root);
+      if (current && current.identity === identity) continue;
+      if (current) closeWatcher(root);
+      if (!identity) continue;
+      try {
+        const watcher = watch(
+          root,
+          { persistent: false, recursive: true },
+          (_eventType, filename) => {
+            if (relevantWorkflowWatchEvent(filename)) markDirty();
+          }
+        );
+        const record = { watcher, identity, closing: false };
+        watchers.set(root, record);
+        watcher.on('error', () => {
+          if (record.closing || !active) return;
+          markDirty();
+          closeWatcher(root);
+        });
+        watcher.on('close', () => {
+          if (record.closing || !active) return;
+          watchers.delete(root);
+          markDirty();
+        });
+        watcher.unref?.();
+      } catch {
+        // Unsupported recursive watches degrade to the periodic reconciliation.
+      }
+    }
+  };
+
+  const ensureStarted = () => {
+    if (!active) {
+      active = true;
+      lifecycle += 1;
+    }
+    if (baselineIdentity == null) {
+      const initial = workflowSourceIdentitySync(projectsRootOrRoots, identityOptions);
+      syncScans += 1;
+      baselineIdentity = initial.signature;
+      coldIdentity = initial.signature;
+      syncWatchers();
+    }
+    if (!interval && options.reconcile !== false) {
+      interval = setInterval(() => {
+        void reconcileNow().catch(() => {
+          // A failed backstop must not become an unhandled rejection or silently
+          // settle the cache gate. Force one invalidation and retry next interval;
+          // the ordinary ingest walk still degrades unreadable input safely.
+          markDirty();
+          syncWatchers();
+        });
+      }, reconcileIntervalMs);
+      interval.unref?.();
+    }
+  };
+
+  const reconcileNow = async () => {
+    ensureStarted();
+    if (reconcilePromise) return reconcilePromise;
+    const reconcileLifecycle = lifecycle;
+    const pending = (async () => {
+      const next = await workflowSourceIdentity(projectsRootOrRoots, identityOptions);
+      asyncScans += 1;
+      if (!active || lifecycle !== reconcileLifecycle) return next.signature;
+      if (next.signature !== baselineIdentity) {
+        baselineIdentity = next.signature;
+        epoch += 1;
+      }
+      syncWatchers();
+      return next.signature;
+    });
+    const tracked = pending().finally(() => {
+      if (reconcilePromise === tracked) reconcilePromise = null;
+    });
+    reconcilePromise = tracked;
+    return reconcilePromise;
+  };
+
+  const suspend = () => {
+    active = false;
+    lifecycle += 1;
+    if (interval) clearInterval(interval);
+    interval = null;
+    if (debounce) clearTimeout(debounce);
+    debounce = null;
+    reconcilePromise = null;
+    for (const root of [...watchers.keys()]) closeWatcher(root);
+    baselineIdentity = null;
+    coldIdentity = null;
+    epoch = 0;
+  };
+
+  return {
+    signature() {
+      ensureStarted();
+      return `${coldIdentity}:${epoch}`;
+    },
+    observeSourceIdentity(identity) {
+      ensureStarted();
+      baselineIdentity = identity;
+      // ingest() just accepted a complete producer snapshot. Re-arm immediately:
+      // a distinct edit/add/remove after that boundary must not be swallowed by
+      // the short burst debounce from the preceding filesystem event.
+      if (debounce) clearTimeout(debounce);
+      debounce = null;
+    },
+    reconcileNow,
+    markDirtyForTests: markDirty,
+    debugState() {
+      return {
+        epoch,
+        syncScans,
+        asyncScans,
+        watcherCount: watchers.size,
+        baselineIdentity,
+        active,
+      };
+    },
+    // Scoped-ingest eviction releases resources. A later signature call may
+    // safely restart from a new exact cold baseline on this cached module.
+    dispose: suspend,
+  };
 }
