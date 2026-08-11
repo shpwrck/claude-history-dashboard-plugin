@@ -65,14 +65,20 @@ const DOC_GRAPH_ROOT = resolve(process.env.CHD_DOC_GRAPH_ROOT || PROJECT_DIR);
 const LIB = join(PROJECT_DIR, 'src', 'lib');
 const { resolveSources } = await import(join(LIB, 'sources.ts'));
 const { filesystemArtifactSource } = await import(join(LIB, 'artifact-source.ts'));
-const DATA_SOURCES = resolveSources({ env: process.env, homeDir: homedir() });
-const DEFAULT_SOURCE = DATA_SOURCES[0];
-const PROJECTS = DEFAULT_SOURCE.historyDir;
-const CLAUDE = dirname(PROJECTS);
-const DEFAULT_SOURCE_PROVENANCE = {
-  sourceId: DEFAULT_SOURCE.id,
-  harness: DEFAULT_SOURCE.harness,
-};
+const DEFAULT_INGEST_CONFIG = resolveIngestConfig(process.env, homedir());
+const {
+  defaultSource: DEFAULT_SOURCE,
+  projects: PROJECTS,
+  claude: CLAUDE,
+  defaultSourceProvenance: DEFAULT_SOURCE_PROVENANCE,
+  claudeJson: CLAUDE_JSON,
+  claudeHome: CLAUDE_HOME,
+  scoped: SCOPED_INGEST,
+  projectConfigRoots: PROJECT_CONFIG_ROOTS,
+  projectSources: PROJECT_SOURCES,
+} = DEFAULT_INGEST_CONFIG;
+export const CHD_CACHE_DIR = DEFAULT_INGEST_CONFIG.cacheDir;
+export const PROJECT_ROOTS = DEFAULT_INGEST_CONFIG.projectRoots;
 const SOURCE_DECORATED_SIGNAL_KEYS = new Set([
   'tokenData',
   'toolData',
@@ -102,22 +108,6 @@ function maybeDecorateSignalValue(datasetKey, value, provenance = DEFAULT_SOURCE
     ? withSourceProvenance(value, provenance)
     : value;
 }
-// Top-level Claude Code config — carries mcpServers (global) plus a `projects`
-// map keyed by absolute project path with per-project mcpServers and
-// enabledMcpjsonServers.
-const CLAUDE_JSON =
-  DEFAULT_SOURCE.configFile || join(dirname(CLAUDE), '.claude.json');
-const CLAUDE_HOME = dirname(CLAUDE_JSON);
-// CHD_CACHE_DIR: all install-dir writes land here so a plugin reinstall never
-// clobbers accumulated runtime state. Defaults to ~/.claude/.cache/chd/ — a
-// subdirectory of the data root that is preserved across plugin updates.
-// Individual path overrides (CHD_DB_PATH, DASHBOARD_REVIEW_EVENTS_CACHE_PATH)
-// take precedence when set; CHD_CACHE_DIR is only the default base.
-export const CHD_CACHE_DIR =
-  process.env.CHD_CACHE_DIR || join(CLAUDE, '.cache', 'chd');
-const SCOPED_INGEST = /^(1|true|yes|on)$/i.test(
-  String(process.env.CHD_SCOPED_INGEST || '')
-);
 function splitPathList(raw) {
   if (!raw) return [];
   return String(raw)
@@ -134,8 +124,8 @@ function projectsRootFromPath(raw, assumeHubRoot = false) {
   return existsSync(nested) ? nested : abs;
 }
 
-function projectsRootsFromEnv(name, assumeHubRoot = false) {
-  return splitPathList(process.env[name]).map((part) =>
+function projectsRootsFromEnv(env, name, assumeHubRoot = false) {
+  return splitPathList(env[name]).map((part) =>
     projectsRootFromPath(part, assumeHubRoot)
   );
 }
@@ -162,11 +152,11 @@ function projectSourceFrom(source, projectsRoot) {
   };
 }
 
-function hubSourceFromRoot(projectsRoot, index) {
+function hubSourceFromRoot(defaultSource, projectsRoot, index) {
   return projectSourceFrom(
     {
       id: `claude-code-hub-${index + 1}`,
-      harness: DEFAULT_SOURCE.harness,
+      harness: defaultSource.harness,
       historyDir: projectsRoot,
     },
     projectsRoot
@@ -187,34 +177,112 @@ function uniqueProjectSources(sources) {
   return out;
 }
 
-const PROJECT_CONFIG_ROOTS = splitPathList(
-  process.env.DASHBOARD_PROJECT_CONFIG_ROOTS
-)
-  .filter((root) => root.startsWith('/'))
-  .map((root) => resolve(root))
-  .sort();
+// Resolve only the root-derived ingest surface here. Process-wide caps and
+// feature flags remain module constants; a later instance can call this with
+// its own env/home pair while the legacy module default still resolves once.
+function resolveIngestConfig(env = process.env, homeDir = homedir()) {
+  const dataSources = resolveSources({ env, homeDir });
+  const defaultSource = dataSources[0];
+  const projects = defaultSource.historyDir;
+  const CLAUDE = dirname(projects);
+  const defaultSourceProvenance = {
+    sourceId: defaultSource.id,
+    harness: defaultSource.harness,
+  };
+  // Top-level Claude Code config — carries mcpServers (global) plus a `projects`
+  // map keyed by absolute project path with per-project mcpServers and
+  // enabledMcpjsonServers.
+  const claudeJson =
+    defaultSource.configFile || join(dirname(CLAUDE), '.claude.json');
+  const claudeHome = dirname(claudeJson);
+  // CHD_CACHE_DIR: all install-dir writes land here so a plugin reinstall never
+  // clobbers accumulated runtime state. Defaults to ~/.claude/.cache/chd/ — a
+  // subdirectory of the data root that is preserved across plugin updates.
+  // Individual path overrides (CHD_DB_PATH, DASHBOARD_REVIEW_EVENTS_CACHE_PATH)
+  // take precedence when set; CHD_CACHE_DIR is only the default base.
+  const cacheDir = env.CHD_CACHE_DIR || join(CLAUDE, '.cache', 'chd');
+  const scoped = /^(1|true|yes|on)$/i.test(String(env.CHD_SCOPED_INGEST || ''));
+  // perf-index-contract: ingest-config-root-order always-consumed: every resolved config exposes this canonical ordered root list
+  const projectConfigRoots = splitPathList(env.DASHBOARD_PROJECT_CONFIG_ROOTS)
+    .filter((root) => root.startsWith('/'))
+    .map((root) => resolve(root))
+    .sort();
+  const extraProjectRoots = scoped
+    ? []
+    : uniqueProjectsRoots([
+        ...projectsRootsFromEnv(env, 'DASHBOARD_HUB_PROJECTS_DIR'),
+        ...projectsRootsFromEnv(env, 'CLAUDE_HUB_PROJECTS_DIR'),
+        ...projectsRootsFromEnv(env, 'CLAUDE_HUB_DIR', true),
+      ]);
+  const projectSources = uniqueProjectSources([
+    ...dataSources.map((source) =>
+      projectSourceFrom(source, resolve(source.historyDir))
+    ),
+    ...extraProjectRoots.map((root, index) =>
+      hubSourceFromRoot(defaultSource, root, index)
+    ),
+  ]).map(({ source, projectsRoot }) => ({
+    source,
+    projectsRoot,
+    // The artifact-source interface (ADR 0009 §1): every source-relative
+    // filesystem read flows through this `list`/`read`-by-`source_id + rel_path
+    // + signature` abstraction, so a second source root is just another
+    // ArtifactSource. Rooted at `dirname(historyDir)` to match the legacy
+    // `sourceArtifactPath`, so single-source paths stay byte-identical.
+    artifacts: filesystemArtifactSource(source),
+  }));
+  const projectRoots = projectSources.map((item) => item.projectsRoot);
+  const usageData = join(CLAUDE, 'usage-data');
+  const LOCAL_CALIBRATION_REPORT =
+    (!scoped && env.CLAUDE_SHADOW_CALLS_CALIBRATION) ||
+    join(CLAUDE, 'shadow-calls', 'calibration-report.json');
+  const MODEL_EVAL_RESULTS_DIR = join(CLAUDE, 'model-evals', 'results');
+  const SEMANTIC_INTENT_DIR = join(CLAUDE, 'model-evals', 'semantic-intent');
 
-const EXTRA_PROJECT_ROOTS = SCOPED_INGEST
-  ? []
-  : uniqueProjectsRoots([
-      ...projectsRootsFromEnv('DASHBOARD_HUB_PROJECTS_DIR'),
-      ...projectsRootsFromEnv('CLAUDE_HUB_PROJECTS_DIR'),
-      ...projectsRootsFromEnv('CLAUDE_HUB_DIR', true),
-    ]);
-const PROJECT_SOURCES = uniqueProjectSources([
-  ...DATA_SOURCES.map((source) => projectSourceFrom(source, resolve(source.historyDir))),
-  ...EXTRA_PROJECT_ROOTS.map((root, index) => hubSourceFromRoot(root, index)),
-]).map(({ source, projectsRoot }) => ({
-  source,
-  projectsRoot,
-  // The artifact-source interface (ADR 0009 §1): every source-relative
-  // filesystem read flows through this `list`/`read`-by-`source_id + rel_path
-  // + signature` abstraction, so a second source root is just another
-  // ArtifactSource. Rooted at `dirname(historyDir)` to match the legacy
-  // `sourceArtifactPath`, so single-source paths stay byte-identical.
-  artifacts: filesystemArtifactSource(source),
-}));
-export const PROJECT_ROOTS = PROJECT_SOURCES.map((item) => item.projectsRoot);
+  return Object.freeze({
+    dataSources,
+    defaultSource,
+    projects,
+    claude: CLAUDE,
+    defaultSourceProvenance,
+    claudeJson,
+    claudeHome,
+    cacheDir,
+    scoped,
+    projectConfigRoots,
+    extraProjectRoots,
+    projectSources,
+    projectRoots,
+    shadowCallsLedger:
+      (!scoped && env.CLAUDE_SHADOW_CALLS_LEDGER) ||
+      join(CLAUDE, 'shadow-calls', 'ledger.jsonl'),
+    localCalibrationReport: LOCAL_CALIBRATION_REPORT,
+    usageData,
+    repoMapDir: join(usageData, 'repo-map'),
+    docHygieneDir: join(usageData, 'doc-hygiene'),
+    dbPath: env.CHD_DB_PATH || join(cacheDir, 'dashboard.db'),
+    settingsGlobal: join(CLAUDE, 'settings.json'),
+    settingsLocal: join(CLAUDE, 'settings.local.json'),
+    claudeMdGlobal: join(CLAUDE, 'CLAUDE.md'),
+    skillsDir: join(CLAUDE, 'skills'),
+    agentsDir: join(CLAUDE, 'agents'),
+    commandsDir: join(CLAUDE, 'commands'),
+    pluginsRegistry: join(CLAUDE, 'plugins', 'installed_plugins.json'),
+    pluginsCache: join(CLAUDE, 'plugins', 'cache'),
+    tasksDir: join(CLAUDE, 'tasks'),
+    teamsDir: join(CLAUDE, 'teams'),
+    plansDir: join(CLAUDE, 'plans'),
+    modelEvalResultsDir: MODEL_EVAL_RESULTS_DIR,
+    semanticIntentDir: SEMANTIC_INTENT_DIR,
+    lastUpdate: join(CLAUDE, '.last-update-result.json'),
+    mcpAuth: join(CLAUDE, 'mcp-needs-auth-cache.json'),
+    backupsDir: join(CLAUDE, 'backups'),
+    reviewEventsCache:
+      env.DASHBOARD_REVIEW_EVENTS_CACHE_PATH ||
+      join(cacheDir, 'review-events', 'github-review-events.json'),
+    docIssueCacheDir: join(cacheDir, 'doc-issues'),
+  });
+}
 
 // Per-source member attribution (#1999). The push-ingest endpoint stamps the shipper's
 // member/displayName/repo out of band at `<root>/.sources/<sourceId>/_source.json` (root =
@@ -445,31 +513,27 @@ function mergeStatsCaches(caches) {
 // CLAUDE swapped to the principal's data root) must derive its own root's
 // ledger, or the process-wide env value would leak the default root's
 // experiment history into a scoped member's aggregate.
-const SHADOW_CALLS_LEDGER =
-  (!SCOPED_INGEST && process.env.CLAUDE_SHADOW_CALLS_LEDGER) ||
-  join(CLAUDE, 'shadow-calls', 'ledger.jsonl');
+const SHADOW_CALLS_LEDGER = DEFAULT_INGEST_CONFIG.shadowCallsLedger;
 // Tier B per-task-class calibration report (#2318, epic #2177): the JSON output of
 // `~/.claude/shadow-calls/lib/calibration-report.mjs` (#2317), read as a plain local
 // file at ingest (see readLocalCalibration) — NO query-time shell-out and zero
 // network/Anthropic egress. Override is GLOBAL-ingest only, mirroring the ledger:
 // a scoped enterprise ingest derives its own root's report.
-const LOCAL_CALIBRATION_REPORT =
-  (!SCOPED_INGEST && process.env.CLAUDE_SHADOW_CALLS_CALIBRATION) ||
-  join(CLAUDE, 'shadow-calls', 'calibration-report.json');
+const LOCAL_CALIBRATION_REPORT = DEFAULT_INGEST_CONFIG.localCalibrationReport;
 // Proof-batch receipts (#2151): finalized PROOF receipts appended by
 // scripts/proof-batch.mjs, one JSON line each. Repo-tracked (data/, not
 // ~/.claude) — the runner writes them next to the preregistration they answer.
 const PROOF_RECEIPTS_PATH = join(PROJECT_DIR, 'data', 'proof-receipts.jsonl');
 // `~/.claude/usage-data` holds the repo-map artifacts we ingest (REPO_MAP_DIR).
-const USAGE_DATA = join(CLAUDE, 'usage-data');
-const REPO_MAP_DIR = join(USAGE_DATA, 'repo-map');
-const DOC_HYGIENE_DIR = join(USAGE_DATA, 'doc-hygiene');
+const USAGE_DATA = DEFAULT_INGEST_CONFIG.usageData;
+const REPO_MAP_DIR = DEFAULT_INGEST_CONFIG.repoMapDir;
+const DOC_HYGIENE_DIR = DEFAULT_INGEST_CONFIG.docHygieneDir;
 // Defaults to CHD_CACHE_DIR/dashboard.db. `CHD_DB_PATH` overrides it so a
 // test can point ingest at a throwaway DB (and a fixture $HOME) without touching
 // the real cache — test-only seam, production behaviour is unchanged when unset.
 // Using CHD_CACHE_DIR (not PROJECT_DIR/.cache) keeps the DB out of the plugin
 // install dir so updates never clobber it (#1336).
-const DB_PATH = process.env.CHD_DB_PATH || join(CHD_CACHE_DIR, 'dashboard.db');
+const DB_PATH = DEFAULT_INGEST_CONFIG.dbPath;
 const DB_DIR_MODE = 0o700;
 const DB_FILE_MODE = 0o600;
 const READ_CHUNK_BYTES = 65_536;
@@ -565,21 +629,21 @@ export const SIGNATURE_TREE_MAX_ENTRIES = Math.max(
 // file/dir below is optional — assembleLiveConfig() degrades to empty values
 // when a source is missing or malformed, so a partial config never sinks the
 // dataset endpoint.
-const SETTINGS_GLOBAL = join(CLAUDE, 'settings.json');
-const SETTINGS_LOCAL = join(CLAUDE, 'settings.local.json');
-const CLAUDE_MD_GLOBAL = join(CLAUDE, 'CLAUDE.md');
-const SKILLS_DIR = join(CLAUDE, 'skills');
-const AGENTS_DIR = join(CLAUDE, 'agents');
-const COMMANDS_DIR = join(CLAUDE, 'commands');
-const PLUGINS_REGISTRY = join(CLAUDE, 'plugins', 'installed_plugins.json');
-const PLUGINS_CACHE = join(CLAUDE, 'plugins', 'cache');
+const SETTINGS_GLOBAL = DEFAULT_INGEST_CONFIG.settingsGlobal;
+const SETTINGS_LOCAL = DEFAULT_INGEST_CONFIG.settingsLocal;
+const CLAUDE_MD_GLOBAL = DEFAULT_INGEST_CONFIG.claudeMdGlobal;
+const SKILLS_DIR = DEFAULT_INGEST_CONFIG.skillsDir;
+const AGENTS_DIR = DEFAULT_INGEST_CONFIG.agentsDir;
+const COMMANDS_DIR = DEFAULT_INGEST_CONFIG.commandsDir;
+const PLUGINS_REGISTRY = DEFAULT_INGEST_CONFIG.pluginsRegistry;
+const PLUGINS_CACHE = DEFAULT_INGEST_CONFIG.pluginsCache;
 // ── #539 ingest artifacts — top-level ~/.claude files/dirs not derived from
 // transcripts (per-artifact child issues #559–#569, #572). All optional; every
 // reader below degrades to an empty value when the source is missing/malformed.
-const TASKS_DIR = join(CLAUDE, 'tasks');
-const TEAMS_DIR = join(CLAUDE, 'teams');
-const PLANS_DIR = join(CLAUDE, 'plans');
-const MODEL_EVAL_RESULTS_DIR = join(CLAUDE, 'model-evals', 'results');
+const TASKS_DIR = DEFAULT_INGEST_CONFIG.tasksDir;
+const TEAMS_DIR = DEFAULT_INGEST_CONFIG.teamsDir;
+const PLANS_DIR = DEFAULT_INGEST_CONFIG.plansDir;
+const MODEL_EVAL_RESULTS_DIR = DEFAULT_INGEST_CONFIG.modelEvalResultsDir;
 // Offline semantic-intent receipts (#2574, epic #2177). OPT-IN via
 // CHD_SEMANTIC_INTENT=1: a local classifier (an existing vLLM Semantic
 // Router / mmBERT deployment, reached over loopback by a host-side runner
@@ -589,14 +653,12 @@ const MODEL_EVAL_RESULTS_DIR = join(CLAUDE, 'model-evals', 'results');
 // so the default deployment path is byte-identical (AGENTS.md local-first rule).
 // The repo defines the artifact contract + parser only; it never invokes the
 // classifier, downloads weights, or opens a socket.
-const SEMANTIC_INTENT_DIR = join(CLAUDE, 'model-evals', 'semantic-intent');
+const SEMANTIC_INTENT_DIR = DEFAULT_INGEST_CONFIG.semanticIntentDir;
 const SEMANTIC_INTENT_ENABLED = process.env.CHD_SEMANTIC_INTENT === '1';
-const LAST_UPDATE = join(CLAUDE, '.last-update-result.json');
-const MCP_AUTH = join(CLAUDE, 'mcp-needs-auth-cache.json');
-const BACKUPS_DIR = join(CLAUDE, 'backups');
-const REVIEW_EVENTS_CACHE =
-  process.env.DASHBOARD_REVIEW_EVENTS_CACHE_PATH ||
-  join(CHD_CACHE_DIR, 'review-events', 'github-review-events.json');
+const LAST_UPDATE = DEFAULT_INGEST_CONFIG.lastUpdate;
+const MCP_AUTH = DEFAULT_INGEST_CONFIG.mcpAuth;
+const BACKUPS_DIR = DEFAULT_INGEST_CONFIG.backupsDir;
+const REVIEW_EVENTS_CACHE = DEFAULT_INGEST_CONFIG.reviewEventsCache;
 
 const { slimSessionTimeline } = await import(
   join(LIB, 'parse-timeline.ts')
@@ -1299,7 +1361,7 @@ export function datasetHasTransientDocGraphFailure(dataset) {
 // Opt-in GitHub issue-state snapshot (#2710, epic #2256). The cache dir shares
 // CHD_CACHE_DIR (like every other runtime write); the server preamble refreshes
 // it, ingest only reads it.
-const DOC_ISSUE_CACHE_DIR = join(CHD_CACHE_DIR, 'doc-issues');
+const DOC_ISSUE_CACHE_DIR = DEFAULT_INGEST_CONFIG.docIssueCacheDir;
 function docIssueConfig() {
   return parseDocIssueConfig(process.env, { cacheDir: DOC_ISSUE_CACHE_DIR });
 }
