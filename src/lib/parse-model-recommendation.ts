@@ -29,8 +29,8 @@ import type { ToolUsageData, ToolCall } from './parse-tools';
 import type { SessionTimeline } from './parse-timeline';
 import type { SessionAttribution } from './parse-agents';
 import {
+  entryCostBreakdown,
   resolveModelPricing,
-  serverToolCost,
   type ModelPricing,
   type ModelPricingResult,
 } from './pricing';
@@ -134,15 +134,14 @@ function tsMs(iso: string): number {
  * against a *different* model than the one that actually ran.
  */
 function entryCostAt(entry: TokenEntry, pricing: ModelPricing): number {
-  const cache1h = Math.min(entry.cacheCreation1hTokens, entry.cacheCreationTokens);
-  const cache5m = entry.cacheCreationTokens - cache1h;
+  const terms = entryCostBreakdown(entry, pricing);
   return (
-    (entry.inputTokens / 1_000_000) * pricing.input +
-    (entry.outputTokens / 1_000_000) * pricing.output +
-    (cache5m / 1_000_000) * pricing.cacheWrite5m +
-    (cache1h / 1_000_000) * pricing.cacheWrite1h +
-    (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-    serverToolCost(entry)
+    terms.input +
+    terms.output +
+    terms.cacheWrite5m +
+    terms.cacheWrite1h +
+    terms.cacheRead +
+    terms.serverTools
   );
 }
 

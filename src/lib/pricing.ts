@@ -188,6 +188,44 @@ export function getModelPricing(model: string): ModelPricing {
  */
 export const CHEAPEST_MODEL = CHEAPEST_CURRENT_MODEL_ID;
 
+/** Dollar contribution of each independently billed term in one token entry. */
+export interface EntryCostBreakdown {
+  input: number;
+  output: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheRead: number;
+  serverTools: number;
+}
+
+/**
+ * Price every billed term in one token entry against an explicit pricing tier.
+ * Consumers select or sum these named terms according to their own claim:
+ * observed totals include all six, while model-swap counterfactuals exclude
+ * model-independent server-tool fees.
+ */
+export function entryCostBreakdown(
+  entry: TokenEntry,
+  pricing: ModelPricing
+): EntryCostBreakdown {
+  const cacheWrite1hTokens = Math.min(
+    entry.cacheCreation1hTokens,
+    entry.cacheCreationTokens
+  );
+  const cacheWrite5mTokens =
+    entry.cacheCreationTokens - cacheWrite1hTokens;
+  return {
+    input: (entry.inputTokens / 1_000_000) * pricing.input,
+    output: (entry.outputTokens / 1_000_000) * pricing.output,
+    cacheWrite5m:
+      (cacheWrite5mTokens / 1_000_000) * pricing.cacheWrite5m,
+    cacheWrite1h:
+      (cacheWrite1hTokens / 1_000_000) * pricing.cacheWrite1h,
+    cacheRead: (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead,
+    serverTools: serverToolCost(entry),
+  };
+}
+
 /**
  * Cost of a single token entry priced under an explicit model tier (the
  * model-swap counterfactual). Used both by the Tokens view's swap scenario and
@@ -198,16 +236,12 @@ export const CHEAPEST_MODEL = CHEAPEST_CURRENT_MODEL_ID;
  */
 export function entryCostAtModel(entry: TokenEntry, model: string): number {
   const pricing = getModelPricing(model);
-  const cache1h = Math.min(
-    entry.cacheCreation1hTokens,
-    entry.cacheCreationTokens
-  );
-  const cache5m = entry.cacheCreationTokens - cache1h;
+  const terms = entryCostBreakdown(entry, pricing);
   return (
-    (entry.inputTokens / 1_000_000) * pricing.input +
-    (entry.outputTokens / 1_000_000) * pricing.output +
-    (cache5m / 1_000_000) * pricing.cacheWrite5m +
-    (cache1h / 1_000_000) * pricing.cacheWrite1h +
-    (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead
+    terms.input +
+    terms.output +
+    terms.cacheWrite5m +
+    terms.cacheWrite1h +
+    terms.cacheRead
   );
 }

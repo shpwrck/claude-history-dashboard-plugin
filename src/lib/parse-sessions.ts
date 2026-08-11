@@ -1,6 +1,6 @@
 import type { SessionTokenData, TokenEntry, CompactionEvent } from '../types';
 import { shortenProject } from './parse-history';
-import { resolveModelPricing, serverToolCost } from './pricing';
+import { entryCostBreakdown, resolveModelPricing } from './pricing';
 import { parseJsonl, parseMessage, summarize, type ContentBlock } from './parse-utils';
 import { resultContentSize } from './parse-tools';
 import {
@@ -511,15 +511,14 @@ const costCache: WeakMap<SessionTokenData, number> = new WeakMap();
  */
 export function estimateEntryCost(entry: TokenEntry): number {
   const { pricing } = resolveModelPricing(entry.model);
-  const cache1h = Math.min(entry.cacheCreation1hTokens, entry.cacheCreationTokens);
-  const cache5m = entry.cacheCreationTokens - cache1h;
+  const terms = entryCostBreakdown(entry, pricing);
   return (
-    (entry.inputTokens / 1_000_000) * pricing.input +
-    (entry.outputTokens / 1_000_000) * pricing.output +
-    (cache5m / 1_000_000) * pricing.cacheWrite5m +
-    (cache1h / 1_000_000) * pricing.cacheWrite1h +
-    (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead +
-    serverToolCost(entry)
+    terms.input +
+    terms.output +
+    terms.cacheWrite5m +
+    terms.cacheWrite1h +
+    terms.cacheRead +
+    terms.serverTools
   );
 }
 

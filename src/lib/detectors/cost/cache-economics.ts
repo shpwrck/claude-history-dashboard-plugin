@@ -1,7 +1,7 @@
 import type { SessionTokenData } from '../../../types';
 import type { Detector } from '../types';
 import { fmtUsd, MIN_SAVINGS_USD, short } from '../shared';
-import { getModelPricing } from '../../pricing';
+import { entryCostBreakdown, getModelPricing } from '../../pricing';
 
 interface SessionContextSpend {
   sessionId: string;
@@ -32,18 +32,16 @@ function summarizeSession(data: SessionTokenData): SessionContextSpend {
   const out = emptySession(data.sessionId);
   for (const entry of data.entries) {
     const pricing = getModelPricing(entry.model);
+    const terms = entryCostBreakdown(entry, pricing);
     const cache1h = Math.min(
       entry.cacheCreation1hTokens,
       entry.cacheCreationTokens
     );
-    const cache5m = entry.cacheCreationTokens - cache1h;
 
-    out.inputCost += (entry.inputTokens / 1_000_000) * pricing.input;
-    out.cacheWriteCost +=
-      (cache5m / 1_000_000) * pricing.cacheWrite5m +
-      (cache1h / 1_000_000) * pricing.cacheWrite1h;
-    out.cacheWrite1hCost += (cache1h / 1_000_000) * pricing.cacheWrite1h;
-    out.cacheReadCost += (entry.cacheReadTokens / 1_000_000) * pricing.cacheRead;
+    out.inputCost += terms.input;
+    out.cacheWriteCost += terms.cacheWrite5m + terms.cacheWrite1h;
+    out.cacheWrite1hCost += terms.cacheWrite1h;
+    out.cacheReadCost += terms.cacheRead;
     out.cacheReadTokens += entry.cacheReadTokens;
     out.cacheCreation1hTokens += cache1h;
   }
