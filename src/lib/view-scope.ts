@@ -256,6 +256,8 @@ export const VIEW_DATA_FILTER_POLICIES = {
   // Workflow runs link to sessions and have start times, so both filters
   // apply.
   workflows: { time: 'filtered', project: 'filtered' },
+  // Read completeness describes the aggregate ledger response, not one run.
+  workflowReadTruncated: { time: 'global', project: 'global' },
   // Tasks are an aggregate artifact; kept global for now.
   tasks: { time: 'global', project: 'global' },
   // Team inbox summaries are not partitioned by workspace filter selection.

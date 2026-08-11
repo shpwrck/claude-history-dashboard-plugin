@@ -430,7 +430,10 @@ export async function fetchMemories(): Promise<MemoriesResponse> {
   return { projects: [] };
 }
 
-export async function fetchWorkflows(): Promise<WorkflowsResponse> {
+export async function fetchWorkflows(
+  signal?: AbortSignal
+): Promise<WorkflowsResponse | null> {
+  void signal;
   return { runs: [] };
 }
 

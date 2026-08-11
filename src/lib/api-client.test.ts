@@ -6,14 +6,58 @@ import {
   fetchEnterpriseAuditExport,
   fetchEnterpriseOrganization,
   fetchEnterpriseReadinessReceipt,
+  fetchWorkflows,
   postCheckpointAnswer,
 } from './api-client';
 import {
   fetchAuditRun as fetchSpaAuditRun,
+  fetchWorkflows as fetchSpaWorkflows,
   postCheckpointAnswer as postSpaCheckpointAnswer,
 } from './api-client.spa';
 import { buildCheckpointAnswerRecord } from './checkpoint-instrumentation';
 import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
+
+describe('fetchWorkflows cancellation boundary', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('forwards the caller AbortSignal to the server request', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ runs: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    await expect(fetchWorkflows(controller.signal)).resolves.toEqual({ runs: [] });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(controller.signal);
+  });
+
+  it('keeps the SPA adapter network-free when passed an AbortSignal', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      fetchSpaWorkflows(new AbortController().signal)
+    ).resolves.toEqual({ runs: [] });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes server failure from a successful empty ledger', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('unavailable', { status: 503 })));
+    await expect(fetchWorkflows()).resolves.toBeNull();
+
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('network unavailable');
+    }));
+    await expect(fetchWorkflows()).resolves.toBeNull();
+  });
+});
 
 describe('fetchAuthSession', () => {
   afterEach(() => {

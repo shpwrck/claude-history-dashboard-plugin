@@ -89,6 +89,8 @@ export interface RawWorkflowRun {
 }
 export interface WorkflowsResponse {
   runs: RawWorkflowRun[];
+  /** True when server-side run or discovery bounds omitted possible manifests. */
+  truncated?: boolean;
 }
 
 function num(v: unknown): number | null {

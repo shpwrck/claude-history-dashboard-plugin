@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { appendFile, chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, normalize, resolve, extname, basename, sep } from 'node:path';
+import { dirname, isAbsolute, join, normalize, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createCipheriv,
@@ -96,6 +96,7 @@ import {
   datasetDocGraphGitWorkingTreeSignature,
   docGraphGitWorkingTreeSignatureForServer,
   docGraphGitWorkingTreeSignatureFromLastSourceGate,
+  PROJECT_ROOTS,
 } from './ingest.mjs';
 import {
   readWorkflows,
@@ -321,46 +322,6 @@ const { computeSessionOutcomes } = await import(
 // principal's configured data root. In the ordinary local container neither is
 // set, so these resolve to bundled dist/ and the bind-mounted ~/.claude.
 const DIST = process.env.DIST_DIR || join(PROJECT_DIR, 'dist');
-function splitPathList(raw) {
-  if (!raw) return [];
-  return String(raw)
-    .split(new RegExp(`[${delimiter === '\\' ? '\\\\' : delimiter},\\n]`))
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-function projectsRootFromPath(raw, assumeHubRoot = false) {
-  const abs = resolve(raw);
-  if (abs.endsWith(`${sep}projects`)) return abs;
-  if (assumeHubRoot) return join(abs, 'projects');
-  const nested = join(abs, 'projects');
-  return existsSync(nested) ? nested : abs;
-}
-
-function projectsRootsFromEnv(name, assumeHubRoot = false) {
-  return splitPathList(process.env[name]).map((part) =>
-    projectsRootFromPath(part, assumeHubRoot)
-  );
-}
-
-function uniqueProjectsRoots(roots) {
-  const seen = new Set();
-  const out = [];
-  for (const root of roots) {
-    const normalized = resolve(root);
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    out.push(normalized);
-  }
-  return out;
-}
-
-const PROJECT_ROOTS = uniqueProjectsRoots([
-  PROJECTS,
-  ...projectsRootsFromEnv('DASHBOARD_HUB_PROJECTS_DIR'),
-  ...projectsRootsFromEnv('CLAUDE_HUB_PROJECTS_DIR'),
-  ...projectsRootsFromEnv('CLAUDE_HUB_DIR', true),
-]);
 const SHADOW_CALLS_DIR = join(CLAUDE, 'shadow-calls');
 // Shadow-calls experiment ledger (#2152): the append-only JSONL the shadow
 // engine writes, served row-by-row at /api/shadow-experiments.json. Read live
@@ -9318,10 +9279,21 @@ function enterpriseRequestProjectsRoot(req) {
 
 function enterpriseRequestProjectsRoots(req) {
   const principal = req.enterprisePrincipal;
-  if (ENTERPRISE_AUTH_ON && principal?.role !== 'admin' && principal?.dataRoot) {
-    return [join(principal.dataRoot, 'projects')];
+  if (ENTERPRISE_AUTH_ON && principal?.role !== 'admin') {
+    return principal?.dataRoot ? [join(principal.dataRoot, 'projects')] : [];
   }
   return PROJECT_ROOTS;
+}
+
+function enterpriseWorkflowReadOptions(req) {
+  const principal = req.enterprisePrincipal;
+  return {
+    // Local and enterprise-admin roots come from trusted server configuration
+    // and may intentionally alias one physical hub. A tenant's configured root
+    // is an authorization boundary: reject if any component of its projects
+    // path resolves through a symlink instead of broadening that boundary.
+    allowRootSymlinks: !(ENTERPRISE_AUTH_ON && principal?.role !== 'admin'),
+  };
 }
 
 function enterpriseRequestDataSource(req, sourceId) {
@@ -11029,8 +11001,8 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/workflows') {
-      // Workflow Run Ledger (#435). Walk every
-      // <scoped-root>/projects/<slug>/<sessionId>/workflows/wf_*.json manifest
+      // Workflow Run Ledger (#435/#2713). Walk every authorized projects root's
+      // <slug>/<sessionId>/workflows/wf_*.json manifest
       // (written on completion of a Workflow-tool run), project it to the
       // ledger fields, and return runs newest-first. Read fresh per request;
       // the manifest JSON itself is NOT merged into readMergedSession / ingest
@@ -11040,7 +11012,10 @@ const server = createServer(async (req, res) => {
       if (req.method !== 'GET') {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
       }
-      const workflows = await readWorkflows(enterpriseRequestProjectsRoot(req));
+      const workflows = await readWorkflows(
+        enterpriseRequestProjectsRoots(req),
+        enterpriseWorkflowReadOptions(req)
+      );
       return sendJson(res, 200, workflows);
     }
 

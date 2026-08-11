@@ -4880,12 +4880,12 @@ function assembleDatasetCore() {
   // the workflow-health detectors (#635) reconcile against real runs. Server-only
   // — not in the SPA upload bundle, so the SPA dataset simply ships [].
   let workflows = [];
-  for (const projectsRoot of PROJECT_ROOTS) {
-    try {
-      workflows.push(...parseWorkflows(readWorkflowsSync(projectsRoot)));
-    } catch {
-      /* ignore — a malformed walk degrades to no workflow recs, never sinks ingest */
-    }
+  try {
+    // One multi-root read keeps the published run/discovery limits global and
+    // matches the live /api/workflows route's configured-root semantics (#2713).
+    workflows = parseWorkflows(readWorkflowsSync(PROJECT_ROOTS));
+  } catch {
+    /* ignore — a malformed walk degrades to no workflow recs, never sinks ingest */
   }
 
   // ── Server aggregate artifacts (top-level ~/.claude plus enterprise slots) ──

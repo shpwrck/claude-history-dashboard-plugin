@@ -318,6 +318,8 @@ export interface ViewData {
   shadowCalls: ShadowCallAggregate | null;
   memories: ProjectMemories[];
   workflows: WorkflowRun[];
+  /** The live server omitted possible workflow manifests due to a read bound. */
+  workflowReadTruncated?: boolean;
   // Server aggregate artifacts (empty arrays/null on the SPA dataset).
   tasks: TaskRecord[];
   teams: TeamSummary[];
@@ -578,6 +580,7 @@ function renderAutomationView(ctx: ViewContext, forcedTab?: string): ReactNode {
           render: () => (
             <WorkflowList
               workflows={d.workflows}
+              readTruncated={d.workflowReadTruncated}
               serverAvailable={serverAvailable}
               onOpenSession={n.openSession}
             />

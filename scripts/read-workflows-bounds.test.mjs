@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -53,6 +53,139 @@ function sparseWorkflowFixture(sessionCount = 12) {
   }
   return { root, projectsRoot };
 }
+
+function singleWorkflowRoot(runId, startTime) {
+  const root = join(tmpdir(), `chd-workflow-root-${randomUUID()}`);
+  const projectsRoot = join(root, 'projects');
+  const workflows = join(projectsRoot, 'proj-a', `${runId}-session`, 'workflows');
+  mkdirSync(workflows, { recursive: true });
+  writeFileSync(
+    join(workflows, `wf_${runId}.json`),
+    JSON.stringify({
+      runId,
+      workflowName: runId,
+      status: 'completed',
+      startTime,
+    })
+  );
+  return { root, projectsRoot };
+}
+
+test('multi-root readers dedupe physical aliases and share ordering and discovery limits (#2713)', async () => {
+  const older = singleWorkflowRoot('older-root', 1767225600000);
+  const newer = singleWorkflowRoot('newer-root', 1767225600001);
+  const alias = join(tmpdir(), `chd-workflow-alias-${randomUUID()}`);
+  symlinkSync(older.projectsRoot, alias, 'dir');
+  try {
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    for (const [label, read] of [
+      ['async', (roots, options) => workflows.readWorkflows(roots, options)],
+      ['sync', (roots, options) => workflows.readWorkflowsSync(roots, options)],
+    ]) {
+      const result = await read(
+        [older.projectsRoot, alias, newer.projectsRoot],
+        { discoveryMaxEntries: 20 }
+      );
+      assert.deepEqual(
+        result.runs.map((run) => run.runId),
+        ['newer-root', 'older-root'],
+        `${label}: roots are globally ordered and a canonical alias is read once`
+      );
+      assert.deepEqual(
+        result.discovery,
+        { entriesExamined: 6, directoriesOpened: 6 },
+        `${label}: the alias consumes no second discovery walk`
+      );
+
+      const capped = await read(
+        [older.projectsRoot, alias, newer.projectsRoot],
+        { discoveryMaxEntries: 4 }
+      );
+      assert.deepEqual(
+        capped.runs.map((run) => run.runId),
+        [],
+        `${label}: the small budget is shared fairly instead of consumed by root order`
+      );
+      assert.equal(capped.truncated, true, `${label}: one shared budget is reported`);
+      assert.deepEqual(capped.discovery, {
+        entriesExamined: 4,
+        directoriesOpened: 4,
+      });
+    }
+  } finally {
+    rmSync(alias, { force: true });
+    rmSync(older.root, { recursive: true, force: true });
+    rmSync(newer.root, { recursive: true, force: true });
+  }
+});
+
+test('a dense first root cannot starve a later root from discovery (#2713)', async () => {
+  const dense = sparseWorkflowFixture();
+  const hub = singleWorkflowRoot('hub-with-reserved-budget', 1767225600003);
+  try {
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    for (const [label, result] of [
+      [
+        'async',
+        await workflows.readWorkflows([dense.projectsRoot, hub.projectsRoot], {
+          discoveryMaxEntries: 6,
+        }),
+      ],
+      [
+        'sync',
+        workflows.readWorkflowsSync([dense.projectsRoot, hub.projectsRoot], {
+          discoveryMaxEntries: 6,
+        }),
+      ],
+    ]) {
+      assert.deepEqual(
+        result.runs.map((run) => run.runId),
+        ['hub-with-reserved-budget'],
+        `${label}: the later root keeps enough budget to discover its run`
+      );
+      assert.equal(result.truncated, true);
+      assert.deepEqual(result.discovery, {
+        entriesExamined: 6,
+        directoriesOpened: 5,
+      });
+    }
+  } finally {
+    rmSync(dense.root, { recursive: true, force: true });
+    rmSync(hub.root, { recursive: true, force: true });
+  }
+});
+
+test('tenant readers reject a projects root whose path crosses a symlink (#2713)', async () => {
+  const outside = singleWorkflowRoot('outside-tenant-root', 1767225600002);
+  const tenantRoot = join(tmpdir(), `chd-workflow-tenant-${randomUUID()}`);
+  const linkedProjects = join(tenantRoot, 'projects');
+  mkdirSync(tenantRoot, { recursive: true });
+  symlinkSync(outside.projectsRoot, linkedProjects, 'dir');
+  try {
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    for (const [label, read] of [
+      ['async', (root, options) => workflows.readWorkflows(root, options)],
+      ['sync', (root, options) => workflows.readWorkflowsSync(root, options)],
+    ]) {
+      const tenantResult = await read(linkedProjects, { allowRootSymlinks: false });
+      assert.deepEqual(
+        tenantResult.runs,
+        [],
+        `${label}: an untrusted root path must not expand through a symlink`
+      );
+
+      const trustedResult = await read(linkedProjects);
+      assert.deepEqual(
+        trustedResult.runs.map((run) => run.runId),
+        ['outside-tenant-root'],
+        `${label}: trusted local/admin readers keep canonical alias support`
+      );
+    }
+  } finally {
+    rmSync(tenantRoot, { recursive: true, force: true });
+    rmSync(outside.root, { recursive: true, force: true });
+  }
+});
 
 test('readWorkflows readers share one injected discovery budget across sparse nested directories (#3100)', async () => {
   const fx = sparseWorkflowFixture();
@@ -167,6 +300,33 @@ test('readWorkflows and readWorkflowsSync honor the workflow run cap', async () 
     if (origCap === undefined) delete process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
     else process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES = origCap;
     rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test('the run cap retains the newest manifests across all scanned roots (#2713)', async () => {
+  const older = singleWorkflowRoot('older-capped-root', 1767225600000);
+  const newer = singleWorkflowRoot('newer-capped-root', 1767225600002);
+  const origCap = process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
+  try {
+    process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES = '1';
+    const workflows = await import(`./read-workflows.mjs?fixture=${randomUUID()}`);
+    for (const [label, result] of [
+      ['async', await workflows.readWorkflows([older.projectsRoot, newer.projectsRoot])],
+      ['sync', workflows.readWorkflowsSync([older.projectsRoot, newer.projectsRoot])],
+    ]) {
+      assert.deepEqual(
+        result.runs.map((run) => run.runId),
+        ['newer-capped-root'],
+        `${label}: a later root's newer run must displace an earlier root's older run`
+      );
+      assert.equal(result.truncated, true);
+      assert.equal(result.limits.maxRuns, 1);
+    }
+  } finally {
+    if (origCap === undefined) delete process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES;
+    else process.env.DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES = origCap;
+    rmSync(older.root, { recursive: true, force: true });
+    rmSync(newer.root, { recursive: true, force: true });
   }
 });
 

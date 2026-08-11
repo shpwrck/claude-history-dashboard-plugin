@@ -139,6 +139,9 @@ async function startServer(extraEnv = {}) {
       DASHBOARD_SESSIONS_MANIFEST_MAX_ENTRIES: '',
       DASHBOARD_MEMORY_MAX_FILES: '',
       DASHBOARD_MEMORY_DIR_MAX_ENTRIES: '',
+      DASHBOARD_HUB_PROJECTS_DIR: '',
+      CLAUDE_HUB_PROJECTS_DIR: '',
+      CLAUDE_HUB_DIR: '',
       DASHBOARD_WORKFLOW_RUN_MAX_ENTRIES: '',
       DASHBOARD_WORKFLOW_PHASE_MAX_ENTRIES: '',
       DASHBOARD_WORKFLOW_PROGRESS_MAX_ENTRIES: '',
@@ -846,6 +849,71 @@ try {
   await server.stop();
 }
 
+const workflowHubRoot = await mkdtemp(join(tmpdir(), 'workflow-hub-root-'));
+const workflowHubProjects = join(workflowHubRoot, 'projects');
+server = await startServer({
+  // Deliberately configure the same physical projects root through every
+  // supported hub variable. It must be scanned once, not once per spelling.
+  DASHBOARD_HUB_PROJECTS_DIR: workflowHubProjects,
+  CLAUDE_HUB_PROJECTS_DIR: workflowHubProjects,
+  CLAUDE_HUB_DIR: workflowHubRoot,
+});
+try {
+  const localWorkflowDir = join(
+    server.claudeDir,
+    'projects',
+    'workflow-local-project',
+    'workflow-local-session',
+    'workflows'
+  );
+  const hubWorkflowDir = join(
+    workflowHubProjects,
+    'workflow-hub-project',
+    'workflow-hub-session',
+    'workflows'
+  );
+  await mkdir(localWorkflowDir, { recursive: true });
+  await mkdir(hubWorkflowDir, { recursive: true });
+  await writeFile(
+    join(localWorkflowDir, 'wf_local.json'),
+    JSON.stringify({
+      runId: 'wf-local-root',
+      workflowName: 'Local root workflow',
+      status: 'completed',
+      startTime: 1767225600000,
+    })
+  );
+  await writeFile(
+    join(hubWorkflowDir, 'wf_hub.json'),
+    JSON.stringify({
+      runId: 'wf-hub-root',
+      workflowName: 'Hub root workflow',
+      status: 'completed',
+      startTime: 1767225600001,
+    })
+  );
+
+  const r = await fetch(`${server.base}/api/workflows`);
+  const body = await json(r);
+  const runIds = body?.runs?.map?.((run) => run.runId) ?? [];
+  check('workflow route reads the local and configured hub roots -> 200', r.status === 200, `got ${r.status}`);
+  check('workflow route includes the default root', runIds.includes('wf-local-root'));
+  check('workflow route includes the configured hub root', runIds.includes('wf-hub-root'));
+  check(
+    'workflow route scans duplicate hub configuration exactly once',
+    runIds.filter((runId) => runId === 'wf-hub-root').length === 1,
+    `got ${JSON.stringify(runIds)}`
+  );
+  check(
+    'workflow route orders runs newest-first across roots',
+    runIds[0] === 'wf-hub-root' && runIds[1] === 'wf-local-root',
+    `got ${JSON.stringify(runIds)}`
+  );
+} finally {
+  await server.stop();
+  await rm(workflowHubRoot, { recursive: true, force: true });
+}
+
 server = await startServer({
   DASHBOARD_SESSIONS_MANIFEST_MAX_ENTRIES: '2',
 });
@@ -1375,6 +1443,30 @@ await writeFile(
   })
 );
 const scopedRoot = await createScopedClaudeRoot(hostProjectRoot);
+const enterpriseWorkflowHubRoot = await mkdtemp(
+  join(tmpdir(), 'enterprise-workflow-hub-')
+);
+const enterpriseWorkflowHubProjects = join(enterpriseWorkflowHubRoot, 'projects');
+const enterpriseWorkflowHubDir = join(
+  enterpriseWorkflowHubProjects,
+  'enterprise-hub-project',
+  'enterprise-hub-session',
+  'workflows'
+);
+await mkdir(enterpriseWorkflowHubDir, { recursive: true });
+await writeFile(
+  join(enterpriseWorkflowHubDir, 'wf_enterprise_hub.json'),
+  JSON.stringify({
+    runId: 'wf-enterprise-hub',
+    workflowName: 'Enterprise Hub Workflow',
+    status: 'completed',
+    startTime: 1767225600002,
+    durationMs: 25,
+    agentCount: 1,
+    totalTokens: 2,
+    totalToolCalls: 1,
+  })
+);
 await writeIdentityRecommendationTasks(
   scopedRoot,
   'u-member',
@@ -1440,6 +1532,9 @@ server = await startServer({
   DASHBOARD_AUTH_TOKENS: scopedTokenConfig,
   DASHBOARD_ORG_ID: 'acme',
   DASHBOARD_ORG_NAME: 'Acme',
+  DASHBOARD_HUB_PROJECTS_DIR: enterpriseWorkflowHubProjects,
+  CLAUDE_HUB_PROJECTS_DIR: enterpriseWorkflowHubProjects,
+  CLAUDE_HUB_DIR: enterpriseWorkflowHubRoot,
   DASHBOARD_RAW_FILE_MAX_BYTES: '65536',
   DASHBOARD_TRANSCRIPT_DECOMPRESS_MAX_BYTES: '65536',
   DASHBOARD_INGEST_SESSION_MAX_BYTES: '65536',
@@ -1559,6 +1654,7 @@ try {
   check('enterprise scoped member workflows -> 200', r.status === 200, `got ${r.status}`);
   check('enterprise scoped member workflows read scoped root', bodyText.includes('wf-scoped'));
   check('enterprise scoped member workflows exclude symlinked host file', !bodyText.includes('wf-host-secret'));
+  check('enterprise scoped member workflows exclude configured hub roots', !bodyText.includes('wf-enterprise-hub'));
   check(
     'enterprise scoped member workflows reports manifest cap',
     body?.limits?.manifestMaxBytes === 1024
@@ -1568,6 +1664,18 @@ try {
     body?.limits?.maxPhasesPerRun === 500 &&
       body?.limits?.maxProgressEntriesPerRun === 5000 &&
       body?.limits?.fieldMaxChars === 4096
+  );
+
+  r = await fetch(`${server.base}/api/workflows`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  body = await json(r);
+  const adminWorkflowIds = body?.runs?.map?.((run) => run.runId) ?? [];
+  check('enterprise admin workflows -> 200', r.status === 200, `got ${r.status}`);
+  check(
+    'enterprise admin workflows include configured hub roots exactly once',
+    adminWorkflowIds.filter((runId) => runId === 'wf-enterprise-hub').length === 1,
+    `got ${JSON.stringify(adminWorkflowIds)}`
   );
 
   await writeFile(
@@ -1721,6 +1829,11 @@ try {
   });
   check('enterprise rootless viewer cannot read dataset', r.status === 403, `got ${r.status}`);
 
+  r = await fetch(`${server.base}/api/workflows`, {
+    headers: { Authorization: `Bearer ${viewerToken}` },
+  });
+  check('enterprise rootless viewer cannot read workflows', r.status === 403, `got ${r.status}`);
+
   r = await fetch(`${server.base}/api/enterprise/organization`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1776,8 +1889,47 @@ try {
   check('enterprise organization redacts member token', !bodyText.includes(memberToken));
 } finally {
   await server.stop();
+  await rm(enterpriseWorkflowHubRoot, { recursive: true, force: true });
   await rm(scopedRoot, { recursive: true, force: true });
   await rm(hostProjectRoot, { recursive: true, force: true });
+}
+
+const symlinkTenantTarget = await createScopedClaudeRoot('/outside/tenant');
+const symlinkTenantRoot = await mkdtemp(join(tmpdir(), 'enterprise-workflow-symlink-root-'));
+const symlinkTenantToken = 'enterprise-workflow-symlink-tenant-token';
+await symlink(join(symlinkTenantTarget, 'projects'), join(symlinkTenantRoot, 'projects'));
+server = await startServer({
+  DASHBOARD_AUTH_MODE: 'enterprise',
+  DASHBOARD_AUTH_TOKENS: JSON.stringify([
+    {
+      token: symlinkTenantToken,
+      userId: 'u-symlink-tenant',
+      email: 'symlink-tenant@example.com',
+      name: 'Symlink Tenant',
+      role: 'member',
+      orgId: 'acme',
+      orgName: 'Acme',
+      dataRoot: symlinkTenantRoot,
+    },
+  ]),
+  DASHBOARD_ORG_ID: 'acme',
+  DASHBOARD_ORG_NAME: 'Acme',
+});
+try {
+  const r = await fetch(`${server.base}/api/workflows`, {
+    headers: { Authorization: `Bearer ${symlinkTenantToken}` },
+  });
+  const body = await json(r);
+  check('enterprise symlink-root tenant workflows -> 200', r.status === 200, `got ${r.status}`);
+  check(
+    'enterprise symlink-root tenant cannot escape its authorized projects path',
+    Array.isArray(body?.runs) && body.runs.length === 0,
+    `got ${JSON.stringify(body?.runs)}`
+  );
+} finally {
+  await server.stop();
+  await rm(symlinkTenantRoot, { recursive: true, force: true });
+  await rm(symlinkTenantTarget, { recursive: true, force: true });
 }
 
 const dataRootBaseAllowed = await createScopedClaudeRoot('/data-root/base/allowed');

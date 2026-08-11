@@ -484,10 +484,14 @@ paths:
       operationId: getWorkflows
       summary: The Workflow-tool run ledger.
       description: |
-        Walks every `<scoped-root>/projects/<slug>/<sessionId>/workflows/wf_*.json`
-        manifest, projects it to the ledger fields, and returns runs newest-first
-        (#435). Post-hoc ledger, not a live monitor. `src/lib/parse-workflows.ts`
-        normalizes the shape.
+        Walks every authorized projects root's
+        `<slug>/<sessionId>/workflows/wf_*.json` manifest, projects it to the
+        ledger fields, and returns runs newest-first (#435, #2713). Local and
+        enterprise-admin requests include the configured local/hub root set;
+        enterprise non-admin requests are confined to their assigned data root.
+        Run and discovery caps apply across the aggregate root set. Post-hoc
+        ledger, not a live monitor. `src/lib/parse-workflows.ts` normalizes the
+        shape.
       responses:
         '200':
           description: The workflow runs.
@@ -1432,7 +1436,42 @@ components:
           items:
             type: object
             additionalProperties: true
-      required: [runs]
+        limits:
+          type: object
+          properties:
+            manifestMaxBytes:
+              type: integer
+            maxRuns:
+              type: integer
+            maxDiscoveryEntries:
+              type: integer
+            maxPhasesPerRun:
+              type: integer
+            maxProgressEntriesPerRun:
+              type: integer
+            fieldMaxChars:
+              type: integer
+          required:
+            - manifestMaxBytes
+            - maxRuns
+            - maxDiscoveryEntries
+            - maxPhasesPerRun
+            - maxProgressEntriesPerRun
+            - fieldMaxChars
+        discovery:
+          type: object
+          properties:
+            entriesExamined:
+              type: integer
+            directoriesOpened:
+              type: integer
+          required: [entriesExamined, directoriesOpened]
+        skippedManifests:
+          type: integer
+        truncated:
+          type: boolean
+          description: True when run or discovery bounds may have omitted manifests.
+      required: [runs, limits, discovery, skippedManifests, truncated]
     Usage:
       description: '`Usage` in `src/lib/usage.ts` — available or degraded.'
       oneOf:
