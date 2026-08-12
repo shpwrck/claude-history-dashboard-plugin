@@ -11,9 +11,9 @@
 
 export const GATES = {
   security: {
-    epic: 1932,
+    epic: 2217,
     label: 'security',
-    milestone: 'v0.6.0',
+    milestone: 'v0.7.0',
     spec:
       'authz/authn/CSRF; filesystem write / path-traversal; LLM egress governance & secrets ' +
       '(ADR 0008 — the subscription OAuth cred must never send ~/.claude content); SPA/server ' +
@@ -21,9 +21,9 @@ export const GATES = {
       'container/proxy/TLS/secrets-in-repo/supply-chain.',
   },
   'data-integrity': {
-    epic: 2133,
+    epic: 2218,
     label: 'data-integrity',
-    milestone: 'v0.6.0',
+    milestone: 'v0.7.0',
     spec:
       'for detectors/parsers/calculation code: every recommendation claim evidence-backed and ' +
       'reproducible (cite artifact/field, structured provenance per docs/adding-a-recommendation.md); ' +
@@ -31,9 +31,9 @@ export const GATES = {
       '`validated` fix snippet copy-paste-safe.',
   },
   performance: {
-    epic: 1930,
+    epic: 2215,
     label: 'performance',
-    milestone: 'v0.6.0',
+    milestone: 'v0.7.0',
     spec:
       'hot-path code: bundle weight; wasteful re-render / re-compute (N× per request); ingest/assemble ' +
       'memory or latency hotspots; a new surface shipped without a probe/budget.',
@@ -59,22 +59,25 @@ export const GATES = {
       },
     ],
   },
-  // Architecture (#1931) is already CLOSED for v0.6.0 — kept here so the harness can
-  // re-run it or apply it to a future release. Not in DEFAULT_GATES; filing to it
-  // requires `--gates architecture` explicitly.
   architecture: {
-    epic: 1931,
+    epic: 2216,
     label: 'tech-debt',
-    milestone: 'v0.6.0',
-    closed: true,
-    spec: 'file placement; dead code; stale content; layering/ownership — the v060-file-audit.md four-check pass.',
+    milestone: 'v0.7.0',
+    spec:
+      'file placement; dead code; stale content; layering/ownership; dependency direction; ' +
+      'duplicated abstractions and boundaries that no longer match runtime ownership.',
   },
 };
 
-// The standing set when no explicit subset is given. Architecture remains an
-// opt-in historical lens; subtraction recurs so every review can remove as well
-// as add surface.
-export const DEFAULT_GATES = ['security', 'data-integrity', 'performance', 'subtraction'];
+// The standing v0.7 set when no explicit subset is given. Subtraction recurs so
+// every review can remove as well as add surface.
+export const DEFAULT_GATES = [
+  'architecture',
+  'security',
+  'data-integrity',
+  'performance',
+  'subtraction',
+];
 
 export function gateNames() {
   return Object.keys(GATES);

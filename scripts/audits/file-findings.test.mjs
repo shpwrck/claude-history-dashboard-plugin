@@ -1,5 +1,5 @@
 // Unit tests for the pure, network-free helpers in file-findings.mjs (the stage-2
-// router of the v0.6.0 review-phase audit harness). The gh-touching path is run
+// router of the release review-phase audit harness). The gh-touching path is run
 // on demand against a real repo; these cover the idempotency key, validation,
 // labelling, and body construction that make concurrent multi-harness filing safe.
 //   node --test scripts/audits/file-findings.test.mjs
@@ -86,17 +86,19 @@ const validSubtractionFinding = {
 };
 
 test('lensConfig maps the standing lenses to their gate epics', () => {
-  assert.equal(lensConfig('security').epic, 1932);
-  assert.equal(lensConfig('data-integrity').epic, 2133);
-  assert.equal(lensConfig('performance').epic, 1930);
+  assert.equal(lensConfig('security').epic, 2217);
+  assert.equal(lensConfig('data-integrity').epic, 2218);
+  assert.equal(lensConfig('performance').epic, 2215);
+  assert.equal(lensConfig('architecture').epic, 2216);
   assert.equal(lensConfig('subtraction').epic, 2994);
   assert.throws(() => lensConfig('nope'), /unknown lens/);
 });
 
 test('epicLabel derives the epic-NNN child label', () => {
-  assert.equal(epicLabel('security'), 'epic-1932');
-  assert.equal(epicLabel('data-integrity'), 'epic-2133');
-  assert.equal(epicLabel('performance'), 'epic-1930');
+  assert.equal(epicLabel('security'), 'epic-2217');
+  assert.equal(epicLabel('data-integrity'), 'epic-2218');
+  assert.equal(epicLabel('performance'), 'epic-2215');
+  assert.equal(epicLabel('architecture'), 'epic-2216');
 });
 
 test('slug is kebab, trimmed, bounded, and never empty', () => {
@@ -240,9 +242,58 @@ test('the receipt schema accepts only the gate-appropriate finding shape', () =>
 });
 
 test('labelsFor includes domain+backlog+epic, and for-agent/groomed only with handoff', () => {
-  assert.deepEqual(labelsFor(validFinding), ['security', 'backlog', 'epic-1932']);
+  assert.deepEqual(labelsFor(validFinding), ['security', 'backlog', 'epic-2217']);
   const h = labelsFor(validFinding, { handoff: true });
   assert.ok(h.includes('for-agent') && h.includes('groomed'));
+});
+
+test('dry-run exposes each additive v0.7 lens parent, label, and milestone', () => {
+  const routes = {
+    architecture: { epic: 2216, label: 'tech-debt' },
+    security: { epic: 2217, label: 'security' },
+    'data-integrity': { epic: 2218, label: 'data-integrity' },
+    performance: { epic: 2215, label: 'performance' },
+  };
+  for (const [lens, route] of Object.entries(routes)) {
+    const finding = {
+      ...validFinding,
+      lens,
+      title: `${lens} release finding`,
+      files: [`src/${lens}.ts:1`],
+    };
+    const logs = [];
+    const summary = runFileFindings(
+      {
+        findings: 'findings.json',
+        dryRun: true,
+        handoff: false,
+        repo: 'o/r',
+        vendor: 'codex',
+        role: 'main',
+        instance: 'audit-1',
+        gates: lens,
+      },
+      {
+        readFindings: () => ({
+          baseline: BASELINE,
+          auditDate: '2026-08-12',
+          section: 'src',
+          auditedFiles: finding.files.map(normalizePath),
+          findings: [finding],
+        }),
+        verifyFindingAtBaseline: () => [],
+        findExistingIssue: () => null,
+        ensureEpicLabelForFinding: () => {},
+        log: (message) => logs.push(message),
+      },
+    );
+    assert.equal(summary.skipped[0].reason, 'dry-run');
+    const routeLog = logs.find((message) => message.includes('[dry-run]'));
+    assert.match(routeLog, new RegExp(`epic-${route.epic}`));
+    assert.match(routeLog, new RegExp(`labels=${route.label},backlog,`));
+    assert.match(routeLog, /milestone=v0\.7\.0/);
+    assert.match(routeLog, new RegExp(`parent=#${route.epic}`));
+  }
 });
 
 test('buildBody carries provenance, the four fields, the epic ref, marker, and sig', () => {
@@ -254,7 +305,7 @@ test('buildBody carries provenance, the four fields, the epic ref, marker, and s
   assert.match(body, /\*\*Fix\.\*\*/);
   assert.match(body, /\*\*Acceptance\.\*\*/);
   assert.match(body, /\*\*Priority\.\*\* High \(severity: high\)/);
-  assert.match(body, /Part of the #1932 review gate\./);
+  assert.match(body, /Part of the #2217 review gate\./);
   assert.match(body, new RegExp(`<!-- audit-finding: ${key} -->`));
   assert.match(body, /Signed: Claude \(z\)/);
 });
@@ -341,21 +392,33 @@ test("gh wrapper raises the child-process buffer above GitHub's 100-sub-issue re
 
 test('LENS is the shared gate registry (alias of GATES)', () => {
   assert.equal(LENS, GATES);
-  assert.equal(LENS.security.epic, 1932);
+  assert.equal(LENS.security.epic, 2217);
   assert.equal(LENS.subtraction.epic, 2994);
 });
 
-test('DEFAULT_GATES includes the standing subtraction lens; architecture remains opt-in', () => {
-  assert.deepEqual([...DEFAULT_GATES].sort(), ['data-integrity', 'performance', 'security', 'subtraction']);
-  assert.ok(GATES.architecture, 'architecture gate available for reuse');
-  assert.equal(GATES.architecture.closed, true);
-  assert.ok(GATES.security.milestone && GATES.security.epic === 1932);
+test('DEFAULT_GATES covers every v0.7 release lens plus subtraction', () => {
+  assert.deepEqual(DEFAULT_GATES, [
+    'architecture',
+    'security',
+    'data-integrity',
+    'performance',
+    'subtraction',
+  ]);
+  assert.ok(GATES.architecture, 'architecture gate available by default');
+  assert.equal(GATES.architecture.closed, undefined);
+  assert.ok(GATES.security.milestone && GATES.security.epic === 2217);
   assert.equal(GATES.subtraction.closed, undefined);
   assert.equal(GATES.subtraction.milestone, 'v0.7.0');
 });
 
-test('resolveGates selects a subset, defaults to the standing four, and rejects unknowns', () => {
-  assert.deepEqual(resolveGates().sort(), ['data-integrity', 'performance', 'security', 'subtraction']);
+test('resolveGates selects a subset, defaults to the standing five, and rejects unknowns', () => {
+  assert.deepEqual(resolveGates().sort(), [
+    'architecture',
+    'data-integrity',
+    'performance',
+    'security',
+    'subtraction',
+  ]);
   assert.deepEqual(resolveGates('security,performance'), ['security', 'performance']);
   assert.deepEqual(resolveGates(['performance']), ['performance']);
   assert.deepEqual(resolveGates('architecture'), ['architecture']);
@@ -441,7 +504,7 @@ test('audit rollup body pins the baseline, gate, marker, close rule, and signatu
     sig,
   });
   assert.match(body, new RegExp(auditRollupMarker('data-integrity', BASELINE)));
-  assert.match(body, /#2133 release-gate hierarchy/);
+  assert.match(body, /#2218 release-gate hierarchy/);
   assert.match(body, /Close when/);
   assert.match(body, /Signed: Codex/);
 });
@@ -476,7 +539,7 @@ test('resolveFindingParent reuses capacity or creates and links a deterministic 
   );
   const runnerWithRollup = (args) => {
     const joined = args.join(' ');
-    if (joined.includes('/issues/2133/sub_issues')) return JSON.stringify([directWithRollup]);
+    if (joined.includes('/issues/2218/sub_issues')) return JSON.stringify([directWithRollup]);
     if (joined.includes('/issues/500/sub_issues')) {
       return JSON.stringify([[{ number: 800 }, { number: 801 }]]);
     }
@@ -497,7 +560,7 @@ test('resolveFindingParent reuses capacity or creates and links a deterministic 
   const linked = [];
   const runnerWithoutRollup = (args) => {
     const joined = args.join(' ');
-    if (joined.includes('/issues/2133/sub_issues')) return JSON.stringify([direct]);
+    if (joined.includes('/issues/2218/sub_issues')) return JSON.stringify([direct]);
     throw new Error('unexpected args: ' + joined);
   };
   assert.equal(
@@ -517,7 +580,7 @@ test('resolveFindingParent reuses capacity or creates and links a deterministic 
     }),
     501,
   );
-  assert.deepEqual(linked, [[2133, 501]]);
+  assert.deepEqual(linked, [[2218, 501]]);
 });
 
 test('portableArtifactPath removes checkout-specific prefixes only for in-repo artifacts', () => {
@@ -599,12 +662,12 @@ test('runFileFindings returns and writes created/existing/skipped issue identiti
     ],
   );
   assert.deepEqual(linked, [
-    [1932, 41, BASELINE],
-    [1932, 52, BASELINE],
+    [2217, 41, BASELINE],
+    [2217, 52, BASELINE],
   ]);
   assert.equal(reconciled[0].number, 41);
-  assert.equal(reconciled[0].milestone, 'v0.6.0');
-  assert.ok(reconciled[0].labels.includes('epic-1932'));
+  assert.equal(reconciled[0].milestone, 'v0.7.0');
+  assert.ok(reconciled[0].labels.includes('epic-2217'));
   assert.equal(written.path, 'result.json');
   assert.deepEqual(written.value, summary);
 });
@@ -842,7 +905,7 @@ test('live routing reopens a closed matching issue with current signed evidence'
     },
   );
   assert.deepEqual(summary.existing.map(({ number }) => number), [73]);
-  assert.equal(restored[0].milestone, 'v0.6.0');
+  assert.equal(restored[0].milestone, 'v0.7.0');
   assert.match(restored[0].comment, /Signed: Codex/);
-  assert.deepEqual(linked, [[1932, 73, BASELINE]]);
+  assert.deepEqual(linked, [[2217, 73, BASELINE]]);
 });

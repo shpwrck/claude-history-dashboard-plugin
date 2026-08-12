@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Review-phase audit — stage 2 (FILE): route verified findings JSON into
+// Release review-phase audit — stage 2 (FILE): route verified findings JSON into
 // specced sub-issues on the configured gate epics, idempotently. Both Claude and Codex
 // invoke this identically. See docs/audits/v060-review-phase-audit.md.
 //
@@ -793,7 +793,10 @@ export function runFileFindings(opts, dependencies = {}) {
     const body = buildBody(finding, { baseline, auditDate, key, sig });
     ensureEpicLabelForFinding(finding.lens, { repo: opts.repo, dryRun: opts.dryRun });
     if (opts.dryRun) {
-      log(`  [dry-run] would CREATE "${title}"  labels=${labels.join(',')}  milestone=${gate.milestone}`);
+      log(
+        `  [dry-run] would CREATE "${title}"  labels=${labels.join(',')}  `
+        + `milestone=${gate.milestone}  parent=#${gate.epic}`,
+      );
       summary.skipped.push(resultEntry(finding, { key, reason: 'dry-run' }));
       seenThisRun.set(key, null);
       counts.wouldCreate++;

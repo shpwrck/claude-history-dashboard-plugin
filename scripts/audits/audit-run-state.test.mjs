@@ -682,7 +682,7 @@ test("ledger rendering uses baseline counts and withholds DONE until a whole sec
   const table = renderLedgerTable(applied);
   assert.match(
     table,
-    /^\| Section \| Files \| security → #1932 \| performance → #1930 \|/,
+    /^\| Section \| Files \| security → #2217 \| performance → #2215 \|/,
   );
   assert.match(table, /\| root \| 2 \| DONE \(#3100\) \| DONE \(clean\) \|/);
   assert.match(table, /\| scripts\/ \| 1 \| — \| — \|/);

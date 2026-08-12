@@ -43,6 +43,7 @@ import {
   filterFiles,
   shq,
 } from './orchestrate.mjs';
+import { DEFAULT_GATES } from './gates.config.mjs';
 
 const SHA = 'a'.repeat(40);
 
@@ -726,7 +727,7 @@ test('loadOrInitializeState partitions only the release manifest final paths and
         gitRunner,
         releaseManifest,
       },
-      ['security'],
+      DEFAULT_GATES,
       { state: statePath },
     );
     assert.equal(state.scope.policyVersion, 2);
@@ -738,7 +739,8 @@ test('loadOrInitializeState partitions only the release manifest final paths and
 
     const initialLedger = initialReleaseLedgerMarkdown(state);
     assert.match(initialLedger, /Release review-phase incremental audit/);
-    assert.match(initialLedger, /security → #1932/);
+    assert.match(initialLedger, /security → #2217/);
+    assert.match(initialLedger, /architecture → #2216/);
     assert.match(initialLedger, new RegExp(releaseManifest.baseSha));
     assert.match(initialLedger, new RegExp(releaseManifest.headSha));
 

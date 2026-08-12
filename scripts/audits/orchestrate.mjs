@@ -106,7 +106,7 @@ export function decideBudget(headers) {
 }
 
 // Extract the ledger's section table -> [{ section, files, gates: {name: 'done'|'pending'} }].
-// The header row names each gate column (e.g. "security → #1932"); we map a column to
+// The header row names each gate column (e.g. "security → #2217"); we map a column to
 // a gate by the first known GATES key appearing in its header.
 export function parseLedger(md, knownGates = Object.keys(GATES)) {
   const lines = String(md).split('\n');
