@@ -150,64 +150,6 @@ exports[`recommendations parity snapshot (#507) > byte-identical buildRecommenda
     "view": "errors",
   },
   {
-    "action": "Compact earlier or start a fresh session once a task is done — keep working context well under the window.",
-    "affected": 3,
-    "category": "context",
-    "detail": "3 session(s) peaked above 200K tokens, where context is evicted and re-sent at cost.",
-    "evidence": [
-      "automate, peak 10000k",
-      "reader, peak 1000k",
-      "mystery, peak 500k",
-    ],
-    "fix": {
-      "appliedMarkers": {
-        "bodyPhrases": [
-          "working context well under the model",
-        ],
-        "headings": [
-          /\\^##\\\\s\\+Context discipline\\\\b/i,
-        ],
-      },
-      "fixKind": "illustrative",
-      "label": "Compact earlier",
-      "note": "Append to your project (or ~/.claude) CLAUDE.md so Claude trims context before the window fills.",
-      "snippet": "## Context discipline
-
-Keep the working context well under the model's context window.
-- When the conversation grows large (roughly 150K+ tokens) or right after finishing a discrete task, run \`/compact\` to summarise and reclaim space.
-- When starting genuinely unrelated work, run \`/clear\` to begin a fresh session instead of carrying stale context.
-- Avoid pulling large files or command output into context the current task doesn't need.",
-      "target": "CLAUDE.md",
-    },
-    "id": "context.over-window",
-    "provenance": {
-      "inference": "A peak above 200,000 tokens is a measured high-water mark. Eviction-and-re-send is what the window does past that point — this counts the sessions that reached it, not the tokens they re-paid.",
-      "observations": [
-        {
-          "claim": "3 of 5 session(s) with readable token entries peaked above the window",
-          "field": "peakContext",
-          "source": "context-health (computeContextGrowth over tokenData)",
-          "value": 3,
-        },
-        {
-          "claim": "the highest observed peak was 10,000,000 tokens, on session automate",
-          "field": "peakContext",
-          "source": "context-health (computeContextGrowth over tokenData.entries)",
-          "value": 10000000,
-        },
-        {
-          "claim": "the threshold applied is OVER_WINDOW = 200,000 tokens",
-          "field": "OVER_WINDOW",
-          "source": "context-health",
-          "value": 200000,
-        },
-      ],
-    },
-    "severity": "warning",
-    "title": "Sessions spilled past the 200K context window",
-    "view": "context",
-  },
-  {
     "action": "Run /compact at task boundaries, /clear when switching tasks, and scope Read with offset/limit. Dominant fix for the cohort: Run /clear when switching tasks.",
     "affected": 3,
     "category": "context",
