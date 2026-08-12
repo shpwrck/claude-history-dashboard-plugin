@@ -21,7 +21,9 @@ import {
   resolveScriptFiles,
   collectWiredSuites,
   findUnwiredSuites,
+  findTestScriptOwnershipErrors,
 } from './check-test-suite-coverage.mjs';
+import { TEST_SUITE_OWNERS } from './lib/test-suite-owners.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -105,6 +107,31 @@ function wiredFor(workflowYaml) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'ci.yml'), workflowYaml, 'utf8');
     return [...collectWiredSuites(root, UNIVERSE, PKG_SCRIPTS)].sort();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** Build the smallest repo that exercises package-script ownership checks. */
+function ownershipFixture({ workflowRun, packageScripts, suite = true }, check) {
+  const root = mkdtempSync(join(tmpdir(), 'suite-ownership-'));
+  try {
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ scripts: packageScripts }),
+      'utf8'
+    );
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      `jobs:\n  gate:\n    steps:\n      - run: ${workflowRun}`,
+      'utf8'
+    );
+    if (suite) {
+      writeFileSync(join(root, 'scripts', 'foo.test.mjs'), '// fixture\n', 'utf8');
+    }
+    check(root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -233,6 +260,119 @@ test('the live repo has zero unwired scripts/**/*.test.mjs suites', () => {
     `these suites run in no workflow — wire them or add to EXCLUDED_SUITES:\n${unwired.join(
       '\n'
     )}`
+  );
+});
+
+test('a synthetic orphaned suite still fails the reachability contract', () => {
+  ownershipFixture(
+    { workflowRun: 'echo no-tests', packageScripts: {}, suite: true },
+    (root) => {
+      assert.deepEqual(findUnwiredSuites(root), ['scripts/foo.test.mjs']);
+    }
+  );
+});
+
+test('test-script ownership rejects an owner outside the bounded vocabulary', () => {
+  ownershipFixture(
+    {
+      workflowRun: 'npm run test:foo',
+      packageScripts: { 'test:foo': 'node --test scripts/foo.test.mjs' },
+    },
+    (root) => {
+      assert.match(
+        findTestScriptOwnershipErrors(root, {
+          owners: { 'test:foo': 'unbounded-owner' },
+        }).join('\n'),
+        /test:foo.*unbounded-owner.*allowed owner/
+      );
+    }
+  );
+});
+
+test('a registered owner must match the workflow job that runs the script', () => {
+  ownershipFixture(
+    {
+      workflowRun: 'npm run test:foo',
+      packageScripts: { 'test:foo': 'node --test scripts/foo.test.mjs' },
+    },
+    (root) => {
+      assert.match(
+        findTestScriptOwnershipErrors(root, {
+          owners: { 'test:foo': 'lint' },
+          workflowOwners: { 'ci.yml#gate': 'gates' },
+        }).join('\n'),
+        /test:foo.*registered to lint.*runs under gates/
+      );
+    }
+  );
+});
+
+test('an executable workflow test root must be registered', () => {
+  ownershipFixture(
+    {
+      workflowRun: 'npm run test:foo',
+      packageScripts: { 'test:foo': 'node --test scripts/foo.test.mjs' },
+    },
+    (root) => {
+      assert.match(
+        findTestScriptOwnershipErrors(root, {
+          owners: {},
+          workflowOwners: { 'ci.yml#gate': 'gates' },
+        }).join('\n'),
+        /test:foo.*workflow root.*not registered/
+      );
+    }
+  );
+});
+
+test('a default-config Vitest subset is covered by the npm test umbrella', () => {
+  ownershipFixture(
+    {
+      workflowRun: 'npm test',
+      packageScripts: {
+        test: 'vitest run',
+        'test:foo': 'vitest run src/foo.test.ts',
+      },
+      suite: false,
+    },
+    (root) => {
+      assert.deepEqual(
+        findTestScriptOwnershipErrors(root, { owners: {} }),
+        []
+      );
+    }
+  );
+});
+
+test('a Vitest alias with a different config is not inferred from the umbrella', () => {
+  ownershipFixture(
+    {
+      workflowRun: 'npm test',
+      packageScripts: {
+        test: 'vitest run',
+        'test:foo': 'vitest run --config isolated.vitest.ts',
+      },
+      suite: false,
+    },
+    (root) => {
+      assert.match(
+        findTestScriptOwnershipErrors(root, { owners: {} }).join('\n'),
+        /test:foo.*neither a workflow root.*nor registered manual/
+      );
+    }
+  );
+});
+
+test('the live 109-script surface is reconciled as roots, covered aliases, or manual', () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
+  const testScripts = Object.keys(pkg.scripts ?? {}).filter((name) =>
+    name.startsWith('test:')
+  );
+
+  assert.equal(testScripts.length, 109);
+  assert.deepEqual(
+    findTestScriptOwnershipErrors(REPO_ROOT, { owners: TEST_SUITE_OWNERS }),
+    []
   );
 });
 

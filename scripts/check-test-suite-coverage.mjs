@@ -15,11 +15,17 @@
 // Modeled on scripts/check-enterprise-route-inventory.mjs (declared inventory vs
 // live surface). The difference: the "reachable" set here is DERIVED, not
 // hand-maintained — computed from package.json scripts + the workflow files —
-// so there is no second list to keep in sync.
+// so there is no second suite-wiring list to keep in sync. #3742 adds only a
+// bounded owner registry for explicit workflow roots and manual commands.
 
 import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  ALLOWED_TEST_SUITE_OWNERS,
+  TEST_SUITE_OWNERS,
+  WORKFLOW_TEST_OWNER_BY_JOB,
+} from './lib/test-suite-owners.mjs';
 
 // Suites intentionally NOT wired to any workflow. Keep this EMPTY where
 // possible: every entry is a hole in the guarantee and needs a justifying
@@ -35,6 +41,7 @@ const SUITE_REF_RE = /(?:\.\/)?scripts\/[^\s'";|&()]*\.test\.mjs/g;
 
 // npm script invocations: `npm run <name>` (captured) or bare `npm test`.
 const NPM_INVOKE_RE = /\bnpm\s+(?:run\s+([^\s&|;()]+)|(test)(?![\w:-]))/g;
+const TEST_SCRIPT_INVOKE_RE = /\bnpm\s+run\s+(test:[^\s&|;()]+)/g;
 
 /** Recursively list every scripts test suite (a `.test.mjs` file), repo-relative with forward slashes. */
 export function listSuiteFiles(repoRoot) {
@@ -239,6 +246,172 @@ export function collectWiredSuites(repoRoot, universe, pkgScripts) {
   return wired;
 }
 
+/** Executable run commands paired with their top-level workflow job id. */
+export function extractJobRunCommands(yamlText) {
+  const lines = yamlText.split('\n');
+  const jobsIndex = lines.findIndex((line) => line === 'jobs:');
+  if (jobsIndex < 0) return [];
+  const commands = [];
+  for (let i = jobsIndex + 1; i < lines.length; i += 1) {
+    const jobMatch = /^  ([A-Za-z0-9_-]+):$/.exec(lines[i]);
+    if (!jobMatch) continue;
+    let end = lines.length;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (/^  [A-Za-z0-9_-]+:$/.test(lines[j])) {
+        end = j;
+        break;
+      }
+    }
+    const jobYaml = ['jobs:', ...lines.slice(i, end)].join('\n');
+    for (const command of extractRunCommands(jobYaml)) {
+      commands.push({ job: jobMatch[1], command });
+    }
+    i = end - 1;
+  }
+  return commands;
+}
+
+/** Explicit workflow roots plus the conceptual owner of each run location. */
+export function collectWorkflowTestRootOwners(
+  repoRoot,
+  { workflowOwners = WORKFLOW_TEST_OWNER_BY_JOB } = {}
+) {
+  // perf-index-contract: workflow-test-root-index always-consumed: every collection call returns the complete root index to the ownership validation scan
+  const roots = new Map();
+  const unowned = [];
+  const wfDir = join(repoRoot, '.github', 'workflows');
+  for (const entry of readdirSync(wfDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue;
+    const runs = extractJobRunCommands(
+      readFileSync(join(wfDir, entry.name), 'utf8')
+    );
+    for (const { job, command } of runs) {
+      const location = `${entry.name}#${job}`;
+      const owner = workflowOwners[location];
+      for (const match of stripComments(command).matchAll(TEST_SCRIPT_INVOKE_RE)) {
+        const script = match[1];
+        // perf-index-contract: workflow-test-root-membership always-consumed: every matched root immediately records and later validates each run location and conceptual owner
+        const record = roots.get(script) ?? {
+          locations: new Set(),
+          owners: new Set(),
+        };
+        record.locations.add(location);
+        if (owner) record.owners.add(owner);
+        else unowned.push({ script, location });
+        roots.set(script, record);
+      }
+    }
+  }
+  return { roots, unowned };
+}
+
+function isUnitUmbrellaAlias(command, testCommand) {
+  const hasDefaultUmbrella = testCommand
+    .split(/\s*(?:&&|\|\||;)\s*/)
+    .some((segment) => segment.trim() === 'vitest run');
+  if (!hasDefaultUmbrella) return false;
+  const match = /^\s*vitest\s+run(?:\s+(.+?))?\s*$/.exec(command);
+  if (!match) return false;
+  const args = match[1]?.trim().split(/\s+/) ?? [];
+  // Positional file/name filters select a subset of the default umbrella.
+  // Options can change config, environment, or project membership, so they
+  // need an explicit root/manual owner instead of an inferred coverage claim.
+  return args.every((arg) => !arg.startsWith('-') && !/[&|;]/.test(arg));
+}
+
+/**
+ * Reconcile every package `test:*` command as exactly one of:
+ *
+ * - an explicitly registered workflow root;
+ * - a convenience alias whose suite is already reached elsewhere (including
+ *   Vitest aliases covered by the `npm test` umbrella); or
+ * - an explicitly registered manual/watch/update command.
+ */
+export function findTestScriptOwnershipErrors(
+  repoRoot,
+  {
+    owners = TEST_SUITE_OWNERS,
+    workflowOwners = WORKFLOW_TEST_OWNER_BY_JOB,
+  } = {}
+) {
+  const errors = [];
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  const pkgScripts = pkg.scripts ?? {};
+  // perf-index-contract: test-script-validation-order always-consumed: every validation call iterates the complete deterministic package-script order during reconciliation
+  const testScripts = Object.keys(pkgScripts)
+    .filter((name) => name.startsWith('test:'))
+    .sort();
+  // perf-index-contract: test-script-validation-memberships always-consumed: every validation call queries all membership sets while reconciling roots, owners, and aliases
+  const testScriptSet = new Set(testScripts);
+  const allowedOwners = new Set(ALLOWED_TEST_SUITE_OWNERS);
+  const workflowOwnership = collectWorkflowTestRootOwners(repoRoot, {
+    workflowOwners,
+  });
+  const workflowRoots = new Set(workflowOwnership.roots.keys());
+
+  for (const { script, location } of workflowOwnership.unowned) {
+    errors.push(`${script} runs from ${location}, whose workflow job has no owner`);
+  }
+
+  // perf-index-contract: test-script-owner-order always-consumed: every validation call scans the complete deterministic owner registry to report all topology errors
+  for (const [script, owner] of Object.entries(owners).sort(([a], [b]) =>
+    a.localeCompare(b)
+  )) {
+    if (!allowedOwners.has(owner)) {
+      errors.push(
+        `${script} uses ${owner}, which is not an allowed owner (${ALLOWED_TEST_SUITE_OWNERS.join(
+          ', '
+        )})`
+      );
+    }
+    if (!testScriptSet.has(script)) {
+      errors.push(`${script} is registered to ${owner} but is absent from package.json`);
+      continue;
+    }
+    if (owner === 'manual' && workflowRoots.has(script)) {
+      errors.push(`${script} is registered manual but is an executable workflow root`);
+    } else if (owner !== 'manual' && !workflowRoots.has(script)) {
+      errors.push(`${script} is registered to ${owner} but is not a workflow root`);
+    } else if (owner !== 'manual') {
+      const actualOwners = workflowOwnership.roots.get(script).owners;
+      for (const actualOwner of actualOwners) {
+        if (actualOwner !== owner) {
+          errors.push(
+            `${script} is registered to ${owner} but runs under ${actualOwner}`
+          );
+        }
+      }
+    }
+  }
+
+  // perf-index-contract: workflow-test-root-order always-consumed: every validation call scans the complete deterministic root order for missing registrations
+  for (const script of [...workflowRoots].sort()) {
+    if (!Object.hasOwn(owners, script)) {
+      errors.push(`${script} is an executable workflow root but is not registered`);
+    }
+  }
+
+  const universe = listSuiteFiles(repoRoot);
+  const scriptFiles = resolveScriptFiles(pkgScripts, universe);
+  const wiredSuites = collectWiredSuites(repoRoot, universe, pkgScripts);
+  const unitUmbrella = pkgScripts.test ?? '';
+  for (const script of testScripts) {
+    if (Object.hasOwn(owners, script) || workflowRoots.has(script)) continue;
+    const command = pkgScripts[script];
+    const referencedSuites = scriptFiles.get(script);
+    const isCoveredSuiteAlias =
+      referencedSuites.size > 0 &&
+      [...referencedSuites].every((suite) => wiredSuites.has(suite));
+    if (!isCoveredSuiteAlias && !isUnitUmbrellaAlias(command, unitUmbrella)) {
+      errors.push(
+        `${script} is neither a workflow root, a covered suite alias, nor registered manual`
+      );
+    }
+  }
+
+  return errors;
+}
+
 /** Return the sorted list of scripts test suites wired into no workflow. */
 export function findUnwiredSuites(repoRoot, { exclude = EXCLUDED_SUITES } = {}) {
   const universe = listSuiteFiles(repoRoot);
@@ -251,6 +424,7 @@ export function findUnwiredSuites(repoRoot, { exclude = EXCLUDED_SUITES } = {}) 
 function main() {
   const repoRoot = fileURLToPath(new URL('..', import.meta.url));
   const unwired = findUnwiredSuites(repoRoot);
+  const ownershipErrors = findTestScriptOwnershipErrors(repoRoot);
   if (unwired.length) {
     console.error(
       'Unwired test suites (#2954): the following scripts/**/*.test.mjs run in NO\n' +
@@ -260,12 +434,26 @@ function main() {
         'scripts/check-test-suite-coverage.mjs with a justifying comment.\n'
     );
     for (const f of unwired) console.error(`  ${f}`);
+  }
+  if (ownershipErrors.length) {
+    console.error(
+      'Test-script ownership errors (#3742): every executable workflow root must\n' +
+        'have one bounded owner, aliases must already be covered, and manual\n' +
+        'commands must be declared explicitly.\n'
+    );
+    for (const error of ownershipErrors) console.error(`  ${error}`);
+  }
+  if (unwired.length || ownershipErrors.length) {
     process.exit(1);
   }
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  const testScriptCount = Object.keys(pkg.scripts ?? {}).filter((name) =>
+    name.startsWith('test:')
+  ).length;
   console.log(
     `Test-suite coverage gate passed: every scripts/**/*.test.mjs (${listSuiteFiles(
       fileURLToPath(new URL('..', import.meta.url))
-    ).length} suites) is invoked by a workflow.`
+    ).length} suites) is invoked by a workflow; all ${testScriptCount} test:* commands have a workflow, covered-alias, or manual owner.`
   );
 }
 
