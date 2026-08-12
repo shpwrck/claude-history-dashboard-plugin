@@ -1,6 +1,6 @@
 /**
- * Warm the lazy `Recommendations` / `AskClaude` chunks once data is ready so the
- * first navigation to those views is instant.
+ * Warm the lazy `Recommendations` chunk once data is ready so the first
+ * navigation to that view is instant.
  *
  * Skipped under Vitest (`import.meta.env.MODE === 'test'`, compile-time so it is
  * dead-code-eliminated from every real build). A fire-and-forget dynamic import
@@ -16,11 +16,7 @@
  * Returns the kicked-off promises so a caller (or a teardown hook) can await
  * them; the array is empty under test.
  */
-export function warmLazyChunks(askClaudeAvailable: boolean): Promise<unknown>[] {
+export function warmLazyChunks(): Promise<unknown>[] {
   if (import.meta.env.MODE === 'test') return [];
-  const promises: Promise<unknown>[] = [import('../components/Recommendations')];
-  if (askClaudeAvailable) {
-    promises.push(import('../components/AskClaude'));
-  }
-  return promises;
+  return [import('../components/Recommendations')];
 }

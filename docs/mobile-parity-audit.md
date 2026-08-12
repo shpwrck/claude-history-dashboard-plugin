@@ -82,26 +82,24 @@ wrapper does not card-ize on narrow viewports):
 
 The audit is deterministic and can be reproduced against any live build: load
 the dashboard, then for each nav view resize to 1440×900 and 390×844 and assert
-(2) and (3) above. The modal / non-nav views (Settings, Ask Claude, File Upload)
+(2) and (3) above. The modal / non-nav views (Settings and File Upload)
 plus a reusable mobile-viewport smoke check are covered below, both under #257.
 
 ---
 
 # Mobile-parity audit — modal / non-nav views (#257)
 
-Extends the audit above to the three views that aren't reached through the
-top-level nav: **Settings** (⚙), **Ask Claude** (the floating action button),
-and **File Upload** ("Upload Data…"). Same method and verdict legend as the nav
+Extends the audit above to the views that aren't reached through the top-level
+nav: **Settings** (⚙) and **File Upload** ("Upload Data…"). Same method and verdict legend as the nav
 audit; both viewports driven against a live build (Playwright at 1440×900 and
 the 390×844 smoke spec below).
 
 | # | View | File | Trigger | Desktop | Mobile | Notes |
 |---|---|---|---|---|---|---|
 | 1 | Settings | `Settings.tsx` | ⚙ button (sidebar / mobile top bar) | PASS | PASS | Centered `role="dialog"` overlay; no page-level overflow at either viewport |
-| 2 | Ask Claude | `AskClaude.tsx` | Floating "Ask Claude" button | PASS | PASS | FAB + `role="dialog"` panel; no page-level overflow at either viewport (FAB requires a stored API key to enable) |
-| 3 | File Upload | `FileUpload.tsx` | "Upload Data…" button | PASS | PASS | Centered `fixed inset-0` overlay; no page-level overflow at either viewport |
+| 2 | File Upload | `FileUpload.tsx` | "Upload Data…" button | PASS | PASS | Centered `fixed inset-0` overlay; no page-level overflow at either viewport |
 
-**No hard failures** on any of the three modal views at either viewport, so no
+**No hard failures** on either modal view at either viewport, so no
 follow-up `ui` breakage issues were filed (per the audit's record-don't-fix
 contract).
 

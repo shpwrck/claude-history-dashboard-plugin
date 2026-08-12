@@ -281,14 +281,6 @@ narrow.
   terminals, fonts, and email/notification surfaces; plain characters don't.
   The deliberate symbol-character nav-icon scheme in `nav-prefs.ts`
   (`★ ⚙ ◎ ✦ ○` …) is fine — those are characters, not emoji.
-- **Ask Claude must never impersonate the CLI `/insights` skill.** An
-  earlier iteration added a "Re-generate insights with Claude" button that
-  sent a JSON summary to api.anthropic.com and asked Claude to mimic the
-  `/insights` report format. The user removed it explicitly. Anything
-  short of a real call to the CLI `/insights` skill (or reading
-  `~/.claude/usage-data/` after the user runs that skill) shouldn't be
-  surfaced as "insights." `Highlight my top 3 wins and frictions` is fine
-  — that's a normal question, not an impersonation.
 - **Anthropic API governance is scoped, not blanket.** Free, automatic, and
   local analysis paths stay local and must not call `api.anthropic.com`. Server
   components may call Anthropic only under

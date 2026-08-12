@@ -155,7 +155,6 @@ const proc = spawn('node', ['--import', REGISTER, SERVER], {
     // Local-only guarantee: every non-local path stays off.
     DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
     DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-    DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
     CHD_GIT_OUTCOMES: '',
     ANTHROPIC_API_KEY: '',
   },

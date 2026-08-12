@@ -51,20 +51,21 @@ function capReceipt(
 }
 
 describe('LLM usage registry', () => {
-  it('has unique ids and exposes the known server/browser entries', () => {
+  it('has unique ids and exposes only the known server entries', () => {
     const ids = LLM_USAGE_REGISTRY.map((entry) => entry.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(getLlmUsageEntry('server.usage-gauge')?.credential).toBe('oauth');
     expect(getLlmUsageEntry('server.audit-judge')?.rule).toBe('B');
     expect(getLlmUsageEntry('server.audit-judge')?.dataClass).toBe('scrubbed');
     expect(getLlmUsageEntry('server.audit-judge')?.egressScrub).toBe('redact');
-    expect(getLlmUsageEntry('browser.ask-claude')?.surface).toBe('browser');
+    expect(LLM_USAGE_REGISTRY.every((entry) => entry.surface === 'server')).toBe(
+      true
+    );
   });
 
   it('cites a callSite.symbol that actually resolves in its callSite.file', () => {
     // The registry is the governance source of truth; a cited symbol that does
-    // not appear in its file makes the manifest unauditable and masks drift
-    // (#1579: browser.ask-claude cited callClaude, but claude-api.ts exports chat).
+    // not appear in its file makes the manifest unauditable and masks drift.
     const root = fileURLToPath(new URL('../..', import.meta.url));
     for (const entry of LLM_USAGE_REGISTRY) {
       const { file, symbol } = entry.callSite;
@@ -97,11 +98,6 @@ describe('LLM usage registry', () => {
       LLM_PHASE_1_EXPOSURE_DEFAULTS,
       LLM_PHASE_1_EXPOSURE_DEFAULTS,
     ]);
-    expect(getLlmUsageEntry('browser.ask-claude')?.exposure).toMatchObject({
-      whoPays: 'end-user',
-      publiclyReachable: false,
-      tenancyBoundary: 'single',
-    });
   });
 
   it('reports incomplete registry descriptors', () => {
@@ -218,15 +214,15 @@ describe('callAnthropic governance', () => {
     });
   });
 
-  it('rejects browser-only registry entries on the server chokepoint', async () => {
+  it('rejects a retired browser registry id as missing', async () => {
     await expect(
-      callAnthropic('browser.ask-claude', {
+      callAnthropic('browser.retired', {
         credential: { kind: 'console-key', apiKey: 'sk-ant-test' },
         path: '/messages',
         capChecked: true,
       })
     ).rejects.toMatchObject({
-      code: 'ERR_DASHBOARD_LLM_BROWSER_ENTRY',
+      code: 'ERR_DASHBOARD_LLM_REGISTRY_MISSING',
     });
   });
 

@@ -384,7 +384,6 @@ exec "$CHD_TEST_REAL_GIT" "$@"
         CHD_DOC_ISSUES: '',
         DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
         DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-        DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
         ANTHROPIC_API_KEY: '',
       },
       stdio: ['ignore', 'pipe', 'pipe'],

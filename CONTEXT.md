@@ -121,22 +121,20 @@ _Avoid_: vendor, harness, artifact source
 
 ## Language — Server LLM usage
 
-**Rule A / Rule B / BYO** (the API-usage partition):
-The three — and only three — categories any `api.anthropic.com` call-site falls
+**Rule A / Rule B** (the API-usage partition):
+The two categories any `api.anthropic.com` call-site falls
 into. **Rule A**: a call using the user's *subscription OAuth credential*, which
 may **never** carry `~/.claude` content (e.g. the plan-limit header ping).
 **Rule B**: a **Server-analysis tier** call using a *Console API key*, allowed to
-carry **scrubbed** content only when opt-in, registered, and cost-capped. **BYO**:
-a user-initiated call from the browser with the user's *own* key (Ask Claude),
-governed by neither rule. Recorded in ADR 0008. _Avoid_: "the API ban", "no
+carry **scrubbed** content only when opt-in, registered, and cost-capped.
+Browser-direct model calls are prohibited. Recorded in ADR 0008. _Avoid_: "the API ban", "no
 api.anthropic.com" as if absolute — the rule is *scoped*, not blanket.
 
 **Server-analysis tier**:
 The paid, server-only surface that sends scrubbed `~/.claude` content to
 `api.anthropic.com` under a Console API key (the judge/audit family) — the Rule B
 carve-out. Distinct from the **free/local paths** (recs engine, parsers, the
-Adoption Card) which never call the API. _Avoid_: calling it "the API tier" or
-conflating it with the **BYO** Ask Claude path.
+Adoption Card) which never call the API. _Avoid_: calling it "the API tier".
 
 **LLM-usage registry**:
 The single machine-checked manifest naming every `api.anthropic.com` call-site

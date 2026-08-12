@@ -5815,13 +5815,13 @@ function assembleScopedRecommendationResult(
       // #2574/#2647/#2719: raw browser ViewData intentionally does not carry
       // this server-only opt-in artifact, but the browser now consumes THIS
       // server-computed surface. Restore it here so viewer-only Home,
-      // Recommendations, and Ask Claude receive the same semantic narrowing as
+      // Recommendations receives the same semantic narrowing as
       // the canonical server engine instead of silently regressing to the
       // unenriched card.
       semanticIntent: dataset.semanticIntent,
       // #2318: same as semanticIntent — the raw browser ViewData envelope does not
       // carry this server-only ingest artifact (recommendationViewsFromViewData is
-      // an explicit field list), but Home/Recommendations/Ask Claude now consume
+      // an explicit field list), but Home/Recommendations now consume
       // THIS typed server surface (#2718/#2719). Restore it here so the
       // cost.local-downroute rec renders on the human UI too, not only on /recs.
       localCalibration: dataset.localCalibration ?? null,

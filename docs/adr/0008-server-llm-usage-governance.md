@@ -1,6 +1,6 @@
 # 0008 — Server LLM-usage governance: scoped API invariant, enforced call-site registry, phased abuse controls
 
-Status: Accepted (2026-07-22 — fully CI-enforced via the check-llm-egress gate and the generated llm-usage registry; originally Proposed from a grilling session, 2026-06-09)
+Status: Accepted (2026-08-11 — browser-direct LLM egress retired by #3734; server paths remain CI-enforced via the check-llm-egress gate and generated registry; originally Proposed from a grilling session, 2026-06-09)
 Date: 2026-06-09
 Supersedes: none — **scopes** (does not amend) the blanket "no api.anthropic.com" phrasing
 Related: epic #930 (decomposition), ADR [0003](0003-public-spa-hosting.md) (public SPA hosting),
@@ -16,8 +16,7 @@ shadow-calls rules, ADR 0005's build constraint). But that rule is **already de 
 shipped code**: `/api/audit.json` — the #738/#923 judge-audit family, including #687's
 judge-deceit — calls `api.anthropic.com`, gated on an explicit `ANTHROPIC_API_KEY`
 (`scripts/server.mjs`). Meanwhile `/api/usage` (#130) calls the API with the user's *subscription
-OAuth* credential to read rate-limit headers, sending no content; and Ask Claude calls the API
-**from the browser** with the user's *own* key.
+OAuth* credential to read rate-limit headers, sending no content.
 
 So "never api.anthropic.com" is neither true nor the real invariant. The real invariant is about
 **not exfiltrating the user's `~/.claude` history**, and it always had unstated exceptions. We are
@@ -29,7 +28,7 @@ multi-tenant phase slots in without re-cutting the model.
 
 ## Decision
 
-### 1. Replace the blanket rule with a two-rule invariant (+ a third, ungoverned, category)
+### 1. Replace the blanket rule with a two-rule invariant
 
 - **Rule A — data-exfiltration invariant (absolute).** No path may send `~/.claude`-derived
   content to `api.anthropic.com` using the user's **subscription OAuth credential**. That
@@ -39,21 +38,13 @@ multi-tenant phase slots in without re-cutting the model.
   **scrubbed** `~/.claude` content to `api.anthropic.com` **only** when all five hold: it uses an
   explicitly-configured **Console API key** (never the subscription credential), it is **opt-in**,
   it is **registered**, it is **cost-capped**, and the content passed the **egress scrub**.
-- **BYO — user-initiated, user's own key (governed by neither).** Ask Claude's browser call uses
-  the user's own key, client-side, never touching the server. It is enumerated in the registry for
-  completeness but is exempt from the server chokepoint. Being exempt from the *server* chokepoint
-  does not exempt it from client-side custody rules (#3281): the raw key MUST NOT be persisted in
-  `localStorage` or any other durable script-readable store. Custody is memory-only or
-  session-bounded — the implementation (`src/lib/api-key.ts`, #2063) holds it in `sessionStorage`
-  (tab-scoped, gone when the tab closes, not shared across tabs), matching the enterprise auth
-  token's custody, and destroys any durable copy a pre-#2063 build left behind by migrating it out
-  of `localStorage` on first read. Because any script running in the origin during the session can
-  still read a session-bounded key, the served dashboard MUST carry a restrictive
-  `Content-Security-Policy` that admits no untrusted script execution — the server sets one
-  (`dashboardContentSecurityPolicy()` in `scripts/server.mjs`).
+Browser-direct model calls are prohibited. #3734 removed the former user-key
+surface, its browser credential custody, and its CSP exception. The standing
+egress gate now enforces a zero-browser-entry registry and rejects raw model
+origins outside the approved server chokepoint and Gate-2702 enforcement points.
 
 **Free / automatic / local paths stay local** — the recs engine, the parsers, the
-Ask-Claude-impersonation ban, and **ADR 0005's recs Adoption Card**. ADR 0005's
+deterministic recommendation surfaces, and **ADR 0005's recs Adoption Card**. ADR 0005's
 `no api.anthropic.com` line is **correct and is not amended**: this ADR records that the blanket
 phrasing was always *scoped* to free/automatic paths. The global `~/.claude` shadow-calls
 "never api.anthropic.com" rule is a *different context* (the recs/shadow engine) and is also left
@@ -81,10 +72,10 @@ unreachable — the same way "the SPA reaches a server route" is unreachable tod
 Both layers ship **from day one** (ADR 0005's hard-learned lesson: *"the adoption schema must be
 … from day one (#467) or the local design silently becomes the SaaS telemetry schema"*).
 
-- **Call-site descriptor (frozen across phases):** `id`, `file:symbol`, `rule (A|B|BYO)`,
-  `purpose`, `credential`, `dataClass (none | scrubbed | raw-forbidden)`,
-  `trigger (automatic | opt-in | user-initiated)`, `caps`, `egressScrub (stub | local-model)`.
-- **Exposure policy (set per deployment phase):** `whoPays (operator | end-user)`,
+- **Call-site descriptor (frozen across phases):** `id`, `file:symbol`, `rule (A|B)`,
+  `purpose`, `credential`, `dataClass (none | scrubbed)`,
+  `trigger (automatic | opt-in)`, `caps`, `egressScrub (none | stub | redact)`.
+- **Exposure policy (set per deployment phase):** `whoPays (operator)`,
   `authRequired`, `tenancyBoundary (single | per-tenant)`, `publiclyReachable`. Phase-1 defaults:
   `operator / false / single / false`.
 

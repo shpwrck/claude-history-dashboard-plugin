@@ -49,8 +49,8 @@ opened outside the original CLI.
   data may include sensitive prompts, paths, outputs, or secrets.
 - A static archive mode would complement the dashboard's live server and SPA
   modes without changing the core analytics product.
-- Transcript publishing should preserve evidence links used by Ask Claude and
-  session drill-ins where possible.
+- Transcript publishing should preserve evidence links used by session
+  drill-ins where possible.
 
 ## Existing Coverage
 

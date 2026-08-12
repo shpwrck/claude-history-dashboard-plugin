@@ -18,7 +18,7 @@ import type { ViewData } from './view-registry';
  * `engineConsumedFields()` is derived from the live detector catalog
  * (required base fields + declared dataDeps), so a NEW detector that starts
  * consuming a client-carried signal fails this test until the envelope (and
- * therefore Home Digest, Recommendations, and Ask Claude together) carries it.
+ * therefore Home Digest and Recommendations together) carries it.
  */
 
 // Fully-populated ViewData stand-in: every engine field gets a non-undefined
@@ -168,7 +168,7 @@ describe('recommendationViewsFromViewData (#2352 parity contract)', () => {
       permissionRows: [],
       apiErrors: [],
     });
-    // The narrow Ask Claude fallback omits every declared optional signal —
+    // The narrow fallback omits every declared optional signal —
     // spot-check a few that the audit called out as parity gaps.
     expect(omitted).toContain('repoMap');
     expect(omitted).toContain('modelEvalSummary');

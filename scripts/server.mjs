@@ -424,9 +424,6 @@ const SERVER_AUDIT_EGRESS_SCRUB_READY =
 const DASHBOARD_ENABLE_SERVER_USAGE_GAUGE = parseBooleanEnv(
   'DASHBOARD_ENABLE_SERVER_USAGE_GAUGE'
 );
-const DASHBOARD_ENABLE_BROWSER_LLM_EGRESS = parseBooleanEnv(
-  'DASHBOARD_ENABLE_BROWSER_LLM_EGRESS'
-);
 const DASHBOARD_TRUST_PROXY_HEADERS = parseBooleanEnv(
   'DASHBOARD_TRUST_PROXY_HEADERS'
 );
@@ -818,10 +815,6 @@ function dashboardContentSecurityPolicy() {
   if (DASHBOARD_CONTENT_SECURITY_POLICY_OVERRIDE) {
     return DASHBOARD_CONTENT_SECURITY_POLICY_OVERRIDE;
   }
-  const connectSrc = ["connect-src 'self'"];
-  if (!ENTERPRISE_AUTH_ON || DASHBOARD_ENABLE_BROWSER_LLM_EGRESS) {
-    connectSrc.push('https://api.anthropic.com');
-  }
   return [
     "default-src 'self'",
     "base-uri 'self'",
@@ -832,7 +825,7 @@ function dashboardContentSecurityPolicy() {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    connectSrc.join(' '),
+    "connect-src 'self'",
     "worker-src 'self' blob:",
   ].join('; ');
 }
@@ -8455,8 +8448,6 @@ function enterpriseReadinessReceipt({
 function enterpriseCapabilitiesForPrincipal(principal) {
   const isAdmin = principal?.role === 'admin';
   const hasDataRoot = Boolean(principal?.dataRoot);
-  const canUseBrowserLlmEgress =
-    !ENTERPRISE_AUTH_ON || DASHBOARD_ENABLE_BROWSER_LLM_EGRESS;
   const canReadOwnSessions =
     (isAdmin || hasDataRoot) &&
     enterprisePrincipalHasScope(principal, [
@@ -8488,7 +8479,6 @@ function enterpriseCapabilitiesForPrincipal(principal) {
       ]),
     canWritePolicy,
     canImportLocalData: false,
-    canUseBrowserLlmEgress,
     hasScopedDataRoot: hasDataRoot,
   };
 }
@@ -8629,14 +8619,6 @@ function enterpriseSecurityPosture() {
     0
   );
   const cspOverrideActive = Boolean(DASHBOARD_CONTENT_SECURITY_POLICY_OVERRIDE);
-  const browserLlmEgressState =
-    ENTERPRISE_AUTH_ON &&
-    cspOverrideActive &&
-    !DASHBOARD_ENABLE_BROWSER_LLM_EGRESS
-      ? 'action-required'
-      : !ENTERPRISE_AUTH_ON || DASHBOARD_ENABLE_BROWSER_LLM_EGRESS
-      ? 'enabled'
-      : 'disabled';
   const rawCredentialCount = enterpriseRawCredentialCount();
   const weakRawCredentialCount = enterpriseWeakRawCredentialCount();
   const transportSecurityState = enterpriseTransportSecurityState();
@@ -9264,21 +9246,6 @@ function enterpriseSecurityPosture() {
         'DASHBOARD_USAGE_CREDENTIAL_MAX_BYTES bounds .credentials.json parsing before the optional server usage gauge looks for an access token.'
       ),
       enterpriseSecurityControl(
-        'browser-llm-egress',
-        'Browser LLM egress',
-        browserLlmEgressState,
-        ENTERPRISE_AUTH_ON &&
-          cspOverrideActive &&
-          !DASHBOARD_ENABLE_BROWSER_LLM_EGRESS
-          ? 'Custom CSP override controls browser egress; verify connect-src'
-          : DASHBOARD_ENABLE_BROWSER_LLM_EGRESS
-          ? 'Browser-side Ask Claude calls to api.anthropic.com are allowed by CSP'
-          : ENTERPRISE_AUTH_ON
-            ? 'Enterprise CSP blocks browser-side calls to api.anthropic.com by default'
-            : 'Browser-side Ask Claude calls remain available in single-user mode',
-        'Set DASHBOARD_ENABLE_BROWSER_LLM_EGRESS=true only when operators approve each browser using its own Anthropic API key directly from the dashboard origin.'
-      ),
-      enterpriseSecurityControl(
         'rate-limits',
         'In-process rate limits',
         rateLimitState,
@@ -9306,7 +9273,6 @@ function enterpriseSecurityPosture() {
       'Per-principal data roots unlock scoped datasets and file-backed reads; realpath containment rejects symlink escapes.',
       'Keep server usage-gauge egress disabled unless the deployment host Claude OAuth credential is approved for organization admins.',
       'Set an Anthropic Console workspace spend limit before enabling server LLM audits with ANTHROPIC_API_KEY.',
-      'Keep browser LLM egress disabled unless browser-held Anthropic API keys are approved for the organization.',
       'Admins retain the global organization view.',
     ],
   };

@@ -49,8 +49,8 @@ support those conclusions.
 
 - The dashboard should make evidence links a first-class data model, not a UI
   afterthought.
-- Ask Claude should cite exact deterministic evidence: session, turn, timeline
-  entry, and tool call where possible.
+- Any future conversational surface should cite exact deterministic evidence:
+  session, turn, timeline entry, and tool call where possible.
 - Risky-action scanning deserves a deterministic parser/recommendation pathway.
 - A session-level forensic graph could complement Session Timeline and
   SessionTranscript for deep investigations.

@@ -313,8 +313,8 @@ checks in the deployment guide.
 - Usage credential bounds (`DASHBOARD_USAGE_CREDENTIAL_MAX_BYTES`) match the
   expected Claude OAuth credential file while preventing optional usage-gauge
   token discovery from parsing unbounded JSON.
-- Server and browser LLM egress remain disabled unless the organization has
-  approved the exact credential and data path; enabled server judge audits use a
+- Server LLM egress remains disabled unless the organization has approved the
+  exact credential and data path; enabled server judge audits use a
   registered Console-key path plus finite `DASHBOARD_AUDIT_MAX_JUDGE_CALLS`
   request budget, `DASHBOARD_AUDIT_MAX_OUTPUT_TOKENS` per-call output cap, and
   `DASHBOARD_AUDIT_INPUT_MAX_ROWS` pre-judge row cap. Operators set Anthropic

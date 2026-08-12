@@ -304,8 +304,8 @@ verify these outcomes against the exact host and origin the buyer will use:
 17. The bounded audit export downloads sanitized NDJSON for external handoff
    through the same admin audit-read gate; it is a pilot artifact, not centralized
    fleet logging.
-18. Custom CSP, proxy-header trust, browser LLM egress, server LLM audits, and
-   server usage-gauge egress are either disabled or explicitly approved. Enabled
+18. Custom CSP, proxy-header trust, server LLM audits, and server usage-gauge
+   egress are either disabled or explicitly approved. Enabled
    server LLM audits have finite judge-call, output-token, and input-row caps
    plus an Anthropic Console workspace spend limit.
 19. Before any public LLM exposure, `npm run gate:llm-egress` passes and the

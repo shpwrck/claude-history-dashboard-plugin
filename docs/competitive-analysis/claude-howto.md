@@ -82,7 +82,7 @@ plugins, and safe recovery workflows.
 | MCP server inventory includes global and project-scoped servers from `~/.claude.json` | Implemented | `src/lib/config-loader.ts`, idle-MCP detector |
 | Hook timing can be observed only through available transcript runtime events | Partial / constrained | [../hook-timing-spike.md](../hook-timing-spike.md), `src/lib/parse-runtime-events.ts` |
 | Checkpoint/file-history signal is parsed without reading snapshot bodies | Implemented | `src/lib/parse-file-history.ts` |
-| Claude Code `/insights` output is rendered from local `~/.claude/usage-data` artifacts | Implemented | `src/lib/parse-insights.ts`; Ask Claude impersonation is explicitly out of scope |
+| Claude Code `/insights` output is rendered from local `~/.claude/usage-data` artifacts | Implemented | `src/lib/parse-insights.ts`; browser-generated impersonation is explicitly out of scope |
 | External guidance ingestion for recurring source review | Backlog | #656 |
 
 ## Follow-up

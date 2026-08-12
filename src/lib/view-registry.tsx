@@ -357,8 +357,6 @@ export interface ViewNav {
   openSession: (sessionId: string) => void;
   /** Open the session drill-in focused on a specific timeline entry (#1307). */
   openEvidence: (ref: EvidenceRef) => void;
-  setActiveSessionId: (id: string | null) => void;
-  setActiveProjectId: (id: string | null) => void;
   focusSessionId: string | null;
   focusEvidenceRef: EvidenceRef | null;
   consumeFocus: () => void;
@@ -381,7 +379,7 @@ export interface ViewContext {
   /**
    * Viewer-only recommendation analysis (#2719): the server-computed `global`
    * surface state, loaded once at the App level and shared by Home, the
-   * Recommendations page, and Ask Claude so they never run the engine or drift.
+   * Recommendations page so viewers never run the engine or drift.
    */
   analysis: RecommendationSurfaceState;
   /** Source identity shared by every independently scoped analysis loader. */
@@ -530,7 +528,6 @@ function renderAutomationView(ctx: ViewContext, forcedTab?: string): ReactNode {
               apiErrors={d.apiErrors}
               activeFilter={filter}
               routeFilter={routeFilter}
-              onActiveSessionChange={n.setActiveSessionId}
               onOpenSession={n.openSession}
               onNavigate={n.navigateWithFilter}
             />
@@ -651,7 +648,6 @@ export const VIEW_RENDERERS: Partial<
       focusSessionId={n.focusSessionId}
       focusEvidenceRef={n.focusEvidenceRef}
       onFocusConsumed={n.consumeFocus}
-      onActiveSessionChange={n.setActiveSessionId}
       onNavigate={n.navigateWithFilter}
       routeFilter={routeFilter}
     />
@@ -661,7 +657,6 @@ export const VIEW_RENDERERS: Partial<
       projects={d.projects}
       onOpenSession={n.openSession}
       navigateWithFilter={n.navigateWithFilter}
-      onActiveProjectChange={n.setActiveProjectId}
     />
   ),
   'experiment-segment': ({ data: d }) => (

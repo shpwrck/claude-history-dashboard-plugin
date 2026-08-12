@@ -17,6 +17,10 @@ import {
   validateLlmWrapperCallSites,
 } from './check-llm-egress.mjs';
 
+const { LLM_USAGE_REGISTRY, validateLlmUsageRegistry } = await import(
+  '../src/lib/llm-registry.ts'
+);
+
 let failures = 0;
 function check(label, fn) {
   try {
@@ -41,12 +45,6 @@ const entries = [
     callSite: { file: 'scripts/server.mjs', symbol: 'handleProbe' },
     egressScrub: 'none',
   },
-  {
-    id: 'browser.fake',
-    surface: 'browser',
-    callSite: { file: 'src/lib/claude-api.ts', symbol: 'callFake' },
-    egressScrub: 'none',
-  },
 ];
 
 const caps = {
@@ -57,6 +55,22 @@ const caps = {
 
 const APPROVED_EGRESS_IMPORT =
   "const { egressScrub } = await import('../src/lib/anthropic-egress.ts');";
+
+check('repository registry has no browser-direct LLM call sites', () => {
+  assert.deepEqual(
+    LLM_USAGE_REGISTRY.filter((entry) => entry.surface === 'browser'),
+    []
+  );
+});
+
+check('registry validation rejects browser-direct LLM call sites', () => {
+  assert.match(
+    validateLlmUsageRegistry([
+      { id: 'browser.fake', surface: 'browser' },
+    ]).join('\n'),
+    /browser-direct LLM registry entries are prohibited/
+  );
+});
 
 function publicEntry(overrides = {}) {
   return {
@@ -74,7 +88,7 @@ function publicEntry(overrides = {}) {
 }
 
 check('runtime-source classifier includes src and scripts, excludes tests', () => {
-  assert.equal(isRuntimeSource('src/components/AskClaude.tsx'), true);
+  assert.equal(isRuntimeSource('src/components/DirectModelClient.tsx'), true);
   assert.equal(isRuntimeSource('src/lib/anthropic-egress.test.ts'), false);
   assert.equal(isRuntimeSource('scripts/server.mjs'), true);
   assert.equal(isRuntimeSource('scripts/check-llm-egress.test.mjs'), false);

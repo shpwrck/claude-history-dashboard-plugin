@@ -116,7 +116,7 @@ describe('semantic-intent boot wiring (#2574)', () => {
     const callEnd = dataset.indexOf('})', recsCall);
     expect(dataset.slice(recsCall, callEnd)).toContain('semanticIntent,');
 
-    // #2719 moves Home, Recommendations, and Ask Claude onto this typed server
+    // #2719 moves Home and Recommendations onto this typed server
     // surface. The raw browser ViewData envelope intentionally lacks the
     // server-only artifact, so the server must restore it explicitly here.
     const scopedIdx = src.indexOf('function assembleScopedRecommendationResult');

@@ -157,7 +157,6 @@ async function startServer(extraEnv = {}) {
       DASHBOARD_CONTENT_SECURITY_POLICY_MAX_BYTES: '',
       DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
       DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-      DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
       DASHBOARD_TRUST_PROXY_HEADERS: '',
       DASHBOARD_TRUSTED_PROXY_ADDRESSES: '',
       DASHBOARD_TRUSTED_PROXY_ADDRESSES_MAX_BYTES: '',
@@ -848,10 +847,6 @@ try {
   check('hsts is opt-in by default', !r.headers.has('strict-transport-security'));
   check('local mode does not require auth', body?.authRequired === false);
   check('local mode can import local data', body?.capabilities?.canImportLocalData === true);
-  check(
-    'local mode can use browser LLM egress',
-    body?.capabilities?.canUseBrowserLlmEgress === true
-  );
   r = await fetch(`${server.base}/`);
   check('local static shell -> 200', r.status === 200, `got ${r.status}`);
   checkSecurityHeaders('local static shell', r);
@@ -3608,7 +3603,7 @@ server = await startServer({
   DASHBOARD_ORG_NAME: 'Acme',
   DASHBOARD_CONTENT_SECURITY_POLICY_MAX_BYTES: '1024',
   DASHBOARD_CONTENT_SECURITY_POLICY:
-    `default-src 'self'; connect-src 'self' https://api.anthropic.com; ${'x'.repeat(2048)}`,
+    `default-src 'self'; connect-src 'self' https://example.invalid; ${'x'.repeat(2048)}`,
 });
 try {
   let r = await fetch(`${server.base}/api/auth/session`, {
@@ -3616,7 +3611,7 @@ try {
   });
   const csp = r.headers.get('content-security-policy') || '';
   check('enterprise oversized custom CSP session -> 200', r.status === 200, `got ${r.status}`);
-  check('enterprise oversized custom CSP falls back to default', !csp.includes('api.anthropic.com'));
+  check('enterprise oversized custom CSP falls back to default', !csp.includes('example.invalid'));
   check('enterprise oversized custom CSP redacts payload header', !csp.includes('xxxxx'));
 
   r = await fetch(`${server.base}/api/enterprise/organization`, {
@@ -3627,17 +3622,10 @@ try {
   const securityHeadersControl = body?.securityPosture?.controls?.find?.(
     (control) => control.id === 'security-headers'
   );
-  const browserEgressControl = body?.securityPosture?.controls?.find?.(
-    (control) => control.id === 'browser-llm-egress'
-  );
   check(
     'enterprise oversized custom CSP marks security headers action-required',
     securityHeadersControl?.state === 'action-required' &&
       securityHeadersControl?.summary?.includes?.('1024 byte limit')
-  );
-  check(
-    'enterprise oversized custom CSP keeps browser egress disabled',
-    browserEgressControl?.state === 'disabled'
   );
   check('enterprise oversized custom CSP redacts payload posture', !bodyText.includes('xxxxx'));
 } finally {
@@ -5378,7 +5366,7 @@ server = await startServer({
   DASHBOARD_ORG_ID: 'acme',
   DASHBOARD_ORG_NAME: 'Acme',
   DASHBOARD_CONTENT_SECURITY_POLICY:
-    "default-src 'self'; connect-src 'self' https://api.anthropic.com; frame-ancestors 'none'",
+    "default-src 'self'; connect-src 'self' https://example.invalid; frame-ancestors 'none'",
 });
 try {
   let r = await fetch(`${server.base}/api/auth/session`, {
@@ -5386,7 +5374,7 @@ try {
   });
   const csp = r.headers.get('content-security-policy') || '';
   check('enterprise custom CSP session -> 200', r.status === 200, `got ${r.status}`);
-  check('enterprise custom CSP override is applied', csp.includes('api.anthropic.com'));
+  check('enterprise custom CSP override is applied', csp.includes('example.invalid'));
 
   r = await fetch(`${server.base}/api/enterprise/organization`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -5395,16 +5383,9 @@ try {
   const securityHeadersControl = body?.securityPosture?.controls?.find?.(
     (control) => control.id === 'security-headers'
   );
-  const browserEgressControl = body?.securityPosture?.controls?.find?.(
-    (control) => control.id === 'browser-llm-egress'
-  );
   check(
     'enterprise custom CSP marks security headers operator-managed',
     securityHeadersControl?.state === 'action-required'
-  );
-  check(
-    'enterprise custom CSP marks browser egress operator-managed',
-    browserEgressControl?.state === 'action-required'
   );
 } finally {
   await server.stop();
@@ -5428,13 +5409,9 @@ try {
   });
   let body = await json(r);
   const csp = r.headers.get('content-security-policy') || '';
-  check('enterprise default browser LLM egress session -> 200', r.status === 200, `got ${r.status}`);
+  check('enterprise default session -> 200', r.status === 200, `got ${r.status}`);
   check(
-    'enterprise default session cannot use browser LLM egress',
-    body?.capabilities?.canUseBrowserLlmEgress === false
-  );
-  check(
-    'enterprise CSP blocks browser LLM egress by default',
+    'enterprise default CSP limits connections to the dashboard origin',
     csp.includes("connect-src 'self'") && !csp.includes('api.anthropic.com')
   );
 
@@ -5458,16 +5435,8 @@ try {
   const usageControl = body?.securityPosture?.controls?.find?.(
     (control) => control.id === 'server-usage-gauge'
   );
-  const browserEgressControl = body?.securityPosture?.controls?.find?.(
-    (control) => control.id === 'browser-llm-egress'
-  );
   check('enterprise posture reports usage gauge control', Boolean(usageControl));
   check('enterprise posture reports usage gauge disabled', usageControl?.state === 'disabled');
-  check('enterprise posture reports browser LLM egress control', Boolean(browserEgressControl));
-  check(
-    'enterprise posture reports browser LLM egress disabled',
-    browserEgressControl?.state === 'disabled'
-  );
 
   // Audit writes are queued after the response path. Under parallel CI load an
   // unrelated earlier record can satisfy a minimum-count wait before this
@@ -5490,41 +5459,6 @@ try {
     )
   );
   check('enterprise usage gauge audit redacts host oauth credential', !audit.raw.includes(hostOauthSecret));
-} finally {
-  await server.stop();
-}
-
-server = await startServer({
-  DASHBOARD_AUTH_MODE: 'enterprise',
-  DASHBOARD_AUTH_TOKENS: tokenConfig,
-  DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: 'true',
-  DASHBOARD_ORG_ID: 'acme',
-  DASHBOARD_ORG_NAME: 'Acme',
-});
-try {
-  let r = await fetch(`${server.base}/api/auth/session`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  let body = await json(r);
-  const csp = r.headers.get('content-security-policy') || '';
-  check('enterprise browser LLM egress opt-in session -> 200', r.status === 200, `got ${r.status}`);
-  check(
-    'enterprise browser LLM egress opt-in session can use browser LLM egress',
-    body?.capabilities?.canUseBrowserLlmEgress === true
-  );
-  check('enterprise CSP allows browser LLM egress when opted in', csp.includes('api.anthropic.com'));
-
-  r = await fetch(`${server.base}/api/enterprise/organization`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  body = await json(r);
-  const browserEgressControl = body?.securityPosture?.controls?.find?.(
-    (control) => control.id === 'browser-llm-egress'
-  );
-  check(
-    'enterprise posture reports browser LLM egress enabled',
-    browserEgressControl?.state === 'enabled'
-  );
 } finally {
   await server.stop();
 }
@@ -6010,7 +5944,6 @@ try {
   check('enterprise admin can read org rollup', body?.capabilities?.canReadOrganizationRollup === true);
   check('enterprise admin can read org data', body?.capabilities?.canReadOrganizationData === true);
   check('enterprise admin cannot import local data by default', body?.capabilities?.canImportLocalData === false);
-  check('enterprise admin cannot use browser LLM egress by default', body?.capabilities?.canUseBrowserLlmEgress === false);
 
   r = await fetch(`${server.base}/sessions-manifest.json`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -6029,7 +5962,6 @@ try {
   check('enterprise viewer cannot read org data capability', body?.capabilities?.canReadOrganizationData === false);
   check('enterprise viewer cannot read raw transcript capability', body?.capabilities?.canReadRawTranscripts === false);
   check('enterprise viewer cannot import local data by default', body?.capabilities?.canImportLocalData === false);
-  check('enterprise viewer cannot use browser LLM egress by default', body?.capabilities?.canUseBrowserLlmEgress === false);
 
   r = await fetch(`${server.base}/api/csrf-token`, {
     headers: { Authorization: `Bearer ${token}` },

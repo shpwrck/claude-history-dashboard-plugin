@@ -129,7 +129,6 @@ async function startServer(fixture, { docIssues }) {
     DASHBOARD_AUTH_JWKS_URL: '',
     DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
     DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-    DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
     ANTHROPIC_API_KEY: '',
     CHD_TEST_FETCH_MARKER: fixture.fetchMarker,
   };

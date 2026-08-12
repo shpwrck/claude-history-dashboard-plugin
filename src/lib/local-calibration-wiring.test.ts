@@ -111,7 +111,7 @@ describe('local-calibration boot wiring (#2318)', () => {
   });
 
   it('restores localCalibration on the typed surface=global path (the browser UI)', () => {
-    // #2718/#2719 moved Home/Recommendations/Ask Claude onto this typed server
+    // #2718/#2719 moved Home/Recommendations onto this typed server
     // surface; recommendationViewsFromViewData drops the server-only artifact, so
     // the server MUST restore it here or the rec is /recs-only (the BLOCKER).
     const scoped = span('function assembleScopedRecommendationResult', 8000);

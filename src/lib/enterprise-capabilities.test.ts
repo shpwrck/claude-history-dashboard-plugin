@@ -34,14 +34,14 @@ function enterpriseSession(
 
 describe('enterpriseCapabilityAllowed', () => {
   it('fails closed until the auth-session probe resolves', () => {
-    expect(enterpriseCapabilityAllowed(null, 'canUseBrowserLlmEgress')).toBe(
+    expect(enterpriseCapabilityAllowed(null, 'canImportLocalData')).toBe(
       false
     );
   });
 
   it('allows a positively resolved single-user session without an explicit capability', () => {
     expect(
-      enterpriseCapabilityAllowed(localSession(), 'canUseBrowserLlmEgress')
+      enterpriseCapabilityAllowed(localSession(), 'canImportLocalData')
     ).toBe(true);
   });
 
@@ -99,33 +99,33 @@ describe('enterpriseCapabilityAllowed', () => {
     expect(
       enterpriseCapabilityAllowed(
         enterpriseSession(),
-        'canUseBrowserLlmEgress'
+        'canImportLocalData'
       )
     ).toBe(false);
     expect(
       enterpriseCapabilityAllowed(
         enterpriseSession({
-          capabilities: { canUseBrowserLlmEgress: true },
+          capabilities: { canImportLocalData: true },
         }),
-        'canUseBrowserLlmEgress'
+        'canImportLocalData'
       )
     ).toBe(true);
     expect(
       enterpriseCapabilityAllowed(
         enterpriseSession({
           authenticated: false,
-          capabilities: { canUseBrowserLlmEgress: true },
+          capabilities: { canImportLocalData: true },
         }),
-        'canUseBrowserLlmEgress'
+        'canImportLocalData'
       )
     ).toBe(false);
     expect(
       enterpriseCapabilityAllowed(
         enterpriseSession({
           configured: false,
-          capabilities: { canUseBrowserLlmEgress: true },
+          capabilities: { canImportLocalData: true },
         }),
-        'canUseBrowserLlmEgress'
+        'canImportLocalData'
       )
     ).toBe(false);
   });

@@ -148,12 +148,6 @@ export async function callAnthropic(
       `No LLM usage registry entry for ${registryId}`
     );
   }
-  if (entry.surface !== 'server') {
-    throw new AnthropicEgressError(
-      'ERR_DASHBOARD_LLM_BROWSER_ENTRY',
-      `${registryId} is a browser-only LLM usage entry`
-    );
-  }
   if (entry.credential !== req.credential.kind) {
     throw new AnthropicEgressError(
       'ERR_DASHBOARD_LLM_CREDENTIAL_MISMATCH',

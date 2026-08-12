@@ -3,28 +3,27 @@
  *
  * Server paths must route through `callAnthropic()` so credential class,
  * transcript-data handling, and cap checks are enforced before the network
- * call. Browser BYO-key paths are listed here for governance visibility, but
- * remain direct-from-browser and are not valid server chokepoint ids.
+ * call. Browser-direct model egress is prohibited; the registry therefore
+ * contains server chokepoint ids only.
  */
 
-export type LlmUsageRule = 'A' | 'B' | 'BYO';
-export type LlmCredentialKind = 'oauth' | 'console-key' | 'browser-key';
-export type LlmSurface = 'server' | 'browser';
-export type LlmDataClass = 'none' | 'scrubbed' | 'raw-forbidden';
-export type LlmTriggerKind = 'automatic' | 'opt-in' | 'user-initiated';
-// 'none'   — no transcript-derived content leaves the process (Rule A / BYO).
+export type LlmUsageRule = 'A' | 'B';
+export type LlmCredentialKind = 'oauth' | 'console-key';
+export type LlmSurface = 'server';
+export type LlmDataClass = 'none' | 'scrubbed';
+export type LlmTriggerKind = 'automatic' | 'opt-in';
+// 'none'   — no transcript-derived content leaves the process (Rule A).
 // 'stub'   — legacy identity pass-through; FAIL-CLOSED at egress (cannot send).
 // 'redact' — transmission-grade local redaction (keys/tokens/paths/emails/env)
 //            applied to content before egress. The only mode cleared to send.
 export type LlmEgressScrubMode = 'none' | 'stub' | 'redact';
-export type LlmWhoPays = 'operator' | 'end-user';
+export type LlmWhoPays = 'operator';
 export type LlmTenancyBoundary = 'single' | 'per-tenant';
 export type LlmPublicExposureDeployment = 'single-tenant' | 'multi-tenant';
 
 export type LlmUsageId =
   | 'server.usage-gauge'
-  | 'server.audit-judge'
-  | 'browser.ask-claude';
+  | 'server.audit-judge';
 
 export interface LlmCallSite {
   file: string;
@@ -146,41 +145,6 @@ export const LLM_USAGE_REGISTRY: readonly LlmUsageEntry[] = [
       'server audit route must emit an enterprise audit event',
     ],
   },
-  {
-    id: 'browser.ask-claude',
-    surface: 'browser',
-    rule: 'BYO',
-    callSite: { file: 'src/lib/claude-api.ts', symbol: 'chat' },
-    credential: 'browser-key',
-    purpose:
-      'Let a user ask Claude about the currently loaded dashboard data with their own browser-held key.',
-    trigger: 'user-initiated',
-    triggerDescription: 'User opens Ask Claude and submits a prompt.',
-    dataClass: 'raw-forbidden',
-    dataBoundary:
-      'The server never receives or stores the browser API key; enterprise mode can disable browser egress.',
-    caps: {
-      callBudget: [
-        'User-initiated browser call only; no server-side fanout.',
-      ],
-      inputBounds: [
-        'browser egress can be disabled by enterprise capability and CSP',
-      ],
-      spendControls: [
-        'the end user provides the browser-held API key',
-      ],
-    },
-    egressScrub: 'none',
-    exposure: {
-      ...LLM_PHASE_1_EXPOSURE_DEFAULTS,
-      whoPays: 'end-user',
-    },
-    requiredControls: [
-      'key held only in browser sessionStorage (session-bounded, tab-scoped); never localStorage or another durable script-readable store (#3281)',
-      'enterprise capability can disable Ask Claude/browser egress',
-      'browser CSP must opt in to Anthropic egress in enterprise mode',
-    ],
-  },
 ];
 
 const LLM_USAGE_BY_ID = new Map(
@@ -211,6 +175,9 @@ export function validateLlmUsageRegistry(
       errors.push(`${id}: callSite.file and callSite.symbol are required`);
     }
     if (!entry.surface) errors.push(`${id}: surface is required`);
+    else if (entry.surface !== 'server') {
+      errors.push(`${id}: browser-direct LLM registry entries are prohibited`);
+    }
     if (!entry.rule) errors.push(`${id}: rule is required`);
     if (!entry.credential) errors.push(`${id}: credential is required`);
     if (!entry.purpose?.trim()) errors.push(`${id}: purpose is required`);
@@ -272,18 +239,6 @@ export function validateLlmUsageRegistry(
       }
       if (entry.egressScrub === 'none') {
         errors.push(`${id}: Rule B requires an egress scrub mode`);
-      }
-    }
-
-    if (entry.rule === 'BYO') {
-      if (entry.surface !== 'browser') {
-        errors.push(`${id}: BYO entries must be browser-only`);
-      }
-      if (entry.credential !== 'browser-key') {
-        errors.push(`${id}: BYO entries require browser-key credential`);
-      }
-      if (entry.egressScrub !== 'none') {
-        errors.push(`${id}: BYO entries must not use server egress scrub`);
       }
     }
 

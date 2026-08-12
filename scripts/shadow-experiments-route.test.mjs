@@ -138,7 +138,6 @@ async function bootServer({ withLedger, withC5Reconciliation = false }) {
     DASHBOARD_REVIEW_EVENTS_CACHE_PATH: join(cacheDir, 'review-events.json'),
     DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
     DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-    DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
     ANTHROPIC_API_KEY: '',
     POLICY_WRITE_TOKEN: '',
     CLAUDE_SHADOW_CALLS_LEDGER: withLedger

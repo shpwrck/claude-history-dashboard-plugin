@@ -36,10 +36,10 @@ depends on it.
 | `session-scorecard.ts` (architecture axis) | `facets.outcome`, `facets.primarySuccess`, `facets.frictionCounts` | LLM-semantic outcome bump (±10/±30) + "Insights outcome" evidence | The axis **already** falls back without facets (`facets ? 85 : 75`, uses `toolData`/`assistantFeatures`/`apiErrors`); `parse-timeline-success` offers only a behavioural *cleanliness proxy* (self-documented as not a real outcome) | **Accept degradation** — keep the existing no-facets path; do NOT substitute the weaker proxy into a confidence-rated score |
 | `SessionPatterns.tsx` | `facets.sessionType` grouping + `facets?` | LLM session-type grouping | `session-type-classifier.ts` (`classifySessionType` heuristic) | **Substitute** — wire the heuristic classifier so grouping survives |
 | `Recommendations.tsx` | `insightsReport` → `InsightsRecommendations` panel | The insights-derived CLAUDE.md suggestion panel | None (it rendered the `/insights` report's own suggestions) | **Remove** the panel; the recommendations engine's own findings remain |
-| `AskClaude.tsx` / `claude-context.ts` | `insightsReport` narrative as chat context | Insights narrative in the Ask-Claude context blob | The context already includes tokens/projects/sessions; narrative is additive | **Remove** the insights section from the context builder |
+| Former browser assistant/context builder | `insightsReport` narrative as chat context | Insights narrative in the chat context blob | The context already included tokens/projects/sessions; narrative was additive | **Remove** the insights section from the context builder |
 | `DigestSpine.tsx` | `insightsReport?` | Optional digest display | None | **Remove** the optional block |
 
-Net product effect: the Ask-Claude context and the scorecard architecture axis
+Net product effect: the former chat context and the scorecard architecture axis
 get slightly less rich; SessionPatterns keeps grouping via the heuristic
 classifier; the insights view and its CLAUDE.md-suggestion panel are gone. No
 feature breaks — every consumer already treated insights data as optional.
@@ -49,7 +49,7 @@ feature breaks — every consumer already treated insights data as optional.
 1. **PR A — decouple + substitute (this PR adds the doc + the alternative wiring,
    removes nothing yet).** Wire `session-type-classifier` into `SessionPatterns`
    as the grouping source; drop the `insightsFacets/Report` inputs from the
-   scorecard fallback path, `Recommendations`, `AskClaude`, `claude-context`,
+   scorecard fallback path, `Recommendations`, the former browser assistant/context builder,
    `DigestSpine`. After PR A, no feature consumes insights data, but the view +
    data layer still exist (unused). Green CI proves nothing broke.
 2. **PR B — remove the feature.** Delete the view/components/parsers/types,

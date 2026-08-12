@@ -79,7 +79,6 @@ test('boot and slice responses identify one dataset snapshot', { timeout: 30_000
       CHD_SEMANTIC_INTENT: '',
       DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
       DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-      DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
       DASHBOARD_ADMIN_TOKEN: '',
       DASHBOARD_ADMIN_TOKEN_SHA256: '',
       DASHBOARD_AUTH_TOKENS: '',

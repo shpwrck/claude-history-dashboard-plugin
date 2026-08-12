@@ -10,7 +10,6 @@ This document is generated from `src/lib/llm-registry.ts` and checked by `npm ru
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `server.usage-gauge` | server | A | oauth | none | none | `scripts/server.mjs`:`handleUsage` | whoPays=operator, authRequired=false, tenancy=single, public=false |
 | `server.audit-judge` | server | B | console-key | scrubbed | redact | `scripts/server.mjs`:`/api/audit.json` | whoPays=operator, authRequired=false, tenancy=single, public=false |
-| `browser.ask-claude` | browser | BYO | browser-key | raw-forbidden | none | `src/lib/claude-api.ts`:`chat` | whoPays=end-user, authRequired=false, tenancy=single, public=false |
 
 ## Pre-Public Exposure Gate
 
@@ -82,30 +81,3 @@ Required controls:
 - egressScrub must produce the opaque scrubbed body consumed by the egress chokepoint
 - capChecked must be true with a matching cap receipt
 - server audit route must emit an enterprise audit event
-
-### `browser.ask-claude`
-
-- Surface: `browser`
-- Rule: `BYO`
-- Credential: `browser-key`
-- Purpose: Let a user ask Claude about the currently loaded dashboard data with their own browser-held key.
-- Trigger: `user-initiated` - User opens Ask Claude and submits a prompt.
-- Data class: `raw-forbidden`
-- Data boundary: The server never receives or stores the browser API key; enterprise mode can disable browser egress.
-- Egress scrub: `none`
-- Call site: `src/lib/claude-api.ts` (`chat`)
-- Exposure: whoPays=end-user, authRequired=false, tenancy=single, public=false
-
-Call budget:
-- User-initiated browser call only; no server-side fanout.
-
-Input bounds:
-- browser egress can be disabled by enterprise capability and CSP
-
-Spend controls:
-- the end user provides the browser-held API key
-
-Required controls:
-- key held only in browser sessionStorage (session-bounded, tab-scoped); never localStorage or another durable script-readable store (#3281)
-- enterprise capability can disable Ask Claude/browser egress
-- browser CSP must opt in to Anthropic egress in enterprise mode

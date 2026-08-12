@@ -59,7 +59,7 @@ stay current without losing auditability.
 | Dynamic rule-engine design that emits reviewed PRs, not runtime rules | Implemented docs / design | #189, [../adr/0002-dynamic-recommendation-rule-engine.md](../adr/0002-dynamic-recommendation-rule-engine.md) |
 | Parser/source mapping for Claude Code artifacts | Implemented / active backlog | [../REFERENCES.md](../REFERENCES.md), #704 |
 | Pricing updates for cost attribution | Implemented / ongoing | `src/lib/pricing.ts`, cost and v0.4 efficiency issues |
-| Ask Claude direct API use | Implemented with explicit user key | `src/lib/claude-api.ts`, Settings |
+| Browser-direct model API use | Retired | #3734 removed the user-key call site and Settings surface |
 
 ## Follow-up
 

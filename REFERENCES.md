@@ -363,7 +363,6 @@ These run in the browser over the assembled dataset arrays — they have no
 | `config-hygiene.ts` (`computeConfigHygiene`) | `liveConfig` |
 | `recommendations.ts` (`buildRecommendations`) | `tokenData`, `toolData`, `sessions`, `projects`, `permissionRows`, `apiErrors`, `liveConfig`, `assistantFeatures`, `timelines`, `agentSettings`, `attribution`, `runtimeEvents`, `taskSteering`, `taskSuccess`, `valueFlow`, `toolInventories`, plus the #539 artifact keys (`tasks`, `teams`, `sessionRegistry`, `telemetry`, `modelLatency`, `debugLogs`, `statsCache`, `fileHistory`, `plans`, `updateResults`, `mcpAuth`, `configBackups`) |
 | `report-card.ts` (`buildReportCard`) | `sessionRegistry`, `telemetry`, `debugLogs` (joins all three per project → the #572 Agent Report Card; used by the `reliability.agent-report-card` detector and the Report Card view) |
-| `claude-context.ts` (`buildContext`) | the whole dataset (AskClaude prompt context) |
 
 Two of these client modules also expose helpers that `scripts/ingest.mjs`
 imports directly: `context-health.ts`'s `OVER_WINDOW` constant (shared
@@ -371,7 +370,7 @@ context-window denominator) and `transcript-hygiene.ts`'s `scrubValue`
 (secret-scrubbing applied to assistant prose before it is persisted, #204).
 Those are ingest-time *helpers*, not dataset-key parsers, so they don't appear
 in the ingest table above. Pure browser/UI infra (`api-client.ts`,
-`claude-api.ts`, `pricing.ts`, `format.ts`, `theme.ts`, `usage.ts`,
+`pricing.ts`, `format.ts`, `theme.ts`, `usage.ts`,
 `nav-prefs.ts`, `use-session-tags.ts`, `dataset-worker.ts`, `unzip-upload.ts`)
 reads no `~/.claude/` artifact and feeds no dataset key, so it is out of scope
 for both tables.

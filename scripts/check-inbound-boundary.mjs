@@ -44,7 +44,6 @@ export const NETWORK_OWNERS = [
   'lib/dataset-worker.ts', // the worker api-client delegates the dataset fetch to (#162); the URL is a param, not a literal
   'lib/dataset-slice-worker.ts', // #2448 off-thread slice decoder (sibling of dataset-worker.ts); slice URLs are params, not literals; imported only by the aliased-away instant-load.ts so it never reaches the SPA bundle
   'lib/instant-load.ts', // #2443 boot-first loader — a LAZY chunk DCE'd from the SPA build (dynamic-imported only under `if (SERVER_AVAILABLE)`), so its /api/ literals never reach the upload bundle
-  'lib/claude-api.ts', // BYO Ask-Claude -> the Anthropic API with the user's own key (governed by ADR 0008, not the chokepoint)
   'lib/sample-data.ts', // fetches the build-time static sample zip (SPA tier, no server involved)
   // — Governed server-side egress (#2963: were evading the old call-syntax
   //   regex via aliasing; now allowlisted BY DECISION, each under its own

@@ -306,12 +306,6 @@ describe('viewer-only engine boundary (#2719)', () => {
     expect(s).not.toMatch(/from '\.\/detectors'/);
   });
 
-  it('the Ask Claude context builder imports Recommendation type-only', () => {
-    const s = read('./claude-context.ts');
-    expect(valueBarrelImports(s, './recommendations')).toEqual([]);
-    expect(s).not.toMatch(/^\s*import\b[^\n;]*from '\.\/detectors'/m);
-  });
-
   it('the client-safe surface module type-only imports and never reaches detectors', () => {
     const s = read('./recommendation-surface.ts');
     expect(valueBarrelImports(s, './recommendations')).toEqual([]);

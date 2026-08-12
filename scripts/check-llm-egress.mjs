@@ -31,19 +31,9 @@ const ANTHROPIC_ORIGIN = 'api.anthropic.com';
 const ALLOWED_ORIGIN_FILES = new Set([
   'scripts/check-llm-egress.mjs',
   'src/lib/anthropic-egress.ts',
-  'src/lib/claude-api.ts',
 ]);
 
 const ALLOWED_ORIGIN_LINE_PATTERNS = new Map([
-  [
-    'scripts/server.mjs',
-    [
-      /connectSrc\.push\('https:\/\/api\.anthropic\.com'\)/,
-      /Browser-side Ask Claude calls to api\.anthropic\.com/,
-      /Enterprise CSP blocks browser-side calls to api\.anthropic\.com/,
-    ],
-  ],
-  ['src/components/AskClaude.tsx', [/^\s*api\.anthropic\.com\s*$/]],
   // #3085: the Gate 2702 sandbox names the model host in its network-policy
   // ALLOWLIST — the one domain a jailed worker may reach. That is the opposite
   // of an unregistered egress path: it is the enforcement point that makes the
@@ -60,14 +50,6 @@ const ALLOWED_ORIGIN_LINE_PATTERNS = new Map([
   [
     'scripts/gate-2702/credential-broker.mjs',
     [/^export const GATE_2702_MODEL_DOMAIN = "api\.anthropic\.com";$/],
-  ],
-  [
-    'src/components/Settings.tsx',
-    [
-      /Connected to api\.anthropic\.com/,
-      /directly to <code>api\.anthropic\.com<\/code>/,
-      /direct calls to <code>api\.anthropic\.com<\/code>/,
-    ],
   ],
 ]);
 

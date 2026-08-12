@@ -180,7 +180,6 @@ function spawnFixtureServer({ testRoot, claudeDir, distDir, cacheDir, port, extr
       DASHBOARD_REVIEW_EVENTS_CACHE_PATH: join(cacheDir, 'review-events.json'),
       DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
       DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-      DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
       DASHBOARD_REVIEW_EVENTS_SOURCE: '',
       DASHBOARD_GITHUB_REVIEW_TOKEN: '',
       DASHBOARD_GITHUB_REVIEW_REPOS: '',

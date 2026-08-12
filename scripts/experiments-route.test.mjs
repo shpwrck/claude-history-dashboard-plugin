@@ -143,7 +143,6 @@ async function bootServer({ ledgerPath }) {
     DASHBOARD_REVIEW_EVENTS_CACHE_PATH: join(cacheDir, 'review-events.json'),
     DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
     DASHBOARD_ENABLE_SERVER_USAGE_GAUGE: '',
-    DASHBOARD_ENABLE_BROWSER_LLM_EGRESS: '',
     ANTHROPIC_API_KEY: '',
     POLICY_WRITE_TOKEN: '',
   };

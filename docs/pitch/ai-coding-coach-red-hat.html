@@ -1472,7 +1472,7 @@
         <h4>Architecture boundaries</h4>
         <p class="time">15:25–16:55</p>
         <p>Do not demo MCP. The published plugin currently omits the SDK dependency needed by its shim. This is evidence that MCP should stay an adapter decision, not the pitch.</p>
-        <p>Do not say the entire app is air-gapped. The core rule analysis is local; usage-limit probing, Ask Claude, and the opt-in audit judge have distinct egress rules.</p>
+        <p>Do not say the entire app is air-gapped. The core rule analysis is local; usage-limit probing and the opt-in audit judge have distinct egress rules.</p>
       </aside>
     </section>
 
@@ -1969,7 +1969,7 @@
         <div class="grid-2 grow nondet-grid">
           <div class="card greenline"><span class="status shipped">Automatic core</span><h3>102 pure rules; zero model calls</h3><p>Given the same normalized snapshot and clock, every registered detector produces the same output. The core recommendation path is offline and local.</p></div>
           <div class="card violetline"><span class="status partial">Four mixed rules</span><h3>Stable replay of variable upstream evidence</h3><p>Shadow-call and model-eval verdicts may vary when generated. Once stored, the four consuming detectors replay them byte-stably.</p></div>
-          <div class="card redline"><span class="status partial">Optional prose</span><h3>User-initiated or explicitly gated</h3><p>Ask Claude, local-model analysis, and the server audit judge can generate variable prose. They are separate surfaces and cannot silently upgrade a rule into proof.</p></div>
+          <div class="card redline"><span class="status partial">Optional prose</span><h3>User-initiated or explicitly gated</h3><p>Local-model analysis and the server audit judge can generate variable prose. They are separate surfaces and cannot silently upgrade a rule into proof.</p></div>
           <div class="card blueline"><span class="status partial">Proof runs</span><h3>Variable agents; reproducible objective machinery</h3><p>Agent outputs—and any model tie-breaker—can vary. Objective gates, statistics, and stop rules are deterministic; the receipt records the bounded result and uncertainty.</p></div>
         </div>
         <div class="bias-band" style="background:rgba(255,255,255,.07); border-color:#ff6683"><strong style="color:#ff98aa">Claim boundary</strong><p>A repeatable detector can still encode an author-specific regex, threshold, task taxonomy, or prescription. Auditability establishes reproducibility; only a broader cohort can test external validity.</p></div>
@@ -2037,7 +2037,7 @@
         <h2>Local-first—with explicit exceptions.</h2>
         <div class="grid-2 grow">
           <div class="card greenline stack"><span class="status shipped">Automatic core path</span><h3>What stays local</h3><ul class="clean-list"><li><span>Transcript and artifact parsing</span></li><li><span>Replay-stable recommendation generation</span></li><li><span>Evidence assembly and migrated structured provenance</span></li><li><span>Local browser/API delivery</span></li><li><span>Default recommendation analysis</span></li></ul></div>
-          <div class="card redline stack"><span class="status partial">Separately governed</span><h3>What can make a call</h3><ul class="clean-list"><li><span>A fixed one-token usage-header probe using configured access</span></li><li><span>User-initiated “Ask Claude” from the browser</span></li><li><span>Explicit opt-in audit judge after content scrubbing and spend caps</span></li><li><span>Future non-local sources only behind explicit flags, off by default</span></li></ul></div>
+          <div class="card redline stack"><span class="status partial">Separately governed</span><h3>What can make a call</h3><ul class="clean-list"><li><span>A fixed one-token usage-header probe using configured access</span></li><li><span>Explicit opt-in audit judge after content scrubbing and spend caps</span></li><li><span>Future non-local sources only behind explicit flags, off by default</span></li></ul></div>
         </div>
         <div class="callout"><div><strong>Safe sentence:</strong> “Core analysis never sends transcript content and is not in the inference path.” Avoid the broader—and false—claim that the entire app makes zero network calls.</div></div>
       </div>

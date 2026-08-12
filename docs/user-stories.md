@@ -510,7 +510,7 @@ click away.
 ## 3. View audit
 
 Walking the 18 top-level views (in `Layout.tsx` order) plus the
-modal-y views (`Settings`, `AskClaude`, `FileUpload`). For each: one
+modal-y views (`Settings`, `FileUpload`, and the retired browser assistant). For each: one
 line on what it does, the personas it serves, and the jobs it answers.
 Orphans are called out explicitly.
 
@@ -539,8 +539,8 @@ Modal / non-nav views:
 
 | View | File | Purpose | Verdict |
 |---|---|---|---|
-| **Settings** | `Settings.tsx` | API key + default model for Ask Claude | Keep as modal |
-| **Ask Claude** | `AskClaude.tsx` | Free-form "ask my dashboard questions" using the user's own key | Keep — but only valuable once the dashboard surfaces *less* on its own. Today it competes with Insights instead of complementing it |
+| **Settings** | `Settings.tsx` | Navigation preferences | Keep as modal |
+| **Retired browser assistant** | removed by #3734 | Former free-form dashboard Q&A using a browser-held key | Remove — the direct browser call site and credential surface no longer fit the product boundary |
 | **File Upload** | `FileUpload.tsx` | One-shot upload for someone without server access | Keep |
 
 ### Tally
@@ -914,10 +914,6 @@ Worth saying out loud, so the next contributor doesn't undo this:
   tab…). The ranking is the whole point. A user with a critical
   safety finding and a $0.05 cost finding should see the safety one
   on top, not have to know to click "Safety" to find it.
-- **Don't move Ask Claude to the top nav.** It is a fallback for
-  "the dashboard didn't anticipate my question." If we're surfacing
-  the right jobs, it's secondary.
-
 ---
 
 ## 8. How to use this document
