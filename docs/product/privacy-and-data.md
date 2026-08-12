@@ -25,10 +25,9 @@ features (ADR [0014](../adr/0014-tiered-delivery-model.md)):
 
 - **Local dashboard** — the full engine, reading your live `~/.claude` on your
   own machine. Nothing leaves.
-- **Upload-only SPA** — the public marketing build parses files you drop in,
-  **in your browser, statelessly**. It has no `~/.claude` mount and no `/api/*`
-  surface; any new server call is blocked by a CI boundary check
-  (`spa-boundary`). Nothing is stored server-side.
+- **Public sample** — the public marketing build renders only a bundled,
+  synthetic corpus. It has no upload affordance, `~/.claude` mount, or `/api/*`
+  surface; any new server call is blocked by `sample-boundary`.
 - **Self-hostable server** — the local engine deployed on infrastructure you
   control.
 

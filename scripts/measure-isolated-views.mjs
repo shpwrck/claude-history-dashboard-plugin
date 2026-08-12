@@ -5,9 +5,8 @@
 //   npm run build:sample                              # emits dist/sample-data.zip
 //   node scripts/measure-isolated-views.mjs [--port 4477]
 //
-// `build:sample` — NOT `build:spa` — is the prerequisite: vite.config.ts applies
-// sampleDataPlugin() only under `--mode sample`, so the spa/edge build ships no
-// mock data at all (ADR 0014) and its preview renders the empty upload-first UI.
+// `build:sample` is the prerequisite: vite.config.ts applies sampleDataPlugin()
+// only under `--mode sample`; a corpus-less output is not this benchmark.
 // Measuring that and calling it the sample-corpus benchmark is what this script
 // now refuses to do.
 //
@@ -25,8 +24,8 @@
 //   - BUILD: a `#root` div plus a hashed `/assets/*.js` entry is the shape of
 //     EVERY built Vite + React app, so the served `<title>` must also equal this
 //     repo's own index.html title.
-//   - CORPUS: `/sample-data.zip` must actually BE a ZIP. `npm run build:spa`
-//     emits none, and vite preview answers the missing path with index.html at
+//   - CORPUS: `/sample-data.zip` must actually BE a ZIP. A corpus-less build
+//     may have Vite preview answer the missing path with index.html at
 //     HTTP 200 — "200 and non-empty" would hash that HTML and call it a corpus.
 // Either failing ABORTS the run. An earlier revision labelled the corpus
 // UNVERIFIED and measured anyway, which caveats the problem instead of cutting
@@ -135,8 +134,8 @@ export const CORPUS_BUILD_COMMAND = 'npm run build:sample';
  * are what the report prints.
  *
  * The body must actually BE a ZIP. `sampleDataPlugin()` runs only under
- * `--mode sample` (vite.config.ts), so the documented `npm run build:spa` output
- * ships no `/sample-data.zip` at all — and Vite preview's SPA fallback answers
+ * `--mode sample` (vite.config.ts). A different output can omit the archive,
+ * and Vite preview's fallback then answers
  * unknown paths with index.html at HTTP 200 with a non-empty body. Accepting
  * "200 and non-empty" hashed that HTML and reported it as a verified corpus: a
  * proxy asserted as the real thing, which is the defect class this file exists
@@ -221,11 +220,8 @@ export function unverifiedCorpusMessage(corpus) {
     `${corpus.id}\n` +
     '  This benchmark reports render churn over the deterministic sample corpus,\n' +
     '  so it cannot publish numbers for a build that does not serve one — a\n' +
-    '  preview without sample-data.zip renders the EMPTY upload-first UI.\n' +
-    `  Rebuild with \`${CORPUS_BUILD_COMMAND}\` and re-run.\n` +
-    '  Note `npm run build:spa` does NOT emit sample-data.zip: vite.config.ts\n' +
-    '  applies sampleDataPlugin() only under `--mode sample`, because the edge\n' +
-    '  upload build deliberately ships no mock data (ADR 0014 / epic #1852).'
+    '  preview without sample-data.zip is not the public sample workload.\n' +
+    `  Rebuild with \`${CORPUS_BUILD_COMMAND}\` and re-run.`
   );
 }
 

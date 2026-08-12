@@ -61,7 +61,6 @@ const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mjs', '.js', '.cjs'];
 const SKIP_DIRECTORIES = new Set([
   'node_modules',
   'dist',
-  'dist-spa',
   'dist-sample',
   '.git',
   'coverage',

@@ -10,7 +10,7 @@
 // presence in the dist means the engine leaked into the browser build.
 //
 // Run once per browser flavor after its build (server frontend `npm run build`
-// AND SPA `npm run build:spa`), mirroring the spa-boundary dist-grep gate:
+// and public sample), mirroring the sample-boundary emitted-bundle gate:
 //   node scripts/check-engine-absent.mjs [distDir=dist]
 //
 // A leak is almost always a VALUE import of `src/lib/recommendations.ts` (or

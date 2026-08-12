@@ -9,8 +9,8 @@
 //   - a generic built Vite/React app (a #root div + a hashed /assets/*.js) is
 //     NOT accepted as this dashboard — a product-specific marker must match;
 //   - a body that is not a real ZIP archive is NOT accepted as the corpus,
-//     including the SPA-fallback index.html that `vite preview` returns with
-//     HTTP 200 for the absent /sample-data.zip under `npm run build:spa`;
+//     including fallback index.html that `vite preview` can return with
+//     HTTP 200 for an absent /sample-data.zip;
 //   - a verified preview yields build + corpus identifiers read from the
 //     response;
 //   - an unverifiable corpus or build ABORTS the run before any measurement,
@@ -240,8 +240,7 @@ test('corpusIdentity: reports UNVERIFIED rather than an assumed session count', 
   assert.match(present.id, /^sample-data\.zip \d+ bytes sha256:[0-9a-f]{16}$/);
 });
 
-// Review P1: `npm run build:spa` emits NO sample-data.zip (vite.config.ts gates
-// sampleDataPlugin on `--mode sample`), and vite preview's SPA fallback answers
+// Review P1: a corpus-less output has no sample-data.zip, and Vite preview answers
 // the missing path with index.html — HTTP 200, non-empty body. Hashing that HTML
 // and calling it a verified corpus is the same proxy-as-the-real-thing defect
 // this file exists to remove.
@@ -290,8 +289,7 @@ test('verifyTarget: a verified preview yields build + corpus provenance', async 
 // preview with no sample-data.zip the SPA renders the EMPTY upload-first UI, so
 // the published numbers are not the sample-corpus benchmark at all.
 test('verifyTarget: an unverifiable corpus aborts even when the build is verified', async () => {
-  // Exactly the `npm run build:spa` + `vite preview` shape: correct shell,
-  // SPA-fallback HTML for the absent archive.
+  // Correct shell, but fallback HTML for the absent archive.
   const responses = {
     '/': { status: 200, contentType: 'text/html', body: Buffer.from(SPA_SHELL) },
     '/sample-data.zip': {
@@ -306,7 +304,6 @@ test('verifyTarget: an unverifiable corpus aborts even when the build is verifie
       assert.match(err.message, /^UNVERIFIED /, 'names what could not be verified');
       // The operator must not be left guessing which build produces a corpus.
       assert.match(err.message, /npm run build:sample/);
-      assert.match(err.message, /build:spa/, 'says why the documented spa build fails');
       return true;
     }
   );
@@ -465,8 +462,7 @@ test('the script exits nonzero when a generic Vite app occupies the port', async
   }
 });
 
-// End-to-end: the exact `npm run build:spa` + `vite preview` situation — this
-// dashboard's real shell, but no sample-data.zip. The script must exit nonzero
+// End-to-end: this dashboard's real shell, but no sample-data.zip. The script must exit nonzero
 // BEFORE measuring and tell the operator which build to run instead.
 test('the script exits nonzero when the corpus cannot be verified, naming build:sample', async () => {
   const server = createServer((req, res) => {

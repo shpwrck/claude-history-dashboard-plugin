@@ -87,9 +87,9 @@ median-gated runs failed, and the unchanged rerun passed. The gate keeps all
 samples visible so sustained slowness remains diagnosable rather than moving a
 ceiling to hide the spread.
 
-The two flavors build into separate outDirs (`dist-server`, `dist-spa`) so the
+The two targets build into separate outDirs (`dist-server`, `dist-sample`) so the
 builds don't clobber each other, and preview on fixed, distinct ports (server →
-4473, upload SPA → 4474) so both can be measured in one run.
+4473, public sample → 4474) so both can be measured in one run.
 
 ## Baseline (FCP/TTI measured 2026-06-05; CP measured 2026-06-17, local dev box)
 
@@ -98,7 +98,7 @@ Five cold loads per flavor after a discarded warmup; medians:
 | Flavor       | FCP (median)      | TTI / `domInteractive` (median) | CP / content-painted (median) |
 |--------------|-------------------|---------------------------------|-------------------------------|
 | server SPA   | ~110 ms           | ~15 ms                          | ~104 ms                       |
-| upload SPA   | ~180 ms           | ~14 ms                          | ~169 ms                       |
+| public sample | ~180 ms          | ~14 ms                          | ~169 ms                       |
 
 (The original FCP/TTI baselines were ~200 ms / ~185 ms; the CP-run remeasure on
 the same harness landed FCP a touch lower — local hardware/version drift, well
@@ -111,7 +111,7 @@ will be higher and more variable.
 | Flavor       | `fcpMaxMs` | `ttiMaxMs` | `cpMaxMs` |
 |--------------|-----------:|-----------:|----------:|
 | server SPA   | 700        | 300        | 1500      |
-| upload SPA   | 700        | 300        | 1500      |
+| public sample | 700       | 300        | 1500      |
 
 **Why not a tight `baseline × 1.4`?** The natural formula would put the server
 FCP ceiling at ~285 ms and the TTI ceiling at ~18 ms. That's a footgun for a CI
@@ -168,16 +168,16 @@ node scripts/cold-load-measure.mjs
 npm run measure:cold-load
 
 # One flavor only
-node scripts/cold-load-measure.mjs --flavor spa
+node scripts/cold-load-measure.mjs --flavor sample
 
-# Reuse existing dist-server/ + dist-spa/ (skip the build)
+# Reuse existing dist-server/ + dist-sample/ (skip the build)
 node scripts/cold-load-measure.mjs --no-build
 
 # Just print the numbers, no gate (use this to re-baseline)
 node scripts/cold-load-measure.mjs --measure-only --json cold-load-results.json
 
 # Local investigation: throttle the CPU ×N (CDP) to surface JS-bound boot cost
-node scripts/cold-load-measure.mjs --flavor spa --measure-only --cpu-throttle 6
+node scripts/cold-load-measure.mjs --flavor sample --measure-only --cpu-throttle 6
 ```
 
 ## CI

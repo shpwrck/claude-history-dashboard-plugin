@@ -38,7 +38,7 @@ Replace the single gated total with **three independent budget classes**, each e
 
 `defaults.totalAdvisoryMaxBytes` is computed and reported for visibility but **never** fails CI.
 
-The CLI interface (`node scripts/check-bundle-size.mjs --flavor server|spa`), the exact-logical-name
+The CLI interface (`node scripts/check-bundle-size.mjs --flavor server`), the exact-logical-name
 chunk matcher (`chunkBaseName`), the rename guard (absent budgeted chunk = failure, now across all
 three classes), and the #1702 SPA/server boundary-marker guard are all preserved. The pure
 `evaluateStructuredBudget` keeps the gate unit-testable without a real build, exactly as the prior
@@ -79,3 +79,11 @@ genuinely runs at first paint and cannot be lazy-split or tree-shaken away.
   `hasExistingData` argument). Both were minimized before raising: #2450's state reuses the existing
   `ImportState` rather than a new eager hook so it DCEs from the SPA, and the count reads are all
   behind `SERVER_AVAILABLE &&`.
+
+- **2026-08-11 — #3735 (upload-only flavor retirement).** The dedicated
+  browser-upload artifact and its second frozen budget were removed. The
+  surviving public sample keeps its isolation and cold-load gates, while this
+  byte-budget contract covers the production server bundle only. The first
+  transition merge temporarily retained the old budget key solely so the
+  base-defined `spa-boundary` workflow could validate its own replacement; the
+  finalizing merge removes that bootstrap shim.

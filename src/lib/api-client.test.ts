@@ -633,7 +633,7 @@ describe('postCheckpointAnswer', () => {
     );
   });
 
-  it('is a network-free no-op in the SPA stub', async () => {
+  it('is a network-free no-op in the sample stub', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
@@ -717,7 +717,7 @@ describe('fetchAuditRun', () => {
 });
 
 describe('fetchSpaAuditRun', () => {
-  it('returns an explicit skipped response for upload-only mode', async () => {
+  it('returns an explicit skipped response for public-sample mode', async () => {
     await expect(fetchSpaAuditRun()).resolves.toEqual({
       status: 'skipped',
       reason: 'spa_unsupported',

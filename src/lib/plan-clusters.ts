@@ -6,7 +6,7 @@
  *
  * This lives in its OWN dependency-free leaf — NOT in `parse-plans.ts` — on
  * purpose: that module imports `node:fs` (directly and via `bounded-fs`,
- * which `parsePlansDir` needs), and in the SPA build `node:fs` resolves to an
+ * which `parsePlansDir` needs), and in the sample build `node:fs` resolves to an
  * empty stub that throws at module scope. The view's value import of
  * `clusterPlans` from the fs-touching module dragged the fs graph into the
  * PlanShapesPf view chunk and white-screened it on load. Browser code imports

@@ -1,13 +1,11 @@
 /**
- * Single server chokepoint (#324) — the SPA build stub.
+ * Single server chokepoint (#324) — the public-sample build stub.
  *
- * `vite build --mode spa` aliases `@api-client` to THIS module instead of
+ * `vite build --mode sample` aliases `@api-client` to THIS module instead of
  * `api-client.ts`. It mirrors the real client's exported surface exactly, but
  * contains NO server URL literals, NO `fetch`, and NO dataset-worker import — so
- * the SPA bundle is provably free of server-touching code (CI greps the emitted
- * `dist/` for `/api/`, `csrf-token`, `policy/write`, `EventSource`). The SPA is
- * upload-only: `SERVER_AVAILABLE === false` makes every consumer gate its
- * server-only UI off, and these functions are never called on the live path.
+ * the public bundle is provably free of server-touching code. With
+ * `SERVER_AVAILABLE === false`, every consumer gates its server-only UI off.
  */
 import type { DailyDigest, HistoryEntry } from '../types';
 import type { Usage } from './usage';
@@ -26,7 +24,7 @@ import type {
   RecommendationSurfaceResponse,
 } from './recommendation-surface';
 
-/** False in the SPA build — gates all server-only UI off. */
+/** False in the public sample build — gates all server-only UI off. */
 export const SERVER_AVAILABLE = false;
 
 export type AuditRunStatus = 'ran' | 'skipped' | 'failed';
@@ -355,18 +353,18 @@ export interface PolicyWriteResult {
   error?: string;
 }
 
-const UNAVAILABLE = 'Not available in the upload-only build';
+const UNAVAILABLE = 'Not available in the public sample';
 
 export function getEnterpriseAuthToken(): string | null {
   return null;
 }
 
 export function setEnterpriseAuthToken(): void {
-  /* no server auth in the upload-only build */
+  /* no server auth in the public sample */
 }
 
 export function clearEnterpriseAuthToken(): void {
-  /* no server auth in the upload-only build */
+  /* no server auth in the public sample */
 }
 
 export function clearEnterpriseBrowserSession(): Promise<void> {
@@ -423,7 +421,7 @@ export async function fetchLive(): Promise<unknown> {
 }
 
 export async function serverFetch(): Promise<Response> {
-  throw new Error('serverFetch is unavailable in the SPA build');
+  throw new Error('serverFetch is unavailable in the sample build');
 }
 
 export async function fetchMemories(): Promise<MemoriesResponse> {
@@ -474,7 +472,7 @@ export async function fetchAdoptionReceipts(): Promise<AdoptionReceipt[]> {
 }
 
 // Steer telemetry (#2203) is a server-tier read of a live ~/.claude log; the
-// upload-only SPA has no server, so this returns empty (the scorecard renders
+// public sample has no server, so this returns empty (the scorecard renders
 // its "no data" state).
 export async function fetchSteerTelemetry(): Promise<SteerRuleTelemetry[]> {
   return [];
@@ -484,7 +482,7 @@ export async function fetchTranscriptContent(): Promise<unknown[] | null> {
   return null;
 }
 
-// Never called on the live SPA path: client-parsed timelines (uploads, the
+// Never called on the live sample path: client-parsed timelines (uploads, the
 // sample corpus) are never slim, so SessionTimeline skips the lazy hydrate.
 export async function fetchSessionTimeline(
   _sessionId?: string,
@@ -521,13 +519,13 @@ export async function writePolicy(): Promise<PolicyWriteResult> {
 }
 
 // Recommendation reject-signal capture (#1294) is a server-tier write; the
-// upload-only SPA has no server to persist it, so this no-ops.
+// public sample has no server to persist it, so this no-ops.
 export type RejectSignalWriteResult = { ok: true } | { ok: false; error: string };
 export async function postRejectSignal(): Promise<RejectSignalWriteResult> {
   return { ok: false, error: UNAVAILABLE };
 }
 
-// Recommendation analysis (#2719) is computed by the server; the upload-only SPA
+// Recommendation analysis (#2719) is computed by the server; the public sample
 // has no server and does NOT run the detector catalog in the browser, so this
 // twin returns the network-free `unavailable` viewer state — no server URL, no
 // fetch, no detector import. Views degrade to the "run the local server for
@@ -542,7 +540,7 @@ export async function fetchRecommendationSurface(
   return { kind: 'unavailable' };
 }
 
-// Checkpoint answer persistence is server-tier. The upload-only SPA keeps the
+// Checkpoint answer persistence is server-tier. The public sample keeps the
 // interactive preview but emits no network call and carries no server literal.
 export type CheckpointAnswerWriteResult =
   | { ok: true; written: boolean }
@@ -555,7 +553,7 @@ export async function postCheckpointAnswer(
 }
 
 // Tier A "Analyze locally" (#2319) needs the server (it fronts the local model);
-// the upload-only SPA has no server, so this degrades to a deterministic result
+// the public sample has no server, so this degrades to a deterministic result
 // with no recommendations rather than erroring — matching the real client's
 // graceful-degradation contract. Carries no `/api/` literal.
 export async function analyzeLocal(
@@ -574,7 +572,7 @@ export async function analyzeLocal(
   };
 }
 
-// Session provisioning (#1251) is a server-tier feature; the upload-only SPA cannot reach a cluster.
+// Session provisioning (#1251) is a server-tier feature; the public sample cannot reach a cluster.
 export interface RemoteSessionPod {
   name: string;
   phase: string;

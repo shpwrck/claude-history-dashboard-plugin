@@ -8,8 +8,8 @@
 // and prove each class gates on its own and that a new lazy route cannot inflate
 // a shared number (the whole point of the restructure).
 //
-// `evaluateStructuredBudget` / `evaluateBudget` / `chunkBaseName` /
-// `findServerMarkers` are the pure core of scripts/check-bundle-size.mjs (the
+// `evaluateStructuredBudget` / `evaluateBudget` / `chunkBaseName` are the pure
+// core of scripts/check-bundle-size.mjs (the
 // CLI just wires them to the filesystem).
 
 import { describe, it, expect } from 'vitest';
@@ -21,8 +21,6 @@ import {
   evaluateStructuredBudget,
   evaluateBudget,
   chunkBaseName,
-  findServerMarkers,
-  SERVER_ONLY_MARKERS,
 } from '../../scripts/check-bundle-size.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -31,9 +29,9 @@ const budget = JSON.parse(
   readFileSync(join(REPO_ROOT, 'bundle-budget.json'), 'utf8'),
 );
 
-// Real measured sizes from clean origin/master (e321189) builds. The matcher
+// Real measured sizes from a clean production build. The matcher
 // keys on the logical chunk name (filename minus the trailing 8-char hash), so
-// we hand it hashed-looking names. Index differs by flavor; the fixture is split.
+// we hand it hashed-looking names.
 // #2719 (epic #2443): the viewer-only refactor removed the ~324 KB browser
 // `recommendations` engine chunk; the fixture now models the real `nav-prefs`
 // shared chunk that split out in its place (41,234 B in CI).
@@ -51,20 +49,6 @@ const MEASURED_BY_FLAVOR = {
     'SessionList-CXENs-RU.js': 32753,
     'TokenUsage-CgNAb11x.js': 26226,
     'Permissions-CPjVHr7T.js': 24737,
-  },
-  spa: {
-    'index-CzC7uEtR.js': 465640,
-    'LightweightCharts-Bos7EVXd.js': 8156,
-    'Td-CHlWUViI.js': 69495,
-    'FlexItem-BpXImNgo.js': 24287,
-    'MenuList-22n1dG9Q.js': 18529,
-    'nav-prefs-B0UrwUTf.js': 41234,
-    'Recommendations-BytKFQei.js': 65142,
-    'upload-pipeline-worker-BITohlXt.js': 82319,
-    'CostAttribution-Bf2aqhBm.js': 29696,
-    'SessionList-B7FXrTZ6.js': 28967,
-    'TokenUsage-I7qW9vTp.js': 26227,
-    'Permissions-Cx_SHffO.js': 24493,
   },
 };
 type Flavor = keyof typeof MEASURED_BY_FLAVOR;
@@ -89,7 +73,7 @@ describe('chunkBaseName', () => {
 });
 
 describe('evaluateStructuredBudget (#1852 Phase C / ADR 0016)', () => {
-  for (const flavor of ['server', 'spa'] as const) {
+  for (const flavor of ['server'] as const) {
     it(`${flavor}: passes at the committed class budgets against real measured sizes`, () => {
       const { files, sizeOf } = fixtureFor(flavor);
       const { ok, failures } = evaluateStructuredBudget(files, sizeOf, budget[flavor]);
@@ -105,7 +89,7 @@ describe('evaluateStructuredBudget (#1852 Phase C / ADR 0016)', () => {
       const sizeOf2 = (f: string) => (f === fatRoute ? 38000 : sizeOf(f));
       const { ok, rows } = evaluateStructuredBudget([...files, fatRoute], sizeOf2, budget[flavor]);
       const shellRow = rows.find((r: { cls: string }) => r.cls === 'shell');
-      expect(shellRow.actual).toBe(flavor === 'server' ? 474756 : 465640);
+      expect(shellRow.actual).toBe(474756);
       expect(ok).toBe(true); // 38000 < defaults.routeMaxBytes (40000)
     });
 
@@ -244,7 +228,7 @@ describe('evaluateStructuredBudget (#1852 Phase C / ADR 0016)', () => {
   });
 
   it('the budget file carries NO gated global total (totalJsMaxBytes is gone)', () => {
-    for (const flavor of ['server', 'spa'] as const) {
+    for (const flavor of ['server'] as const) {
       expect(budget[flavor]).not.toHaveProperty('totalJsMaxBytes');
       expect(budget[flavor]).toHaveProperty('shell');
       expect(budget[flavor]).toHaveProperty('vendor');
@@ -253,20 +237,7 @@ describe('evaluateStructuredBudget (#1852 Phase C / ADR 0016)', () => {
   });
 });
 
-describe('boundary guard + legacy evaluator', () => {
-  it('findServerMarkers flags a server dist measured against the spa budget (#1702)', () => {
-    const spaLike = ['index-CzC7uEtR.js', 'LightweightCharts-Bos7EVXd.js'];
-    const cleanContent = () => 'const x=1;export{x};';
-    expect(findServerMarkers(spaLike, cleanContent)).toBeNull();
-
-    const serverLike = ['index-hEGllWjd.js'];
-    const serverContent = () => 'fetch("/api/dataset.json")';
-    const hit = findServerMarkers(serverLike, serverContent);
-    expect(hit).not.toBeNull();
-    expect(hit?.file).toBe('index-hEGllWjd.js');
-    expect(SERVER_ONLY_MARKERS).toContain(hit?.marker);
-  });
-
+describe('legacy evaluator', () => {
   it('legacy evaluateBudget still works against a synthetic v1 block (migration shim)', () => {
     // Kept only so stragglers resolve during migration; not used by the CLI.
     const files = ['index-aaaaaaaa.js', 'LightweightCharts-bbbbbbbb.js'];

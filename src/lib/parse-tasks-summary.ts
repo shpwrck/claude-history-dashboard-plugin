@@ -5,7 +5,7 @@
  * thresholds, and `summarizeTasks` (a fold over already-parsed records). It
  * imports NO node built-ins, so browser-reachable code (e.g.
  * `src/components/TaskHealthPf.tsx`) can value-import it without dragging
- * `node:fs`/`node:path` into the SPA bundle.
+ * `node:fs`/`node:path` into the sample bundle.
  *
  * The fs-reading half — `parseTasksDir` and its options — lives in the
  * server-only `parse-tasks.ts`, which re-exports everything here so existing

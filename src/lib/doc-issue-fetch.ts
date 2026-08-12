@@ -7,7 +7,7 @@
  * `doc-issue-snapshot.ts`. It is invoked from `scripts/server.mjs` (async
  * refresh, in the request preamble) and `scripts/ingest.mjs` (sync validated
  * cache read only — ingest NEVER makes a network call). It is NOT imported by
- * the SPA bundle (it uses `node:fs`/`node:crypto` and the credential path).
+ * the sample bundle (it uses `node:fs`/`node:crypto` and the credential path).
  *
  * Design mirrors `github-review-sync.ts` (the #1127 review-events fetcher):
  * env-driven config with an `enabled` gate, an SSRF-fixed host, a slug guard, a

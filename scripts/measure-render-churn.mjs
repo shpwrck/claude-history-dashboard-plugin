@@ -10,9 +10,7 @@
 //     total longtask duration during that window is captured.
 //
 // Usage:
-//   npm run build:sample       # emits dist/sample-data.zip — `build:spa` does
-//                              # NOT: vite.config.ts applies sampleDataPlugin()
-//                              # only under `--mode sample` (ADR 0014)
+//   npm run build:sample       # emits dist/sample-data.zip
 //   node scripts/measure-render-churn.mjs [--port 4476]
 //   node scripts/measure-render-churn.mjs --sweep [--json]   # warm-nav settle sweep (#2395)
 //   node scripts/measure-render-churn.mjs --help
@@ -187,8 +185,7 @@ async function startPreview(port) {
     if (!free) break;
   }
   // The preview we just spawned must verify too — it may be serving a
-  // sample-corpus-less `build:spa` dist, which renders the empty upload-first
-  // UI (see the usage block above).
+  // corpus-less dist, which is not the public sample workload.
   try {
     const provenance = await verifyTarget(port);
     return { proc, provenance };
@@ -1062,7 +1059,7 @@ function printHelp() {
   console.log(`measure-render-churn — render-churn / warm-nav-settle measurement harness
 
 Usage:
-  npm run build:sample     (build:spa does NOT emit the sample corpus)
+  npm run build:sample     (emits the deterministic sample corpus)
   node scripts/measure-render-churn.mjs [options]
 
 Options:

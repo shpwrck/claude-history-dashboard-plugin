@@ -1,19 +1,25 @@
-# 0003 — Public SPA hosting: ship the upload-only build publicly while source stays private
+# 0003 — Public upload hosting while source stays private (superseded)
 
-- **Status:** Accepted (2026-07-22 — the public SPA channel is live; originally research for #326)
+- **Status:** Superseded by #3735 (2026-08-11)
 - **Date:** 2026-06-01
 - **Deciders:** repo owner
 - **Related:** #324 (the `spa` build target), #325 (the published SPA image),
   #326 (this research), and the eventual SPA/server productization split.
+
+> **Supersession note.** Issue #3735 retired the upload-only browser flavor,
+> its edge-coach Pages channel, standalone image, and compose deployment. The
+> public sample at `coach.skrzypek.dev` remains supported and retains the
+> browser-only `@api-client` stub plus the `sample-boundary` publish gate. The
+> material below records the historical decision; it is not an active runbook.
 
 ## Context
 
 We want a live, public, zero-backend demo of the dashboard: visitors load their
 own `~/.claude` `*.jsonl` exports through the upload UI, nothing is baked in, and
 there is no server. The `spa` build (#324) already produces exactly this
-artifact — `vite build --mode spa` aliases the single server chokepoint
+artifact — the retired upload target aliased the single server chokepoint
 `@api-client` to a no-op stub (`src/lib/api-client.spa.ts`), and the
-`spa-boundary` CI job (`.github/workflows/ci.yml`) greps the emitted bundle for
+historical browser-boundary CI job grepped the emitted bundle for
 `/api/|csrf-token|policy/write|EventSource` and fails on any hit. So the *bytes*
 that would go public are already provably free of server-touching code and read
 no host data.
@@ -50,7 +56,7 @@ SPA artifact to a *separate public repo*, and drive both from this repo.**
 
 ### Option A — Build here, push `dist/` to a separate public repo's Pages ✅ recommended
 
-A workflow **in this private repo** runs `npm run build:spa` and pushes the
+A workflow **in this private repo** built the retired upload target and pushed the
 resulting `dist/` to a public repo (e.g. `shpwrck/claude-history-dashboard-demo`)
 whose Pages is enabled. The public repo holds only built static assets — never
 source. Releases stay driven from here (the workflow lives here, triggers on
@@ -92,7 +98,7 @@ Turn on Pages for this repo; a workflow builds `spa` and deploys via the officia
 
 ### Option C — Publish the existing `…-spa` GHCR image as the deploy artifact
 
-We already push `ghcr.io/shpwrck/claude-history-dashboard-spa:latest` (#325). A
+At the time, the project also pushed a dedicated upload-image package (#325). A
 Pages deploy could pull that image, extract `/usr/share/nginx/html`, and publish
 it.
 
@@ -102,7 +108,7 @@ it.
 - **Benefit:** the published bytes are *exactly* the released image's bytes (one
   source of truth).
 - **Trade-off:** strictly more complex than building `dist/` directly in the
-  workflow, for a marginal provenance gain. The `spa-boundary` CI already
+  workflow, for a marginal provenance gain. The browser-boundary CI already
   guarantees the `dist/` is clean, so the extra indirection isn't buying safety.
 - **Verdict:** not worth it now; revisit only if image/demo drift becomes a real
   problem.
@@ -131,7 +137,7 @@ prefer it unless a custom domain is already wanted.
 
 ## Security / data-leak check
 
-- The published artifact is the `spa` build, which the `spa-boundary` CI job
+- The published artifact was the upload build, whose browser-boundary CI job
   already proves contains none of `/api/`, `csrf-token`, `policy/write`,
   `EventSource`. The implementation workflow MUST run (or depend on) that same
   boundary check before publishing, so a regression can't ship server strings to

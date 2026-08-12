@@ -5,7 +5,7 @@
 // sourcemap (`dist/assets/*.js` + sibling `.js.map`). No new dependency, no
 // bundler plugin — it post-processes a sourcemap build. Run:
 //
-//   npx vite build --mode spa --sourcemap   # (or --mode production for server)
+//   npx vite build --mode sample --sourcemap   # (or production for server)
 //   node scripts/analyze-bundle.mjs --dist dist
 //
 // Flags:

@@ -12,7 +12,7 @@
  * BEFORE serialization keeps the export parseable by every consumer. Properly
  * paired surrogates (real emoji) are preserved untouched.
  *
- * Pure and dependency-free so it is safe to import from both the SPA bundle and
+ * Pure and dependency-free so it is safe to import from both the sample bundle and
  * the register-ts server runtime (which ships no node_modules).
  */
 

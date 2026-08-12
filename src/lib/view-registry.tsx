@@ -239,13 +239,13 @@ const ModelEvals = lazy(() =>
   import('../components/ModelEvalsPf').then((m) => ({ default: m.ModelEvalsPf }))
 );
 // Recs Adoption Scorecard (#577, ADR 0005 "Demo artifact"). Server-only: it
-// self-fetches the dashboard-owned receipt store; the SPA stub returns [].
+// self-fetches the dashboard-owned receipt store; the sample stub returns [].
 const AdoptionScorecard = lazy(() =>
   import('../components/AdoptionScorecard').then((m) => ({
     default: m.AdoptionScorecardPf,
   }))
 );
-// Server-tier session provisioning (#1251); kept out of the upload-only SPA bundle.
+// Server-tier session provisioning (#1251); kept out of the public sample bundle.
 const SessionProvisioning = lazy(() =>
   import('../components/SessionProvisioning').then((m) => ({
     default: m.SessionProvisioningPf,
@@ -272,10 +272,10 @@ const ExperimentSegment = lazy(() =>
     default: m.ExperimentSegment,
   }))
 );
-// Keep the admin-only live-server view out of the upload-only SPA bundle.
+// Keep the admin-only live-server view out of the public sample bundle.
 const EnterpriseAdminUnavailable = () => null;
 const EnterpriseAdmin =
-  import.meta.env.MODE === 'spa' || import.meta.env.MODE === 'sample'
+  import.meta.env.MODE === 'sample'
     ? EnterpriseAdminUnavailable
     : lazy(() =>
         import('../components/EnterpriseAdmin').then((m) => ({

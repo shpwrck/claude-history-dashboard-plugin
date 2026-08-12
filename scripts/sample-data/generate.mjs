@@ -1,6 +1,6 @@
 // Standalone sample-data generator (issue #526) — `npm run generate:sample`.
 //
-// The SPA build generates `sample-data.zip` automatically via the Vite plugin
+// The sample build generates `sample-data.zip` automatically via the Vite plugin
 // in vite.config.ts; this script is the manual escape hatch for inspecting or
 // hand-shipping the bundle. It writes `sample-data.zip` to the repo root
 // (gitignored) and prints a coverage summary. It is NOT part of any build.

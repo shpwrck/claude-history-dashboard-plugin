@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Inbound SPA/server boundary gate (#2081 — the inbound half of the #324 split).
 //
-// The `spa-boundary` CI job guards the OUTBOUND direction: it builds the SPA
+// The `sample-boundary` CI job guards the OUTBOUND direction: it builds the sample
 // (which aliases @api-client to a no-op stub) and fails if any server-touching
 // string survives in the emitted bundle. That is one-directional. This gate
 // guards the INBOUND direction: it asserts that every dashboard-server call
@@ -42,16 +42,16 @@ export const NETWORK_OWNERS = [
   'lib/api-client.ts', // THE chokepoint — owns every /api/ server call
   'lib/api-client.spa.ts', // its no-op SPA-build alias (no server strings)
   'lib/dataset-worker.ts', // the worker api-client delegates the dataset fetch to (#162); the URL is a param, not a literal
-  'lib/dataset-slice-worker.ts', // #2448 off-thread slice decoder (sibling of dataset-worker.ts); slice URLs are params, not literals; imported only by the aliased-away instant-load.ts so it never reaches the SPA bundle
-  'lib/instant-load.ts', // #2443 boot-first loader — a LAZY chunk DCE'd from the SPA build (dynamic-imported only under `if (SERVER_AVAILABLE)`), so its /api/ literals never reach the upload bundle
+  'lib/dataset-slice-worker.ts', // #2448 off-thread slice decoder; slice URLs are params, not literals; imported only by the aliased-away instant-load.ts so it never reaches the sample bundle
+  'lib/instant-load.ts', // #2443 boot-first loader — DCE'd from the sample build under `if (SERVER_AVAILABLE)`, so its server literals never reach the public bundle
   'lib/sample-data.ts', // fetches the build-time static sample zip (SPA tier, no server involved)
   // — Governed server-side egress (#2963: were evading the old call-syntax
   //   regex via aliasing; now allowlisted BY DECISION, each under its own
   //   governance regime, none a dashboard-server call) —
   'lib/anthropic-egress.ts', // ADR 0008 server-side Anthropic chokepoint; every call site is separately gated by the AST-scanning check-llm-egress.mjs + llm-registry.ts
   'lib/local-model-client.ts', // ADR 0018 Tier A local-analyze transport — LOOPBACK ONLY by construction (assertLoopbackEndpoint refuses non-loopback hosts); flag-off default makes zero network calls
-  'lib/github-review-sync.ts', // #1127 server-only opt-in GitHub review-event sync — env-gated off by default per the non-local-data rule; never imported by the SPA bundle
-  'lib/doc-issue-fetch.ts', // #2710 server-only opt-in GitHub GraphQL doc-issue snapshot — env-gated, SSRF-fixed host, credential never serialized; never imported by the SPA bundle
+  'lib/github-review-sync.ts', // #1127 server-only opt-in GitHub review-event sync — env-gated off by default per the non-local-data rule; never imported by the sample bundle
+  'lib/doc-issue-fetch.ts', // #2710 server-only opt-in GitHub GraphQL doc-issue snapshot — env-gated, SSRF-fixed host, credential never serialized; never imported by the sample bundle
 ];
 
 // The non-fetch network constructors that open a direct connection outside the
@@ -288,7 +288,7 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
       console.error(`  src/${v.file}:${v.line}: ${v.text}`);
     }
     console.error(
-      '\nRoute dashboard-server calls through src/lib/api-client.ts (the spa-boundary' +
+      '\nRoute dashboard-server calls through src/lib/api-client.ts (the sample-boundary' +
         ' job guards the outbound half), and do not alias the global fetch —' +
         ' accept an injected fetchImpl WITHOUT a `?? fetch` fallback instead. If this' +
         ' module is a genuine network owner (a governed egress chokepoint), add it to' +

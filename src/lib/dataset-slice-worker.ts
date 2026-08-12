@@ -26,7 +26,7 @@
 //
 // URLs arrive as PARAMS (no `/api/` literal lives here). It is imported only by
 // instant-load.ts, which the SPA/sample build aliases to a stub, so this chunk
-// never reaches the upload-only bundle.
+// never reaches the public sample bundle.
 
 import { fetchSliceBatch, type SliceBatch } from './dataset-slice-fetch';
 

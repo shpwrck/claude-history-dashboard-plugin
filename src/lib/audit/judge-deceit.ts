@@ -16,7 +16,7 @@
  * this audit is inherently SERVER-ONLY — it runs inside the tier-3 harness
  * behind `/api/audit.json` (#605/#738), reusing that harness's {@link JudgeFn}
  * and {@link AuditFinding} contract rather than inventing a parallel surface
- * (the #687 product-tier coordination note). It NEVER ships in the SPA bundle.
+ * (the #687 product-tier coordination note). It NEVER ships in the sample bundle.
  *
  * Shape (mirrors the sibling audits):
  *   - {@link seedDeceitCandidates} — PURE, deterministic seed. Picks substantive

@@ -160,8 +160,8 @@ function freshDefaults(): NavPrefs {
 // dataset (epic #1852, ADR 0014). `serverData` views just need a rich dataset —
 // shown on the sample showcase (full corpus) and on a user upload that covers
 // them; `liveServer` views need the live backend control plane and stay out of
-// the public SPA builds entirely (they also carry server-touching code that the
-// `spa-boundary` gate forbids). See {@link variantCapabilities}.
+// the public sample builds entirely (they also carry server-touching code that the
+// `sample-boundary` gate forbids). See {@link variantCapabilities}.
 /**
  * A route's page-contract class (#2350, epic #2345): what job the page holds
  * itself to. `action` pages exist to fix/decide (copy/write/drill affordances
@@ -596,7 +596,7 @@ export const SERVER_DATA_VIEWS = new Set<View>(
   NAV_ITEMS.filter((i) => i.requires === 'serverData').map((i) => i.view)
 );
 
-/** Views needing the live backend control plane — excluded from public SPA builds. */
+/** Views needing the live backend control plane — excluded from public sample builds. */
 export const LIVE_SERVER_VIEWS = new Set<View>(
   NAV_ITEMS.filter((i) => i.requires === 'liveServer').map((i) => i.view)
 );

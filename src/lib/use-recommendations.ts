@@ -18,7 +18,7 @@ import {
  *
  * The browser no longer runs the detector catalog. This hook fetches the
  * server-computed `{ recommendations, domainCoverage }` envelope for a scoped
- * surface (via the `@api-client` reader, which the SPA build aliases to a
+ * surface (via the `@api-client` reader, which the sample build aliases to a
  * network-free `unavailable` twin) and exposes a discriminated async state:
  *
  *   loading | ready | error | unavailable

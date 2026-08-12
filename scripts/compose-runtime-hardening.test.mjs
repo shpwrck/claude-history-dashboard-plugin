@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(SCRIPTS_DIR, '..');
 const COMPOSE = readFileSync(join(PROJECT_DIR, 'docker-compose.yml'), 'utf8');
-const SPA_COMPOSE = readFileSync(join(PROJECT_DIR, 'docker-compose.spa.yml'), 'utf8');
 const TLS_COMPOSE = readFileSync(join(PROJECT_DIR, 'docker-compose.tls.yml'), 'utf8');
 const LINES = COMPOSE.split(/\r?\n/);
 const APP_SERVICE = serviceBlock('app');
@@ -204,10 +203,6 @@ for (const destination of ['/home/node/.claude', '/home/node/.claude.json']) {
 check(
   'base compose pins the published app image by digest',
   allImageReferencesAreImmutable(COMPOSE)
-);
-check(
-  'standalone SPA compose pins the published image by digest',
-  allImageReferencesAreImmutable(SPA_COMPOSE)
 );
 check(
   'TLS compose pins the reverse-proxy image by digest',

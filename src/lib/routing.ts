@@ -5,7 +5,7 @@
  * last-view (see `nav-prefs.ts`); this module makes that state *addressable* so
  * digest cards deep-link into raw views and any view is a shareable URL —
  * without a router dependency and without server rewrite rules (so the GitHub
- * Pages SPA build keeps working unchanged).
+ * Pages sample build keeps working unchanged).
  *
  * URL shape:
  *   #/cost?time=24h&project=All+projects

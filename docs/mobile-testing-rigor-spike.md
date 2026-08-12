@@ -12,7 +12,7 @@ relitigate them:
 
 - **"Not in CI."** `.github/workflows/browser-compat.yml` now runs the Playwright
   suite on **every PR** (the `changes`/docs-only gate skips it only for docs-only
-  PRs), serving the `build:spa` bundle. Mobile regressions now gate PRs.
+  PRs), serving the public sample bundle. Mobile regressions now gate PRs.
 - **"iOS Safari not exercised."** The suite runs a **`mobile-webkit`** project
   (the real WebKit/Safari engine, iPhone 12 profile at 390×844) alongside
   `mobile-chromium` and `desktop-chromium`. A Safari-only break fails CI.
@@ -62,7 +62,7 @@ Add device/viewport projects (small/large/landscape/tablet) and richer
 assertions (tap-target size, no vertical content cutoff, a mobile interaction
 flow) to the harness that already exists and already gates CI.
 
-- **Pros:** zero new infra; reuses the self-hosted runner, the `build:spa`
+- **Pros:** zero new infra; reuses the self-hosted runner, the sample-build
   serving glue, `REACHABLE_VIEWS`, and the existing assertion helpers; real
   WebKit engine already in place; incremental and low-flakiness.
 - **Cons:** still emulation, not a physical device; more projects = more wall

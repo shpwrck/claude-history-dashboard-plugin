@@ -97,5 +97,5 @@ caching / invalidation against the stamp. The in-app trigger-button automation
   automation later). Until then the map is generated on demand by running the
   generator on the host.
 - The runtime container never runs Tree-sitter; the SPA never imports it
-  (`spa-boundary` stays satisfied). The zero-`node_modules` runtime invariant
+  (`sample-boundary` stays satisfied). The zero-`node_modules` runtime invariant
   is untouched.

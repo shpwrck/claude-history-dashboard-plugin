@@ -27,7 +27,7 @@
  *
  * This module computes ONLY over the data CostAttribution already receives
  * (`Recommendation[]` claims + `SessionTokenData[]`). No new server call — it
- * routes everything through the existing rollup, so `spa-boundary` stays green.
+ * routes everything through the existing rollup, so `sample-boundary` stays green.
  */
 import { isoWeekStart } from './weekly-delta';
 import {

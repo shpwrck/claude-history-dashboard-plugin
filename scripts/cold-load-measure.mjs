@@ -6,13 +6,13 @@
 // bundle-size regression, a render-blocking import, or a boot-path change can
 // silently blow without tripping the byte budget.
 //
-// It measures, per SPA flavor, against the PUBLISHED build served by `vite
+// It measures each shipped browser target against the published build served by `vite
 // preview` (NOT dev — dev's unbundled module graph is not representative):
 //   - First Contentful Paint (FCP) — performance.getEntriesByType('paint')
 //   - Time-to-Interactive proxy (TTI) — domInteractive, the moment the parser
 //     finished and the document is interactive. A real PerformanceObserver
 //     longtask TTI needs sustained network/CPU-idle heuristics that are noisy in
-//     a sample-data SPA with no server; domInteractive is the stable, repeatable
+//     a sample-data browser build with no server; domInteractive is the stable, repeatable
 //     proxy the bundle-budget sibling's spirit calls for.
 //   - Content-Painted (CP) — time until #root first has a rendered child element
 //     (a MutationObserver fires the instant React mounts its first node). For
@@ -31,8 +31,8 @@
 // contention. See #3720 and docs/perf-sprint/cold-load.md.
 //
 // Run it locally (builds both flavors itself unless --no-build):
-//   node scripts/cold-load-measure.mjs                 # both flavors, gate
-//   node scripts/cold-load-measure.mjs --flavor spa    # one flavor
+//   node scripts/cold-load-measure.mjs                    # both targets, gate
+//   node scripts/cold-load-measure.mjs --flavor sample    # one target
 //   node scripts/cold-load-measure.mjs --json out.json # also write JSON results
 //   node scripts/cold-load-measure.mjs --no-build      # reuse existing dist-*/
 //   node scripts/cold-load-measure.mjs --measure-only  # print numbers, no gate
@@ -55,7 +55,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
 
 // Per-flavor preview config. Distinct ports so both flavors can be measured in
-// one run without collision (server → 4473, spa → 4474, per #663). Each flavor
+// one run without collision (server → 4473, sample → 4474, per #663). Each target
 // builds into its own dist dir so the two builds never clobber each other (both
 // default to `dist`).
 const FLAVORS = {
@@ -65,11 +65,11 @@ const FLAVORS = {
     port: 4473,
     buildArgs: ['vite', 'build', '--outDir', 'dist-server'],
   },
-  spa: {
-    label: 'upload SPA',
-    dist: 'dist-spa',
+  sample: {
+    label: 'public sample',
+    dist: 'dist-sample',
     port: 4474,
-    buildArgs: ['vite', 'build', '--mode', 'spa', '--outDir', 'dist-spa'],
+    buildArgs: ['vite', 'build', '--mode', 'sample', '--outDir', 'dist-sample'],
   },
 };
 
@@ -494,7 +494,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log('\n✓ Cold-load gate PASSED: all flavors within budget.\n');
+  console.log('\n✓ Cold-load gate PASSED: all targets within budget.\n');
 }
 
 main().catch((err) => die(err.stack || err.message));

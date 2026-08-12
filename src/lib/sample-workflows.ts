@@ -1,17 +1,17 @@
-// Sample Workflow-tool runs for the marketing SPA (issue #537).
+// Sample Workflow-tool runs for the public sample (issue #537).
 //
 // The Workflow view (#435) reads `workflows/wf_*.json` run manifests via the
 // `/api/workflows` endpoint. Like Insights and Memories, that data CANNOT ride
-// the upload zip (the uploader keeps only `.jsonl`), and the SPA stub returns
+// the bundled corpus (which keeps only `.jsonl`), and the sample stub returns
 // `{ runs: [] }`, so in demo mode the ledger would render empty. This module
 // builds a representative raw `WorkflowsResponse` that App.tsx runs through the
 // real `parseWorkflows` when sample mode activates.
 //
 // Lazy-imported (only when demo mode turns on) so it stays off the cold-load
-// path and out of real uploads. Runs are templated over the ACTUAL sample
+// path. Runs are templated over the ACTUAL sample
 // session ids (passed in at load time) so each run's parent-session link joins
 // a real demo session — mirroring how sample-insights templates its facets.
-// Content is entirely synthetic; no `/api/` literals (spa-boundary clean).
+// Content is entirely synthetic; no `/api/` literals (sample-boundary clean).
 
 import type { WorkflowsResponse, RawWorkflowRun } from './parse-workflows';
 import { CURRENT_MODEL_IDS } from './model-registry';

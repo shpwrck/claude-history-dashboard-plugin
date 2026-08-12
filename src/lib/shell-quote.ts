@@ -11,7 +11,7 @@
  * drifted apart. This module is the thing to reach for.
  *
  * Dependency-free and browser-safe on purpose: `config-hygiene-actions.ts` and
- * `repeated-command-snippet.ts` ship in the SPA bundle, so this leaf must not
+ * `repeated-command-snippet.ts` ship in the sample bundle, so this leaf must not
  * import `node:*` (or anything else).
  *
  * ## What quoting does and does not buy you

@@ -59,7 +59,7 @@ not on the MVP critical path. Within each track the order is strict.
    unblocks the blob client.
 2. **S2 — `public-image` boot CI gate + runtime `Dockerfile` + `/healthz` (doc 10 §4/§5).** Proves the
    dependency-free image boots `/healthz` with **zero `node_modules`** (the #1013 crash-loop guard,
-   ADR 0011 §8), keeps `spa-boundary` green, and runs under OpenShift `restricted-v2` SCC (arbitrary
+   ADR 0011 §8), keeps `sample-boundary` green, and runs under OpenShift `restricted-v2` SCC (arbitrary
    UID, GID-0 group-writable `/app/.cache`, no hardcoded `runAsUser`). `/healthz` is a single
    unconditional route, above any gate (C7).
 

@@ -84,4 +84,4 @@ it to start sparse; seed it from the dead speed data points as the wiring backlo
   1. **Navigate** — drill to the detail view / session (the `onOpenSession` / `onNavigate` fabric). The floor; every datum gets at least this.
   2. **Copy** — `CopyButton` for any snippet the app already computes (`/compact`, `@path` pin, prune command, cheaper-model key, `json.tool` repair).
   3. **In-app write** — the PolicyBuilder model (preview diff → confirm → write `settings.json`) for *safe* config changes, extended to model-routing and resource-pruning where the patch is unambiguous.
-  - **SPA-mode degradation:** SPA can't write to `~/.claude`, so tier-3 writes **degrade to tier-2 copy** there (gated through `src/lib/api-client.ts` per the spa-boundary contract). No card may depend on a write that has no copy fallback.
+  - **SPA-mode degradation:** SPA can't write to `~/.claude`, so tier-3 writes **degrade to tier-2 copy** there (gated through `src/lib/api-client.ts` per the sample-boundary contract). No card may depend on a write that has no copy fallback.

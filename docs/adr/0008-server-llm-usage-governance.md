@@ -6,7 +6,7 @@ Supersedes: none — **scopes** (does not amend) the blanket "no api.anthropic.c
 Related: epic #930 (decomposition), ADR [0003](0003-public-spa-hosting.md) (public SPA hosting),
 ADR [0005](0005-recs-adoption-measurable-impact.md) (recs free-path rule — **unchanged**),
 #467 (public multi-tenant Coach), #683/#687/#923 (judge-audit family), #605/#594 (product tiers),
-the `spa-boundary` CI job (the enforcement precedent)
+the `sample-boundary` CI job (the enforcement precedent)
 
 ## Context
 
@@ -52,7 +52,7 @@ untouched.
 
 ### 2. The hard guarantee is machine-checked, not a doc
 
-A single server **chokepoint** `callAnthropic(registryId, req)` — the `spa-boundary` pattern
+A single server **chokepoint** `callAnthropic(registryId, req)` — the `sample-boundary` pattern
 (centralize-then-stub through one seam) applied to *outbound* LLM calls. Rule A and Rule B both
 route through it. The chokepoint enforces the registry entry **per call**:
 
@@ -61,7 +61,7 @@ route through it. The chokepoint enforces the registry entry **per call**:
 - Rule `B` (`credential: console-key`) → **require the egress-scrub stage ran and the cap check
   passed** before the request leaves.
 
-A `spa-boundary`-style CI gate asserts (a) no raw `api.anthropic.com` / Messages-API call exists
+A `sample-boundary`-style CI gate asserts (a) no raw `api.anthropic.com` / Messages-API call exists
 in server code outside the chokepoint, and (b) every `registryId` has a complete manifest entry.
 The human-readable `docs/llm-usage-registry.md` is **generated from the manifest** so it cannot
 drift. Result: "undocumented call" and "wrong-credential-for-the-data" are both structurally
@@ -210,7 +210,7 @@ independently auditable by the sealer rather than relying on the issue prompt's 
 
 ### Positive
 - The guarantee is structural, not aspirational: an undocumented or wrong-credential API call
-  cannot compile/pass CI, mirroring the proven `spa-boundary` enforcement.
+  cannot compile/pass CI, mirroring the proven `sample-boundary` enforcement.
 - The schema is forward-compatible: the #467 multi-tenant model flips exposure fields, with no
   call-site re-cut and a gate that *starts requiring* the phase-2 controls automatically.
 - The named public-release dependencies (local-model egress scrub, tenancy isolation, per-IP

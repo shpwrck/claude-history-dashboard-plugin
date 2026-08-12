@@ -6,7 +6,7 @@
  *
  * This lives in its OWN dependency-free leaf — NOT in `parse-telemetry.ts` —
  * on purpose. `parse-telemetry.ts` transitively imports `node:fs` (via
- * `bounded-fs`, which `parseTelemetryDir` needs), and in the SPA build
+ * `bounded-fs`, which `parseTelemetryDir` needs), and in the sample build
  * `node:fs` resolves to an empty stub that throws at module scope. A value
  * import of `analyzeReliability`/`aggregateModelLatency` from the fs-touching
  * module dragged the fs graph into the ReviewQueuePf / AgentReportCardPf view

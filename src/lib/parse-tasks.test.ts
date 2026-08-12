@@ -481,7 +481,7 @@ describe('blocked-task pileup gate logic (>=2)', () => {
 // ── SPA/server boundary (#2960) — structural, not Vite-stub-dependent ─────────
 // The pure summarize half lives in the node-free leaf `parse-tasks-summary.ts`
 // so browser-reachable code can value-import it without pulling `node:fs` into
-// the SPA bundle. These source-contract checks fail at unit-test time — before
+// the sample bundle. These source-contract checks fail at unit-test time — before
 // any build — if the leaf gains a node import or the browser component reaches
 // back to the server-only `parse-tasks` for a value.
 describe('SPA/server boundary (#2960)', () => {

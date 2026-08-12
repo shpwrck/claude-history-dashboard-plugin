@@ -4,7 +4,7 @@
  * The exported dataset is intentionally transcript-free: it contains PR ids,
  * reviewer logins, request state, and timestamps, never prompt or transcript
  * content. The dashboard server calls this module from scripts/ingest.mjs; it is
- * not imported by the SPA bundle.
+ * not imported by the sample bundle.
  */
 import { readTextFileCappedSync as cappedRead } from './capped-read';
 import { createHash } from 'node:crypto';

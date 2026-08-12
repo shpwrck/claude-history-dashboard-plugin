@@ -1,15 +1,15 @@
 // Instant-load boot-first fetcher (#2443, epic #1852) — a LAZY, server-only chunk.
 //
 // App dynamic-imports this ONLY inside `if (SERVER_AVAILABLE)`, so:
-//   - it is DCE'd out of the SPA build (its `/api/` literals never reach the
-//     upload-only bundle — spa-boundary stays clean), and
+//   - it is DCE'd out of the sample build (its `/api/` literals never reach the
+//     public sample bundle — sample-boundary stays clean), and
 //   - it stays OUT of the eager server shell (the frozen first-paint bundle cap,
 //     ADR 0016); as a dynamic import it rides its own lazy-route budget.
 //
 // It makes raw network calls, so it is a registered NETWORK_OWNER
 // (scripts/check-inbound-boundary.mjs) — the ONE exception to the api-client
 // chokepoint, justified because the code must be a standalone lazy chunk and the
-// chunk is physically absent from the SPA bundle.
+// chunk is physically absent from the sample bundle.
 
 import {
   getEnterpriseAuthToken,

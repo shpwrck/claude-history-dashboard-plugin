@@ -334,11 +334,11 @@ npm run lint
 npm test
 npm run test:enterprise-auth
 rm -rf dist && npx vite build && node scripts/check-bundle-size.mjs --flavor server
-rm -rf dist && npm run build:spa && node scripts/check-bundle-size.mjs --flavor spa
+rm -rf dist && npm run build:sample && npm run gate:sample-boundary
 ```
 
-For the upload-only SPA build, also scan the emitted bundle for server strings as
-documented in `AGENTS.md`; the SPA must not include `/api/*`, CSRF, policy-write,
+For the public sample build, also scan the emitted bundle for server strings as
+documented in `AGENTS.md`; the sample must not include `/api/*`, CSRF, policy-write,
 or `EventSource` surfaces.
 
 ## Limits To State Clearly

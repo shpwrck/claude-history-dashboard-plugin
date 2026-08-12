@@ -11,7 +11,7 @@ The easy-to-miss load-bearing checks are:
 | Check | Workflow | Why it matters |
 | --- | --- | --- |
 | `non-empty-diff` | `.github/workflows/pr-nonempty.yml` (PR has a diff) | guards against empty PRs |
-| `spa-boundary` | `.github/workflows/ci.yml` (Lint and build) | keeps SPA builds from importing server-only routes directly |
+| `sample-boundary` | `.github/workflows/ci.yml` (Lint and build) | keeps the public sample from importing server-only routes |
 | `test` | `.github/workflows/test.yml` (Unit tests) | catches parser/UI regressions |
 | Full CI rollup | all PR workflows | every non-skipped required-for-this-PR job must pass; pending or absent checks are not green |
 

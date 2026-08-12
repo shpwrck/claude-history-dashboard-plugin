@@ -18,7 +18,7 @@ export const CONTAINER_PUBLISH_WORKFLOW = '.github/workflows/docker-publish.yml'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_MANIFEST_BYTES = 64 * 1024;
-const BUILD_MODES = ['server', 'spa', 'plain'];
+const BUILD_MODES = ['server', 'plain'];
 const MANIFEST_KEYS = ['images', 'schemaVersion'];
 const ENTRY_KEYS = ['buildMode', 'context', 'id', 'image', 'recipe'];
 
@@ -124,9 +124,7 @@ export function inspectContainerImageManifest(root = REPO_ROOT) {
   const images = new Set();
   const recipes = new Set();
   let serverModeCount = 0;
-  let spaModeCount = 0;
   let serverIdSeen = false;
-  let spaIdSeen = false;
   for (const [index, candidate] of parsed.images.entries()) {
     const label = `container image manifest images[${index}]`;
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
@@ -155,22 +153,15 @@ export function inspectContainerImageManifest(root = REPO_ROOT) {
     const contextProblem = checkedRelativePath(context, { allowDot: true });
     if (contextProblem) reasons.push(`${label}.context ${contextProblem}`);
     if (!BUILD_MODES.includes(buildMode)) {
-      reasons.push(`${label}.buildMode must be one of server, spa, plain`);
+      reasons.push(`${label}.buildMode must be one of server, plain`);
     } else {
       if (buildMode === 'server') serverModeCount += 1;
-      if (buildMode === 'spa') spaModeCount += 1;
     }
     if (id === 'server') {
       serverIdSeen = true;
       if (buildMode !== 'server') reasons.push(`${label} reserved id server must use buildMode server`);
     } else if (buildMode === 'server') {
       reasons.push(`${label}.buildMode server is reserved for id server`);
-    }
-    if (id === 'spa') {
-      spaIdSeen = true;
-      if (buildMode !== 'spa') reasons.push(`${label} reserved id spa must use buildMode spa`);
-    } else if (buildMode === 'spa') {
-      reasons.push(`${label}.buildMode spa is reserved for id spa`);
     }
     if (!recipeProblem && !contextProblem && !recipeInsideContext(recipe, context)) {
       reasons.push(`${label}.recipe ${recipe} is not inside build context ${context}`);
@@ -186,12 +177,8 @@ export function inspectContainerImageManifest(root = REPO_ROOT) {
     entries.push({ id, image, recipe, context, buildMode });
   }
   if (!serverIdSeen) reasons.push('container image manifest must declare reserved id server');
-  if (!spaIdSeen) reasons.push('container image manifest must declare reserved id spa');
   if (serverModeCount !== 1) {
     reasons.push(`container image manifest must declare exactly one server buildMode (found ${serverModeCount})`);
-  }
-  if (spaModeCount !== 1) {
-    reasons.push(`container image manifest must declare exactly one spa buildMode (found ${spaModeCount})`);
   }
 
   const manifestHash = createHash('sha256').update(source).digest('hex');
@@ -310,7 +297,7 @@ jobs:
           build_args=()
           while IFS= read -r t; do [ -n "$t" ] && build_args+=(-t "$t"); done <<< "$TAGS"
           while IFS= read -r l; do [ -n "$l" ] && build_args+=(--label "$l"); done <<< "$LABELS"
-          if [ "$BUILD_MODE" = server ] || [ "$BUILD_MODE" = spa ]; then
+          if [ "$BUILD_MODE" = server ]; then
             build_args+=(--build-arg "GIT_SHA=$GIT_SHA" --build-arg "RELEASE_TAG=$RELEASE_TAG")
           fi
           docker build "\${build_args[@]}" -f "$RECIPE" "$BUILD_CONTEXT"

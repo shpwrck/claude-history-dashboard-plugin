@@ -39,7 +39,7 @@ opened outside the original CLI.
 - Supports live reload from disk for new sessions in the server build.
 - Provides token, cost, tool, context, permission, error, and file-impact
   surfaces.
-- Offers an upload-only SPA for local parsing without a backend.
+- Offers a public synthetic-data sample and a local server for private data.
 
 ## Product Implications
 

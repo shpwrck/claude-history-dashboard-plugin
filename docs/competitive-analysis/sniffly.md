@@ -38,7 +38,7 @@ errors, and patterns — without sending data to a cloud service.
   impact, runtime events, recommendations, and native `/insights` ingestion.
 - A local **recommendation engine** ("Claude Coach") that feeds both UI and
   agent behavior, plus the efficiency-accounting direction.
-- Dual mode: live server **and** upload-only SPA.
+- Dual mode: live local server **and** public synthetic-data sample.
 
 ## Product Implications
 

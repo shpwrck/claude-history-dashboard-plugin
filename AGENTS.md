@@ -190,21 +190,16 @@ ineligible, so the two loops never grab the same issue.
     and must stay **host-side** — never in the zero-node_modules runtime
     container (ADR 0007, #1013/#1195). `npm run deploy:pull` refreshes then runs
     the published-image path; `scripts/deploy.sh --no-refresh` skips the refresh.
-- SPA build (#324/#325): `npm run build:spa` (`vite build --mode spa`) emits the
-  upload-only static bundle. Deploy it standalone with the **self-contained**
-  `docker-compose.spa.yml` (nginx image `Dockerfile.spa`, host port 8325, **no
-  `~/.claude` bind mount, no `/api/*`**):
-  `CHD_SPA_IMAGE=localhost/claude-history-dashboard-spa:local podman compose -f docker-compose.spa.yml up --build -d`, verify on
-  `http://127.0.0.1:8325`. The same publish workflow pushes
-  `ghcr.io/shpwrck/claude-history-dashboard-spa:latest` + `:sha-<short>`. Any new
-  server call MUST route through `src/lib/api-client.ts` or the `spa-boundary` CI
-  job fails — see the SPA/server split note below.
+- Public sample build (#324/#3735): `npm run build:sample` emits the static
+  showcase published to `coach.skrzypek.dev`. Any new server call MUST route
+  through `src/lib/api-client.ts` or the `sample-boundary` CI job fails. This is
+  a publish artifact, not a separately supported container deployment.
 
 ## Worktrees & the shared checkout
 
 **Create a git worktree before any branch-scoped work in this repo — do not commit,
 branch, or stash in the main checkout.** The main checkout
-(`project/claude-history-dashboard`) and the standing `chd-main` / `chd-spa`
+(`project/claude-history-dashboard`) and the standing `chd-main`
 instances are each a single working directory that **more than one live agent
 session can share at once**. A working tree has exactly one HEAD, so a `git checkout`
 in one session is a global mutation that drags HEAD, the index, and tracked files
@@ -234,7 +229,7 @@ longer performs. Open the PR via `gh pr create`, then merge it ONLY once **both*
 hold:
 
 1. **CI is green** — every required GitHub check has passed (not pending, not
-   absent). The `PR has a diff` (`pr-nonempty.yml`), `spa-boundary`, and `test`
+   absent). The `PR has a diff` (`pr-nonempty.yml`), `sample-boundary`, and `test`
    jobs are load-bearing here; a missing/empty-diff PR must never be merged (see
    [`docs/adr/0001-squash-merge-missing-commits.md`](./docs/adr/0001-squash-merge-missing-commits.md)).
 2. **Self-review passed** — run a self-review pass on the diff (in Claude Code,

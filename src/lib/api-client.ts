@@ -4,10 +4,10 @@
  * Every call the frontend makes to the dashboard's own backend lives here and
  * NOWHERE else: each server URL literal (`/api/...`, `/history.jsonl`) and the
  * dataset Web Worker are owned by this module. That centralization is what makes
- * the SPA build's hard boundary provable — `vite build --mode spa` aliases this
+ * the public sample's hard boundary provable — `vite build --mode sample` aliases this
  * module to `api-client.spa.ts` (a no-op stub with no URL literals and no
- * worker import), so server-touching code is physically *absent* from the SPA
- * bundle rather than merely disabled. The CI guard greps the emitted `spa`
+ * worker import), so server-touching code is physically *absent* from the sample
+ * bundle rather than merely disabled. The CI guard greps the emitted sample
  * `dist/` for these literals and fails if any survive.
  *
  * `SERVER_AVAILABLE` is the build-target flag consumers read to gate server-only
@@ -48,7 +48,7 @@ import {
 } from './recommendation-surface';
 import { parseHistoryJsonl } from './parse-history';
 
-/** True in the server build; the SPA stub exports `false`. */
+/** True in the server build; the public-sample stub exports `false`. */
 export const SERVER_AVAILABLE = true;
 
 export type AuditRunStatus = 'ran' | 'skipped' | 'failed';
@@ -715,7 +715,7 @@ export async function datasetCacheKey(token: string | null): Promise<string | nu
 // with the React commit. Resolves the parsed dataset; rejects on fetch/parse
 // failure (the caller's try/catch falls back to manual upload). The worker is
 // one-shot and terminated as soon as it replies. This is the ONLY importer of
-// dataset-worker.ts, so the worker chunk is absent from the SPA bundle.
+// dataset-worker.ts, so the worker chunk is absent from the sample bundle.
 async function fetchDatasetViaWorker(
   url: string,
   onFresh?: (data: unknown) => void
@@ -947,8 +947,8 @@ export async function fetchAdoptionReceipts(): Promise<AdoptionReceipt[]> {
  * Read the per-rule PreToolUse-steer telemetry rollup (#2203): fire-count +
  * followed/ignored + misfire tags, aggregated from the existing steer log. The
  * server route is read-only; never called on dataset load. The `/api/steer-telemetry`
- * literal is owned here so the SPA build (aliased to api-client.spa.ts) carries
- * no server string — the spa-boundary gate depends on it.
+ * literal is owned here so the sample build (aliased to api-client.spa.ts) carries
+ * no server string — the sample-boundary gate depends on it.
  */
 export async function fetchSteerTelemetry(): Promise<SteerRuleTelemetry[]> {
   const res = await serverFetch('/api/steer-telemetry', {
@@ -1117,8 +1117,8 @@ export type RejectSignalWriteResult = { ok: true } | { ok: false; error: string 
  * Record that the user rejected a recommendation, with a reason
  * (`dismiss` / `wrong` / `not-relevant`). Fetches the per-process CSRF token
  * then POSTs to the capture route. The `/api/recommendations/reject` literal is
- * owned here so the SPA build (aliased to api-client.spa.ts, which no-ops this)
- * carries no server string — the spa-boundary gate depends on it. Resolves a
+ * owned here so the sample build (aliased to api-client.spa.ts, which no-ops this)
+ * carries no server string — the sample-boundary gate depends on it. Resolves a
  * normalized result; never rejects.
  */
 export async function postRejectSignal(
@@ -1153,7 +1153,7 @@ export async function postRejectSignal(
  * Fetch server-computed recommendation analysis for a scoped view surface
  * (#2719, epic #2443). The browser is a viewer: it consumes the typed #2718
  * `{ recommendations, domainCoverage }` envelope instead of running the detector
- * catalog. The `/api/recommendations.json` literal is owned here so the SPA build
+ * catalog. The `/api/recommendations.json` literal is owned here so the sample build
  * (aliased to api-client.spa.ts, which returns `unavailable` without a fetch)
  * carries no server string. A non-OK response or transport failure THROWS — the
  * caller maps that to an `error` state — so a failed load can never render as a
@@ -1225,8 +1225,8 @@ export async function postCheckpointAnswer(
  * Tier A "Analyze locally" (#2319, ADR 0018). POST the current recommendation
  * scope to the server, which runs a LOCAL model over the SAME deterministic
  * recommendation call sites. The `/api/analyze/local` literal is owned ONLY here
- * so the SPA build (aliased to api-client.spa.ts) carries no server string — the
- * spa-boundary gate depends on it.
+ * so the sample build (aliased to api-client.spa.ts) carries no server string — the
+ * sample-boundary gate depends on it.
  *
  * Governance: the server route's only egress is a loopback local model; there is
  * NO Anthropic fallback. Never rejects — a down server or an unreachable local
@@ -1271,8 +1271,8 @@ export async function analyzeLocal(
 }
 
 // --- Session provisioning (#1251, Slice 1) -------------------------------------------------------
-// The `/api/sessions` literals are owned ONLY here so the SPA build (aliased to api-client.spa.ts)
-// carries no server strings — the spa-boundary gate depends on it.
+// The `/api/sessions` literals are owned ONLY here so the sample build (aliased to api-client.spa.ts)
+// carries no server strings — the sample-boundary gate depends on it.
 
 export interface RemoteSessionPod {
   name: string;

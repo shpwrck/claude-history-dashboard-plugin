@@ -10,7 +10,7 @@ import { computeSessionOutcomes } from './parse-timeline-success';
 // From the fs-free leaf, NOT `./parse-telemetry`: this module is bundled into
 // the browser ReviewQueuePf chunk, and a value import of the fs-touching
 // parser drags the node:fs graph into that chunk, which throws at module
-// scope in the SPA build (#3639, the #3613 failure mode).
+// scope in the sample build (#3639, the #3613 failure mode).
 import {
   analyzeReliability,
   RETRY_STORM_THRESHOLD,

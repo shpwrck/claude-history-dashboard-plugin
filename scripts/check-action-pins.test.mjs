@@ -71,24 +71,12 @@ function fixtureImage(overrides = {}) {
   };
 }
 
-function fixtureSpaImage(overrides = {}) {
-  return {
-    id: 'spa',
-    image: 'example/dashboard-spa',
-    recipe: 'Dockerfile.spa',
-    context: '.',
-    buildMode: 'spa',
-    ...overrides,
-  };
-}
-
-function fixtureImages(serverOverrides = {}, spaOverrides = {}) {
-  return [fixtureImage(serverOverrides), fixtureSpaImage(spaOverrides)];
+function fixtureImages(serverOverrides = {}) {
+  return [fixtureImage(serverOverrides)];
 }
 
 function writeFixtureRecipes(root) {
   writeFileSync(join(root, 'Dockerfile'), `FROM node@sha256:${'0'.repeat(64)}\n`);
-  writeFileSync(join(root, 'Dockerfile.spa'), `FROM node@sha256:${'0'.repeat(64)}\n`);
 }
 
 function writeCanonicalPublisher(root) {
@@ -766,7 +754,6 @@ test('#3064/#3513: the complete declared published-recipe inventory is scanned a
   const files = listPublishedImageFiles();
   assert.deepEqual(files.map((absolute) => relative(process.cwd(), absolute)), [
     'Dockerfile',
-    'Dockerfile.spa',
     'probaitio-operator/Dockerfile',
     'probaitio-operator/Dockerfile.dispatch',
   ]);
@@ -779,23 +766,22 @@ test('#3064/#3513: the complete declared published-recipe inventory is scanned a
   }
 });
 
-test('#3513: the live publisher and gate consume one valid four-image manifest', () => {
+test('#3513/#3735: the live publisher and gate consume one valid three-image manifest', () => {
   const inspected = inspectContainerImageManifest();
   assert.deepEqual(inspected.reasons, []);
   assert.deepEqual(inspected.entries.map((entry) => entry.id), [
     'server',
-    'spa',
     'dispatch',
     'operator-sdk',
   ]);
   assert.deepEqual(publisherWorkflowDriftReasons(), []);
   assert.deepEqual(publisherCapabilityReasons(), []);
   const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'docker-publish.yml'), 'utf8');
-  assert.match(workflow, /4 sequential dind jobs \(the former publisher used one job\)/);
+  assert.match(workflow, /3 sequential dind jobs \(the former publisher used one job\)/);
   assert.match(workflow, /fail-fast: true\n\s+max-parallel: 1/);
 });
 
-test('#3513: manifest schema and reserved server/SPA publication modes fail closed', () => {
+test('#3513/#3735: manifest schema and reserved server publication mode fail closed', () => {
   const root = mkdtempSync(join(tmpdir(), 'container-manifest-modes-'));
   try {
     writeFixtureRecipes(root);
@@ -817,10 +803,11 @@ test('#3513: manifest schema and reserved server/SPA publication modes fail clos
     assert.match(demoted, /reserved id server must use buildMode server/);
     assert.match(demoted, /exactly one server buildMode \(found 0\)/);
 
-    writeContainerManifest(root, fixtureImages({ buildMode: 'spa' }, { buildMode: 'server' }));
-    const swapped = inspectContainerImageManifest(root).reasons.join('\n');
-    assert.match(swapped, /reserved id server must use buildMode server/);
-    assert.match(swapped, /reserved id spa must use buildMode spa/);
+    writeContainerManifest(root, fixtureImages({ buildMode: 'browser' }));
+    assert.match(
+      inspectContainerImageManifest(root).reasons.join('\n'),
+      /buildMode must be one of server, plain/
+    );
 
     writeFileSync(join(root, 'Dockerfile.extra'), 'FROM scratch\n');
     writeContainerManifest(root, [
@@ -836,12 +823,6 @@ test('#3513: manifest schema and reserved server/SPA publication modes fail clos
     assert.match(
       inspectContainerImageManifest(root).reasons.join('\n'),
       /exactly one server buildMode \(found 2\)/
-    );
-
-    writeContainerManifest(root, [fixtureImage()]);
-    assert.match(
-      inspectContainerImageManifest(root).reasons.join('\n'),
-      /exactly one spa buildMode \(found 0\)/
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1117,7 +1098,6 @@ test('#3506 INERT: every image-input walker explicitly refuses symlinked scoped 
   try {
     writeFileSync(join(root, 'recipe-target'), 'FROM node:24-slim\n');
     symlinkSync('recipe-target', join(root, 'Dockerfile'));
-    writeFileSync(join(root, 'Dockerfile.spa'), `FROM node@sha256:${'0'.repeat(64)}\n`);
     writeContainerManifest(root, [fixtureImage()]);
 
     const runnerDirectory = join(root, 'deploy', 'arc', 'runner-image');

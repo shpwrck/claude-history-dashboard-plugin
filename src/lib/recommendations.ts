@@ -408,7 +408,7 @@ function collapseUnattendedIntoDangerousBypass(recs: Recommendation[]): void {
  * suppression is reversible — un-rejecting a finding drops its id from the set,
  * so it reappears on the next build. Pure and non-mutating: returns a NEW array
  * when any finding is filtered, and the input reference unchanged on the
- * empty-set fast path (no receipts → no copy), so the browser/SPA path — which
+ * empty-set fast path (no receipts → no copy), so the browser/sample path — which
  * has no receipts — is byte-identical.
  */
 export function suppressRejectedRecommendations(

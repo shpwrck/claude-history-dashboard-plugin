@@ -13,7 +13,7 @@ ADR [0008](0008-server-llm-usage-governance.md) (server LLM-usage governance —
 
 Today there are two deployment flavors: the **server** build (reads one host's live
 `~/.claude` from disk, incrementally ingests into a signature-keyed SQLite cache, #627) and the
-**SPA** build (upload-only, parses the whole corpus in the browser). Remote sessions "like my
+historical browser-upload build (retired by #3735). Remote sessions "like my
 laptop" are systemd-managed `claude remote-control` instances, one per project dir, all reading
 that one host's `~/.claude` (the `add-remote` skill).
 

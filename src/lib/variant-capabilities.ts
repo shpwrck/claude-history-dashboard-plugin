@@ -13,8 +13,8 @@
  *    user **upload** shows the ones its own data covers; a **server** has them all.
  *  - `liveServer` — the view needs the live backend control plane (e.g. Enterprise
  *    admin roster, remote-session provisioning). Only the **server** tier has it,
- *    and these stay excluded from the public SPA builds — both because they cannot
- *    function and because their server-touching code would trip the `spa-boundary`
+ *    and these stay excluded from the public sample builds — both because they cannot
+ *    function and because their server-touching code would trip the `sample-boundary`
  *    publish gate.
  */
 import { SERVER_AVAILABLE } from '@api-client';
@@ -52,7 +52,7 @@ export function deliveryVariant(
 const CAPABILITIES: Record<DeliveryVariant, VariantCapabilities> = {
   // coach.skrzypek.dev — static showcase: full app on the sample corpus, no upload.
   sample: { showUpload: false, hasServerData: true, hasLiveServer: false },
-  // edge-coach.skrzypek.dev — analyse your own data client-side; no live backend.
+  // Public browser-only variants have no live backend.
   upload: { showUpload: true, hasServerData: false, hasLiveServer: false },
   // self-hosted / live server — everything (further narrowed by enterprise session caps).
   server: { showUpload: true, hasServerData: true, hasLiveServer: true },

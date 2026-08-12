@@ -4,10 +4,9 @@ Measured against the sample build (`npm run build:sample`) with the 18-session
 deterministic sample corpus (`build-corpus.mjs`, seed `0x5eed1234`), served via
 `vite preview` on port 4476/4477. Chromium headless via Playwright.
 
-> **`build:sample`, not `build:spa`.** This doc previously said `build:spa`,
+> **Use `build:sample`.** This doc previously pointed at the retired upload target,
 > which cannot be right: `vite.config.ts` applies `sampleDataPlugin()` only
-> under `--mode sample`, so the spa/edge build emits no `sample-data.zip` and its
-> preview renders the empty upload-first UI (ADR 0014 / epic #1852).
+> under `--mode sample`; a corpus-less output cannot represent this benchmark.
 > `scripts/measure-isolated-views.mjs` now verifies the served corpus and
 > **aborts** rather than measuring an empty UI, so the old instruction would
 > fail immediately.
@@ -281,7 +280,7 @@ wins in every build mode.
 
 ```sh
 # 1. Build with the sample corpus. ONLY `--mode sample` emits sample-data.zip
-#    (vite.config.ts); `npm run build:spa` is the upload-first build and ships
+#    (vite.config.ts); other outputs do not ship
 #    no mock data, so its preview renders an EMPTY UI.
 npm run build:sample
 

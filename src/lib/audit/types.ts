@@ -12,7 +12,7 @@
  * This module is RUNTIME server-only: `scripts/server.mjs` imports it behind
  * the `/api/audit.json` route. `api-client.ts`, `api-client.spa.ts`, and
  * `Recommendations.tsx` take TYPE-only imports (erased at build), so no
- * runtime code is ever pulled into the SPA bundle (the SPA has no API key and
+ * runtime code is ever pulled into the sample bundle (the SPA has no API key and
  * no `/api/*`).
  */
 

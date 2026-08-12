@@ -34,7 +34,7 @@ planes remain follow-on work.
 | Container runtime posture | The runtime image runs as the unprivileged `node` user, and the base compose service makes the image filesystem read-only, drops all Linux capabilities, denies privilege escalation, keeps Claude mounts read-only, and limits writable state to `/app/.cache` plus bounded `/tmp` tmpfs. |
 | Transport posture | Enterprise posture marks loopback or HSTS-enabled deployments as clean and broad service binds without app-level HSTS as action-required. |
 | Credential hygiene | Admin posture flags raw static bearer secrets, short raw bearer tokens, malformed SHA-256 fingerprints, and recommends SHA-256 fingerprints or RS256 JWTs for production. Duplicate static/bootstrap credentials fail closed, static token config parsing is byte-capped, raw static credentials are converted to fingerprints in principal records after parsing, and oversized bearer credentials, including the raw bootstrap admin token, are rejected before hashing or JWT parsing. |
-| SPA boundary | The upload-only SPA build remains separate: no `/api/*`, no host mounts, and no backend attack surface. The server build remains the live-data, auth-gated product. |
+| Public-sample boundary | The public sample remains browser-only: no `/api/*`, no host mounts, and no backend attack surface. The server build remains the live-data, auth-gated product. |
 
 ## Route Access Policy Matrix
 
@@ -104,7 +104,7 @@ trust-boundary, threat, mitigation, and residual-risk review.
 
 Run `npm run gate:enterprise-readiness` before a CTO demo or paid-pilot
 handoff. It composes the mechanical auth/posture, LLM-egress, server-scale,
-route-inventory, repo-map, server-bundle, SPA-boundary, and SPA-bundle checks
+route-inventory, repo-map, server-bundle, and public-sample boundary checks
 into one pass/fail receipt. It complements, but does not replace, the live host
 checks in the deployment guide.
 

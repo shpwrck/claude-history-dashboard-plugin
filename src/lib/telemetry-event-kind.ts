@@ -9,7 +9,7 @@
  * browser-bundled `upload-artifacts.ts` into `parse-telemetry.ts` perturbed
  * Rollup's chunking enough to pull that fs graph into a browser VIEW chunk — the
  * `node:fs` `O_RDONLY` constant leaked into the Recommendations render path and
- * the render-smoke e2e failed. (The bundle-size / spa-boundary gates don't catch
+ * the render-smoke e2e failed. (The bundle-size / sample-boundary gates don't catch
  * an fs leak; only render-smoke does.) Keeping the predicate in a pure leaf lets
  * both parsers import the SAME predicate with no fs edge from the browser side.
  *

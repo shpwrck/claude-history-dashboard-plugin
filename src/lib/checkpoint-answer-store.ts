@@ -5,7 +5,7 @@
  * owns the filesystem boundary: sanitize again, append one allowlisted JSONL
  * row, and aggregate immutable first-seen evidence plus monotonic correction
  * state for each checkpoint instance. It imports only Node builtins plus types,
- * so it stays outside the SPA bundle.
+ * so it stays outside the sample bundle.
  */
 import { appendFile, mkdir, open } from 'node:fs/promises';
 import { dirname } from 'node:path';

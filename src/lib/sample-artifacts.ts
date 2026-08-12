@@ -1,10 +1,10 @@
-// Sample #539 ingest artifacts for the marketing SPA (epic #539; follows the
+// Sample #539 ingest artifacts for the public sample (epic #539; follows the
 // sample-memories.ts / sample-workflows.ts pattern from #537/#526).
 //
 // The 11 #539 artifacts (tasks, teams, sessions, telemetry, debug, stats-cache,
 // file-history, plans, last-update, mcp-auth, backups) are SERVER-ONLY: they are
 // read live from `~/.claude/` and CANNOT ride the upload zip (the uploader keeps
-// only `.jsonl`). In the SPA the dataset omits them, so the five new views (Task
+// only `.jsonl`). In the sample corpus the dataset omits them, so the five new views (Task
 // Health, Team Coordination, Task Plans, Pulse, Agent Report Card) and the
 // #539 detectors would render empty in demo mode. This module ships representative
 // data in the exact shapes those views/parsers consume, so App.tsx can inject it
@@ -16,7 +16,7 @@
 // three generators must stay mutually consistent to produce a sensible
 // KEEP/FLAG/MOVE spread, so they live together. Lazy-imported (only when demo
 // mode turns on). Content is entirely synthetic — no real paths/secrets, no
-// `/api/` literals (spa-boundary clean).
+// `/api/` literals (sample-boundary clean).
 
 import type { TaskRecord } from './parse-tasks';
 import type { TeamSummary } from './parse-teams';
@@ -507,7 +507,7 @@ export function buildSampleShadowCalls(): ShadowCallAggregate {
  *
  * This ships a small, hand-authored `RepoMapDataset` in the exact join shape
  * the detector consumes (NO parser invocation — no `web-tree-sitter` is pulled
- * into the SPA bundle or the server runtime image). Three files are read-only
+ * into the sample bundle or the server runtime image). Three files are read-only
  * (no churn), re-read across multiple sessions, and structurally pinnable: an
  * exported-API client (`stable-api`, also high-centrality), a config-backed
  * types module (`config-backed`), and a shared formatter (`stable-api`). The
@@ -516,7 +516,7 @@ export function buildSampleShadowCalls(): ShadowCallAggregate {
  * waste). The detector then surfaces exactly one card naming the three files,
  * their exported symbols, and the re-paid token cost.
  *
- * Fully synthetic — no real paths or secrets, no `/api/` literals (spa-boundary
+ * Fully synthetic — no real paths or secrets, no `/api/` literals (sample-boundary
  * clean) — and a pure literal, so the drift guard in `sample-artifacts.test.ts`
  * can assert the exact card it produces.
  */

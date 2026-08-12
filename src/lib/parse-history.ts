@@ -264,4 +264,4 @@ export function groupWorktrees(projects: ProjectStats[]): RepoGroup[] {
 
 // `loadDefaultHistory()` (the `/history.jsonl` fallback fetch) moved to
 // `api-client.ts` (#324) so the server URL lives only in the aliased-away
-// chokepoint and never reaches the SPA bundle.
+// chokepoint and never reaches the sample bundle.

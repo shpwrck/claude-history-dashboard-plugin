@@ -25,12 +25,12 @@
 // reviewable PR. Deliberately NOT refreshed here (and why), so the coverage is
 // honest rather than assumed:
 //
-//   * Dockerfile, Dockerfile.spa, probaitio-operator/Dockerfile{,.dispatch}
+//   * Dockerfile and probaitio-operator/Dockerfile{,.dispatch}
 //     bases (node/nginx/golang/distroless) — TAGGED, so Dependabot's docker
 //     ecosystem raises those bumps. Refreshing them here too would only open
 //     duplicate PRs.
-//   * ghcr.io/shpwrck/claude-history-dashboard{,-spa}:latest in
-//     docker-compose.yml / docker-compose.spa.yml — our OWN images, rebuilt and
+//   * ghcr.io/shpwrck/claude-history-dashboard:latest in docker-compose.yml —
+//     our own image, rebuilt and
 //     republished on every push to master by docker-publish.yml. They are not
 //     an external-CVE staleness risk, and auto-bumping them would churn a PR
 //     every week for a digest we already move ourselves.

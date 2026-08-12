@@ -38,8 +38,8 @@
 // not know the styles at all. The region markers also live inside that opaque
 // subtree, so their comment nodes never reach React's child diff.
 //
-// SPA/static hosts are unaffected by design: the vite plugin only injects for the
-// default (server) build, so `--mode spa|sample` index.html is byte-identical and
+// Static sample hosting is unaffected by design: the Vite plugin only injects for
+// the default (server) build, so the sample index.html remains static and
 // src/main.tsx falls back to createRoot when the shell is absent.
 
 import type { DatasetBoot } from './dataset-boot';
@@ -277,7 +277,7 @@ export function injectShellIntoTemplate(
 /**
  * RUNTIME rewrite of the built index.html, replacing the skeleton shell region +
  * boot script content with real data. Pure string splice on exact markers / tag
- * boundaries (no regex). If the shell markers are absent (e.g. an SPA build served
+ * boundaries (no regex). If the shell markers are absent (e.g. an sample build served
  * here, or a build without injection), returns html UNCHANGED — a safe no-op, so
  * the server path degrades to the static skeleton rather than erroring.
  */

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Per-flavor JS bundle-size budget gate (#664, epic #638).
+// Production JS bundle-size budget gate (#664, epic #638).
 //
 // PF6 + the victory/react-charts stack make it easy to bloat the bundle with no
 // guardrail. This script reads the emitted `dist/assets/*.js` for ONE build
@@ -7,24 +7,18 @@
 // exceeds the ceiling committed in bundle-budget.json. It reuses the vite build
 // output; no new bundler, no manifest plugin.
 //
-// Run it right after a flavor's build, against that flavor's dist/:
+// Run it right after the production build:
 //   npx vite build      && node scripts/check-bundle-size.mjs --flavor server
-//   npm run build:spa   && node scripts/check-bundle-size.mjs --flavor spa
 //
-// Wired into .github/workflows/ci.yml (the `build` job covers server, the
-// `spa-boundary` job covers spa) so a PR that regresses past the budget fails
+// Wired into .github/workflows/ci.yml's `build` job so a PR that regresses past the budget fails
 // CI. Raise the budget deliberately — with justification — when growth is real;
 // the baselines carry ~5% headroom so normal churn does not trip it.
 //
-// `--flavor spa` also refuses to run against a stale/wrong SERVER dist (#1702):
-// the spa ceilings are tighter, so measuring a leftover `npx vite build` output
-// as if it were a SPA build trips the gate on a bundle that was never built as a
-// SPA. Since a real SPA build can't carry the server-only boundary markers, one
-// turning up means you forgot `npm run build:spa` — the gate says so instead of
-// reporting a phantom regression.
-//
 // Flags:
-//   --flavor server|spa   (required) which budget block to enforce
+//   --flavor server       production budget block to enforce
+//   --flavor spa          temporary #3735 bootstrap alias for the base-defined
+//                         CI job; measures the sample build against its frozen
+//                         legacy budget and is removed by the finalizing PR
 //   --dist <dir>          dist root to measure (default: dist)
 //   --budget <file>       budget JSON (default: bundle-budget.json at repo root)
 
@@ -79,29 +73,6 @@ export function chunkBaseName(filename) {
 // messages, and an overall ok flag. `main()` wires this to the filesystem; the
 // vitest suite (src/lib/check-bundle-size.test.ts) feeds it synthetic sizes to
 // prove a budgeted chunk actually trips when it grows past its ceiling.
-// Server-only markers the spa/server boundary (#324) forbids in a SPA build —
-// kept in sync with the FORBIDDEN list in .github/workflows/ci.yml's
-// spa-boundary job. A genuine upload-only SPA build aliases its api-client to
-// no-op stubs, so these literals can NEVER appear in it.
-export const SERVER_ONLY_MARKERS = ['/api/', 'csrf-token', 'policy/write', 'EventSource'];
-
-// Guard against measuring the WRONG dist against the spa budget (#1702). The
-// spa total/index ceilings are tighter than the server ones, so pointing the
-// `--flavor spa` check at a stale SERVER dist (e.g. a leftover `npx vite build`
-// output, or forgetting to re-run `npm run build:spa`) trips the spa gate on a
-// bundle that was never built as a SPA — exactly the stale-dist mismatch that
-// got mis-filed as a real ~38 KB SPA regression in #1702. Since a real SPA
-// build cannot contain SERVER_ONLY_MARKERS, finding one here means the dist is a
-// server build. Returns the first {file, marker} hit, or null when clean.
-export function findServerMarkers(files, contentOf) {
-  for (const f of files) {
-    const text = contentOf(f);
-    const marker = SERVER_ONLY_MARKERS.find((m) => text.includes(m));
-    if (marker) return { file: f, marker };
-  }
-  return null;
-}
-
 // LEGACY v1 evaluator — a single gated total + named per-chunk ceilings. Kept
 // only so the function (and any straggling caller/test) still resolves during
 // the v1→v2 migration; the budget file and CLI now use evaluateStructuredBudget
@@ -296,7 +267,7 @@ export function evaluateStructuredBudget(files, sizeOf, flavorBudget) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.flavor !== 'server' && args.flavor !== 'spa') {
-    die('--flavor must be "server" or "spa".');
+    die('--flavor must be "server" or the temporary "spa" CI alias.');
   }
 
   let budget;
@@ -318,24 +289,6 @@ function main() {
   if (files.length === 0) die(`no .js files under ${assetsDir}.`);
 
   const sizeOf = (f) => statSync(join(assetsDir, f)).size;
-
-  // Refuse to measure a server dist against the tighter spa ceilings (#1702).
-  // A real upload-only SPA build never carries the server-only boundary markers,
-  // so finding one means the dist on disk is a server build (stale, or the wrong
-  // flavor was rebuilt) — fail loudly with the fix instead of a false RED.
-  if (args.flavor === 'spa') {
-    const contentOf = (f) => readFileSync(join(assetsDir, f), 'utf8');
-    const hit = findServerMarkers(files, contentOf);
-    if (hit) {
-      die(
-        `this looks like a SERVER dist, not a SPA build: chunk "${hit.file}" ` +
-          `contains the server-only marker "${hit.marker}", which the spa/server ` +
-          `boundary (#324) forbids in an upload-only SPA bundle. You are measuring ` +
-          `the wrong dist against the spa budget — rebuild with \`npm run build:spa\` ` +
-          `before \`--flavor spa\`.`,
-      );
-    }
-  }
 
   // Per-chunk budgets match a hashed file by its EXACT logical chunk name
   // (filename minus the trailing `-<hash>.js`). Exact-name matching avoids both

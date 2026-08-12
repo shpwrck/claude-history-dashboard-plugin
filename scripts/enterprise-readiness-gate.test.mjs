@@ -4,15 +4,8 @@
 //   node scripts/enterprise-readiness-gate.test.mjs
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-
 import {
   ENTERPRISE_READINESS_CHECKS,
-  assertSpaBoundary,
-  findSpaBoundaryOffenders,
-  inspectSpaBoundary,
   renderCheckList,
 } from './enterprise-readiness-gate.mjs';
 
@@ -43,9 +36,8 @@ check('receipt lists the enterprise readiness sub-checks', () => {
   assert.match(list, /test:server-http-timeouts/);
   assert.match(list, /gate:server-scale/);
   assert.match(list, /gate:repo-map/);
-  assert.match(list, /npm run build:spa/);
-  assert.match(list, /<internal>/);
-  assert.match(list, /check-bundle-size\.mjs --flavor spa/);
+  assert.match(list, /npm run build:sample/);
+  assert.match(list, /npm run gate:sample-boundary/);
 });
 
 check('gate keeps a stable ordered list for CTO-demo receipts', () => {
@@ -66,101 +58,10 @@ check('gate keeps a stable ordered list for CTO-demo receipts', () => {
       'Server HTTP listener timeout contract',
       'Server-mode large-history scale budget',
       'Repo-map scale and localization budget',
-      'Upload-only SPA build',
-      'SPA emitted bundle contains no server-touching strings',
-      'SPA bundle-size budget',
+      'Public sample build',
+      'Public sample browser-only boundary',
     ]
   );
-});
-
-check('SPA boundary scanner reports forbidden emitted strings', () => {
-  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
-  try {
-    mkdirSync(join(root, 'dist', 'assets'), { recursive: true });
-    writeFileSync(join(root, 'dist', 'index.html'), '<main></main>');
-    writeFileSync(
-      join(root, 'dist', 'assets', 'index-test.js'),
-      'fetch("/api/dataset.json");\nconsole.log("ok");\n'
-    );
-    writeFileSync(
-      join(root, 'dist', 'assets', 'style-test.css'),
-      '.ok { color: black; }\n'
-    );
-
-    assert.deepEqual(findSpaBoundaryOffenders(root), [
-      'dist/assets/index-test.js:1',
-    ]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-check('SPA boundary scanner accepts clean emitted files', () => {
-  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
-  try {
-    mkdirSync(join(root, 'dist', 'assets'), { recursive: true });
-    writeFileSync(join(root, 'dist', 'index.html'), '<main></main>');
-    writeFileSync(
-      join(root, 'dist', 'assets', 'index-test.js'),
-      'console.log("clean");\n'
-    );
-
-    assert.deepEqual(findSpaBoundaryOffenders(root), []);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-check('a missing emitted bundle is a loud SKIP, never a silent pass (#3478)', () => {
-  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
-  try {
-    // No dist/ at all: the scanner used to `continue` past both targets and
-    // report zero offenders — indistinguishable from a genuinely clean bundle.
-    const { offenders, missing } = inspectSpaBoundary(root);
-    assert.deepEqual(offenders, []);
-    assert.deepEqual(missing, ['dist/index.html', 'dist/assets']);
-
-    const outcome = assertSpaBoundary(root);
-    assert.equal(outcome.status, 'skipped');
-    assert.match(outcome.reason, /NOTHING was inspected/);
-    assert.match(outcome.reason, /build:spa/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-check('--require-emitted-bundle turns a missing bundle into a hard failure', () => {
-  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
-  try {
-    assert.throws(
-      () => assertSpaBoundary(root, { requireEmittedBundle: true }),
-      /inspected nothing/
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-check('assertSpaBoundary reports a real inspection as passed, and offenders still throw', () => {
-  const root = mkdtempSync(join(tmpdir(), 'enterprise-gate-'));
-  try {
-    mkdirSync(join(root, 'dist', 'assets'), { recursive: true });
-    writeFileSync(join(root, 'dist', 'index.html'), '<main></main>');
-    writeFileSync(join(root, 'dist', 'assets', 'index-test.js'), 'console.log("clean");\n');
-    assert.deepEqual(assertSpaBoundary(root), { status: 'passed' });
-    assert.deepEqual(
-      assertSpaBoundary(root, { requireEmittedBundle: true }),
-      { status: 'passed' }
-    );
-
-    writeFileSync(
-      join(root, 'dist', 'assets', 'index-test.js'),
-      'fetch("/api/dataset.json");\n'
-    );
-    assert.throws(() => assertSpaBoundary(root), /server-touching strings/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
 });
 
 if (failures) {

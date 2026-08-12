@@ -56,7 +56,7 @@ because we snapshot rather than transfer):
   snapshot excludes them, but remove explicitly.)
 - **Self-hosted runner** - the `chd-browser` browser-compat runner -> GitHub-hosted or non-fork-gated.
 - **Personal deploy coupling** - genericize `chd-main`/`chd-spa`/`chd-ent` instance + port refs
-  (8000/7000/8190) in `AGENTS.md`, `README.md`, `docker-compose.spa.yml`, `.dockerignore`,
+  (8000/7000/8190) in historical deployment docs and `.dockerignore`,
   `.gitignore`.
 - **Personal paths** - keep observed host paths portable in retained evidence,
   and gate the tracked tree against unreviewed Unix/Windows home identities.
@@ -155,9 +155,9 @@ probaitio/probaitio                 TS pnpm-workspace monorepo (whole web+server
   packages/proof-consumer          parse-shadow-calls + 2 shadow detectors -- the read-only
                                    boundary to shpwrck/claude's ledger.jsonl.     [-> parse,types]
   apps/web                         App.tsx + PatternFly components + 22 views + the
-                                   api-client.ts/api-client.spa.ts Vite --mode spa seam +
+                                   api-client.ts/api-client.spa.ts browser-only alias seam +
                                    sample-data. ONE codebase = marketing SPA + dashboard.
-                                   spa-boundary grep guards the free/paid line.  [-> detectors,parse,types]
+                                   sample-boundary grep guards the free/paid line.  [-> detectors,parse,types]
   apps/server                      server.mjs (~1630 lines) + audit/judge + ADR-0008 callAnthropic
                                    chokepoint + policy-writer + adoption endpoints + artifact-source
                                    + #1248 push-ingest. register-ts, ZERO node_modules, path-mapped

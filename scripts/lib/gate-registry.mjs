@@ -66,11 +66,16 @@ export const GATE_REGISTRY = [
     discriminatingTest: 'src/lib/check-bundle-size.test.ts',
   },
   {
+    name: 'check-sample-boundary',
+    script: 'scripts/check-sample-boundary.mjs',
+    discriminatingTest: 'scripts/check-sample-boundary.test.mjs',
+  },
+  {
     // Drives the real gate over synthetic dists: both leak shapes fail (exit 1)
     // and an empty/absent dist is "verified nothing" (exit 2), never a pass.
-    name: 'check-spa-no-node-fs',
-    script: 'scripts/check-spa-no-node-fs.mjs',
-    discriminatingTest: 'scripts/check-spa-no-node-fs.test.mjs',
+    name: 'check-sample-no-node-fs',
+    script: 'scripts/check-sample-no-node-fs.mjs',
+    discriminatingTest: 'scripts/check-sample-no-node-fs.test.mjs',
   },
   {
     // Inspected for #3478: its runCli spawn tests assert status 1 for missing
@@ -143,8 +148,8 @@ export const GATE_REGISTRY = [
   { name: 'measure-sessions-scale', script: 'scripts/measure-sessions-scale.mjs', discriminatingTest: null },
   { name: 'ingest-bench', script: 'scripts/ingest-bench.mjs', discriminatingTest: null },
   {
-    // The grep/step gates written inline in ci.yml (entry-chunk recharts,
-    // SPA-boundary grep, and friends): fail-closed shapes as of #3478 but not
+    // The grep/step gates written inline in ci.yml (entry-chunk recharts and
+    // friends): fail-closed shapes as of #3478 but not
     // separately testable until they move into scripts.
     name: 'ci-yaml-inline-gates',
     script: '.github/workflows/ci.yml',

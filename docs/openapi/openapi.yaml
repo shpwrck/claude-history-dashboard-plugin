@@ -13,11 +13,11 @@ info:
 
     ## Server-only surface (SPA/server split, #324/#325)
 
-    Every path here belongs to the **server** deployment. The upload-only SPA build
-    (`vite build --mode spa`) aliases `src/lib/api-client.ts` to a no-op stub, so
-    the SPA bundle contains **none** of these URL literals and makes **zero**
-    `/api/*` calls — it works entirely from a user-uploaded export. Do not assume
-    any route below exists in the SPA build. `src/lib/api-client.ts` is the
+    Every path here belongs to the **server** deployment. The public sample build
+    (`vite build --mode sample`) aliases `src/lib/api-client.ts` to a no-op stub, so
+    the sample bundle contains **none** of these URL literals and makes **zero**
+    `/api/*` calls — it works entirely from bundled synthetic data. Do not assume
+    any route below exists in the sample build. `src/lib/api-client.ts` is the
     de-facto client boundary that owns each literal; this spec is the formal
     version of that module.
 

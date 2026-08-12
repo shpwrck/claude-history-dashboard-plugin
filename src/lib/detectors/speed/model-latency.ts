@@ -2,7 +2,7 @@ import type { Detector, RecProvenance } from '../types';
 // From the fs-free leaf, NOT `../../parse-telemetry`: detectors are bundled
 // browser-side, and a value import of the fs-touching parser drags the
 // node:fs graph into the containing chunk, which throws at module scope in
-// the SPA build (#3639, the #3613 failure mode).
+// the sample build (#3639, the #3613 failure mode).
 import {
   aggregateModelLatency,
   type ModelLatency,

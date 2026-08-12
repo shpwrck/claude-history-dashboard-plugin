@@ -6,9 +6,9 @@
  * eagerly by the app shell, so every byte added there lands in the frozen
  * `index` chunk. This fetcher is consumed only by the lazy Shadow Calls chunk,
  * so it lives in its own module that the lazy chunk imports via the
- * `@shadow-experiments-client` alias — `vite build --mode spa` swaps in
+ * `@shadow-experiments-client` alias — `vite build --mode sample` swaps in
  * `shadow-experiments-client.spa.ts` (no URL literals, no fetch), keeping the
- * SPA boundary provable exactly like the main chokepoint.
+ * public-sample boundary provable exactly like the main chokepoint.
  */
 import { serverFetch } from '@api-client';
 import type { ExperimentRow, Gate2702Projection } from './shadow-experiments';

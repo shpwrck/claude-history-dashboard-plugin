@@ -24,7 +24,7 @@
 // fs-touching parsers (`parse-session-registry`, `parse-telemetry`): this
 // module is bundled into the browser AgentReportCardPf chunk, and a value
 // import of either parser drags the node:fs graph into that chunk, which
-// throws at module scope in the SPA build (#3639, the #3613 failure mode).
+// throws at module scope in the sample build (#3639, the #3613 failure mode).
 import {
   analyzeAttribution,
   type SessionRegistryEntry,

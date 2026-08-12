@@ -1,8 +1,8 @@
-// Sample agent memories for the marketing SPA (issue #537).
+// Sample agent memories for the public sample (issue #537).
 //
 // The Memories view (#458) reads `~/.claude/projects/<slug>/memory/*.md` via the
 // `/api/memories` endpoint. Like Insights, that data CANNOT ride the upload zip
-// (the uploader keeps only `.jsonl`), and the SPA stub returns `{ projects: [] }`,
+// (the bundled corpus keeps only `.jsonl`), and the sample stub returns `{ projects: [] }`,
 // so in demo mode the view would render empty. This module ships a representative
 // raw `MemoriesResponse` that App.tsx runs through the real `parseMemories` —
 // exercising the same path the server build uses — when sample mode activates.
@@ -11,7 +11,7 @@
 // cold-load path and out of real uploads. Project slugs mirror the sample
 // corpus (`scripts/sample-data/build-corpus.mjs`) so the demo's Memories join
 // the same fake projects every other section shows. Content is entirely
-// synthetic — no real paths, secrets, or `/api/` literals (spa-boundary clean).
+// synthetic — no real paths, secrets, or `/api/` literals (sample-boundary clean).
 
 import type { MemoriesResponse } from './parse-memories';
 

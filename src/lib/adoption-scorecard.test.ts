@@ -252,7 +252,7 @@ describe('buildAdoptionScorecard', () => {
     const receipts: AdoptionReceipt[] = [
       surfaced('2026-05-28T00:00:00.000Z', ['reliability.api-errors']),
     ];
-    // Omitting the third arg (e.g. the SPA build) preserves the prior behaviour:
+    // Omitting the third arg (e.g. the sample build) preserves the prior behaviour:
     // surfaced-only findings cannot reach MARKER-CONFIRMED without the catalog.
     const sc = buildAdoptionScorecard(receipts, config(CLAUDE_MD_RATE_LIMIT_ADOPTED));
     expect(sc.rows[0].status).toBe('SURFACED');

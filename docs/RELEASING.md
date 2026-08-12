@@ -6,11 +6,10 @@ How Coding Agent Dashboard (`coding-agent-dashboard`, repository
 ## Model: trunk-continuous deploy, tagged checkpoints
 
 `master` is always deployable and is **continuously published**: every push to
-`master` builds `:latest`, `:master`, and `:sha-<short>` images for all four
+`master` builds `:latest`, `:master`, and `:sha-<short>` images for all three
 published containers (`.github/workflows/docker-publish.yml`):
 
 - `claude-history-dashboard` (live server),
-- `claude-history-dashboard-spa` (upload-only SPA),
 - `claude-history-dashboard-dispatch` (RemoteSession dispatch), and
 - `claude-history-dashboard-operator-sdk` (Go operator).
 
@@ -29,13 +28,13 @@ hold the tag until `master` is at the commit you want.
 ### Deployable Compose references are digest-pinned
 
 The publish workflow's tags are discovery and release labels; the deployable
-Compose defaults do not trust a tag alone. `docker-compose.yml`,
-`docker-compose.spa.yml`, and `docker-compose.tls.yml` select reviewed artifacts
+Compose defaults do not trust a tag alone. `docker-compose.yml` and
+`docker-compose.tls.yml` select reviewed artifacts
 with `@sha256:` digests, so a registry retag cannot change the executable chosen
 by an unchanged checkout.
 
 Advancing a default pin is a reviewed follow-up change after the target image is
-published. For the two dashboard images, confirm the image's
+published. For the dashboard image, confirm the image's
 `org.opencontainers.image.revision` label matches the intended commit before
 recording its registry-reported manifest digest. For a multi-architecture
 upstream such as Caddy, record the top-level index digest rather than one
@@ -45,14 +44,22 @@ machine's child manifest. Render all supported deployments before merging:
 podman compose -f docker-compose.yml config
 podman compose -f docker-compose.yml -f docker-compose.local.yml config
 podman compose -f docker-compose.yml -f docker-compose.tls.yml config
-podman compose -f docker-compose.spa.yml config
 ```
 
 Every rendered production `image:` must contain `@sha256:`. Direct source
 builds are the deliberate exception: Compose cannot use a digest reference as a
 build output tag, so `scripts/deploy.sh` selects
 `localhost/claude-history-dashboard:local`; direct commands set the matching
-`CHD_APP_IMAGE` or `CHD_SPA_IMAGE` override documented in `README.md`.
+`CHD_APP_IMAGE` override documented in `README.md`.
+
+### Retired upload-only channel
+
+Issue #3735 retired the edge-coach upload site, its cross-repo Pages publish,
+standalone container package, and compose deployment. `coach.skrzypek.dev`
+remains the release-pinned public sample. Operators should remove the retired
+edge domain's DNS/CNAME and archive the artifact-only
+`shpwrck/claude-coach-edge` Pages repository rather than leave an unexplained
+404; neither is part of the release procedure below.
 
 ## Each release answers one question
 
@@ -81,7 +88,7 @@ predicted) recommendation savings.
 
 `docker-publish.yml` (issue #168) triggers on a `v*` tag push **and** on
 `release: published`, and emits semver image tags `:X.Y.Z`, `:X.Y`, `:X` for all
-four images. The release event may start a second, synthetic build whose ref is
+three images. The release event may start a second, synthetic build whose ref is
 not the semver tag; treat the workflow run triggered by the actual `v*` **tag
 push** as the authoritative semver-image build. Cutting a release requires no
 separate local image build — creating the tag and publishing the release drive
@@ -323,7 +330,7 @@ checks into one mechanical receipt before the live deployment checklist is run.
      "Generate release notes" button to re-bucket. Do not hand-sort the list.
 
    Then publish. The tag push is the authoritative `docker-publish.yml` run and
-   pushes `:X.Y.Z`, `:X.Y`, and `:X` tags for all four images. Publishing may
+   pushes `:X.Y.Z`, `:X.Y`, and `:X` tags for all three images. Publishing may
    also fire a synthetic release-event run; do not use that run as proof of the
    semver tags. Put the summary in before publishing, not after.
 
@@ -332,7 +339,7 @@ checks into one mechanical receipt before the live deployment checklist is run.
    and open the next one.
 
 6. **Verify** the authoritative workflow run has `event=push` and the expected
-   tag as its `headBranch`, then verify the semver tag exists on all four
+   tag as its `headBranch`, then verify the semver tag exists on all three
    user-owned GHCR packages. Set `VERSION` to the release being cut:
 
    ```sh
@@ -344,7 +351,6 @@ checks into one mechanical receipt before the live deployment checklist is run.
 
    for image in \
      claude-history-dashboard \
-     claude-history-dashboard-spa \
      claude-history-dashboard-dispatch \
      claude-history-dashboard-operator-sdk
    do

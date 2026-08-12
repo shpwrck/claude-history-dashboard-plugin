@@ -4,18 +4,9 @@
 // that already carry the detailed contracts.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-} from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-
-const FORBIDDEN_SPA_PATTERN = /\/api\/|csrf-token|policy\/write|EventSource/;
-const TEXT_DIST_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.svg']);
 
 export const ENTERPRISE_READINESS_CHECKS = [
   {
@@ -92,104 +83,16 @@ export const ENTERPRISE_READINESS_CHECKS = [
     args: ['run', 'gate:repo-map'],
   },
   {
-    name: 'Upload-only SPA build',
+    name: 'Public sample build',
     command: 'npm',
-    args: ['run', 'build:spa'],
+    args: ['run', 'build:sample'],
   },
   {
-    name: 'SPA emitted bundle contains no server-touching strings',
-    run: assertSpaBoundary,
-  },
-  {
-    name: 'SPA bundle-size budget',
-    command: 'node',
-    args: ['scripts/check-bundle-size.mjs', '--flavor', 'spa'],
+    name: 'Public sample browser-only boundary',
+    command: 'npm',
+    args: ['run', 'gate:sample-boundary'],
   },
 ];
-
-// #3478: report what was actually LOOKED AT, not just what was found. The
-// old scanner silently `continue`d past a missing dist/index.html or
-// dist/assets, so with no emitted bundle at all the sub-check "passed" having
-// inspected nothing. Missing targets are now first-class output.
-export function inspectSpaBoundary(root) {
-  const targets = [
-    join(root, 'dist', 'index.html'),
-    join(root, 'dist', 'assets'),
-  ];
-  const offenders = [];
-  const missing = [];
-
-  for (const target of targets) {
-    if (!existsSync(target)) {
-      missing.push(relative(root, target));
-      continue;
-    }
-    for (const file of textFiles(target)) {
-      const lines = readFileSync(file, 'utf8').split(/\r?\n/);
-      for (let index = 0; index < lines.length; index += 1) {
-        if (FORBIDDEN_SPA_PATTERN.test(lines[index])) {
-          offenders.push(`${relative(root, file)}:${index + 1}`);
-        }
-      }
-    }
-  }
-
-  return { offenders, missing };
-}
-
-export function findSpaBoundaryOffenders(root) {
-  return inspectSpaBoundary(root).offenders;
-}
-
-// Returns { status: 'passed' } after a real inspection, { status: 'skipped',
-// reason } when there was nothing to inspect (unless --require-emitted-bundle
-// makes that a hard failure), and throws on offenders.
-export function assertSpaBoundary(root, { requireEmittedBundle = false } = {}) {
-  const { offenders, missing } = inspectSpaBoundary(root);
-  if (missing.length > 0) {
-    const reason =
-      `emitted bundle not found (missing: ${missing.join(', ')}) — ` +
-      'NOTHING was inspected; run "npm run build:spa" first';
-    if (requireEmittedBundle) {
-      throw new Error(
-        `SPA boundary sub-check inspected nothing: ${reason} (--require-emitted-bundle)`
-      );
-    }
-    return { status: 'skipped', reason };
-  }
-  if (offenders.length > 0) {
-    throw new Error(
-      [
-        'SPA bundle contains server-touching strings:',
-        ...offenders.map((offender) => `- ${offender}`),
-      ].join('\n')
-    );
-  }
-  return { status: 'passed' };
-}
-
-function* textFiles(path) {
-  const stat = statSync(path);
-  if (stat.isFile()) {
-    if (isTextDistFile(path)) yield path;
-    return;
-  }
-  if (!stat.isDirectory()) return;
-
-  const entries = readdirSync(path, { withFileTypes: true });
-  for (const entry of entries) {
-    const child = join(path, entry.name);
-    if (entry.isDirectory()) {
-      yield* textFiles(child);
-    } else if (entry.isFile() && isTextDistFile(child)) {
-      yield child;
-    }
-  }
-}
-
-function isTextDistFile(path) {
-  return TEXT_DIST_EXTENSIONS.has(path.slice(path.lastIndexOf('.')));
-}
 
 function repoRoot() {
   return execFileSync('git', ['rev-parse', '--show-toplevel'], {

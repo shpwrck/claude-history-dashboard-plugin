@@ -42,7 +42,7 @@ support those conclusions.
 - Includes persistent views for cost, context, permissions, files, tools,
   errors, recommendations, `/insights`, and session timelines.
 - Has a local recommendation engine that feeds both UI and agent behavior.
-- Supports both live server mode and upload-only SPA mode.
+- Supports a live local server and a public synthetic-data sample.
 - Tracks long-term trends and repeated patterns across the user's history.
 
 ## Product Implications
@@ -61,7 +61,7 @@ support those conclusions.
 
 | Observation | Status | Evidence / issue |
 |---|---|---|
-| Broad Claude Code session analytics over local/uploaded data | Implemented | README feature list, live server, upload-only SPA |
+| Broad Claude Code session analytics over local data | Implemented | README feature list, live server, public sample |
 | Session timeline and detail drill-in | Implemented | Session Timeline, SessionTranscript, #205, #817 |
 | Trace-bound citations for Ask answers | Backlog | #807 |
 | Value-flow / provenance detection | Backlog | #807 |

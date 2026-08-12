@@ -2,8 +2,11 @@
 
 **Status:** active since #1852 Phase C (#1859 + #1861). Decision: [ADR 0016](./adr/0016-bundle-budget-classes.md).
 Enforced by [`scripts/check-bundle-size.mjs`](../scripts/check-bundle-size.mjs) (`evaluateStructuredBudget`),
-configured by [`bundle-budget.json`](../bundle-budget.json), wired into `.github/workflows/ci.yml`
-(`build` job = `server` flavor, `spa-boundary` job = `spa` flavor).
+configured by [`bundle-budget.json`](../bundle-budget.json), and wired into the
+`.github/workflows/ci.yml` `build` job for the server flavor. The former
+upload-only budget was retired by #3735 (apart from a one-merge CI bootstrap
+shim); the public sample retains isolation and
+cold-load gates without a second frozen byte budget.
 
 ## Why this exists
 
@@ -55,7 +58,7 @@ chunk self-reports instead of silently going unguarded.
 ## Seeding / re-baselining numbers
 
 All caps are seeded from a measured build (and the #1860 composition report), never invented. The
-current values came from `origin/master` @ `e321189`. When re-baselining, build both flavors, measure,
+current values came from `origin/master` @ `e321189`. When re-baselining, build the server flavor, measure,
 and set caps to measured + the established small headroom. The shell cap is deliberately **not**
 re-baselined upward casually — #1858 *tightens* it after #1856 evicts non-first-paint code from `index`.
 

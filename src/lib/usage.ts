@@ -3,7 +3,7 @@
  *
  * The browser-side fetch (`fetchUsage`) lives in `api-client.ts` (#324) so the
  * `/api/usage` literal is owned by the single server chokepoint and stays out of
- * the SPA bundle. This module is now types-only; importers pull the `Usage`
+ * the sample bundle. This module is now types-only; importers pull the `Usage`
  * shapes from here and `fetchUsage` from `@api-client`.
  */
 

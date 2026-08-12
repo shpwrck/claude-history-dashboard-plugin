@@ -208,7 +208,7 @@ without `--user` (simulating OpenShift's arbitrary-UID assignment).
 ## 3. Boot-the-image CI gate
 
 A new job `image-boot` in `.github/workflows/image-boot.yml`, sitting alongside `test`
-and `spa-boundary`. It builds the runtime image, runs it with a stub env (`/healthz`
+and `sample-boundary`. It builds the runtime image, runs it with a stub env (`/healthz`
 must answer **without** any upstream — it only proves the process boots and serves),
 curls `/healthz`, and greps the image filesystem to prove **no `node_modules`** rode in
 (the #1013 guard).
@@ -281,7 +281,7 @@ job), so the boot gate stays fast.
   `runAsUser`; GID-0 group-writable `/app/.cache`; Dockerfile `chown 0:0` + `chmod g+rwX`.
 - **A new `image-boot` CI gate** builds the runtime image, asserts **zero `node_modules`**
   (#1013 guard), boots it with a stub env, and curls a dependency-free `/healthz` — wired
-  beside `test`/`spa-boundary`.
+  beside `test`/`sample-boundary`.
 - **`node_modules`-free principle (ADR 0011 §8):** any server-side dependency is
   implemented dependency-free; future additions (OIDC when #467 lands, any new S3 op) must
   not break the boot gate.
@@ -650,7 +650,7 @@ The loopback/enterprise builds set neither `PUBLIC_ORIGIN` nor `PROBAITIO_FLAVOR
 `server.mjs` behaves **byte-identically** to today (verified by the existing
 `scripts/policy-write.test.mjs` continuing to pass unchanged).
 
-### D5. Chokepoint (#324) touch for OIDC session — keep `spa-boundary` green
+### D5. Chokepoint (#324) touch for OIDC session — keep `sample-boundary` green
 
 `src/lib/api-client.ts` gains three exports for the multi-tenant SPA:
 
@@ -664,6 +664,6 @@ export async function logout() { await fetch('/api/auth/logout', { method: 'POST
 ```
 
 `api-client.spa.ts` mirrors them as no-ops (`fetchSession` -> `{ authenticated: false }`,
-`loginRedirect`/`logout` -> no-op) so the upload-only SPA bundle keeps
-`SERVER_AVAILABLE === false` and the `spa-boundary` grep finds no `/api/auth/...` literal
+`loginRedirect`/`logout` -> no-op) so the public sample bundle keeps
+`SERVER_AVAILABLE === false` and the `sample-boundary` grep finds no `/api/auth/...` literal
 in the SPA `dist/`.

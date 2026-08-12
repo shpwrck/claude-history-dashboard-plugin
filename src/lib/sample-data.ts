@@ -1,15 +1,14 @@
-// Marketing-SPA sample-data loader (issue #526).
+// Public-sample data loader (issue #526).
 //
-// In SPA mode the dashboard has no server and no ~/.claude mount — a first-time
-// visitor would see an empty upload modal. To demo the product we ship a
+// The sample has no server, upload affordance, or ~/.claude mount. To demo the product we ship a
 // build-generated `sample-data.zip` (emitted by the Vite plugin in
 // vite.config.ts) as a static asset and load it through the SAME unzip -> parse
-// path as a real upload. This module just fetches + inflates that asset; the
-// parsing/state wiring lives in App.tsx exactly like the upload flow.
+// existing in-browser parse path. This module just fetches + inflates that asset;
+// the parsing/state wiring lives in App.tsx.
 //
 // Boundary note: the only network call is a static `fetch` of the bundled zip
 // (relative to import.meta.env.BASE_URL). It deliberately contains none of the
-// server-touching strings the spa-boundary CI grep forbids (`/api/`,
+// server-touching strings the sample-boundary CI grep forbids (`/api/`,
 // `EventSource`, `csrf-token`, `policy/write`).
 
 import { unzipBundle, type LoadedFile } from './unzip-upload';
@@ -23,13 +22,13 @@ export interface SampleBundle {
   sessionIds: string[];
 }
 
-/** Asset name the Vite SPA plugin emits into the build output. */
+/** Asset name the Vite sample plugin emits into the build output. */
 const SAMPLE_ZIP = 'sample-data.zip';
 
 /**
  * Fetch and inflate the bundled sample zip, split into the same history vs
  * session channels FileUpload produces. Returns null when the asset is missing
- * or unreadable, so the caller can fall back to the upload modal.
+ * or unreadable, so the caller can show an unavailable sample state.
  */
 export async function loadSampleBundle(): Promise<SampleBundle | null> {
   try {

@@ -9,7 +9,7 @@ The pilot is intentionally small and opt-in:
 
 - Views: Overview, Sessions, Tokens.
 - Viewports: 390 x 844 mobile Chromium and 1440 x 900 desktop Chromium.
-- Target: the upload SPA bundle with generated sample data.
+- Target: the public sample bundle with generated sample data.
 - Assertion: first-viewport `toHaveScreenshot()` snapshots.
 
 The committed harness lives outside the blocking browser-compat path:
@@ -27,14 +27,14 @@ does not reference the visual-pilot config.
 Build the SPA sample-data target, then run the opt-in pilot:
 
 ```sh
-npm run build:spa -- --outDir dist-spa
+npm run build:sample -- --outDir dist-sample
 npm run test:e2e:visual-pilot
 ```
 
 Refresh baselines after an intentional visual change:
 
 ```sh
-npm run build:spa -- --outDir dist-spa
+npm run build:sample -- --outDir dist-sample
 npm run test:e2e:visual-pilot:update
 ```
 
@@ -86,4 +86,3 @@ mobile spacing, masthead/sidebar chrome, dense tables, or dashboard typography
 changes. Reconsider a blocking gate only after the same baselines have stayed
 stable across several intentional local reruns and at least one dedicated
 self-hosted browser runner.
-

@@ -65,7 +65,6 @@ export const TEXT_EXTENSIONS = Object.freeze([
 const SKIP_DIRECTORIES = new Set([
   'node_modules',
   'dist',
-  'dist-spa',
   'dist-sample',
   'coverage',
   'playwright-report',
