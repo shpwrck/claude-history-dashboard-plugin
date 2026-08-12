@@ -1,4 +1,9 @@
 import type { SessionTokenData, TokenEntry, CompactionEvent } from '../types';
+import {
+  resolveContextWindow,
+  type ExactContextWindowResolution,
+  type LowerBoundContextWindowResolution,
+} from './model-registry';
 import { estimateCost } from './parse-sessions';
 import { getModelPricing } from './pricing';
 
@@ -14,11 +19,24 @@ export const HIGH_GROWTH_PER_HOUR = 50_000;
 export const MAX_COMPACTION_PENALTY = 30;
 export const LOW_HEALTH_SCORE = 50;
 
+export type ContextWindowUsage =
+  | {
+      resolution: ExactContextWindowResolution;
+      /** Exact share of the resolved window consumed by the observed peak. */
+      usagePercent: number;
+    }
+  | {
+      resolution: LowerBoundContextWindowResolution;
+      /** A lower bound cannot support an exact utilization percentage. */
+      usagePercent: null;
+    };
+
 export interface ContextGrowthStat {
   sessionId: string;
   startContext: number;
   endContext: number;
   peakContext: number;
+  contextWindow: ContextWindowUsage;
   /** (end - start) / hours-of-session, 0 if < 1 entry or duration is 0 */
   growthRate: number;
   compactionCount: number;
@@ -70,6 +88,26 @@ function peakContextSize(entries: TokenEntry[]): number {
   return peak;
 }
 
+/** Resolve honest per-session window utilization from model and peak evidence. */
+export function resolveContextWindowUsage(
+  model: string | undefined,
+  peakContext: number
+): ContextWindowUsage {
+  // Legacy/partial rows without a retained model use the resolver's explicit
+  // 200K default. Their peak is not model evidence, so do not promote that
+  // missing-model fallback to an observed 1M tier.
+  const resolution = model
+    ? resolveContextWindow(model, peakContext)
+    : resolveContextWindow('');
+  if (resolution.kind === 'lower-bound') {
+    return { resolution, usagePercent: null };
+  }
+  return {
+    resolution,
+    usagePercent: (peakContext / resolution.contextWindowTokens) * 100,
+  };
+}
+
 function hoursBetween(startIso: string, endIso: string): number {
   const start = new Date(startIso).getTime();
   const end = new Date(endIso).getTime();
@@ -88,6 +126,7 @@ export function computeContextGrowth(
     const startContext = contextSize(first);
     const endContext = contextSize(last);
     const peakContext = peakContextSize(d.entries);
+    const contextWindow = resolveContextWindowUsage(d.model, peakContext);
 
     const hours = hoursBetween(first.timestamp, last.timestamp);
     const rawGrowth = hours > 0 ? (endContext - startContext) / hours : 0;
@@ -101,6 +140,7 @@ export function computeContextGrowth(
       startContext,
       endContext,
       peakContext,
+      contextWindow,
       growthRate,
       compactionCount: d.compactionEvents.length,
     });
@@ -196,8 +236,10 @@ export function listCompactions(data: SessionTokenData[]): CompactionRow[] {
  * Starts at 100 and applies the following penalties:
  *  - Cache hit rate below LOW_HIT_RATE: -20
  *  - Per compaction: -10, capped at MAX_COMPACTION_PENALTY
- *  - Peak context above PEAK_CONTEXT_WARN tokens: -20
- *  - Peak context above OVER_WINDOW (200K) tokens: additional -20
+ *  - Peak context above 50% of an exact resolved window: -20
+ *  - Peak context above an exact resolved window: additional -20
+ * Lower-bound windows receive neither threshold penalty because they cannot
+ * support an exact percentage or exceeded-window claim.
  *  - Growth rate above HIGH_GROWTH_PER_HOUR tokens/hour: -10
  * Floor at 0. Sessions with score < LOW_HEALTH_SCORE are flagged in the UI.
  */
@@ -231,21 +273,28 @@ export function scoreSessionHealth(
       );
     }
 
-    // Peak context above warn threshold
+    // Threshold penalties require an exact denominator. PEAK_CONTEXT_WARN and
+    // OVER_WINDOW retain the standard 200K values exported to legacy callers;
+    // their ratio defines the model-aware warning fraction.
     const peakContext = peakContextSize(d.entries);
-    if (peakContext > PEAK_CONTEXT_WARN) {
-      score -= 20;
-      reasons.push(`Peak context: ${(peakContext / 1000).toFixed(0)}k`);
-    }
+    const contextWindow = resolveContextWindowUsage(d.model, peakContext);
+    if (contextWindow.resolution.kind === 'exact') {
+      const windowTokens = contextWindow.resolution.contextWindowTokens;
+      const peakWarnThreshold =
+        windowTokens * (PEAK_CONTEXT_WARN / OVER_WINDOW);
+      if (peakContext > peakWarnThreshold) {
+        score -= 20;
+        reasons.push(`Peak context: ${(peakContext / 1000).toFixed(0)}k`);
+      }
 
-    // Peak context past the usable window: compact earlier / start fresh.
-    // Coexists with PEAK_CONTEXT_WARN above (which still fires); this adds an
-    // extra penalty and an actionable reason for the egregious cases.
-    if (peakContext > OVER_WINDOW) {
-      score -= 20;
-      reasons.push(
-        `Over window (${(peakContext / 1000).toFixed(0)}k > 200k) — compact earlier or start fresh`
-      );
+      // Coexists with the proportional warning above; this adds an actionable
+      // penalty only when exact evidence supports the exceeded-window claim.
+      if (peakContext > windowTokens) {
+        score -= 20;
+        reasons.push(
+          `Over window (${(peakContext / 1000).toFixed(0)}k > ${(windowTokens / 1000).toFixed(0)}k) — compact earlier or start fresh`
+        );
+      }
     }
 
     // Growth rate above warn threshold (tokens/hour)

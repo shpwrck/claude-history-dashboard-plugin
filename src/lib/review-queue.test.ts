@@ -210,7 +210,7 @@ describe('buildReviewQueue', () => {
           [
             tokenEntry({
               model: '<synthetic>',
-              inputTokens: 210_000,
+              inputTokens: 600_000,
               cacheCreationTokens: 20_000,
               cacheCreation1hTokens: 0,
               cacheReadTokens: 0,
@@ -219,14 +219,12 @@ describe('buildReviewQueue', () => {
           {
             totalCacheCreationTokens: 20_000,
             totalCacheReadTokens: 0,
-            compactionEvents: [
-              {
-                timestamp: '2026-06-01T00:10:00.000Z',
-                beforeContext: 210_000,
-                afterContext: 80_000,
-                reductionPercent: 62,
-              },
-            ],
+            compactionEvents: Array.from({ length: 3 }, (_, index) => ({
+              timestamp: `2026-06-01T00:1${index}:00.000Z`,
+              beforeContext: 620_000,
+              afterContext: 80_000,
+              reductionPercent: 87,
+            })),
           }
         ),
       ],
@@ -239,7 +237,7 @@ describe('buildReviewQueue', () => {
       severity: 'high',
       evidenceView: 'context',
     });
-    expect(queue[0].reason).toContain('Over window');
+    expect(queue[0].reason).toContain('Peak context: 620k');
   });
 
   it('emits row-addressed, score-reproducible provenance for every signal path (#3171)', () => {
@@ -292,20 +290,18 @@ describe('buildReviewQueue', () => {
           [
             tokenEntry({
               model: '<synthetic>',
-              inputTokens: 210_000,
+              inputTokens: 600_000,
               cacheCreationTokens: 20_000,
             }),
           ],
           {
             totalCacheCreationTokens: 20_000,
-            compactionEvents: [
-              {
-                timestamp: '2026-06-01T00:10:00.000Z',
-                beforeContext: 210_000,
-                afterContext: 80_000,
-                reductionPercent: 62,
-              },
-            ],
+            compactionEvents: Array.from({ length: 3 }, (_, index) => ({
+              timestamp: `2026-06-01T00:1${index}:00.000Z`,
+              beforeContext: 620_000,
+              afterContext: 80_000,
+              reductionPercent: 87,
+            })),
           }
         ),
       ],
