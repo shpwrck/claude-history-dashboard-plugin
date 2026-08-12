@@ -16,7 +16,10 @@ import { parseJsonl, type RawSessionEntry } from './parse-utils';
 import { detectRetryGroups } from './parse-errors';
 import { parseFileReread } from './parse-file-reread';
 import { IDLE_TURN_THRESHOLD_MS } from './parse-runtime-events';
-import { OVER_WINDOW } from './context-health';
+import {
+  resolveContextWindowUsage,
+  type ContextWindowUsage,
+} from './context-health';
 
 // How many trailing tool calls the in-progress reread / retry-storm detectors
 // scan (#196). Scoping to the recent tail answers "is this pattern happening
@@ -91,8 +94,7 @@ export interface LiveSessionResult {
   model?: string;
   tokensBurned?: number;
   contextTokens?: number;
-  contextWindow?: number;
-  contextPercent?: number;
+  contextWindow?: ContextWindowUsage;
   lastEventMs?: number;
   msSinceLastEvent?: number;
   msSinceLastUserTurn?: number | null;
@@ -387,12 +389,23 @@ export function liveSession(
     token.totalCacheCreationTokens +
     token.totalCacheReadTokens;
   const contextTokens = currentContextTokens(token) || 0;
-  // Same denominator (200K) the compaction-risk / context-health views use.
-  // isFinite-fenced so a bad token field can never render NaN% / a broken bar.
-  const rawPercent = (contextTokens / OVER_WINDOW) * 100;
-  const contextPercent = isFinite(rawPercent)
-    ? Math.min(100, Math.max(0, rawPercent))
-    : 0;
+  const resolvedContextWindow = resolveContextWindowUsage(
+    token.model,
+    contextTokens
+  );
+  // The live widget historically rendered a 0..100 progress value. Preserve
+  // that exact-session display contract while retaining lower-bound certainty
+  // as `null`, which cannot support an exact percentage.
+  const contextWindow: ContextWindowUsage =
+    resolvedContextWindow.usagePercent === null
+      ? resolvedContextWindow
+      : {
+          ...resolvedContextWindow,
+          usagePercent: Math.min(
+            100,
+            Math.max(0, resolvedContextWindow.usagePercent)
+          ),
+        };
 
   // "Time since last user turn" stays on the top-level file only: subagent
   // "user" lines are task prompts, not the human's input (mirrors deriveEntries).
@@ -409,8 +422,7 @@ export function liveSession(
     model: token.model,
     tokensBurned,
     contextTokens,
-    contextWindow: OVER_WINDOW,
-    contextPercent,
+    contextWindow,
     lastEventMs: newestMs,
     msSinceLastEvent: Math.max(0, now - newestMs),
     msSinceLastUserTurn,

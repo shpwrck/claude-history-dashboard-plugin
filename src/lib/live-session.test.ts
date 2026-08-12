@@ -23,12 +23,13 @@ import { IDLE_TURN_THRESHOLD_MS } from './parse-runtime-events'
 const assistant = (
   ts: string,
   usage: Record<string, unknown> = { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
-  id = 'a1'
+  id = 'a1',
+  model = 'claude-haiku-4-5-20251001'
 ) =>
   JSON.stringify({
     type: 'assistant',
     timestamp: ts,
-    message: { id, model: 'claude-opus-4-8', usage },
+    message: { id, model, usage },
   })
 
 // One typed user turn (real text content, so it counts as a user turn).
@@ -70,18 +71,76 @@ describe('liveSession', () => {
     expect(out.active).toBe(true)
     expect(out.sessionId).toBe('sess-recent')
     expect(out.project).toBe('proj-x')
-    // input(100) + cacheRead(5) = 105 occupancy / 200K window.
+    // input(100) + cacheRead(5) = 105 occupancy / exact 200K window.
     expect(out.contextTokens).toBe(105)
-    expect(out.contextPercent).toBeGreaterThan(0)
-    expect(out.contextPercent).toBeLessThanOrEqual(100)
+    expect(out.contextWindow).toEqual({
+      resolution: {
+        kind: 'exact',
+        contextWindowTokens: 200_000,
+        source: 'registry',
+      },
+      usagePercent: 0.0525,
+    })
+    expect(out).not.toHaveProperty('contextPercent')
     // input(100)+output(20)+cacheRead(5) burned.
     expect(out.tokensBurned).toBe(125)
-    expect(out.model).toBe('claude-opus-4-8')
+    expect(out.model).toBe('claude-haiku-4-5-20251001')
     expect(out.lastEventMs).toBe(Date.parse(recent))
     // Last typed user turn was 2 min ago.
     expect(out.msSinceLastUserTurn).toBe(120_000)
     expect(out.retryStorm).toBe(false)
     expect(out.rereadLoop).toBe(false)
+  })
+
+  it('resolves an explicit 1M live session at 400K to exact 40% fullness', () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0)
+    const recent = new Date(now - 60_000).toISOString()
+    const input = seed('sess-1m', [
+      assistant(
+        recent,
+        { input_tokens: 400_000, output_tokens: 20 },
+        'a-1m',
+        'claude-haiku-4-5-20251001[1m]'
+      ),
+    ])
+
+    const out = liveSession([input], now)
+
+    expect(out.contextTokens).toBe(400_000)
+    expect(out.contextWindow).toEqual({
+      resolution: {
+        kind: 'exact',
+        contextWindowTokens: 1_000_000,
+        source: 'model-marker',
+      },
+      usagePercent: 40,
+    })
+    expect(out).not.toHaveProperty('contextPercent')
+  })
+
+  it('returns lower-bound certainty without an exact fullness percentage', () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0)
+    const recent = new Date(now - 60_000).toISOString()
+    const input = seed('sess-lower-bound', [
+      assistant(
+        recent,
+        { input_tokens: 1_000_001, output_tokens: 20 },
+        'a-lower',
+        'claude-haiku-4-5-20251001[1m]'
+      ),
+    ])
+
+    const out = liveSession([input], now)
+
+    expect(out.contextWindow).toEqual({
+      resolution: {
+        kind: 'lower-bound',
+        minimumContextWindowTokens: 1_000_001,
+        source: 'observed',
+      },
+      usagePercent: null,
+    })
+    expect(out).not.toHaveProperty('contextPercent')
   })
 
   it('reports inactive for an idle session (newest event past the idle threshold)', () => {
