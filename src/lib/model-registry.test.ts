@@ -6,6 +6,7 @@ import {
   CURRENT_RECOMMENDATION_MODEL_IDS,
   MODEL_PRICING,
   buildModelUpdateChecklist,
+  resolveContextWindow,
   resolveModelFamily,
 } from './model-registry';
 
@@ -73,6 +74,65 @@ describe('model registry', () => {
     expect(resolveModelFamily('claude-sonnet-4-6')).toBe('sonnet');
     expect(resolveModelFamily('claude-haiku-4-5-20251001')).toBe('haiku');
     expect(resolveModelFamily('claude-rhyme-1-20260609')).toBeNull();
+  });
+
+  it('resolves an explicit 1m marker before the base model window', () => {
+    expect(
+      resolveContextWindow('claude-haiku-4-5-20251001[1m]', 120_000)
+    ).toEqual({
+      kind: 'exact',
+      contextWindowTokens: 1_000_000,
+      source: 'model-marker',
+    });
+  });
+
+  it('resolves exact ids and aliases without fuzzy near-name matches', () => {
+    expect(resolveContextWindow('claude-opus-4-8')).toEqual({
+      kind: 'exact',
+      contextWindowTokens: 1_000_000,
+      source: 'registry',
+    });
+    expect(resolveContextWindow('claude-sonnet-4-6')).toEqual({
+      kind: 'exact',
+      contextWindowTokens: 1_000_000,
+      source: 'registry',
+    });
+    expect(resolveContextWindow('claude-sonnet-4-5-20250929')).toEqual({
+      kind: 'exact',
+      contextWindowTokens: 200_000,
+      source: 'registry',
+    });
+    expect(resolveContextWindow('claude-sonnet-5-preview')).toEqual({
+      kind: 'exact',
+      contextWindowTokens: 200_000,
+      source: 'default',
+    });
+  });
+
+  it('uses observed evidence to identify the known 1m tier', () => {
+    expect(
+      resolveContextWindow('claude-haiku-4-5-20251001', 400_000)
+    ).toEqual({
+      kind: 'exact',
+      contextWindowTokens: 1_000_000,
+      source: 'observed-tier',
+    });
+  });
+
+  it('defaults unknown models to an exact 200k window', () => {
+    expect(resolveContextWindow('claude-rhyme-1-20260609')).toEqual({
+      kind: 'exact',
+      contextWindowTokens: 200_000,
+      source: 'default',
+    });
+  });
+
+  it('returns evidence above the known tier as a lower bound, not an exact size', () => {
+    expect(resolveContextWindow('claude-opus-4-8[1m]', 1_000_001)).toEqual({
+      kind: 'lower-bound',
+      minimumContextWindowTokens: 1_000_001,
+      source: 'observed',
+    });
   });
 
   it('builds a repeatable update checklist for a registered Fable model', () => {

@@ -19,6 +19,7 @@ interface ModelRegistryEntry {
   id: string;
   family: ModelFamily;
   pricing: ModelPricing;
+  contextWindowTokens: number;
   label?: string;
   description?: string;
   picker?: boolean;
@@ -57,6 +58,9 @@ const OPUS_3 = tier(15);
 const SONNET_3 = tier(3);
 const HAIKU_3 = tier(0.25);
 
+const STANDARD_CONTEXT_WINDOW_TOKENS = 200_000;
+const LONG_CONTEXT_WINDOW_TOKENS = 1_000_000;
+
 export const CURRENT_FAMILY_PRICING = {
   fable: FABLE_CURRENT,
   mythos: MYTHOS_CURRENT,
@@ -70,6 +74,7 @@ const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
     id: 'claude-fable-5',
     family: 'fable',
     pricing: FABLE_CURRENT,
+    contextWindowTokens: LONG_CONTEXT_WINDOW_TOKENS,
     label: 'Claude Fable 5',
     description: 'Most capable widely released model for long-horizon agentic work.',
   },
@@ -77,6 +82,7 @@ const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
     id: 'claude-mythos-5',
     family: 'mythos',
     pricing: MYTHOS_CURRENT,
+    contextWindowTokens: LONG_CONTEXT_WINDOW_TOKENS,
     label: 'Claude Mythos 5',
     description: 'Limited-availability Mythos-class model.',
   },
@@ -84,10 +90,17 @@ const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
     id: CURRENT_MODEL_IDS.opus,
     family: 'opus',
     pricing: OPUS_CURRENT,
+    contextWindowTokens: LONG_CONTEXT_WINDOW_TOKENS,
     picker: true,
     label: 'Claude Opus 4.8',
     description: 'Most capable model. Best for complex reasoning.',
-    aliases: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-5-20250620'],
+    aliases: ['claude-opus-4-7', 'claude-opus-4-6'],
+  },
+  {
+    id: 'claude-opus-4-5-20250620',
+    family: 'opus',
+    pricing: OPUS_CURRENT,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
   },
   {
     // Claude Opus 5: registered but NOT the default Opus — CURRENT_MODEL_IDS.opus
@@ -97,20 +110,30 @@ const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
     id: 'claude-opus-5',
     family: 'opus',
     pricing: OPUS_CURRENT,
+    contextWindowTokens: LONG_CONTEXT_WINDOW_TOKENS,
   },
   {
     id: CURRENT_MODEL_IDS.sonnet,
     family: 'sonnet',
     pricing: SONNET_CURRENT,
+    contextWindowTokens: LONG_CONTEXT_WINDOW_TOKENS,
     picker: true,
     label: 'Claude Sonnet 5',
     description: 'Most agentic Sonnet yet; balances capability and speed.',
-    aliases: ['claude-sonnet-4-6', 'claude-sonnet-4-5-20250514', 'claude-sonnet-4-5-20250929'],
+    aliases: ['claude-sonnet-4-6'],
+  },
+  {
+    id: 'claude-sonnet-4-5-20250514',
+    family: 'sonnet',
+    pricing: SONNET_CURRENT,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
+    aliases: ['claude-sonnet-4-5-20250929'],
   },
   {
     id: CURRENT_MODEL_IDS.haiku,
     family: 'haiku',
     pricing: HAIKU_CURRENT,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
     picker: true,
     label: 'Claude Haiku 4.5',
     description: 'Fastest, lowest cost. Great for short tasks.',
@@ -119,40 +142,126 @@ const MODEL_REGISTRY: readonly ModelRegistryEntry[] = [
     id: 'claude-opus-4-1-20250414',
     family: 'opus',
     pricing: OPUS_LEGACY,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
     aliases: ['claude-opus-4-20250115'],
   },
   {
     id: 'claude-sonnet-4-20250514',
     family: 'sonnet',
     pricing: SONNET_LEGACY,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
   },
   {
     id: 'claude-3-5-sonnet-20241022',
     family: 'sonnet',
     pricing: SONNET_CURRENT,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
     aliases: ['claude-3-5-sonnet-20240620'],
   },
   {
     id: 'claude-3-5-haiku-20241022',
     family: 'haiku',
     pricing: HAIKU_35,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
   },
   {
     id: 'claude-3-opus-20240229',
     family: 'opus',
     pricing: OPUS_3,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
   },
   {
     id: 'claude-3-sonnet-20240229',
     family: 'sonnet',
     pricing: SONNET_3,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
   },
   {
     id: 'claude-3-haiku-20240307',
     family: 'haiku',
     pricing: HAIKU_3,
+    contextWindowTokens: STANDARD_CONTEXT_WINDOW_TOKENS,
   },
 ];
+
+export type ExactContextWindowResolution = {
+  kind: 'exact';
+  contextWindowTokens: number;
+  source: 'model-marker' | 'registry' | 'observed-tier' | 'default';
+};
+
+export type LowerBoundContextWindowResolution = {
+  kind: 'lower-bound';
+  minimumContextWindowTokens: number;
+  source: 'observed';
+};
+
+export type ContextWindowResolution =
+  | ExactContextWindowResolution
+  | LowerBoundContextWindowResolution;
+
+/**
+ * Resolve a model's context window from retained model and token evidence.
+ *
+ * The registry values follow Anthropic's current model capability table
+ * (https://platform.claude.com/docs/en/about-claude/models/overview, verified
+ * 2026-08-11). The emitted `[1m]` suffix remains authoritative for historical
+ * CLI sessions that explicitly selected that tier. Evidence above the largest
+ * known tier is a lower bound, never an invented exact window.
+ */
+export function resolveContextWindow(
+  model: string,
+  observedTokens?: number
+): ContextWindowResolution {
+  const observed =
+    typeof observedTokens === 'number' &&
+    Number.isFinite(observedTokens) &&
+    observedTokens >= 0
+      ? observedTokens
+      : null;
+
+  // Contradictory evidence outranks even an explicit marker: no known exact
+  // tier can explain a larger observation.
+  if (observed !== null && observed > LONG_CONTEXT_WINDOW_TOKENS) {
+    return {
+      kind: 'lower-bound',
+      minimumContextWindowTokens: observed,
+      source: 'observed',
+    };
+  }
+
+  if (model.toLowerCase().endsWith('[1m]')) {
+    return {
+      kind: 'exact',
+      contextWindowTokens: LONG_CONTEXT_WINDOW_TOKENS,
+      source: 'model-marker',
+    };
+  }
+
+  const exact = MODEL_REGISTRY.find(
+    (entry) => entry.id === model || entry.aliases?.includes(model)
+  );
+  const registeredWindow =
+    exact?.contextWindowTokens ?? STANDARD_CONTEXT_WINDOW_TOKENS;
+
+  if (
+    registeredWindow === STANDARD_CONTEXT_WINDOW_TOKENS &&
+    observed !== null &&
+    observed > STANDARD_CONTEXT_WINDOW_TOKENS
+  ) {
+    return {
+      kind: 'exact',
+      contextWindowTokens: LONG_CONTEXT_WINDOW_TOKENS,
+      source: 'observed-tier',
+    };
+  }
+
+  return {
+    kind: 'exact',
+    contextWindowTokens: registeredWindow,
+    source: exact ? 'registry' : 'default',
+  };
+}
 
 export const ANTHROPIC_PICKER_MODELS = MODEL_REGISTRY
   .filter((model) => model.picker)
