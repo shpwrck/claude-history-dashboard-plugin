@@ -16,6 +16,50 @@ export const SERVER_ONLY_MARKERS = [
   'EventSource',
 ];
 
+const SAME_ORIGIN_CONNECT_SRC = "connect-src 'self'";
+
+function attributeValue(tag, name) {
+  const match = tag.match(
+    new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i'),
+  );
+  return match ? (match[1] ?? match[2]) : null;
+}
+
+export function inspectSampleCsp(html) {
+  const cspTags = (html.match(/<meta\b[^>]*>/gi) ?? []).filter(
+    (tag) =>
+      attributeValue(tag, 'http-equiv')?.toLowerCase() ===
+      'content-security-policy',
+  );
+  if (cspTags.length !== 1) {
+    return [`expected exactly one emitted CSP meta tag; found ${cspTags.length}`];
+  }
+
+  const content = attributeValue(cspTags[0], 'content');
+  if (content === null) return ['emitted CSP meta tag has no content attribute'];
+
+  const connectDirectives = content
+    .split(';')
+    .map((directive) => directive.trim())
+    .filter((directive) => /^connect-src(?:\s|$)/i.test(directive));
+  if (connectDirectives.length !== 1) {
+    return [
+      `expected exactly one explicit same-origin connect-src directive; found ${connectDirectives.length}`,
+    ];
+  }
+  const tokens = connectDirectives[0].split(/\s+/);
+  if (
+    tokens.length !== 2 ||
+    tokens[0].toLowerCase() !== 'connect-src' ||
+    tokens[1] !== "'self'"
+  ) {
+    return [
+      `expected same-origin connect-src "${SAME_ORIGIN_CONNECT_SRC}"; found "${connectDirectives[0]}"`,
+    ];
+  }
+  return [];
+}
+
 function filesUnder(path) {
   const out = [];
   for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -31,10 +75,14 @@ export function inspectSampleBoundary(dist = 'dist') {
   const assets = join(dist, 'assets');
   const missing = [];
   const files = [];
+  let cspProblems = [];
 
   try {
     if (!statSync(index).isFile()) missing.push(index);
-    else files.push(index);
+    else {
+      files.push(index);
+      cspProblems = inspectSampleCsp(readFileSync(index, 'utf8'));
+    }
   } catch {
     missing.push(index);
   }
@@ -52,7 +100,7 @@ export function inspectSampleBoundary(dist = 'dist') {
       if (bytes.includes(marker)) offenders.push({ file, marker });
     }
   }
-  return { files, missing, offenders };
+  return { files, missing, offenders, cspProblems };
 }
 
 function die(message, code) {
@@ -87,6 +135,14 @@ function main() {
   }
   if (result.files.length === 0) {
     die(`no emitted files under ${dist}; this gate verified NOTHING.`, 2);
+  }
+  if (result.cspProblems.length > 0) {
+    console.error('\n✗ Sample boundary gate BLOCKED:');
+    for (const problem of result.cspProblems) console.error(`  - ${problem}`);
+    console.error(
+      '\nThe public sample must emit an explicit same-origin connect-src policy.\n',
+    );
+    process.exit(1);
   }
   if (result.offenders.length > 0) {
     console.error('\n✗ Sample boundary gate BLOCKED:');
