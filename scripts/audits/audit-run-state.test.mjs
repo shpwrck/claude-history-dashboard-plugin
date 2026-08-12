@@ -59,6 +59,36 @@ const V2_SCOPE = {
   },
 };
 
+const RELEASE_SCOPE = {
+  policyVersion: 2,
+  mode: "incremental",
+  previousTag: "v0.6.0",
+  baseSha: "a".repeat(40),
+  headSha: "b".repeat(40),
+  fullAudit: false,
+  manifestSha256: "4".repeat(64),
+  tracked: {
+    count: ALL_SECTION_FILES.length + 9,
+    bytes: 300,
+    manifestSha256: "5".repeat(64),
+  },
+  auditable: {
+    count: ALL_SECTION_FILES.length,
+    bytes: 200,
+    manifestSha256: "6".repeat(64),
+  },
+  omitted: {
+    count: 5,
+    bytes: 60,
+    manifestSha256: "7".repeat(64),
+  },
+  excludedEvidence: {
+    count: 4,
+    bytes: 40,
+    manifestSha256: "8".repeat(64),
+  },
+};
+
 function makeState(gates = ["security", "performance"]) {
   return initializeAuditState({
     baseline: "abc123",
@@ -278,6 +308,32 @@ test("v2 state rejects corrupt scope equations, section counts, and unsupported 
     () => assertAuditState(unexpectedMetric),
     /must contain exactly/,
   );
+});
+
+test("release-scope policy v2 seals a bounded head subset without reinterpreting policy v1", () => {
+  const state = initializeAuditState({
+    baseline: RELEASE_SCOPE.headSha,
+    gates: ["security"],
+    auditDate: "2026-08-12",
+    sectionFiles: partitionAuditFiles(ALL_SECTION_FILES),
+    scope: RELEASE_SCOPE,
+  });
+
+  assert.equal(assertAuditState(state), true);
+  assert.deepEqual(parseAuditState(serializeAuditState(state)), state);
+
+  const wrongHead = structuredClone(state);
+  wrongHead.scope.headSha = "c".repeat(40);
+  assert.throws(() => assertAuditState(wrongHead), /head.*baseline/i);
+
+  const badEquation = structuredClone(state);
+  badEquation.scope.omitted.count -= 1;
+  assert.throws(() => assertAuditState(badEquation), /count equation/);
+
+  const implicitFull = structuredClone(state);
+  implicitFull.scope.fullAudit = true;
+  implicitFull.scope.mode = "full";
+  assert.throws(() => assertAuditState(implicitFull), /full audit.*omitted/i);
 });
 
 test("initializeAuditState rejects invalid provenance and gate sets", () => {

@@ -29,6 +29,11 @@ import {
   loadOrInitializeState,
   assertV2LedgerTarget,
   parseArgs,
+  prepareAuditOptions,
+  defaultStatePath,
+  defaultScopeManifestPath,
+  initialReleaseLedgerMarkdown,
+  reconcileLedger,
   readBaselineBlobs,
   readTrackedEntries,
   resolveBaselineAuditUniverse,
@@ -633,6 +638,119 @@ test('parseArgs: requires --baseline, defaults to --plan', () => {
   assert.throws(() => parseArgs(['--baseline', SHA, '--floor', '101']), /floor/);
   assert.throws(() => parseArgs(['--baseline', SHA, '--max-batch-bytes', '0']), /max-batch-bytes/);
   assert.throws(() => parseArgs(['--baseline', SHA, '--worker-timeout-ms', '0']), /worker-timeout-ms/);
+});
+
+test('release-scope arguments require an explicit previous tag and head, and prepare v0.7-specific evidence paths', () => {
+  const parsed = parseArgs([
+    '--previous-tag',
+    'v0.6.0',
+    '--head',
+    'candidate',
+    '--add',
+    'docs/claim.md',
+    '--reason',
+    'Changed API claim',
+  ]);
+  assert.equal(parsed.previousTag, 'v0.6.0');
+  assert.equal(parsed.head, 'candidate');
+  assert.deepEqual(parsed.manualAdditions, [
+    { path: 'docs/claim.md', reason: 'Changed API claim' },
+  ]);
+  const manifest = {
+    policyVersion: 2,
+    headSha: SHA,
+    manifestSha256: 'f'.repeat(64),
+    finalPaths: ['package.json'],
+  };
+  const prepared = prepareAuditOptions(parsed, {
+    manifestBuilder: () => manifest,
+  });
+  assert.equal(prepared.baseline, SHA);
+  assert.equal(prepared.ledger, 'docs/audits/v070-review-phase-audit.md');
+  assert.equal(prepared.ledgerExplicit, true);
+  assert.deepEqual(prepared.releaseManifest, manifest);
+  assert.equal(defaultStatePath(SHA, 2), `docs/audits/runs/v070-${SHA.slice(0, 12)}.json`);
+  assert.equal(
+    defaultScopeManifestPath(SHA),
+    `docs/audits/v070-scope-${SHA.slice(0, 12)}.json`,
+  );
+
+  assert.throws(
+    () => parseArgs(['--previous-tag', 'v0.6.0']),
+    /--head.*required/,
+  );
+  assert.throws(
+    () => parseArgs(['--head', SHA]),
+    /--previous-tag.*required/,
+  );
+  assert.throws(
+    () => parseArgs(['--baseline', SHA, '--previous-tag', 'v0.6.0', '--head', SHA]),
+    /cannot combine.*--baseline/i,
+  );
+  assert.throws(
+    () => parseArgs(['--baseline', SHA, '--full-audit']),
+    /--full-audit.*release scope/i,
+  );
+});
+
+test('loadOrInitializeState partitions only the release manifest final paths and seals omitted head files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chd-release-audit-state-'));
+  const statePath = join(dir, 'state.json');
+  const treeOutput = [
+    `100644 blob ${'d'.repeat(40)} 12\tpackage.json`,
+    `100644 blob ${'e'.repeat(40)} 7\tREADME.md`,
+    '',
+  ].join('\0');
+  const gitRunner = (_file, args) => {
+    if (args.includes('ls-tree')) return treeOutput;
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+  const releaseManifest = {
+    schemaVersion: 1,
+    policyVersion: 2,
+    mode: 'incremental',
+    fullAudit: false,
+    previousTag: 'v0.6.0',
+    baseSha: 'b'.repeat(40),
+    head: SHA,
+    headSha: SHA,
+    manifestSha256: 'f'.repeat(64),
+    finalPaths: ['package.json'],
+  };
+  try {
+    const state = loadOrInitializeState(
+      {
+        repoDir: dir,
+        baseline: SHA,
+        auditDate: '2026-08-12',
+        gitRunner,
+        releaseManifest,
+      },
+      ['security'],
+      { state: statePath },
+    );
+    assert.equal(state.scope.policyVersion, 2);
+    assert.deepEqual(state.sections[0].files, ['package.json']);
+    assert.equal(state.scope.tracked.count, 2);
+    assert.equal(state.scope.auditable.count, 1);
+    assert.equal(state.scope.omitted.count, 1);
+    assert.equal(state.scope.excludedEvidence.count, 0);
+
+    const initialLedger = initialReleaseLedgerMarkdown(state);
+    assert.match(initialLedger, /Release review-phase incremental audit/);
+    assert.match(initialLedger, /security → #1932/);
+    assert.match(initialLedger, new RegExp(releaseManifest.baseSha));
+    assert.match(initialLedger, new RegExp(releaseManifest.headSha));
+
+    const ledgerPath = join(dir, 'docs/audits/v070-review-phase-audit.md');
+    reconcileLedger({ ledger: ledgerPath }, state);
+    const writtenLedger = readFileSync(ledgerPath, 'utf8');
+    assert.match(writtenLedger, /Audit scope \(policy v2, incremental\)/);
+    assert.match(writtenLedger, /\| root \| 1 \| — \|/);
+    assert.equal(initialReleaseLedgerMarkdown(state).includes('v0.6 receipts'), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('v2 mutating runs require an explicit run-specific human ledger outside evidence directories', () => {

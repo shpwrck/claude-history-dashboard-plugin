@@ -19,7 +19,9 @@ import {
   gateEpicBody,
   GATE_DOMAINS,
   missingGateDomains,
+  releaseAuditScopeSection,
   seedReleaseGates,
+  usesIncrementalReleaseAudit,
 } from './seed-release-gates.mjs';
 
 const TOKEN = 'test-token';
@@ -335,4 +337,25 @@ test('gateEpicBody frames the data-integrity gate as provable + faultless (#2130
   assert.match(body, /provable/);
   assert.match(body, /faultless/);
   assert.match(body, /docs\/adding-a-recommendation\.md/);
+});
+
+test('v0.7+ gate bodies pin incremental scope while v0.6 stays historical', () => {
+  assert.equal(usesIncrementalReleaseAudit('v0.6.0'), false);
+  assert.equal(usesIncrementalReleaseAudit('v0.7.0'), true);
+  assert.equal(usesIncrementalReleaseAudit('v1.0.0'), true);
+  assert.deepEqual(releaseAuditScopeSection('Future'), []);
+
+  const performance = GATE_DOMAINS.find((domain) => domain.key === 'performance');
+  const historical = gateEpicBody(performance, 'v0.6.0');
+  const incremental = gateEpicBody(performance, 'v0.7.0');
+  assert.doesNotMatch(historical, /release-audit-scope/);
+  assert.match(incremental, /release-audit-scope\.mjs/);
+  assert.match(incremental, /--previous-tag/);
+  assert.match(incremental, /--head/);
+  assert.match(incremental, /direct TS\/JS static-relative importers/);
+  assert.match(incremental, /exact old\/new path/);
+  assert.match(incremental, /--add <path> --reason <why>/);
+  assert.match(incremental, /--full-audit/);
+  assert.match(incremental, /v070-/);
+  assert.match(incremental, /do not reinterpret.*v0\.6 receipts/);
 });

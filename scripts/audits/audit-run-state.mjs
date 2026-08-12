@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { AUDIT_SCOPE_POLICY_VERSION } from "./audit-scope.mjs";
+import {
+  AUDIT_SCOPE_POLICY_VERSION,
+  RELEASE_AUDIT_SCOPE_POLICY_VERSION,
+} from "./audit-scope.mjs";
 import { dedupKey, normalizePath, validateFinding } from "./file-findings.mjs";
 import { GATES } from "./gates.config.mjs";
 
@@ -690,7 +693,7 @@ function assertAuditScopeMetric(metric, label) {
   }
 }
 
-function assertAuditScope(scope, auditableFileCount) {
+function assertLegacyAuditScope(scope, auditableFileCount) {
   assertExactObjectKeys(
     scope,
     ["policyVersion", "tracked", "auditable", "excludedEvidence"],
@@ -731,6 +734,95 @@ function assertAuditScope(scope, auditableFileCount) {
   return true;
 }
 
+function assertReleaseAuditScope(scope, auditableFileCount) {
+  assertExactObjectKeys(
+    scope,
+    [
+      "policyVersion",
+      "mode",
+      "previousTag",
+      "baseSha",
+      "headSha",
+      "fullAudit",
+      "manifestSha256",
+      "tracked",
+      "auditable",
+      "omitted",
+      "excludedEvidence",
+    ],
+    "state.scope",
+  );
+  if (scope.policyVersion !== RELEASE_AUDIT_SCOPE_POLICY_VERSION) {
+    throw new Error(
+      `unsupported audit scope policy ${JSON.stringify(scope.policyVersion)}`,
+    );
+  }
+  if (!["incremental", "full"].includes(scope.mode)) {
+    throw new Error("state.scope.mode must be incremental or full");
+  }
+  if (scope.fullAudit !== (scope.mode === "full")) {
+    throw new Error("state.scope.fullAudit must match state.scope.mode");
+  }
+  requireNonemptyString(scope.previousTag, "state.scope.previousTag");
+  for (const field of ["baseSha", "headSha"]) {
+    if (!/^[0-9a-f]{40}$/.test(scope[field] || "")) {
+      throw new Error(`state.scope.${field} must be a full lowercase commit SHA`);
+    }
+  }
+  if (!/^[0-9a-f]{64}$/.test(scope.manifestSha256 || "")) {
+    throw new Error(
+      "state.scope.manifestSha256 must be a lowercase SHA-256 digest",
+    );
+  }
+  for (const field of ["tracked", "auditable", "omitted", "excludedEvidence"]) {
+    assertAuditScopeMetric(scope[field], `state.scope.${field}`);
+  }
+  if (
+    scope.tracked.count !==
+    scope.auditable.count +
+      scope.omitted.count +
+      scope.excludedEvidence.count
+  ) {
+    throw new Error(
+      "state.scope count equation must satisfy tracked = auditable + omitted + excludedEvidence",
+    );
+  }
+  if (
+    scope.tracked.bytes !==
+    scope.auditable.bytes +
+      scope.omitted.bytes +
+      scope.excludedEvidence.bytes
+  ) {
+    throw new Error(
+      "state.scope byte equation must satisfy tracked = auditable + omitted + excludedEvidence",
+    );
+  }
+  if (scope.auditable.count !== auditableFileCount) {
+    throw new Error(
+      "state.scope auditable count does not equal the section file count",
+    );
+  }
+  if (
+    scope.fullAudit &&
+    (scope.omitted.count !== 0 || scope.omitted.bytes !== 0)
+  ) {
+    throw new Error("a full audit cannot retain omitted tracked files");
+  }
+  return true;
+}
+
+function assertAuditScope(scope, auditableFileCount) {
+  if (scope?.policyVersion === AUDIT_SCOPE_POLICY_VERSION) {
+    return assertLegacyAuditScope(scope, auditableFileCount);
+  }
+  if (scope?.policyVersion === RELEASE_AUDIT_SCOPE_POLICY_VERSION) {
+    return assertReleaseAuditScope(scope, auditableFileCount);
+  }
+  throw new Error(
+    `state.scope has unsupported audit scope policy ${JSON.stringify(scope?.policyVersion)}`,
+  );
+}
+
 export function assertAuditState(state) {
   if (!state || ![1, 2].includes(state.version))
     throw new Error("unsupported or missing audit state");
@@ -755,6 +847,14 @@ export function assertAuditState(state) {
   assertExactPartition(allFiles, state.sections);
   if (state.version === 2) {
     assertAuditScope(state.scope, allFiles.length);
+    if (
+      state.scope.policyVersion === RELEASE_AUDIT_SCOPE_POLICY_VERSION &&
+      state.scope.headSha !== state.baseline
+    ) {
+      throw new Error(
+        "release audit scope head SHA must equal the audit-state baseline",
+      );
+    }
   } else if (state.scope !== undefined) {
     throw new Error("legacy v1 audit state must not contain state.scope");
   }
@@ -955,6 +1055,20 @@ function scopeMarkerIndexes(lines) {
 
 function renderAuditScopeBlock(scope) {
   const format = new Intl.NumberFormat("en-US").format;
+  if (scope.policyVersion === RELEASE_AUDIT_SCOPE_POLICY_VERSION) {
+    return [
+      AUDIT_SCOPE_START,
+      `**Audit scope (policy v${scope.policyVersion}, ${scope.mode}):** ` +
+        `${format(scope.tracked.count)} tracked head files (${format(scope.tracked.bytes)} bytes) = ` +
+        `${format(scope.auditable.count)} selected files (${format(scope.auditable.bytes)} bytes) + ` +
+        `${format(scope.omitted.count)} unchanged/out-of-radius files (${format(scope.omitted.bytes)} bytes) + ` +
+        `${format(scope.excludedEvidence.count)} excluded sealed-evidence files ` +
+        `(${format(scope.excludedEvidence.bytes)} bytes). Base ${scope.previousTag} ` +
+        `(${scope.baseSha.slice(0, 12)}), head ${scope.headSha.slice(0, 12)}, ` +
+        `manifest ${scope.manifestSha256.slice(0, 12)}.`,
+      AUDIT_SCOPE_END,
+    ];
+  }
   return [
     AUDIT_SCOPE_START,
     `**Audit scope (policy v${scope.policyVersion}):** ` +

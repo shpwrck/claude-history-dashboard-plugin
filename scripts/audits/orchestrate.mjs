@@ -21,6 +21,8 @@
 //
 // Usage:
 //   node scripts/audits/orchestrate.mjs --baseline <full-sha> [--gates a,b]
+//   node scripts/audits/orchestrate.mjs --previous-tag <tag> --head <ref>
+//     [--add <path> --reason <why>] [--full-audit] [--gates a,b]
 //     [--plan|--run|--run-all] [--file] [--audit-date YYYY-MM-DD]
 //     [--ledger <path>] [--state <path>] [--receipt-dir <path>]
 //     [--floor 12] [--full-batch 40] [--max-batch-bytes 98304]
@@ -51,8 +53,11 @@ import { shellQuote } from '../lib/shell-quote.mjs';
 import { DEFAULT_GATES, resolveGates, GATES } from './gates.config.mjs';
 import {
   assertExactAuditUniverse,
+  RELEASE_AUDIT_SCOPE_POLICY_VERSION,
   resolveAuditUniverse,
+  summarizeAuditEntries,
 } from './audit-scope.mjs';
+import { buildReleaseAuditManifest } from './release-audit-scope.mjs';
 import { validateAuditEvidenceArchive } from './audit-evidence.mjs';
 import {
   partitionAuditFiles,
@@ -474,6 +479,8 @@ export function parseArgs(argv) {
     file: false,
     instance: 'orchestrator',
     maxBatches: Number.POSITIVE_INFINITY,
+    fullAudit: false,
+    manualAdditions: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
@@ -481,6 +488,18 @@ export function parseArgs(argv) {
     else if (v === '--run') a.mode = 'run';
     else if (v === '--run-all') a.mode = 'run-all';
     else if (v === '--baseline') a.baseline = argv[++i];
+    else if (v === '--previous-tag') a.previousTag = argv[++i];
+    else if (v === '--head') a.head = argv[++i];
+    else if (v === '--full-audit') a.fullAudit = true;
+    else if (v === '--add') {
+      const path = argv[++i];
+      if (argv[i + 1] !== '--reason') {
+        throw new Error(`--add ${path ?? ''} requires an immediate --reason`);
+      }
+      i += 1;
+      const reason = argv[++i];
+      a.manualAdditions.push({ path, reason });
+    }
     else if (v === '--gates') a.gates = argv[++i];
     else if (v === '--ledger') {
       a.ledger = argv[++i];
@@ -503,8 +522,21 @@ export function parseArgs(argv) {
     else if (v === '--file') a.file = true;
     else throw new Error(`unknown arg ${v}`);
   }
-  if (!/^[0-9a-f]{40}$/.test(a.baseline || '')) {
-    throw new Error('--baseline requires the full 40-character origin/master SHA');
+  const releaseScope = Boolean(a.previousTag || a.head);
+  if (a.baseline && releaseScope) {
+    throw new Error('cannot combine legacy --baseline with --previous-tag/--head');
+  }
+  if (releaseScope) {
+    if (!a.previousTag) throw new Error('--previous-tag is required with --head');
+    if (!a.head) throw new Error('--head is required with --previous-tag');
+    a.releaseScope = true;
+  } else if (!/^[0-9a-f]{40}$/.test(a.baseline || '')) {
+    throw new Error(
+      '--baseline requires the full 40-character origin/master SHA (or pass --previous-tag and --head)',
+    );
+  }
+  if ((a.fullAudit || a.manualAdditions.length) && !releaseScope) {
+    throw new Error('--full-audit and --add are available only with release scope');
   }
   if (!Number.isFinite(a.floor) || a.floor < 0 || a.floor > 100) {
     throw new Error('--floor must be a number in [0, 100]');
@@ -530,8 +562,45 @@ export function parseArgs(argv) {
   return a;
 }
 
-export function defaultStatePath(baseline) {
-  return `docs/audits/runs/v060-${baseline.slice(0, 12)}.json`;
+export function prepareAuditOptions(
+  opts,
+  { manifestBuilder = buildReleaseAuditManifest } = {}
+) {
+  if (!opts.releaseScope) return opts;
+  const releaseManifest = manifestBuilder({
+    repoDir: opts.repoDir,
+    previousTag: opts.previousTag,
+    head: opts.head,
+    fullAudit: opts.fullAudit,
+    manualAdditions: opts.manualAdditions,
+  });
+  if (
+    releaseManifest?.policyVersion !== RELEASE_AUDIT_SCOPE_POLICY_VERSION ||
+    !/^[0-9a-f]{40}$/.test(releaseManifest.headSha || '') ||
+    !/^[0-9a-f]{64}$/.test(releaseManifest.manifestSha256 || '') ||
+    !Array.isArray(releaseManifest.finalPaths)
+  ) {
+    throw new Error('release scope builder returned an invalid manifest');
+  }
+  return {
+    ...opts,
+    baseline: releaseManifest.headSha,
+    releaseManifest,
+    ledger: opts.ledgerExplicit
+      ? opts.ledger
+      : 'docs/audits/v070-review-phase-audit.md',
+    // The v0.7 default is itself run-specific and never aliases the v0.6 ledger.
+    ledgerExplicit: true,
+  };
+}
+
+export function defaultStatePath(baseline, policyVersion = 1) {
+  const release = policyVersion === RELEASE_AUDIT_SCOPE_POLICY_VERSION;
+  return `docs/audits/runs/${release ? 'v070' : 'v060'}-${baseline.slice(0, 12)}.json`;
+}
+
+export function defaultScopeManifestPath(baseline) {
+  return `docs/audits/v070-scope-${baseline.slice(0, 12)}.json`;
 }
 
 export function defaultBaselineDir(baseline) {
@@ -730,15 +799,25 @@ export function writeAtomic(path, contents) {
 }
 
 function statePaths(opts) {
+  const policyVersion = opts.releaseManifest?.policyVersion ?? 1;
   return {
     ledger: absoluteFromRepo(opts.repoDir, opts.ledger),
-    state: absoluteFromRepo(opts.repoDir, opts.state || defaultStatePath(opts.baseline)),
+    state: absoluteFromRepo(
+      opts.repoDir,
+      opts.state || defaultStatePath(opts.baseline, policyVersion),
+    ),
     receiptDir: absoluteFromRepo(
       opts.repoDir,
       opts.receiptDir || 'docs/audits/findings',
     ),
     schema: absoluteFromRepo(opts.repoDir, opts.schema || DEFAULT_RECEIPT_SCHEMA),
     baselineDir: opts.baselineDir || defaultBaselineDir(opts.baseline),
+    scopeManifest: opts.releaseManifest
+      ? absoluteFromRepo(
+          opts.repoDir,
+          opts.scopeManifest || defaultScopeManifestPath(opts.baseline),
+        )
+      : null,
   };
 }
 
@@ -811,7 +890,7 @@ export function ensureBaselineWorktree({
 }
 
 export function loadOrInitializeState(opts, activeGates, paths) {
-  const universe = resolveBaselineAuditUniverse({
+  const fullUniverse = resolveBaselineAuditUniverse({
     repoDir: opts.repoDir,
     baseline: opts.baseline,
     gitRunner: opts.gitRunner || execFileSync,
@@ -819,6 +898,9 @@ export function loadOrInitializeState(opts, activeGates, paths) {
     receiptSchema: opts.receiptSchema,
     evidenceValidator: opts.evidenceValidator || validateAuditEvidenceArchive,
   });
+  const universe = opts.releaseManifest
+    ? resolveReleaseAuditUniverse(opts.releaseManifest, fullUniverse)
+    : fullUniverse;
   const { trackedEntries } = universe;
   if (existsSync(paths.state)) {
     const state = parseAuditState(readFileSync(paths.state, 'utf8'));
@@ -871,6 +953,52 @@ export function loadOrInitializeState(opts, activeGates, paths) {
   });
 }
 
+export function resolveReleaseAuditUniverse(manifest, fullUniverse) {
+  if (
+    manifest?.policyVersion !== RELEASE_AUDIT_SCOPE_POLICY_VERSION ||
+    !Array.isArray(manifest.finalPaths)
+  ) {
+    throw new Error('release audit manifest is invalid');
+  }
+  // perf-index-contract: release-scope-head-path-index always-consumed: every valid manifest probes missing paths and resolves every selected head entry before returning
+  const byPath = new Map(
+    fullUniverse.auditableEntries.map((entry) => [entry.path, entry])
+  );
+  // perf-index-contract: release-scope-final-membership always-consumed: every valid manifest checks duplicates and queries every auditable head path while deriving omissions
+  const selectedPaths = new Set(manifest.finalPaths);
+  if (selectedPaths.size !== manifest.finalPaths.length) {
+    throw new Error('release audit manifest finalPaths contains duplicates');
+  }
+  const missing = manifest.finalPaths.filter((path) => !byPath.has(path));
+  if (missing.length) {
+    throw new Error(
+      `release audit manifest contains non-auditable head path(s): ${missing.join(', ')}`
+    );
+  }
+  const selected = manifest.finalPaths.map((path) => byPath.get(path));
+  const omitted = fullUniverse.auditableEntries.filter(
+    ({ path }) => !selectedPaths.has(path)
+  );
+  return {
+    ...fullUniverse,
+    scope: {
+      policyVersion: RELEASE_AUDIT_SCOPE_POLICY_VERSION,
+      mode: manifest.mode,
+      previousTag: manifest.previousTag,
+      baseSha: manifest.baseSha,
+      headSha: manifest.headSha,
+      fullAudit: manifest.fullAudit,
+      manifestSha256: manifest.manifestSha256,
+      tracked: fullUniverse.scope.tracked,
+      auditable: summarizeAuditEntries(selected),
+      omitted: summarizeAuditEntries(omitted),
+      excludedEvidence: fullUniverse.scope.excludedEvidence,
+    },
+    auditableEntries: selected,
+    releaseManifest: manifest,
+  };
+}
+
 export function artifactPaths(paths, state, batch) {
   const section = state.sections.find((entry) => entry.section === batch.section);
   const offset = section ? section.completedFiles.length : 0;
@@ -879,7 +1007,11 @@ export function artifactPaths(paths, state, batch) {
     .update(batch.auditedFiles.join('\0'))
     .digest('hex')
     .slice(0, 12);
-  const stem = `${safe}-${state.baseline.slice(0, 12)}-${String(offset + 1).padStart(4, '0')}-${digest}`;
+  const releasePrefix =
+    state.scope?.policyVersion === RELEASE_AUDIT_SCOPE_POLICY_VERSION
+      ? 'v070-'
+      : '';
+  const stem = `${releasePrefix}${safe}-${state.baseline.slice(0, 12)}-${String(offset + 1).padStart(4, '0')}-${digest}`;
   return {
     receipt: join(paths.receiptDir, `${stem}.json`),
     metadata: join(paths.receiptDir, `${stem}.meta.json`),
@@ -1046,13 +1178,46 @@ function runRouter(opts, batch, artifacts, { dryRun, vendor }) {
 }
 
 export function ledgerTextForState(paths, state) {
-  return updateLedgerMarkdown(readFileSync(paths.ledger, 'utf8'), state);
+  const currentLedger = existsSync(paths.ledger)
+    ? readFileSync(paths.ledger, 'utf8')
+    : initialReleaseLedgerMarkdown(state);
+  return updateLedgerMarkdown(currentLedger, state);
+}
+
+export function initialReleaseLedgerMarkdown(state) {
+  if (
+    state?.version !== 2 ||
+    state.scope?.policyVersion !== RELEASE_AUDIT_SCOPE_POLICY_VERSION
+  ) {
+    throw new Error('a missing ledger can be initialized only for release scope policy v2');
+  }
+  const headers = state.gates.map(
+    (gate) => `${gate} → #${GATES[gate].epic}`
+  );
+  return [
+    '# Release review-phase incremental audit',
+    '',
+    `Base: \`${state.scope.previousTag}\` at \`${state.scope.baseSha}\`.`,
+    `Candidate head: \`${state.scope.headSha}\`.`,
+    `Scope manifest SHA-256: \`${state.scope.manifestSha256}\`.`,
+    '',
+    'This ledger is regenerated from the sealed run state. The scope equation',
+    'below distinguishes selected release-delta coverage from unchanged files',
+    'and validated historical evidence that were deliberately not dispatched.',
+    '',
+    `| Section | Files | ${headers.join(' | ')} |`,
+    `|${['Section', 'Files', ...headers].map(() => '---').join('|')}|`,
+    '',
+  ].join('\n');
 }
 
 export function reconcileLedger(paths, state) {
-  const currentLedger = readFileSync(paths.ledger, 'utf8');
+  const ledgerExists = existsSync(paths.ledger);
+  const currentLedger = ledgerExists
+    ? readFileSync(paths.ledger, 'utf8')
+    : initialReleaseLedgerMarkdown(state);
   const nextLedger = updateLedgerMarkdown(currentLedger, state);
-  if (nextLedger !== currentLedger) {
+  if (!ledgerExists || nextLedger !== currentLedger) {
     writeAtomic(paths.ledger, nextLedger);
   }
 }
@@ -1079,11 +1244,15 @@ function logUsage(usage) {
 
 function logAuditScope(state) {
   if (state.version === 2) {
+    const omitted = state.scope.omitted
+      ? `, omitted=${state.scope.omitted.count}`
+      : '';
     console.log(
       `  scope policy v${state.scope.policyVersion}: `
       + `tracked=${state.scope.tracked.count}, `
       + `auditable=${state.scope.auditable.count}, `
-      + `excluded sealed evidence=${state.scope.excludedEvidence.count}`,
+      + `excluded sealed evidence=${state.scope.excludedEvidence.count}`
+      + omitted,
     );
     return;
   }
@@ -1202,7 +1371,7 @@ export function executeOneBatch(opts, state, paths) {
 }
 
 export function main(argv = process.argv.slice(2)) {
-  const opts = parseArgs(argv);
+  const opts = prepareAuditOptions(parseArgs(argv));
   const activeGates = resolveGates(opts.gates);
   const paths = statePaths(opts);
   let state = loadOrInitializeState(opts, activeGates, paths);
@@ -1251,6 +1420,12 @@ export function main(argv = process.argv.slice(2)) {
     throw new Error('--instance <unique id> is required with --file');
   }
   if (opts.file) reconcileLedger(paths, state);
+  if (opts.file && paths.scopeManifest) {
+    writeAtomic(
+      paths.scopeManifest,
+      `${JSON.stringify(opts.releaseManifest, null, 2)}\n`,
+    );
+  }
   writeAtomic(paths.state, serializeAuditState(state));
   let batches = 0;
   for (;;) {

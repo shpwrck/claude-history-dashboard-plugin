@@ -163,6 +163,29 @@ test("orchestrator-generated artifact and state paths are recognized evidence", 
       { disposition: "excluded-evidence", kind },
     );
   }
+
+  const releaseArtifacts = artifactPaths(
+    { receiptDir: "docs/audits/findings" },
+    {
+      baseline,
+      scope: { policyVersion: 2 },
+      sections: [{ section: "root", completedFiles: [] }],
+    },
+    batch,
+  );
+  const releaseGenerated = [
+    [releaseArtifacts.receipt, "receipt"],
+    [releaseArtifacts.metadata, "receipt-metadata"],
+    [releaseArtifacts.router, "router-result"],
+    [defaultStatePath(baseline, 2), "run-state"],
+  ];
+  for (const [path, kind] of releaseGenerated) {
+    assert.match(path, /\/v070-/);
+    assert.deepEqual(
+      classifyAuditEntry(entry(path, OIDS.receipt)),
+      { disposition: "excluded-evidence", kind },
+    );
+  }
 });
 
 test("universe validation rejects duplicate paths and any overlap, omission, or manifest drift", () => {

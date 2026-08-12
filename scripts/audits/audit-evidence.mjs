@@ -8,6 +8,7 @@ import {
   parseAuditState,
   validateWorkerReceipt,
 } from "./audit-run-state.mjs";
+import { RELEASE_AUDIT_SCOPE_POLICY_VERSION } from "./audit-scope.mjs";
 import { cleanTitle, dedupKey } from "./file-findings.mjs";
 
 const FINDINGS_ROOT = "docs/audits/findings/";
@@ -110,8 +111,12 @@ function receiptStem(path, kind) {
   return name.slice(0, -suffix.length);
 }
 
-function defaultStatePath(baseline) {
-  return `${RUNS_ROOT}v060-${baseline.slice(0, 12)}.json`;
+function defaultStatePath(state) {
+  const prefix =
+    state.scope?.policyVersion === RELEASE_AUDIT_SCOPE_POLICY_VERSION
+      ? "v070"
+      : "v060";
+  return `${RUNS_ROOT}${prefix}-${state.baseline.slice(0, 12)}.json`;
 }
 
 function expectedReceiptPath(state, batch, offset) {
@@ -119,7 +124,11 @@ function expectedReceiptPath(state, batch, offset) {
     .replace(/[^a-z0-9]+/gi, "-")
     .replace(/^-|-$/g, "");
   const filesDigest = sha256(batch.auditedFiles.join("\0")).slice(0, 12);
-  const stem = `${sectionSlug}-${state.baseline.slice(0, 12)}-${String(
+  const releasePrefix =
+    state.scope?.policyVersion === RELEASE_AUDIT_SCOPE_POLICY_VERSION
+      ? "v070-"
+      : "";
+  const stem = `${releasePrefix}${sectionSlug}-${state.baseline.slice(0, 12)}-${String(
     offset + 1,
   ).padStart(4, "0")}-${filesDigest}`;
   return `${FINDINGS_ROOT}${stem}.json`;
@@ -409,7 +418,7 @@ export function validateAuditEvidenceArchive({
       throw new Error(`invalid audit run state ${record.entry.path}: ${error.message}`);
     }
     validateStateShape(state);
-    if (record.entry.path !== defaultStatePath(state.baseline)) {
+    if (record.entry.path !== defaultStatePath(state)) {
       throw new Error(
         `audit run state path ${record.entry.path} does not match baseline ${state.baseline}`,
       );

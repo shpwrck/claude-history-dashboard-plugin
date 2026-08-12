@@ -108,10 +108,42 @@ export function classifySeedTarget(title) {
   return { seed: true, title: trimmed };
 }
 
+export function usesIncrementalReleaseAudit(milestoneTitle) {
+  const match = /^v(\d+)\.(\d+)(?:\.\d+)?$/.exec(
+    String(milestoneTitle ?? '').trim()
+  );
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 0 || minor >= 7;
+}
+
+export function releaseAuditScopeSection(milestoneTitle) {
+  if (!usesIncrementalReleaseAudit(milestoneTitle)) return [];
+  return [
+    '## Review scope',
+    '',
+    'Use the deterministic release-scope policy in ' +
+      '`scripts/audits/release-audit-scope.mjs`: pass the previous release tag ' +
+      'with `--previous-tag` and the immutable candidate with `--head`. The ' +
+      'automatic set is changed paths plus direct TS/JS static-relative importers ' +
+      'and tracked text files containing an exact old/new path in either tree. ' +
+      'Deleted/renamed old paths remain evidenced tombstones; only head-present ' +
+      'paths are dispatched.',
+    '',
+    'A reviewer may add an adjacent path only as `--add <path> --reason <why>`; ' +
+      'the reason is sealed in the scope manifest. `--full-audit` is the explicit ' +
+      'opt-in escape hatch, never the default. Use the v0.7 ledger/state/artifact ' +
+      'names (`v070-*`); do not reinterpret the immutable v0.6 receipts.',
+    '',
+  ];
+}
+
 // Dormant concern-bucket body, mirroring the v0.4.0 gate epics (#1071/#1072/
 // #1073) and the two-phase model in docs/RELEASING.md: seeded at release start,
 // NOT decomposed until the review phase.
 export function gateEpicBody(domain, milestoneTitle) {
+  const reviewScope = releaseAuditScopeSection(milestoneTitle);
   return [
     '## Why',
     '',
@@ -136,6 +168,7 @@ export function gateEpicBody(domain, milestoneTitle) {
       `${domain.groomHint} — into sub-issues (clean titles, \`epic-NNN\` label, ` +
       'native sub-issue links).',
     '',
+    ...reviewScope,
     '## Acceptance',
     '',
     'Closes when drained: every sub-issue closed and the concern checklist above ' +

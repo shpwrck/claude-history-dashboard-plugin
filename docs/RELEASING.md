@@ -243,6 +243,44 @@ The shared phase signal is `releasePhase()` in `burn-epic`'s `pick.mjs`
 **cut** time, by which point the reviews must exist and be closed regardless of
 phase.
 
+### Review audit scope from v0.7 onward
+
+The v0.6 review was the one-time complete-repository baseline. Starting with
+v0.7, review-gate audits default to the deterministic release delta between an
+explicit previous-release tag and an immutable candidate head:
+
+```sh
+node scripts/audits/orchestrate.mjs \
+  --previous-tag v0.6.0 \
+  --head <full-candidate-sha> \
+  --plan
+```
+
+`scripts/audits/release-audit-scope.mjs` seals the reproducible scope manifest.
+Its automatic set is changed paths (including added, modified, deleted, and
+renamed paths), plus direct TS/JS static-relative importers and tracked text
+files containing an exact changed old/new path. Both the base and head trees
+contribute importer/reference evidence. Deleted and renamed-away paths remain
+in the manifest as tombstones but are not dispatched; dynamic imports, symbol
+references, and prose matches without the exact path are not inferred.
+
+A reviewer may add a head-present adjacent file only with a recorded reason:
+
+```sh
+node scripts/audits/orchestrate.mjs \
+  --previous-tag v0.6.0 \
+  --head <full-candidate-sha> \
+  --add docs/example.md --reason "Documents the changed contract" \
+  --plan
+```
+
+Use `--full-audit` to opt into the complete auditable head tree. It is never the
+default. v0.7 scope manifests, run state, receipts, prompts, and findings use
+the `v070-*` artifact family and record the exact base/head SHAs, manifest hash,
+selected/omitted counts and bytes, exclusions, and manual reasons. The sealed
+`v060-*` receipts remain policy-v1 evidence and are validated byte-for-byte as
+before; this policy does not reinterpret or rewrite them.
+
 Enforcement is a hard gate, `scripts/check-release-gate.mjs`:
 
 ```sh

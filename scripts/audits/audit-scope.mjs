@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 export const AUDIT_SCOPE_POLICY_VERSION = 1;
+export const RELEASE_AUDIT_SCOPE_POLICY_VERSION = 2;
 
 const FINDINGS_ROOT = "docs/audits/findings/";
 const RUNS_ROOT = "docs/audits/runs/";
@@ -21,7 +22,7 @@ const SECTION_SLUGS = [
   "data-tools-bin-commands-claude",
 ];
 const RECEIPT_STEM = new RegExp(
-  `^(?:${SECTION_SLUGS.join("|")})-[0-9a-f]{12}-[0-9]{4,}-[0-9a-f]{12}$`,
+  `^(?:v070-)?(?:${SECTION_SLUGS.join("|")})-[0-9a-f]{12}-[0-9]{4,}-[0-9a-f]{12}$`,
 );
 const RUN_STATE_NAME = /^v[0-9]{3}-[0-9a-f]{12}\.json$/;
 
@@ -103,7 +104,7 @@ function canonicalEntry(entry, kind) {
       };
 }
 
-function summarize(entries) {
+export function summarizeAuditEntries(entries) {
   const sorted = [...entries].sort((left, right) =>
     left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
@@ -168,9 +169,9 @@ export function resolveAuditUniverse(entries) {
   return {
     scope: {
       policyVersion: AUDIT_SCOPE_POLICY_VERSION,
-      tracked: summarize(trackedEntries),
-      auditable: summarize(auditableEntries),
-      excludedEvidence: summarize(excludedEvidenceEntries),
+      tracked: summarizeAuditEntries(trackedEntries),
+      auditable: summarizeAuditEntries(auditableEntries),
+      excludedEvidence: summarizeAuditEntries(excludedEvidenceEntries),
     },
     auditableEntries,
     excludedEvidenceEntries,
