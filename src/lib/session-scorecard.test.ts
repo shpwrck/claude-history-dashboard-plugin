@@ -52,6 +52,25 @@ function tokenData(partial: Partial<SessionTokenData> = {}): SessionTokenData {
   };
 }
 
+function contextTokenData(model: string | undefined, peak: number): SessionTokenData {
+  return tokenData({
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCacheCreationTokens: 0,
+    totalCacheReadTokens: 0,
+    model,
+    entries: [
+      tokenEntry({
+        model: model ?? 'claude-sonnet-4-6',
+        inputTokens: peak,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+      }),
+    ],
+  });
+}
+
 function toolCall(toolName: string, partial: Partial<ToolCall> = {}): ToolCall {
   return {
     timestamp: baseTime,
@@ -205,12 +224,16 @@ describe('computeSessionScorecard', () => {
 
   it('penalizes expensive high-context sessions on cost and focus', () => {
     const bloated = tokenData({
+      // Legacy rows without a retained top-level model keep the explicit 200K
+      // default; entry models still preserve cost estimation.
+      model: undefined,
       totalInputTokens: 1_500_000,
       totalOutputTokens: 150_000,
       totalCacheCreationTokens: 300_000,
       totalCacheReadTokens: 0,
       entries: [
         tokenEntry({
+          model: 'claude-sonnet-4-6',
           timestamp: '2026-01-01T00:00:00.000Z',
           inputTokens: 10_000,
           outputTokens: 0,
@@ -218,6 +241,7 @@ describe('computeSessionScorecard', () => {
           cacheReadTokens: 0,
         }),
         tokenEntry({
+          model: 'claude-sonnet-4-6',
           timestamp: '2026-01-01T00:30:00.000Z',
           inputTokens: 240_000,
           outputTokens: 20_000,
@@ -246,6 +270,125 @@ describe('computeSessionScorecard', () => {
     expect(scorecardAxis(scorecard, 'cost').score).toBeLessThan(50);
     expect(scorecardAxis(scorecard, 'focus').score).toBeLessThan(60);
     expect(scorecardAxis(scorecard, 'cost').evidence.join(' ')).toContain('Peak context');
+  });
+
+  describe('model-aware context-window penalties', () => {
+    const contextAxes = (data: SessionTokenData) => {
+      const scorecard = computeSessionScorecard({
+        sessionId: data.sessionId,
+        tokenData: data,
+        toolData: toolData([]),
+      });
+      return {
+        cost: scorecardAxis(scorecard, 'cost'),
+        focus: scorecardAxis(scorecard, 'focus'),
+      };
+    };
+
+    it('does not penalize a 400K explicit 1M session as over-window', () => {
+      const axes = contextAxes(
+        contextTokenData('claude-haiku-4-5-20251001[1m]', 400_000)
+      );
+
+      expect(axes.cost).toMatchObject({
+        score: 100,
+        evidence: ['Estimated cost 0.40 USD.'],
+      });
+      expect(axes.focus).toMatchObject({
+        score: 100,
+        evidence: [
+          'No high-context, high-churn, or repeated-command scope signal observed.',
+        ],
+      });
+    });
+
+    it('scales warning penalties to half of an exact 1M window', () => {
+      const below = contextAxes(
+        contextTokenData('claude-haiku-4-5-20251001[1m]', 500_000)
+      );
+      const above = contextAxes(
+        contextTokenData('claude-haiku-4-5-20251001[1m]', 500_001)
+      );
+
+      expect(below.cost.score).toBe(100);
+      expect(below.focus.score).toBe(100);
+      expect(above.cost).toMatchObject({
+        score: 82,
+        evidence: [
+          'Estimated cost 0.50 USD.',
+          'Peak context 500k crossed the warning threshold.',
+        ],
+      });
+      expect(above.focus).toMatchObject({
+        score: 85,
+        evidence: ['Peak context 500k needs scope control.'],
+      });
+    });
+
+    it('omits exact-window penalties when the resolver has only a lower bound', () => {
+      const axes = contextAxes(
+        contextTokenData('claude-haiku-4-5-20251001[1m]', 1_000_001)
+      );
+
+      expect(axes.cost).toMatchObject({
+        score: 88,
+        evidence: ['Estimated cost 1.00 USD.'],
+      });
+      expect(axes.focus).toMatchObject({
+        score: 100,
+        evidence: [
+          'No high-context, high-churn, or repeated-command scope signal observed.',
+        ],
+      });
+    });
+
+    it('preserves standard 200K scores and evidence bytes', () => {
+      const warning = contextAxes(
+        contextTokenData(undefined, 150_000)
+      );
+      const over = contextAxes(
+        contextTokenData(undefined, 260_000)
+      );
+
+      expect(warning).toEqual({
+        cost: {
+          id: 'cost',
+          label: 'Cost efficiency',
+          score: 82,
+          confidence: 'high',
+          evidence: [
+            'Estimated cost 0.45 USD.',
+            'Peak context 150k crossed the warning threshold.',
+          ],
+        },
+        focus: {
+          id: 'focus',
+          label: 'Focus / scope',
+          score: 85,
+          confidence: 'high',
+          evidence: ['Peak context 150k needs scope control.'],
+        },
+      });
+      expect(over).toEqual({
+        cost: {
+          id: 'cost',
+          label: 'Cost efficiency',
+          score: 70,
+          confidence: 'high',
+          evidence: [
+            'Estimated cost 0.78 USD.',
+            'Peak context 260k exceeded the usable window.',
+          ],
+        },
+        focus: {
+          id: 'focus',
+          label: 'Focus / scope',
+          score: 70,
+          confidence: 'high',
+          evidence: ['Peak context 260k suggests a sprawling session.'],
+        },
+      });
+    });
   });
 
   it('applies a graduated cache-hit cost curve without a cliff at 50%', () => {

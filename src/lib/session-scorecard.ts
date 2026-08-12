@@ -15,6 +15,7 @@ import {
   HIGH_GROWTH_PER_HOUR,
   OVER_WINDOW,
   PEAK_CONTEXT_WARN,
+  resolveContextWindowUsage,
 } from './context-health';
 import { detectDangerousCommands } from './parse-permissions';
 
@@ -123,6 +124,19 @@ function peakContextSize(data: SessionTokenData): number {
     peak = Math.max(peak, contextSize(entry));
   }
   return peak;
+}
+
+function exactContextThresholds(
+  data: SessionTokenData,
+  peak: number
+): { warning: number; window: number } | null {
+  const usage = resolveContextWindowUsage(data.model, peak);
+  if (usage.resolution.kind !== 'exact') return null;
+  const window = usage.resolution.contextWindowTokens;
+  return {
+    warning: window * (PEAK_CONTEXT_WARN / OVER_WINDOW),
+    window,
+  };
 }
 
 function hoursBetween(startIso: string, endIso: string): number {
@@ -240,6 +254,7 @@ function scoreCost(input: SessionScorecardInput): SessionScorecardAxis {
   const evidence: string[] = [];
   const cost = estimateCost(data);
   const peak = peakContextSize(data);
+  const contextThresholds = exactContextThresholds(data, peak);
   const growth = contextGrowthPerHour(data);
   const cacheTotal = data.totalCacheReadTokens + data.totalCacheCreationTokens;
   const hitRate = cacheTotal > 0 ? data.totalCacheReadTokens / cacheTotal : 0;
@@ -249,10 +264,10 @@ function scoreCost(input: SessionScorecardInput): SessionScorecardAxis {
   else if (cost > 1) score -= 12;
   evidence.push(`Estimated cost ${cost.toFixed(2)} USD.`);
 
-  if (peak > OVER_WINDOW) {
+  if (contextThresholds && peak > contextThresholds.window) {
     score -= 30;
     evidence.push(`Peak context ${(peak / 1000).toFixed(0)}k exceeded the usable window.`);
-  } else if (peak > PEAK_CONTEXT_WARN) {
+  } else if (contextThresholds && peak > contextThresholds.warning) {
     score -= 18;
     evidence.push(`Peak context ${(peak / 1000).toFixed(0)}k crossed the warning threshold.`);
   }
@@ -535,11 +550,12 @@ function scoreFocus(input: SessionScorecardInput): SessionScorecardAxis {
 
   if (tokenData) {
     const peak = peakContextSize(tokenData);
+    const contextThresholds = exactContextThresholds(tokenData, peak);
     const growth = contextGrowthPerHour(tokenData);
-    if (peak > OVER_WINDOW) {
+    if (contextThresholds && peak > contextThresholds.window) {
       score -= 30;
       evidence.push(`Peak context ${(peak / 1000).toFixed(0)}k suggests a sprawling session.`);
-    } else if (peak > PEAK_CONTEXT_WARN) {
+    } else if (contextThresholds && peak > contextThresholds.warning) {
       score -= 15;
       evidence.push(`Peak context ${(peak / 1000).toFixed(0)}k needs scope control.`);
     }
