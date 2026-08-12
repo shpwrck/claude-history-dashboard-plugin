@@ -83,7 +83,7 @@ genuinely runs at first paint and cannot be lazy-split or tree-shaken away.
 - **2026-08-11 — #3735 (upload-only flavor retirement).** The dedicated
   browser-upload artifact and its second frozen budget were removed. The
   surviving public sample keeps its isolation and cold-load gates, while this
-  byte-budget contract covers the production server bundle only. The first
-  transition merge temporarily retained the old budget key solely so the
-  base-defined `spa-boundary` workflow could validate its own replacement; the
-  finalizing merge removes that bootstrap shim.
+  byte-budget contract covers the production server bundle only. A one-merge
+  compatibility key let the old base-defined boundary workflow validate its
+  replacement, then was deleted after the sample boundary became trusted base
+  code.

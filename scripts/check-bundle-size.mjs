@@ -16,9 +16,6 @@
 //
 // Flags:
 //   --flavor server       production budget block to enforce
-//   --flavor spa          temporary #3735 bootstrap alias for the base-defined
-//                         CI job; measures the sample build against its frozen
-//                         legacy budget and is removed by the finalizing PR
 //   --dist <dir>          dist root to measure (default: dist)
 //   --budget <file>       budget JSON (default: bundle-budget.json at repo root)
 
@@ -266,8 +263,8 @@ export function evaluateStructuredBudget(files, sizeOf, flavorBudget) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.flavor !== 'server' && args.flavor !== 'spa') {
-    die('--flavor must be "server" or the temporary "spa" CI alias.');
+  if (args.flavor !== 'server') {
+    die('--flavor must be "server".');
   }
 
   let budget;

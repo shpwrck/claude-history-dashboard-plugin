@@ -4,8 +4,7 @@
 Enforced by [`scripts/check-bundle-size.mjs`](../scripts/check-bundle-size.mjs) (`evaluateStructuredBudget`),
 configured by [`bundle-budget.json`](../bundle-budget.json), and wired into the
 `.github/workflows/ci.yml` `build` job for the server flavor. The former
-upload-only budget was retired by #3735 (apart from a one-merge CI bootstrap
-shim); the public sample retains isolation and
+upload-only budget was retired by #3735; the public sample retains isolation and
 cold-load gates without a second frozen byte budget.
 
 ## Why this exists
