@@ -186,8 +186,26 @@ describe('recommendations parity snapshot (#507)', () => {
         tokenSession('mystery', 'cli', [entry('some-unknown-model', 500_000, 100_000)], {
           hasUnknownModel: true,
         }),
-        tokenSession('extra1', 'cli', [entry('claude-opus-4-8', 100_000, 20_000)]),
-        tokenSession('extra2', 'cli', [entry('claude-opus-4-8', 100_000, 20_000)]),
+        // Zero-cost synthetic turns preserve the frozen 3-of-5 hot-risk
+        // cohort without changing any priced-spend claim in this snapshot.
+        tokenSession(
+          'extra1',
+          'cli',
+          [
+            entry('claude-opus-4-8', 100_000, 20_000),
+            entry('<synthetic>', 180_000, 0),
+          ],
+          { model: 'claude-haiku-4-5-20251001' }
+        ),
+        tokenSession(
+          'extra2',
+          'cli',
+          [
+            entry('claude-opus-4-8', 100_000, 20_000),
+            entry('<synthetic>', 180_000, 0),
+          ],
+          { model: 'claude-haiku-4-5-20251001' }
+        ),
       ],
       toolData: [automationSession, readSession],
       sessions: [],

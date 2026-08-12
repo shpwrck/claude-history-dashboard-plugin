@@ -9,16 +9,22 @@ import {
   RISK_MEDIUM,
   RISK_HIGH,
 } from './parse-compaction-risk'
-import { OVER_WINDOW } from './context-health'
 import type { SessionTokenData, TokenEntry, CompactionEvent } from '../types'
 import type { ToolUsageData, ToolCall } from './parse-tools'
+
+const STANDARD_CONTEXT_WINDOW = 200_000
+const STANDARD_MODEL = 'claude-haiku-4-5-20251001'
 
 // ── Fixture builders ─────────────────────────────────────────────────────
 // `contextSize` in the parser is inputTokens + cacheCreation + cacheRead.
 // We drive the context-size series purely through `inputTokens` so the math
 // in each fixture is obvious; the other cache fields stay zero.
 
-const entry = (inputTokens: number, ts = '2026-01-01T00:00:00.000Z'): TokenEntry => ({
+const entry = (
+  inputTokens: number,
+  ts = '2026-01-01T00:00:00.000Z',
+  model = STANDARD_MODEL
+): TokenEntry => ({
   timestamp: ts,
   inputTokens,
   outputTokens: 0,
@@ -27,22 +33,23 @@ const entry = (inputTokens: number, ts = '2026-01-01T00:00:00.000Z'): TokenEntry
   cacheReadTokens: 0,
   webSearchRequests: 0,
   webFetchRequests: 0,
-  model: 'claude-opus-4-8',
+  model,
 })
 
 const session = (
   sessionId: string,
   contextSizes: number[],
-  compactionEvents: CompactionEvent[] = []
+  compactionEvents: CompactionEvent[] = [],
+  model = STANDARD_MODEL
 ): SessionTokenData => ({
   sessionId,
   totalInputTokens: contextSizes.reduce((a, b) => a + b, 0),
   totalOutputTokens: 0,
   totalCacheCreationTokens: 0,
   totalCacheReadTokens: 0,
-  model: 'claude-opus-4-8',
+  model,
   messageCount: contextSizes.length,
-  entries: contextSizes.map((n) => entry(n)),
+  entries: contextSizes.map((n) => entry(n, undefined, model)),
   compactionEvents,
   hasUnknownModel: false,
 })
@@ -85,7 +92,16 @@ describe('computeCompactionRisk', () => {
     expect(r.sessionId).toBe('calm')
     expect(r.riskClass).toBe('low')
     expect(r.riskScore).toBe(0)
-    expect(r.peakContextPct).toBeCloseTo((11_000 / OVER_WINDOW) * 100)
+    expect(r.peakContextPct).toBeCloseTo((11_000 / STANDARD_CONTEXT_WINDOW) * 100)
+    expect(r.peakContextTokens).toBe(11_000)
+    expect(r.contextWindow).toEqual({
+      resolution: {
+        kind: 'exact',
+        contextWindowTokens: STANDARD_CONTEXT_WINDOW,
+        source: 'registry',
+      },
+      usagePercent: 5.5,
+    })
     expect(r.topFactor).toBeUndefined()
     expect(r.suggestions).toEqual([])
   })
@@ -164,6 +180,88 @@ describe('computeCompactionRisk', () => {
     expect(rows.map((r) => r.sessionId)).toEqual(['hot', 'calm'])
     expect(rows[0].riskScore).toBeGreaterThanOrEqual(rows[1].riskScore)
   })
+
+  it('scores equivalent 200K and explicit 1M peaks in the same risk bucket', () => {
+    const standard = computeCompactionRisk([
+      session('standard', [170_000]),
+    ])[0]
+    const long = computeCompactionRisk([
+      session('long', [850_000], [], 'claude-haiku-4-5-20251001[1m]'),
+    ])[0]
+
+    expect(standard.peakContextPct).toBe(85)
+    expect(long.peakContextPct).toBe(85)
+    expect(long.contextWindow).toEqual({
+      resolution: {
+        kind: 'exact',
+        contextWindowTokens: 1_000_000,
+        source: 'model-marker',
+      },
+      usagePercent: 85,
+    })
+    expect(long.riskScore).toBe(standard.riskScore)
+    expect(long.riskClass).toBe(standard.riskClass)
+    expect(standard.suggestions[0]).toBe(
+      'Peaked at 85% of the 200K window — run /compact before the next milestone, or /clear when switching tasks.'
+    )
+    expect(long.suggestions[0]).toBe(
+      'Peaked at 85% of the 1M window — run /compact before the next milestone, or /clear when switching tasks.'
+    )
+  })
+
+  it('reports an explicit 1M session at 400K as exact 40% without peak risk', () => {
+    const row = computeCompactionRisk([
+      session('long-calm', [400_000], [], 'claude-haiku-4-5-20251001[1m]'),
+    ])[0]
+
+    expect(row.peakContextTokens).toBe(400_000)
+    expect(row.peakContextPct).toBe(40)
+    expect(row.contextWindow).toEqual({
+      resolution: {
+        kind: 'exact',
+        contextWindowTokens: 1_000_000,
+        source: 'model-marker',
+      },
+      usagePercent: 40,
+    })
+    expect(row.riskScore).toBe(0)
+    expect(row.topFactor).toBeUndefined()
+    expect(row.suggestions).toEqual([])
+  })
+
+  it('keeps lower-bound peak utilization unknown while retaining independent signals', () => {
+    const compaction: CompactionEvent = {
+      timestamp: '2026-01-01T00:00:00.000Z',
+      beforeContext: 1_000_001,
+      afterContext: 100_000,
+      reductionPercent: 90,
+    }
+    const tokenRow = session(
+      'lower-bound',
+      [1_000_001],
+      [compaction, compaction],
+      'claude-haiku-4-5-20251001[1m]'
+    )
+    const toolRow = tools('lower-bound', [bigCall(), bigCall(), smallCall(), smallCall()])
+
+    const row = computeCompactionRisk([tokenRow], [toolRow])[0]
+
+    expect(row.peakContextTokens).toBe(1_000_001)
+    expect(row.peakContextPct).toBeNull()
+    expect(row.contextWindow).toEqual({
+      resolution: {
+        kind: 'lower-bound',
+        minimumContextWindowTokens: 1_000_001,
+        source: 'observed',
+      },
+      usagePercent: null,
+    })
+    expect(row.topFactor).toBe('tool-output')
+    expect(row.riskClass).toBe('medium')
+    expect(row.suggestions.some((text) => text.includes('Peaked at'))).toBe(false)
+    expect(row.suggestions.some((text) => text.includes('tool calls returned'))).toBe(true)
+    expect(row.suggestions.some((text) => text.includes('compactions already occurred'))).toBe(true)
+  })
 })
 
 describe('RiskClass boundary logic', () => {
@@ -171,7 +269,7 @@ describe('RiskClass boundary logic', () => {
   // HIGH band the peak score is 25 + ((pct - 80) / 20) * 15, so we can place
   // the rounded riskScore exactly on either side of the class boundaries.
   const sessionAtPct = (id: string, pct: number) =>
-    session(id, [Math.round((pct / 100) * OVER_WINDOW)])
+    session(id, [Math.round((pct / 100) * STANDARD_CONTEXT_WINDOW)])
 
   const classAt = (pct: number): string =>
     computeCompactionRisk([sessionAtPct('b', pct)])[0].riskClass

@@ -17,7 +17,10 @@ import type {
 } from '../types';
 import type { ToolUsageData, ToolCall } from './parse-tools';
 import type { SessionTimeline } from './parse-timeline';
-import { OVER_WINDOW } from './context-health';
+import {
+  resolveContextWindowUsage,
+  type ContextWindowUsage,
+} from './context-health';
 
 // ── Heuristic thresholds ────────────────────────────────────────────────
 // All exposed so the UI can mirror them in labels / tooltips without drifting.
@@ -32,9 +35,9 @@ export const GROWTH_WINDOW_TURNS = 10;
  */
 export const LARGE_TOOL_OUTPUT_BYTES = 20_000;
 
-/** Context utilisation thresholds for risk-class bucketing (percent of 200K). */
-export const PEAK_PCT_WARN = 50; // 100K / 200K
-export const PEAK_PCT_HIGH = 80; // 160K / 200K
+/** Context utilisation thresholds for risk-class bucketing (percent of the resolved window). */
+export const PEAK_PCT_WARN = 50;
+export const PEAK_PCT_HIGH = 80;
 
 /** Per-turn growth thresholds, in tokens. */
 export const GROWTH_PER_TURN_WARN = 5_000;
@@ -56,8 +59,12 @@ export type RiskClass = 'low' | 'medium' | 'high';
 
 export interface CompactionRiskRow {
   sessionId: string;
-  /** Peak context utilisation as a percent of the 200K window (0-100+). */
-  peakContextPct: number;
+  /** Largest observed context occupancy in the session. */
+  peakContextTokens: number;
+  /** Resolved window and exact/lower-bound certainty for the observed peak. */
+  contextWindow: ContextWindowUsage;
+  /** Exact peak utilization, or null when retained evidence is only a lower bound. */
+  peakContextPct: number | null;
   /**
    * Average tokens added per assistant turn over the last
    * {@link GROWTH_WINDOW_TURNS} turns. Negative values are clamped to 0;
@@ -216,6 +223,13 @@ function formatTokensShort(n: number): string {
   return n.toFixed(0);
 }
 
+/** Stable tier label used inside established suggestion copy (200K / 1M). */
+function formatWindowTokens(n: number): string {
+  if (n % 1_000_000 === 0) return `${n / 1_000_000}M`;
+  if (n % 1_000 === 0) return `${n / 1_000}K`;
+  return formatTokensShort(n);
+}
+
 function basename(p: string): string {
   const i = p.lastIndexOf('/');
   return i === -1 ? p : p.slice(i + 1);
@@ -224,7 +238,7 @@ function basename(p: string): string {
 // ── Suggestions ─────────────────────────────────────────────────────────
 
 interface SuggestionInput {
-  peakContextPct: number;
+  contextWindow: ContextWindowUsage;
   contextGrowthRate: number;
   largeToolOutputRate: number;
   repeatedReadDensity: number;
@@ -237,14 +251,22 @@ interface SuggestionInput {
 
 function buildSuggestions(s: SuggestionInput): string[] {
   const out: string[] = [];
+  const peakContextPct = s.contextWindow.usagePercent;
 
-  if (s.peakContextPct >= PEAK_PCT_HIGH) {
-    out.push(
-      `Peaked at ${s.peakContextPct.toFixed(0)}% of the 200K window — run /compact before the next milestone, or /clear when switching tasks.`
+  if (
+    peakContextPct !== null &&
+    s.contextWindow.resolution.kind === 'exact' &&
+    peakContextPct >= PEAK_PCT_HIGH
+  ) {
+    const windowLabel = formatWindowTokens(
+      s.contextWindow.resolution.contextWindowTokens
     );
-  } else if (s.peakContextPct >= PEAK_PCT_WARN) {
     out.push(
-      `Context climbed to ${s.peakContextPct.toFixed(0)}% of the window — consider /compact at task boundaries to avoid an automatic compaction later.`
+      `Peaked at ${peakContextPct.toFixed(0)}% of the ${windowLabel} window — run /compact before the next milestone, or /clear when switching tasks.`
+    );
+  } else if (peakContextPct !== null && peakContextPct >= PEAK_PCT_WARN) {
+    out.push(
+      `Context climbed to ${peakContextPct.toFixed(0)}% of the window — consider /compact at task boundaries to avoid an automatic compaction later.`
     );
   }
 
@@ -291,7 +313,7 @@ interface ScoreParts {
 }
 
 function scoreParts(args: {
-  peakContextPct: number;
+  peakContextPct: number | null;
   contextGrowthRate: number;
   largeToolOutputRate: number;
   repeatedReadDensity: number;
@@ -299,11 +321,12 @@ function scoreParts(args: {
 }): ScoreParts {
   const { peakContextPct, contextGrowthRate, largeToolOutputRate, repeatedReadDensity, compactionsObserved } = args;
 
-  // Peak: 0 below WARN, ramps to ~35 at the OVER_WINDOW line, capped at 40.
+  // Peak: unavailable lower bounds contribute nothing; exact utilization ramps
+  // from 0 below WARN to the 40-point cap at a full resolved window.
   let peak = 0;
-  if (peakContextPct >= PEAK_PCT_HIGH) {
+  if (peakContextPct !== null && peakContextPct >= PEAK_PCT_HIGH) {
     peak = 25 + Math.min(15, ((peakContextPct - PEAK_PCT_HIGH) / 20) * 15);
-  } else if (peakContextPct >= PEAK_PCT_WARN) {
+  } else if (peakContextPct !== null && peakContextPct >= PEAK_PCT_WARN) {
     peak = ((peakContextPct - PEAK_PCT_WARN) / (PEAK_PCT_HIGH - PEAK_PCT_WARN)) * 25;
   }
 
@@ -385,7 +408,8 @@ export function computeCompactionRisk(
   for (const d of tokenData) {
     if (d.entries.length === 0) continue;
     const peak = peakContext(d.entries);
-    const peakContextPct = (peak / OVER_WINDOW) * 100;
+    const contextWindow = resolveContextWindowUsage(d.model, peak);
+    const peakContextPct = contextWindow.usagePercent;
     const contextGrowthRate = rollingGrowthPerTurn(d.entries, GROWTH_WINDOW_TURNS);
 
     const calls = toolBySession.get(d.sessionId)?.calls ?? [];
@@ -408,7 +432,7 @@ export function computeCompactionRisk(
     const largeToolCount = calls.filter((c) => c.resultBytes >= LARGE_TOOL_OUTPUT_BYTES).length;
 
     const suggestions = buildSuggestions({
-      peakContextPct,
+      contextWindow,
       contextGrowthRate,
       largeToolOutputRate: largeRate,
       repeatedReadDensity: reread.density,
@@ -421,6 +445,8 @@ export function computeCompactionRisk(
 
     rows.push({
       sessionId: d.sessionId,
+      peakContextTokens: peak,
+      contextWindow,
       peakContextPct,
       contextGrowthRate,
       largeToolOutputRate: largeRate,
