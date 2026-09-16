@@ -64,6 +64,12 @@ test('dataset and recommendation caches invalidate an affirmative removal verdic
   const outsideSkillPath = join(testRoot, 'outside', 'project-risk');
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
+  // The unused-skill claim is bounded to the project's own observation inside
+  // the 30-day active window (#3118/#3119), and the server judges that window
+  // against its real clock. Keep the fixture session recent relative to now; a
+  // fixed date silently ages out of the window and drops the project skill from
+  // the recommendation (#3869).
+  const observedAtMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
   await mkdir(join(claudeDir, 'projects'), { recursive: true });
   await mkdir(join(claudeDir, 'projects', 'demo'), { recursive: true });
@@ -102,13 +108,13 @@ test('dataset and recommendation caches invalidate an affirmative removal verdic
     [
       JSON.stringify({
         type: 'user',
-        timestamp: '2026-07-20T00:00:00.000Z',
+        timestamp: new Date(observedAtMs).toISOString(),
         cwd: projectRoot,
         message: { role: 'user', content: 'observe plugin usage' },
       }),
       JSON.stringify({
         type: 'assistant',
-        timestamp: '2026-07-20T00:00:01.000Z',
+        timestamp: new Date(observedAtMs + 1_000).toISOString(),
         message: {
           role: 'assistant',
           model: 'claude-sonnet-4-5',

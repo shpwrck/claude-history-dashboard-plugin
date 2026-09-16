@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error - plain ESM build helper, no .d.ts
-import { buildSampleCorpus, buildSampleModelEvalResults } from '../../scripts/sample-data/build-corpus.mjs';
+import { SAMPLE_CORPUS_BASE_MS, buildSampleCorpus, buildSampleModelEvalResults } from '../../scripts/sample-data/build-corpus.mjs';
 
 import { parseHistoryJsonl, groupBySessions, groupByProjects } from './parse-history';
 import { parseSessionJsonl } from './parse-sessions';
@@ -31,6 +31,12 @@ import { ingestModelEvalResults } from './model-eval-ingest';
 import { actNowRoutingGaps } from './detectors/cost/model-eval-routing-gap';
 
 const corpus = buildSampleCorpus();
+// The corpus is anchored at a fixed date so the zip stays byte-stable, so any
+// detector that decays stale evidence against the clock (the automation-share
+// 90-day model-pin freshness window, #2142) must see a `now` pinned to the
+// corpus rather than the wall clock. Otherwise the sample's measured savings
+// expire on a calendar date and this suite fails on its own (#3868).
+const SAMPLE_NOW = SAMPLE_CORPUS_BASE_MS + 14 * 24 * 60 * 60 * 1000;
 const sessionFiles: { name: string; text: string }[] = corpus.sessions.map(
   (s: { sessionId: string; jsonl: string }) => ({
     name: `${s.sessionId}.jsonl`,
@@ -122,7 +128,7 @@ describe('sample corpus — tokens', () => {
       permissionRows: [],
       apiErrors: [],
     });
-    const rec = buildRecommendations(input).find(
+    const rec = buildRecommendations(input, SAMPLE_NOW).find(
       (r) => r.id === 'cost.automation-share'
     );
 
@@ -254,7 +260,7 @@ describe('sample corpus — runtime events', () => {
       apiErrors: [],
       runtimeEvents: runtime,
       timelines,
-    }).find((r) => r.id === 'speed.time-motion');
+    }, SAMPLE_NOW).find((r) => r.id === 'speed.time-motion');
 
     expect(rec?.detail).toContain('serial Read latency');
     expect(rec?.detail).toContain('idle/AFK');
@@ -344,7 +350,7 @@ describe('sample corpus — churn geometry', () => {
       apiErrors: [],
       churnGeometry,
     });
-    const rec = buildRecommendations(input).find(
+    const rec = buildRecommendations(input, SAMPLE_NOW).find(
       (r) => r.id === 'workflow.churn-geometry'
     );
 

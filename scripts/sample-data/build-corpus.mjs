@@ -40,7 +40,10 @@ function pick(arr) {
 
 // --- time ------------------------------------------------------------------
 // Fixed base epoch so timestamps (and therefore the zip) are reproducible.
-const BASE_MS = Date.UTC(2026, 4, 12, 9, 0, 0); // 2026-05-12T09:00:00Z
+// Exported so clock-sensitive consumers (the corpus coverage suite) can pin
+// their `now` to the corpus instead of the wall clock (#3868).
+export const SAMPLE_CORPUS_BASE_MS = Date.UTC(2026, 4, 12, 9, 0, 0); // 2026-05-12T09:00:00Z
+const BASE_MS = SAMPLE_CORPUS_BASE_MS;
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
