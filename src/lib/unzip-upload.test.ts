@@ -2,11 +2,18 @@ import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { zipSync, strToU8 } from 'fflate';
+import { zipSync } from 'fflate';
+import { ArchiveTooLargeError, MAX_COMPRESSED_PUSH_BYTES, formatBytes } from './archive-reader';
 import {
-  MAX_COMPRESSED_PUSH_BYTES,
+  MIB,
+  buildZip,
+  forgeDeclaredSize,
+  observeSubarrays,
+} from './__fixtures__/zip-archive-fixture';
+import {
   unzipBundle,
   unzipBundleFromChunks,
+  unzipBundleFromFile,
   shouldSkipFile,
   isMetadataOnlyPath,
   extractProjectName,
@@ -23,35 +30,8 @@ import {
   type LoadedFile,
 } from './unzip-upload';
 
-const MIB = 1024 * 1024;
 const MAX_TEST_INFLATED_CHUNK_BYTES = 5 * MIB;
 const PROJECT_DIR = fileURLToPath(new URL('../..', import.meta.url));
-
-function forgeDeclaredSize(zip: Uint8Array, declared: number): Uint8Array {
-  const out = zip.slice();
-  const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
-  for (let i = 0; i + 4 <= out.length; i += 1) {
-    const sig = dv.getUint32(i, true);
-    if (sig === 0x04034b50) dv.setUint32(i + 22, declared, true);
-    else if (sig === 0x02014b50) dv.setUint32(i + 24, declared, true);
-  }
-  return out;
-}
-
-function observeSubarrays(chunk: Uint8Array, sizes: number[]): Uint8Array {
-  return new Proxy(chunk, {
-    get(target, property) {
-      if (property === 'subarray') {
-        return (start?: number, end?: number) => {
-          const slice = target.subarray(start, end);
-          sizes.push(slice.byteLength);
-          return slice;
-        };
-      }
-      return Reflect.get(target, property, target);
-    },
-  });
-}
 
 describe('shouldSkipFile', () => {
   it('keeps history and session transcripts', () => {
@@ -326,14 +306,6 @@ describe('isZipPath', () => {
 });
 
 describe('unzipBundle', () => {
-  function buildZip(files: Record<string, string>): Uint8Array {
-    const tree: Record<string, Uint8Array> = {};
-    for (const [path, content] of Object.entries(files)) {
-      tree[path] = strToU8(content);
-    }
-    return zipSync(tree);
-  }
-
   it('accepts a native hub export zip rooted at projects/ (#697)', async () => {
     const zip = buildZip({
       'projects/hub-project/hub-session.jsonl': '{"type":"user"}\n',
@@ -523,12 +495,6 @@ describe('unzipBundle', () => {
  * itself small could inflate without bound and exhaust the tab's memory.
  */
 describe('unzipBundle forged size metadata (#3176)', () => {
-  function buildZip(files: Record<string, string>): Uint8Array {
-    const tree: Record<string, Uint8Array> = {};
-    for (const [path, content] of Object.entries(files)) tree[path] = strToU8(content);
-    return zipSync(tree);
-  }
-
   /**
    * Overwrite the DECLARED uncompressed size in every local-file and
    * central-directory header. The compressed size is left alone, so the entry
@@ -584,6 +550,106 @@ describe('unzipBundle forged size metadata (#3176)', () => {
     await expect(unzipBundle(zip, { maxEntryBytes: 50_000 })).rejects.toBeInstanceOf(
       UploadTooLargeError
     );
+  });
+});
+
+/**
+ * #3806 — the fflate engine and its ceilings moved to the neutral
+ * `archive-reader`; `unzipBundle` is now a compatibility wrapper. These pin the
+ * wrapper's half of the contract: upload admission and attribution, plus the
+ * upload wording the UI has always surfaced for each ceiling.
+ */
+describe('unzipBundle compatibility wrapper (#3806)', () => {
+  async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+    try {
+      await promise;
+    } catch (err) {
+      return err as Error;
+    }
+    throw new Error('expected the upload to be rejected');
+  }
+
+  const LIVE_HINT =
+    'For a dataset this large, run the dashboard against your live ~/.claude directory instead';
+  const CORRUPT_HINT =
+    'That file looks corrupt or not a supported agent transcript - remove it and try again.';
+
+  it('rephrases each neutral reader ceiling in upload wording', async () => {
+    const perFile = await rejectionOf(
+      unzipBundle(buildZip({ 'projects/p/huge.jsonl': 'x'.repeat(5000) }), { maxEntryBytes: 1000 })
+    );
+    expect(perFile).toBeInstanceOf(UploadTooLargeError);
+    expect(perFile.name).toBe('UploadTooLargeError');
+    expect(perFile.message).toBe(
+      `"projects/p/huge.jsonl" is 5 KB, over the 1 KB per-file limit. ${CORRUPT_HINT}`
+    );
+
+    const count = await rejectionOf(
+      unzipBundle(buildZip({ 'a.jsonl': '{}', 'b.jsonl': '{}' }), { maxEntries: 1 })
+    );
+    expect(count.message).toBe(
+      `This archive holds more than 1 files, over the upload limit. ${LIVE_HINT}.`
+    );
+
+    const total = await rejectionOf(
+      unzipBundle(buildZip({ 'a.jsonl': 'a'.repeat(800), 'b.jsonl': 'b'.repeat(800) }), {
+        maxTotalBytes: 1000,
+      })
+    );
+    expect(total.message).toBe(
+      `This archive inflates to over 1 KB, past the upload limit. ${LIVE_HINT}.`
+    );
+
+    const zip = buildZip({ 'a.jsonl': '{}' });
+    const archive = await rejectionOf(unzipBundle(zip, { maxArchiveBytes: 1 }));
+    expect(archive.message).toBe(
+      `This archive is ${formatBytes(zip.byteLength)}, over the 0 KB upload limit. ` +
+        `${LIVE_HINT} of uploading.`
+    );
+  });
+
+  it('omits the size when an observed per-file overflow followed a forged declared size', async () => {
+    const zip = forgeDeclaredSize(buildZip({ 'projects/p/sess.jsonl': 'x'.repeat(200_000) }), 10);
+    const err = await rejectionOf(unzipBundle(zip, { maxEntryBytes: 50_000 }));
+    expect(err.message).toBe(
+      `"projects/p/sess.jsonl" is over the 49 KB per-file limit. ${CORRUPT_HINT}`
+    );
+  });
+
+  it('keeps the structured reader violation as the cause, never as the thrown type', async () => {
+    const err = await rejectionOf(
+      unzipBundle(buildZip({ 'a.jsonl': '{}', 'b.jsonl': '{}' }), { maxEntries: 1 })
+    );
+    expect(err).toBeInstanceOf(UploadTooLargeError);
+    expect(err).not.toBeInstanceOf(ArchiveTooLargeError);
+    expect(err.cause).toBeInstanceOf(ArchiveTooLargeError);
+    expect(err.cause).toMatchObject({ kind: 'entries', limit: 1 });
+  });
+
+  it('rejects rather than throws when handed a bad argument', async () => {
+    await expect(unzipBundle(undefined as unknown as Uint8Array)).rejects.toBeInstanceOf(TypeError);
+    await expect(unzipBundleFromFile(undefined as unknown as Blob)).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it('keeps metadata-only entries flagged and counted while inflating nothing for them', async () => {
+    const inflated: number[] = [];
+    const zip = buildZip({
+      'file-history/sess-1/snapshot@v2': 'SECRET SNAPSHOT BODY',
+      'projects/p/sess-1.jsonl': '{"type":"user"}\n',
+    });
+
+    const loaded = await unzipBundleFromChunks([zip], zip.byteLength, {}, (bytes) =>
+      inflated.push(bytes)
+    );
+
+    expect(loaded.map((f) => [f.name, f.metadataOnly ?? false, f.project])).toEqual([
+      ['snapshot@v2', true, undefined],
+      ['sess-1.jsonl', false, 'p'],
+    ]);
+    expect(inflated.reduce((sum, bytes) => sum + bytes, 0)).toBe('{"type":"user"}\n'.length);
+    await expect(
+      unzipBundleFromChunks([zip], zip.byteLength, { maxEntries: 1 })
+    ).rejects.toBeInstanceOf(UploadTooLargeError);
   });
 });
 

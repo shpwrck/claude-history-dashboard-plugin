@@ -1,5 +1,17 @@
-import { AsyncUnzipInflate, Unzip } from 'fflate';
 import type { HistoryEntry } from '../types';
+import {
+  ArchiveTooLargeError,
+  formatBytes,
+  readArchive,
+  readArchiveBlob,
+  readArchiveBytes,
+  type ArchiveEntry,
+  type ArchiveEntryDecision,
+  type ArchiveEntryInfo,
+  type ArchiveLimitKind,
+  type ArchiveLimits,
+  type ArchiveTestInstrumentation,
+} from './archive-reader';
 import { deriveEntriesFromTranscript } from './parse-history';
 import type { MemoriesResponse, RawMemoryFile } from './parse-memories';
 import type { WorkflowsResponse, RawWorkflowRun } from './parse-workflows';
@@ -16,47 +28,22 @@ import type { WorkflowsResponse, RawWorkflowRun } from './parse-workflows';
 export const SENSITIVE_FILES = ['credentials.json', '.env', 'settings.json', 'statsig_config.json'];
 export const SKIP_DIRECTORIES = ['.git', 'node_modules', '__pycache__'];
 
-// Fail-proof upload guards (#758). A large or pathological archive must fail
-// fast and clearly instead of locking the tab while it inflates to memory. These
-// caps are deliberately generous — a real `~/.claude` bundle is megabytes of
-// well-compressing `.jsonl`, far under them — so they only ever trip on
-// genuinely huge input or a decompression bomb (small compressed, vast inflated).
-// Declared sizes provide an early-rejection hint; the authoritative per-entry
-// and total caps use observed output bytes. Compressed input is fed to fflate in
-// bounded pushes so the observed-byte guard has a finite allocation overshoot.
-
-/** Compressed-input ceiling, checked before any decompression starts. */
-export const MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
-/** Per-entry inflated-size ceiling — a single file this big is pathological. */
-export const MAX_ENTRY_BYTES = 512 * 1024 * 1024; // 512 MiB
-/** Total inflated-bytes budget across all admitted entries. */
-export const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
-/** Cap on the number of admitted entries. */
-export const MAX_ENTRIES = 200_000;
-/**
- * Maximum compressed archive bytes handed to fflate in one push. DEFLATE can
- * expand one compressed byte roughly 1,032x; keeping pushes at 4 KiB prevents
- * fflate from materializing an arbitrarily large output buffer before the
- * observed-byte guards below can reject it (#3368).
- */
-export const MAX_COMPRESSED_PUSH_BYTES = 4096;
+// The bounded fflate engine and its byte/entry/ZIP-bomb ceilings (#758, #3176,
+// #3368) live in the upload-neutral `archive-reader` (#3806). This module is the
+// upload compatibility wrapper: it owns the skip rules, project attribution,
+// and metadata-only rules, and phrases each ceiling in upload terms.
 
 /**
- * Thrown when an upload trips a {@link MAX_ARCHIVE_BYTES}/{@link MAX_TOTAL_BYTES}/
- * {@link MAX_ENTRIES} guard. Carries a human-readable `message` the upload UI
- * surfaces verbatim so the user knows why it stopped (and that nothing hung).
+ * Thrown when an upload trips one of the archive ceilings. Carries a
+ * human-readable `message` the upload UI surfaces verbatim so the user knows
+ * why it stopped (and that nothing hung); the structured
+ * {@link ArchiveTooLargeError} it rephrases is kept as `cause`.
  */
 export class UploadTooLargeError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, cause?: ArchiveTooLargeError) {
+    super(message, { cause });
     this.name = 'UploadTooLargeError';
   }
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
-  return `${Math.round(bytes / 1024)} KB`;
 }
 
 export interface LoadedFile {
@@ -315,209 +302,95 @@ export function collectUploadTranscriptSessionIds(files: LoadedFile[]): string[]
   return [...ids];
 }
 
+const LIVE_DIRECTORY_HINT =
+  'For a dataset this large, run the dashboard against your live ~/.claude directory instead';
+const CORRUPT_FILE_HINT =
+  'That file looks corrupt or not a supported agent transcript - remove it and try again.';
+
 /**
- * Inflate a `.zip` of `~/.claude` artifacts into the same `{ name, text,
- * project?, path? }` shape the loose-file path produces. The fflate `filter`
- * hook skips decompressing anything `shouldSkipFile` rejects, so sensitive
- * files bundled into the zip are dropped before they are ever read into memory.
- * Project attribution and the full path are recovered from each entry's in-zip
- * path.
+ * Upload wording for each neutral reader ceiling. This is the copy the upload
+ * UI has always surfaced (#758); only the source of the violation moved.
  */
-/** Tunable upload guard ceilings; defaults to the module `MAX_*` constants. */
-export interface UploadLimits {
-  maxArchiveBytes: number;
-  maxEntryBytes: number;
-  maxTotalBytes: number;
-  maxEntries: number;
-}
-
-export type UnzipTestInstrumentation = (inflatedBytes: number) => void;
-
-const DEFAULT_LIMITS: UploadLimits = {
-  maxArchiveBytes: MAX_ARCHIVE_BYTES,
-  maxEntryBytes: MAX_ENTRY_BYTES,
-  maxTotalBytes: MAX_TOTAL_BYTES,
-  maxEntries: MAX_ENTRIES,
+const UPLOAD_LIMIT_MESSAGES: Record<ArchiveLimitKind, (err: ArchiveTooLargeError) => string> = {
+  archive: (err) =>
+    `This archive is ${formatBytes(err.observed ?? 0)}, over the ${formatBytes(err.limit)} ` +
+    `upload limit. ${LIVE_DIRECTORY_HINT} of uploading.`,
+  entry: (err) =>
+    `"${err.path}" is ${err.observed === undefined ? '' : `${formatBytes(err.observed)}, `}` +
+    `over the ${formatBytes(err.limit)} per-file limit. ${CORRUPT_FILE_HINT}`,
+  total: (err) =>
+    `This archive inflates to over ${formatBytes(err.limit)}, past the upload limit. ` +
+    `${LIVE_DIRECTORY_HINT}.`,
+  entries: (err) =>
+    `This archive holds more than ${err.limit.toLocaleString()} files, over the upload limit. ` +
+    `${LIVE_DIRECTORY_HINT}.`,
 };
 
+/** Rephrase a neutral reader violation in the upload UI's own words. */
+async function withUploadErrors<T>(read: Promise<T>): Promise<T> {
+  try {
+    return await read;
+  } catch (err) {
+    if (err instanceof ArchiveTooLargeError) {
+      throw new UploadTooLargeError(UPLOAD_LIMIT_MESSAGES[err.kind](err), err);
+    }
+    throw err;
+  }
+}
+
+/** Upload admission: skip rules first, then metadata-only file-history snapshots. */
+function admitUploadEntry(entry: ArchiveEntryInfo): ArchiveEntryDecision {
+  if (shouldSkipFile(entry.path)) return 'skip';
+  return isMetadataOnlyPath(entry.path) ? 'metadata' : 'read';
+}
+
+/**
+ * Map an admitted entry into the `{ name, text, project?, path? }` upload shape.
+ * ZIP entries carry no `lastModified`; only loose files do.
+ */
+function toLoadedFile(entry: ArchiveEntry): LoadedFile {
+  const file: LoadedFile = {
+    name: entry.name,
+    text: entry.text,
+    project: extractProjectName(entry.path),
+    path: entry.path,
+  };
+  return entry.metadataOnly ? { ...file, metadataOnly: true } : file;
+}
+
+const UPLOAD_ARCHIVE_POLICY = { admit: admitUploadEntry, map: toLoadedFile };
+
+/**
+ * Inflate a `.zip` of `~/.claude` artifacts into the same `{ name, text,
+ * project?, path? }` shape the loose-file path produces. Admission runs before
+ * decompression, so anything `shouldSkipFile` rejects — sensitive files
+ * included — is dropped before it is ever read into memory. Project
+ * attribution and the full path are recovered from each entry's in-zip path.
+ * These stay `async` so a bad argument rejects instead of throwing.
+ */
 export async function unzipBundle(
   data: Uint8Array,
-  limits: Partial<UploadLimits> = {}
+  limits: Partial<ArchiveLimits> = {}
 ): Promise<LoadedFile[]> {
-  return unzipBundleFromChunks([data], data.byteLength, limits);
+  return withUploadErrors(readArchiveBytes(data, { ...UPLOAD_ARCHIVE_POLICY, limits }));
 }
 
 export async function unzipBundleFromFile(
   file: Blob,
-  limits: Partial<UploadLimits> = {}
+  limits: Partial<ArchiveLimits> = {}
 ): Promise<LoadedFile[]> {
-  if (typeof file.stream !== 'function') {
-    return unzipBundle(new Uint8Array(await file.arrayBuffer()), limits);
-  }
-  return unzipBundleFromChunks(file.stream(), file.size, limits);
+  return withUploadErrors(readArchiveBlob(file, { ...UPLOAD_ARCHIVE_POLICY, limits }));
 }
 
 export async function unzipBundleFromChunks(
   chunks: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
   archiveBytes?: number,
-  limits: Partial<UploadLimits> = {},
-  observeForTest?: UnzipTestInstrumentation
+  limits: Partial<ArchiveLimits> = {},
+  observeForTest?: ArchiveTestInstrumentation
 ): Promise<LoadedFile[]> {
-  const { maxArchiveBytes, maxEntryBytes, maxTotalBytes, maxEntries } = {
-    ...DEFAULT_LIMITS,
-    ...limits,
-  };
-
-  // Fail fast on an absurdly large compressed input before spending any work
-  // inflating it — this is the "immediate" half of fail-proof (#758).
-  if (archiveBytes !== undefined && archiveBytes > maxArchiveBytes) {
-    throw new UploadTooLargeError(
-      `This archive is ${formatBytes(archiveBytes)}, over the ${formatBytes(maxArchiveBytes)} upload limit. ` +
-        `For a dataset this large, run the dashboard against your live ~/.claude directory instead of uploading.`
-    );
-  }
-
-  // The streaming unzip handler enforces skip rules plus declared-size/count
-  // hints before `start()`; observed output enforces the authoritative budgets.
-  // Unlike fflate's object-returning `unzip`, this decodes admitted entries
-  // directly into `LoadedFile`s and avoids a second full decompressed byte map.
-  let admittedCount = 0;
-  let admittedBytes = 0;
-  let overflow: UploadTooLargeError | null = null;
-  let streamError: Error | null = null;
-  const loaded: Array<LoadedFile | undefined> = [];
-  const pending: Promise<void>[] = [];
-
-  const rejectWithOverflow = (err: UploadTooLargeError): void => {
-    overflow = err;
-    streamError = err;
-  };
-
-  const unzip = new Unzip((file) => {
-    if (file.name.endsWith('/') || shouldSkipFile(file.name) || overflow) return;
-    const originalSize = file.originalSize;
-    if (originalSize !== undefined && originalSize > maxEntryBytes) {
-      rejectWithOverflow(
-        new UploadTooLargeError(
-          `"${file.name}" is ${formatBytes(originalSize)}, over the ${formatBytes(maxEntryBytes)} per-file limit. ` +
-            `That file looks corrupt or not a supported agent transcript - remove it and try again.`
-        )
-      );
-      return;
-    }
-    if (admittedCount + 1 > maxEntries) {
-      rejectWithOverflow(
-        new UploadTooLargeError(
-          `This archive holds more than ${maxEntries.toLocaleString()} files, over the upload limit. ` +
-            `For a dataset this large, run the dashboard against your live ~/.claude directory instead.`
-        )
-      );
-      return;
-    }
-    if (originalSize !== undefined && admittedBytes + originalSize > maxTotalBytes) {
-      rejectWithOverflow(
-        new UploadTooLargeError(
-          `This archive inflates to over ${formatBytes(maxTotalBytes)}, past the upload limit. ` +
-            `For a dataset this large, run the dashboard against your live ~/.claude directory instead.`
-        )
-      );
-      return;
-    }
-
-    const index = loaded.length;
-    loaded.push(undefined);
-    admittedCount += 1;
-    // NOTE: `originalSize` is untrusted ZIP metadata, so it is only ever an
-    // EARLY REJECTION HINT (the checks above, which avoid decompressing an
-    // entry that already declares itself too big). It is deliberately not
-    // added to `admittedBytes`: an entry can declare 1 KiB and emit 2 GiB, and
-    // accounting from the declaration would let that sail past both budgets.
-    // All accounting below is from bytes we actually observed (#3176).
-
-    const decoder = new TextDecoder();
-    const path = file.name;
-    const name = path.split('/').pop() ?? path;
-    const lastModified =
-      (file as unknown as { mtime?: Date }).mtime instanceof Date
-        ? (file as unknown as { mtime: Date }).mtime.getTime()
-        : undefined;
-    if (isMetadataOnlyPath(path)) {
-      loaded[index] = {
-        name,
-        text: '',
-        project: extractProjectName(path),
-        path,
-        lastModified,
-        metadataOnly: true,
-      };
-      return;
-    }
-    let text = '';
-    let observedBytes = 0;
-
-    pending.push(
-      new Promise<void>((resolve, reject) => {
-        file.ondata = (err, chunk, final) => {
-          if (err) {
-            streamError = err;
-            reject(err);
-            return;
-          }
-          if (chunk) {
-            if (import.meta.env?.MODE === 'test') observeForTest?.(chunk.byteLength);
-            observedBytes += chunk.byteLength;
-            if (observedBytes > maxEntryBytes) {
-              const tooLarge = new UploadTooLargeError(
-                `"${path}" is over the ${formatBytes(maxEntryBytes)} per-file limit. ` +
-                  `That file looks corrupt or not a supported agent transcript - remove it and try again.`
-              );
-              rejectWithOverflow(tooLarge);
-              file.terminate();
-              reject(tooLarge);
-              return;
-            }
-            admittedBytes += chunk.byteLength;
-            if (admittedBytes > maxTotalBytes) {
-              const tooLarge = new UploadTooLargeError(
-                `This archive inflates to over ${formatBytes(maxTotalBytes)}, past the upload limit. ` +
-                  `For a dataset this large, run the dashboard against your live ~/.claude directory instead.`
-              );
-              rejectWithOverflow(tooLarge);
-              file.terminate();
-              reject(tooLarge);
-              return;
-            }
-            text += decoder.decode(chunk, { stream: !final });
-          }
-          if (final) {
-            text += decoder.decode();
-            loaded[index] = { name, text, project: extractProjectName(path), path, lastModified };
-            resolve();
-          }
-        };
-        file.start();
-      })
-    );
-  });
-  unzip.register(AsyncUnzipInflate);
-
-  try {
-    feed:
-    for await (const chunk of chunks) {
-      for (let offset = 0; offset < chunk.length; ) {
-        if (overflow) break feed;
-        unzip.push(chunk.subarray(offset, (offset += MAX_COMPRESSED_PUSH_BYTES)), false);
-      }
-    }
-    if (!overflow) unzip.push(new Uint8Array(), true);
-    await Promise.all(pending);
-  } catch (err) {
-    streamError = err instanceof Error ? err : new Error(String(err));
-  }
-
-  if (overflow || streamError) throw overflow || streamError;
-
-  return loaded.filter(Boolean) as LoadedFile[];
+  return withUploadErrors(
+    readArchive(chunks, { ...UPLOAD_ARCHIVE_POLICY, limits, archiveBytes, observeForTest })
+  );
 }
 
 /**
