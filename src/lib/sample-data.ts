@@ -53,8 +53,8 @@ export function readSampleArchive(bytes: Uint8Array): Promise<SampleFile[]> {
 }
 
 /**
- * Fetch and inflate the bundled sample zip, split into the same history vs
- * session channels FileUpload produces. Returns null when the asset is missing
+ * Fetch and inflate the bundled sample zip, split into history and session
+ * channels. Returns null when the asset is missing
  * or unreadable, so the caller can show an unavailable sample state.
  */
 export async function loadSampleBundle(): Promise<SampleBundle | null> {
