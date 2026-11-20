@@ -2798,6 +2798,56 @@ describe('nativeToolBypass', () => {
     expect(out.totalBypass).toBe(0)
   })
 
+  it('ignores tool names used as arguments or data (#2670)', () => {
+    for (const command of [
+      'echo grep foo',
+      'printf find',
+      'echo sed',
+      'xargs grep foo',
+      'echo "a; grep b"',
+      "echo 'x && find .'",
+      'git log --grep fix',
+      'command -v rg >/dev/null && echo ok',
+      'command -V grep',
+    ]) {
+      const out = nativeToolBypass([session('s', [bash(command)])])
+      expect(out.totalBypass, command).toBe(0)
+    }
+  })
+
+  it('still counts leading and shell-chained invocations (#2670)', () => {
+    const cases: Array<[string, string]> = [
+      ['grep foo src', 'grep'],
+      ['cd /repo && grep foo src', 'grep'],
+      ['true; find . -name x', 'find'],
+      ['false || sed -n 1p f', 'sed'],
+      ['LC_ALL=C grep foo f', 'grep'],
+      ['(rg foo)', 'grep'],
+      ['sudo -E grep foo f', 'grep'],
+      ['time find . -name x', 'find'],
+      ['make\nawk 1 f', 'awk'],
+      ['if grep -q foo f; then echo y; fi', 'grep'],
+      ['for f in *; do sed -n 1p "$f"; done', 'sed'],
+      ['! grep x f', 'grep'],
+      ['sudo -u root grep foo f', 'grep'],
+      ['nice -n 10 find . -name x', 'find'],
+    ]
+    for (const [command, category] of cases) {
+      const out = nativeToolBypass([session('s', [bash(command.replace('\\n', '\n'))])])
+      expect(out.categories.map((c) => c.category), command).toContain(category)
+    }
+  })
+
+  it('keeps pipe-fed tools excluded inside chains (#72, #2670)', () => {
+    for (const command of ['ls | grep foo', 'cd x && ls | sed 1d', 'cat f |awk 1', 'make |& grep error']) {
+      const out = nativeToolBypass([session('s', [bash(command)])])
+      expect(
+        out.categories.filter((c) => c.category !== 'cat' && c.category !== 'cd'),
+        command
+      ).toEqual([])
+    }
+  })
+
   it('counts find bypasses against native Glob in findRatio', () => {
     const data = [session('s', [bash('find . -name "*.ts"'), call({ toolName: 'Glob', input: {} })])]
     const out = nativeToolBypass(data)

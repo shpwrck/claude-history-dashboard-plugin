@@ -183,6 +183,9 @@ try {
     undefined,
     'plugin MCP config belongs inline in plugin.json, not at payload root'
   );
+  // The start and stop slash commands both ship (#2563).
+  await access(join(payloadRoot, 'commands', 'dashboard.md'));
+  await access(join(payloadRoot, 'commands', 'dashboard-stop.md'));
   await access(join(payloadRoot, 'REFERENCES.md'));
   await access(join(payloadRoot, 'docs', 'adding-a-recommendation.md'));
   await access(

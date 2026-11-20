@@ -48,6 +48,26 @@ describe('aggregateDatedStopHooks', () => {
     });
   });
 
+  it('discards overflowing and implausible durations instead of publishing Infinity (#2671)', () => {
+    const now = Date.parse('2026-07-14T12:00:00Z');
+    const at = new Date(now - 60_000).toISOString();
+    const data = runtime([
+      ...Array.from({ length: 5 }, () => stop(at, Number.MAX_VALUE)),
+      stop(at, 2 * 60 * 60 * 1000),
+      stop(at, 2000),
+      stop(at, 4000),
+    ]);
+    const stats = aggregateDatedStopHooks([data], now - 86_400_000, now);
+    expect(stats).toMatchObject({
+      timedEvents: 2,
+      totalDurationMs: 6000,
+      meanTimedDurationMs: 3000,
+      maxDurationMs: 4000,
+      discardedTimingEvents: 6,
+    });
+    expect(JSON.parse(JSON.stringify(stats))).toEqual(stats);
+  });
+
   it('returns an empty aggregate for invalid bounds', () => {
     expect(
       aggregateDatedStopHooks([runtime([])], Number.NaN, 0)

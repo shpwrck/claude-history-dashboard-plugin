@@ -26,9 +26,11 @@ In any Claude Code session:
 
 It boots a local server and prints the exact URL to open. Port 5173 is preferred;
 if it is occupied, the supervisor selects a free port and the MCP tools follow
-the running instance. To stop it today, run
-`node <plugin-dir>/scripts/plugin-ctl.mjs stop`; a dedicated `/dashboard-stop`
-command is tracked in [source issue #2563](https://github.com/shpwrck/claude-history-dashboard/issues/2563).
+the running instance. To stop it, run:
+
+```
+/dashboard-stop
+```
 
 ## Requirements
 

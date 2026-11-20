@@ -13,6 +13,7 @@
         "name": "Jason Skrzypek",
         "email": "jankoszy@gmail.com"
       },
+      "license": "MIT",
       "category": "productivity",
       "source": ".",
       "homepage": "https://github.com/shpwrck/claude-history-dashboard"

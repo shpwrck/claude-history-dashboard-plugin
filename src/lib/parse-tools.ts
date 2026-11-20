@@ -3621,34 +3621,149 @@ export function rfc3339TimestampMs(timestamp: string): number | null {
 
 /**
  * Does `cmd` invoke one of `words` as a command word that is NOT fed from a
- * pipe? (#72)
+ * pipe? (#72, #2670)
  *
  * The native tool only replaces a bypass when the shell tool reads its OWN
  * argument (a file path or a search root). When the tool sits on the right of a
  * pipe — `cmd | grep …`, `… | sed …`, `… | awk …` — it consumes another
  * command's stdout, which native Grep/Read/Edit cannot do, so it is NOT a
- * bypass. We therefore match the tool token only at a command-word boundary
- * (start of string, or after `;`/`&`/whitespace) whose effective preceding
- * operator is not `|`. Leading uses and `;`/`&&`-separated uses still count.
+ * bypass.
+ *
+ * Only the COMMAND WORD of each shell segment counts: the first word of the
+ * string or of a segment after `;`, `&`, `&&`, `||` or a newline, skipping
+ * leading `VAR=value` assignments, `(`/`{` grouping, reserved words such as
+ * `if`/`do`/`!`, and transparent wrappers such as `env`, `sudo` and `time`
+ * (with their flag values). `command -v`/`-V` is a lookup, not an invocation. A word used as an
+ * argument or data (`echo grep foo`, `printf find`, `xargs grep foo`) is not an
+ * invocation (#2670). Operators inside single or double quotes, or escaped with
+ * a backslash, do not split segments.
  */
+/** Wrappers that run their first non-flag argument as the command (#2670). */
+// perf-index-contract: bypass-wrapper-words always-consumed: module constant built once; every Bash command scanned for bypasses reads it
+const TRANSPARENT_COMMAND_WRAPPERS = new Set([
+  'env',
+  'sudo',
+  'time',
+  'nohup',
+  'nice',
+  'command',
+  'exec',
+  'builtin',
+]);
+
+/** Wrapper flags that consume the next word as their value (#2670). */
+// perf-index-contract: bypass-wrapper-value-flags always-consumed: module constant built once; read whenever a wrapper word is skipped
+const WRAPPER_VALUE_FLAGS: Record<string, ReadonlySet<string>> = {
+  sudo: new Set(['-u', '-g', '-U', '-C', '-D', '-h', '-p', '-r', '-t', '-T']),
+  nice: new Set(['-n']),
+  env: new Set(['-u', '-C']),
+  time: new Set(['-f', '-o']),
+};
+
+/** Shell reserved words that precede a command word in the same segment. */
+// perf-index-contract: bypass-shell-prefix-words always-consumed: module constant built once; read for every scanned segment
+const SHELL_PREFIX_WORDS = new Set([
+  '!',
+  'if',
+  'then',
+  'else',
+  'elif',
+  'do',
+  'while',
+  'until',
+]);
+
 function unpipedCommandWords(cmd: string, words: string[]): string[] {
-  // All callers pass fixed, shell-command-safe words; keep the expression
-  // identical to the long-standing matcher so alias capture cannot drift from
-  // category classification.
-  const re = new RegExp(`(${words.join('|')})(?=\\s|$)`, 'g');
+  // perf-index-contract: bypass-command-words always-consumed: both sets are read for every segment of the command being scanned
+  const wanted = new Set(words);
   const matched = new Set<string>();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(cmd)) !== null) {
-    const start = m.index;
-    // Must sit at a command-word boundary (mirrors the original anchors).
-    const boundary = start === 0 || /[|&;\s]/.test(cmd[start - 1]);
-    if (!boundary) continue;
-    // Walk back over any whitespace to the effective preceding operator; if it
-    // is a pipe, this token is stdin-fed and is not a native-tool bypass.
-    let j = start - 1;
-    while (j >= 0 && (cmd[j] === ' ' || cmd[j] === '\t')) j -= 1;
-    if (j >= 0 && cmd[j] === '|') continue;
-    matched.add(m[1]);
+  // Each segment: its text and whether a single `|` (a pipe) introduced it.
+  const segments: Array<{ text: string; piped: boolean }> = [];
+  let current = '';
+  let piped = false;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < cmd.length; i += 1) {
+    const ch = cmd[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < cmd.length) {
+        current += ch + cmd[i + 1];
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < cmd.length) {
+      current += ch + cmd[i + 1];
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ';' || ch === '\n' || ch === '&' || ch === '|') {
+      segments.push({ text: current, piped });
+      current = '';
+      if (ch === '|' && cmd[i + 1] === '|') {
+        piped = false;
+        i += 1;
+      } else if (ch === '|' && cmd[i + 1] === '&') {
+        piped = true; // `|&` pipes stdout and stderr
+        i += 1;
+      } else if (ch === '|') {
+        piped = !(i > 0 && cmd[i - 1] === '>'); // `>|` is a redirect, not a pipe
+      } else {
+        if (ch === '&' && cmd[i + 1] === '&') i += 1;
+        piped = false;
+      }
+      continue;
+    }
+    current += ch;
+  }
+  segments.push({ text: current, piped });
+
+  for (const segment of segments) {
+    if (segment.piped) continue;
+    const tokens = segment.text.trim().split(/\s+/).filter(Boolean);
+    let k = 0;
+    let lookupOnly = false;
+    for (;;) {
+      const token = tokens[k];
+      if (token === undefined) break;
+      if (
+        token === '(' ||
+        token === '{' ||
+        SHELL_PREFIX_WORDS.has(token) ||
+        /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)
+      ) {
+        k += 1;
+      } else if (TRANSPARENT_COMMAND_WRAPPERS.has(token)) {
+        // `env FOO=1 rg …`, `sudo -u root grep …`, `nice -n 10 find …`: the
+        // wrapped program is the real command word. Skip the wrapper, its
+        // flags and the values of flags that take one.
+        const valueFlags = WRAPPER_VALUE_FLAGS[token];
+        k += 1;
+        while (tokens[k]?.startsWith('-')) {
+          const flag = tokens[k];
+          // `command -v rg` / `command -V grep` only look the name up.
+          if ((token === 'command' || token === 'builtin') && /^-[a-zA-Z]*[vV]/.test(flag)) {
+            lookupOnly = true;
+          }
+          k += valueFlags?.has(flag) ? 2 : 1;
+        }
+      } else {
+        break;
+      }
+    }
+    if (lookupOnly) continue;
+    let word = tokens[k];
+    if (word === undefined) continue;
+    // `(grep x)` / `{grep x; }` without a separating space.
+    word = word.replace(/^[({]+/, '');
+    if (wanted.has(word)) matched.add(word);
   }
   return [...matched];
 }

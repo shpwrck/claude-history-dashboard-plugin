@@ -102,9 +102,57 @@ describe('aggregateStopHooks', () => {
       maxDurationMs: 60,
       timedEvents: 2,
       meanTimedDurationMs: 50,
+      discardedTimingEvents: 0,
       errorEvents: 1,
       preventedContinuations: 1,
     })
+  })
+
+  it('discards corrupt or overflowing durations and stays JSON-safe (#2671)', () => {
+    const stop = (totalDurationMs: number) => ({
+      sessionId: 's',
+      timestamp: '2026-01-01T00:00:00Z',
+      hookCount: 1,
+      totalDurationMs,
+      hadErrors: false,
+      preventedContinuation: false,
+    })
+    const data = [
+      {
+        sessionId: 's',
+        stopHooks: [
+          ...Array.from({ length: 5 }, () => stop(Number.MAX_VALUE)),
+          stop(Number.POSITIVE_INFINITY),
+          stop(Number.NaN),
+          stop(-5),
+          stop(2_000),
+          stop(4_000),
+        ],
+      },
+    ] as unknown as RuntimeEvents[]
+    const stats = aggregateStopHooks(data)
+    expect(stats.timedEvents).toBe(2)
+    expect(stats.totalDurationMs).toBe(6_000)
+    expect(stats.meanTimedDurationMs).toBe(3_000)
+    expect(stats.maxDurationMs).toBe(4_000)
+    expect(stats.discardedTimingEvents).toBe(8)
+    expect(JSON.parse(JSON.stringify(stats))).toEqual(stats)
+  })
+
+  it('parses an overflowing hookInfos sum as discarded timing (#2671)', () => {
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'stop_hook_summary',
+      timestamp: '2026-01-01T00:00:00Z',
+      hookCount: 2,
+      hookInfos: [{ durationMs: Number.MAX_VALUE }, { durationMs: Number.MAX_VALUE }],
+    })
+    const parsed = parseRuntimeEvents(line, 's.jsonl')
+    expect(parsed?.stopHooks[0]?.totalDurationMs).toBe(Number.MAX_VALUE)
+    expect(JSON.parse(JSON.stringify(parsed)).stopHooks[0].totalDurationMs).toBe(Number.MAX_VALUE)
+    const stats = aggregateStopHooks([parsed!])
+    expect(stats.discardedTimingEvents).toBe(1)
+    expect(stats.timedEvents).toBe(0)
   })
 
   it('meanTimedDurationMs divides only by events with a measured duration', () => {

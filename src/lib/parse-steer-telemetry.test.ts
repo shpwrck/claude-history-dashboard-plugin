@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -202,5 +202,53 @@ describe('readSteerTelemetry — file IO', () => {
 
   it('returns [] for an empty log', async () => {
     expect(await readSteerTelemetry(tmpFile(''))).toEqual([]);
+  });
+});
+
+describe('readSteerTelemetry candidate paths (#2900)', () => {
+  const line = delivered('read-streak', '2026-06-10T00:00:00Z');
+
+  it('reads the canonical skill-state log when present', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'steer-paths-'));
+    dirs.push(dir);
+    const canonical = join(dir, 'skill-state-recs.jsonl');
+    const legacy = join(dir, 'legacy.jsonl');
+    writeFileSync(canonical, line + '\n' + line + '\n');
+    writeFileSync(legacy, line + '\n');
+    const out = await readSteerTelemetry([canonical, legacy]);
+    expect(out[0]?.fireCount).toBe(2);
+  });
+
+  it('falls back to the legacy log only when the canonical log is missing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'steer-paths-'));
+    dirs.push(dir);
+    const legacy = join(dir, 'legacy.jsonl');
+    writeFileSync(legacy, line + '\n');
+    const out = await readSteerTelemetry([join(dir, 'missing.jsonl'), legacy]);
+    expect(out[0]?.fireCount).toBe(1);
+  });
+
+  it('does not mix in the legacy log when the canonical log exists but is empty', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'steer-paths-'));
+    dirs.push(dir);
+    const canonical = join(dir, 'canonical.jsonl');
+    const legacy = join(dir, 'legacy.jsonl');
+    writeFileSync(canonical, '');
+    writeFileSync(legacy, line + '\n');
+    expect(await readSteerTelemetry([canonical, legacy])).toEqual([]);
+  });
+
+  it('does not fall back when the canonical log exists but cannot be read', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'steer-paths-'));
+    dirs.push(dir);
+    const canonical = join(dir, 'canonical.jsonl');
+    const legacy = join(dir, 'legacy.jsonl');
+    mkdirSync(canonical); // EISDIR, not ENOENT
+    writeFileSync(legacy, line + '\n');
+    expect(await readSteerTelemetry([canonical, legacy])).toEqual([]);
+  });
+
+  it('returns no data when no candidate exists', async () => {
+    expect(await readSteerTelemetry(['/nonexistent/a.jsonl', '/nonexistent/b.jsonl'])).toEqual([]);
   });
 });

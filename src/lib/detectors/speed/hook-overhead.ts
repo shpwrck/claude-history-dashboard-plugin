@@ -1,5 +1,9 @@
 import type { Detector, RecommendationInput } from '../types';
-import type { RuntimeEvents, StopHookStats } from '../../parse-runtime-events';
+import {
+  isPlausibleStopHookDuration,
+  type RuntimeEvents,
+  type StopHookStats,
+} from '../../parse-runtime-events';
 import { hasStopHook, STALE_WEEKS } from '../shared';
 
 /**
@@ -99,6 +103,7 @@ function emptyDatedStopHookStats(): DatedStopHookStats {
     maxDurationMs: 0,
     timedEvents: 0,
     meanTimedDurationMs: 0,
+    discardedTimingEvents: 0,
     errorEvents: 0,
     preventedContinuations: 0,
     latestTimedTimestampMs: null,
@@ -142,10 +147,14 @@ export function aggregateDatedStopHooks(
       if (event.preventedContinuation) stats.preventedContinuations += 1;
 
       // A non-positive or non-finite duration is not measured timing evidence.
-      if (
-        !Number.isFinite(event.totalDurationMs) ||
-        event.totalDurationMs <= 0
-      ) {
+      if (!isPlausibleStopHookDuration(event.totalDurationMs)) {
+        if (event.totalDurationMs !== 0) stats.discardedTimingEvents += 1;
+        continue;
+      }
+      // Fail closed on aggregate overflow (#2671): a sum that leaves finite
+      // range would publish "Infinity" copy and a null provenance value.
+      if (!Number.isFinite(stats.totalDurationMs + event.totalDurationMs)) {
+        stats.discardedTimingEvents += 1;
         continue;
       }
       stats.totalDurationMs += event.totalDurationMs;
@@ -245,12 +254,7 @@ export function hookOverheadCacheValidity(
   let through = Number.POSITIVE_INFINITY;
   for (const session of events) {
     for (const event of session.stopHooks) {
-      if (
-        !Number.isFinite(event.totalDurationMs) ||
-        event.totalDurationMs <= 0
-      ) {
-        continue;
-      }
+      if (!isPlausibleStopHookDuration(event.totalDurationMs)) continue;
       const observedAt = runtimeEventTimestampMs(event.timestamp);
       if (observedAt === null) continue;
       const staleAfter = observedAt + HOOK_OVERHEAD_FRESHNESS_MS;

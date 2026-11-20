@@ -1972,10 +1972,52 @@ function isDatabaseMutation(tokens: string[], command: string): boolean {
 const SECRET_ENV_RE =
   /\$(?:\{)?[A-Z_][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*(?:\})?/i;
 
+const SECRET_ENV_AT_RE = new RegExp(SECRET_ENV_RE.source, 'iy');
+
+/**
+ * True when `command` EXPANDS a secret-shaped variable (#2723). A `$` inside
+ * single quotes, or escaped with a backslash (outside single quotes), is a
+ * literal character and prints the variable's name, not its value:
+ * `echo '$GITHUB_TOKEN'`, `echo \$GITHUB_TOKEN`, `echo "x \$GITHUB_TOKEN"`.
+ * An unquoted or double-quoted `$GITHUB_TOKEN` / `${GITHUB_TOKEN}` expands.
+ */
+export function expandsSecretEnvReference(command: string): boolean {
+  // Comments, ANSI-C `$'…'` quoting, command substitution and backticks can
+  // nest or reinterpret quotes beyond this scanner. Fail closed there: any
+  // secret-shaped reference counts.
+  if (/[#`]|\$['(]/.test(command)) return SECRET_ENV_RE.test(command);
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      i += 1; // the next character is literal (in double quotes too, for `$`)
+      continue;
+    }
+    if (ch === '"') {
+      quote = quote === '"' ? null : '"';
+      continue;
+    }
+    if (ch === "'" && quote === null) {
+      quote = "'";
+      continue;
+    }
+    if (ch === '$') {
+      SECRET_ENV_AT_RE.lastIndex = i;
+      if (SECRET_ENV_AT_RE.test(command)) return true;
+    }
+  }
+  // An unterminated quote means the scan lost track; fail closed.
+  return quote !== null && SECRET_ENV_RE.test(command);
+}
+
 function isSecretSensitive(tokens: string[], command: string): boolean {
   const [head, verb, subverb] = tokens;
   if (hasHelpArg(tokens)) return false;
-  if ((head === 'echo' || head === 'printf') && SECRET_ENV_RE.test(command)) {
+  if ((head === 'echo' || head === 'printf') && expandsSecretEnvReference(command)) {
     return true;
   }
   if (head === 'gh' && verb === 'secret' && subverb === 'set') return true;

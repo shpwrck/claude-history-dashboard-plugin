@@ -349,11 +349,16 @@ const REJECT_SIGNALS =
 const CHECKPOINT_ANSWERS =
   process.env.CHECKPOINT_ANSWERS_PATH ||
   join(CHD_CACHE_DIR, 'checkpoint-answers.jsonl');
-// Read-only PreToolUse-steer delivery/outcome log (#2203). Written by the recs
-// steer hook under ~/.claude/skills/recs; the dashboard only reads + aggregates it.
-const STEER_TELEMETRY_LOG =
-  process.env.STEER_TELEMETRY_PATH ||
-  join(CLAUDE, 'skills', 'recs', '.pretooluse-steer.jsonl');
+// Read-only PreToolUse-steer delivery/outcome log (#2203). The recs steer hook
+// writes ~/.claude/skill-state/recs/pretooluse-steer.jsonl; the pre-#2900 path
+// under ~/.claude/skills/recs is read only when the canonical log is absent.
+// The dashboard only reads + aggregates it. STEER_TELEMETRY_PATH pins one file.
+const STEER_TELEMETRY_LOGS = process.env.STEER_TELEMETRY_PATH
+  ? [process.env.STEER_TELEMETRY_PATH]
+  : [
+      join(CLAUDE, 'skill-state', 'recs', 'pretooluse-steer.jsonl'),
+      join(CLAUDE, 'skills', 'recs', '.pretooluse-steer.jsonl'),
+    ];
 // Dashboard-owned spool the SessionStart recs hook appends to when the server is
 // down (#581). Drained into ADOPTION_RECEIPTS on boot. Sibling of the receipts
 // log in the same dashboard data dir — NEVER under the install dir.
@@ -5323,7 +5328,7 @@ async function handleAdoptionReceiptRead(req, res) {
 // empty array (the dashboard renders a "no data" state).
 async function handleSteerTelemetryRead(req, res) {
   try {
-    const records = await readSteerTelemetry(STEER_TELEMETRY_LOG);
+    const records = await readSteerTelemetry(STEER_TELEMETRY_LOGS);
     return sendJson(res, 200, { ok: true, records });
   } catch (err) {
     return sendJson(res, 500, {

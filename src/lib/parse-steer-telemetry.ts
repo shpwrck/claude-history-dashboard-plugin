@@ -9,8 +9,11 @@ import {
 } from './steer-telemetry-types';
 
 /**
- * Reader + aggregator for the PreToolUse-steer delivery/outcome log
- * (`~/.claude/skills/recs/.pretooluse-steer.jsonl`) — #2203, epic #1868.
+ * Reader + aggregator for the PreToolUse-steer delivery/outcome log — #2203,
+ * epic #1868. The recs steer hook writes
+ * `~/.claude/skill-state/recs/pretooluse-steer.jsonl`; older hook versions wrote
+ * `~/.claude/skills/recs/.pretooluse-steer.jsonl`, which the server still reads
+ * as an explicit fallback when the canonical log does not exist (#2900).
  *
  * The steer hook already logs every `delivered` / `accepted` / `declined` event
  * keyed by `ruleId`; this consumes that EXISTING channel (no second capture) and
@@ -155,13 +158,26 @@ export function aggregateSteerTelemetry(records: SteerRecord[]): SteerRuleTeleme
     .sort((x, y) => y.fireCount - x.fireCount || x.ruleId.localeCompare(y.ruleId));
 }
 
-/** Read + aggregate the steer log. Missing/unreadable file ⇒ `[]` (no throw). */
-export async function readSteerTelemetry(file: string): Promise<SteerRuleTelemetry[]> {
-  let raw: string;
-  try {
-    raw = await readFile(file, 'utf8');
-  } catch {
-    return [];
+/**
+ * Read + aggregate the steer log. `files` may list candidates in priority order
+ * (canonical first, then a legacy fallback): the first one that can be read is
+ * used (a later candidate only when an earlier one is missing), so a present-but-empty canonical log is never mixed with a stale legacy
+ * one (#2900). No readable candidate ⇒ `[]` (no throw).
+ */
+export async function readSteerTelemetry(
+  files: string | readonly string[]
+): Promise<SteerRuleTelemetry[]> {
+  for (const file of typeof files === 'string' ? [files] : files) {
+    let raw: string;
+    try {
+      raw = await readFile(file, 'utf8');
+    } catch (err) {
+      // Only a missing canonical log falls back to the legacy path; an
+      // unreadable one must not surface stale legacy counts as current.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      return [];
+    }
+    return aggregateSteerTelemetry(parseSteerTelemetryLines(raw));
   }
-  return aggregateSteerTelemetry(parseSteerTelemetryLines(raw));
+  return [];
 }

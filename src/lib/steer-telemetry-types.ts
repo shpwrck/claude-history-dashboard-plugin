@@ -6,7 +6,8 @@
  * pulling `node:fs` into the client bundle.
  *
  * The steer hook (`~/.claude/skills/recs/scripts/pretooluse-steer.mjs`) already
- * logs every delivery + accepted/declined outcome to `.pretooluse-steer.jsonl`.
+ * logs every delivery + accepted/declined outcome to
+ * `~/.claude/skill-state/recs/pretooluse-steer.jsonl` (#2900).
  * This module is the consumer-side vocabulary; the `misfireTag` *write* is a meta
  * companion in that hook (a separate child of #1868, mirrored to shpwrck/claude).
  */

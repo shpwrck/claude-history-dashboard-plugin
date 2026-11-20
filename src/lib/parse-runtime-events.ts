@@ -141,7 +141,10 @@ export function parseRuntimeEvents(
           sessionId,
           timestamp,
           hookCount: num(entry.hookCount),
-          totalDurationMs,
+          // Individually finite durations can still overflow the sum. Keep a
+          // finite, JSON-safe but implausible value so aggregation counts the
+          // row as discarded timing rather than as unmeasured (#2671).
+          totalDurationMs: Number.isFinite(totalDurationMs) ? totalDurationMs : Number.MAX_VALUE,
           hadErrors: errs.length > 0,
           preventedContinuation: entry.preventedContinuation === true,
         });
@@ -280,6 +283,18 @@ export function sessionWithStopHook(
   return undefined;
 }
 
+/**
+ * Upper bound on a plausible single Stop event's hook duration (one hour).
+ * Claude Code hook timeouts are minutes, so a larger value is a corrupt row,
+ * not overhead; it is discarded rather than averaged into copy (#2671).
+ */
+export const MAX_PLAUSIBLE_STOP_HOOK_MS = 60 * 60 * 1000;
+
+/** True when `ms` is a measured, plausible Stop-hook duration. */
+export function isPlausibleStopHookDuration(ms: number): boolean {
+  return Number.isFinite(ms) && ms > 0 && ms <= MAX_PLAUSIBLE_STOP_HOOK_MS;
+}
+
 export interface StopHookStats {
   events: number;
   /** Sum of every stop event's `hookCount` — total stop-hook fires across the dataset. */
@@ -301,6 +316,13 @@ export interface StopHookStats {
    * events with no `durationMs`. `0` when no event carried a measured duration.
    */
   meanTimedDurationMs: number;
+  /**
+   * Events whose duration was non-zero but not a plausible measurement:
+   * non-finite, negative, above {@link MAX_PLAUSIBLE_STOP_HOOK_MS}, or would
+   * push the running total out of finite range (#2671). They are excluded from
+   * every timing figure, so timing stats stay finite and JSON-serializable.
+   */
+  discardedTimingEvents: number;
   errorEvents: number;
   preventedContinuations: number;
 }
@@ -327,13 +349,21 @@ export function aggregateStopHooks(data: RuntimeEvents[]): StopHookStats {
   let timedEvents = 0;
   let errorEvents = 0;
   let prevented = 0;
+  let discarded = 0;
   for (const s of data) {
     for (const h of s.stopHooks) {
       events += 1;
       hookCount += h.hookCount;
-      total += h.totalDurationMs;
-      if (h.totalDurationMs > 0) timedEvents += 1;
-      if (h.totalDurationMs > max) max = h.totalDurationMs;
+      const duration = h.totalDurationMs;
+      if (isPlausibleStopHookDuration(duration) && Number.isFinite(total + duration)) {
+        total += duration;
+        timedEvents += 1;
+        if (duration > max) max = duration;
+      } else if (duration !== 0) {
+        // NaN, Infinity, negative, implausibly large, or overflowing the sum:
+        // corrupt, not measured timing.
+        discarded += 1;
+      }
       if (h.hadErrors) errorEvents += 1;
       if (h.preventedContinuation) prevented += 1;
     }
@@ -346,6 +376,7 @@ export function aggregateStopHooks(data: RuntimeEvents[]): StopHookStats {
     maxDurationMs: max,
     timedEvents,
     meanTimedDurationMs: timedEvents === 0 ? 0 : total / timedEvents,
+    discardedTimingEvents: discarded,
     errorEvents,
     preventedContinuations: prevented,
   };

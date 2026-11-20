@@ -521,6 +521,43 @@ describe('safety.risky-actions (#1309)', () => {
     ).toEqual(commands.map(() => 'secret exposure or mutation'));
   });
 
+  it('ignores literal or escaped secret variable syntax but keeps expansions (#2723)', () => {
+    const literal = [
+      "echo '$GITHUB_TOKEN'",
+      "printf '%s' '$AWS_SECRET_ACCESS_KEY'",
+      'echo \\$GITHUB_TOKEN',
+      'echo "literal \\$GITHUB_TOKEN"',
+      "echo 'quoted ${ANTHROPIC_API_KEY}'",
+    ];
+    const expanded = [
+      'echo "$GITHUB_TOKEN"',
+      'echo $GITHUB_TOKEN',
+      'echo "${ANTHROPIC_API_KEY}"',
+      "echo 'x' \"$GITHUB_TOKEN\"",
+      'echo "\\\\$GITHUB_TOKEN"',
+      // ANSI-C quoting the scanner can't model fails closed.
+      "echo $'it\\'s' \"$GITHUB_TOKEN\"",
+    ];
+    for (const command of literal) {
+      // Parser precompute.
+      expect(deriveBashCommandSignals(command).commandRiskyActionPattern, command).toBeUndefined();
+      // Raw command bodies.
+      expect(detectRiskyActions([toolSession([bash('raw', command, 1)])]), command).toEqual([]);
+      // Stripped tool data carrying only the precomputed signal.
+      const stripped = { ...bash('stripped', command, 1), ...deriveBashCommandSignals(command), input: {} };
+      expect(detectRiskyActions([toolSession([stripped])]), command).toEqual([]);
+      // Recommendation.
+      expect(detector.rule(input([bash('rec', command, 1)]), 0), command).toBeNull();
+    }
+    for (const command of expanded) {
+      expect(deriveBashCommandSignals(command).commandRiskyActionPattern, command).toBe(
+        'secret exposure or mutation'
+      );
+      const rec = detector.rule(input([bash('rec', command, 1)]), 0);
+      expect(rec?.severity, command).toBe('critical');
+    }
+  });
+
   it('emits a recommendation carrying structured evidence refs', () => {
     const calls = [bash('secret-1', 'printf "%s" "$GITHUB_TOKEN"', 1)];
     const rec = detector.rule(input(calls), 0);
