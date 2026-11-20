@@ -19,7 +19,6 @@
  */
 import { SERVER_AVAILABLE } from '@api-client';
 import { SAMPLE_MODE } from './build-mode';
-import type { View } from '../types';
 
 // The browser-only `upload` variant was retired with File Upload (#3807, epic
 // #3736). Only the public sample and the live server remain.
@@ -62,21 +61,4 @@ export function variantCapabilities(
   serverAvailable: boolean = SERVER_AVAILABLE
 ): VariantCapabilities {
   return CAPABILITIES[deliveryVariant(serverAvailable)];
-}
-
-/**
- * Whether a view with `requirement` is available under `caps`. The upload tier
- * has no blanket server data, but specific `serverData` views whose data the
- * user's upload happens to cover are passed via `uploadCoveredViews`.
- */
-export function isViewAvailable(
-  view: View,
-  requirement: ViewRequirement | undefined,
-  caps: VariantCapabilities,
-  uploadCoveredViews: ReadonlySet<View> = new Set()
-): boolean {
-  if (!requirement) return true;
-  if (requirement === 'liveServer') return caps.hasLiveServer;
-  // serverData
-  return caps.hasServerData || uploadCoveredViews.has(view);
 }

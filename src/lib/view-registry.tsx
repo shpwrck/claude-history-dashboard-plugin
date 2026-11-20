@@ -57,7 +57,7 @@ import type { TaskSuccessProxy } from './parse-task-success';
 import type { SecretsAtRestSignal } from './parse-secrets-at-rest';
 import type { ProjectMemories } from './parse-memories';
 import type { WorkflowRun } from './parse-workflows';
-// #539 ingest artifacts (server-only; empty on the SPA/upload dataset).
+// #539 ingest artifacts (server-only; empty on the sample dataset).
 import type { TaskRecord } from './parse-tasks';
 import type { TeamSummary } from './parse-teams';
 import type { SessionRegistryEntry } from './parse-session-registry';
@@ -309,9 +309,9 @@ export interface ViewData {
   secretsAtRest: SecretsAtRestSignal[];
   liveConfig: LiveConfig | null;
   repoMap: RepoMapDataset | null;
-  /** Local repository Markdown graph; null on SPA/upload datasets. */
+  /** Local repository Markdown graph; null on the sample dataset. */
   docGraph: DocGraph | null;
-  /** Versioned docs-map contract wrapper (#2709); null on SPA/upload datasets. */
+  /** Versioned docs-map contract wrapper (#2709); null on the sample dataset. */
   docsMap: DocsMapArtifact | null;
   /** Opt-in GitHub issue-state snapshot (#2710); null unless CHD_DOC_ISSUES set. */
   docIssueSnapshot: DocIssueSnapshot | null;
@@ -429,8 +429,7 @@ function renderCostAttributionView(
 // Workflows) render one CompositeTabsView each. The per-tab render closures
 // are the verbatim prop wiring the absorbed views' standalone renderers used.
 // Tab gating mirrors each absorbed view's former NAV_ITEMS `requires`
-// (tasks/teams/plans: serverData, `covered` when the upload carries the
-// artifact — the composite-tab equivalent of `uploadAvailableViews`).
+// (tasks/teams/plans: serverData).
 
 function renderCapabilitiesView(ctx: ViewContext, forcedTab?: string): ReactNode {
   const { data: d, nav: n, filter, routeFilter, serverAvailable } = ctx;
@@ -537,7 +536,6 @@ function renderAutomationView(ctx: ViewContext, forcedTab?: string): ReactNode {
           id: 'tasks',
           label: 'Tasks',
           requires: 'serverData',
-          covered: d.tasks.length > 0,
           render: () => (
             <TaskHealth
               tasks={d.tasks}
@@ -551,7 +549,6 @@ function renderAutomationView(ctx: ViewContext, forcedTab?: string): ReactNode {
           id: 'teams',
           label: 'Teams',
           requires: 'serverData',
-          covered: d.teams.length > 0,
           render: () => (
             <TeamCoordination
               teams={d.teams}
@@ -566,7 +563,6 @@ function renderAutomationView(ctx: ViewContext, forcedTab?: string): ReactNode {
           id: 'plans',
           label: 'Plans',
           requires: 'serverData',
-          covered: d.plans.length > 0,
           render: () => (
             <PlanShapes plans={d.plans} serverAvailable={serverAvailable} />
           ),

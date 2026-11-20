@@ -45,7 +45,6 @@ import type { ViewRequirement, VariantCapabilities } from './variant-capabilitie
 import { ALL_DOMAINS, DOMAIN_OUTCOME_VERB } from './domain-registry';
 
 const STORAGE_KEY = 'claude-dashboard:nav-prefs';
-const EMPTY_VIEW_SET: ReadonlySet<View> = new Set();
 
 /**
  * Sticky entrypoint scope (#132). `all` shows every session's activity;
@@ -158,8 +157,7 @@ function freshDefaults(): NavPrefs {
 // leading, a `discovery` Find group, and orientation/replay views demoted to `raw`.
 // The `requires` field marks views that need more than the always-available
 // dataset (epic #1852, ADR 0014). `serverData` views just need a rich dataset —
-// shown on the sample showcase (full corpus) and on a user upload that covers
-// them; `liveServer` views need the live backend control plane and stay out of
+// shown on the sample showcase (full corpus) and on a server; `liveServer` views need the live backend control plane and stay out of
 // the public sample builds entirely (they also carry server-touching code that the
 // `sample-boundary` gate forbids). See {@link variantCapabilities}.
 /**
@@ -591,7 +589,7 @@ export const ABSORBED_VIEW_ITEMS: readonly NavItem[] = [
   },
 ] as const;
 
-/** Views needing a rich dataset (sample corpus / covered upload / server). */
+/** Views needing a rich dataset (sample corpus or server). */
 export const SERVER_DATA_VIEWS = new Set<View>(
   NAV_ITEMS.filter((i) => i.requires === 'serverData').map((i) => i.view)
 );
@@ -613,19 +611,15 @@ export const SERVER_ONLY_VIEWS = new Set<View>(
 /**
  * Whether a view is available under a delivery variant's capabilities (epic
  * #1852, ADR 0014). `liveServer` views need the backend control plane;
- * `serverData` views need a rich dataset (the sample corpus, a covered upload,
- * or a server). Kept here (using the derived sets) so this module stays free of
+ * `serverData` views need a rich dataset (the sample corpus or a server). Kept here (using the derived sets) so this module stays free of
  * any `@api-client` value import. Callers pass `variantCapabilities()`.
  */
 export function isNavViewAvailable(
   view: View,
-  caps: VariantCapabilities,
-  uploadCoveredViews: ReadonlySet<View> = EMPTY_VIEW_SET
+  caps: VariantCapabilities
 ): boolean {
   if (LIVE_SERVER_VIEWS.has(view)) return caps.hasLiveServer;
-  if (SERVER_DATA_VIEWS.has(view)) {
-    return caps.hasServerData || uploadCoveredViews.has(view);
-  }
+  if (SERVER_DATA_VIEWS.has(view)) return caps.hasServerData;
   return true;
 }
 
@@ -809,24 +803,23 @@ export function migrateNavPrefs(prefs: NavPrefs): NavPrefs {
 
 /**
  * Pick the route to land on at load (#141). Prefers the sticky `lastView`, but
- * guards it: a stored view that's invalid, now hidden, or server-only in upload
- * mode falls through to the default. If even the default is unavailable, falls
+ * guards it: a stored view that's invalid, now hidden, or unavailable in this
+ * delivery variant falls through to the default. If even the default is unavailable, falls
  * back to the first still-visible tab.
  */
 export function resolveInitialView(
   prefs: NavPrefs,
-  caps: VariantCapabilities,
-  uploadCoveredViews: ReadonlySet<View> = EMPTY_VIEW_SET
+  caps: VariantCapabilities
 ): View {
   const hidden = new Set(prefs.hiddenViews);
   const isVisible = (v: View) =>
     VALID_VIEWS.has(v) &&
     !hidden.has(v) &&
-    isNavViewAvailable(v, caps, uploadCoveredViews);
+    isNavViewAvailable(v, caps);
   if (prefs.lastView && isVisible(prefs.lastView)) return prefs.lastView;
   if (isVisible(DEFAULT_VIEW)) return DEFAULT_VIEW;
   const firstVisible = NAV_ITEMS.find(
-    (i) => !hidden.has(i.view) && isNavViewAvailable(i.view, caps, uploadCoveredViews)
+    (i) => !hidden.has(i.view) && isNavViewAvailable(i.view, caps)
   );
   return firstVisible?.view ?? DEFAULT_VIEW;
 }

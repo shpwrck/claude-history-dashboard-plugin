@@ -123,7 +123,6 @@ export const TEST_SUITE_OWNER_GROUPS = Object.freeze({
     'test:transcript-cache',
     'test:transcript-rewrite-staleness',
     'test:transcript-warm-cache',
-    'test:upload-server-parity',
     'test:workflow-cache',
   ]),
   test: Object.freeze([
