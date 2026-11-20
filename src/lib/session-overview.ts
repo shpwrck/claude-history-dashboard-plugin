@@ -3,7 +3,13 @@ import type { ToolUsageData } from './parse-tools';
 import type { SessionTimeline } from './parse-timeline';
 import type { ApiErrorEvent } from './parse-errors';
 import { estimateCost } from './parse-sessions';
-import { OVER_WINDOW } from './context-health';
+import { formatTokens } from './format';
+import {
+  OVER_WINDOW,
+  PEAK_CONTEXT_WARN,
+  resolveContextWindowUsage,
+  type ContextWindowUsage,
+} from './context-health';
 
 export interface SessionOverviewCount {
   name: string;
@@ -43,7 +49,18 @@ export interface SessionOverview {
   userTurns: number;
 
   peakContextTokens: number;
-  peakContextPercent: number;
+  /**
+   * Peak share of the session's resolved context window, capped at 100.
+   * `null` when only a lower bound on the window is known: no exact
+   * percentage can be stated then (#3797).
+   */
+  peakContextPercent: number | null;
+  /**
+   * The session's resolved context window (exact or lower bound), present
+   * whenever token data is. Consumers must render a lower bound without an
+   * invented denominator or percentage (#3443).
+   */
+  contextWindow?: ContextWindowUsage;
 }
 
 const FILE_TOOLS = new Set([
@@ -124,10 +141,15 @@ export function computeSessionOverview(
     overview.compactionCount = tokenData.compactionEvents.length;
     overview.firstCompactionAt = tokenData.compactionEvents[0]?.timestamp;
     overview.peakContextTokens = peakContextSize(tokenData.entries);
+    const contextWindow = resolveContextWindowUsage(
+      tokenData.model,
+      overview.peakContextTokens
+    );
+    overview.contextWindow = contextWindow;
     overview.peakContextPercent =
-      OVER_WINDOW > 0
-        ? Math.min(100, (overview.peakContextTokens / OVER_WINDOW) * 100)
-        : 0;
+      contextWindow.usagePercent === null
+        ? null
+        : Math.min(100, contextWindow.usagePercent);
   }
 
   if (toolData) {
@@ -173,4 +195,44 @@ export function computeSessionOverview(
   }
 
   return overview;
+}
+
+/** A window size as people say it: 200K, 1M; otherwise the usual format. */
+function windowLabel(tokens: number): string {
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
+  if (tokens < 1_000_000 && tokens >= 1_000 && tokens % 1_000 === 0) return `${tokens / 1_000}K`;
+  return formatTokens(tokens);
+}
+
+/** Peak share of the window that warns, the same ratio the scorecards use. */
+const PEAK_WARN_PERCENT = (PEAK_CONTEXT_WARN / OVER_WINDOW) * 100;
+
+/**
+ * Peak-context card copy from the session's resolved window (#3798). An exact
+ * window prints its own denominator; a lower bound prints no denominator or
+ * percentage, only the known minimum, and always warns: a peak above every
+ * known window is past the warning share of any window that could hold it.
+ */
+export function peakContextMetric(
+  overview: Pick<SessionOverview, 'peakContextTokens' | 'peakContextPercent' | 'contextWindow'>
+): { value: string; sub: string; warn: boolean } {
+  const peak = formatTokens(overview.peakContextTokens);
+  const usage = overview.contextWindow;
+  if (!usage) {
+    return { value: 'n/a', sub: 'no token data for a context window', warn: false };
+  }
+  if (usage.resolution.kind === 'lower-bound' || overview.peakContextPercent === null) {
+    const min =
+      usage.resolution.kind === 'lower-bound'
+        ? usage.resolution.minimumContextWindowTokens
+        : overview.peakContextTokens;
+    return { value: peak, sub: `window unknown (at least ${windowLabel(min)})`, warn: true };
+  }
+  // Warn on the rounded figure the card shows, so "50%" never appears unwarned.
+  const shown = Math.round(overview.peakContextPercent);
+  return {
+    value: `${shown}%`,
+    sub: `${peak} / ${windowLabel(usage.resolution.contextWindowTokens)}`,
+    warn: shown >= PEAK_WARN_PERCENT,
+  };
 }
