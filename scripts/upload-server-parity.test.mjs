@@ -107,15 +107,15 @@ export const SERVER_ONLY_KEYS = {
   taskSteering: 'derived server-side at assembly (#2203 steer telemetry join)',
   // taskSuccess/assistantFeatures/deceitSignals/secretsAtRest ARE per-session
   // SESSION_SIGNALS (structurally like churnGeometry/valueFlow, which we DO
-  // compare); they're server-only here only because runUploadParse
-  // (src/lib/upload-parse.ts) never wires their parsers into the upload passes.
+  // compare); they're server-only here only because runSessionParse
+  // (src/lib/session-parse.ts) never wires their parsers into the upload passes.
   // A wiring gap, not a structural one — graduating them to PARITY_KEYS is
   // tracked with the other convergence follow-ups.
-  taskSuccess: 'per-session signal parser not wired into runUploadParse (upload-parse.ts)',
-  assistantFeatures: 'per-session signal parser not wired into runUploadParse (upload-parse.ts)',
+  taskSuccess: 'per-session signal parser not wired into runSessionParse (session-parse.ts)',
+  assistantFeatures: 'per-session signal parser not wired into runSessionParse (session-parse.ts)',
   promptAnalysis: 'derived server-side at assembly (prompt traits)',
-  deceitSignals: 'per-session signal parser not wired into runUploadParse (upload-parse.ts)',
-  secretsAtRest: 'per-session signal parser not wired into runUploadParse (upload-parse.ts)',
+  deceitSignals: 'per-session signal parser not wired into runSessionParse (session-parse.ts)',
+  secretsAtRest: 'per-session signal parser not wired into runSessionParse (session-parse.ts)',
   recommendations: 'server-computed envelope; the browser is a pure viewer since #2719',
   externalGuidance:
     'repo-shipped curated first-party guidance seed (data/external-guidance/, EXTERNAL_GUIDANCE_DIR) the server always loads — not derived from the uploaded ~/.claude tree',

@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { strToU8, zipSync } from 'fflate';
 import {
   ArchiveTooLargeError,
@@ -19,6 +22,8 @@ import {
   noise,
   observeSubarrays,
 } from './__fixtures__/zip-archive-fixture';
+
+const PROJECT_DIR = fileURLToPath(new URL('../..', import.meta.url));
 
 const readEverything: ArchiveReaderOptions<ArchiveEntry> = {
   admit: () => 'read',
@@ -421,5 +426,31 @@ describe('formatBytes', () => {
     expect(formatBytes(512)).toBe('1 KB');
     expect(formatBytes(3 * MIB)).toBe('3 MB');
     expect(formatBytes(1.5 * 1024 * MIB)).toBe('1.5 GB');
+  });
+});
+
+describe('isolated archive memory receipt (#3368)', () => {
+  it('keeps the isolated bomb RSS delta inside 32 MiB', () => {
+    const archive = forgeDeclaredSize(
+      zipSync({ 'projects/p/bomb.jsonl': new Uint8Array(64 * MIB) }),
+      10
+    );
+    const probe = spawnSync(
+      process.execPath,
+      [
+        '--expose-gc',
+        '--import',
+        join(PROJECT_DIR, 'scripts/register-ts.mjs'),
+        join(PROJECT_DIR, 'scripts/fixtures/archive-reader-rss-probe.mjs'),
+      ],
+      { cwd: PROJECT_DIR, encoding: 'utf8', input: archive }
+    );
+    expect(probe.status, probe.stderr || probe.stdout).toBe(0);
+    const receipt = JSON.parse(probe.stdout.trim()) as {
+      rejected: boolean;
+      rssDelta: number;
+    };
+    expect(receipt.rejected).toBe(true);
+    expect(receipt.rssDelta).toBeLessThanOrEqual(32 * MIB);
   });
 });

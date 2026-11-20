@@ -28,7 +28,7 @@ import {
   isZipPath,
   unzipBundleFromFile,
 } from './unzip-upload';
-import { runUploadParse, type UploadParseEmit } from './upload-parse';
+import { runSessionParse, type SessionParseEmit } from './session-parse';
 import { parseHistoryJsonl } from './parse-history';
 import { parseMemories, type ProjectMemories } from './parse-memories';
 import { parseWorkflows, type WorkflowRun } from './parse-workflows';
@@ -61,7 +61,7 @@ export interface UploadInput {
 
 /** A parsed pipeline result — bounded structures, never raw transcript text. */
 export type UploadResult =
-  | UploadParseEmit
+  | SessionParseEmit
   // The session ids this upload carried, posted before the parse passes so the
   // main thread can apply the same replace-shaped dedup the inline path used
   // (drop a session's prior rows before concatenating this upload's).
@@ -281,7 +281,7 @@ export async function buildUploadDataset(
       type: 'sessionIndex',
       sessionIds: sessionFiles.map((file) => file.name.replace(/\.jsonl$/, '')),
     });
-    await runUploadParse(sessionFiles, post, { yielding });
+    await runSessionParse(sessionFiles, post, { yielding });
   }
 
   // Aux artifacts (#538/#539/#1051): the user's own memories, workflow run
