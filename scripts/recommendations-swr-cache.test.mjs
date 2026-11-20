@@ -241,6 +241,7 @@ async function postLocalAnalyze(base) {
   const res = await fetch(`${base}/api/analyze/local`, {
     method: 'POST',
     headers: {
+      origin: new URL(base).origin,
       'content-type': 'application/json',
       connection: 'close',
     },

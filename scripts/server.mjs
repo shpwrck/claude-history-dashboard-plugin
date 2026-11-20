@@ -4837,6 +4837,25 @@ function localAnalyzeResultWithValidity(result, build) {
     : result;
 }
 
+// Analyze locally is non-mutating, so it needs no CSRF token, but it starts an
+// ingest and a local-model run. Require a same-origin Origin and a JSON body so a
+// cross-site form POST (simple request, no preflight) cannot trigger it (#3906).
+function passesAnalyzeLocalOriginGate(req, res) {
+  if (!isSameOrigin(req)) {
+    sendJson(res, 403, { ok: false, error: 'Forbidden: cross-origin request rejected' });
+    return false;
+  }
+  const ctype = String(req.headers['content-type'] || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (ctype !== 'application/json') {
+    sendJson(res, 415, { ok: false, error: 'Unsupported Media Type: Content-Type must be application/json' });
+    return false;
+  }
+  return true;
+}
+
 async function handleAnalyzeLocal(req, res) {
   // Optional JSON body { project?: string }; a missing/invalid body analyzes the
   // global scope. Reading it also drains the request stream before ingest.
@@ -6321,6 +6340,7 @@ const server = createServer(async (req, res) => {
       if (req.method !== 'POST') {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use POST' });
       }
+      if (!passesAnalyzeLocalOriginGate(req, res)) return;
       return handleAnalyzeLocal(req, res);
     }
 

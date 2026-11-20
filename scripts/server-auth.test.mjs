@@ -223,6 +223,34 @@ try {
   body = await json(r);
   check('malformed request path -> 400', r.status === 400, `got ${r.status}`);
   check('malformed request path reports bad request', body?.ok === false);
+
+  // #3906: Analyze locally rejects cross-site form posts before any ingest.
+  r = await fetch(`${server.base}/api/analyze/local`, {
+    method: 'POST',
+    headers: { origin: 'https://evil.example', 'content-type': 'text/plain' },
+    body: 'project=x',
+  });
+  check('analyze local rejects a foreign origin -> 403', r.status === 403, `got ${r.status}`);
+  r = await fetch(`${server.base}/api/analyze/local`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  check('analyze local rejects a missing origin -> 403', r.status === 403, `got ${r.status}`);
+  r = await fetch(`${server.base}/api/analyze/local`, {
+    method: 'POST',
+    headers: { origin: new URL(server.base).origin, 'content-type': 'text/plain' },
+    body: '{}',
+  });
+  check('analyze local rejects a non-JSON body -> 415', r.status === 415, `got ${r.status}`);
+  r = await fetch(`${server.base}/api/analyze/local`, {
+    method: 'POST',
+    headers: { origin: new URL(server.base).origin, 'content-type': 'application/json' },
+    body: '{}',
+  });
+  body = await json(r);
+  check('analyze local accepts a same-origin JSON post -> 200', r.status === 200, `got ${r.status}`);
+  check('analyze local same-origin result is deterministic without a model', body?.source === 'deterministic');
 } finally {
   await server.stop();
 }

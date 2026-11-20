@@ -55,12 +55,12 @@ export const ROUTE_ACCESS_POLICIES = {
     transcriptExposure: 'derived evidence after the egress scrub',
     mutating: false,
   },
-  // Tier A "Analyze locally" (#2319, ADR 0018). POST but NON-mutating; no CSRF or
-  // same-origin check yet (#3906). It reads
+  // Tier A "Analyze locally" (#2319, ADR 0018). POST but NON-mutating, so no CSRF
+  // token; same-origin Origin and a JSON body are required (#3906). It reads
   // the deterministic recommendations and runs a LOCAL model over them. Egress is
   // loopback-only (assertLoopbackEndpoint) with no Anthropic API call.
   'local-analyze': {
-    requestGate: `${BASE_GATE}; POST only`,
+    requestGate: `${BASE_GATE}; POST only, with a same-origin Origin and application/json body`,
     dataBoundary: 'local-model analysis over derived recommendations; loopback-only egress (ADR 0018)',
     transcriptExposure: 'derived recommendation evidence only',
     mutating: false,
