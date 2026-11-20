@@ -92,7 +92,7 @@ check('runtime-source classifier includes src and scripts, excludes tests', () =
   assert.equal(isRuntimeSource('src/lib/anthropic-egress.test.ts'), false);
   assert.equal(isRuntimeSource('scripts/server.mjs'), true);
   assert.equal(isRuntimeSource('scripts/check-llm-egress.test.mjs'), false);
-  assert.equal(isRuntimeSource('docs/enterprise-readiness.md'), false);
+  assert.equal(isRuntimeSource('docs/RELEASING.md'), false);
 });
 
 check('origin gate allows only the broker pinned-domain declaration', () => {

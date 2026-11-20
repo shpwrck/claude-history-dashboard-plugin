@@ -1,4 +1,4 @@
-// Unit tests for the server route access-policy inventory gate (#1180, #3825).
+// Unit tests for the server route access-policy inventory gate (#1180, #3825, #3904).
 //
 // Run:
 //   node scripts/check-server-route-access-policy.test.mjs
@@ -116,26 +116,32 @@ check('inventory access categories all have explicit policies', () => {
   );
 });
 
-check('checkpoint answer inventory distinguishes org read from org write', () => {
+check('checkpoint answer inventory distinguishes read from write', () => {
   const route = ROUTE_INVENTORY.find(
     (candidate) => candidate.kind === 'exact'
       && candidate.value === '/api/checkpoint/answers'
   );
-  assert.equal(route?.access, 'organization-data');
-  assert.deepEqual(route?.methodAccess, {
-    POST: 'organization-efficacy-write',
-  });
-  assert.deepEqual(
-    ROUTE_ACCESS_POLICIES['organization-efficacy-write'],
-    {
-      allowedPrincipals: ['admin'],
-      requiredCapability: 'canWriteOrganizationData',
-      scopePosture: 'org:write',
-      dataBoundary: 'organization checkpoint efficacy evidence',
-      transcriptExposure: 'none',
-      mutating: true,
+  assert.equal(route?.access, 'read');
+  assert.deepEqual(route?.methodAccess, { POST: 'write' });
+  assert.equal(ROUTE_ACCESS_POLICIES.write.mutating, true);
+  assert.match(ROUTE_ACCESS_POLICIES.write.requestGate, /CSRF token/);
+});
+
+check('no category names a retired enterprise role, scope, or org boundary (#3904)', () => {
+  const retired = /\b(admin|member|viewer|principal|organization|tenant|scoped|data root)\b|\borg:/i;
+  for (const [name, policy] of Object.entries(ROUTE_ACCESS_POLICIES)) {
+    assert.doesNotMatch(name, retired, name);
+    for (const [field, value] of Object.entries(policy)) {
+      if (typeof value === 'string') {
+        assert.doesNotMatch(value, retired, `${name}.${field}`);
+      }
     }
-  );
+    assert.deepEqual(
+      Object.keys(policy).sort(),
+      ['dataBoundary', 'mutating', 'requestGate', 'transcriptExposure'],
+      name
+    );
+  }
 });
 
 check('validator rejects handled routes missing from inventory', () => {
@@ -149,7 +155,7 @@ check('validator rejects handled routes missing from inventory', () => {
 
 check('validator rejects stale inventory entries', () => {
   const inventory = [
-    { kind: 'exact', value: '/api/stale-route', access: 'organization-data' },
+    { kind: 'exact', value: '/api/stale-route', access: 'read' },
   ];
   const errors = validateRouteInventory([], inventory);
   assert.match(
@@ -181,7 +187,7 @@ check('validator rejects unknown method-specific access categories', () => {
   const route = {
     kind: 'exact',
     value: '/api/checkpoint/answers',
-    access: 'organization-data',
+    access: 'read',
     methodAccess: { POST: 'surprise-write-access' },
   };
   const errors = validateRouteInventory([route], [route]);
@@ -195,14 +201,12 @@ check('validator rejects stale access policies', () => {
   const route = {
     kind: 'exact',
     value: '/api/dataset.json',
-    access: 'scoped-or-admin-data',
+    access: 'read',
   };
   const policies = {
-    'scoped-or-admin-data': ROUTE_ACCESS_POLICIES['scoped-or-admin-data'],
+    read: ROUTE_ACCESS_POLICIES.read,
     stale: {
-      allowedPrincipals: ['admin'],
-      requiredCapability: 'canReadOrganizationData',
-      scopePosture: 'org:read',
+      requestGate: 'unused',
       dataBoundary: 'unused',
       transcriptExposure: 'none',
       mutating: false,
@@ -216,11 +220,11 @@ check('validator requires policy posture fields', () => {
   const route = {
     kind: 'exact',
     value: '/api/dataset.json',
-    access: 'scoped-or-admin-data',
+    access: 'read',
   };
   const policies = {
-    'scoped-or-admin-data': {
-      ...ROUTE_ACCESS_POLICIES['scoped-or-admin-data'],
+    read: {
+      ...ROUTE_ACCESS_POLICIES.read,
       transcriptExposure: '',
       mutating: 'no',
     },
@@ -234,12 +238,12 @@ check('validator reports malformed policy objects', () => {
   const route = {
     kind: 'exact',
     value: '/api/dataset.json',
-    access: 'scoped-or-admin-data',
+    access: 'read',
   };
   const errors = validateRouteInventory(
     [route],
     [route],
-    { 'scoped-or-admin-data': null }
+    { read: null }
   );
   assert.match(errors.join('\n'), /must declare a policy object/);
 });

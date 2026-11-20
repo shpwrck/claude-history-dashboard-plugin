@@ -192,9 +192,10 @@ runs, and its HTML-path work is a constant-time read of the last accepted boot
 projection. Cheaper boot assembly does not replace that pre-JavaScript benefit.
 
 The shell may be updated only after the surrounding snapshot-bound cache accepts
-the boot projection. With enterprise auth enabled, an unauthenticated request
-must continue receiving the skeleton; scoped or principal-specific counts must
-never enter the global shell.
+the boot projection. When HTTP Basic auth is enabled, an unauthenticated request
+is refused with the Basic challenge and never sees real counts.
+(Amended 2026-11-20, #3842: the enterprise principals and scoped counts this rule
+first guarded were retired in epic #3743.)
 
 Follow-up child: **Rebase the instant shell on lazy boot assembly and preserve
 the pre-auth disclosure guard**.
@@ -223,7 +224,7 @@ frozen:
   snapshot identity must include the observed feature-mode state (or use distinct
   enabled/flag-off epochs), so two modes can never alias the same version.
 - **Pre-auth disclosure.** A global instant shell is never served with real
-  counts before enterprise authentication. The spawned-server regression is
+  counts before HTTP Basic authentication when Basic auth is enabled. The spawned-server regression is
   `scripts/instant-shell-server.test.mjs`.
 
 ## Cache-invalidation lattice

@@ -80,4 +80,4 @@ Spend controls:
 Required controls:
 - egressScrub must produce the opaque scrubbed body consumed by the egress chokepoint
 - capChecked must be true with a matching cap receipt
-- server audit route must emit an enterprise audit event
+- server audit route must return skipped findings when the kill switch or API key is absent

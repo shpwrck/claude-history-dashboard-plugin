@@ -132,5 +132,5 @@ The CLI does not migrate or manage legacy `claude-history-dashboard` containers,
 volumes, images, compose projects, or plugin-launched instances. It only
 reconciles the new `coding-agent-dashboard` container name.
 
-For local source builds, TLS, SPA hosting, or enterprise compose overrides, keep
+For local source builds, TLS, SPA hosting, or other compose overrides, keep
 using the compose files documented in the README.

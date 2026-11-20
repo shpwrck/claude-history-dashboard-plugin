@@ -3,225 +3,167 @@
 //
 // Every data route the server handles (/api/*, the sessions manifest, history,
 // and raw project files) must be classified here with an access policy, so
-// adding a route is an explicit security review rather than an accident. The
-// auth layer already fails closed for unknown /api/* routes; this gate fails
-// CI when a handled route is unlisted or a listed route no longer exists.
+// adding a route is an explicit security review rather than an accident. Each
+// category records the gate the single-user server actually applies. This gate
+// fails CI when a handled route is unlisted or a listed route no longer exists.
 
 import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const ALL_PRINCIPALS = Object.freeze(['anonymous', 'admin', 'member', 'viewer']);
-const ADMIN_PRINCIPALS = Object.freeze(['admin']);
-const SCOPED_READ_PRINCIPALS = Object.freeze([
-  'admin',
-  'member-with-data-root',
-  'viewer-with-data-root',
-]);
-const SCOPED_READ_CAPABILITY =
-  'canReadOrganizationData or canReadOwnSessions';
-const SCOPED_READ_SCOPE =
-  'org:read or sessions:read/transcripts:read with scoped data root';
+// What the single-user server enforces on every route before a handler runs
+// (#3904, epic #3743): open on the loopback default, HTTP Basic when
+// DASHBOARD_USER/DASHBOARD_PASS are configured.
+const BASE_GATE = 'HTTP Basic when configured; open on the loopback default';
+// passesWriteAuth() in scripts/server.mjs, layered on top of BASE_GATE.
+const WRITE_GATE = `${BASE_GATE}; plus same-origin Origin, application/json body, and the per-process CSRF token`;
 
 export const ROUTE_ACCESS_POLICIES = {
-  'public-auth-status': {
-    allowedPrincipals: ALL_PRINCIPALS,
-    requiredCapability: 'auth-status',
-    scopePosture: 'none',
-    dataBoundary: 'authentication metadata only',
+  'auth-status': {
+    requestGate: BASE_GATE,
+    dataBoundary: 'neutral single-user session and capability map',
     transcriptExposure: 'none',
     mutating: false,
   },
-
-  'policy-write': {
-    allowedPrincipals: ADMIN_PRINCIPALS,
-    requiredCapability: 'canWritePolicy',
-    scopePosture: 'org:write or policy:write',
-    dataBoundary: 'global policy and adoption receipt writes',
+  'csrf-bootstrap': {
+    requestGate: `${BASE_GATE}; GET only, body readable by same-origin pages only`,
+    dataBoundary: 'per-process write CSRF token',
     transcriptExposure: 'none',
-    mutating: true,
-  },
-  // Tier A "Analyze locally" (#2319, ADR 0018). POST, so the runtime gate treats
-  // it as privileged (canWritePolicy) — admin-only under enterprise auth. It is
-  // NON-mutating: it reads the deterministic recommendations and runs a LOCAL
-  // model over them. Egress is loopback-only (assertLoopbackEndpoint) with NO
-  // Anthropic API call and no external fallback, so no ADR-0008 governance surface
-  // attaches to it (ADR 0018 §Consequences).
-  'local-analyze': {
-    allowedPrincipals: ADMIN_PRINCIPALS,
-    requiredCapability: 'canWritePolicy',
-    scopePosture: 'org:read (POST-gated) — local-model analysis, no external egress',
-    dataBoundary:
-      'local-model analysis over organization-derived recommendations; egress is loopback-only (ADR 0018), no Anthropic API call',
-    transcriptExposure: 'derived recommendation evidence only',
     mutating: false,
   },
-  'session-dispatch': {
-    allowedPrincipals: ADMIN_PRINCIPALS,
-    requiredCapability: 'canWritePolicy',
-    scopePosture: 'org:write or sessions:dispatch',
-    dataBoundary: 'remote session dispatch (RemoteSession CR create/list/delete)',
-    transcriptExposure: 'none',
-    mutating: true,
-  },
-  'session-ingest': {
-    allowedPrincipals: ADMIN_PRINCIPALS,
-    requiredCapability: 'canWritePolicy',
-    scopePosture: 'sessions:ingest (bearer-token, machine-to-machine)',
-    dataBoundary: 'session-data artifacts pushed by the shipper (session-data only; config/secret refused)',
-    transcriptExposure: 'writes raw transcripts into the per-source ingest store',
-    mutating: true,
-  },
-  'organization-data': {
-    allowedPrincipals: ADMIN_PRINCIPALS,
-    requiredCapability: 'canReadOrganizationData',
-    scopePosture: 'org:read',
-    dataBoundary: 'organization-derived dashboard data',
-    transcriptExposure: 'derived evidence',
+  read: {
+    requestGate: BASE_GATE,
+    dataBoundary: 'dashboard data derived from the ingested ~/.claude roots',
+    transcriptExposure: 'parsed or derived session content',
     mutating: false,
   },
-  'organization-efficacy-write': {
-    allowedPrincipals: ADMIN_PRINCIPALS,
-    requiredCapability: 'canWriteOrganizationData',
-    scopePosture: 'org:write',
-    dataBoundary: 'organization checkpoint efficacy evidence',
-    transcriptExposure: 'none',
-    mutating: true,
-  },
-  'scoped-or-admin-data': {
-    allowedPrincipals: SCOPED_READ_PRINCIPALS,
-    requiredCapability: SCOPED_READ_CAPABILITY,
-    scopePosture: SCOPED_READ_SCOPE,
-    dataBoundary: 'organization data for admins, own scoped root for non-admins',
-    transcriptExposure: 'parsed session content',
-    mutating: false,
-  },
-  'scoped-data': {
-    allowedPrincipals: SCOPED_READ_PRINCIPALS,
-    requiredCapability: SCOPED_READ_CAPABILITY,
-    scopePosture: SCOPED_READ_SCOPE,
-    dataBoundary: 'organization data for admins, own scoped root for non-admins',
-    transcriptExposure: 'derived scoped data',
-    mutating: false,
-  },
-  'scoped-session-list': {
-    allowedPrincipals: SCOPED_READ_PRINCIPALS,
-    requiredCapability: SCOPED_READ_CAPABILITY,
-    scopePosture: SCOPED_READ_SCOPE,
-    dataBoundary: 'organization session list for admins, own scoped root for non-admins',
-    transcriptExposure: 'session metadata',
-    mutating: false,
-  },
-  'scoped-history': {
-    allowedPrincipals: SCOPED_READ_PRINCIPALS,
-    requiredCapability: SCOPED_READ_CAPABILITY,
-    scopePosture: SCOPED_READ_SCOPE,
-    dataBoundary: 'organization history for admins, own scoped root for non-admins',
-    transcriptExposure: 'raw history log',
-    mutating: false,
-  },
-  'scoped-session-detail': {
-    allowedPrincipals: SCOPED_READ_PRINCIPALS,
-    requiredCapability: SCOPED_READ_CAPABILITY,
-    scopePosture: SCOPED_READ_SCOPE,
-    dataBoundary: 'organization session detail for admins, own scoped root for non-admins',
-    transcriptExposure: 'session detail',
-    mutating: false,
-  },
-  'raw-transcript': {
-    allowedPrincipals: SCOPED_READ_PRINCIPALS,
-    requiredCapability: 'canReadRawTranscripts',
-    scopePosture: SCOPED_READ_SCOPE,
-    dataBoundary: 'organization transcripts for admins, own scoped root for non-admins',
+  'raw-read': {
+    requestGate: BASE_GATE,
+    dataBoundary: 'raw history, transcript, and project files under the ingested roots',
     transcriptExposure: 'raw transcript',
     mutating: false,
   },
-  'scoped-raw-session': {
-    allowedPrincipals: SCOPED_READ_PRINCIPALS,
-    requiredCapability: SCOPED_READ_CAPABILITY,
-    scopePosture: SCOPED_READ_SCOPE,
-    dataBoundary: 'organization project files for admins, own scoped root for non-admins',
-    transcriptExposure: 'raw session file',
+  'usage-gauge': {
+    requestGate: `${BASE_GATE}; on a Basic server also requires DASHBOARD_ENABLE_SERVER_USAGE_GAUGE`,
+    dataBoundary: 'plan-limit headers read with the host Claude OAuth credential (no ~/.claude content sent)',
+    transcriptExposure: 'none',
     mutating: false,
+  },
+  'llm-audit': {
+    requestGate: `${BASE_GATE}; runs only with DASHBOARD_ENABLE_SERVER_LLM_AUDITS and a Console API key (ADR 0008)`,
+    dataBoundary: 'scrubbed derived findings sent to the Anthropic API under ADR 0008 caps',
+    transcriptExposure: 'derived evidence after the egress scrub',
+    mutating: false,
+  },
+  // Tier A "Analyze locally" (#2319, ADR 0018). POST but NON-mutating; no CSRF or
+  // same-origin check yet (#3906). It reads
+  // the deterministic recommendations and runs a LOCAL model over them. Egress is
+  // loopback-only (assertLoopbackEndpoint) with no Anthropic API call.
+  'local-analyze': {
+    requestGate: `${BASE_GATE}; POST only`,
+    dataBoundary: 'local-model analysis over derived recommendations; loopback-only egress (ADR 0018)',
+    transcriptExposure: 'derived recommendation evidence only',
+    mutating: false,
+  },
+  write: {
+    requestGate: WRITE_GATE,
+    dataBoundary: 'policy, adoption receipt, reject-signal, checkpoint answer, and remote session writes',
+    transcriptExposure: 'none',
+    mutating: true,
+  },
+  // Non-local: lists RemoteSession resources from the configured cluster.
+  'dispatch-list': {
+    requestGate: BASE_GATE,
+    dataBoundary: 'RemoteSession list read from the configured Kubernetes cluster (non-local)',
+    transcriptExposure: 'none',
+    mutating: false,
+  },
+  ingest: {
+    requestGate: `${BASE_GATE}; plus PROBAITIO_INGEST_TOKEN (Authorization Bearer, or X-CSRF-Token when HTTP Basic is on); off unless PROBAITIO_INGEST_DIR and the token are set`,
+    dataBoundary: 'session-data artifacts pushed by the shipper (config and secrets refused)',
+    transcriptExposure: 'writes raw transcripts into the per-source ingest store',
+    mutating: true,
   },
 };
 
 export const ROUTE_INVENTORY = [
-  { kind: 'exact', value: '/api/auth/session', access: 'public-auth-status' },
-  { kind: 'exact', value: '/api/csrf-token', access: 'policy-write' },
-  { kind: 'exact', value: '/api/policy/write', access: 'policy-write' },
-  { kind: 'exact', value: '/api/adoption/receipts', access: 'organization-data' },
-  { kind: 'exact', value: '/api/recommendations/reject', access: 'policy-write' },
+  { kind: 'exact', value: '/api/auth/session', access: 'auth-status' },
+  { kind: 'exact', value: '/api/csrf-token', access: 'csrf-bootstrap' },
+  { kind: 'exact', value: '/api/policy/write', access: 'write' },
+  {
+    kind: 'exact',
+    value: '/api/adoption/receipts',
+    access: 'read',
+    methodAccess: { POST: 'write' },
+  },
+  { kind: 'exact', value: '/api/recommendations/reject', access: 'write' },
   {
     kind: 'exact',
     value: '/api/checkpoint/answers',
-    access: 'organization-data',
-    methodAccess: { POST: 'organization-efficacy-write' },
+    access: 'read',
+    methodAccess: { POST: 'write' },
   },
   { kind: 'exact', value: '/api/analyze/local', access: 'local-analyze' },
-  { kind: 'exact', value: '/api/steer-telemetry', access: 'organization-data' },
-  { kind: 'exact', value: '/api/sessions', access: 'session-dispatch' },
-  { kind: 'prefix', value: '/api/sessions/', access: 'session-dispatch' },
-  { kind: 'regex', value: '^\\/api\\/ingest\\/([^/]+)\\/artifacts$', access: 'session-ingest' },
-  { kind: 'exact', value: '/api/dataset.json', access: 'scoped-or-admin-data' },
-  { kind: 'exact', value: '/api/dataset/boot', access: 'scoped-or-admin-data' },
-  { kind: 'prefix', value: '/api/dataset/slice/', access: 'scoped-or-admin-data' },
+  { kind: 'exact', value: '/api/steer-telemetry', access: 'read' },
   {
     kind: 'exact',
-    value: '/api/recommendations.json',
-    access: 'scoped-or-admin-data',
+    value: '/api/sessions',
+    access: 'dispatch-list',
+    methodAccess: { POST: 'write' },
   },
-  { kind: 'exact', value: '/api/search', access: 'scoped-or-admin-data' },
-  { kind: 'exact', value: '/api/digest', access: 'scoped-or-admin-data' },
+  { kind: 'prefix', value: '/api/sessions/', access: 'write' },
+  { kind: 'regex', value: '^\\/api\\/ingest\\/([^/]+)\\/artifacts$', access: 'ingest' },
+  { kind: 'exact', value: '/api/dataset.json', access: 'read' },
+  { kind: 'exact', value: '/api/dataset/boot', access: 'read' },
+  { kind: 'prefix', value: '/api/dataset/slice/', access: 'read' },
+  { kind: 'exact', value: '/api/recommendations.json', access: 'read' },
+  { kind: 'exact', value: '/api/search', access: 'read' },
+  { kind: 'exact', value: '/api/digest', access: 'read' },
   {
     kind: 'regex',
     value: '^\\/api\\/sources\\/([^/]+)\\/history\\.jsonl$',
-    access: 'scoped-history',
+    access: 'raw-read',
   },
   {
     kind: 'regex',
     value: '^\\/api\\/sources\\/([^/]+)\\/sessions\\/([^/]+)\\/([^/]+)$',
-    access: 'scoped-raw-session',
+    access: 'raw-read',
   },
-  { kind: 'exact', value: '/api/memories', access: 'scoped-data' },
-  { kind: 'exact', value: '/api/workflows', access: 'scoped-data' },
-  { kind: 'exact', value: '/api/experiments.json', access: 'scoped-data' },
-  { kind: 'exact', value: '/api/shadow-experiments.json', access: 'scoped-data' },
-  { kind: 'exact', value: '/api/usage', access: 'organization-data' },
-  { kind: 'exact', value: '/api/audit.json', access: 'organization-data' },
-  { kind: 'exact', value: '/api/live', access: 'scoped-or-admin-data' },
-  {
-    kind: 'exact',
-    value: '/sessions-manifest.json',
-    access: 'scoped-session-list',
-  },
-  { kind: 'exact', value: '/history.jsonl', access: 'scoped-history' },
+  { kind: 'exact', value: '/api/memories', access: 'read' },
+  { kind: 'exact', value: '/api/workflows', access: 'read' },
+  { kind: 'exact', value: '/api/experiments.json', access: 'read' },
+  { kind: 'exact', value: '/api/shadow-experiments.json', access: 'read' },
+  { kind: 'exact', value: '/api/usage', access: 'usage-gauge' },
+  { kind: 'exact', value: '/api/audit.json', access: 'llm-audit' },
+  { kind: 'exact', value: '/api/live', access: 'read' },
+  { kind: 'exact', value: '/sessions-manifest.json', access: 'read' },
+  { kind: 'exact', value: '/history.jsonl', access: 'raw-read' },
   {
     kind: 'regex',
     value: '^\\/api\\/session\\/([^/]+)\\/timeline(?:\\.json)?$',
-    access: 'scoped-session-detail',
+    access: 'read',
   },
   {
     kind: 'regex',
     value: '^\\/api\\/session\\/([^/]+)\\/tools(?:\\.json)?$',
-    access: 'scoped-session-detail',
+    access: 'read',
   },
   {
     kind: 'regex',
     value: '^\\/api\\/transcript\\/([^/]+)\\/thinking$',
-    access: 'raw-transcript',
+    access: 'raw-read',
   },
   {
     kind: 'regex',
     value: '^\\/api\\/transcript\\/([^/]+)$',
-    access: 'raw-transcript',
+    access: 'raw-read',
   },
   {
     kind: 'regex',
     value: '^\\/projects\\/([^/]+)\\/([^/]+)$',
-    access: 'scoped-raw-session',
+    access: 'raw-read',
   },
-  { kind: 'prefix', value: '/projects/', access: 'scoped-raw-session' },
+  { kind: 'prefix', value: '/projects/', access: 'raw-read' },
 ];
 
 const GENERIC_PREFIXES = new Set(['/api/']);
@@ -408,12 +350,8 @@ function validateAccessPolicy(access, policy) {
   if (!policy || typeof policy !== 'object') {
     return [`access policy "${access}" must declare a policy object`];
   }
-  if (!Array.isArray(policy.allowedPrincipals) || policy.allowedPrincipals.length === 0) {
-    errors.push(`access policy "${access}" must declare allowedPrincipals`);
-  }
   for (const field of [
-    'requiredCapability',
-    'scopePosture',
+    'requestGate',
     'dataBoundary',
     'transcriptExposure',
   ]) {

@@ -11,6 +11,11 @@
   #1852 (bundle budget) as browser-delivery optimization. Plan detail in
   `docs/plans/bundle-rearchitecture.md`.
 
+- **Amended 2026-11-20 (#3842, epic #3743):** the enterprise dashboard (bearer/JWT
+  principals, org views, org aggregation) was retired. Tier 4 no longer promises an
+  enterprise web or org-aggregation surface; each install serves the single-user
+  dashboard, shared beyond loopback only behind HTTP Basic auth and TLS.
+
 ## Context
 
 The investigation started as "the JS bundle keeps hitting its ceiling and that warps how features
@@ -41,7 +46,7 @@ and *how it is invoked*.
 | 1 | **Sample SPA** | build-time sample corpus | browser | none | none | **static / SSG → instant** |
 | 2 | **Self-hosted MCP** | the user's machine | the user's machine | none (local) | plugin / local server | local web UI (may SSR) + agent MCP |
 | 3 | **Hosted MCP** *(deferred)* | our servers | our servers, **inside a confidential-computing enclave** | trust the enclave attestation, not us | account | web + MCP |
-| 4 | **Operator full install** | customer's cluster | customer's cluster | their own infra | k8s operator | enterprise web + MCP + org aggregation |
+| 4 | **Operator full install** | customer's cluster | customer's cluster | their own infra | k8s operator | single-user web + MCP per install |
 
 Each rung trades a little more trust/install for more capability/scale. Tier 1 is
 zero-install; Tier 2 is the privacy-max solo tier with agent integration; Tier 4 is the
