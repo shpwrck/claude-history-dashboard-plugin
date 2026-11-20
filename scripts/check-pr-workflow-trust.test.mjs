@@ -46,7 +46,7 @@ test('a new pull_request workflow cannot schedule a self-hosted job', () => {
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /unsafe\.yml.*pull_request job test.*ubuntu-latest/i
+        /unsafe\.yml.*pull_request job test.*ubuntu-24.04/i
       );
     }
   );
@@ -88,10 +88,10 @@ test('pull_request jobs cannot evade hosted-only policy through hub, future-priv
     },
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
-      assert.match(reasons, /unsafe\.yml.*hub-standard.*ubuntu-latest/i);
-      assert.match(reasons, /unsafe\.yml.*hub-dind.*ubuntu-latest/i);
-      assert.match(reasons, /unsafe\.yml.*future-private.*ubuntu-latest/i);
-      assert.match(reasons, /unsafe\.yml.*local-reusable.*ubuntu-latest/i);
+      assert.match(reasons, /unsafe\.yml.*hub-standard.*ubuntu-24.04/i);
+      assert.match(reasons, /unsafe\.yml.*hub-dind.*ubuntu-24.04/i);
+      assert.match(reasons, /unsafe\.yml.*future-private.*ubuntu-24.04/i);
+      assert.match(reasons, /unsafe\.yml.*local-reusable.*ubuntu-24.04/i);
     }
   );
 });
@@ -116,7 +116,7 @@ test('pull_request workflows cannot hide a private runner behind expression-valu
         '  test:',
         '    strategy:',
         '      matrix:',
-        '        runner: [ubuntu-latest, arc-runner-set]',
+        '        runner: [ubuntu-24.04, arc-runner-set]',
         '    runs-on: ${{ matrix.runner }}',
         '    steps:',
         '      - run: npm test',
@@ -142,7 +142,7 @@ test('a pull_request_target workflow requires the canonical authorization broker
         '  contents: read',
         'jobs:',
         '  test:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -199,7 +199,7 @@ test('hosted pull_request_target code and secrets still require broker protectio
         '  contents: write',
         'jobs:',
         '  deploy:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
         '        with:',
@@ -237,7 +237,7 @@ test('authorization receives only canonical fork metadata with no token permissi
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -266,13 +266,13 @@ test('every CI job depends on authorization and the verified merge resolver', ()
         '    with:',
         '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
         '  direct-bypass:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '  alternate-bypass:',
         '    needs: authorize',
         "    if: github.actor == 'shpwrck'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -305,7 +305,7 @@ test('the first executable job also requires the verified merge output', () => {
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -338,7 +338,7 @@ test('protected workflows must resolve one immutable merge SHA after authorizati
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true' && github.event.pull_request.merge_commit_sha != null",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -375,7 +375,7 @@ test('the reusable merge resolver is pinned to the CI runner, read-only, and con
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /pr-merge-sha\.yml.*workflow_call.*input.*output/i);
       assert.match(reasons, /pr-merge-sha\.yml.*workflow permissions.*\{\}/i);
-      assert.match(reasons, /pr-merge-sha\.yml.*CI runner.*ubuntu-latest/i);
+      assert.match(reasons, /pr-merge-sha\.yml.*CI runner.*ubuntu-24.04/i);
       assert.match(reasons, /pr-merge-sha\.yml.*timeout.*2/i);
       assert.match(reasons, /pr-merge-sha\.yml.*contents.*pull-requests.*read/i);
     }
@@ -411,7 +411,7 @@ test('post-resolver jobs cannot bypass the verified output guard or exact checko
         '  test:',
         '    needs: resolve-merge',
         "    if: needs.resolve-merge.outputs.merge-sha != '' || true",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - uses: actions/checkout@0123456789012345678901234567890123456789',
         '        with:',
@@ -447,7 +447,7 @@ test('protected workflows isolate concurrency and checkout the verified merge SH
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - uses: Actions/Checkout@0123456789012345678901234567890123456789',
         '        with:',
@@ -482,7 +482,7 @@ test('the reusable trust broker is pinned to the CI runner and has no token perm
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -505,7 +505,7 @@ test('the reusable trust broker is pinned to the CI runner and has no token perm
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /pr-trust\.yml.*permissions.*\{\}/i);
-      assert.match(reasons, /pr-trust\.yml.*CI runner.*ubuntu-latest/i);
+      assert.match(reasons, /pr-trust\.yml.*CI runner.*ubuntu-24.04/i);
     }
   );
 });
@@ -529,7 +529,7 @@ test('the trust broker contract cannot drift to alternate metadata or extra work
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -553,7 +553,7 @@ test('the trust broker contract cannot drift to alternate metadata or extra work
         '  authorize:',
         '    permissions:',
         '      contents: read',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    container: attacker.invalid/forged-broker:latest',
         '    outputs:',
         '      trusted: ${{ steps.same-repo.outputs.trusted }}',
@@ -563,7 +563,7 @@ test('the trust broker contract cannot drift to alternate metadata or extra work
         '          TRUSTED: ${{ inputs.head-repository == github.actor }}',
         '        run: echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"',
         '  extra:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -599,7 +599,7 @@ test('the trust broker input cannot gain a default or alternate data channel', (
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: echo safe',
         '',
@@ -621,7 +621,7 @@ test('the trust broker input cannot gain a default or alternate data channel', (
         'permissions: {}',
         'jobs:',
         '  authorize:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    permissions: {}',
         '    outputs:',
         '      trusted: ${{ steps.same-repo.outputs.trusted }}',
@@ -662,19 +662,19 @@ test('a transitive CI job cannot override a skipped authorization ancestor', () 
         '  gate:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: echo safe',
         '  bypass:',
         '    needs: gate',
         '    if: always()',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '  success-bypass:',
         '    needs: gate',
         '    if: success() || true',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -707,11 +707,11 @@ test('forks cannot schedule a hosted secret-bearing job beside the protected gra
         '  arc:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: echo safe',
         '  secret-bypass:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - env:',
         '          TOKEN: ${{ secrets.DEPLOY_TOKEN }}',
@@ -747,7 +747,7 @@ test('every executable job in a canonical target workflow must stay on the CI ru
         '  ci:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true' && github.event.pull_request.merge_commit_sha != null",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '  hosted-bypass:',
@@ -776,7 +776,7 @@ test('canonical workflows cannot regress to pull_request after cutover', () => {
         '  pull_request:',
         'jobs:',
         '  lint:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    steps:',
         '      - run: npm test',
         '',
@@ -807,7 +807,7 @@ test('milestone guard cannot drift off the CI runner', () => {
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /milestone-guard\.yml.*CI runner.*ubuntu-latest/i
+        /milestone-guard\.yml.*CI runner.*ubuntu-24.04/i
       );
     }
   );
@@ -881,7 +881,7 @@ test('the canonical sandbox proof job must require namespaces and run only the h
         '  gate-2702-sandbox-proof:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: ubuntu-latest',
+        '    runs-on: ubuntu-24.04',
         '    permissions:',
         '      contents: read',
         '    steps:',
@@ -916,7 +916,7 @@ test('a canonical job cannot reach a self-hosted runner through a label array', 
         '  mixed:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: [self-hosted, ubuntu-latest]',
+        '    runs-on: [self-hosted, ubuntu-24.04]',
         '    steps:',
         '      - run: npm test',
         '',

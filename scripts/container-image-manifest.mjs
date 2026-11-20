@@ -216,7 +216,7 @@ permissions:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
       matrix: \${{ steps.images.outputs.matrix }}
@@ -238,7 +238,7 @@ jobs:
       fail-fast: true
       max-parallel: 1
       matrix: \${{ fromJSON(needs.plan.outputs.matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout

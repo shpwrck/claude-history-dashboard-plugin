@@ -3,7 +3,7 @@
 //
 // Runner placement policy: the self-hosted ARC pools (and the clusters behind
 // them) are retired, so every job runs on the single-use GitHub-hosted
-// `ubuntu-latest` runner named by CI_RUNNER. pull_request_target workflows still
+// `ubuntu-24.04` runner named by CI_RUNNER. pull_request_target workflows still
 // get the full trust ceiling below (fork gate via pr-trust.yml, merge-SHA
 // resolution via pr-merge-sha.yml, PR-number concurrency), because they run
 // with base-repo credentials regardless of where the runner lives. Plain
@@ -18,7 +18,9 @@ import { parse } from 'yaml';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 // perf-index-contract: pr-workflow-policy-membership always-consumed: every workflow scan queries these fixed runner and canonical-file memberships
-export const CI_RUNNER = 'ubuntu-latest';
+// Pinned, not ubuntu-latest: ubuntu-latest moved to 26.04, which the locked
+// Playwright (1.60) cannot install browsers or OS deps for.
+export const CI_RUNNER = 'ubuntu-24.04';
 // perf-index-contract: pr-workflow-canonical-membership always-consumed: every repository audit queries and inventories the complete canonical workflow membership
 const CANONICAL_TARGET_WORKFLOWS = new Set([
   'agent-cross-review.yml',
@@ -82,7 +84,7 @@ function triggerNames(workflow) {
 }
 
 function usesCiRunner(job) {
-  // Exact string only: a label array such as [self-hosted, ubuntu-latest] would
+  // Exact string only: a label array such as [self-hosted, ubuntu-24.04] would
   // route to any runner carrying ALL labels, i.e. a self-hosted machine.
   return job?.['runs-on'] === CI_RUNNER;
 }
@@ -173,7 +175,7 @@ export function prWorkflowTrustReasons(root) {
       for (const [jobName, job] of Object.entries(jobs)) {
         if (!usesApprovedHostedRunner(job)) {
           reasons.push(
-            `${entry.name}: pull_request job ${jobName} must use GitHub-hosted ubuntu-latest directly`
+            `${entry.name}: pull_request job ${jobName} must use GitHub-hosted ${CI_RUNNER} directly`
           );
         }
       }
