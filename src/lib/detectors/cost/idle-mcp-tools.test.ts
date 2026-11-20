@@ -104,6 +104,21 @@ describe('cost.idle-mcp-tools (#416)', () => {
       expect(wording).not.toMatch(/\d+\s*[-–]\s*\d+\s*tokens/);
     });
 
+    it('treats inventory tools as deferred and claims no resident context cost (#3403)', () => {
+      const rec = detector.rule(input(fooLoadedNeverUsed(), lc(['foo']), dates(OBSERVED)), RUN_AT)!;
+      const wording = [rec.title, rec.detail, rec.action, rec.fix?.note ?? '', rec.provenance?.inference ?? ''].join('\n');
+      // The old copy said a loaded tool contributes its manifest entry to every
+      // turn. Deferred tools keep only their name in context.
+      expect(wording).not.toMatch(/every turn/i);
+      expect(wording).not.toMatch(/tokens? (?:to|on|per) (?:the )?(?:tool )?manifest/i);
+      expect(rec.detail).toMatch(/not a token cost/);
+      expect(rec.estSavingsUsd ?? 0).toBe(0);
+      expect(rec.reclaim?.counterfactual.kind).toBe('flag-only');
+      expect(rec.provenance?.observations[0].source).toContain('deferred_tools_delta');
+      expect(rec.provenance?.inference).toMatch(/deferred/);
+      expect(rec.provenance?.inference).toMatch(/No token or dollar saving is claimed/);
+    });
+
     it('dates the claim from the newest OBSERVED turn, not the clock', () => {
       // Fixture observes 2026-06-09 and runs at 2026-06-10: a clock-derived
       // date is off by one day and fails here (the #3459 guard shape).

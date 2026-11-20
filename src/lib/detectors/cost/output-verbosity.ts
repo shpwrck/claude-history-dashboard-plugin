@@ -29,7 +29,7 @@ import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
  *    cache-compounded tail (compressed prose also shrinks cached history on later
  *    turns) is estimated and reported in the detail but deliberately NOT added to
  *    the booked figure — those cache-read tokens are already the territory of the
- *    payload levers (tool-call-right-sizing / mcp-schema-tax), so double-claiming
+ *    payload levers (e.g. tool-call-right-sizing), so double-claiming
  *    them would inflate the bill.
  *
  * The causal proof (a caveman vs normal `/replay` axis) is a separate meta

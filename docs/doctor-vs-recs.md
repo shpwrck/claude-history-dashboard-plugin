@@ -26,7 +26,7 @@ artifact was not enough. On that basis, 11 detectors (about 10%) overlap:
 - setup and updates: `reliability.settings-json-invalid` and
   `reliability.self-update-health`;
 - unused or context-heavy extensions: `cost.idle-mcp-tools`,
-  `context.mcp-schema-tax`, `safety.config-hygiene-rollup`,
+  `context.mcp-schema-tax` (since removed, #3403), `safety.config-hygiene-rollup`,
   `workflow.unused-installed-skills`, and
   `workflow.unused-installed-plugins`;
 - always-loaded guidance and hooks: `context.bloated-claude-md`,

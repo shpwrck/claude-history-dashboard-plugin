@@ -895,15 +895,15 @@ const PROVENANCE_TRIGGER_FIXTURES: Record<string, () => ProvenanceFixture> = {
   },
 
   'context.bloated-claude-md': () => {
-    // A merged CLAUDE.md past the 200-line target. Split across a global file
-    // AND a per-project file so the "this is a merge" observation is exercised
-    // on a genuine merge rather than a single document.
+    // A merged CLAUDE.md past the 40,000-character memory-warning floor. Split
+    // across a global file AND a per-project file so the "this is a merge"
+    // observation is exercised on a genuine merge rather than a single document.
     return {
       input: baseInput({
         liveConfig: liveConfig({
           claudeMd: {
-            global: 'global rule line\n'.repeat(180),
-            perProject: { '/repo': 'project rule line\n'.repeat(60) },
+            global: 'global rule line\n'.repeat(1_800),
+            perProject: { '/repo': 'project rule line\n'.repeat(900) },
           },
         } as unknown as Partial<LiveConfig>),
       }),

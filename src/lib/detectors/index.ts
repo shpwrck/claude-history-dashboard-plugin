@@ -74,7 +74,6 @@ import { detector as repoMapContextWaste } from './context/repo-map-context-wast
 import { detector as lastNRunsAudit } from './context/last-n-runs-audit';
 import { detector as crossSessionReread } from './context/cross-session-reread';
 import { detector as toolCallRightSizing } from './context/tool-call-right-sizing';
-import { detector as mcpSchemaTax } from './context/mcp-schema-tax';
 import { detector as reclaimPotential } from './context/reclaim-potential';
 
 // ── WORKFLOW ────────────────────────────────────────────────────────────
@@ -350,13 +349,6 @@ export const DETECTORS: Detector[] = [
   // cacheRead scaleTokens claim. Excludes native-bypass Bash calls so the same
   // bytes aren't double-claimed; compaction-large-tool-outputs books no claim.
   toolCallRightSizing,
-
-  // ── #1920 (epic #1910) — MCP tool-schema prefix tax ───────────────────────
-  // Sizes the MCP tool-schema share of the fixed per-turn prefix and flags
-  // duplicate/redundant MCP servers (overlapping tool sets, e.g. github +
-  // githubmcp) as a safe removal lever. Sibling to bloated-claude-md (prose docs
-  // only); schema size is a documented token proxy → tier-0 estSavingsUsd.
-  mcpSchemaTax,
 
   // ── #1923 (epic #1910) — output-verbosity (caveman) cost lever ────────────
   // Measures verbose assistant PROSE output (assistantFeatures.textLength, text

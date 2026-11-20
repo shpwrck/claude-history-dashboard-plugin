@@ -171,10 +171,9 @@ export const detector: Detector = {
           : '') +
       coverageNote +
       partialNote;
-    // Flag-only in the closed PR1 cascade: the wasted tokens are tool-manifest
-    // re-reads that the dashboard cannot map to a priced `(scope,pool)` cell
-    // deterministically (no per-turn manifest-token ledger). Books $0; carries
-    // the idle-tool count as evidence for per-category coverage.
+    // Flag-only in the closed PR1 cascade: the tools are deferred, so no
+    // resident schema tokens exist to reclaim (#3403). Books $0; carries the
+    // idle-tool count as evidence for per-category coverage.
     const reclaim: ReclaimClaim = {
       leverId: 'cost.idle-mcp-tools',
       category: 'cost',
@@ -188,8 +187,8 @@ export const detector: Detector = {
       id: 'cost.idle-mcp-tools',
       category: 'cost',
       severity: 'info',
-      title: 'Remove MCP tools loaded but never invoked',
-      detail: `${datePrefix}${idle.length} MCP tool(s) were loaded in ${MIN_NEVER_USED_SESSIONS}+ sessions yet invoked zero times.${dateNote}`,
+      title: 'Remove MCP servers whose tools are never invoked',
+      detail: `${datePrefix}${idle.length} deferred MCP tool(s) were available in ${MIN_NEVER_USED_SESSIONS}+ sessions yet invoked zero times. Deferred tools keep only their names in context, so this is connection clutter to maintain and authenticate, not a token cost.${dateNote}`,
       action:
         'Disable or remove the MCP server(s) backing the never-used tool(s) from ~/.claude.json (or scope them to the projects that need them).',
       reclaim,
@@ -198,8 +197,8 @@ export const detector: Detector = {
       provenance: {
         observations: [
           {
-            claim: `${idle.length} MCP tool(s) loaded in ${MIN_NEVER_USED_SESSIONS}+ sessions, invoked 0 times`,
-            source: 'parse-tool-inventory',
+            claim: `${idle.length} deferred MCP tool(s) listed in ${MIN_NEVER_USED_SESSIONS}+ sessions, invoked 0 times`,
+            source: 'transcript attachment deferred_tools_delta (parse-tool-inventory)',
             field: 'aggregateInventory().unusedByFrequency (usedIn === 0)',
             value: idle.length,
           },
@@ -229,17 +228,16 @@ export const detector: Detector = {
             value: undatedTools,
           },
         ],
-        // #3197: the per-tool manifest overhead is NOT observed here, so the
-        // inference no longer quotes a figure for it. What is observed is that
-        // the tools were loaded and never invoked; that a loaded tool costs
-        // manifest tokens is a property of the protocol, and how many is
-        // unmeasured by anything in this input.
+        // #3403: every tool in the inventory comes from a `deferred_tools_delta`
+        // attachment, so it was DEFERRED: only its name sat in context and its
+        // schema loaded on demand. Claude Code's own rule is to never report a
+        // token cost for deferred MCP tools, so this finding is decluttering
+        // (connections to maintain and authenticate), never context savings.
         inference:
-          'A tool that is loaded but never invoked contributes its manifest entry to every ' +
-          'turn of every session that loads it and returns nothing for it; removing the ' +
-          'still-configured backing server(s) removes that entry. The per-tool token cost of ' +
-          'a manifest entry is not measured by the tool inventory, so no figure is claimed ' +
-          'for it here.',
+          'The tools were listed in deferred_tools_delta transcript attachments, so they were ' +
+          'deferred: their schemas were not resident in context and loaded only on demand. ' +
+          'No token or dollar saving is claimed. Removing the still-configured backing ' +
+          'server(s) removes connections that are maintained and authenticated but never used.',
         ...(asOf !== undefined ? { asOf, stale } : {}),
       },
       view: 'tools',

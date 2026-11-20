@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detector } from './bloated-claude-md';
+import { detector, MEMORY_WARNING_FLOOR_CHARS } from './bloated-claude-md';
 import { validateRecommendationProvenance } from '../provenance';
 import type { RecommendationInput } from '../types';
 
@@ -20,72 +20,109 @@ function input(
   };
 }
 
-describe('context.bloated-claude-md (#412)', () => {
-  it.each([
-    ['newline-terminated', 'x\n'.repeat(200)],
-    ['unterminated', Array(200).fill('x').join('\n')],
-  ])('stays silent for exactly 200 %s lines', (_description, text) => {
-    expect(detector.rule(input(text), 0)).toBeNull();
-  });
+/** `n` characters of text in 80-character lines (newline included). */
+function textOf(n: number): string {
+  const line = 'x'.repeat(79) + '\n';
+  return line.repeat(Math.floor(n / 80)) + 'x'.repeat(n % 80);
+}
 
+describe('context.bloated-claude-md (#412, #3404)', () => {
   it('stays silent for empty input', () => {
     expect(detector.rule(input(''), 0)).toBeNull();
   });
 
-  it.each([
-    ['newline-terminated', 'x\n'.repeat(201)],
-    ['unterminated', Array(201).fill('x').join('\n')],
-  ])('reports exactly 201 affected %s lines', (_description, text) => {
-    expect(detector.rule(input(text), 0)?.affected).toBe(201);
+  it('stays silent for a 250-line, 8,000-character file', () => {
+    const text = ('y'.repeat(31) + '\n').repeat(250);
+    expect(text.length).toBe(8_000);
+    expect(detector.rule(input(text), 0)).toBeNull();
   });
 
-  it('warns past 200 lines and escalates to critical past 400', () => {
-    const warn = detector.rule(input('x\n'.repeat(250)), 0);
-    expect(warn?.id).toBe('context.bloated-claude-md');
-    expect(warn?.severity).toBe('warning');
-    expect(warn?.fix?.target).toBe('CLAUDE.md');
+  it('stays silent exactly at the 40,000-character floor', () => {
+    expect(MEMORY_WARNING_FLOOR_CHARS).toBe(40_000);
+    expect(detector.rule(input(textOf(40_000)), 0)).toBeNull();
+  });
 
-    const crit = detector.rule(input('x\n'.repeat(450)), 0);
-    expect(crit?.severity).toBe('critical');
+  it('warns above the floor and cites the measured text and the floor', () => {
+    const rec = detector.rule(input(textOf(40_001)), 0);
+    expect(rec?.id).toBe('context.bloated-claude-md');
+    expect(rec?.severity).toBe('warning');
+    expect(rec?.affected).toBe(1);
+    expect(rec?.provenance?.observations[0].value).toBe(40_001);
+    expect(rec?.fix?.target).toBe('CLAUDE.md');
+    expect(rec?.detail).toContain('40,001 characters');
+    expect(rec?.detail).toContain('40,000-character floor');
+    expect(rec?.detail).toMatch(/does not know the active model/);
+  });
+
+  it('never claims a 200-line limit', () => {
+    const rec = detector.rule(input(textOf(50_000)), 0)!;
+    const copy = JSON.stringify(rec);
+    expect(copy).not.toMatch(/200-line/);
+    expect(copy).not.toMatch(/WARN_LINES|CRITICAL_LINES/);
   });
 
   // ── Provenance (#3180) ───────────────────────────────────────────────────
   describe('provenance', () => {
     it('passes the contract when it fires', () => {
-      const rec = detector.rule(input('x\n'.repeat(250)), 0);
+      const rec = detector.rule(input(textOf(45_000)), 0);
       expect(validateRecommendationProvenance(rec!)).toEqual([]);
     });
 
-    it('reproduces the reported line count from the cited text', () => {
-      const cited = (lines: number) =>
-        detector.rule(input('x\n'.repeat(lines)), 0)!.provenance!.observations[0].value;
-      expect(cited(250)).toBe(250);
-      expect(cited(300)).toBe(300);
+    it('reproduces the reported character count from the cited text', () => {
+      const cited = (n: number) =>
+        detector.rule(input(textOf(n)), 0)!.provenance!.observations[0].value;
+      expect(cited(45_000)).toBe(45_000);
+      expect(cited(60_123)).toBe(60_123);
     });
 
-    it('discloses that the count is a MERGE, with how many documents', () => {
-      // Without this a reader checks ~/.claude/CLAUDE.md, finds it far shorter
-      // than the headline, and concludes the finding is wrong.
-      const rec = detector.rule(
-        input('x\n'.repeat(180), { '/repo': 'y\n'.repeat(60), '/other': 'z\n'.repeat(30) }),
-        0
+    it('cites the product-anchored floor as the threshold', () => {
+      const rec = detector.rule(input(textOf(45_000)), 0)!;
+      const floorObs = rec.provenance!.observations.find((o) => o.field === 'MEMORY_WARNING_FLOOR_CHARS');
+      expect(floorObs?.value).toBe(40_000);
+      expect(floorObs?.claim).toMatch(/getMaxMemoryCharacterCount/);
+      expect(floorObs?.claim).toMatch(/context window is unknown/);
+    });
+
+    it('adds the global file to one project, never projects to each other', () => {
+      // 6k global + ten 4k project files: no session loads more than 10k.
+      const projects = Object.fromEntries(
+        Array.from({ length: 10 }, (_, i) => [`/p${i}`, textOf(4_000)])
       );
-      const mergeObs = rec!.provenance!.observations.find((o) => o.claim.includes('concatenation'));
-      expect(mergeObs, 'expected an observation disclosing the merge').toBeDefined();
-      expect(mergeObs!.value).toBe(3); // global + two project files
-      expect(mergeObs!.claim).toContain('not the size of any single file');
+      expect(detector.rule(input(textOf(6_000), projects), 0)).toBeNull();
     });
 
-    it('counts only the documents that actually merge', () => {
-      const rec = detector.rule(input('x\n'.repeat(250), { '/repo': '' }), 0);
-      const mergeObs = rec!.provenance!.observations.find((o) => o.claim.includes('concatenation'));
-      expect(mergeObs!.value).toBe(1); // the empty project file is not merged
+    it('reports the largest loaded set and discloses that it adds two files', () => {
+      const rec = detector.rule(
+        input(textOf(30_000), { '/repo': textOf(12_000), '/other': textOf(4_000) }),
+        0
+      )!;
+      expect(rec.affected).toBe(2);
+      expect(rec.detail).toContain('/repo');
+      expect(rec.detail).not.toContain('/other');
+      expect(rec.provenance!.observations[0].value).toBe(42_000);
+      const docsObs = rec.provenance!.observations.find((o) => o.claim.includes('loaded together'));
+      expect(docsObs!.value).toBe(2);
+      expect(docsObs!.claim).toContain('not the size of any single file');
     });
 
-    it('attributes the target and the adherence claim to documentation, not measurement', () => {
-      const rec = detector.rule(input('x\n'.repeat(250)), 0);
-      // `detail` asserts adherence degrades; nothing here measures adherence.
-      expect(rec!.provenance!.inference).toMatch(/documented guidance/i);
+    it('does not count separators between files', () => {
+      // 39,998 + 1 characters is under the floor however the files are joined.
+      expect(detector.rule(input(textOf(39_998), { '/repo': 'x' }), 0)).toBeNull();
+    });
+
+    it('measures a project file alone when there is no global file', () => {
+      const rec = detector.rule(input('', { '/repo': textOf(41_000) }), 0)!;
+      expect(rec.affected).toBe(1);
+      expect(rec.provenance!.observations[0].value).toBe(41_000);
+    });
+
+    it('ignores an empty project file', () => {
+      const rec = detector.rule(input(textOf(45_000), { '/repo': '' }), 0);
+      expect(rec!.affected).toBe(1);
+    });
+
+    it('states that adherence and token cost are not measured', () => {
+      const rec = detector.rule(input(textOf(45_000)), 0);
       expect(rec!.provenance!.inference).toMatch(/no adherence rate/i);
     });
   });

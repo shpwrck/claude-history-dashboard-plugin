@@ -2100,7 +2100,7 @@ function fixtureBank(): Fixture[] {
     now,
     input: bankBase({
       liveConfig: liveConfigShell({
-        claudeMd: { global: Array.from({ length: 450 }, (_, i) => `line ${i}`).join('\n'), perProject: {} },
+        claudeMd: { global: Array.from({ length: 600 }, (_, i) => `line ${i} `.padEnd(80, 'x')).join('\n'), perProject: {} },
       }),
     }),
   });
@@ -2235,48 +2235,6 @@ function fixtureBank(): Fixture[] {
     const inv = (sessionId: string) =>
       ({ sessionId, toolsAvailable: ['mcp__foo__bar', 'Bash'], toolsUsed: ['Bash'], unusedTools: [], utilizationPct: 0 }) as unknown as NonNullable<RecommendationInput['toolInventories']>[number];
     out.push({ now, input: bankBase({ toolInventories: [inv('s1'), inv('s2'), inv('s3')] }) });
-  }
-
-  // ── context.mcp-schema-tax ─────────────────────────────────────────────
-  {
-    const SHARED = Array.from({ length: 40 }, (_, i) => `tool_${i}`);
-    const inv = (sessionId: string) =>
-      ({
-        sessionId,
-        toolsAvailable: ['github', 'githubmcp'].flatMap((s) =>
-          SHARED.map((t) => `mcp__${s}__${t}`)
-        ),
-        toolsUsed: [],
-        unusedTools: [],
-        utilizationPct: 0,
-      }) as unknown as NonNullable<RecommendationInput['toolInventories']>[number];
-    const e = () => ({
-      timestamp: 't',
-      model: 'claude-opus-4-7',
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationTokens: 0,
-      cacheCreation1hTokens: 0,
-      cacheReadTokens: 100_000,
-      webSearchRequests: 0,
-      webFetchRequests: 0,
-    });
-    const td = [
-      { sessionId: 'mcp1', entries: Array.from({ length: 30 }, e), compactionEvents: [] },
-    ] as unknown as RecommendationInput['tokenData'];
-    out.push({
-      now,
-      input: bankBase({
-        toolInventories: [inv('mcp1')],
-        tokenData: td,
-        liveConfig: liveConfigShell({
-          mcpServers: [
-            { id: 'github', scope: 'global' },
-            { id: 'githubmcp', scope: 'global' },
-          ],
-        }),
-      }),
-    });
   }
 
   // ── cost.output-verbosity ──────────────────────────────────────────────
