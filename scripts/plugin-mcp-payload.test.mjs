@@ -27,7 +27,9 @@ import {
 } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import {
+  PLUGIN_MIRROR_REPOSITORY,
   assemblePluginPayload,
+  stampedDocsMap,
   stampedPluginManifest,
 } from './assemble-plugin-payload.mjs';
 
@@ -40,6 +42,20 @@ import {
   );
   assert.equal(stamped.version, '9.9.9', 'stamp must override the source version');
   assert.equal(stamped.name, 'x', 'stamp must preserve other manifest keys');
+}
+
+// Unit: the payload docs map declares the mirror slug a plugin checkout
+// derives, so ingest's declared-vs-derived guard accepts it (#3853).
+{
+  const stamped = JSON.parse(
+    stampedDocsMap(
+      '{"version":1,"repository":"shpwrck/claude-history-dashboard","documents":{"a.md":{}}}',
+      PLUGIN_MIRROR_REPOSITORY
+    )
+  );
+  assert.equal(stamped.repository, 'shpwrck/claude-history-dashboard-plugin');
+  assert.deepEqual(stamped.documents, { 'a.md': {} }, 'stamp must preserve documents');
+  assert.equal(stamped.version, 1);
 }
 
 const EXPECTED_TOOLS = [
@@ -176,6 +192,20 @@ try {
     await readFile(join(payloadRoot, 'README.md'), 'utf8'),
     await readFile(resolve('docs/plugin-mirror-README.md'), 'utf8'),
     'the payload doc graph should use the marketplace-specific README'
+  );
+  assert.equal(
+    JSON.parse(await readFile(join(payloadRoot, 'docs', 'docs-map.json'), 'utf8'))
+      .repository,
+    PLUGIN_MIRROR_REPOSITORY,
+    'the payload docs map must declare the mirror slug a plugin checkout derives (#3853)'
+  );
+  assert.match(
+    await readFile(resolve('.github/workflows/pages-publish-plugin.yml'), 'utf8'),
+    new RegExp(
+      `^\\s*EXTERNAL_REPO:\\s*${PLUGIN_MIRROR_REPOSITORY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`,
+      'm'
+    ),
+    'the publish workflow must push to the slug the docs map is stamped with'
   );
 
   const manifest = JSON.parse(

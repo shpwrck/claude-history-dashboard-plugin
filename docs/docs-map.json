@@ -1,16 +1,21 @@
 {
   "version": 1,
-  "repository": "shpwrck/claude-history-dashboard",
+  "repository": "shpwrck/claude-history-dashboard-plugin",
   "documents": {
     "docs/adding-a-recommendation.md": {
       "sources": [
         {
           "path": "src/lib/recommendations.ts",
-          "symbols": ["assembleRecommendationInput", "buildRecommendations"]
+          "symbols": [
+            "assembleRecommendationInput",
+            "buildRecommendations"
+          ]
         },
         {
           "path": "src/lib/detectors/fix-validity.ts",
-          "symbols": ["validateFixSnippet"]
+          "symbols": [
+            "validateFixSnippet"
+          ]
         }
       ]
     },
@@ -18,7 +23,10 @@
       "sources": [
         {
           "path": "src/lib/recommendations.ts",
-          "symbols": ["buildRecommendations", "assembleRecommendationInput"]
+          "symbols": [
+            "buildRecommendations",
+            "assembleRecommendationInput"
+          ]
         }
       ]
     },
@@ -26,7 +34,9 @@
       "sources": [
         {
           "path": "src/lib/parse-memories.ts",
-          "symbols": ["buildMemoryStores"]
+          "symbols": [
+            "buildMemoryStores"
+          ]
         }
       ]
     },
@@ -34,7 +44,10 @@
       "sources": [
         {
           "path": "src/lib/nav-prefs.ts",
-          "symbols": ["NAV_ITEMS", "REDIRECTED_VIEW_TAB"]
+          "symbols": [
+            "NAV_ITEMS",
+            "REDIRECTED_VIEW_TAB"
+          ]
         }
       ]
     }

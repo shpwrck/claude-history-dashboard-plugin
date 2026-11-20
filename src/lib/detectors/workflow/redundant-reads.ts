@@ -3,7 +3,13 @@ import type { AppliedMarkers } from '../types';
 import { claudeMdMarksApplied, short, basename, newestIsoDate, truncate } from '../shared';
 import { redundantReads, type RedundantRead } from '../../parse-files';
 import { parseFileReread } from '../../parse-file-reread';
-import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
+import {
+  FRESH_PROMPT_POOLS,
+  freshPromptDeletion,
+  freshPromptTokens,
+  scopeKeyOf,
+  type ReclaimClaim,
+} from '../../reclaim';
 
 const MARKERS_REDUNDANT_READS: AppliedMarkers = {
   headings: [/^##\s+Key files\b/i],
@@ -37,11 +43,11 @@ export const detector: Detector = {
     // estimate only"): the measured re-read tokens, no modelled counterfactual.
     // `parseFileReread.estimatedTokenWaste` = (reads-1) × avgBytesPerRead / 4 — the
     // tokens that would NOT have been re-spent had the file loaded once. We book a
-    // `scaleTokens` deletion of those tokens against the re-reading sessions' INPUT
-    // pool (re-read file content re-enters context as input). Per-session waste is
-    // summed and expressed as one fraction of the in-scope input residual; the
-    // cascade's `residual ≥ 0` guard caps each cell so we never reclaim more than
-    // the real input bill. No reprice, no cross-model heroics — direct only.
+    // `scaleTokens` deletion of those tokens against the re-reading sessions' fresh
+    // prompt pools (re-read content re-enters context as uncached input or a cache
+    // write, #3854). Per-session waste is summed and expressed as one fraction of the
+    // in-scope fresh prompt tokens; an estimate above them makes no claim, and the
+    // cascade's `residual ≥ 0` guard caps each cell. No reprice, no cross-model heroics — direct only.
     const reread = parseFileReread(input.toolData, input.tokenData);
     const wasteBySession = new Map<string, number>();
     for (const r of reread.repeats) {
@@ -53,10 +59,10 @@ export const detector: Detector = {
     }
 
     // Resolve each re-reading session to its (session, model) scopes and tally the
-    // in-scope input tokens so the deletion fraction targets exactly the re-read
-    // bytes (direct estimate), bounded by the real input residual per cell.
+    // in-scope fresh prompt tokens so the deletion fraction targets exactly the re-read
+    // bytes (direct estimate), bounded by the real fresh prompt residual per cell.
     const scopeKeys = new Set<string>();
-    let inScopeInputTokens = 0;
+    let inScopeFreshTokens = 0;
     let directWasteTokens = 0;
     for (const d of input.tokenData) {
       const waste = wasteBySession.get(d.sessionId);
@@ -64,24 +70,29 @@ export const detector: Detector = {
       directWasteTokens += waste;
       for (const e of d.entries) {
         scopeKeys.add(scopeKeyOf(d.sessionId, e.model || 'unknown'));
-        inScopeInputTokens += e.inputTokens;
+        inScopeFreshTokens += freshPromptTokens(e);
       }
     }
 
     let reclaim: ReclaimClaim | undefined;
-    if (directWasteTokens > 0 && scopeKeys.size > 0 && inScopeInputTokens > 0) {
-      // Fraction of the in-scope input pool the re-read waste represents. >1 ⇒ the
-      // cascade keeps 0 (deletes the whole input residual, never goes negative).
-      const inputFrac = directWasteTokens / inScopeInputTokens;
+    // Re-entered content is billed as fresh prompt tokens: uncached input or a
+    // cache write. Dividing by `input` alone gave fractions above 1 on cached
+    // sessions, which the cascade rejected every cycle (#3854). An estimate larger
+    // than the scope's fresh tokens makes no claim rather than booking them all.
+    const poolDeltaFrac =
+      directWasteTokens > 0 && scopeKeys.size > 0
+        ? freshPromptDeletion(directWasteTokens, inScopeFreshTokens)
+        : null;
+    if (poolDeltaFrac) {
       reclaim = {
         leverId: 'workflow.redundant-reads',
         category: 'workflow',
         cause: 'workflow-rework',
         // Behavioural band [10,40): reliability(10) → safety(20) → workflow(30).
         orderKey: 30,
-        ownedPools: ['input'],
+        ownedPools: [...FRESH_PROMPT_POOLS],
         scopeKeys: [...scopeKeys],
-        counterfactual: { kind: 'scaleTokens', poolDeltaFrac: { input: inputFrac } },
+        counterfactual: { kind: 'scaleTokens', poolDeltaFrac },
         evidenceTokens: directWasteTokens,
       };
     }
@@ -153,7 +164,7 @@ export const detector: Detector = {
         ],
         // The token figure is a DIRECT estimate — (reads-1) × avgBytesPerRead / 4
         // — of tokens that would not have re-entered context had the file loaded
-        // once; it is booked against the in-scope input pool, not a modelled
+        // once; it is booked against the in-scope fresh prompt pools, not a modelled
         // reprice. No claim is made about WHY the file was re-read (eviction,
         // forgetfulness, or a legitimate re-check); only that each repeat re-paid
         // its own bytes.

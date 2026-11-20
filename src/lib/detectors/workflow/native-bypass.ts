@@ -9,7 +9,13 @@ import {
 import { isAsOfStale } from '../provenance';
 import { nativeToolBypass, nativeBypassByScope } from '../../parse-tools';
 import { nativeBypassGuidanceSnippet } from '../../native-bypass-snippet';
-import { scopeKeyOf, type ReclaimClaim } from '../../reclaim';
+import {
+  FRESH_PROMPT_POOLS,
+  freshPromptDeletion,
+  freshPromptTokens,
+  scopeKeyOf,
+  type ReclaimClaim,
+} from '../../reclaim';
 
 /** Chars-per-token proxy (same coarse heuristic as parse-file-reread). */
 const CHARS_PER_TOKEN = 4;
@@ -115,8 +121,9 @@ export const detector: Detector = {
     // the result bytes the bypass shell commands streamed back into context (a
     // direct char-count proxy, /4 → tokens) that a native Grep/Read would not have
     // re-billed the same way. Book a `scaleTokens` deletion of those tokens against
-    // the bypassing sessions' INPUT pool; the cascade's `residual ≥ 0` guard caps
-    // each cell so we never reclaim more than the real input bill. Needs tokenData
+    // the bypassing sessions' fresh prompt pools (input + cache writes, #3854); an
+    // estimate above them makes no claim, and the cascade's `residual ≥ 0` guard caps each
+    // cell so we never reclaim more than the real fresh prompt bill. Needs tokenData
     // to resolve real token cells — absent ⇒ no claim (the rec still surfaces).
     const byScope = nativeBypassByScope(input.toolData);
     const bytesBySession = new Map<string, number>();
@@ -128,7 +135,7 @@ export const detector: Detector = {
       }
     }
     const scopeKeys = new Set<string>();
-    let inScopeInputTokens = 0;
+    let inScopeFreshTokens = 0;
     let directWasteTokens = 0;
     let attributedResultBytes = 0;
     let attributedResultCalls = 0;
@@ -140,22 +147,29 @@ export const detector: Detector = {
       directWasteTokens += bytes / CHARS_PER_TOKEN;
       for (const e of d.entries) {
         scopeKeys.add(scopeKeyOf(d.sessionId, e.model || 'unknown'));
-        inScopeInputTokens += e.inputTokens;
+        inScopeFreshTokens += freshPromptTokens(e);
       }
     }
 
     let reclaim: ReclaimClaim | undefined;
-    if (directWasteTokens > 0 && scopeKeys.size > 0 && inScopeInputTokens > 0) {
-      const inputFrac = directWasteTokens / inScopeInputTokens;
+    // Re-entered content is billed as fresh prompt tokens: uncached input or a
+    // cache write. Dividing by `input` alone gave fractions above 1 on cached
+    // sessions, which the cascade rejected every cycle (#3854). An estimate larger
+    // than the scope's fresh tokens makes no claim rather than booking them all.
+    const poolDeltaFrac =
+      directWasteTokens > 0 && scopeKeys.size > 0
+        ? freshPromptDeletion(directWasteTokens, inScopeFreshTokens)
+        : null;
+    if (poolDeltaFrac) {
       reclaim = {
         leverId: 'workflow.native-bypass',
         category: 'workflow',
         cause: 'workflow-rework',
         // Behavioural band [10,40): reliability(10) → safety(20) → workflow(30).
         orderKey: 30,
-        ownedPools: ['input'],
+        ownedPools: [...FRESH_PROMPT_POOLS],
         scopeKeys: [...scopeKeys],
-        counterfactual: { kind: 'scaleTokens', poolDeltaFrac: { input: inputFrac } },
+        counterfactual: { kind: 'scaleTokens', poolDeltaFrac },
         evidenceTokens: Math.round(directWasteTokens),
       };
     }
@@ -234,10 +248,10 @@ export const detector: Detector = {
                   claim:
                     `${attributedResultBytes} result character(s) from result-bearing Bash calls ` +
                     'were counted once per call and linked ' +
-                    'to sessions with input-token data used to scope the reclaim',
+                    'to sessions with fresh prompt-token data used to scope the reclaim',
                   source: 'parse-tools + tokenData',
                   field:
-                    'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens',
+                    'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens + cacheCreationTokens',
                   value: attributedResultBytes,
                 },
                 {
@@ -246,16 +260,16 @@ export const detector: Detector = {
                     'linked result characters',
                   source: 'parse-tools + tokenData',
                   field:
-                    'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens',
+                    'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens + cacheCreationTokens',
                   value: attributedResultCalls,
                 },
                 {
                   claim:
-                    `${directWasteTokens} unrounded input-token proxy units form the requested ` +
+                    `${directWasteTokens} unrounded prompt-token proxy units form the requested ` +
                     'scaleTokens counterfactual before cascade caps and overlap reduction',
                   source: 'reclaim cascade input',
                   field:
-                    'sum(linked toolData[].calls[].resultBytes) / 4, requested as scaleTokens(input) before cascade guards',
+                    'sum(linked toolData[].calls[].resultBytes) / 4, requested as scaleTokens(input, cacheWrite5m, cacheWrite1h) before cascade guards',
                   value: directWasteTokens,
                 },
               ]

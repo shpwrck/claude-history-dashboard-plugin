@@ -337,6 +337,39 @@ export interface ReclaimCascadeResult {
   booked: BookedClaim[];
 }
 
+/**
+ * Pools a newly added prompt token is first billed in: uncached `input`, or a
+ * cache write when prompt caching is on (#3854). Content that re-enters the
+ * context (a re-read file, a shell-dumped tool result) lands here, not only in
+ * `input`: with caching, `input` alone is often a few hundred tokens per call.
+ */
+export const FRESH_PROMPT_POOLS: readonly PoolId[] = [
+  'input',
+  'cacheWrite5m',
+  'cacheWrite1h',
+] as const;
+
+/** Tokens an entry billed in {@link FRESH_PROMPT_POOLS} (input + all cache writes). */
+export function freshPromptTokens(entry: TokenEntry): number {
+  return (entry.inputTokens || 0) + (entry.cacheCreationTokens || 0);
+}
+
+/**
+ * `scaleTokens` fractions that delete `wasteTokens` of fresh prompt tokens out
+ * of `freshTokens` in scope, spread evenly over {@link FRESH_PROMPT_POOLS}.
+ * Returns `null` (no claim) when the estimate exceeds the fresh tokens the scope
+ * billed: that means the estimate disagrees with the bill, and booking the whole
+ * fresh prompt instead would silently clamp it (#3165, #3854).
+ */
+export function freshPromptDeletion(
+  wasteTokens: number,
+  freshTokens: number
+): Partial<Record<PoolId, number>> | null {
+  const frac = wasteTokens / freshTokens;
+  if (!Number.isFinite(frac) || frac <= 0 || frac > 1) return null;
+  return Object.fromEntries(FRESH_PROMPT_POOLS.map((pool) => [pool, frac]));
+}
+
 /** Per-entry 1h/5m cache split (mirrors `entryCostAtModel`). */
 function cacheSplit(entry: TokenEntry): { cache1h: number; cache5m: number } {
   const cache1h = Math.min(entry.cacheCreation1hTokens, entry.cacheCreationTokens);

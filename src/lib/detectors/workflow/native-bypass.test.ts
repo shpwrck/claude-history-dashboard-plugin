@@ -131,12 +131,12 @@ describe('workflow.native-bypass (#951)', () => {
     const resultBytesObservation = rec.provenance?.observations.find(
       (observation) =>
         observation.field ===
-        'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens'
+        'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens + cacheCreationTokens'
     );
     const resultCallsObservation = rec.provenance?.observations.find(
       (observation) =>
         observation.field ===
-        'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens'
+        'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens + cacheCreationTokens'
     );
 
     expect({
@@ -175,12 +175,12 @@ describe('workflow.native-bypass (#951)', () => {
     const resultBytesObservation = rec.provenance?.observations.find(
       (observation) =>
         observation.field ===
-        'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens'
+        'toolData[].calls[].resultBytes joined by sessionId to tokenData[].entries[].inputTokens + cacheCreationTokens'
     );
     const resultCallsObservation = rec.provenance?.observations.find(
       (observation) =>
         observation.field ===
-        'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens'
+        'count(toolData[].calls[].resultBytes > 0) joined by sessionId to tokenData[].entries[].inputTokens + cacheCreationTokens'
     );
 
     expect(rec.affected).toBe(10);
@@ -234,7 +234,11 @@ describe('workflow.native-bypass (#951)', () => {
     expect(rec.reclaim?.evidenceTokens).toBe(3);
     expect(rec.reclaim?.counterfactual).toMatchObject({
       kind: 'scaleTokens',
-      poolDeltaFrac: { input: 3.25 / 100_000 },
+      poolDeltaFrac: {
+        input: 3.25 / 100_000,
+        cacheWrite5m: 3.25 / 100_000,
+        cacheWrite1h: 3.25 / 100_000,
+      },
     });
     expect(rec.provenance?.observations).toEqual(
       expect.arrayContaining([
@@ -247,6 +251,60 @@ describe('workflow.native-bypass (#951)', () => {
         observation.claim.includes('booked')
       )
     ).toBe(false);
+  });
+
+  it('scopes to fresh prompt tokens so a cached session is never rejected (#3854)', () => {
+    // Prompt caching: tiny uncached input, the result bytes land in cache writes.
+    // Before #3854 the fraction was 1200 / 100 = 12 and the cascade rejected it.
+    const cached = tokenData.map((d) => ({
+      ...d,
+      entries: d.entries.map((e) => ({
+        ...e,
+        inputTokens: 100,
+        cacheCreationTokens: 50_000,
+        cacheCreation1hTokens: 0,
+      })),
+    }));
+    const rec = detector.rule(input({ tokenData: cached }), 0)!;
+    const frac = 1200 / 50_100;
+    expect(rec.reclaim?.ownedPools).toEqual(['input', 'cacheWrite5m', 'cacheWrite1h']);
+    expect(rec.reclaim?.counterfactual).toEqual({
+      kind: 'scaleTokens',
+      poolDeltaFrac: { input: frac, cacheWrite5m: frac, cacheWrite1h: frac },
+    });
+    const rejects: string[] = [];
+    const result = runReclaimCascade([rec.reclaim!], cached, (m) => rejects.push(m));
+    expect(rejects).toEqual([]);
+    expect(result.total).toBeGreaterThan(0);
+    expect(result.billOriginal - result.billFinal).toBeCloseTo(result.total, 9);
+  });
+
+  it('makes no claim when the waste estimate exceeds fresh prompt tokens', () => {
+    const tiny = tokenData.map((d) => ({
+      ...d,
+      entries: d.entries.map((e) => ({
+        ...e,
+        inputTokens: 10,
+        cacheCreationTokens: 0,
+        cacheCreation1hTokens: 0,
+      })),
+    }));
+    const rec = detector.rule(input({ tokenData: tiny }), 0)!;
+    expect(rec.id).toBe('workflow.native-bypass');
+    expect(rec.reclaim).toBeUndefined();
+  });
+
+  it('treats a missing cacheCreationTokens field as zero', () => {
+    const partial = tokenData.map((d) => ({
+      ...d,
+      entries: d.entries.map((e) => {
+        const { cacheCreationTokens: _omit, ...rest } = e;
+        void _omit;
+        return rest as typeof e;
+      }),
+    }));
+    const rec = detector.rule(input({ tokenData: partial }), 0)!;
+    expect(rec.reclaim?.counterfactual).toMatchObject({ kind: 'scaleTokens' });
   });
 
   it('omits the claim when no token data resolves the bypassing session', () => {

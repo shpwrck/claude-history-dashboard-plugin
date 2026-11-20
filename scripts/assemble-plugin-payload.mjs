@@ -30,6 +30,25 @@ export function stampedPluginManifest(manifestText, version) {
   return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
+/**
+ * The marketplace mirror the payload is published to. A plugin install is a
+ * checkout of this repository, so ingest derives this slug as its identity.
+ */
+export const PLUGIN_MIRROR_REPOSITORY = 'shpwrck/claude-history-dashboard-plugin';
+
+/**
+ * Return `docsMapText` (docs/docs-map.json) with `repository` set to the
+ * mirror slug. Ingest rejects a docs map whose declared repository differs
+ * from the checkout it is read from (#2709); the payload is a legitimate
+ * republish under the mirror slug, so the assembler stamps it rather than
+ * loosening that guard (#3853). Exported for the payload test.
+ */
+export function stampedDocsMap(docsMapText, repository) {
+  const map = JSON.parse(docsMapText);
+  map.repository = repository;
+  return `${JSON.stringify(map, null, 2)}\n`;
+}
+
 function containsPath(parent, candidate) {
   const rel = relative(parent, candidate);
   return (
@@ -42,6 +61,7 @@ export async function assemblePluginPayload({
   projectDir = PROJECT_DIR,
   outputDir,
   distDir = join(projectDir, 'dist'),
+  mirrorRepository = PLUGIN_MIRROR_REPOSITORY,
 } = {}) {
   if (!outputDir) throw new Error('assemblePluginPayload requires outputDir');
 
@@ -109,6 +129,17 @@ export async function assemblePluginPayload({
     }
   }
   await copy(join(projectRoot, 'docs'), join(payloadRoot, 'docs'));
+  // The docs map is optional data; stamp it only when the source ships one.
+  const docsMapPath = join(payloadRoot, 'docs', 'docs-map.json');
+  let docsMapText = null;
+  try {
+    docsMapText = await readFile(docsMapPath, 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  if (docsMapText !== null) {
+    await writeFile(docsMapPath, stampedDocsMap(docsMapText, mirrorRepository), 'utf8');
+  }
   // Keep this replacement after the root-doc copy. The marketplace landing
   // page has plugin installation instructions that the repository README does
   // not, and is intentionally the payload's canonical README node.

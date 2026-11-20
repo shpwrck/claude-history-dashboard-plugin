@@ -76,7 +76,7 @@ describe('workflow.redundant-reads (#951)', () => {
     expect(rec?.reclaim?.evidenceTokens).toBe(3000);
   });
 
-  it('books the direct redundant-read tokens against the input pool through the cascade', () => {
+  it('books the direct redundant-read tokens against the fresh prompt pools through the cascade', () => {
     const rec = detector.rule(input(), 0);
     const result = runReclaimCascade([rec!.reclaim!], tokenData);
     // 3000 input tokens deleted at Opus input rate; just assert it booked > $0
@@ -84,6 +84,30 @@ describe('workflow.redundant-reads (#951)', () => {
     expect(result.total).toBeGreaterThan(0);
     expect(result.byCategory.workflow).toBeCloseTo(result.total, 9);
     expect(result.billOriginal - result.billFinal).toBeCloseTo(result.total, 9);
+  });
+
+  it('scopes to fresh prompt tokens so a cached session is never rejected (#3854)', () => {
+    // Before #3854: 3000 waste / 500 uncached input = 6, rejected every cycle.
+    const cached = tokenData.map((d) => ({
+      ...d,
+      entries: d.entries.map((e) => ({
+        ...e,
+        inputTokens: 500,
+        cacheCreationTokens: 20_000,
+        cacheCreation1hTokens: 5_000,
+      })),
+    }));
+    const rec = detector.rule(input({ tokenData: cached }), 0)!;
+    const frac = 3000 / 20_500;
+    expect(rec.reclaim?.ownedPools).toEqual(['input', 'cacheWrite5m', 'cacheWrite1h']);
+    expect(rec.reclaim?.counterfactual).toEqual({
+      kind: 'scaleTokens',
+      poolDeltaFrac: { input: frac, cacheWrite5m: frac, cacheWrite1h: frac },
+    });
+    const rejects: string[] = [];
+    const result = runReclaimCascade([rec.reclaim!], cached, (m) => rejects.push(m));
+    expect(rejects).toEqual([]);
+    expect(result.total).toBeGreaterThan(0);
   });
 
   it('self-suppresses when CLAUDE.md already pins key files', () => {
