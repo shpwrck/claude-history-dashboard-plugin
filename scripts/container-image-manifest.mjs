@@ -248,7 +248,7 @@ jobs:
 
       - name: Set up Node for the server manifest
         if: matrix.buildMode == 'server'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -265,7 +265,7 @@ jobs:
           echo "::error::Docker daemon did not become ready"; docker info; exit 1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: \${{ env.REGISTRY }}
           username: \${{ github.actor }}
