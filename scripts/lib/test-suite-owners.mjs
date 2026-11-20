@@ -59,6 +59,7 @@ export const TEST_SUITE_OWNER_GROUPS = Object.freeze({
   gates: Object.freeze([
     'test:perf-index-contracts',
     'test:analyze-bundle',
+    'test:detector-census',
     'test:artifact-cache',
     'test:audit-evidence',
     'test:audit-file-findings',

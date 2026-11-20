@@ -5974,6 +5974,7 @@ function close() {
     assemblyInstrumentation,
     assembleDataset,
     assembleRecommendationDataset,
+    assembleRecommendationContext,
     assembleRecommendations,
     assembleRecommendationResult,
     assembleScopedRecommendationResult,
@@ -6093,6 +6094,10 @@ export const assembleArtifacts = DEFAULT_INGEST.assembleArtifacts;
 export const assemblyInstrumentation = DEFAULT_INGEST.assemblyInstrumentation;
 export const assembleDataset = DEFAULT_INGEST.assembleDataset;
 export const assembleRecommendationDataset = DEFAULT_INGEST.assembleRecommendationDataset;
+// #2998: the detector census reads the engine input (not just the findings) to
+// tell a detector that saw its data and stayed quiet from one that saw none.
+// Module-level only; createIngest keeps its server-parity API.
+export const assembleRecommendationContext = DEFAULT_INGEST.assembleRecommendationContext;
 export const assembleRecommendations = DEFAULT_INGEST.assembleRecommendations;
 export const assembleRecommendationResult = DEFAULT_INGEST.assembleRecommendationResult;
 export const assembleScopedRecommendationResult = DEFAULT_INGEST.assembleScopedRecommendationResult;

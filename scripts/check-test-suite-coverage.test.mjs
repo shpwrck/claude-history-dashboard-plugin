@@ -363,13 +363,13 @@ test('a Vitest alias with a different config is not inferred from the umbrella',
   );
 });
 
-test('the live 108-script surface is reconciled as roots, covered aliases, or manual', () => {
+test('the live 109-script surface is reconciled as roots, covered aliases, or manual', () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
   const testScripts = Object.keys(pkg.scripts ?? {}).filter((name) =>
     name.startsWith('test:')
   );
 
-  assert.equal(testScripts.length, 108); // #3741 added manual test:lock-stress; #3833 retired test:enterprise-readiness-gate; #3823 added test:server-auth; #3835 retired test:enterprise-auth
+  assert.equal(testScripts.length, 109); // #2998 added test:detector-census; #3741 added manual test:lock-stress; #3833 retired test:enterprise-readiness-gate; #3823 added test:server-auth; #3835 retired test:enterprise-auth
   assert.deepEqual(
     findTestScriptOwnershipErrors(REPO_ROOT, { owners: TEST_SUITE_OWNERS }),
     []
@@ -383,7 +383,8 @@ test('the live 108-script surface is reconciled as roots, covered aliases, or ma
 // response contract as the 62nd root; #3816 retires the upload/server parity
 // root, leaving gates at 60 and build + gates at 61. #3740 moves
 // test:perf-index-contracts into gates from the retired docs-only classifier
-// job: gates 60 -> 61, build + gates 61 -> 62. The exact count turns a dropped or
+// job: gates 60 -> 61, build + gates 61 -> 62. #2998 adds test:detector-census:
+// gates 61 -> 62, build + gates 62 -> 63. The exact count turns a dropped or
 // duplicated invocation into a reviewable failure; the zero-unwired assertion
 // above independently proves that the underlying scripts/*.test.mjs files stay
 // reachable from some workflow.
@@ -393,9 +394,9 @@ test('the build test tail runs in the parallel gates job without losing a root',
   const gateScripts = testScriptsInJob(ci, 'gates');
 
   assert.deepEqual(buildScripts, ['test:package-surface']);
-  assert.equal(gateScripts.length, 61, gateScripts.join('\n'));
-  assert.equal(new Set(gateScripts).size, 61, 'gates must not duplicate a test:* root');
-  assert.equal(new Set([...buildScripts, ...gateScripts]).size, 62);
+  assert.equal(gateScripts.length, 62, gateScripts.join('\n'));
+  assert.equal(new Set(gateScripts).size, 62, 'gates must not duplicate a test:* root');
+  assert.equal(new Set([...buildScripts, ...gateScripts]).size, 63);
 
   const gatesJob = workflowJobBlock(ci, 'gates');
   assert.match(gatesJob, /\n    needs: resolve-merge\n/);
