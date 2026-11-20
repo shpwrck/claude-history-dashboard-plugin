@@ -1,4 +1,4 @@
-// Shared ZIP fixtures for the archive-reader and unzip-upload suites (#3806).
+// Shared ZIP fixtures for the archive-reader suite (#3806).
 // The byte offsets in `forgeDeclaredSize` are the load-bearing part of the
 // #3176 forged-size proof, so they live in exactly one place.
 

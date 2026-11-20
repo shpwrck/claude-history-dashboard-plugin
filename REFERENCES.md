@@ -289,7 +289,7 @@ its origin. Each row was read off the parser source and `scripts/ingest.mjs`
 | `parse-titles.ts` (`parseSessionTitles`) | session transcripts | folded into `entries[].title` (no own key) |
 | `parse-history.ts` (`parseHistoryJsonl`, `unionHistoryParts`) | `history.jsonl`, `history.d/*.jsonl` (+ transcripts via `deriveEntries`) | `entries` (its `groupBySessions`/`groupByProjects` derive `sessions`/`projects` client-side) |
 | `parse-shadow-calls.ts` (`parseShadowCalls`) | `shadow-calls/ledger.jsonl` | `shadowCalls` (per-axis aggregate; feeds `workflow.shadow-axis-wins` + `workflow.uncovered-shadow-axis`) |
-| `parse-workflows.ts` (`parseWorkflows`) | projected `workflows/wf_*.json` manifests from `scripts/read-workflows.mjs` | `workflows` (server-only; SPA upload builds the same shape client-side) |
+| `parse-workflows.ts` (`parseWorkflows`) | projected `workflows/wf_*.json` manifests from `scripts/read-workflows.mjs` | `workflows` (server-only) |
 | `parse-external-guidance.ts` (`readExternalGuidanceSnapshots`) | repository-bundled `data/external-guidance/*.json` snapshots | `externalGuidance` (repo-committed reference docs attached to fired recommendations) |
 | `parse-docs.ts` (`buildDocGraph`) | repository-bundled root `*.md` + `docs/**/*.md`, bounded live Git status/index-flag/history probes, and generated `data/doc-git-times.json` (#2707/#2743) | `docGraph` (bounded Markdown node/edge graph; server-produced, client-carried; null in SPA/upload data); nodes carry `gitMtimeProvenance`, with tracked changes and assume-unchanged/skip-worktree docs labelled non-authoritative `git-dirty` rather than inheriting HEAD time; live Git walks that throw fall through without claiming `git` provenance |
 | `doc-git-times.ts` (`parseDocGitTimesManifest`; pure, browser-safe) | generated `data/doc-git-times.json` (producer: `scripts/doc-git-times-generate.mjs`) | joined by `buildDocGraph` into `DocNode.gitMtimeIso`/`gitMtimeProvenance` (no own dataset key; fail-closed on any schema/commit/bounds violation; only `git`/`manifest` are authoritative) |
@@ -329,11 +329,11 @@ inside `scripts/ingest.mjs` reads `settings.json`, `CLAUDE.md`, `skills/`,
 project-scoped Claude Code files under readable project roots directly. See the
 artifact tables above for those paths and mount requirements.
 
-### API/upload parsers (parse projected payloads; no top-level `assembleDataset()` key)
+### API parsers (parse projected payloads; no top-level `assembleDataset()` key)
 
 | `src/lib/` module | Consumes | Output / consumer |
 | --- | --- | --- |
-| `parse-memories.ts` (`parseMemories`) | raw `GET /api/memories` response, or the equivalent SPA upload collection from `memory/*.md` files | `ProjectMemories[]` for the Memories view (no top-level dataset key; the server route and upload worker provide the payload) |
+| `parse-memories.ts` (`parseMemories`) | raw `GET /api/memories` response | `ProjectMemories[]` for the Memories view (no top-level dataset key; the server route provides the payload) |
 | `parse-memories.ts` (`buildMemoryStores`, `parseMemoryIndex`) | same raw `GET /api/memories` response, including the `MEMORY.md` index when present (#1965) | `ProjectMemoryStore[]` (per-project fact store split from the `MEMORY.md` index) supplied on `RecommendationInput.memoryStores` at the ingest call site — foundation for the #1779 memory-hygiene `maintenance` detector. NB: the live `readMemories` route still excludes `MEMORY.md`, so the index is empty until that read is widened with #1779. |
 
 ### Derived parsers (client-side; consume dataset keys, read no `~/.claude/` artifact)
@@ -371,7 +371,7 @@ context-window denominator) and `transcript-hygiene.ts`'s `scrubValue`
 Those are ingest-time *helpers*, not dataset-key parsers, so they don't appear
 in the ingest table above. Pure browser/UI infra (`api-client.ts`,
 `pricing.ts`, `format.ts`, `theme.ts`, `usage.ts`,
-`nav-prefs.ts`, `use-session-tags.ts`, `dataset-worker.ts`, `unzip-upload.ts`)
+`nav-prefs.ts`, `use-session-tags.ts`, `dataset-worker.ts`, `archive-reader.ts`)
 reads no `~/.claude/` artifact and feeds no dataset key, so it is out of scope
 for both tables.
 

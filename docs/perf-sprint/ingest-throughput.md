@@ -118,7 +118,7 @@ domain.
 
 ## Bounded filesystem discovery (#3100, #3261)
 
-Two ingest-adjacent paths now carry explicit global work budgets rather than
+Two ingest-adjacent paths carried explicit global work budgets rather than
 only capping the arrays they return:
 
 - Workflow discovery examines at most 50,000 directory entries across the
@@ -126,17 +126,13 @@ only capping the arrays they return:
   with `DASHBOARD_WORKFLOW_DISCOVERY_MAX_ENTRIES`; the public async and sync
   results expose `limits.maxDiscoveryEntries`,
   `discovery.entriesExamined`, `discovery.directoriesOpened`, and `truncated`.
-- Loose drag-and-drop directory upload examines at most 100,000 entries, admits
-  at most 50,000 usable files, and sends at most 100 progress callbacks. It
-  consumes `readEntries()` batches incrementally. Crossing either discovery
-  budget raises a user-visible error before reading the refused file instead of
-  silently returning a partial upload.
+- Loose drag-and-drop directory upload carried similar entry and file budgets
+  until File Upload was retired (epic #3736).
 
 The sparse/deep/over-limit contracts and exact operation counts are covered by:
 
 ```
 npm run test:read-workflows-bounds
-npx vitest run src/lib/upload-directory.test.ts src/components/FileUpload.test.ts
 ```
 
 The 10,000-file upload measurement is reproducible with:

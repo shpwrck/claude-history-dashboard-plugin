@@ -7,12 +7,11 @@
 // module is the single source of truth for that pipeline so it runs identically
 // wherever it is driven:
 //
-//   - inside the upload pipeline worker (upload-pipeline-worker.ts via
-//     upload-dataset.ts) — the default for a user upload, where inflation and
-//     the CPU-heavy parse run entirely off the UI thread (#1069), and
-//   - on the main thread with `yielding` — the pipeline's no-Worker fallback,
-//     and the SPA sample-data path (a small curated corpus) — where it stays
-//     responsive via mapChunked's between-chunk yields.
+//   - inside the sample session worker (session-parse-worker.ts), where the
+//     CPU-heavy parse runs off the UI thread, and
+//   - on the main thread with `yielding` — the no-Worker fallback in
+//     session-parse-client.ts — where it stays responsive via mapChunked's
+//     between-chunk yields.
 //
 // Each pass `emit`s its parsed result as soon as it finishes, preserving the
 // progressive-render UX (sections populate one pass at a time). The caller owns

@@ -64,6 +64,9 @@ const CLEAN_ASSETS = {
   'AgentReportCardPf-B3LLViF9.js': 'import"./Spinner-DTC27OcH.js";export const A=1;',
   'PlanShapesPf-CIZJDjZp.js': 'import{L as b}from"./Spinner-DTC27OcH.js";export{b};',
   'ReviewQueuePf-DDu-zzYS.js': 'import{b}from"./parse-telemetry-Do29yvEo.js";export{b};',
+  // The retained sample session worker (#3810, #3820): browser-reachable but
+  // fs-free, so a clean build that ships it passes.
+  'session-parse-worker-D4wV2TXt.js': 'import{L as b}from"./Spinner-DTC27OcH.js";export{b};',
   'Recommendations-DKfrBmLI.js':
     'import{L as a}from"./Spinner-DTC27OcH.js";' +
     "const fix=[`const fs = require('node:fs');`,`JSON.parse(fs.readFileSync(path, 'utf8'))`];export{fix,a};",
@@ -96,13 +99,13 @@ test('the fs graph DUPLICATED into a second chunk FAILS the gate (exit 1)', () =
   withDist(
     {
       ...CLEAN_ASSETS,
-      'upload-pipeline-worker-DuRemhRo.js': `${FS_GRAPH_BODY}export{};`,
+      'session-parse-worker-DuRemhRo.js': `${FS_GRAPH_BODY}export{};`,
     },
     (dist) => {
       const r = runGate(GATE, ['--dist', dist]);
       assert.equal(r.code, 1, r.out);
       assert.match(r.out, /CONTAINS the node:fs graph/);
-      assert.match(r.out, /upload-pipeline-worker-DuRemhRo\.js/);
+      assert.match(r.out, /session-parse-worker-DuRemhRo\.js/);
     }
   );
 });

@@ -36,10 +36,10 @@ import {
   readDirentsBoundedSync,
 } from './bounded-fs'
 // The slow-first-byte event kind + predicate live in the fs-free
-// `telemetry-event-kind` leaf so the browser-bundled upload parser
-// (`upload-artifacts.ts`) can share the SAME predicate WITHOUT a runtime import
-// edge into this fs-touching module (#3613 — that edge leaked `node:fs` into a
-// browser view chunk). Re-exported below so existing `from './parse-telemetry'`
+// `telemetry-event-kind` leaf so browser code can share the SAME predicate
+// WITHOUT a runtime import edge into this fs-touching module (#3613 — such an
+// edge from the since-retired upload parser leaked `node:fs` into a browser view
+// chunk). Re-exported below so existing `from './parse-telemetry'`
 // consumers keep resolving; `parseTelemetryLine` uses the imported binding.
 import { SLOW_FIRST_BYTE_EVENT, isSlowFirstByteEvent } from './telemetry-event-kind'
 
@@ -176,8 +176,8 @@ export function parseTelemetryLine(line: string): TelemetryEvent | null {
   // elapsed_ms 0 and dilute totalEvents + depress retryStormPct, so they are
   // dropped before a TelemetryEvent is emitted. (This also rejects an empty
   // event_name.) The tengu_exit latency reader is a separate parse path. The
-  // shared {@link isSlowFirstByteEvent} predicate keeps this filter identical to
-  // the upload parser's (#3613).
+  // shared {@link isSlowFirstByteEvent} predicate is the single definition of the
+  // reliability event (#3613).
   if (!isSlowFirstByteEvent(event_name)) return null
 
   const attempt = num(meta.attempt, 1)

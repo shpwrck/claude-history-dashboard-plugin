@@ -16,10 +16,10 @@ import {
  * directly — deliberately NOT re-exported here.
  *
  * A convenience pass-through on this module is not free: `parse-sessions` is
- * bundled into the SPA upload-pipeline worker, so re-exporting dragged the
+ * bundled into the sample session-parse worker, so re-exporting would drag the
  * boundary table into a bundle that never runs detectors (the engine-absent
- * gate proves the catalog is excluded) and pushed that route 1,520 B over its
- * size cap. The only consumer is server-side, so it imports
+ * gate proves the catalog is excluded); it once pushed the since-retired upload
+ * worker 1,520 B over its size cap. The only consumer is server-side, so it imports
  * `./prompt-regime` directly and the SPA pays nothing.
  *
  * @see ./prompt-regime.ts — `promptRegimeForSession` / `summarizePromptRegimes`

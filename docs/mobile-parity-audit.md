@@ -97,7 +97,7 @@ the 390×844 smoke spec below).
 | # | View | File | Trigger | Desktop | Mobile | Notes |
 |---|---|---|---|---|---|---|
 | 1 | Settings | `Settings.tsx` | ⚙ button (sidebar / mobile top bar) | PASS | PASS | Centered `role="dialog"` overlay; no page-level overflow at either viewport |
-| 2 | File Upload | `FileUpload.tsx` | "Upload Data…" button | PASS | PASS | Centered `fixed inset-0` overlay; no page-level overflow at either viewport |
+| 2 | File Upload | removed by epic #3736 | (retired) | n/a | n/a | Passed at audit time; the modal has since been deleted |
 
 **No hard failures** on either modal view at either viewport, so no
 follow-up `ui` breakage issues were filed (per the audit's record-don't-fix

@@ -44,7 +44,7 @@ const MEASURED_BY_FLAVOR = {
     'MenuList-aaaaaaaa.js': 18530,
     'nav-prefs-UfDmvBmg.js': 41234,
     'Recommendations-bw21B0pw.js': 65137,
-    'upload-pipeline-worker-BITohlXt.js': 82319,
+    'session-parse-worker-BITohlXt.js': 82319,
     'CostAttribution-DNVO2py3.js': 29701,
     'SessionList-CXENs-RU.js': 32753,
     'TokenUsage-CgNAb11x.js': 26226,
@@ -68,7 +68,7 @@ describe('chunkBaseName', () => {
     expect(chunkBaseName('LightweightCharts-CC58yk5J.js')).toBe('LightweightCharts');
     expect(chunkBaseName('index-hEGllWjd.js')).toBe('index');
     // A logical name that itself contains dashes is preserved.
-    expect(chunkBaseName('upload-pipeline-worker-BITohlXt.js')).toBe('upload-pipeline-worker');
+    expect(chunkBaseName('session-parse-worker-BITohlXt.js')).toBe('session-parse-worker');
   });
 });
 

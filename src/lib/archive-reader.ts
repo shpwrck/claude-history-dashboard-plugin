@@ -2,14 +2,15 @@ import { AsyncUnzipInflate, Unzip, type UnzipFile } from 'fflate';
 
 // Upload-neutral bounded ZIP reader (#3806, epic #3736).
 //
-// This is the generic fflate streaming engine that `unzip-upload.ts` used to
-// own, with the upload-specific parts (skip rules, project attribution,
-// metadata-only paths, UI error copy) pushed out through two injection points:
+// This is the generic fflate streaming engine the retired File Upload ZIP
+// wrapper used to own (#3818), with the feature-specific parts (skip rules,
+// project attribution, metadata-only paths, UI error copy) pushed out through
+// two injection points:
 // `admit` decides what happens to each entry before any decompression, and
 // `map` turns an admitted entry into the caller's shape. The byte, entry, and
 // ZIP-bomb limits stay here because they are properties of reading an archive
-// safely in a browser tab, not of any one feature. Both the upload wrapper and
-// the public sample loader (#3804) sit on top of this module.
+// safely in a browser tab, not of any one feature. The public sample loader
+// (#3804) sits on top of this module.
 
 // Fail-proof guards (#758). A large or pathological archive must fail fast and
 // clearly instead of locking the tab while it inflates to memory. These caps

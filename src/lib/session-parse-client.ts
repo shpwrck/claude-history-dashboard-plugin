@@ -7,8 +7,7 @@
 // `onResult` is called once per message in BOTH paths, in the same order:
 // `sessionIndex` first, then one message per parse pass. Re-running the parse on
 // the fallback after a mid-run worker error is safe because the caller's
-// per-result merge is idempotent (see upload-pipeline-client.ts, which this
-// mirrors).
+// per-result merge is idempotent.
 
 import type { SessionParseEmit, SessionParseFile } from './session-parse';
 

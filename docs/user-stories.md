@@ -510,7 +510,7 @@ click away.
 ## 3. View audit
 
 Walking the 18 top-level views (in `Layout.tsx` order) plus the
-modal-y views (`Settings`, `FileUpload`, and the retired browser assistant). For each: one
+modal-y views (`Settings`, the retired File Upload, and the retired browser assistant). For each: one
 line on what it does, the personas it serves, and the jobs it answers.
 Orphans are called out explicitly.
 
@@ -541,7 +541,7 @@ Modal / non-nav views:
 |---|---|---|---|
 | **Settings** | `Settings.tsx` | Navigation preferences | Keep as modal |
 | **Retired browser assistant** | removed by #3734 | Former free-form dashboard Q&A using a browser-held key | Remove — the direct browser call site and credential surface no longer fit the product boundary |
-| **File Upload** | `FileUpload.tsx` | One-shot upload for someone without server access | Keep |
+| **File Upload** | removed by epic #3736 | Former one-shot upload for someone without server access | Remove — the public sample and the server cover both audiences |
 
 ### Tally
 
