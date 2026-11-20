@@ -28,10 +28,8 @@ import type {
   RecommendationSurfaceLoadOptions,
   RecommendationSurfaceState,
 } from './use-recommendations';
-import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
+import { serverCapabilityAllowed } from './server-capabilities';
 import { navigateDrillThroughWithFilter } from '../components/affordance/DrillThrough';
-import { PageTitle } from '../components/heading';
-import { PageSection } from '@patternfly/react-core';
 import type {
   View,
   HistoryEntry,
@@ -81,7 +79,7 @@ import type { DocIssueSnapshot } from './doc-issue-snapshot';
 import type { OrganizationReviewEventsDataset } from './organization-review-events';
 import type { ShadowCallAggregate } from './parse-shadow-calls';
 import type { EvidenceRef } from './evidence';
-import type { EnterpriseSession } from '@api-client';
+import type { ServerSession } from '@api-client';
 import {
   ALL_PROJECTS,
   type DashboardFilter,
@@ -330,7 +328,7 @@ export interface ViewData {
   configBackups: DriftEvent[];
   /** Committed external guidance snapshots (#1302); empty on the SPA dataset. */
   externalGuidance: ExternalGuidance[];
-  enterpriseSession: EnterpriseSession | null;
+  serverSession: ServerSession | null;
   /**
    * Synthetic adoption-lifecycle receipts injected by the marketing SPA's
    * sample data (#578). Empty on the live server build (which self-fetches the
@@ -747,8 +745,8 @@ export const VIEW_RENDERERS: Partial<
       permissionChanges={d.permissionChanges}
       tokenData={d.tokenData}
       liveConfig={d.liveConfig}
-      canWritePolicy={enterpriseCapabilityAllowed(
-        d.enterpriseSession,
+      canWritePolicy={serverCapabilityAllowed(
+        d.serverSession,
         'canWritePolicy'
       )}
       configBackups={d.configBackups}
@@ -858,15 +856,6 @@ export const VIEW_RENDERERS: Partial<
   // artifact no client dataset carries), so the surface demos the retrieval +
   // view + checkpoint end-to-end from a bundled sample.
   'doc-relationships': () => <DocRelationshipView />,
-  // The Enterprise Admin component was deleted (#3827, epic #3743); the
-  // navigation entry goes with #3829. Until then a stale link lands on a plain
-  // retired-view notice.
-  enterprise: () => (
-    <PageSection>
-      <PageTitle>Enterprise</PageTitle>
-      <p>The Enterprise Admin view has been retired.</p>
-    </PageSection>
-  ),
 };
 
 type FilterableViewDataKey = keyof ViewData;

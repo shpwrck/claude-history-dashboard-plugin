@@ -121,11 +121,10 @@ export const GATE_REGISTRY = [
   { name: 'check-test-suite-coverage', script: 'scripts/check-test-suite-coverage.mjs', discriminatingTest: null },
   { name: 'ensure-pr-milestone', script: 'scripts/ensure-pr-milestone.mjs', discriminatingTest: null },
   { name: 'seed-release-gates', script: 'scripts/seed-release-gates.mjs', discriminatingTest: null },
-  { name: 'enterprise-posture-gate', script: 'scripts/enterprise-posture-gate.mjs', discriminatingTest: null },
   {
-    name: 'check-enterprise-route-inventory',
-    script: 'scripts/check-enterprise-route-inventory.mjs',
-    discriminatingTest: 'scripts/check-enterprise-route-inventory.test.mjs',
+    name: 'check-server-route-access-policy',
+    script: 'scripts/check-server-route-access-policy.mjs',
+    discriminatingTest: 'scripts/check-server-route-access-policy.test.mjs',
   },
   {
     // The CONFIG path is discriminating-tested (scripts/server-scale-budget.test.mjs,
@@ -160,7 +159,6 @@ export const LEGACY_NULL_GATES = [
   'check-test-suite-coverage',
   'ensure-pr-milestone',
   'seed-release-gates',
-  'enterprise-posture-gate',
   'server-scale-budget',
   'cold-load-measure',
   'measure-sessions-scale',

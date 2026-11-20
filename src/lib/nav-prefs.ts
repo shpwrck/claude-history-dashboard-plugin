@@ -266,18 +266,6 @@ export const NAV_ITEMS: readonly NavItem[] = [
     description:
       'Track permission modes, dangerous commands, prompt-prone tools, and policy candidates that shape safety posture.',
   },
-  {
-    view: 'enterprise',
-    // Evidence, not action: the page's affordances are downloads/refresh only
-    // (no write UI today) — see docs/page-contracts.md.
-    contract: 'evidence',
-    label: 'Enterprise',
-    icon: LockIcon,
-    domain: 'safety',
-    requires: 'liveServer',
-    description:
-      'Configure enterprise authentication and review who has access when the dashboard runs in shared, multi-user mode.',
-  },
   { view: 'summary', contract: 'evidence', label: 'Summary', icon: ChartPieIcon, domain: 'cost' },
   {
     view: 'cost',

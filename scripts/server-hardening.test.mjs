@@ -168,27 +168,6 @@ await withServerDirs('server-hardening-port', async ({ env }) => {
   );
 });
 
-await withServerDirs('server-hardening-jwt', async ({ env }) => {
-  const result = await spawnServerExpectExit({
-    ...env,
-    PORT: '5989',
-    DASHBOARD_AUTH_MODE: 'enterprise',
-    DASHBOARD_AUTH_JWKS_URL: 'http://127.0.0.1:9/.well-known/jwks.json',
-  });
-  check(
-    'JWT auth without issuer exits before binding',
-    !result.timedOut && result.code !== 0,
-    result.output.slice(-2000)
-  );
-  check(
-    'JWT issuer pin is required when JWT auth is configured',
-    /DASHBOARD_AUTH_JWT_ISSUER is required when enterprise JWT auth is configured/.test(
-      result.output
-    ),
-    result.output.slice(-2000)
-  );
-});
-
 await withServerDirs('server-hardening-bind', async ({ env }) => {
   // Exposed beyond loopback (DASHBOARD_BIND_HOST non-loopback) with no auth must
   // refuse to start (#2064).

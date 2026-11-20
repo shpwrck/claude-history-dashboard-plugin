@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { serverCapabilityAllowed } from './server-capabilities';
-import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
 import type { ServerSession } from '@api-client';
 
 function localSession(
@@ -18,7 +17,7 @@ function localSession(
   };
 }
 
-function enterpriseSession(
+function serverSession(
   overrides: Partial<ServerSession> = {}
 ): ServerSession {
   return {
@@ -57,7 +56,7 @@ describe('serverCapabilityAllowed', () => {
     ).toBe(false);
     expect(
       serverCapabilityAllowed(
-        enterpriseSession({
+        serverSession({
           capabilities: { canWritePolicy: true },
           error: 'Auth check failed (HTTP 500)',
         }),
@@ -72,7 +71,7 @@ describe('serverCapabilityAllowed', () => {
         {
           authRequired: false,
           authenticated: true,
-        } as unknown as EnterpriseSession,
+        } as unknown as ServerSession,
         'canWritePolicy'
       )
     ).toBe(false);
@@ -99,13 +98,13 @@ describe('serverCapabilityAllowed', () => {
   it('requires an explicit enterprise capability', () => {
     expect(
       serverCapabilityAllowed(
-        enterpriseSession(),
+        serverSession(),
         'canImportLocalData'
       )
     ).toBe(false);
     expect(
       serverCapabilityAllowed(
-        enterpriseSession({
+        serverSession({
           capabilities: { canImportLocalData: true },
         }),
         'canImportLocalData'
@@ -113,7 +112,7 @@ describe('serverCapabilityAllowed', () => {
     ).toBe(true);
     expect(
       serverCapabilityAllowed(
-        enterpriseSession({
+        serverSession({
           authenticated: false,
           capabilities: { canImportLocalData: true },
         }),
@@ -122,18 +121,12 @@ describe('serverCapabilityAllowed', () => {
     ).toBe(false);
     expect(
       serverCapabilityAllowed(
-        enterpriseSession({
+        serverSession({
           configured: false,
           capabilities: { canImportLocalData: true },
         }),
         'canImportLocalData'
       )
     ).toBe(false);
-  });
-});
-
-describe('enterpriseCapabilityAllowed (temporary alias, #3832)', () => {
-  it('is the neutral check under its old name', () => {
-    expect(enterpriseCapabilityAllowed).toBe(serverCapabilityAllowed);
   });
 });

@@ -315,7 +315,7 @@ verify these outcomes against the exact host and origin the buyer will use:
 20. If GitHub review sync is enabled, `reviewEvents` appears for the admin/global
     dataset, remains null for scoped member datasets, the `github-review-sync`
     posture control is enabled, and the cache file is private on disk.
-21. `npm run gate:enterprise-routes` passes and the route access matrix in
+21. `npm run gate:server-route-access-policy` passes and the route access matrix in
     [`enterprise-readiness.md`](./enterprise-readiness.md#route-access-policy-matrix)
     matches the intended pilot boundary: admin/global views for admins, scoped
     roots for non-admin users, raw transcript routes treated as highest

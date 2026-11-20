@@ -275,3 +275,22 @@ describe('toggleAdvancedNav — Show advanced views toggle (#609)', () => {
     expect(reExpanded.hiddenViews).toEqual(['stats', 'cost']);
   });
 });
+
+describe('retired Enterprise destination (#3829)', () => {
+  it('is no longer a catalog view or nav item', async () => {
+    const { NAV_ITEMS, isValidView } = await import('./nav-prefs');
+    expect(isValidView('enterprise')).toBe(false);
+    expect(NAV_ITEMS.some((i) => (i.view as string) === 'enterprise')).toBe(false);
+  });
+
+  it('sends a stored enterprise last-view to the default view', async () => {
+    const { resolveInitialView, DEFAULT_VIEW } = await import('./nav-prefs');
+    const prefs = { ...getNavPrefs(), lastView: 'enterprise' } as unknown as NavPrefs;
+    expect(resolveInitialView(prefs, { hasServerData: true, hasLiveServer: true })).toBe(DEFAULT_VIEW);
+  });
+
+  it('parses an enterprise hash without selecting a view', async () => {
+    const { parseRoute } = await import('./routing');
+    expect(parseRoute('#/enterprise').view).toBeUndefined();
+  });
+});

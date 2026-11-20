@@ -115,7 +115,7 @@ const emptyData: ViewData = {
   mcpAuth: null,
   configBackups: [],
   externalGuidance: [],
-  enterpriseSession: null,
+  serverSession: null,
   sampleAdoptionReceipts: [],
   docsMap: null,
 };

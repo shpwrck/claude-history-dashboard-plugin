@@ -12,7 +12,7 @@
 // It is a CHECKER, not a generator: openapi.yaml stays hand-authored prose
 // (request/response schemas, auth, examples), and this only asserts the SET of
 // documented path templates matches the SET of served route templates. Modeled
-// on scripts/check-enterprise-route-inventory.mjs (declared inventory vs live
+// on scripts/check-server-route-access-policy.mjs (declared inventory vs live
 // surface), reusing the same server.mjs route-extraction shapes.
 //
 // Run: node scripts/check-openapi-freshness.mjs

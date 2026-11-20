@@ -12,7 +12,7 @@
 //
 // Run: node scripts/check-test-suite-coverage.mjs
 //
-// Modeled on scripts/check-enterprise-route-inventory.mjs (declared inventory vs
+// Modeled on scripts/check-server-route-access-policy.mjs (declared inventory vs
 // live surface). The difference: the "reachable" set here is DERIVED, not
 // hand-maintained — computed from package.json scripts + the workflow files —
 // so there is no second suite-wiring list to keep in sync. #3742 adds only a

@@ -68,9 +68,6 @@ export interface ServerSession {
   error?: string;
 }
 
-/** @deprecated Temporary alias for {@link ServerSession}; removed by #3830. */
-export type EnterpriseSession = ServerSession;
-
 export interface EnterpriseAuditEvent {
   timestamp: string;
   requestId?: string;

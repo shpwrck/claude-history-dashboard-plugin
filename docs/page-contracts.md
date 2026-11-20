@@ -126,7 +126,6 @@ time/project filters do not narrow this view (#2367).
 | View | Class | Tier | Filters | Primary action |
 | --- | --- | --- | --- | --- |
 | `permissions` (Permissions) | action | all | partial (`liveConfig`, `configBackups` unfiltered) | copy diff / capability-gated write-back |
-| `enterprise` (Enterprise) | evidence | liveServer | unfiltered | receipt / audit export (read-only; no write UI today) |
 
 **permissions** — Track permission modes, dangerous commands, prompt-prone
 tools, and policy candidates; the Policy Builder computes allowlist diffs and
@@ -145,15 +144,6 @@ RESOLVED #2476: the write affordance now requires the enterprise
 `canWritePolicy` capability. Roles without it retain the copy action and see an
 explicit explanation; auth-session probe errors fail closed, while a positively
 resolved local/no-auth server session keeps the write path unchanged.
-
-**enterprise** — Review enterprise access and export readiness receipts /
-audit logs in shared multi-user mode. Classed evidence: the page's
-affordances are downloads, refresh, and pagination — it has no write path
-today, so an action class would enforce an affordance that does not exist
-(re-class when a write UI ships). Data: `enterpriseSession` (`@api-client`);
-the component is replaced by a null stub in `spa`/`sample` builds
-(`view-registry.tsx`). Empty state: "Server build required."
-(`EnterpriseAdmin.tsx`).
 
 ## Cut cost (cost)
 

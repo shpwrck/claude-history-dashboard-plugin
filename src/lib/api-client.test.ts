@@ -17,7 +17,7 @@ import {
   postCheckpointAnswer as postSpaCheckpointAnswer,
 } from './api-client.spa';
 import { buildCheckpointAnswerRecord } from './checkpoint-instrumentation';
-import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
+import { serverCapabilityAllowed } from './server-capabilities';
 
 describe('fetchWorkflows cancellation boundary', () => {
   afterEach(() => {
@@ -177,7 +177,7 @@ describe('fetchAuthSession', () => {
     expect(session.configured).toBe(true);
     expect(session.capabilities).toEqual({});
     expect(
-      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+      serverCapabilityAllowed(session, 'canWritePolicy')
     ).toBe(false);
     expect(session.error).toBe(
       'Too many enterprise requests; retry after the rate limit resets'
@@ -227,7 +227,7 @@ describe('fetchAuthSession', () => {
     expect(session.capabilities).toEqual({});
     expect(session.error).toBe('server exploded');
     expect(
-      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+      serverCapabilityAllowed(session, 'canWritePolicy')
     ).toBe(false);
   });
 
@@ -312,7 +312,7 @@ describe('fetchAuthSession', () => {
 
     expect(session.capabilities).toEqual({});
     expect(
-      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+      serverCapabilityAllowed(session, 'canWritePolicy')
     ).toBe(false);
     expect(session.error).toBe('Auth check failed (HTTP 500)');
   });
@@ -390,7 +390,7 @@ describe('createEnterpriseBrowserSession', () => {
 
     expect(session.capabilities).toEqual({});
     expect(
-      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+      serverCapabilityAllowed(session, 'canWritePolicy')
     ).toBe(false);
     expect(session.error).toBe('Auth check failed (HTTP 500)');
   });
@@ -434,7 +434,7 @@ describe('createEnterpriseBrowserSession', () => {
       error,
     });
     expect(
-      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+      serverCapabilityAllowed(session, 'canWritePolicy')
     ).toBe(false);
   });
 
@@ -477,7 +477,7 @@ describe('createEnterpriseBrowserSession', () => {
       capabilities: {},
     });
     expect(
-      enterpriseCapabilityAllowed(session, 'canWritePolicy')
+      serverCapabilityAllowed(session, 'canWritePolicy')
     ).toBe(false);
   });
 });
@@ -562,7 +562,7 @@ describe('fetchEnterpriseReadinessReceipt', () => {
               },
               rollup: null,
               routeAccess: {
-                inventoryGate: 'npm run gate:enterprise-routes',
+                inventoryGate: 'npm run gate:server-route-access-policy',
                 unclassifiedApiRoutesFailClosed: true,
                 adminGlobalViews: true,
                 scopedUserViewsRequireDataRoot: true,

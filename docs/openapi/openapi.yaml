@@ -952,114 +952,6 @@ paths:
         '204':
           description: Session cleared.
 
-  /api/enterprise/audit-log:
-    get:
-      tags: [enterprise]
-      operationId: getEnterpriseAuditLog
-      summary: Enterprise auth audit-event log (privileged).
-      description: Enforced only when enterprise auth is on; requires an admin principal.
-      responses:
-        '200':
-          description: Audit events.
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /api/enterprise/audit-export.ndjson:
-    get:
-      tags: [enterprise]
-      operationId: exportEnterpriseAudit
-      summary: Enterprise audit export as NDJSON (privileged).
-      parameters:
-        - name: limit
-          in: query
-          required: false
-          description: Max events to export.
-          schema:
-            type: integer
-            minimum: 0
-      responses:
-        '200':
-          description: NDJSON audit export (one JSON event per line).
-          content:
-            application/x-ndjson:
-              schema:
-                type: string
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /api/enterprise/organization:
-    get:
-      tags: [enterprise]
-      operationId: getEnterpriseOrganization
-      summary: Organization summary (principals, teams, rollup) — privileged.
-      parameters:
-        - name: principalLimit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 0
-        - name: principalOffset
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 0
-      responses:
-        '200':
-          description: The organization summary.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EnterpriseOrganizationSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /api/enterprise/readiness-receipt:
-    get:
-      tags: [enterprise]
-      operationId: getEnterpriseReadinessReceipt
-      summary: Enterprise readiness receipt (privileged).
-      responses:
-        '200':
-          description: The readiness receipt.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EnterpriseReadinessReceipt'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /api/organization/rollup.json:
-    get:
-      tags: [enterprise]
-      operationId: getEnterpriseOrganizationRollup
-      summary: Aggregate organization rollup (privileged).
-      responses:
-        '200':
-          description: The organization rollup.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EnterpriseOrganizationRollup'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
   /sessions-manifest.json:
     get:
       tags: [raw-feeds]
@@ -2023,7 +1915,7 @@ components:
       required: [ok, sourceId, written, skipped, refused]
     EnterpriseSession:
       type: object
-      description: '`EnterpriseSession` in `src/lib/api-client.ts`.'
+      description: '`ServerSession` in `src/lib/api-client.ts`.'
       properties:
         mode:
           type: string

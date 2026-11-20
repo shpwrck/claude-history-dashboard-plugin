@@ -242,7 +242,7 @@ function emptyData(overrides: Partial<ViewData> = {}): ViewData {
     updateResults: [],
     mcpAuth: null,
     configBackups: [],
-    enterpriseSession: null,
+    serverSession: null,
     sampleAdoptionReceipts: [],
     ...overrides,
   };
@@ -354,7 +354,7 @@ describe('view registry ↔ nav catalog parity', () => {
     ): boolean | undefined => {
       const node = VIEW_RENDERERS.permissions?.(
         viewContext(allProjectsFilter, {
-          enterpriseSession: {
+          serverSession: {
             mode: authRequired ? 'enterprise' : 'single-user',
             authRequired,
             authenticated: true,

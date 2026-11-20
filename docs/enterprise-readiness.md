@@ -39,11 +39,11 @@ planes remain follow-on work.
 ## Route Access Policy Matrix
 
 The server route inventory is enforced by
-`scripts/check-enterprise-route-inventory.mjs`. Every live data route handled by
+`scripts/check-server-route-access-policy.mjs`. Every live data route handled by
 `scripts/server.mjs` must appear in `ENTERPRISE_ROUTE_INVENTORY`, and every
 inventory `access` category must have a matching
 `ENTERPRISE_ROUTE_ACCESS_POLICIES` entry. Unknown categories, stale policy
-entries, and missing posture fields fail `npm run gate:enterprise-routes`; the
+entries, and missing posture fields fail `npm run gate:server-route-access-policy`; the
 full CTO receipt also runs that gate through `npm run gate:enterprise-readiness`.
 
 | Access category | Representative routes | Who can read/write | Data exposure |

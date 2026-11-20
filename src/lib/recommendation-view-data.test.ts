@@ -70,7 +70,7 @@ function fullViewData(overrides: Partial<ViewData> = {}): ViewData {
     mcpAuth: null,
     configBackups: [],
     externalGuidance: [],
-    enterpriseSession: null,
+    serverSession: null,
     sampleAdoptionReceipts: [],
     ...overrides,
   };

@@ -294,7 +294,7 @@ export const VIEW_DATA_FILTER_POLICIES = {
   // Guidance inputs are signed commit artifacts, intentionally global.
   externalGuidance: { time: 'global', project: 'global' },
   // Enterprise sessions are admin-level context, not part of picker slicing.
-  enterpriseSession: { time: 'global', project: 'global' },
+  serverSession: { time: 'global', project: 'global' },
   // Adoption receipts are synthetic sample/demo aggregates in this build path.
   sampleAdoptionReceipts: { time: 'global', project: 'global' },
   // Source descriptors are static member attribution metadata for the session

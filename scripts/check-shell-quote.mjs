@@ -171,7 +171,7 @@ function main() {
 }
 
 // Resolve through symlinks before comparing (the house pattern, see
-// check-enterprise-route-inventory.mjs). A raw string compare can miss under a
+// check-server-route-access-policy.mjs). A raw string compare can miss under a
 // symlinked checkout, and a gate whose main() silently fails to fire exits 0
 // and reports nothing — green CI proving nothing, which is the failure mode
 // this gate exists to prevent.
