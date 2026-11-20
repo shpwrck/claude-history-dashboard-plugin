@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// Fail-closed trust ceiling for PR workflows that schedule self-hosted ARC jobs.
+// Fail-closed trust ceiling for PR workflows that run base-controlled jobs.
 //
-// Runner placement policy: the repo runs zero GitHub-hosted minutes, so the
-// broker, resolver, and milestone guard are pinned to arc-runner-set. They are
-// base-controlled jobs that never execute PR head code, so ARC placement does
-// not weaken the fork ceiling itself. The one hosted rule that REMAINS is for
-// plain `pull_request` triggers, whose workflow definition is fork-controlled:
-// those must never reach ARC (the original #3313 finding) — the fix for such a
-// workflow is conversion to pull_request_target behind this trust ceiling, not
-// an ARC runs-on.
+// Runner placement policy: the self-hosted ARC pools (and the clusters behind
+// them) are retired, so every job runs on the single-use GitHub-hosted
+// `ubuntu-latest` runner named by CI_RUNNER. pull_request_target workflows still
+// get the full trust ceiling below (fork gate via pr-trust.yml, merge-SHA
+// resolution via pr-merge-sha.yml, PR-number concurrency), because they run
+// with base-repo credentials regardless of where the runner lives. Plain
+// `pull_request` triggers, whose workflow definition is fork-controlled, must
+// still name the hosted runner literally (no dynamic runs-on).
 
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,14 +18,9 @@ import { parse } from 'yaml';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 // perf-index-contract: pr-workflow-policy-membership always-consumed: every workflow scan queries these fixed runner and canonical-file memberships
-const ARC_RUNNERS = new Set([
-  'arc-runner-set',
-  'arc-dind',
-  'arc-runner-set-hub',
-  'arc-dind-hub',
-]);
+export const CI_RUNNER = 'ubuntu-latest';
 // perf-index-contract: pr-workflow-canonical-membership always-consumed: every repository audit queries and inventories the complete canonical workflow membership
-const CANONICAL_TARGET_ARC_WORKFLOWS = new Set([
+const CANONICAL_TARGET_WORKFLOWS = new Set([
   'agent-cross-review.yml',
   'browser-compat.yml',
   'ci.yml',
@@ -86,11 +81,10 @@ function triggerNames(workflow) {
   return [];
 }
 
-function usesArc(job) {
-  const runner = job?.['runs-on'];
-  if (typeof runner === 'string') return ARC_RUNNERS.has(runner);
-  if (Array.isArray(runner)) return runner.some((label) => ARC_RUNNERS.has(label));
-  return false;
+function usesCiRunner(job) {
+  // Exact string only: a label array such as [self-hosted, ubuntu-latest] would
+  // route to any runner carrying ALL labels, i.e. a self-hosted machine.
+  return job?.['runs-on'] === CI_RUNNER;
 }
 
 function usesDynamicRunner(job) {
@@ -105,7 +99,7 @@ function usesDynamicRunner(job) {
 }
 
 function usesApprovedHostedRunner(job) {
-  return job?.['runs-on'] === 'ubuntu-latest';
+  return usesCiRunner(job);
 }
 
 function dependencyNames(job) {
@@ -164,10 +158,10 @@ export function prWorkflowTrustReasons(root) {
     workflows.set(entry.name, workflow);
     const triggers = triggerNames(workflow);
     const jobs = workflow?.jobs ?? {};
-    const arcJobs = Object.values(jobs).some(usesArc);
+    const ciRunnerJobs = Object.values(jobs).some(usesCiRunner);
     const dynamicRunnerJobs = Object.values(jobs).some(usesDynamicRunner);
     const canonicalTargetWorkflow =
-      CANONICAL_TARGET_ARC_WORKFLOWS.has(entry.name);
+      CANONICAL_TARGET_WORKFLOWS.has(entry.name);
     const retiredTemporaryWorkflow =
       RETIRED_TEMP_TARGET_WORKFLOWS.has(entry.name);
     if (retiredTemporaryWorkflow) {
@@ -184,12 +178,6 @@ export function prWorkflowTrustReasons(root) {
         }
       }
     }
-    if (
-      triggers.includes('pull_request') &&
-      arcJobs
-    ) {
-      reasons.push(`${entry.name}: pull_request may not schedule an ARC job`);
-    }
     if (triggers.includes('pull_request') && dynamicRunnerJobs) {
       reasons.push(
         `${entry.name}: pull_request dynamic runs-on selection cannot prove a hosted runner; use the trust ceiling`
@@ -204,19 +192,19 @@ export function prWorkflowTrustReasons(root) {
           `${entry.name}: canonical workflow must retain only pull_request_target after cutover`
         );
       }
-      if (!arcJobs) {
+      if (!ciRunnerJobs) {
         reasons.push(
-          `${entry.name}: canonical workflow must retain ARC execution after cutover`
+          `${entry.name}: canonical workflow must run its jobs on the CI runner`
         );
       }
       for (const [jobName, job] of Object.entries(jobs)) {
         if (
           jobName !== 'authorize' &&
           jobName !== 'resolve-merge' &&
-          !usesArc(job)
+          !usesCiRunner(job)
         ) {
           reasons.push(
-            `${entry.name}: canonical job ${jobName} must use an approved ARC scale set after cutover`
+            `${entry.name}: canonical job ${jobName} must use the CI runner (${CI_RUNNER})`
           );
         }
       }
@@ -231,9 +219,9 @@ export function prWorkflowTrustReasons(root) {
         );
       }
       for (const [jobName, job] of Object.entries(jobs)) {
-        if (job?.['runs-on'] !== 'arc-runner-set') {
+        if (job?.['runs-on'] !== CI_RUNNER) {
           reasons.push(
-            `${entry.name}: job ${jobName} must run on the self-hosted arc-runner-set scale set (zero hosted-minutes policy)`
+            `${entry.name}: job ${jobName} must run on the CI runner (${CI_RUNNER})`
           );
         }
       }
@@ -251,7 +239,7 @@ export function prWorkflowTrustReasons(root) {
       const authorize = workflow?.jobs?.authorize;
       if (authorize?.uses !== './.github/workflows/pr-trust.yml') {
         reasons.push(
-          `${entry.name}: ARC jobs require an authorize job using ./.github/workflows/pr-trust.yml`
+          `${entry.name}: pull_request_target jobs require an authorize job using ./.github/workflows/pr-trust.yml`
         );
       } else {
         if (
@@ -312,7 +300,7 @@ export function prWorkflowTrustReasons(root) {
       }
       for (const [jobName, job] of Object.entries(jobs)) {
         if (jobName === 'authorize' || jobName === 'resolve-merge') continue;
-        const jobKind = usesArc(job) ? 'ARC job' : 'job';
+        const jobKind = usesCiRunner(job) ? 'CI job' : 'job';
         const directDependencies = dependencyNames(job);
         if (!reachesJob(jobs, jobName, 'authorize')) {
           reasons.push(
@@ -352,13 +340,13 @@ export function prWorkflowTrustReasons(root) {
         const proof = jobs['gate-2702-sandbox-proof'];
         const proofPermissions = proof?.permissions;
         if (
-          proof?.['runs-on'] !== 'arc-dind' ||
+          proof?.['runs-on'] !== CI_RUNNER ||
           !proofPermissions ||
           Object.keys(proofPermissions).join(',') !== 'contents' ||
           proofPermissions.contents !== 'read'
         ) {
           reasons.push(
-            'test.yml: sandbox proof must use arc-dind with only contents: read permission'
+            `test.yml: sandbox proof must use ${CI_RUNNER} with only contents: read permission`
           );
         }
         const proofSteps = proof?.steps ?? [];
@@ -451,9 +439,9 @@ export function prWorkflowTrustReasons(root) {
           `${MERGE_RESOLVER_WORKFLOW}: resolver must contain exactly one resolve job`
         );
       }
-      if (resolverJob?.['runs-on'] !== 'arc-runner-set') {
+      if (resolverJob?.['runs-on'] !== CI_RUNNER) {
         reasons.push(
-          `${MERGE_RESOLVER_WORKFLOW}: resolve must use the arc-runner-set scale set (zero hosted-minutes policy)`
+          `${MERGE_RESOLVER_WORKFLOW}: resolve must use the CI runner (${CI_RUNNER})`
         );
       }
       if (resolverJob?.['timeout-minutes'] !== 2) {
@@ -584,9 +572,9 @@ export function prWorkflowTrustReasons(root) {
         );
       }
       const brokerJob = broker?.jobs?.authorize;
-      if (brokerJob?.['runs-on'] !== 'arc-runner-set') {
+      if (brokerJob?.['runs-on'] !== CI_RUNNER) {
         reasons.push(
-          'pr-trust.yml: authorize must use the arc-runner-set scale set (zero hosted-minutes policy)'
+          `pr-trust.yml: authorize must use the CI runner (${CI_RUNNER})`
         );
       }
       const brokerJobKeys = Object.keys(brokerJob ?? {});
@@ -628,7 +616,7 @@ export function prWorkflowTrustReasons(root) {
     }
   }
   if (repositoryFixture) {
-    for (const workflowName of CANONICAL_TARGET_ARC_WORKFLOWS) {
+    for (const workflowName of CANONICAL_TARGET_WORKFLOWS) {
       if (!workflows.has(workflowName)) {
         reasons.push(`missing canonical target workflow ${workflowName}`);
       }
@@ -652,7 +640,7 @@ function main() {
     process.exit(1);
   }
   console.log(
-    `PR workflow trust check passed: ${CANONICAL_TARGET_ARC_WORKFLOWS.size} canonical target workflows are base-controlled, ARC-backed, and fork-gated.`
+    `PR workflow trust check passed: ${CANONICAL_TARGET_WORKFLOWS.size} canonical target workflows are base-controlled, CI-runner-backed, and fork-gated.`
   );
 }
 

@@ -22,11 +22,11 @@ function withWorkflowFixture(workflows, run) {
   }
 }
 
-test('the live Stage C repository keeps canonical ARC checks behind the target trust ceiling', () => {
+test('the live repository keeps canonical PR checks behind the target trust ceiling', () => {
   assert.deepEqual(prWorkflowTrustReasons(REPO_ROOT), []);
 });
 
-test('a new pull_request workflow cannot schedule an ARC job', () => {
+test('a new pull_request workflow cannot schedule a self-hosted job', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -37,7 +37,7 @@ test('a new pull_request workflow cannot schedule an ARC job', () => {
         '  contents: read',
         'jobs:',
         '  test:',
-        '    runs-on: arc-runner-set',
+        '    runs-on: self-hosted',
         '    steps:',
         '      - run: npm test',
         '',
@@ -46,7 +46,7 @@ test('a new pull_request workflow cannot schedule an ARC job', () => {
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /unsafe\.yml.*pull_request.*ARC/i
+        /unsafe\.yml.*pull_request job test.*ubuntu-latest/i
       );
     }
   );
@@ -96,7 +96,7 @@ test('pull_request jobs cannot evade hosted-only policy through hub, future-priv
   );
 });
 
-test('pull_request workflows cannot hide ARC behind expression-valued runners', () => {
+test('pull_request workflows cannot hide a private runner behind expression-valued runners', () => {
   withWorkflowFixture(
     {
       'expression.yml': [
@@ -131,7 +131,7 @@ test('pull_request workflows cannot hide ARC behind expression-valued runners', 
   );
 });
 
-test('a pull_request_target ARC workflow requires the canonical authorization broker', () => {
+test('a pull_request_target workflow requires the canonical authorization broker', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -142,7 +142,7 @@ test('a pull_request_target ARC workflow requires the canonical authorization br
         '  contents: read',
         'jobs:',
         '  test:',
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -237,7 +237,7 @@ test('authorization receives only canonical fork metadata with no token permissi
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -251,7 +251,7 @@ test('authorization receives only canonical fork metadata with no token permissi
   );
 });
 
-test('every ARC job depends on authorization and the verified merge resolver', () => {
+test('every CI job depends on authorization and the verified merge resolver', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -266,13 +266,13 @@ test('every ARC job depends on authorization and the verified merge resolver', (
         '    with:',
         '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
         '  direct-bypass:',
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '  alternate-bypass:',
         '    needs: authorize',
         "    if: github.actor == 'shpwrck'",
-        '    runs-on: arc-dind',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -305,7 +305,7 @@ test('the first executable job also requires the verified merge output', () => {
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -338,7 +338,7 @@ test('protected workflows must resolve one immutable merge SHA after authorizati
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true' && github.event.pull_request.merge_commit_sha != null",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -353,7 +353,7 @@ test('protected workflows must resolve one immutable merge SHA after authorizati
   );
 });
 
-test('the reusable merge resolver is ARC-pinned, read-only, and contract-closed', () => {
+test('the reusable merge resolver is pinned to the CI runner, read-only, and contract-closed', () => {
   withWorkflowFixture(
     {
       'pr-merge-sha.yml': [
@@ -363,7 +363,7 @@ test('the reusable merge resolver is ARC-pinned, read-only, and contract-closed'
         '  contents: write',
         'jobs:',
         '  resolve:',
-        '    runs-on: arc-dind',
+        '    runs-on: self-hosted',
         '    permissions:',
         '      contents: write',
         '    steps:',
@@ -375,7 +375,7 @@ test('the reusable merge resolver is ARC-pinned, read-only, and contract-closed'
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /pr-merge-sha\.yml.*workflow_call.*input.*output/i);
       assert.match(reasons, /pr-merge-sha\.yml.*workflow permissions.*\{\}/i);
-      assert.match(reasons, /pr-merge-sha\.yml.*arc-runner-set/i);
+      assert.match(reasons, /pr-merge-sha\.yml.*CI runner.*ubuntu-latest/i);
       assert.match(reasons, /pr-merge-sha\.yml.*timeout.*2/i);
       assert.match(reasons, /pr-merge-sha\.yml.*contents.*pull-requests.*read/i);
     }
@@ -411,7 +411,7 @@ test('post-resolver jobs cannot bypass the verified output guard or exact checko
         '  test:',
         '    needs: resolve-merge',
         "    if: needs.resolve-merge.outputs.merge-sha != '' || true",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - uses: actions/checkout@0123456789012345678901234567890123456789',
         '        with:',
@@ -447,7 +447,7 @@ test('protected workflows isolate concurrency and checkout the verified merge SH
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - uses: Actions/Checkout@0123456789012345678901234567890123456789',
         '        with:',
@@ -463,7 +463,7 @@ test('protected workflows isolate concurrency and checkout the verified merge SH
   );
 });
 
-test('the reusable trust broker is ARC-pinned and has no token permissions', () => {
+test('the reusable trust broker is pinned to the CI runner and has no token permissions', () => {
   withWorkflowFixture(
     {
       'protected.yml': [
@@ -482,7 +482,7 @@ test('the reusable trust broker is ARC-pinned and has no token permissions', () 
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -496,7 +496,7 @@ test('the reusable trust broker is ARC-pinned and has no token permissions', () 
         'jobs:',
         '  authorize:',
         '    permissions: {}',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: self-hosted',
         '    steps:',
         '      - run: echo no',
         '',
@@ -505,7 +505,7 @@ test('the reusable trust broker is ARC-pinned and has no token permissions', () 
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /pr-trust\.yml.*permissions.*\{\}/i);
-      assert.match(reasons, /pr-trust\.yml.*arc-runner-set/i);
+      assert.match(reasons, /pr-trust\.yml.*CI runner.*ubuntu-latest/i);
     }
   );
 });
@@ -529,7 +529,7 @@ test('the trust broker contract cannot drift to alternate metadata or extra work
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -563,7 +563,7 @@ test('the trust broker contract cannot drift to alternate metadata or extra work
         '          TRUSTED: ${{ inputs.head-repository == github.actor }}',
         '        run: echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"',
         '  extra:',
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -599,7 +599,7 @@ test('the trust broker input cannot gain a default or alternate data channel', (
         '  test:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: echo safe',
         '',
@@ -643,7 +643,7 @@ test('the trust broker input cannot gain a default or alternate data channel', (
   );
 });
 
-test('a transitive ARC job cannot override a skipped authorization ancestor', () => {
+test('a transitive CI job cannot override a skipped authorization ancestor', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -662,19 +662,19 @@ test('a transitive ARC job cannot override a skipped authorization ancestor', ()
         '  gate:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: echo safe',
         '  bypass:',
         '    needs: gate',
         '    if: always()',
-        '    runs-on: arc-dind',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '  success-bypass:',
         '    needs: gate',
         '    if: success() || true',
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '',
@@ -688,7 +688,7 @@ test('a transitive ARC job cannot override a skipped authorization ancestor', ()
   );
 });
 
-test('forks cannot schedule a hosted secret-bearing job beside the ARC graph', () => {
+test('forks cannot schedule a hosted secret-bearing job beside the protected graph', () => {
   withWorkflowFixture(
     {
       'unsafe.yml': [
@@ -707,7 +707,7 @@ test('forks cannot schedule a hosted secret-bearing job beside the ARC graph', (
         '  arc:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: echo safe',
         '  secret-bypass:',
@@ -728,7 +728,7 @@ test('forks cannot schedule a hosted secret-bearing job beside the ARC graph', (
   );
 });
 
-test('every executable job in a canonical target workflow must stay on an approved ARC scale set', () => {
+test('every executable job in a canonical target workflow must stay on the CI runner', () => {
   withWorkflowFixture(
     {
       'ci.yml': [
@@ -744,15 +744,15 @@ test('every executable job in a canonical target workflow must stay on an approv
         '    uses: ./.github/workflows/pr-trust.yml',
         '    with:',
         '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
-        '  arc:',
+        '  ci:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true' && github.event.pull_request.merge_commit_sha != null",
-        '    runs-on: arc-runner-set',
+        '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: npm test',
         '  hosted-bypass:',
-        '    needs: arc',
-        '    runs-on: ubuntu-latest',
+        '    needs: ci',
+        '    runs-on: self-hosted',
         '    steps:',
         '      - run: npm test',
         '',
@@ -761,13 +761,13 @@ test('every executable job in a canonical target workflow must stay on an approv
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /ci\.yml.*hosted-bypass.*approved ARC/i
+        /ci\.yml.*hosted-bypass.*CI runner/i
       );
     }
   );
 });
 
-test('canonical workflows cannot regress to pull_request or GitHub-hosted execution after cutover', () => {
+test('canonical workflows cannot regress to pull_request after cutover', () => {
   withWorkflowFixture(
     {
       'ci.yml': [
@@ -785,12 +785,11 @@ test('canonical workflows cannot regress to pull_request or GitHub-hosted execut
     (root) => {
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /ci\.yml.*canonical.*pull_request_target/i);
-      assert.match(reasons, /ci\.yml.*canonical.*ARC/i);
     }
   );
 });
 
-test('milestone guard cannot drift off the pinned ARC scale set', () => {
+test('milestone guard cannot drift off the CI runner', () => {
   withWorkflowFixture(
     {
       'milestone-guard.yml': [
@@ -799,7 +798,7 @@ test('milestone guard cannot drift off the pinned ARC scale set', () => {
         '  pull_request_target:',
         'jobs:',
         '  ensure:',
-        '    runs-on: ubuntu-latest',
+        '    runs-on: self-hosted',
         '    steps:',
         '      - run: echo drifted',
         '',
@@ -808,7 +807,7 @@ test('milestone guard cannot drift off the pinned ARC scale set', () => {
     (root) => {
       assert.match(
         prWorkflowTrustReasons(root).join('\n'),
-        /milestone-guard\.yml.*arc-runner-set/i
+        /milestone-guard\.yml.*CI runner.*ubuntu-latest/i
       );
     }
   );
@@ -882,7 +881,7 @@ test('the canonical sandbox proof job must require namespaces and run only the h
         '  gate-2702-sandbox-proof:',
         '    needs: authorize',
         "    if: needs.authorize.outputs.trusted == 'true'",
-        '    runs-on: arc-dind',
+        '    runs-on: ubuntu-latest',
         '    permissions:',
         '      contents: read',
         '    steps:',
@@ -894,6 +893,40 @@ test('the canonical sandbox proof job must require namespaces and run only the h
       const reasons = prWorkflowTrustReasons(root).join('\n');
       assert.match(reasons, /test\.yml.*sandbox proof.*CHD_REQUIRE_GATE_2702_SANDBOX_PROBE/i);
       assert.match(reasons, /test\.yml.*sandbox proof.*test-name-pattern/i);
+    }
+  );
+});
+
+test('a canonical job cannot reach a self-hosted runner through a label array', () => {
+  withWorkflowFixture(
+    {
+      'ci.yml': [
+        'name: Lint and build',
+        'on:',
+        '  pull_request_target:',
+        'concurrency:',
+        '  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}',
+        'permissions: {}',
+        'jobs:',
+        '  authorize:',
+        '    permissions: {}',
+        '    uses: ./.github/workflows/pr-trust.yml',
+        '    with:',
+        '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
+        '  mixed:',
+        '    needs: authorize',
+        "    if: needs.authorize.outputs.trusted == 'true'",
+        '    runs-on: [self-hosted, ubuntu-latest]',
+        '    steps:',
+        '      - run: npm test',
+        '',
+      ].join('\n'),
+    },
+    (root) => {
+      assert.match(
+        prWorkflowTrustReasons(root).join('\n'),
+        /ci\.yml.*mixed.*CI runner/i
+      );
     }
   );
 });

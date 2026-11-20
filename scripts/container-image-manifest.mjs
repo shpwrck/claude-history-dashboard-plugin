@@ -216,7 +216,8 @@ permissions:
 
 jobs:
   plan:
-    runs-on: arc-runner-set
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
       matrix: \${{ steps.images.outputs.matrix }}
     steps:
@@ -237,7 +238,8 @@ jobs:
       fail-fast: true
       max-parallel: 1
       matrix: \${{ fromJSON(needs.plan.outputs.matrix) }}
-    runs-on: arc-dind
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
