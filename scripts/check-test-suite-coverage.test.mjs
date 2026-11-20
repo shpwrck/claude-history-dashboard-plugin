@@ -363,13 +363,13 @@ test('a Vitest alias with a different config is not inferred from the umbrella',
   );
 });
 
-test('the live 107-script surface is reconciled as roots, covered aliases, or manual', () => {
+test('the live 108-script surface is reconciled as roots, covered aliases, or manual', () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
   const testScripts = Object.keys(pkg.scripts ?? {}).filter((name) =>
     name.startsWith('test:')
   );
 
-  assert.equal(testScripts.length, 107); // #3833 retired test:enterprise-readiness-gate; #3823 added test:server-auth; #3835 retired test:enterprise-auth
+  assert.equal(testScripts.length, 108); // #3741 added manual test:lock-stress; #3833 retired test:enterprise-readiness-gate; #3823 added test:server-auth; #3835 retired test:enterprise-auth
   assert.deepEqual(
     findTestScriptOwnershipErrors(REPO_ROOT, { owners: TEST_SUITE_OWNERS }),
     []

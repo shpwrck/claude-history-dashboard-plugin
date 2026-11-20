@@ -136,6 +136,7 @@ export const TEST_SUITE_OWNER_GROUPS = Object.freeze({
     'test:e2e:visual-pilot',
     'test:e2e:visual-pilot:update',
     'test:e2e:webkit',
+    'test:lock-stress',
     'test:watch',
   ]),
 });

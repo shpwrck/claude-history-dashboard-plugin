@@ -212,8 +212,13 @@ if (lock) {
 process.exit(0);
 `;
 
-const STALE_CONTENTION_ROUNDS = 12;
-const STALE_CONTENTION_BATCHES = 4;
+// #3741: normal PR runs keep a real-process smoke (4 rounds x 2 children);
+// `npm run test:lock-stress` sets CHD_LOCK_STRESS=1 for the full >=48-round
+// contention run (#3615). The deterministic recycled-inode test below is the
+// correctness proof and runs in both modes.
+const LOCK_STRESS = process.env.CHD_LOCK_STRESS === '1';
+const STALE_CONTENTION_ROUNDS = LOCK_STRESS ? 12 : 4;
+const STALE_CONTENTION_BATCHES = LOCK_STRESS ? 4 : 1;
 
 async function assertSingleStaleReclaimWinner(round: number): Promise<void> {
   const dir = await makeDir();
@@ -705,10 +710,10 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
   );
 
   // (c) Two contender child processes racing a stale lock: it is reclaimed
-  // within bounds and EXACTLY ONE contender wins. Run >=48 rounds at
-  // concurrency 12 (the #3615 acceptance bar) in BATCHES — each batch is 12
-  // rounds x 2 children = 24 concurrent processes, awaited before the next — so
-  // CI runners are never hit with all 96 processes at once.
+  // within bounds and EXACTLY ONE contender wins. The stress command runs >=48
+  // rounds at concurrency 12 (the #3615 acceptance bar) in BATCHES — each batch
+  // is 12 rounds x 2 children = 24 concurrent processes, awaited before the
+  // next. Normal PR runs keep 4 real-process rounds as a smoke test (#3741).
   //
   // NOTE: this only exercises the inode-reuse vulnerable path on an
   // inode-recycling filesystem. os.tmpdir() is tmpfs here, whose inode numbers
@@ -718,6 +723,9 @@ describe('adoption-spool rotation lock (protocol v1)', () => {
   it(
     'lets exactly one of two concurrent child contenders reclaim a stale lock across repeated parallel rounds',
     async () => {
+      expect(STALE_CONTENTION_ROUNDS * STALE_CONTENTION_BATCHES).toBeGreaterThanOrEqual(
+        LOCK_STRESS ? 48 : 4
+      );
       for (let batch = 0; batch < STALE_CONTENTION_BATCHES; batch++) {
         await Promise.all(
           Array.from({ length: STALE_CONTENTION_ROUNDS }, (_, i) =>
@@ -1405,9 +1413,12 @@ describe('adoption-spool generation-claim lease (protocol v2)', () => {
       const { acquireAdoptionSpoolRotationLock: acquireRacing } = await import(
         './adoption-spool-lock'
       );
+      // The loser retries until its budget runs out while the winner holds the
+      // lock, so the budget sets this test's duration (#3741). 750ms still
+      // leaves the winner's single rename far inside it.
       const options = {
         role: 'drain' as const,
-        budgetMs: 2_000,
+        budgetMs: 750,
         retryDelayMs: 5,
       };
       const results = await Promise.all([
