@@ -3,12 +3,9 @@
 // index.html upgrade end-to-end through the real server:
 //   A. auth OFF (single-user/local): after a boot build warms `lastInstantShell`,
 //      GET / serves REAL KPIs (ready:true, no skeleton em-dash).
-//   B. auth ON (enterprise): even after an ADMIN boot build populates the global
-//      shell, the unauthenticated GET / MUST serve the SKELETON — `/` is pre-auth
-//      and scoped principals are walled off from global data, so the pre-auth HTML
-//      must never carry the global host counts. This guards the security-relevant
-//      gate (`ENTERPRISE_AUTH_ON ? null : lastInstantShell`) against regressing to
-//      the opt-in scope-enforcement flag.
+//   B. HTTP Basic auth ON: an unauthenticated GET / is refused (401) so the
+//      warm shell's counts never reach a visitor without credentials, and an
+//      authenticated GET / gets the same real-count upgrade (#3839).
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -123,23 +120,21 @@ await check('auth off: GET / serves real KPIs after a boot build', async () => {
   }
 });
 
-// B — auth on: the pre-auth GET / stays a skeleton even though an admin boot
-// build populated the GLOBAL shell.
-await check('auth on: pre-auth GET / stays skeleton despite a warm global shell', async () => {
-  const token = 'test-admin-token-0123456789abcdef';
-  const srv = await startServer({ DASHBOARD_ADMIN_TOKEN: token });
+// B — Basic auth on: counts are served only behind the Basic gate.
+await check('basic auth: GET / needs credentials and then serves real KPIs', async () => {
+  const srv = await startServer({ DASHBOARD_USER: 'shell-user', DASHBOARD_PASS: 'shell-pass' });
+  const authorization = `Basic ${Buffer.from('shell-user:shell-pass').toString('base64')}`;
   try {
-    // Admin-authenticated boot build → populates the global lastInstantShell.
-    const boot = await fetch(`${srv.base}/api/dataset/boot`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    assert.equal(boot.status, 200, 'admin boot build should succeed (warms the global shell)');
-    // Unauthenticated landing request: MUST be the skeleton, never global counts.
-    const res = await fetch(`${srv.base}/`);
-    const html = await res.text();
+    const boot = await fetch(`${srv.base}/api/dataset/boot`, { headers: { Authorization: authorization } });
+    assert.equal(boot.status, 200, 'authenticated boot build should succeed');
+    const anonymous = await fetch(`${srv.base}/`);
+    const anonymousBody = await anonymous.text();
+    assert.equal(anonymous.status, 401, 'unauthenticated GET / must be refused');
+    assert.ok(!anonymousBody.includes('data-instant-shell'), 'refusal must not carry the shell');
+    const html = await (await fetch(`${srv.base}/`, { headers: { Authorization: authorization } })).text();
     assert.ok(html.includes('data-instant-shell'), 'shell wrapper present');
-    assert.ok(html.includes('&mdash;'), 'pre-auth shell must stay skeleton under enterprise auth');
-    assert.match(html, /"ready":false/, '__BOOT__ envelope must remain the skeleton');
+    assert.ok(!html.includes('&mdash;'), 'authenticated shell is upgraded');
+    assert.match(html, /"ready":true/, '__BOOT__ envelope marked ready');
   } finally {
     srv.stop();
   }

@@ -32,14 +32,10 @@ info:
       `application/json`.
     - **HTTP Basic Auth** (`DASHBOARD_USER` + `DASHBOARD_PASS`): when set, gates
       every sensitive surface — used when the host port is bound beyond loopback.
-    - **Enterprise auth** (`Bearer` token or session cookie, only when
-      `DASHBOARD_ORG_ID`/JWT config is present): role- and scope-based
-      authorization over the `/api/*` surface and the raw feeds.
 
     Because these gates are off by default, operations carry `security` requirements
-    only where a gate is unconditional (the CSRF-protected writes). Basic and
-    enterprise auth are described here but not attached per-operation since they are
-    deployment-conditional.
+    only where a gate is unconditional (the CSRF-protected writes). Basic auth is
+    described here but not attached per-operation since it is deployment-conditional.
   license:
     name: See repository LICENSE
     url: https://github.com/shpwrck/claude-history-dashboard/blob/master/LICENSE
@@ -65,8 +61,8 @@ tags:
     description: RemoteSession provisioning CRUD (#1251). Writes require the CSRF token.
   - name: ingest
     description: Push-ingest of session artifacts from a remote shipper (#1563).
-  - name: enterprise
-    description: Enterprise auth/session and org rollups. Enforced only when enterprise auth is configured.
+  - name: auth
+    description: The neutral single-user server session and capability map.
   - name: raw-feeds
     description: Root-level (non-`/api`) live data feeds that mirror the on-disk `~/.claude` layout.
   - name: ops
@@ -490,10 +486,8 @@ paths:
       description: |
         Walks every authorized projects root's
         `<slug>/<sessionId>/workflows/wf_*.json` manifest, projects it to the
-        ledger fields, and returns runs newest-first (#435, #2713). Local and
-        enterprise-admin requests include the configured local/hub root set;
-        enterprise non-admin requests are confined to their assigned data root.
-        Run and discovery caps apply across the aggregate root set. Post-hoc
+        ledger fields, and returns runs newest-first (#435, #2713). Requests
+        include the configured local/hub root set. Run and discovery caps apply across the aggregate root set. Post-hoc
         ledger, not a live monitor. `src/lib/parse-workflows.ts` normalizes the
         shape.
       responses:
@@ -917,40 +911,21 @@ paths:
 
   /api/auth/session:
     get:
-      tags: [enterprise]
+      tags: [auth]
       operationId: getAuthSession
-      summary: Current enterprise auth session.
+      summary: Current server session and capabilities.
       description: |
-        Reports the auth mode/principal. In the default single-user deployment
-        returns a `single-user` session with `authRequired: false`. Enforced shapes
-        appear only when enterprise auth is configured.
+        Returns the neutral single-user session (`mode: single-user`,
+        `authRequired: false`, no principal or organization) and its capability
+        map. When HTTP Basic auth is configured, the request must carry valid
+        credentials before this route runs.
       responses:
         '200':
-          description: The auth session.
+          description: The server session.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/EnterpriseSession'
-    post:
-      tags: [enterprise]
-      operationId: createAuthSession
-      summary: Establish a browser session from a Bearer token.
-      security:
-        - enterpriseBearer: []
-      responses:
-        '200':
-          description: The established session.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EnterpriseSession'
-    delete:
-      tags: [enterprise]
-      operationId: clearAuthSession
-      summary: Clear the browser session.
-      responses:
-        '204':
-          description: Session cleared.
+                $ref: '#/components/schemas/ServerSession'
 
   /sessions-manifest.json:
     get:
@@ -1043,10 +1018,6 @@ components:
         Per-process token from `GET /api/csrf-token`, replayed on every mutating
         route (may also be sent as `Authorization: Bearer <token>`). Writes also
         require a same-origin browser `Origin` and `application/json`.
-    enterpriseBearer:
-      type: http
-      scheme: bearer
-      description: Enterprise Bearer token (only when enterprise auth is configured). A session cookie is an accepted alternative.
     ingestBearer:
       type: http
       scheme: bearer
@@ -1112,7 +1083,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     Forbidden:
-      description: Not allowed (failed CSRF/same-origin or enterprise authorization).
+      description: Not allowed (failed CSRF/same-origin check).
       content:
         application/json:
           schema:
@@ -1913,7 +1884,7 @@ components:
                 type: string
                 description: 'One of: `bad-path` | `not-session-data` | `escapes-root` | `too-large` | `symlink-dest`.'
       required: [ok, sourceId, written, skipped, refused]
-    EnterpriseSession:
+    ServerSession:
       type: object
       description: '`ServerSession` in `src/lib/api-client.ts`.'
       properties:
@@ -1979,18 +1950,3 @@ components:
         dataRootConfigured:
           type: boolean
       required: [userId, name, role, orgId, orgName, scopes]
-    EnterpriseOrganizationSummary:
-      type: object
-      description: |
-        `EnterpriseOrganizationSummary` in `src/lib/api-client.ts` — principals,
-        teams, identity coverage, rollup, security posture, and audit activity.
-        Documented as an open object; the full nested shape is owned by the TS type.
-      additionalProperties: true
-    EnterpriseReadinessReceipt:
-      type: object
-      description: '`EnterpriseReadinessReceipt` in `src/lib/api-client.ts`.'
-      additionalProperties: true
-    EnterpriseOrganizationRollup:
-      type: object
-      description: '`EnterpriseOrganizationRollup` in `src/lib/api-client.ts`.'
-      additionalProperties: true

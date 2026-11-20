@@ -27,7 +27,7 @@ The gate is necessary but not sufficient: the release-gate checklist still needs
 - Rule: `A`
 - Credential: `oauth`
 - Purpose: Read Anthropic plan-limit response headers for the live usage gauge.
-- Trigger: `opt-in` - GET /api/usage when DASHBOARD_ENABLE_SERVER_USAGE_GAUGE is enabled.
+- Trigger: `opt-in` - GET /api/usage on the open loopback server; with HTTP Basic auth configured, only when DASHBOARD_ENABLE_SERVER_USAGE_GAUGE is enabled.
 - Data class: `none`
 - Data boundary: May use the local Claude OAuth token, but must not send ~/.claude-derived content.
 - Egress scrub: `none`
@@ -42,7 +42,7 @@ Input bounds:
 - request body, if present, must be the fixed max_tokens=1 probe payload
 
 Spend controls:
-- DASHBOARD_ENABLE_SERVER_USAGE_GAUGE kill switch
+- DASHBOARD_ENABLE_SERVER_USAGE_GAUGE gates the probe on Basic-auth servers
 - DASHBOARD_USAGE_CREDENTIAL_MAX_BYTES bounds credential reads
 - only parsed rate-limit headers are returned to the browser
 

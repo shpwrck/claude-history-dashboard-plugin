@@ -321,18 +321,15 @@ describe('createIngest instance isolation (#3678)', () => {
     }
   }, 30_000);
 
-  it('constructs scoped server instances without env mutation or ESM cache busting', () => {
+  // The enterprise per-principal scoped instances were retired with epic #3743
+  // (#3839); the server builds one global ingest. Guard that the env-mutating
+  // and cache-busting workarounds the scoped path once replaced stay gone.
+  it('keeps one global ingest without env mutation or ESM cache busting', () => {
     const source = readFileSync(join(repoRoot, 'scripts', 'server.mjs'), 'utf8');
-    expect(source).toContain('createIngest({');
-    expect(source).toContain('claudeDir: dataRoot');
-    expect(source).toContain('dbPath: scopedIngestDbPath(dataRoot)');
+    expect(source).not.toContain('scopedIngestDbPath');
     expect(source).not.toContain('scopedIngestImportQueue');
     expect(source).not.toContain('restoreEnvValue');
     expect(source).not.toContain('enterpriseRoot=');
     expect(source).not.toMatch(/process\.env\.(?:CLAUDE_DIR|CLAUDE_HOME_DIR|CHD_DB_PATH|CHD_SCOPED_INGEST)\s*=/);
-    expect(source).toContain('!lease.handlerDone || !lease.responseDone');
-    expect(source).toContain('finishScopedDatasetRequest(req);');
-    expect(source).toContain('state.activeRequests === 0');
-    expect(source).toContain('...(state.detachedBuilds ?? [])');
   });
 });

@@ -59,11 +59,6 @@ export interface AuditRunResponse {
   findings: AuditFinding[];
 }
 
-const ENTERPRISE_AUTH_TOKEN_KEY =
-  'claude-history-dashboard:enterprise-auth-token';
-
-let enterpriseDatasetCacheKeyHint: string | null = null;
-
 export type EnterpriseRole = 'admin' | 'member' | 'viewer';
 
 export interface EnterprisePrincipal {
@@ -82,8 +77,8 @@ export interface EnterprisePrincipal {
 /**
  * The `/api/auth/session` response (#3832, epic #3743). A single-user server
  * answers `mode: 'single-user'`, `authRequired: false`, no principal or
- * organization, and its capability map. The enterprise fields stay until the
- * server drops tenant auth (#3839).
+ * organization, and its capability map. The server no longer returns the
+ * enterprise shape (#3839); narrowing this type is tracked in #3904.
  */
 export interface ServerSession {
   mode: 'single-user' | 'enterprise';
@@ -97,290 +92,6 @@ export interface ServerSession {
   error?: string;
 }
 
-export interface EnterpriseAuditEvent {
-  timestamp: string;
-  requestId?: string;
-  type: string;
-  outcome?: string;
-  status?: number;
-  method?: string;
-  path?: string;
-  reason?: string;
-  principal?: {
-    userId?: string;
-    role?: EnterpriseRole;
-    orgId?: string;
-    teamId?: string;
-  };
-  tokenHash?: string;
-  remoteAddress?: string;
-}
-
-export interface EnterpriseAuditActivitySummary {
-  source: string;
-  window: { start: string | null; end: string | null };
-  events: {
-    total: number;
-    allowed: number;
-    denied: number;
-    skipped: number;
-    other: number;
-    rateLimited: number;
-    serverErrors: number;
-  };
-  outcomes: Record<string, number>;
-  principalRoles: Record<string, number>;
-  topTypes: EnterpriseRollupNameCount[];
-  privacy: {
-    redacted: boolean;
-    derivedFrom: string[];
-    excludes: string[];
-  };
-}
-
-export type EnterpriseSecurityControlState =
-  | 'enabled'
-  | 'disabled'
-  | 'action-required';
-
-export interface EnterpriseSecurityControl {
-  id: string;
-  label: string;
-  state: EnterpriseSecurityControlState;
-  summary: string;
-  detail: string;
-}
-
-export interface EnterpriseSecurityPosture {
-  generatedAt: string;
-  controls: EnterpriseSecurityControl[];
-  deploymentNotes: string[];
-}
-
-export interface EnterpriseTeamSummary {
-  teamId?: string;
-  teamName: string;
-  principalCount: number;
-  adminCount: number;
-  memberCount: number;
-  viewerCount: number;
-  scopedDataRoots: number;
-}
-
-export interface EnterprisePrincipalPage {
-  total: number;
-  limit: number;
-  offset: number;
-  returned: number;
-}
-
-export interface EnterpriseIdentityCoverage {
-  source: string;
-  contributors: {
-    total: number;
-    withEmailAlias: number;
-    withTeam: number;
-    withScopedDataRoot: number;
-    roles: Record<EnterpriseRole, number>;
-  };
-  teams: {
-    total: number;
-    mappedPrincipals: number;
-    unassignedPrincipals: number;
-    withScopedDataRoots: number;
-  };
-  aliases: {
-    userId: number;
-    email: number;
-    team: number;
-    total: number;
-  };
-  privacy: {
-    redacted: boolean;
-    derivedFrom: string[];
-    excludes: string[];
-  };
-}
-
-export interface EnterpriseRollupNameCount {
-  name: string;
-  count: number;
-}
-
-export interface EnterpriseOrganizationRollup {
-  schemaVersion: string;
-  mode: 'single-user' | 'enterprise';
-  generatedAt: string;
-  window: { start: string | null; end: string | null };
-  organization: { id: string; name: string };
-  requester: {
-    userId?: string;
-    email?: string;
-    role?: EnterpriseRole;
-  } | null;
-  principals: {
-    configured: number;
-    roles: Record<EnterpriseRole, number>;
-  };
-  capabilities: Record<string, boolean>;
-  counts: {
-    sessions: number;
-    projects: number;
-    userMessages: number;
-    tokenSessions: number;
-    toolSessions: number;
-    permissionSessions: number;
-    apiErrors: number;
-    unattendedSessions: number;
-    bypassPermissionSessions: number;
-    dangerousCommandSessions: number;
-  };
-  usage: {
-    tokens: {
-      input: number;
-      output: number;
-      cacheCreation: number;
-      cacheRead: number;
-      total: number;
-    };
-    estimatedCostUsd: number;
-    models: EnterpriseRollupNameCount[];
-    serviceTiers: EnterpriseRollupNameCount[];
-  };
-  tools: {
-    totalCalls: number;
-    errorCalls: number;
-    errorRate: number;
-    topTools: {
-      toolName: string;
-      count: number;
-      errorCount: number;
-      errorRate: number;
-    }[];
-  };
-  safety: {
-    permissionModes: {
-      mode: string;
-      entryCount: number;
-      sessionCount: number;
-    }[];
-    dangerousCommands: {
-      count: number;
-      sessions: number;
-      patterns: EnterpriseRollupNameCount[];
-    };
-    bypassPermissionSessions: number;
-  };
-  topProjects: {
-    rank: number;
-    label: string;
-    projectKey: string;
-    sessionCount: number;
-    messageCount: number;
-    estimatedCostUsd: number;
-  }[];
-  privacy: {
-    redacted: boolean;
-    projectKeys: string;
-    excludes: string[];
-  };
-}
-
-export interface EnterpriseOrganizationSummary {
-  organization: { id: string; name: string };
-  principals: EnterprisePrincipal[];
-  principalPage: EnterprisePrincipalPage;
-  teams: EnterpriseTeamSummary[];
-  identityCoverage?: EnterpriseIdentityCoverage;
-  rollup?: EnterpriseOrganizationRollup;
-  securityPosture?: EnterpriseSecurityPosture;
-  auditActivity?: EnterpriseAuditActivitySummary;
-  auditEvents: EnterpriseAuditEvent[];
-}
-
-export interface EnterpriseReadinessReceipt {
-  schemaVersion: string;
-  generatedAt: string;
-  status: 'ready' | 'review-required';
-  mode: 'single-user' | 'enterprise';
-  organization: { id: string; name: string };
-  reviewer: {
-    role?: EnterpriseRole;
-    capabilities: Record<string, boolean>;
-  } | null;
-  summary: {
-    actionRequiredControls: number;
-    enabledControls: number;
-    disabledControls: number;
-    configuredPrincipals: number;
-    teams: number;
-    scopedDataRoots: number;
-    sessions: number;
-    projects: number;
-    auditEvents: number;
-    deniedAuditEvents: number;
-    rateLimitedAuditEvents: number;
-    serverErrorAuditEvents: number;
-  };
-  evidence: {
-    posture: {
-      generatedAt: string;
-      controls: {
-        total: number;
-        enabled: number;
-        disabled: number;
-        actionRequired: number;
-        other: number;
-        actionRequiredIds: string[];
-        states: {
-          id: string;
-          label: string;
-          state: EnterpriseSecurityControlState;
-        }[];
-      };
-    };
-    identityCoverage?: EnterpriseIdentityCoverage;
-    auditActivity?: EnterpriseAuditActivitySummary;
-    rollup: {
-      schemaVersion: string;
-      generatedAt: string;
-      window: { start: string | null; end: string | null };
-      principals: EnterpriseOrganizationRollup['principals'];
-      counts: EnterpriseOrganizationRollup['counts'];
-      usage: EnterpriseOrganizationRollup['usage'];
-      tools: Pick<
-        EnterpriseOrganizationRollup['tools'],
-        'totalCalls' | 'errorCalls' | 'errorRate'
-      >;
-      safety: EnterpriseOrganizationRollup['safety'];
-      privacy: EnterpriseOrganizationRollup['privacy'];
-    } | null;
-    routeAccess: {
-      inventoryGate: string;
-      unclassifiedApiRoutesFailClosed: boolean;
-      adminGlobalViews: boolean;
-      scopedUserViewsRequireDataRoot: boolean;
-      rawTranscriptRoutesHighestSensitivity: boolean;
-      writesRequireAdminAndCsrf: boolean;
-    };
-    bounds: Record<string, number>;
-  };
-  privacy: {
-    redacted: boolean;
-    derivedFrom: string[];
-    excludes: string[];
-  };
-}
-
-export interface FetchEnterpriseOrganizationOptions {
-  principalLimit?: number;
-  principalOffset?: number;
-}
-
-export interface FetchEnterpriseAuditExportOptions {
-  limit?: number;
-}
-
 /** Normalized result of a policy write-back. */
 export interface PolicyWriteResult {
   ok: boolean;
@@ -389,46 +100,12 @@ export interface PolicyWriteResult {
   error?: string;
 }
 
-export function getEnterpriseAuthToken(): string | null {
-  try {
-    return sessionStorage.getItem(ENTERPRISE_AUTH_TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function setEnterpriseAuthToken(token: string): void {
-  try {
-    sessionStorage.setItem(ENTERPRISE_AUTH_TOKEN_KEY, token);
-  } catch {
-    /* sessionStorage may be disabled */
-  }
-}
-
-export function clearEnterpriseAuthToken(): void {
-  try {
-    sessionStorage.removeItem(ENTERPRISE_AUTH_TOKEN_KEY);
-  } catch {
-    /* sessionStorage may be disabled */
-  }
-}
-
-function rememberEnterpriseSessionForCache(session: ServerSession): void {
-  if (session.authRequired && session.authenticated && session.principal) {
-    enterpriseDatasetCacheKeyHint = `${session.principal.orgId}\u001f${session.principal.userId}`;
-  } else if (session.authRequired) {
-    enterpriseDatasetCacheKeyHint = null;
-  }
-}
-
 /**
- * Same-origin guard for the shared request primitive (#3108). serverFetch
- * attaches the enterprise bearer token by default, and `credentials:
- * 'same-origin'` constrains only AMBIENT credentials (cookies) — it does not
- * suppress an explicitly-set Authorization header, which would ride along to
- * whatever absolute URL a caller passed. Every dashboard endpoint is
- * same-origin by construction, so a cross-origin target is never legitimate
- * here; it is refused before `fetch` runs, token or no token.
+ * Same-origin guard for the shared request primitive (#3108). Every dashboard
+ * endpoint is same-origin by construction, so a cross-origin target is never
+ * legitimate here; it is refused before `fetch` runs, so no caller-supplied
+ * Authorization header or other request state can ride along to a foreign
+ * origin.
  *
  * Returns the refusal message, or `null` when the target is acceptable. In a
  * non-browser context (no `location`) there is no origin to compare against:
@@ -437,7 +114,7 @@ function rememberEnterpriseSessionForCache(session: ServerSession): void {
  *
  * Scope note: only the INITIAL target is checked here. A same-origin request
  * that the server redirects cross-origin is covered by the platform instead —
- * the Fetch standard's HTTP-redirect fetch deletes the Authorization header
+ * the Fetch standard's HTTP-redirect fetch deletes any Authorization header
  * when the redirect target is not same-origin with the request's origin.
  */
 function crossOriginViolation(input: RequestInfo | URL): string | null {
@@ -475,18 +152,13 @@ function crossOriginViolation(input: RequestInfo | URL): string | null {
  */
 export function serverFetch(
   input: RequestInfo | URL,
-  init: RequestInit = {},
-  token: string | null = getEnterpriseAuthToken()
+  init: RequestInit = {}
 ): Promise<Response> {
   const violation = crossOriginViolation(input);
   if (violation !== null) {
     return Promise.reject(new Error(violation));
   }
-  const headers = new Headers(init.headers);
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
-  return fetch(input, { ...init, credentials: 'same-origin', headers });
+  return fetch(input, { ...init, credentials: 'same-origin' });
 }
 
 function isServerSession(value: unknown): value is ServerSession {
@@ -568,18 +240,13 @@ function rejectedAuthSession(
   };
 }
 
-export async function fetchAuthSession(
-  token: string | null = getEnterpriseAuthToken()
-): Promise<ServerSession> {
+export async function fetchAuthSession(): Promise<ServerSession> {
   try {
-    const res = await serverFetch(
-      '/api/auth/session',
-      { headers: { Accept: 'application/json' } },
-      token
-    );
+    const res = await serverFetch('/api/auth/session', {
+      headers: { Accept: 'application/json' },
+    });
     const body = (await res.json().catch(() => null)) as unknown;
     if (res.ok && isServerSession(body)) {
-      rememberEnterpriseSessionForCache(body);
       return body;
     }
     return rejectedAuthSession(
@@ -601,118 +268,11 @@ export async function fetchAuthSession(
   }
 }
 
-export async function createEnterpriseBrowserSession(
-  token: string
-): Promise<ServerSession> {
-  try {
-    const res = await serverFetch(
-      '/api/auth/session',
-      {
-        method: 'POST',
-        headers: { Accept: 'application/json' },
-      },
-      token
-    );
-    const body = (await res.json().catch(() => null)) as unknown;
-    if (res.ok && isServerSession(body)) {
-      rememberEnterpriseSessionForCache(body);
-      return body;
-    }
-    return rejectedAuthSession(body, res.status, true);
-  } catch {
-    return {
-      mode: 'enterprise',
-      authRequired: true,
-      authenticated: false,
-      configured: true,
-      principal: null,
-      organization: null,
-      capabilities: {},
-      error: 'Could not reach the dashboard server',
-    };
-  }
-}
-
-export async function clearEnterpriseBrowserSession(): Promise<void> {
-  enterpriseDatasetCacheKeyHint = null;
-  clearEnterpriseAuthToken();
-  await serverFetch('/api/auth/session', { method: 'DELETE' }, null).catch(() => undefined);
-}
-
-function appendPositiveIntegerParam(
-  params: URLSearchParams,
-  name: string,
-  value: number | undefined
-): void {
-  if (value == null || !Number.isFinite(value)) return;
-  params.set(name, String(Math.max(0, Math.floor(value))));
-}
-
-export async function fetchEnterpriseOrganization(
-  options: FetchEnterpriseOrganizationOptions = {}
-): Promise<EnterpriseOrganizationSummary> {
-  const params = new URLSearchParams();
-  appendPositiveIntegerParam(params, 'principalLimit', options.principalLimit);
-  appendPositiveIntegerParam(params, 'principalOffset', options.principalOffset);
-  const query = params.toString();
-  const res = await serverFetch(`/api/enterprise/organization${query ? `?${query}` : ''}`, {
-    headers: { Accept: 'application/json' },
-  });
-  const body = (await res.json().catch(() => null)) as unknown;
-  if (!res.ok || !body || typeof body !== 'object') {
-    throw new Error(`Enterprise organization request failed (HTTP ${res.status})`);
-  }
-  return body as EnterpriseOrganizationSummary;
-}
-
-export async function fetchEnterpriseAuditExport(
-  options: FetchEnterpriseAuditExportOptions = {}
-): Promise<string> {
-  const params = new URLSearchParams();
-  appendPositiveIntegerParam(params, 'limit', options.limit);
-  const query = params.toString();
-  const res = await serverFetch(
-    `/api/enterprise/audit-export.ndjson${query ? `?${query}` : ''}`,
-    {
-      headers: { Accept: 'application/x-ndjson, text/plain;q=0.9, */*;q=0.1' },
-    }
-  );
-  if (!res.ok) {
-    throw new Error(`Enterprise audit export request failed (HTTP ${res.status})`);
-  }
-  return res.text();
-}
-
-export async function fetchEnterpriseReadinessReceipt(): Promise<EnterpriseReadinessReceipt> {
-  const res = await serverFetch('/api/enterprise/readiness-receipt', {
-    headers: { Accept: 'application/json' },
-  });
-  const body = (await res.json().catch(() => null)) as unknown;
-  if (!res.ok || !body || typeof body !== 'object') {
-    throw new Error(`Enterprise readiness receipt request failed (HTTP ${res.status})`);
-  }
-  return body as EnterpriseReadinessReceipt;
-}
-
-async function stableDatasetCacheKey(source: string): Promise<string | null> {
-  try {
-    if (!globalThis.crypto?.subtle) return null;
-    const bytes = new TextEncoder().encode(source);
-    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-    const hex = [...new Uint8Array(digest)]
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-    return `auth:${hex.slice(0, 24)}`;
-  } catch {
-    return null;
-  }
-}
-
-export async function datasetCacheKey(token: string | null): Promise<string | null> {
-  if (token) return stableDatasetCacheKey(`bearer:${token}`);
-  if (enterpriseDatasetCacheKeyHint) {
-    return stableDatasetCacheKey(`session:${enterpriseDatasetCacheKeyHint}`);
-  }
+/**
+ * IndexedDB key for the last-good dataset. The browser holds no per-user
+ * credential, so every load shares one stable local key.
+ */
+export async function datasetCacheKey(): Promise<string | null> {
   return 'live';
 }
 
@@ -726,8 +286,7 @@ async function fetchDatasetViaWorker(
   url: string,
   onFresh?: (data: unknown) => void
 ): Promise<unknown> {
-  const token = getEnterpriseAuthToken();
-  const cacheKey = await datasetCacheKey(token);
+  const cacheKey = await datasetCacheKey();
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./dataset-worker.ts', import.meta.url), {
       type: 'module',
@@ -774,7 +333,7 @@ async function fetchDatasetViaWorker(
     };
     worker.postMessage({
       url,
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: {},
       cacheKey,
     });
   });

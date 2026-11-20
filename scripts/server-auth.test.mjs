@@ -138,8 +138,49 @@ function checkSecurityHeaders(prefix, res) {
 }
 
 function checkNeutralSession(prefix, body) {
+  check(`${prefix} reports single-user mode`, body?.mode === 'single-user');
   check(`${prefix} reports no bearer auth requirement`, body?.authRequired === false);
+  check(`${prefix} reports no principal or organization`, body?.principal === null && body?.organization === null);
   check(`${prefix} reports a capabilities object`, body?.capabilities && typeof body.capabilities === 'object');
+  check(`${prefix} allows policy writes`, body?.capabilities?.canWritePolicy === true);
+}
+
+// Boot the server expecting it to refuse to start; resolves with exit status.
+async function startServerExpectExit(extraEnv = {}) {
+  const claudeDir = await mkdtemp(join(tmpdir(), 'server-auth-claude-'));
+  const distDir = await mkdtemp(join(tmpdir(), 'server-auth-dist-'));
+  const cacheDir = await mkdtemp(join(tmpdir(), 'server-auth-cache-'));
+  const port = await freePort();
+  const proc = spawn('node', ['--import', REGISTER, SERVER], {
+    cwd: PROJECT_DIR,
+    env: {
+      ...scrubbedEnv(),
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      CLAUDE_DIR: claudeDir,
+      DIST_DIR: distDir,
+      CHD_CACHE_DIR: cacheDir,
+      ...extraEnv,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  proc.stdout.on('data', (chunk) => { output += String(chunk); });
+  proc.stderr.on('data', (chunk) => { output += String(chunk); });
+  const result = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve({ code: null, timedOut: true });
+    }, 15_000);
+    proc.once('exit', (code) => {
+      clearTimeout(timer);
+      resolve({ code, timedOut: false });
+    });
+  });
+  await rm(claudeDir, { recursive: true, force: true });
+  await rm(distDir, { recursive: true, force: true });
+  await rm(cacheDir, { recursive: true, force: true });
+  return { ...result, output };
 }
 
 const basic = (user, pass) => `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
@@ -251,6 +292,78 @@ try {
   check('oversized configured basic auth redacts secret', !text.includes('pppppppppppppppp'));
 } finally {
   await server.stop();
+}
+
+// ── Retired enterprise auth knobs (#3839) ──────────────────────────────────
+// Leftover enterprise configuration no longer authenticates anyone. A bearer
+// token is not a credential, the session stays neutral, and a beyond-loopback
+// bind without HTTP Basic still refuses to start.
+const ENTERPRISE_ENV = {
+  DASHBOARD_AUTH_MODE: 'enterprise',
+  DASHBOARD_ADMIN_TOKEN: 'retired-enterprise-admin-token-0123456789abcdef',
+};
+server = await startServer({
+  ...ENTERPRISE_ENV,
+  DASHBOARD_USER: 'basic-user',
+  DASHBOARD_PASS: 'basic-pass',
+});
+try {
+  let r = await fetch(`${server.base}/sessions-manifest.json`, {
+    headers: { Authorization: `Bearer ${ENTERPRISE_ENV.DASHBOARD_ADMIN_TOKEN}` },
+  });
+  check('retired enterprise bearer does not bypass Basic auth', r.status === 401, `got ${r.status}`);
+  r = await fetch(`${server.base}/api/auth/session`, {
+    headers: { Authorization: basic('basic-user', 'basic-pass') },
+  });
+  checkNeutralSession('retired enterprise config session', await json(r));
+  r = await fetch(`${server.base}/api/auth/session`, {
+    method: 'POST',
+    headers: { Authorization: basic('basic-user', 'basic-pass') },
+  });
+  check('browser session creation is gone', r.status === 405, `got ${r.status}`);
+  r = await fetch(`${server.base}/api/usage`, {
+    headers: { Authorization: basic('basic-user', 'basic-pass') },
+  });
+  const usage = await json(r);
+  check(
+    'usage gauge stays off on a Basic-auth server without the opt-in',
+    usage?.available === false && usage?.reason === 'server_usage_gauge_disabled',
+    JSON.stringify(usage)
+  );
+} finally {
+  await server.stop();
+}
+
+{
+  const result = await startServerExpectExit(ENTERPRISE_ENV);
+  check(
+    'loopback bind with only retired enterprise config refuses to start',
+    !result.timedOut && result.code !== 0,
+    result.output.slice(-2000)
+  );
+  check(
+    'refusal names the ignored settings',
+    /DASHBOARD_AUTH_MODE, DASHBOARD_ADMIN_TOKEN are set/.test(result.output),
+    result.output.slice(-2000)
+  );
+}
+
+{
+  const result = await startServerExpectExit({
+    ...ENTERPRISE_ENV,
+    HOST: '0.0.0.0',
+    DASHBOARD_BIND_HOST: '0.0.0.0',
+  });
+  check(
+    'beyond-loopback bind with only enterprise config refuses to start',
+    !result.timedOut && result.code !== 0,
+    result.output.slice(-2000)
+  );
+  check(
+    'refusal names the missing Basic credentials',
+    /Refusing to start/.test(result.output) && /DASHBOARD_USER\/DASHBOARD_PASS/.test(result.output),
+    result.output.slice(-2000)
+  );
 }
 
 // ── Opt-in HSTS ────────────────────────────────────────────────────────────

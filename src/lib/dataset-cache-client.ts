@@ -37,8 +37,8 @@ function runDatasetCacheOperation(
 }
 
 /** Capture once per load so auth changes cannot redirect the eventual write. */
-export function resolveDatasetCacheKey(token: string | null): Promise<string | null> {
-  return datasetCacheKey(token);
+export function resolveDatasetCacheKey(): Promise<string | null> {
+  return datasetCacheKey();
 }
 
 /** Read the parsed last-good dataset without starting a network revalidation. */
@@ -53,7 +53,6 @@ export async function persistCachedDataset(cacheKey: string | null, data: unknow
 
 /** Monolith SWR fallback bound to the same immutable auth/cache identity. */
 export function fetchDatasetForIdentity(
-  token: string | null,
   cacheKey: string | null,
   onFresh?: (data: unknown) => void,
 ): Promise<unknown> {
@@ -82,7 +81,7 @@ export function fetchDatasetForIdentity(
     worker.postMessage({
       operation: 'fetch',
       url: ['', 'api', 'dataset.json'].join('/'),
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers: {},
       cacheKey,
     });
   });

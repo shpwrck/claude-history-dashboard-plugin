@@ -15,12 +15,8 @@ const readCachedDatasetMock = vi.hoisted(() => vi.fn());
 const persistCachedDatasetMock = vi.hoisted(() => vi.fn());
 const resolveDatasetCacheKeyMock = vi.hoisted(() => vi.fn());
 const cacheReadCancelMock = vi.hoisted(() => vi.fn());
-const authTokenMock = vi.hoisted(() => vi.fn());
-vi.mock('@api-client', () => ({
-  getEnterpriseAuthToken: () => authTokenMock(),
-}));
 vi.mock('./dataset-cache-client', () => ({
-  resolveDatasetCacheKey: (token: string | null) => resolveDatasetCacheKeyMock(token),
+  resolveDatasetCacheKey: () => resolveDatasetCacheKeyMock(),
   readCachedDataset: (cacheKey: string | null) => ({
     promise: readCachedDatasetMock(cacheKey),
     cancel: cacheReadCancelMock,
@@ -28,10 +24,9 @@ vi.mock('./dataset-cache-client', () => ({
   persistCachedDataset: (cacheKey: string | null, data: unknown) =>
     persistCachedDatasetMock(cacheKey, data),
   fetchDatasetForIdentity: (
-    token: string | null,
     cacheKey: string | null,
     onFresh?: (data: unknown) => void,
-  ) => fetchDatasetMock(token, cacheKey, onFresh),
+  ) => fetchDatasetMock(cacheKey, onFresh),
 }));
 
 import { loadServerDataset } from './instant-load';
@@ -116,7 +111,6 @@ function installIndexedDb(events: string[]) {
 }
 
 beforeEach(() => {
-  authTokenMock.mockReturnValue(null);
   resolveDatasetCacheKeyMock.mockResolvedValue('cache-a');
   readCachedDatasetMock.mockResolvedValue(null);
   persistCachedDatasetMock.mockResolvedValue(undefined);
@@ -129,7 +123,6 @@ afterEach(() => {
   persistCachedDatasetMock.mockReset();
   resolveDatasetCacheKeyMock.mockReset();
   cacheReadCancelMock.mockReset();
-  authTokenMock.mockReset();
 });
 
 describe('loadServerDataset', () => {
@@ -509,56 +502,31 @@ describe('loadServerDataset', () => {
     expect(cacheReadCancelMock).toHaveBeenCalledTimes(1);
   });
 
-  it('binds boot, slices, cache read, and persistence to one auth identity', async () => {
-    authTokenMock.mockReturnValue('token-a');
-    resolveDatasetCacheKeyMock.mockResolvedValue('principal-a');
-    let resolveBoot: ((response: Response) => void) | undefined;
-    const bootResponse = new Promise<Response>((resolve) => { resolveBoot = resolve; });
-    const fetchMock = installFetch({
-      ...okRoutes(),
-      '/api/dataset/boot': () => bootResponse,
-    });
-
-    const loading = loadServerDataset(vi.fn(), vi.fn(), vi.fn());
-    await vi.waitFor(() => expect(resolveBoot).toBeDefined());
-    authTokenMock.mockReturnValue('token-b');
-    resolveBoot?.(jsonRes(BOOT, { version: 'v1' }));
-    await loading;
-
-    expect(resolveDatasetCacheKeyMock).toHaveBeenCalledTimes(1);
-    expect(resolveDatasetCacheKeyMock).toHaveBeenCalledWith('token-a');
-    expect(readCachedDatasetMock).toHaveBeenCalledWith('principal-a');
-    expect(persistCachedDatasetMock).toHaveBeenCalledWith(
-      'principal-a',
-      expect.any(Object),
-    );
-    for (const [, init] of fetchMock.mock.calls) {
-      expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer token-a' });
-    }
-  });
-
-  it('binds monolith fallback to the auth identity captured before loading', async () => {
-    authTokenMock.mockReturnValue('token-a');
-    resolveDatasetCacheKeyMock.mockResolvedValue('principal-a');
+  it('binds cache read, persistence, and fallback to one cache key with no bearer header', async () => {
+    resolveDatasetCacheKeyMock.mockResolvedValue('live');
     const routes = okRoutes();
-    routes['/api/dataset/boot'] = () => {
-      authTokenMock.mockReturnValue('token-b');
-      return jsonRes(BOOT, { version: 'v1' });
-    };
     routes['/api/dataset/slice/entries'] = () => jsonRes({}, { status: 500 });
     const fetchMock = installFetch(routes);
     fetchDatasetMock.mockResolvedValue({ entries: [], tokenData: [] });
 
     await loadServerDataset(vi.fn(), vi.fn(), vi.fn());
 
-    expect(fetchDatasetMock).toHaveBeenCalledWith(
-      'token-a',
-      'principal-a',
-      expect.any(Function),
-    );
+    expect(resolveDatasetCacheKeyMock).toHaveBeenCalledTimes(1);
+    expect(readCachedDatasetMock).toHaveBeenCalledWith('live');
+    expect(fetchDatasetMock).toHaveBeenCalledWith('live', expect.any(Function));
     for (const [, init] of fetchMock.mock.calls) {
-      expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer token-a' });
+      expect((init as RequestInit).credentials).toBe('same-origin');
+      expect((init as RequestInit).headers).not.toHaveProperty('Authorization');
     }
+  });
+
+  it('persists a completed progressive load under the captured cache key', async () => {
+    resolveDatasetCacheKeyMock.mockResolvedValue('live');
+    installFetch(okRoutes());
+
+    await loadServerDataset(vi.fn(), vi.fn(), vi.fn());
+
+    expect(persistCachedDatasetMock).toHaveBeenCalledWith('live', expect.any(Object));
   });
 
   it('falls back to the monolith on a mid-load version skew', async () => {

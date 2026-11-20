@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  createEnterpriseBrowserSession,
   fetchAuditRun,
   fetchAuthSession,
-  fetchEnterpriseAuditExport,
-  fetchEnterpriseOrganization,
-  fetchEnterpriseReadinessReceipt,
   fetchWorkflows,
   postCheckpointAnswer,
 } from './api-client';
@@ -115,7 +111,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    await expect(fetchAuthSession(null)).resolves.toEqual(local);
+    await expect(fetchAuthSession()).resolves.toEqual(local);
   });
 
   it('matches the sample stub to the neutral single-user contract (#3832)', async () => {
@@ -137,7 +133,7 @@ describe('fetchAuthSession', () => {
       vi.fn(async () => new Response('forbidden', { status: 403 }))
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.mode).toBe('enterprise');
     expect(session.authRequired).toBe(true);
@@ -169,7 +165,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.mode).toBe('enterprise');
     expect(session.authRequired).toBe(true);
@@ -205,7 +201,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    await expect(fetchAuthSession(null)).resolves.toEqual(body);
+    await expect(fetchAuthSession()).resolves.toEqual(body);
   });
 
   it('preserves a structured GET failure while keeping the session indeterminate', async () => {
@@ -220,7 +216,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.authRequired).toBe(false);
     expect(session.authenticated).toBe(false);
@@ -246,7 +242,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.error).toBe('Auth check failed (HTTP 500)');
     expect(session.configError).toBeUndefined();
@@ -266,7 +262,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.error).toBe('x'.repeat(2_000));
   });
@@ -308,7 +304,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.capabilities).toEqual({});
     expect(
@@ -335,7 +331,7 @@ describe('fetchAuthSession', () => {
       )
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.authRequired).toBe(false);
     expect(session.capabilities).toEqual({});
@@ -350,274 +346,11 @@ describe('fetchAuthSession', () => {
       })
     );
 
-    const session = await fetchAuthSession(null);
+    const session = await fetchAuthSession();
 
     expect(session.authRequired).toBe(false);
     expect(session.capabilities).toEqual({});
     expect(session.error).toBe('Could not reach the dashboard server');
-  });
-});
-
-describe('createEnterpriseBrowserSession', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('rejects a complete writable enterprise session body returned with HTTP 500', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              mode: 'enterprise',
-              authRequired: true,
-              authenticated: true,
-              configured: true,
-              principal: null,
-              organization: { id: 'acme', name: 'Acme' },
-              capabilities: { canWritePolicy: true },
-            }),
-            {
-              status: 500,
-              headers: { 'Content-Type': 'application/json' },
-            }
-          )
-      )
-    );
-
-    const session = await createEnterpriseBrowserSession('saved-token');
-
-    expect(session.capabilities).toEqual({});
-    expect(
-      serverCapabilityAllowed(session, 'canWritePolicy')
-    ).toBe(false);
-    expect(session.error).toBe('Auth check failed (HTTP 500)');
-  });
-
-  it('preserves a structured org-mismatch reason while rejecting every other 403 field', async () => {
-    const error =
-      'Forbidden: this principal is outside the configured organization';
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              mode: 'single-user',
-              authRequired: false,
-              authenticated: true,
-              configured: false,
-              principal: { userId: 'outside-org' },
-              organization: { id: 'other-org', name: 'Other org' },
-              capabilities: { canWritePolicy: true },
-              error,
-            }),
-            {
-              status: 403,
-              headers: { 'Content-Type': 'application/json' },
-            }
-          )
-      )
-    );
-
-    const session = await createEnterpriseBrowserSession('outside-org-token');
-
-    expect(session).toEqual({
-      mode: 'enterprise',
-      authRequired: true,
-      authenticated: false,
-      configured: true,
-      principal: null,
-      organization: null,
-      capabilities: {},
-      error,
-    });
-    expect(
-      serverCapabilityAllowed(session, 'canWritePolicy')
-    ).toBe(false);
-  });
-
-  it('preserves a structured configuration error while keeping a rejected session closed', async () => {
-    const configError =
-      'DASHBOARD_AUTH_CONFIG contains a principal outside DASHBOARD_ORG_ID';
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              mode: 'enterprise',
-              authRequired: true,
-              authenticated: true,
-              configured: true,
-              principal: { userId: 'admin' },
-              organization: { id: 'acme', name: 'Acme' },
-              capabilities: { canWritePolicy: true },
-              configError,
-            }),
-            {
-              status: 503,
-              headers: { 'Content-Type': 'application/json' },
-            }
-          )
-      )
-    );
-
-    const session = await createEnterpriseBrowserSession('admin-token');
-
-    expect(session).toEqual({
-      mode: 'enterprise',
-      authRequired: true,
-      authenticated: false,
-      configured: false,
-      configError,
-      principal: null,
-      organization: null,
-      capabilities: {},
-    });
-    expect(
-      serverCapabilityAllowed(session, 'canWritePolicy')
-    ).toBe(false);
-  });
-});
-
-describe('fetchEnterpriseOrganization', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('passes bounded principal pagination parameters to the organization API', async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            organization: { id: 'acme', name: 'Acme' },
-            principals: [],
-            principalPage: { total: 200, limit: 50, offset: 100, returned: 0 },
-            teams: [],
-            auditEvents: [],
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
-    );
-    vi.stubGlobal('fetch', fetchMock);
-
-    await fetchEnterpriseOrganization({
-      principalLimit: 50,
-      principalOffset: 100,
-    });
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/enterprise/organization?principalLimit=50&principalOffset=100',
-      expect.objectContaining({
-        headers: expect.any(Headers),
-      })
-    );
-  });
-});
-
-describe('fetchEnterpriseReadinessReceipt', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('fetches the redacted enterprise readiness receipt through the server chokepoint', async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            schemaVersion: '1',
-            generatedAt: '2026-06-10T00:00:00.000Z',
-            status: 'ready',
-            mode: 'enterprise',
-            organization: { id: 'acme', name: 'Acme' },
-            reviewer: null,
-            summary: {
-              actionRequiredControls: 0,
-              enabledControls: 1,
-              disabledControls: 0,
-              configuredPrincipals: 1,
-              teams: 1,
-              scopedDataRoots: 1,
-              sessions: 0,
-              projects: 0,
-              auditEvents: 0,
-              deniedAuditEvents: 0,
-              rateLimitedAuditEvents: 0,
-              serverErrorAuditEvents: 0,
-            },
-            evidence: {
-              posture: {
-                generatedAt: '2026-06-10T00:00:00.000Z',
-                controls: {
-                  total: 1,
-                  enabled: 1,
-                  disabled: 0,
-                  actionRequired: 0,
-                  other: 0,
-                  actionRequiredIds: [],
-                  states: [{ id: 'auth', label: 'Auth', state: 'enabled' }],
-                },
-              },
-              rollup: null,
-              routeAccess: {
-                inventoryGate: 'npm run gate:server-route-access-policy',
-                unclassifiedApiRoutesFailClosed: true,
-                adminGlobalViews: true,
-                scopedUserViewsRequireDataRoot: true,
-                rawTranscriptRoutesHighestSensitivity: true,
-                writesRequireAdminAndCsrf: true,
-              },
-              bounds: {},
-            },
-            privacy: {
-              redacted: true,
-              derivedFrom: [],
-              excludes: ['raw bearer tokens'],
-            },
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
-    );
-    vi.stubGlobal('fetch', fetchMock);
-
-    const receipt = await fetchEnterpriseReadinessReceipt();
-
-    expect(receipt.privacy.redacted).toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/enterprise/readiness-receipt',
-      expect.objectContaining({
-        headers: expect.any(Headers),
-      })
-    );
-  });
-});
-
-describe('fetchEnterpriseAuditExport', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('fetches bounded sanitized audit NDJSON through the server chokepoint', async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response('{"type":"enterprise.route.allowed"}\n', {
-          status: 200,
-          headers: { 'Content-Type': 'application/x-ndjson' },
-        })
-    );
-    vi.stubGlobal('fetch', fetchMock);
-
-    const body = await fetchEnterpriseAuditExport({ limit: 3 });
-
-    expect(body).toContain('enterprise.route.allowed');
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/enterprise/audit-export.ndjson?limit=3',
-      expect.objectContaining({
-        headers: expect.any(Headers),
-      })
-    );
   });
 });
 
@@ -660,7 +393,7 @@ describe('postCheckpointAnswer', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/csrf-token',
-      expect.objectContaining({ headers: expect.any(Headers) })
+      expect.objectContaining({ credentials: 'same-origin' })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,

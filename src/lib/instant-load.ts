@@ -12,9 +12,6 @@
 // chunk is physically absent from the sample bundle.
 
 import {
-  getEnterpriseAuthToken,
-} from '@api-client';
-import {
   fetchDatasetForIdentity,
   persistCachedDataset,
   readCachedDataset,
@@ -51,21 +48,20 @@ export interface LoadServerDatasetOptions {
   applySlice?: (patch: DatasetSlicePatch) => void;
 }
 
-// Same credentials + enterprise-auth header the api-client `serverFetch` applies.
-function authHeaders(token: string | null): Record<string, string> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return headers;
+// Same credentials the api-client `serverFetch` applies; HTTP Basic auth, when
+// configured, is managed by the browser.
+function requestHeaders(): Record<string, string> {
+  return { Accept: 'application/json' };
 }
 
-function authFetch(url: string, token: string | null): Promise<Response> {
-  return fetch(url, { credentials: 'same-origin', headers: authHeaders(token) });
+function sameOriginFetch(url: string): Promise<Response> {
+  return fetch(url, { credentials: 'same-origin', headers: requestHeaders() });
 }
 
 const sliceUrl = (key: string) => `/api/dataset/slice/${encodeURIComponent(key)}`;
 
-async function fetchBoot(token: string | null): Promise<DatasetBoot> {
-  const res = await authFetch('/api/dataset/boot', token);
+async function fetchBoot(): Promise<DatasetBoot> {
+  const res = await sameOriginFetch('/api/dataset/boot');
   if (!res.ok) throw new Error(`dataset boot failed: ${res.status}`);
   return (await res.json()) as DatasetBoot;
 }
@@ -76,9 +72,8 @@ async function fetchBoot(token: string | null): Promise<DatasetBoot> {
 // preserve-data) is covered without a real worker.
 async function fetchSliceOnMainThread(
   key: string,
-  token: string | null,
 ): Promise<DatasetSliceResult> {
-  const res = await authFetch(sliceUrl(key), token);
+  const res = await sameOriginFetch(sliceUrl(key));
   if (!res.ok) throw new Error(`dataset slice '${key}' failed: ${res.status}`);
   return {
     key,
@@ -177,7 +172,6 @@ function decodeSlicesViaWorker(
 // the monolith, rather than re-downloading every slice here first (#2448 review).
 async function fetchSlices(
   sliceKeys: string[],
-  token: string | null,
   onResult: (result: DatasetSliceResult) => void,
 ): Promise<DatasetSliceResult[]> {
   if (sliceKeys.length === 0) return [];
@@ -187,7 +181,7 @@ async function fetchSlices(
   }));
   if (typeof Worker !== 'undefined') {
     try {
-      return await decodeSlicesViaWorker(requests, authHeaders(token), onResult);
+      return await decodeSlicesViaWorker(requests, requestHeaders(), onResult);
     } catch (err) {
       if (!(err instanceof SliceWorkerCrashError)) throw err;
       // Worker infra failed — fall through to the main thread.
@@ -197,7 +191,7 @@ async function fetchSlices(
   try {
     return await Promise.all(
       requests.map(async (request) => {
-        const result = await fetchSliceOnMainThread(request.key, token);
+        const result = await fetchSliceOnMainThread(request.key);
         if (acceptingResults) onResult(result);
         return result;
       })
@@ -232,9 +226,8 @@ function shellCountsFromBoot(boot: DatasetBoot): DatasetShellCounts {
 async function fetchDatasetProgressive(
   onPartial: (data: unknown, counts: DatasetShellCounts) => void,
   onSlice: (patch: DatasetSlicePatch) => void,
-  token: string | null,
 ): Promise<unknown | null> {
-  const boot = await fetchBoot(token);
+  const boot = await fetchBoot();
   const meta = boot.meta ?? {};
   // Instant shell: the full Dataset shape with heavy slices still empty, plus the
   // real session/entry/token counts so the masthead shows true numbers now.
@@ -253,7 +246,7 @@ async function fetchDatasetProgressive(
   let acceptingSlices = true;
   let skew = false;
   try {
-    await fetchSlices(requestedKeys, token, (result) => {
+    await fetchSlices(requestedKeys, (result) => {
       if (!acceptingSlices) return;
       if (!isSliceKey(result.key) || !requested.has(result.key)) {
         throw new Error(`unexpected dataset slice key '${result.key}'`);
@@ -365,8 +358,7 @@ export async function loadServerDataset(
   let coldShell: unknown | null = null;
   let progressivePatchApplied = false;
   setBusy(true);
-  const token = getEnterpriseAuthToken();
-  const cacheKey = await resolveDatasetCacheKey(token);
+  const cacheKey = await resolveDatasetCacheKey();
   // Restore the pre-split instant repeat paint without starting the monolith
   // network request: a cache-only worker read races boot/slices. A late cache
   // result never overwrites a completed progressive load.
@@ -403,8 +395,7 @@ export async function loadServerDataset(
           opts.applySlice(patch);
           progressivePatchApplied = true;
         }
-      },
-      token
+      }
     );
     if (full) {
       suppressCachePaint = true;
@@ -429,7 +420,7 @@ export async function loadServerDataset(
     // Invalidate it BEFORE the fetch (awaited) so the SWR fallback paints fresh,
     // not the old snapshot on the exact path where the snapshot changed (#2448 review).
     await invalidateMonolithCache();
-    apply(await fetchDatasetForIdentity(token, cacheKey, (fresh) => apply(fresh)));
+    apply(await fetchDatasetForIdentity(cacheKey, (fresh) => apply(fresh)));
   } catch {
     // A delayed cache-only read remains valid on failure and continues in the
     // background, but never blocks the monolith fallback.
@@ -439,7 +430,6 @@ export async function loadServerDataset(
       // stale. Let fetchDataset paint/revalidate that last-good fallback; only
       // the explicit version-skew branch above invalidates it.
       const fallback = await fetchDatasetForIdentity(
-        token,
         cacheKey,
         (fresh) => apply(fresh),
       );

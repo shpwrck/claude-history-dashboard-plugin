@@ -216,7 +216,6 @@ export const ROUTE_INVENTORY = [
     value: '^\\/api\\/transcript\\/([^/]+)$',
     access: 'raw-transcript',
   },
-  { kind: 'prefix', value: '/api/transcript/', access: 'raw-transcript' },
   {
     kind: 'regex',
     value: '^\\/projects\\/([^/]+)\\/([^/]+)$',

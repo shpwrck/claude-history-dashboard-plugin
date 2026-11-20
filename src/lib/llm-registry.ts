@@ -82,7 +82,7 @@ export const LLM_USAGE_REGISTRY: readonly LlmUsageEntry[] = [
       'Read Anthropic plan-limit response headers for the live usage gauge.',
     trigger: 'opt-in',
     triggerDescription:
-      'GET /api/usage when DASHBOARD_ENABLE_SERVER_USAGE_GAUGE is enabled.',
+      'GET /api/usage on the open loopback server; with HTTP Basic auth configured, only when DASHBOARD_ENABLE_SERVER_USAGE_GAUGE is enabled.',
     dataClass: 'none',
     dataBoundary:
       'May use the local Claude OAuth token, but must not send ~/.claude-derived content.',
@@ -95,7 +95,7 @@ export const LLM_USAGE_REGISTRY: readonly LlmUsageEntry[] = [
         'request body, if present, must be the fixed max_tokens=1 probe payload',
       ],
       spendControls: [
-        'DASHBOARD_ENABLE_SERVER_USAGE_GAUGE kill switch',
+        'DASHBOARD_ENABLE_SERVER_USAGE_GAUGE gates the probe on Basic-auth servers',
         'DASHBOARD_USAGE_CREDENTIAL_MAX_BYTES bounds credential reads',
         'only parsed rate-limit headers are returned to the browser',
       ],

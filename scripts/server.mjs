@@ -18,21 +18,12 @@
 //      published port, not the (NAT'd) peer address.
 
 import { createServer } from 'node:http';
-import { appendFile, chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { lstat, mkdir, open, opendir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { constants as fsConstants, createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, normalize, resolve, extname, basename, sep } from 'node:path';
+import { dirname, join, normalize, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  createPublicKey,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-  verify as verifySignature,
-} from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   brotliCompress,
   brotliCompressSync,
@@ -97,7 +88,6 @@ import {
   docGraphGitWorkingTreeSignatureForServer,
   docGraphGitWorkingTreeSignatureFromLastSourceGate,
   PROJECT_ROOTS,
-  createIngest,
 } from './ingest.mjs';
 import {
   readWorkflows,
@@ -319,9 +309,7 @@ const { computeSessionOutcomes } = await import(
   join(PROJECT_DIR, 'src', 'lib', 'parse-timeline-success.ts')
 );
 // DIST_DIR lets route tests point at throwaway bundles. CLAUDE_DIR also supports
-// those tests. Enterprise scoped ingest receives each principal's data root as
-// an explicit factory option and never mutates this process-wide setting. In the
-// ordinary local container neither is set, so these resolve to bundled dist/
+// those tests. In the ordinary local container neither is set, so these resolve to bundled dist/
 // and the bind-mounted ~/.claude.
 const DIST = process.env.DIST_DIR || join(PROJECT_DIR, 'dist');
 const SHADOW_CALLS_DIR = join(CLAUDE, 'shadow-calls');
@@ -366,10 +354,6 @@ const CHECKPOINT_ANSWERS =
 const STEER_TELEMETRY_LOG =
   process.env.STEER_TELEMETRY_PATH ||
   join(CLAUDE, 'skills', 'recs', '.pretooluse-steer.jsonl');
-const ENTERPRISE_AUDIT_LOG =
-  process.env.ENTERPRISE_AUDIT_LOG_PATH ||
-  join(CHD_CACHE_DIR, 'enterprise-audit.jsonl');
-const ENTERPRISE_AUDIT_FILE_MODE = 0o600;
 // Dashboard-owned spool the SessionStart recs hook appends to when the server is
 // down (#581). Drained into ADOPTION_RECEIPTS on boot. Sibling of the receipts
 // log in the same dashboard data dir — NEVER under the install dir.
@@ -479,9 +463,6 @@ const DASHBOARD_WRITE_ORIGINS = Array.from(
       .filter(Boolean)
   )
 );
-const ENTERPRISE_SCOPE_ENFORCEMENT = parseBooleanEnv(
-  'DASHBOARD_AUTH_ENFORCE_SCOPES'
-);
 const DASHBOARD_CONTENT_SECURITY_POLICY_MAX_BYTES = Math.max(
   512,
   Math.min(
@@ -496,32 +477,6 @@ const {
   policy: DASHBOARD_CONTENT_SECURITY_POLICY_OVERRIDE,
   maxBytesExceeded: DASHBOARD_CONTENT_SECURITY_POLICY_MAX_BYTES_EXCEEDED,
 } = parseContentSecurityPolicyOverride('DASHBOARD_CONTENT_SECURITY_POLICY');
-const ENTERPRISE_RATE_LIMIT_WINDOW_MS = parseNonNegativeIntEnv(
-  'ENTERPRISE_RATE_LIMIT_WINDOW_MS',
-  60_000
-);
-const ENTERPRISE_AUTH_RATE_LIMIT = parseNonNegativeIntEnv(
-  'ENTERPRISE_AUTH_RATE_LIMIT',
-  120
-);
-const ENTERPRISE_API_RATE_LIMIT = parseNonNegativeIntEnv(
-  'ENTERPRISE_API_RATE_LIMIT',
-  1_200
-);
-const ENTERPRISE_RATE_LIMIT_MAX_BUCKETS = Math.max(
-  1_000,
-  Math.min(
-    1_000_000,
-    parseNonNegativeIntEnv('ENTERPRISE_RATE_LIMIT_MAX_BUCKETS', 50_000)
-  )
-);
-const ENTERPRISE_MAX_BEARER_TOKEN_BYTES = Math.max(
-  256,
-  Math.min(
-    65_536,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_MAX_BEARER_BYTES', 8_192)
-  )
-);
 const DASHBOARD_BASIC_AUTH_MAX_BYTES = Math.max(
   128,
   Math.min(
@@ -532,37 +487,6 @@ const DASHBOARD_BASIC_AUTH_MAX_BYTES = Math.max(
 const DASHBOARD_BASIC_AUTH_HEADER_MAX_BYTES = Math.min(
   262_144,
   DASHBOARD_BASIC_AUTH_MAX_BYTES * 3
-);
-const ENTERPRISE_SESSION_COOKIE_NAME = 'chd_enterprise_session';
-const ENTERPRISE_SESSION_COOKIE_MAX_BYTES = 4_096;
-const ENTERPRISE_SESSION_COOKIE_AAD = Buffer.from('claude-history-dashboard.enterprise-session.v1');
-const ENTERPRISE_SESSION_SECRET_MIN_BYTES = 32;
-const ENTERPRISE_SESSION_SECRET_MAX_BYTES = 4_096;
-const ENTERPRISE_SESSION_EPOCH_MAX_BYTES = 1_024;
-const ENTERPRISE_SESSION_COOKIE_MAX_AGE_SECONDS = Math.max(
-  60,
-  Math.min(
-    604_800,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_SESSION_MAX_AGE_SECONDS', 28_800)
-  )
-);
-const ENTERPRISE_SESSION_COOKIE_SECURE =
-  DASHBOARD_ENABLE_HSTS || parseBooleanEnv('DASHBOARD_AUTH_SESSION_COOKIE_SECURE');
-const ENTERPRISE_SESSION_EPOCH_CONFIG = enterpriseSessionEpochConfig();
-const ENTERPRISE_SESSION_SECRET_CONFIG = enterpriseSessionSecretConfig();
-const ENTERPRISE_AUTH_TOKENS_MAX_BYTES = Math.max(
-  1_024,
-  Math.min(
-    16_777_216,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_TOKENS_MAX_BYTES', 1_048_576)
-  )
-);
-const ENTERPRISE_AUTH_TOKENS_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(
-    4_096,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_TOKENS_MAX_ENTRIES', 256)
-  )
 );
 const DASHBOARD_SESSIONS_MANIFEST_MAX_ENTRIES = Math.max(
   1,
@@ -579,21 +503,6 @@ const DASHBOARD_ADOPTION_RECEIPT_READ_MAX_BYTES = Math.max(
       'DASHBOARD_ADOPTION_RECEIPT_READ_MAX_BYTES',
       1_048_576
     )
-  )
-);
-const ENTERPRISE_AUDIT_ROTATE_MAX_BYTES = Math.min(
-  1_073_741_824,
-  parseNonNegativeIntEnv('ENTERPRISE_AUDIT_ROTATE_MAX_BYTES', 67_108_864)
-);
-const ENTERPRISE_AUDIT_ROTATE_MAX_FILES = Math.min(
-  50,
-  parseNonNegativeIntEnv('ENTERPRISE_AUDIT_ROTATE_MAX_FILES', 5)
-);
-const ENTERPRISE_SCOPED_DATASET_MAX_STATES = Math.max(
-  1,
-  Math.min(
-    5_000,
-    parseNonNegativeIntEnv('ENTERPRISE_SCOPED_DATASET_MAX_STATES', 500)
   )
 );
 const DASHBOARD_RECOMMENDATIONS_CACHE_MAX_ENTRIES = Math.max(
@@ -805,7 +714,7 @@ function parseContentSecurityPolicyOverride(name) {
 }
 
 function revalidatingLiveCacheControl() {
-  return ENTERPRISE_AUTH_ON ? 'no-store' : 'no-cache';
+  return 'no-cache';
 }
 
 function parseNonNegativeIntEnv(name, fallback) {
@@ -885,74 +794,6 @@ function parseBasicAuthCredentialEnv(name) {
 
 function parseBooleanEnv(name) {
   return /^(1|true|yes|on)$/i.test(String(process.env[name] || ''));
-}
-
-function parseBoundedCsvEnv(
-  name,
-  fallback = [],
-  { maxBytes, maxEntries, maxEntryChars } = {}
-) {
-  const rawConfig = String(process.env[name] || '');
-  const raw = rawConfig.trim();
-  if (raw && maxBytes && Buffer.byteLength(rawConfig, 'utf8') > maxBytes) {
-    return {
-      values: [],
-      maxBytesExceeded: true,
-      entryLimitExceeded: false,
-      entrySizeExceeded: false,
-    };
-  }
-  const source = raw ? rawConfig.split(',') : fallback;
-  const values = [];
-  let entryCount = 0;
-  let entryLimitExceeded = false;
-  let entrySizeExceeded = false;
-  for (const entry of source) {
-    const value = String(entry || '').trim().toLowerCase();
-    if (!value) continue;
-    entryCount += 1;
-    if (maxEntries && entryCount > maxEntries) {
-      entryLimitExceeded = true;
-      break;
-    }
-    if (maxEntryChars && value.length > maxEntryChars) {
-      entrySizeExceeded = true;
-      continue;
-    }
-    values.push(value);
-  }
-  return {
-    values: Array.from(new Set(values)),
-    maxBytesExceeded: false,
-    entryLimitExceeded,
-    entrySizeExceeded,
-  };
-}
-
-function parseJwtDataRootTemplateEnv(name) {
-  const raw = String(process.env[name] || '').trim();
-  if (!raw) {
-    return {
-      template: '',
-      configured: false,
-      maxBytesExceeded: false,
-    };
-  }
-  if (
-    Buffer.byteLength(raw, 'utf8') >
-    ENTERPRISE_JWT_DATA_ROOT_TEMPLATE_MAX_BYTES
-  ) {
-    return {
-      template: '',
-      configured: true,
-      maxBytesExceeded: true,
-    };
-  }
-  return {
-    template: raw,
-    configured: true,
-    maxBytesExceeded: false,
-  };
 }
 
 function parseTrustedProxyAddresses(name) {
@@ -1325,162 +1166,6 @@ function datasetState(apiPromise, key = 'global') {
 }
 
 const globalDatasetState = datasetState(Promise.resolve(GLOBAL_INGEST_API));
-const scopedDatasetStates = new Map();
-const REQUEST_DATASET_RESPONSE = Symbol('requestDatasetResponse');
-const REQUEST_SCOPED_DATASET_LEASE = Symbol('requestScopedDatasetLease');
-
-function enterpriseDataRootKey(dataRoot) {
-  return createHash('sha256').update(dataRoot).digest('hex').slice(0, 24);
-}
-
-function scopedIngestDbPath(dataRoot) {
-  const destinationPath = join(
-    CHD_CACHE_DIR,
-    'enterprise-roots',
-    `${enterpriseDataRootKey(dataRoot)}.db`
-  );
-  const legacyPath = join(
-    PROJECT_DIR,
-    '.cache',
-    'enterprise-roots',
-    `${enterpriseDataRootKey(dataRoot)}.db`
-  );
-  // A SQLite database may have live WAL/SHM sidecars, so moving its files one
-  // at a time is not atomic. Prefer the relocated DB once it exists; otherwise
-  // keep the complete legacy bundle in place instead of silently rebuilding it.
-  if (
-    destinationPath !== legacyPath &&
-    !existsSync(destinationPath) &&
-    existsSync(legacyPath)
-  ) {
-    return legacyPath;
-  }
-  return destinationPath;
-}
-
-function createScopedIngest(dataRoot) {
-  return createIngest({
-    claudeDir: dataRoot,
-    claudeHomeDir: dirname(dataRoot),
-    dbPath: scopedIngestDbPath(dataRoot),
-    scoped: true,
-  });
-}
-
-function enterpriseRequestUsesGlobalIngest(req) {
-  const principal = req.enterprisePrincipal;
-  return !ENTERPRISE_AUTH_ON || principal?.role === 'admin' || !principal?.dataRoot;
-}
-
-function pendingScopedDatasetWork(state) {
-  const values = [
-    state.datasetRefresh,
-    state.datasetColdBuild,
-    ...(state.detachedBuilds ?? []),
-    ...state.recommendationsBuilds.values(),
-    ...state.digestBuilds.values(),
-    ...state.searchBuilds.values(),
-    ...state.bootBuilds.values(),
-    ...state.sliceBuilds.values(),
-  ];
-  return values
-    .map((value) => value?.promise ?? value)
-    .filter((value) => value && typeof value.then === 'function');
-}
-
-function closeScopedDatasetState(state) {
-  if (state.closePromise) return state.closePromise;
-  state.closePromise = (async () => {
-    // A stale response may schedule its background refresh from the response's
-    // `finish` event. The request lease is released by that same event, so keep
-    // sampling until all work registered by either listener has settled.
-    for (;;) {
-      await Promise.resolve();
-      const pending = pendingScopedDatasetWork(state);
-      if (pending.length === 0) break;
-      await Promise.allSettled(pending);
-    }
-    const api = await state.apiPromise;
-    api.close();
-  })();
-  state.closePromise.catch((error) => {
-    console.error('scoped ingest close failed:', error?.message ?? error);
-  });
-  return state.closePromise;
-}
-
-function pruneScopedDatasetStates(activeKey = null) {
-  if (scopedDatasetStates.size <= ENTERPRISE_SCOPED_DATASET_MAX_STATES) return;
-  const candidates = [...scopedDatasetStates.entries()]
-    .filter(([key, state]) => key !== activeKey && state.activeRequests === 0)
-    .sort((a, b) => (a[1].lastAccess || 0) - (b[1].lastAccess || 0));
-  for (const [key] of candidates) {
-    if (scopedDatasetStates.size <= ENTERPRISE_SCOPED_DATASET_MAX_STATES) return;
-    const evicted = scopedDatasetStates.get(key);
-    scopedDatasetStates.delete(key);
-    void closeScopedDatasetState(evicted);
-  }
-}
-
-function retainScopedDatasetStateForRequest(req, state) {
-  if (state === globalDatasetState) return;
-  const existingLease = req[REQUEST_SCOPED_DATASET_LEASE];
-  if (existingLease) {
-    if (existingLease.state === state) return;
-    throw new Error('One request cannot retain multiple scoped ingest states');
-  }
-  const res = req[REQUEST_DATASET_RESPONSE];
-  if (!res) throw new Error('Scoped dataset request is missing its response owner');
-
-  state.activeRequests += 1;
-  const lease = {
-    state,
-    handlerDone: false,
-    responseDone: res.writableFinished || res.destroyed,
-    released: false,
-    maybeRelease: null,
-  };
-  lease.maybeRelease = () => {
-    if (lease.released || !lease.handlerDone || !lease.responseDone) return;
-    lease.released = true;
-    state.activeRequests = Math.max(0, state.activeRequests - 1);
-    pruneScopedDatasetStates();
-  };
-  req[REQUEST_SCOPED_DATASET_LEASE] = lease;
-  const responseDone = () => {
-    lease.responseDone = true;
-    lease.maybeRelease();
-  };
-  res.once('finish', responseDone);
-  res.once('close', responseDone);
-}
-
-function finishScopedDatasetRequest(req) {
-  const lease = req[REQUEST_SCOPED_DATASET_LEASE];
-  if (!lease) return;
-  lease.handlerDone = true;
-  lease.maybeRelease();
-}
-
-function enterpriseRequestDatasetState(req) {
-  const principal = req.enterprisePrincipal;
-  if (enterpriseRequestUsesGlobalIngest(req)) return globalDatasetState;
-  const key = enterpriseDataRootKey(principal.dataRoot);
-  let state = scopedDatasetStates.get(key);
-  if (!state) {
-    state = datasetState(Promise.resolve(createScopedIngest(principal.dataRoot)), key);
-    scopedDatasetStates.set(key, state);
-  }
-  state.lastAccess = Date.now();
-  retainScopedDatasetStateForRequest(req, state);
-  pruneScopedDatasetStates(key);
-  return state;
-}
-
-async function enterpriseRequestIngestApi(req) {
-  return enterpriseRequestDatasetState(req).apiPromise;
-}
-
 async function refreshReviewEventsForIngest(ingestApi) {
   if (typeof ingestApi.refreshReviewEvents !== 'function') return null;
   return ingestApi.refreshReviewEvents();
@@ -1514,7 +1199,7 @@ async function refreshDocIssueSnapshotForIngest(ingestApi) {
 // the inlined preamble at each site. Per-request ingest semantics for
 // digest/search are deliberately unchanged here (that caching is issue #1573).
 async function loadIngestedDataset(req, { useCache = false } = {}) {
-  const ingestState = enterpriseRequestDatasetState(req);
+  const ingestState = globalDatasetState;
   const ingestApi = await ingestState.apiPromise;
   await refreshReviewEventsForIngest(ingestApi);
   await refreshDocIssueSnapshotForIngest(ingestApi);
@@ -2394,9 +2079,7 @@ function memoizedAssembleRecommendationDataset(
 // finish-deferred, #2184) stalls the event loop, so a request landing during a
 // rebuild waits behind it. This long-lived worker runs the rebuild on its own
 // thread with its OWN SQLite cache (worker-private CHD_DB_PATH), so the main
-// loop never blocks. The worker serves the GLOBAL ingest path only; enterprise
-// per-principal scoped rebuilds and the cold first-build fall back to the inline
-// path. Set CHD_RECS_WORKER=0 to disable and always build inline.
+// loop never blocks. The cold first-build falls back to the inline path. Set CHD_RECS_WORKER=0 to disable and always build inline.
 const RECS_WORKER_ENABLED = process.env.CHD_RECS_WORKER !== '0';
 const RECS_CACHE_TEST_EVENTS = process.env.CHD_RECS_CACHE_TEST_EVENTS === '1';
 let recsWorker = null;
@@ -3571,9 +3254,7 @@ async function compressedPayload(value, version) {
 // from the most recent GLOBAL boot build. serveStatic() reads this to upgrade the
 // build-time skeleton index.html to real KPIs WITHOUT itself triggering a dataset
 // assemble (that work would block the event loop on the HTML critical path). It is
-// populated only for globalDatasetState below, so it can only ever hold non-scoped
-// (host) counts — never one principal's data — and serveStatic additionally
-// suppresses the upgrade under scope enforcement. null until the first boot build.
+// populated only for globalDatasetState below. null until the first boot build.
 let lastInstantShell = null;
 
 async function buildBootPayload(state, api, sourceSig) {
@@ -3710,14 +3391,6 @@ async function writeContainedFileNoFollow(dir, name, data) {
     await fh.writeFile(data);
   } finally {
     await fh.close();
-  }
-}
-
-function realpathSyncOrNull(pathname) {
-  try {
-    return realpathSync(pathname);
-  } catch {
-    return null;
   }
 }
 
@@ -3903,16 +3576,8 @@ async function readSelectedMemoryFileCapped(candidate, maxBytes) {
       throw error;
     }
     if (!realFull) {
-      // Enterprise deployments require descriptor-bound containment. Local
       // Windows/macOS plugin mode retains support through conservative
       // before/open/after identity checks when no descriptor filesystem exists.
-      if (ENTERPRISE_AUTH_ON) {
-        const error = new Error(
-          'Cannot bind enterprise memory containment to the opened descriptor'
-        );
-        error.code = 'ERR_DASHBOARD_MEMORY_FD_PATH_UNAVAILABLE';
-        throw error;
-      }
       const afterReal = await realpath(candidate.full);
       if (!pathInside(candidate.realParent, afterReal)) {
         const error = new Error(
@@ -4256,21 +3921,13 @@ async function serveStatic(req, pathname, res) {
     // warm / seconds cold and regressed the static ~5 ms serve). Cold, before the
     // first boot build => skeleton; warm => real numbers; the client's boot fetch
     // fills/corrects the masthead regardless. Guarded to the resolved index.html.
-    // `lastInstantShell` only ever holds GLOBAL (non-scoped) data (buildBootPayload
-    // sets it only for globalDatasetState). We ALSO suppress the upgrade whenever
-    // enterprise auth is on: `/` is served PRE-AUTH (it is not an enterprise-protected
-    // path — the login page must render), and non-admin principals are scoped to their
-    // own dataRoot, so baking the global host counts into this HTML would disclose them
-    // to unauthenticated visitors and to scoped principals walled off from global data.
-    // Gate on ENTERPRISE_AUTH_ON (NOT the opt-in DASHBOARD_AUTH_ENFORCE_SCOPES flag,
-    // which is off in the default enterprise posture): under any enterprise auth serve
-    // the skeleton and let each client's own scoped /api/dataset/boot fetch fill the
-    // masthead. Single-user/local (auth off) keeps the real-count upgrade — there the
-    // global data IS the user's own. rewriteServedHtml is a no-op when the markers are
+    // The served data is the single user's own, and when HTTP Basic auth is
+    // configured the dispatcher has already authenticated this request, so the
+    // real-count upgrade is safe here. rewriteServedHtml is a no-op when the markers are
     // absent (an spa build served here), so that path stays byte-identical. HEAD is
     // fine: sendBody derives Content-Length from the served body, then ends no payload.
     if (ext === '.html' && basename(filePath) === 'index.html') {
-      const shell = ENTERPRISE_AUTH_ON ? null : lastInstantShell;
+      const shell = lastInstantShell;
       const body = shell
         ? Buffer.from(rewriteServedHtml(raw.toString('utf8'), shell))
         : raw;
@@ -4638,15 +4295,10 @@ function readRequestBody(req, maxBytes = DASHBOARD_MUTATING_BODY_MAX_BYTES, { ra
 // buildUsagePayload, imported at the top of this file.
 
 async function handleUsage(req, res) {
-  if (ENTERPRISE_AUTH_ON && !DASHBOARD_ENABLE_SERVER_USAGE_GAUGE) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.usage_gauge',
-      outcome: 'skipped',
-      status: 200,
-      path: '/api/usage',
-      reason: 'server_usage_gauge_disabled',
-      principal: req.enterprisePrincipal,
-    });
+  // A Basic-auth server is shared, so reading the host's OAuth credential for
+  // other viewers stays opt-in (ADR 0008). The open loopback default is the
+  // user's own machine and keeps the gauge on.
+  if (BASIC_AUTH_ON && !DASHBOARD_ENABLE_SERVER_USAGE_GAUGE) {
     live(res, 'application/json; charset=utf-8');
     sendBody(
       req,
@@ -4779,8 +4431,7 @@ function singleRequestHeaderValue(req, name) {
 }
 
 // Pull the write CSRF token from X-CSRF-Token when present. Authorization:
-// Bearer remains a fallback for older/local callers, while enterprise bearer
-// auth can coexist in Authorization for route authorization.
+// Bearer remains a fallback for older/local callers.
 function extractToken(req) {
   const csrf = singleRequestHeaderValue(req, 'x-csrf-token');
   if (csrf) {
@@ -4797,434 +4448,6 @@ function extractToken(req) {
       : token;
   }
   return null;
-}
-
-function extractBearerToken(req) {
-  const auth = singleRequestHeaderValue(req, 'authorization');
-  if (!auth) return null;
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const token = m[1].trim();
-  if (Buffer.byteLength(token, 'utf8') > ENTERPRISE_MAX_BEARER_TOKEN_BYTES) {
-    return null;
-  }
-  return token;
-}
-
-function enterpriseSessionSecretConfig() {
-  const secretConfig = readEnterpriseSessionSecretConfig({
-    envName: 'DASHBOARD_AUTH_SESSION_SECRET',
-    fileName: 'DASHBOARD_AUTH_SESSION_SECRET_FILE',
-  });
-  const currentKeyConfig = deriveEnterpriseSessionSecretKey(secretConfig);
-  const previousSecretConfig = readEnterpriseSessionSecretConfig({
-    envName: 'DASHBOARD_AUTH_SESSION_PREVIOUS_SECRET',
-    fileName: 'DASHBOARD_AUTH_SESSION_PREVIOUS_SECRET_FILE',
-  });
-  const previousKeyConfig =
-    previousSecretConfig.configured || previousSecretConfig.error
-      ? deriveEnterpriseSessionSecretKey(previousSecretConfig)
-      : null;
-  const errors = [
-    currentKeyConfig.error,
-    previousKeyConfig?.error,
-    previousSecretConfig.configured && !secretConfig.configured
-      ? 'DASHBOARD_AUTH_SESSION_PREVIOUS_SECRET requires DASHBOARD_AUTH_SESSION_SECRET or DASHBOARD_AUTH_SESSION_SECRET_FILE'
-      : null,
-  ].filter(Boolean);
-  if (errors.length > 0) {
-    const key = randomBytes(32);
-    return {
-      key,
-      decryptKeys: [key],
-      stable: false,
-      previousKeyCount: 0,
-      error: errors.join('; '),
-    };
-  }
-  if (!currentKeyConfig.stable) {
-    return {
-      key: currentKeyConfig.key,
-      decryptKeys: [currentKeyConfig.key],
-      stable: false,
-      previousKeyCount: 0,
-      error: null,
-    };
-  }
-  const decryptKeys = [currentKeyConfig.key];
-  if (previousKeyConfig?.stable && !previousKeyConfig.key.equals(currentKeyConfig.key)) {
-    decryptKeys.push(previousKeyConfig.key);
-  }
-  return {
-    key: currentKeyConfig.key,
-    decryptKeys,
-    stable: true,
-    previousKeyCount: decryptKeys.length - 1,
-    error: null,
-  };
-}
-
-function deriveEnterpriseSessionSecretKey(secretConfig) {
-  if (secretConfig.error) {
-    return {
-      key: randomBytes(32),
-      stable: false,
-      configured: secretConfig.configured,
-      error: secretConfig.error,
-    };
-  }
-  const raw = secretConfig.rawSecret;
-  if (!raw && !secretConfig.configured) {
-    return {
-      key: randomBytes(32),
-      stable: false,
-      configured: false,
-      error: null,
-    };
-  }
-  const bytes = Buffer.from(raw, 'utf8');
-  if (bytes.byteLength > ENTERPRISE_SESSION_SECRET_MAX_BYTES) {
-    return {
-      key: randomBytes(32),
-      stable: false,
-      configured: secretConfig.configured,
-      error: `${secretConfig.source} exceeds ${ENTERPRISE_SESSION_SECRET_MAX_BYTES} byte limit`,
-    };
-  }
-  if (bytes.byteLength < ENTERPRISE_SESSION_SECRET_MIN_BYTES) {
-    return {
-      key: randomBytes(32),
-      stable: false,
-      configured: secretConfig.configured,
-      error: `${secretConfig.source} must be at least ${ENTERPRISE_SESSION_SECRET_MIN_BYTES} bytes`,
-    };
-  }
-  return {
-    key: createHash('sha256').update(bytes).digest(),
-    stable: true,
-    configured: true,
-    error: null,
-  };
-}
-
-function readEnterpriseSessionSecretConfig({ envName, fileName }) {
-  const envSecret = String(process.env[envName] || '').trim();
-  const secretFile = String(process.env[fileName] || '').trim();
-  if (envSecret && secretFile) {
-    return {
-      rawSecret: '',
-      source: fileName,
-      configured: true,
-      error: `${envName} and ${fileName} cannot both be configured`,
-    };
-  }
-  if (!secretFile) {
-    return {
-      rawSecret: envSecret,
-      source: envName,
-      configured: Boolean(envSecret),
-      error: null,
-    };
-  }
-  if (!isAbsolute(secretFile)) {
-    return {
-      rawSecret: '',
-      source: fileName,
-      configured: true,
-      error: `${fileName} must be an absolute path`,
-    };
-  }
-  let fd = null;
-  try {
-    fd = openSync(secretFile, 'r');
-    const info = fstatSync(fd);
-    if (!info.isFile()) {
-      return {
-        rawSecret: '',
-        source: fileName,
-        configured: true,
-        error: `${fileName} must point to a regular file`,
-      };
-    }
-    if (info.size > ENTERPRISE_SESSION_SECRET_MAX_BYTES) {
-      return {
-        rawSecret: '',
-        source: fileName,
-        configured: true,
-        error: `${fileName} exceeds ${ENTERPRISE_SESSION_SECRET_MAX_BYTES} byte limit`,
-      };
-    }
-    const chunks = [];
-    let totalBytes = 0;
-    const maxReadBytes = ENTERPRISE_SESSION_SECRET_MAX_BYTES + 1;
-    while (totalBytes < maxReadBytes) {
-      const buffer = Buffer.allocUnsafe(Math.min(65_536, maxReadBytes - totalBytes));
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      totalBytes += bytesRead;
-      if (totalBytes > ENTERPRISE_SESSION_SECRET_MAX_BYTES) {
-        return {
-          rawSecret: '',
-          source: fileName,
-          configured: true,
-          error: `${fileName} exceeds ${ENTERPRISE_SESSION_SECRET_MAX_BYTES} byte limit`,
-        };
-      }
-      chunks.push(buffer.subarray(0, bytesRead));
-    }
-    return {
-      rawSecret: Buffer.concat(chunks, totalBytes).toString('utf8').trim(),
-      source: fileName,
-      configured: true,
-      error: null,
-    };
-  } catch {
-    return {
-      rawSecret: '',
-      source: fileName,
-      configured: true,
-      error: `${fileName} could not be read`,
-    };
-  } finally {
-    if (fd !== null) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* best-effort cleanup of startup config descriptor */
-      }
-    }
-  }
-}
-
-function enterpriseSessionEpochConfig() {
-  const value = String(process.env.DASHBOARD_AUTH_SESSION_EPOCH || '').trim();
-  if (Buffer.byteLength(value, 'utf8') > ENTERPRISE_SESSION_EPOCH_MAX_BYTES) {
-    return {
-      value: '',
-      error: `DASHBOARD_AUTH_SESSION_EPOCH exceeds ${ENTERPRISE_SESSION_EPOCH_MAX_BYTES} byte limit`,
-    };
-  }
-  return { value, error: null };
-}
-
-function enterpriseCredentialHashFromToken(token) {
-  if (!token) return undefined;
-  return createHash('sha256').update(token).digest('hex').slice(0, 24);
-}
-
-function requestCookieValues(req, name) {
-  const matches = [];
-  for (const header of requestHeaderValues(req, 'cookie')) {
-    for (const part of String(header || '').split(';')) {
-      const index = part.indexOf('=');
-      if (index <= 0) continue;
-      const key = part.slice(0, index).trim();
-      if (key !== name) continue;
-      const value = part.slice(index + 1).trim();
-      if (value) matches.push(value);
-    }
-  }
-  return matches;
-}
-
-function requestEnterpriseSessionCookie(req) {
-  const values = requestCookieValues(req, ENTERPRISE_SESSION_COOKIE_NAME);
-  return values.length === 1 ? values[0] : '';
-}
-
-function hasEnterpriseSessionCookie(req) {
-  return requestCookieValues(req, ENTERPRISE_SESSION_COOKIE_NAME).length > 0;
-}
-
-function appendSetCookie(res, value) {
-  const current = res.getHeader('Set-Cookie');
-  if (!current) {
-    res.setHeader('Set-Cookie', value);
-  } else if (Array.isArray(current)) {
-    res.setHeader('Set-Cookie', [...current, value]);
-  } else {
-    res.setHeader('Set-Cookie', [String(current), value]);
-  }
-}
-
-function enterpriseSessionCookieAttributes(maxAgeSeconds) {
-  return [
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Strict',
-    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
-    ENTERPRISE_SESSION_COOKIE_SECURE ? 'Secure' : null,
-  ]
-    .filter(Boolean)
-    .join('; ');
-}
-
-function clearEnterpriseSessionCookie(res) {
-  appendSetCookie(
-    res,
-    `${ENTERPRISE_SESSION_COOKIE_NAME}=; ${enterpriseSessionCookieAttributes(0)}`
-  );
-}
-
-function enterpriseSessionCookieValue(principal, expiresAtSeconds = null) {
-  const now = Math.floor(Date.now() / 1000);
-  const maxExp = now + ENTERPRISE_SESSION_COOKIE_MAX_AGE_SECONDS;
-  const configuredExp = Number(expiresAtSeconds);
-  const exp =
-    Number.isFinite(configuredExp) && configuredExp > now
-      ? Math.min(Math.floor(configuredExp), maxExp)
-      : maxExp;
-  const payload = {
-    v: 1,
-    iat: now,
-    exp,
-    epoch: ENTERPRISE_SESSION_EPOCH_CONFIG.value,
-    principal,
-  };
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', ENTERPRISE_SESSION_SECRET_CONFIG.key, iv);
-  cipher.setAAD(ENTERPRISE_SESSION_COOKIE_AAD);
-  const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify(payload), 'utf8'),
-    cipher.final(),
-  ]);
-  const tag = cipher.getAuthTag();
-  return [
-    'v1',
-    iv.toString('base64url'),
-    ciphertext.toString('base64url'),
-    tag.toString('base64url'),
-  ].join('.');
-}
-
-function openEnterpriseSessionCookie(value) {
-  const cookie = String(value || '').trim();
-  if (!cookie) return { principal: null, reason: 'missing_session' };
-  if (Buffer.byteLength(cookie, 'utf8') > ENTERPRISE_SESSION_COOKIE_MAX_BYTES) {
-    return { principal: null, reason: 'session_cookie_too_large' };
-  }
-  const parts = cookie.split('.');
-  if (parts.length !== 4 || parts[0] !== 'v1') {
-    return { principal: null, reason: 'invalid_session' };
-  }
-  try {
-    const iv = Buffer.from(parts[1], 'base64url');
-    const ciphertext = Buffer.from(parts[2], 'base64url');
-    const tag = Buffer.from(parts[3], 'base64url');
-    if (iv.byteLength !== 12 || tag.byteLength !== 16) {
-      return { principal: null, reason: 'invalid_session' };
-    }
-    const decryptKeys = ENTERPRISE_SESSION_SECRET_CONFIG.decryptKeys || [
-      ENTERPRISE_SESSION_SECRET_CONFIG.key,
-    ];
-    for (const key of decryptKeys) {
-      const session = openEnterpriseSessionCookieWithKey(cookie, key, iv, ciphertext, tag);
-      if (session.reason !== 'invalid_session') return session;
-    }
-    return { principal: null, reason: 'invalid_session' };
-  } catch {
-    return { principal: null, reason: 'invalid_session' };
-  }
-}
-
-function openEnterpriseSessionCookieWithKey(cookie, key, iv, ciphertext, tag) {
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAAD(ENTERPRISE_SESSION_COOKIE_AAD);
-    decipher.setAuthTag(tag);
-    const raw = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]).toString('utf8');
-    const payload = JSON.parse(raw);
-    if (!payload || payload.v !== 1 || !payload.principal || typeof payload.principal !== 'object') {
-      return { principal: null, reason: 'invalid_session' };
-    }
-    const exp = Number(payload.exp);
-    const iat = Number(payload.iat);
-    const now = Math.floor(Date.now() / 1000);
-    if (!Number.isFinite(exp) || exp <= now) {
-      return { principal: null, reason: 'expired_session' };
-    }
-    if (!Number.isFinite(iat) || iat > now + 60 || exp - iat > ENTERPRISE_SESSION_COOKIE_MAX_AGE_SECONDS) {
-      return { principal: null, reason: 'invalid_session' };
-    }
-    if (String(payload.epoch || '') !== ENTERPRISE_SESSION_EPOCH_CONFIG.value) {
-      return { principal: null, reason: 'stale_session' };
-    }
-    const principal = normalizeEnterprisePrincipal(payload.principal);
-    if (!principal.userId || !principal.orgId) {
-      return { principal: null, reason: 'invalid_session' };
-    }
-    return {
-      principal,
-      reason: null,
-      sessionHash: createHash('sha256').update(cookie).digest('hex').slice(0, 24),
-    };
-  } catch {
-    return { principal: null, reason: 'invalid_session' };
-  }
-}
-
-function enterpriseTokenSessionExpiresAt(token) {
-  const parsed = parseJwt(token);
-  const exp = Number(parsed?.claims?.exp);
-  return Number.isFinite(exp) && exp > 0 ? Math.floor(exp) : null;
-}
-
-function setEnterpriseSessionCookie(res, principal, expiresAtSeconds = null) {
-  const now = Math.floor(Date.now() / 1000);
-  const maxAgeSeconds =
-    expiresAtSeconds && expiresAtSeconds > now
-      ? Math.min(ENTERPRISE_SESSION_COOKIE_MAX_AGE_SECONDS, expiresAtSeconds - now)
-      : ENTERPRISE_SESSION_COOKIE_MAX_AGE_SECONDS;
-  const value = enterpriseSessionCookieValue(principal, expiresAtSeconds);
-  if (Buffer.byteLength(value, 'utf8') > ENTERPRISE_SESSION_COOKIE_MAX_BYTES) {
-    return false;
-  }
-  appendSetCookie(
-    res,
-    `${ENTERPRISE_SESSION_COOKIE_NAME}=${value}; ${enterpriseSessionCookieAttributes(maxAgeSeconds)}`
-  );
-  return true;
-}
-
-const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
-
-function normalizeEnterpriseTokenSha256(raw) {
-  const value = String(raw || '').trim();
-  const hex = value.toLowerCase().startsWith('sha256:')
-    ? value.slice('sha256:'.length)
-    : value;
-  const normalized = hex.toLowerCase();
-  return SHA256_HEX_RE.test(normalized) ? normalized : '';
-}
-
-function firstEnterpriseTokenSha256(...candidates) {
-  for (const candidate of candidates) {
-    const normalized = normalizeEnterpriseTokenSha256(candidate);
-    if (normalized) return normalized;
-  }
-  return '';
-}
-
-function enterpriseCredentialFingerprint(record) {
-  const tokenSha256 = normalizeEnterpriseTokenSha256(record?.tokenSha256);
-  if (tokenSha256) return tokenSha256;
-  const token = String(record?.token || '').trim();
-  return token ? createHash('sha256').update(token).digest('hex') : '';
-}
-
-function enterpriseRawTokenMetadata(token) {
-  const value = String(token || '').trim();
-  if (!value) {
-    return { tokenSha256: '', rawTokenConfigured: false, rawTokenLength: 0 };
-  }
-  return {
-    tokenSha256: createHash('sha256').update(value).digest('hex'),
-    rawTokenConfigured: true,
-    rawTokenLength: value.length,
-  };
 }
 
 // True when the request's Origin header names this server's own loopback origin
@@ -5351,7 +4574,7 @@ async function handleAdoptionReceiptWrite(req, res) {
   return sendJson(res, 200, result);
 }
 
-// Drop every cached /api/recommendations.json entry (global + enterprise-scoped)
+// Drop every cached /api/recommendations.json entry
 // so the next request rebuilds with fresh receipt state (#2206). The recs cache
 // freshness gate is keyed only by source signature / contentHash, neither of
 // which covers the receipt log — so a reject/un-reject that leaves transcripts
@@ -5360,10 +4583,6 @@ async function handleAdoptionReceiptWrite(req, res) {
 function invalidateRecommendationsCaches() {
   globalDatasetState.recommendationsInvalidationGeneration += 1;
   globalDatasetState.recommendationsCache.clear();
-  for (const state of scopedDatasetStates.values()) {
-    state.recommendationsInvalidationGeneration += 1;
-    state.recommendationsCache.clear();
-  }
 }
 
 // POST /api/recommendations/reject — append-only recommendation reject-signal
@@ -5442,10 +4661,9 @@ async function handleCheckpointAnswerWrite(req, res) {
   return sendJson(res, 200, result);
 }
 
-// GET twin: bounded efficacy aggregate only (no raw log dump). Enterprise GET
-// requires org:read; POST requires org:write plus passesWriteAuth above.
+// GET twin: bounded efficacy aggregate only (no raw log dump).
 async function handleCheckpointAnswerRead(req, res) {
-  const ingestApi = await enterpriseRequestIngestApi(req);
+  const ingestApi = await globalDatasetState.apiPromise;
   try {
     const efficacy = await ingestApi.readCheckpointAnswerEfficacy(
       CHECKPOINT_ANSWERS
@@ -5506,7 +4724,7 @@ async function buildLocalAnalyzeDeterministic(req, project) {
   const { ingestState, ingestApi } = await loadIngestedDataset(req, {
     useCache: true,
   });
-  const organizationIdentity = enterpriseRecommendationIdentity(req);
+  const organizationIdentity = null;
   let expectedSourceSig = ingestApi.sourceSignature();
   let expectedDocGraphGitWorkingTreeSignature =
     sourceBoundDocGraphGitWorkingTreeSignature(ingestApi);
@@ -6106,16 +5324,9 @@ const BASIC_AUTH_USER_CONFIG = parseBasicAuthCredentialEnv('DASHBOARD_USER');
 const BASIC_AUTH_PASS_CONFIG = parseBasicAuthCredentialEnv('DASHBOARD_PASS');
 const BASIC_AUTH_ON =
   BASIC_AUTH_USER_CONFIG.configured && BASIC_AUTH_PASS_CONFIG.configured;
-function checkBasicAuth(req, { allowEnterpriseBearer = false } = {}) {
+function checkBasicAuth(req) {
   if (!BASIC_AUTH_ON) return true; // not configured → open (loopback default)
   const auth = singleRequestHeaderValue(req, 'authorization');
-  if (
-    allowEnterpriseBearer &&
-    ENTERPRISE_AUTH_ON &&
-    (/^Bearer\s+.+/i.test(auth) || Boolean(requestEnterpriseSessionCookie(req)))
-  ) {
-    return true;
-  }
   if (BASIC_AUTH_USER_CONFIG.maxBytesExceeded || BASIC_AUTH_PASS_CONFIG.maxBytesExceeded) {
     return false;
   }
@@ -6151,1028 +5362,6 @@ function checkBasicAuth(req, { allowEnterpriseBearer = false } = {}) {
   return eq(username, BASIC_AUTH_USER_CONFIG.digest) && eq(password, BASIC_AUTH_PASS_CONFIG.digest);
 }
 
-const ENTERPRISE_AUTH_MODE =
-  String(process.env.DASHBOARD_AUTH_MODE || '').toLowerCase() === 'enterprise';
-const ENTERPRISE_PRINCIPAL_FIELD_MAX_CHARS = Math.max(
-  64,
-  Math.min(
-    4_096,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_PRINCIPAL_FIELD_MAX_CHARS', 512)
-  )
-);
-const ENTERPRISE_SCOPE_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(1_024, parseNonNegativeIntEnv('DASHBOARD_AUTH_SCOPE_MAX_ENTRIES', 64))
-);
-const ENTERPRISE_SCOPE_SOURCE_MAX_BYTES = Math.max(
-  128,
-  Math.min(
-    65_536,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_SCOPE_SOURCE_MAX_BYTES', 8_192)
-  )
-);
-const ENTERPRISE_SCOPE_MAX_CHARS = Math.max(
-  16,
-  Math.min(1_024, parseNonNegativeIntEnv('DASHBOARD_AUTH_SCOPE_MAX_CHARS', 128))
-);
-const ENTERPRISE_JWT_PINNING_MAX_BYTES = Math.max(
-  128,
-  Math.min(
-    16_384,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_PINNING_MAX_BYTES', 2_048)
-  )
-);
-const ENTERPRISE_ORG_ID = firstNonEmptyString(
-  process.env.DASHBOARD_ORG_ID,
-  'local-org'
-);
-const ENTERPRISE_ORG_NAME = firstNonEmptyString(
-  process.env.DASHBOARD_ORG_NAME,
-  'Local organization'
-);
-const {
-  value: ENTERPRISE_JWT_ISSUER,
-  error: ENTERPRISE_JWT_ISSUER_CONFIG_ERROR,
-} = parseBoundedTrimmedEnv(
-  'DASHBOARD_AUTH_JWT_ISSUER',
-  ENTERPRISE_JWT_PINNING_MAX_BYTES
-);
-const {
-  value: ENTERPRISE_JWT_AUDIENCE,
-  error: ENTERPRISE_JWT_AUDIENCE_CONFIG_ERROR,
-} = parseBoundedTrimmedEnv(
-  'DASHBOARD_AUTH_JWT_AUDIENCE',
-  ENTERPRISE_JWT_PINNING_MAX_BYTES
-);
-const ENTERPRISE_JWT_ORG_ID_CLAIM = String(
-  process.env.DASHBOARD_AUTH_JWT_ORG_ID_CLAIM || ''
-).trim();
-const ENTERPRISE_JWT_ROLE_CLAIM =
-  process.env.DASHBOARD_AUTH_JWT_ROLE_CLAIM || 'role';
-const ENTERPRISE_JWT_SCOPE_CLAIM =
-  process.env.DASHBOARD_AUTH_JWT_SCOPE_CLAIM || 'scope';
-const ENTERPRISE_JWT_TEAM_ID_CLAIM =
-  process.env.DASHBOARD_AUTH_JWT_TEAM_ID_CLAIM || 'team';
-const ENTERPRISE_JWT_TEAM_NAME_CLAIM =
-  process.env.DASHBOARD_AUTH_JWT_TEAM_NAME_CLAIM || 'team_name';
-const ENTERPRISE_JWT_DATA_ROOT_TEMPLATE_MAX_BYTES = Math.max(
-  128,
-  Math.min(
-    65_536,
-    parseNonNegativeIntEnv(
-      'DASHBOARD_AUTH_JWT_DATA_ROOT_TEMPLATE_MAX_BYTES',
-      4_096
-    )
-  )
-);
-const {
-  template: ENTERPRISE_JWT_DATA_ROOT_TEMPLATE,
-  configured: ENTERPRISE_JWT_DATA_ROOT_TEMPLATE_CONFIGURED,
-  maxBytesExceeded: ENTERPRISE_JWT_DATA_ROOT_TEMPLATE_MAX_BYTES_EXCEEDED,
-} = parseJwtDataRootTemplateEnv('DASHBOARD_AUTH_JWT_DATA_ROOT_TEMPLATE');
-const ENTERPRISE_JWT_CLAIM_PATH_MAX_BYTES = Math.max(
-  32,
-  Math.min(
-    4_096,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_CLAIM_PATH_MAX_BYTES', 512)
-  )
-);
-const ENTERPRISE_JWT_CLAIM_PATH_MAX_SEGMENTS = Math.max(
-  1,
-  Math.min(
-    64,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_CLAIM_PATH_MAX_SEGMENTS', 16)
-  )
-);
-const ENTERPRISE_JWT_HEADER_MAX_BYTES = Math.max(
-  64,
-  Math.min(
-    16_384,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_HEADER_MAX_BYTES', 2_048)
-  )
-);
-const ENTERPRISE_JWT_CLAIMS_MAX_BYTES = Math.max(
-  128,
-  Math.min(
-    262_144,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_CLAIMS_MAX_BYTES', 16_384)
-  )
-);
-const ENTERPRISE_JWT_SIGNATURE_MAX_BYTES = Math.max(
-  64,
-  Math.min(
-    65_536,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_SIGNATURE_MAX_BYTES', 4_096)
-  )
-);
-const ENTERPRISE_DATA_ROOT_BASE = normalizeEnterpriseDataRootPath(
-  process.env.DASHBOARD_AUTH_DATA_ROOT_BASE || ''
-);
-const ENTERPRISE_JWKS_URL_MAX_BYTES = Math.max(
-  128,
-  Math.min(
-    16_384,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWKS_URL_MAX_BYTES', 2_048)
-  )
-);
-const ENTERPRISE_JWKS_URL = String(
-  process.env.DASHBOARD_AUTH_JWKS_URL || ''
-).trim();
-const ENTERPRISE_JWKS_CACHE_TTL_MS = Math.max(
-  30_000,
-  Math.min(
-    3_600_000,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWKS_CACHE_TTL_MS', 300_000)
-  )
-);
-const ENTERPRISE_JWKS_FETCH_TIMEOUT_MS = Math.max(
-  500,
-  Math.min(
-    30_000,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWKS_FETCH_TIMEOUT_MS', 5_000)
-  )
-);
-const ENTERPRISE_JWKS_MAX_BYTES = Math.max(
-  1_024,
-  Math.min(
-    1_048_576,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWKS_MAX_BYTES', 65_536)
-  )
-);
-const ENTERPRISE_JWKS_MAX_KEYS = Math.max(
-  1,
-  Math.min(1_024, parseNonNegativeIntEnv('DASHBOARD_AUTH_JWKS_MAX_KEYS', 32))
-);
-const ENTERPRISE_JWKS_MIN_REFRESH_MS = Math.max(
-  1_000,
-  Math.min(
-    300_000,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWKS_MIN_REFRESH_MS', 30_000)
-  )
-);
-const ENTERPRISE_JWT_MIN_RSA_BITS = Math.max(
-  2048,
-  Math.min(
-    16_384,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_MIN_RSA_BITS', 2048)
-  )
-);
-const ENTERPRISE_JWT_MAX_LIFETIME_SECONDS = Math.min(
-  2_592_000,
-  parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_MAX_LIFETIME_SECONDS', 86_400)
-);
-const ENTERPRISE_JWT_CLOCK_SKEW_SECONDS = Math.min(
-  300,
-  parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_CLOCK_SKEW_SECONDS', 60)
-);
-const ENTERPRISE_JWT_ROLE_MAP_MAX_BYTES = Math.max(
-  128,
-  Math.min(
-    65_536,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_ROLE_MAP_MAX_BYTES', 8_192)
-  )
-);
-const ENTERPRISE_JWT_ROLE_MAP_MAX_ENTRIES = Math.max(
-  1,
-  Math.min(
-    1_024,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_ROLE_MAP_MAX_ENTRIES', 128)
-  )
-);
-const ENTERPRISE_JWT_ROLE_MAP_ENTRY_MAX_CHARS = Math.max(
-  8,
-  Math.min(
-    1_024,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_ROLE_MAP_ENTRY_MAX_CHARS', 128)
-  )
-);
-const ENTERPRISE_JWT_ROLE_CLAIM_MAX_VALUES = Math.max(
-  1,
-  Math.min(
-    1_024,
-    parseNonNegativeIntEnv('DASHBOARD_AUTH_JWT_ROLE_CLAIM_MAX_VALUES', 128)
-  )
-);
-const ENTERPRISE_JWT_ADMIN_ROLE_CONFIG = parseBoundedCsvEnv(
-  'DASHBOARD_AUTH_JWT_ADMIN_ROLES',
-  ['admin', 'owner'],
-  {
-    maxBytes: ENTERPRISE_JWT_ROLE_MAP_MAX_BYTES,
-    maxEntries: ENTERPRISE_JWT_ROLE_MAP_MAX_ENTRIES,
-    maxEntryChars: ENTERPRISE_JWT_ROLE_MAP_ENTRY_MAX_CHARS,
-  }
-);
-const ENTERPRISE_JWT_MEMBER_ROLE_CONFIG = parseBoundedCsvEnv(
-  'DASHBOARD_AUTH_JWT_MEMBER_ROLES',
-  ['member'],
-  {
-    maxBytes: ENTERPRISE_JWT_ROLE_MAP_MAX_BYTES,
-    maxEntries: ENTERPRISE_JWT_ROLE_MAP_MAX_ENTRIES,
-    maxEntryChars: ENTERPRISE_JWT_ROLE_MAP_ENTRY_MAX_CHARS,
-  }
-);
-const ENTERPRISE_JWT_VIEWER_ROLE_CONFIG = parseBoundedCsvEnv(
-  'DASHBOARD_AUTH_JWT_VIEWER_ROLES',
-  ['viewer', 'read-only', 'readonly'],
-  {
-    maxBytes: ENTERPRISE_JWT_ROLE_MAP_MAX_BYTES,
-    maxEntries: ENTERPRISE_JWT_ROLE_MAP_MAX_ENTRIES,
-    maxEntryChars: ENTERPRISE_JWT_ROLE_MAP_ENTRY_MAX_CHARS,
-  }
-);
-const ENTERPRISE_JWT_ADMIN_ROLES = ENTERPRISE_JWT_ADMIN_ROLE_CONFIG.values;
-const ENTERPRISE_JWT_MEMBER_ROLES = ENTERPRISE_JWT_MEMBER_ROLE_CONFIG.values;
-const ENTERPRISE_JWT_VIEWER_ROLES = ENTERPRISE_JWT_VIEWER_ROLE_CONFIG.values;
-function normalizeEnterpriseRole(role, fallback = 'member') {
-  const r = String(role || fallback).trim().toLowerCase();
-  return ['admin', 'member', 'viewer'].includes(r) ? r : fallback;
-}
-
-function normalizeEnterpriseDataRootPath(raw) {
-  const configured = String(raw || '').trim();
-  if (!configured) return undefined;
-  const expanded =
-    configured === '~'
-      ? homedir()
-      : configured.startsWith(`~${sep}`)
-        ? join(homedir(), configured.slice(2))
-        : configured;
-  return normalize(isAbsolute(expanded) ? expanded : resolve(expanded));
-}
-
-function normalizeEnterpriseDataRoot(raw = {}, fallback = {}) {
-  const normalized = normalizeEnterpriseDataRootPath(
-    raw.dataRoot || raw.claudeDir || fallback.dataRoot || fallback.claudeDir || ''
-  );
-  if (!normalized) return undefined;
-  if (ENTERPRISE_DATA_ROOT_BASE && !pathInside(ENTERPRISE_DATA_ROOT_BASE, normalized)) {
-    return undefined;
-  }
-  const realBase = ENTERPRISE_DATA_ROOT_BASE
-    ? realpathSyncOrNull(ENTERPRISE_DATA_ROOT_BASE)
-    : null;
-  const realRoot = ENTERPRISE_DATA_ROOT_BASE
-    ? realpathSyncOrNull(normalized)
-    : null;
-  if (realBase && realRoot && !pathInside(realBase, realRoot)) {
-    return undefined;
-  }
-  return normalized;
-}
-
-function normalizeEnterpriseScopes(...values) {
-  const scopes = [];
-  const seen = new Set();
-  const stack = [...values].reverse();
-  const addScope = (scope) => {
-    const text = boundedEnterpriseText(scope, ENTERPRISE_SCOPE_MAX_CHARS);
-    if (!text || seen.has(text)) return;
-    seen.add(text);
-    if (scopes.length < ENTERPRISE_SCOPE_MAX_ENTRIES) scopes.push(text);
-  };
-  while (stack.length > 0 && scopes.length < ENTERPRISE_SCOPE_MAX_ENTRIES) {
-    const value = stack.pop();
-    if (Array.isArray(value)) {
-      for (let i = value.length - 1; i >= 0; i -= 1) {
-        stack.push(value[i]);
-      }
-    } else if (typeof value === 'string') {
-      if (Buffer.byteLength(value, 'utf8') > ENTERPRISE_SCOPE_SOURCE_MAX_BYTES) {
-        continue;
-      }
-      for (const scope of value.split(/[,\s]+/)) {
-        addScope(scope);
-        if (scopes.length >= ENTERPRISE_SCOPE_MAX_ENTRIES) break;
-      }
-    }
-  }
-  return scopes;
-}
-
-function enterpriseScopesEnforced() {
-  return ENTERPRISE_AUTH_ON && ENTERPRISE_SCOPE_ENFORCEMENT;
-}
-
-function enterpriseScopeMatches(granted, required) {
-  if (granted === '*' || granted === required) return true;
-  const [namespace] = required.split(':');
-  return namespace ? granted === `${namespace}:*` : false;
-}
-
-function enterprisePrincipalHasScope(principal, requiredScopes) {
-  if (!enterpriseScopesEnforced()) return true;
-  const grantedScopes = normalizeEnterpriseScopes(principal?.scopes);
-  return requiredScopes.some((required) =>
-    grantedScopes.some((granted) => enterpriseScopeMatches(granted, required))
-  );
-}
-
-function boundedEnterpriseText(
-  value,
-  maxLength = ENTERPRISE_PRINCIPAL_FIELD_MAX_CHARS
-) {
-  const text = String(value ?? '')
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
-    .trim();
-  if (!text) return '';
-  if (text.length <= maxLength) return text;
-  const hash = createHash('sha256').update(text).digest('hex').slice(0, 16);
-  const prefixLength = Math.max(1, maxLength - hash.length - 1);
-  return `${text.slice(0, prefixLength)}-${hash}`;
-}
-
-function firstNonEmptyString(...values) {
-  for (const value of values) {
-    const text = boundedEnterpriseText(value);
-    if (text) return text;
-  }
-  return '';
-}
-
-function parseBoundedTrimmedEnv(name, maxBytes) {
-  const value = String(process.env[name] || '').trim();
-  if (!value) return { value: '', error: null };
-  if (Buffer.byteLength(value, 'utf8') > maxBytes) {
-    return {
-      value: '',
-      error: `${name} exceeds ${maxBytes} byte limit`,
-    };
-  }
-  return { value, error: null };
-}
-
-function normalizeEnterprisePrincipal(raw = {}, fallback = {}) {
-  const email = firstNonEmptyString(raw.email, fallback.email);
-  const userId = firstNonEmptyString(
-    raw.userId,
-    raw.id,
-    fallback.userId,
-    email,
-    'enterprise-user'
-  );
-  const role = normalizeEnterpriseRole(raw.role, fallback.role || 'member');
-  const orgId = firstNonEmptyString(raw.orgId, fallback.orgId, ENTERPRISE_ORG_ID);
-  const orgName = firstNonEmptyString(raw.orgName, fallback.orgName, ENTERPRISE_ORG_NAME);
-  const teamId = firstNonEmptyString(
-    raw.teamId,
-    raw.team,
-    fallback.teamId,
-    fallback.team
-  );
-  const teamName = firstNonEmptyString(
-    raw.teamName,
-    raw.teamDisplayName,
-    fallback.teamName,
-    fallback.teamDisplayName,
-    teamId
-  );
-  const scopes = normalizeEnterpriseScopes(
-    raw.scopes,
-    raw.scope,
-    fallback.scopes,
-    fallback.scope
-  );
-  return {
-    userId,
-    email: email || undefined,
-    name: firstNonEmptyString(raw.name, fallback.name, email, userId),
-    role,
-    orgId,
-    orgName,
-    teamId: teamId || undefined,
-    teamName: teamName || undefined,
-    scopes,
-    dataRoot: normalizeEnterpriseDataRoot(raw, fallback),
-  };
-}
-
-function base64UrlJson(segment, maxBytes) {
-  try {
-    const decoded = Buffer.from(segment, 'base64url');
-    if (decoded.byteLength > maxBytes) return null;
-    return JSON.parse(decoded.toString('utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function parseJwt(token) {
-  const parts = String(token || '').split('.');
-  if (parts.length !== 3 || parts.some((part) => part.length === 0)) return null;
-  const header = base64UrlJson(parts[0], ENTERPRISE_JWT_HEADER_MAX_BYTES);
-  const claims = base64UrlJson(parts[1], ENTERPRISE_JWT_CLAIMS_MAX_BYTES);
-  if (!header || !claims || typeof header !== 'object' || typeof claims !== 'object') {
-    return null;
-  }
-  const signature = Buffer.from(parts[2], 'base64url');
-  if (signature.byteLength > ENTERPRISE_JWT_SIGNATURE_MAX_BYTES) return null;
-  return {
-    header,
-    claims,
-    signingInput: `${parts[0]}.${parts[1]}`,
-    signature,
-  };
-}
-
-function jwtClaimPathLimitReason(path) {
-  const raw = String(path || '').trim();
-  if (!raw) return '';
-  if (Buffer.byteLength(raw, 'utf8') > ENTERPRISE_JWT_CLAIM_PATH_MAX_BYTES) {
-    return `exceeds ${ENTERPRISE_JWT_CLAIM_PATH_MAX_BYTES} byte limit`;
-  }
-  const segments = raw.split('.').filter(Boolean);
-  if (segments.length > ENTERPRISE_JWT_CLAIM_PATH_MAX_SEGMENTS) {
-    return `exceeds ${ENTERPRISE_JWT_CLAIM_PATH_MAX_SEGMENTS} segment limit`;
-  }
-  return '';
-}
-
-function jwtClaimPathSegments(path) {
-  const raw = String(path || '').trim();
-  if (!raw) return [];
-  if (jwtClaimPathLimitReason(raw)) return null;
-  return raw.split('.').filter(Boolean);
-}
-
-function getClaim(claims, path) {
-  let cur = claims;
-  const segments = jwtClaimPathSegments(path);
-  if (!segments) return undefined;
-  for (const part of segments) {
-    if (!cur || typeof cur !== 'object') return undefined;
-    cur = cur[part];
-  }
-  return cur;
-}
-
-function claimValues(value, maxValues = ENTERPRISE_JWT_ROLE_CLAIM_MAX_VALUES) {
-  const values = [];
-  const addValue = (raw) => {
-    const text = boundedEnterpriseText(raw, ENTERPRISE_JWT_ROLE_MAP_ENTRY_MAX_CHARS)
-      .toLowerCase();
-    if (text && values.length < maxValues) values.push(text);
-  };
-  const stack = [value];
-  while (stack.length > 0 && values.length < maxValues) {
-    const item = stack.pop();
-    if (Array.isArray(item)) {
-      for (let i = item.length - 1; i >= 0; i -= 1) {
-        stack.push(item[i]);
-      }
-    } else if (typeof item === 'string') {
-      for (const part of item.split(/[,\s]+/)) {
-        addValue(part);
-        if (values.length >= maxValues) break;
-      }
-    } else if (item != null) {
-      addValue(item);
-    }
-  }
-  return values;
-}
-
-function jwtRoleFromClaims(claims) {
-  const values = claimValues(getClaim(claims, ENTERPRISE_JWT_ROLE_CLAIM));
-  if (values.some((value) => ENTERPRISE_JWT_ADMIN_ROLES.includes(value))) {
-    return 'admin';
-  }
-  if (values.some((value) => ENTERPRISE_JWT_MEMBER_ROLES.includes(value))) {
-    return 'member';
-  }
-  if (values.some((value) => ENTERPRISE_JWT_VIEWER_ROLES.includes(value))) {
-    return 'viewer';
-  }
-  const fallbackRole = normalizeEnterpriseRole(values[0], 'member');
-  return fallbackRole === 'admin' ? 'member' : fallbackRole;
-}
-
-function jwtStringClaim(value) {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function jwtDirectStringClaim(claims, name) {
-  if (
-    Object.prototype.hasOwnProperty.call(claims, name) &&
-    typeof claims[name] !== 'string'
-  ) {
-    return { valid: false, value: '' };
-  }
-  return { valid: true, value: jwtStringClaim(claims[name]) };
-}
-
-function safeJwtPathSegment(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return 'unknown';
-  const cleaned = raw.replace(/[^A-Za-z0-9@._-]+/g, '_');
-  if (!cleaned || cleaned === '.' || cleaned === '..') {
-    return createHash('sha256').update(raw).digest('hex').slice(0, 24);
-  }
-  if (cleaned === raw && cleaned.length <= 160) return cleaned;
-  const hash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
-  const prefixLength = Math.max(1, 160 - hash.length - 1);
-  const prefix = cleaned.slice(0, prefixLength);
-  if (!prefix || prefix === '.' || prefix === '..') {
-    return createHash('sha256').update(raw).digest('hex').slice(0, 24);
-  }
-  return `${prefix}-${hash}`;
-}
-
-function jwtDataRootFromClaims(claims) {
-  if (!ENTERPRISE_JWT_DATA_ROOT_TEMPLATE) return undefined;
-  const subject = jwtStringClaim(claims.sub);
-  const email = jwtStringClaim(claims.email);
-  const preferredUsername = jwtStringClaim(claims.preferred_username);
-  const userId = subject || preferredUsername || email;
-  const teamId = jwtStringClaim(getClaim(claims, ENTERPRISE_JWT_TEAM_ID_CLAIM));
-  const replacements = {
-    sub: safeJwtPathSegment(subject),
-    email: safeJwtPathSegment(email),
-    preferred_username: safeJwtPathSegment(preferredUsername),
-    userId: safeJwtPathSegment(userId),
-    team: safeJwtPathSegment(teamId),
-    teamId: safeJwtPathSegment(teamId),
-  };
-  return ENTERPRISE_JWT_DATA_ROOT_TEMPLATE.replace(
-    /\{(sub|email|preferred_username|userId|team|teamId)\}/g,
-    (_, key) => replacements[key] || 'unknown'
-  );
-}
-
-function parseEnterpriseJwks(rawJwks, source) {
-  try {
-    const parsed = JSON.parse(rawJwks);
-    const rawKeys = Array.isArray(parsed) ? parsed : parsed?.keys;
-    if (!Array.isArray(rawKeys)) {
-      return {
-        keys: [],
-        error: `${source} must be a JWKS object or key array`,
-        weakKeyCount: 0,
-      };
-    }
-    if (rawKeys.length > ENTERPRISE_JWKS_MAX_KEYS) {
-      return {
-        keys: [],
-        error: `${source} exceeds ${ENTERPRISE_JWKS_MAX_KEYS} key limit`,
-        weakKeyCount: 0,
-      };
-    }
-    const keys = [];
-    const seenKids = new Set();
-    const duplicateKids = new Set();
-    let weakKeyCount = 0;
-    let nonSigningKeyCount = 0;
-    for (const jwk of rawKeys) {
-      if (!jwk || typeof jwk !== 'object') continue;
-      if (jwk.kty !== 'RSA') continue;
-      if (jwk.alg && jwk.alg !== 'RS256') continue;
-      if (jwk.use && jwk.use !== 'sig') {
-        nonSigningKeyCount += 1;
-        continue;
-      }
-      if (Array.isArray(jwk.key_ops) && !jwk.key_ops.includes('verify')) {
-        nonSigningKeyCount += 1;
-        continue;
-      }
-      try {
-        const key = createPublicKey({ key: jwk, format: 'jwk' });
-        const modulusLength = key.asymmetricKeyDetails?.modulusLength || 0;
-        if (modulusLength < ENTERPRISE_JWT_MIN_RSA_BITS) {
-          weakKeyCount += 1;
-          continue;
-        }
-        const kid = typeof jwk.kid === 'string' ? jwk.kid.trim() : '';
-        if (kid) {
-          if (seenKids.has(kid)) {
-            duplicateKids.add(kid);
-          } else {
-            seenKids.add(kid);
-          }
-        }
-        keys.push({
-          kid: kid || undefined,
-          key,
-        });
-      } catch {
-        /* skip invalid public keys; fail below if none remain */
-      }
-    }
-    if (keys.length === 0) {
-      return {
-        keys: [],
-        error:
-          weakKeyCount > 0
-            ? `${source} has no RS256 keys at or above ${ENTERPRISE_JWT_MIN_RSA_BITS} bits`
-            : nonSigningKeyCount > 0
-              ? `${source} has no usable RS256 signing keys`
-            : `${source} has no usable RS256 keys`,
-        weakKeyCount,
-      };
-    }
-    if (duplicateKids.size > 0) {
-      return {
-        keys: [],
-        error: `${source} has ${duplicateKids.size} duplicate JWT key id(s)`,
-        weakKeyCount,
-      };
-    }
-    return { keys, error: null, weakKeyCount };
-  } catch {
-    return {
-      keys: [],
-      error: `${source} is not valid JSON`,
-      weakKeyCount: 0,
-    };
-  }
-}
-
-function validateEnterpriseJwksUrl(rawUrl) {
-  if (!rawUrl) return null;
-  if (Buffer.byteLength(rawUrl, 'utf8') > ENTERPRISE_JWKS_URL_MAX_BYTES) {
-    return `DASHBOARD_AUTH_JWKS_URL exceeds ${ENTERPRISE_JWKS_URL_MAX_BYTES} byte limit`;
-  }
-  try {
-    const url = new URL(rawUrl);
-    const hostname = url.hostname.toLowerCase();
-    const localhost =
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname === '::1' ||
-      hostname === '[::1]';
-    if (url.protocol === 'https:' || (url.protocol === 'http:' && localhost)) {
-      return null;
-    }
-    return 'DASHBOARD_AUTH_JWKS_URL must use HTTPS, except localhost HTTP for development';
-  } catch {
-    return 'DASHBOARD_AUTH_JWKS_URL is not a valid URL';
-  }
-}
-
-function loadEnterpriseJwtConfig() {
-  const rawJwks = String(process.env.DASHBOARD_AUTH_JWKS || '').trim();
-  const urlError = validateEnterpriseJwksUrl(ENTERPRISE_JWKS_URL);
-  const staticConfig = rawJwks
-    ? Buffer.byteLength(rawJwks, 'utf8') > ENTERPRISE_JWKS_MAX_BYTES
-      ? {
-          keys: [],
-          error: `DASHBOARD_AUTH_JWKS exceeds ${ENTERPRISE_JWKS_MAX_BYTES} byte limit`,
-          weakKeyCount: 0,
-        }
-      : parseEnterpriseJwks(rawJwks, 'DASHBOARD_AUTH_JWKS')
-    : { keys: [], error: null, weakKeyCount: 0 };
-  return {
-    keys: staticConfig.keys,
-    error:
-      [
-        staticConfig.error,
-        urlError,
-        ENTERPRISE_JWT_ISSUER_CONFIG_ERROR,
-        ENTERPRISE_JWT_AUDIENCE_CONFIG_ERROR,
-      ]
-        .filter(Boolean)
-        .join('; ') || null,
-    weakKeyCount: staticConfig.weakKeyCount || 0,
-  };
-}
-
-function readEnterpriseStaticTokenConfig() {
-  const envTokens = String(process.env.DASHBOARD_AUTH_TOKENS || '').trim();
-  const tokensFile = String(process.env.DASHBOARD_AUTH_TOKENS_FILE || '').trim();
-  if (envTokens && tokensFile) {
-    return {
-      rawTokens: '',
-      source: 'DASHBOARD_AUTH_TOKENS_FILE',
-      error: 'DASHBOARD_AUTH_TOKENS and DASHBOARD_AUTH_TOKENS_FILE cannot both be configured',
-    };
-  }
-  if (!tokensFile) {
-    return {
-      rawTokens: envTokens,
-      source: 'DASHBOARD_AUTH_TOKENS',
-      error: null,
-    };
-  }
-  if (!isAbsolute(tokensFile)) {
-    return {
-      rawTokens: '',
-      source: 'DASHBOARD_AUTH_TOKENS_FILE',
-      error: 'DASHBOARD_AUTH_TOKENS_FILE must be an absolute path',
-    };
-  }
-  let fd = null;
-  try {
-    fd = openSync(tokensFile, 'r');
-    const info = fstatSync(fd);
-    if (!info.isFile()) {
-      return {
-        rawTokens: '',
-        source: 'DASHBOARD_AUTH_TOKENS_FILE',
-        error: 'DASHBOARD_AUTH_TOKENS_FILE must point to a regular file',
-      };
-    }
-    if (info.size > ENTERPRISE_AUTH_TOKENS_MAX_BYTES) {
-      return {
-        rawTokens: '',
-        source: 'DASHBOARD_AUTH_TOKENS_FILE',
-        error: `DASHBOARD_AUTH_TOKENS_FILE exceeds ${ENTERPRISE_AUTH_TOKENS_MAX_BYTES} byte limit`,
-      };
-    }
-    const chunks = [];
-    let totalBytes = 0;
-    const maxReadBytes = ENTERPRISE_AUTH_TOKENS_MAX_BYTES + 1;
-    while (totalBytes < maxReadBytes) {
-      const buffer = Buffer.allocUnsafe(Math.min(65_536, maxReadBytes - totalBytes));
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      totalBytes += bytesRead;
-      if (totalBytes > ENTERPRISE_AUTH_TOKENS_MAX_BYTES) {
-        return {
-          rawTokens: '',
-          source: 'DASHBOARD_AUTH_TOKENS_FILE',
-          error: `DASHBOARD_AUTH_TOKENS_FILE exceeds ${ENTERPRISE_AUTH_TOKENS_MAX_BYTES} byte limit`,
-        };
-      }
-      chunks.push(buffer.subarray(0, bytesRead));
-    }
-    const rawTokens = Buffer.concat(chunks, totalBytes).toString('utf8').trim();
-    return {
-      rawTokens,
-      source: 'DASHBOARD_AUTH_TOKENS_FILE',
-      error: null,
-    };
-  } catch {
-    return {
-      rawTokens: '',
-      source: 'DASHBOARD_AUTH_TOKENS_FILE',
-      error: 'DASHBOARD_AUTH_TOKENS_FILE could not be read',
-    };
-  } finally {
-    if (fd !== null) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* best-effort cleanup of startup config descriptor */
-      }
-    }
-  }
-}
-
-function loadEnterprisePrincipals() {
-  const principals = [];
-  const tokenConfig = readEnterpriseStaticTokenConfig();
-  const tokenConfigSource = tokenConfig.source;
-  let error = tokenConfig.error;
-  let invalidTokenFingerprints = 0;
-  let oversizedStaticBearerCount = 0;
-  const rawTokens = tokenConfig.error ? '' : tokenConfig.rawTokens;
-  if (rawTokens) {
-    const rawTokensBytes = Buffer.byteLength(rawTokens, 'utf8');
-    if (rawTokensBytes > ENTERPRISE_AUTH_TOKENS_MAX_BYTES) {
-      error = `${tokenConfigSource} exceeds ${ENTERPRISE_AUTH_TOKENS_MAX_BYTES} byte limit`;
-    } else {
-      try {
-        const parsed = JSON.parse(rawTokens);
-        if (Array.isArray(parsed)) {
-          if (parsed.length > ENTERPRISE_AUTH_TOKENS_MAX_ENTRIES) {
-            error = `${tokenConfigSource} exceeds ${ENTERPRISE_AUTH_TOKENS_MAX_ENTRIES} entry limit`;
-          } else {
-            for (const item of parsed) {
-              if (!item || typeof item !== 'object') continue;
-              let token = String(item.token || '').trim();
-              if (
-                token &&
-                Buffer.byteLength(token, 'utf8') > ENTERPRISE_MAX_BEARER_TOKEN_BYTES
-              ) {
-                oversizedStaticBearerCount += 1;
-                token = '';
-              }
-              const tokenHashCandidates = [
-                item.tokenSha256,
-                item.tokenHash,
-                item.sha256,
-              ].filter((value) => String(value || '').trim());
-              const tokenSha256 = firstEnterpriseTokenSha256(
-                ...tokenHashCandidates
-              );
-              if (tokenHashCandidates.length > 0 && !tokenSha256) {
-                invalidTokenFingerprints += 1;
-              }
-              const rawToken = enterpriseRawTokenMetadata(token);
-              const storedTokenSha256 = tokenSha256 || rawToken.tokenSha256;
-              if (!storedTokenSha256) continue;
-              const {
-                token: _token,
-                tokenSha256: _tokenSha256,
-                tokenHash: _tokenHash,
-                sha256: _sha256,
-                ...principal
-              } = item;
-              void _token;
-              void _tokenSha256;
-              void _tokenHash;
-              void _sha256;
-              principals.push({
-                tokenSha256: storedTokenSha256,
-                rawTokenConfigured: rawToken.rawTokenConfigured,
-                rawTokenLength: rawToken.rawTokenLength || undefined,
-                principal: normalizeEnterprisePrincipal(principal),
-              });
-            }
-          }
-        } else if (parsed && typeof parsed === 'object') {
-          const entries = Object.entries(parsed);
-          if (entries.length > ENTERPRISE_AUTH_TOKENS_MAX_ENTRIES) {
-            error = `${tokenConfigSource} exceeds ${ENTERPRISE_AUTH_TOKENS_MAX_ENTRIES} entry limit`;
-          } else {
-            for (const [token, principal] of entries) {
-              const key = String(token).trim();
-              if (!key) continue;
-              const hashKey = key.toLowerCase().startsWith('sha256:');
-              if (
-                !hashKey &&
-                Buffer.byteLength(key, 'utf8') > ENTERPRISE_MAX_BEARER_TOKEN_BYTES
-              ) {
-                oversizedStaticBearerCount += 1;
-                continue;
-              }
-              const tokenSha256 = hashKey
-                ? normalizeEnterpriseTokenSha256(key)
-                : '';
-              if (hashKey && !tokenSha256) {
-                invalidTokenFingerprints += 1;
-                continue;
-              }
-              const rawToken = hashKey
-                ? {
-                    tokenSha256: '',
-                    rawTokenConfigured: false,
-                    rawTokenLength: 0,
-                  }
-                : enterpriseRawTokenMetadata(key);
-              principals.push({
-                tokenSha256: tokenSha256 || rawToken.tokenSha256 || undefined,
-                rawTokenConfigured: rawToken.rawTokenConfigured,
-                rawTokenLength: rawToken.rawTokenLength || undefined,
-                principal: normalizeEnterprisePrincipal(
-                  principal && typeof principal === 'object' ? principal : {}
-                ),
-              });
-            }
-          }
-        } else {
-          error = `${tokenConfigSource} must be a JSON object or array`;
-        }
-      } catch {
-        error = `${tokenConfigSource} is not valid JSON`;
-      }
-    }
-  }
-  if (invalidTokenFingerprints > 0) {
-    error = [error, `${tokenConfigSource} has ${invalidTokenFingerprints} invalid SHA-256 token fingerprint(s)`]
-      .filter(Boolean)
-      .join('; ');
-  }
-  if (oversizedStaticBearerCount > 0) {
-    error = [
-      error,
-      `${tokenConfigSource} has ${oversizedStaticBearerCount} raw bearer token(s) above ${ENTERPRISE_MAX_BEARER_TOKEN_BYTES} byte limit`,
-    ]
-      .filter(Boolean)
-      .join('; ');
-  }
-
-  let adminToken = String(process.env.DASHBOARD_ADMIN_TOKEN || '').trim();
-  const adminTokenSha256Raw = String(
-    process.env.DASHBOARD_ADMIN_TOKEN_SHA256 || ''
-  ).trim();
-  if (
-    adminToken &&
-    Buffer.byteLength(adminToken, 'utf8') > ENTERPRISE_MAX_BEARER_TOKEN_BYTES
-  ) {
-    error = [
-      error,
-      `DASHBOARD_ADMIN_TOKEN exceeds ${ENTERPRISE_MAX_BEARER_TOKEN_BYTES} byte limit`,
-    ]
-      .filter(Boolean)
-      .join('; ');
-    adminToken = '';
-  }
-  const adminTokenSha256 = firstEnterpriseTokenSha256(adminTokenSha256Raw);
-  if (adminTokenSha256Raw && !adminTokenSha256) {
-    error = [
-      error,
-      'DASHBOARD_ADMIN_TOKEN_SHA256 is not a valid SHA-256 token fingerprint',
-    ]
-      .filter(Boolean)
-      .join('; ');
-  }
-  const rawAdminToken = enterpriseRawTokenMetadata(adminToken);
-  if (adminToken || adminTokenSha256) {
-    principals.push({
-      tokenSha256: adminTokenSha256 || rawAdminToken.tokenSha256 || undefined,
-      rawTokenConfigured: rawAdminToken.rawTokenConfigured,
-      rawTokenLength: rawAdminToken.rawTokenLength || undefined,
-      principal: normalizeEnterprisePrincipal(
-        {
-          userId: process.env.DASHBOARD_ADMIN_USER_ID || 'admin',
-          email: process.env.DASHBOARD_ADMIN_EMAIL || 'admin@local',
-          name: process.env.DASHBOARD_ADMIN_NAME || 'Dashboard Admin',
-          role: 'admin',
-          scope:
-            process.env.DASHBOARD_ADMIN_SCOPES ||
-            'org:read org:write audit:read sessions:read',
-        },
-        { role: 'admin' }
-      ),
-    });
-  }
-
-  const seenCredentialFingerprints = new Set();
-  const duplicateCredentialFingerprints = new Set();
-  for (const record of principals) {
-    const fingerprint = enterpriseCredentialFingerprint(record);
-    if (!fingerprint) continue;
-    if (seenCredentialFingerprints.has(fingerprint)) {
-      duplicateCredentialFingerprints.add(fingerprint);
-    } else {
-      seenCredentialFingerprints.add(fingerprint);
-    }
-  }
-  if (duplicateCredentialFingerprints.size > 0) {
-    error = [
-      error,
-      `Enterprise auth has ${duplicateCredentialFingerprints.size} duplicate bearer credential fingerprint(s)`,
-    ]
-      .filter(Boolean)
-      .join('; ');
-  }
-  const crossOrgPrincipalCount = principals.filter(
-    (record) => !enterprisePrincipalInConfiguredOrg(record.principal)
-  ).length;
-  if (crossOrgPrincipalCount > 0) {
-    error = [
-      error,
-      `Enterprise auth has ${crossOrgPrincipalCount} principal(s) outside DASHBOARD_ORG_ID`,
-    ]
-      .filter(Boolean)
-      .join('; ');
-  }
-
-  return { principals, error };
-}
-
-const {
-  principals: ENTERPRISE_PRINCIPALS,
-  error: ENTERPRISE_TOKEN_CONFIG_ERROR,
-} = loadEnterprisePrincipals();
-const ENTERPRISE_PRINCIPALS_BY_CREDENTIAL_SHA256 = new Map(
-  ENTERPRISE_PRINCIPALS.map((record) => [
-    enterpriseCredentialFingerprint(record),
-    record.principal,
-  ]).filter(([fingerprint, principal]) => fingerprint && principal)
-);
-const {
-  keys: ENTERPRISE_JWT_KEYS,
-  error: ENTERPRISE_JWT_CONFIG_ERROR,
-  weakKeyCount: ENTERPRISE_JWT_WEAK_KEY_COUNT,
-} = loadEnterpriseJwtConfig();
-const ENTERPRISE_JWT_SIGNING_CONFIGURED =
-  ENTERPRISE_JWT_KEYS.length > 0 || Boolean(ENTERPRISE_JWKS_URL);
-const ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR =
-  ENTERPRISE_JWT_SIGNING_CONFIGURED &&
-  !ENTERPRISE_JWT_ISSUER &&
-  !ENTERPRISE_JWT_ISSUER_CONFIG_ERROR
-    ? 'DASHBOARD_AUTH_JWT_ISSUER is required when enterprise JWT auth is configured'
-    : null;
-const ENTERPRISE_JWT_CONFIGURED =
-  ENTERPRISE_JWT_SIGNING_CONFIGURED &&
-  !ENTERPRISE_JWT_CONFIG_ERROR &&
-  !ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR;
-const ENTERPRISE_AUTH_CONFIG_ERROR =
-  [
-    ENTERPRISE_TOKEN_CONFIG_ERROR,
-    ENTERPRISE_JWT_CONFIG_ERROR,
-    ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR,
-    ENTERPRISE_SESSION_EPOCH_CONFIG.error,
-    ENTERPRISE_SESSION_SECRET_CONFIG.error,
-  ]
-    .filter(Boolean)
-    .join('; ') || null;
-const ENTERPRISE_AUTH_ON =
-  ENTERPRISE_AUTH_MODE ||
-  ENTERPRISE_PRINCIPALS.length > 0 ||
-  Boolean(process.env.DASHBOARD_AUTH_TOKENS) ||
-  Boolean(process.env.DASHBOARD_AUTH_TOKENS_FILE) ||
-  Boolean(process.env.DASHBOARD_ADMIN_TOKEN) ||
-  Boolean(process.env.DASHBOARD_ADMIN_TOKEN_SHA256) ||
-  Boolean(process.env.DASHBOARD_AUTH_JWKS) ||
-  Boolean(ENTERPRISE_JWKS_URL);
-const ENTERPRISE_AUTH_CONFIGURED =
-  (ENTERPRISE_PRINCIPALS.length > 0 || ENTERPRISE_JWT_CONFIGURED) &&
-  !ENTERPRISE_AUTH_CONFIG_ERROR;
-if (ENTERPRISE_AUTH_ON && ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR) {
-  throw new Error(`[enterprise-auth] ${ENTERPRISE_JWT_ISSUER_REQUIRED_ERROR}`);
-}
-
 // Fail-closed bind guard (#2064; the insecure-bind override was removed in
 // #3295). The dashboard reads ~/.claude live, so an unauthenticated
 // beyond-loopback bind is unrepresentable — there is deliberately NO override
@@ -7194,7 +5383,7 @@ function isLoopbackHost(host) {
   );
 }
 {
-  const anyAuthConfigured = BASIC_AUTH_ON || ENTERPRISE_AUTH_ON;
+  const anyAuthConfigured = BASIC_AUTH_ON;
   const publishHost = String(process.env.DASHBOARD_BIND_HOST || '').trim();
   const confidentExposure = publishHost !== '' && !isLoopbackHost(publishHost);
   const ambiguousExposure = publishHost === '' && !isLoopbackHost(HOST);
@@ -7203,439 +5392,49 @@ function isLoopbackHost(host) {
       ? `DASHBOARD_BIND_HOST=${publishHost}`
       : `HOST=${HOST}`;
     const detail =
-      `the dashboard is bound beyond loopback (${where}) with no DASHBOARD_USER/DASHBOARD_PASS ` +
-      `and no DASHBOARD_AUTH_MODE=enterprise, so it is reachable UNAUTHENTICATED while reading ~/.claude live`;
+      `the dashboard is bound beyond loopback (${where}) with no DASHBOARD_USER/DASHBOARD_PASS, ` +
+      `so it is reachable UNAUTHENTICATED while reading ~/.claude live`;
     if (confidentExposure) {
       // No override: an unauthenticated beyond-loopback bind cannot start.
       throw new Error(
         `[security] Refusing to start: ${detail}. Set DASHBOARD_USER/DASHBOARD_PASS ` +
           `(and terminate TLS at a trusted reverse proxy for beyond-loopback traffic), ` +
-          `enable enterprise auth, or bind to loopback (BIND_HOST=127.0.0.1).`
+          `or bind to loopback (BIND_HOST=127.0.0.1).`
       );
     }
     console.warn(`[security] WARNING: ${detail}.`);
   }
 }
-let enterpriseAuditWriteQueue = Promise.resolve();
-const enterpriseRateLimitBuckets = new Map();
-let enterpriseRateLimitNextPruneAt = 0;
-const enterpriseRemoteJwksCache = {
-  keys: [],
-  expiresAt: 0,
-  lastAttemptAt: 0,
-  error: null,
-  promise: null,
-  weakKeyCount: 0,
-  duplicateKidCount: 0,
-};
-
-async function readBoundedTextResponse(res, maxBytes) {
-  const contentLength = Number(res.headers.get('content-length') || 0);
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error(`JWKS response exceeds ${maxBytes} byte limit`);
-  }
-  if (!res.body || typeof res.body.getReader !== 'function') {
-    const body = Buffer.from(await res.arrayBuffer());
-    if (body.byteLength > maxBytes) {
-      throw new Error(`JWKS response exceeds ${maxBytes} byte limit`);
-    }
-    return body.toString('utf8');
-  }
-  const reader = res.body.getReader();
-  const chunks = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = Buffer.from(value);
-    total += chunk.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw new Error(`JWKS response exceeds ${maxBytes} byte limit`);
-    }
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-async function fetchEnterpriseRemoteJwks() {
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    ENTERPRISE_JWKS_FETCH_TIMEOUT_MS
+// Retired enterprise auth settings (#3839). The server no longer reads them, so
+// a deployment that still sets one expected an auth gate that is gone. Without
+// HTTP Basic that deployment would be open, so refuse to start; with Basic the
+// settings are only ignored, so warn.
+const RETIRED_ENTERPRISE_AUTH_ENV = [
+  'DASHBOARD_AUTH_MODE',
+  'DASHBOARD_AUTH_TOKENS',
+  'DASHBOARD_AUTH_TOKENS_FILE',
+  'DASHBOARD_ADMIN_TOKEN',
+  'DASHBOARD_ADMIN_TOKEN_SHA256',
+  'DASHBOARD_AUTH_JWKS',
+  'DASHBOARD_AUTH_JWKS_URL',
+];
+{
+  const retired = RETIRED_ENTERPRISE_AUTH_ENV.filter(
+    (name) => String(process.env[name] || '').trim() !== ''
   );
-  try {
-    const res = await fetch(ENTERPRISE_JWKS_URL, {
-      headers: { Accept: 'application/json' },
-      redirect: 'error',
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      throw new Error(`JWKS endpoint returned HTTP ${res.status}`);
+  if (retired.length > 0) {
+    const detail =
+      `${retired.join(', ')} ${retired.length === 1 ? 'is' : 'are'} set, but enterprise ` +
+      `auth was removed and the server ignores ${retired.length === 1 ? 'it' : 'them'}`;
+    if (!BASIC_AUTH_ON) {
+      throw new Error(
+        `[security] Refusing to start: ${detail}, which would leave the dashboard ` +
+          `unauthenticated. Set DASHBOARD_USER/DASHBOARD_PASS for HTTP Basic auth, ` +
+          `or unset the retired settings to run the open loopback default.`
+      );
     }
-    const text = await readBoundedTextResponse(res, ENTERPRISE_JWKS_MAX_BYTES);
-    const parsed = parseEnterpriseJwks(text, 'DASHBOARD_AUTH_JWKS_URL');
-    if (parsed.error) throw new Error(parsed.error);
-    enterpriseRemoteJwksCache.keys = parsed.keys;
-    enterpriseRemoteJwksCache.weakKeyCount = parsed.weakKeyCount || 0;
-    enterpriseRemoteJwksCache.error = null;
-    enterpriseRemoteJwksCache.expiresAt = Date.now() + ENTERPRISE_JWKS_CACHE_TTL_MS;
-    return enterpriseRemoteJwksCache.keys;
-  } finally {
-    clearTimeout(timeout);
+    console.warn(`[security] WARNING: ${detail}; HTTP Basic auth still applies.`);
   }
-}
-
-async function enterpriseRemoteJwtKeys({ forceRefresh = false } = {}) {
-  if (!ENTERPRISE_JWKS_URL || ENTERPRISE_JWT_CONFIG_ERROR) return [];
-  const now = Date.now();
-  if (!forceRefresh && enterpriseRemoteJwksCache.expiresAt > now) {
-    return enterpriseRemoteJwksCache.keys;
-  }
-  if (
-    forceRefresh &&
-    now - enterpriseRemoteJwksCache.lastAttemptAt < ENTERPRISE_JWKS_MIN_REFRESH_MS
-  ) {
-    return enterpriseRemoteJwksCache.expiresAt > now
-      ? enterpriseRemoteJwksCache.keys
-      : [];
-  }
-  if (!enterpriseRemoteJwksCache.promise) {
-    enterpriseRemoteJwksCache.lastAttemptAt = now;
-    enterpriseRemoteJwksCache.promise = fetchEnterpriseRemoteJwks()
-      .catch((err) => {
-        enterpriseRemoteJwksCache.error = err.message;
-        enterpriseRemoteJwksCache.expiresAt = 0;
-        return [];
-      })
-      .finally(() => {
-        enterpriseRemoteJwksCache.promise = null;
-      });
-  }
-  return enterpriseRemoteJwksCache.promise;
-}
-
-async function enterpriseJwtKeys({ forceRefresh = false } = {}) {
-  const remoteKeys = await enterpriseRemoteJwtKeys({ forceRefresh });
-  const keys = [...ENTERPRISE_JWT_KEYS, ...remoteKeys];
-  if (ENTERPRISE_JWKS_URL) {
-    enterpriseRemoteJwksCache.duplicateKidCount = countDuplicateJwtKids(keys);
-  }
-  return keys;
-}
-
-function countDuplicateJwtKids(keys) {
-  const seen = new Set();
-  const duplicates = new Set();
-  for (const entry of keys) {
-    const kid = typeof entry?.kid === 'string' ? entry.kid.trim() : '';
-    if (!kid) continue;
-    if (seen.has(kid)) {
-      duplicates.add(kid);
-    } else {
-      seen.add(kid);
-    }
-  }
-  return duplicates.size;
-}
-
-function jwtAudienceMatches(claims) {
-  if (!ENTERPRISE_JWT_AUDIENCE) return true;
-  const aud = claims.aud;
-  if (Array.isArray(aud)) return aud.includes(ENTERPRISE_JWT_AUDIENCE);
-  return aud === ENTERPRISE_JWT_AUDIENCE;
-}
-
-function jwtTimeValid(claims) {
-  const now = Math.floor(Date.now() / 1000);
-  if (!Number.isFinite(claims.exp)) return false;
-  if (claims.exp <= now - ENTERPRISE_JWT_CLOCK_SKEW_SECONDS) return false;
-  if (Number.isFinite(claims.nbf)) {
-    if (claims.nbf > now + ENTERPRISE_JWT_CLOCK_SKEW_SECONDS) return false;
-    if (claims.nbf >= claims.exp) return false;
-  }
-  if (Number.isFinite(claims.iat) && claims.iat >= claims.exp) {
-    return false;
-  }
-  if (ENTERPRISE_JWT_MAX_LIFETIME_SECONDS > 0) {
-    if (!Number.isFinite(claims.iat)) return false;
-    if (claims.iat > now + ENTERPRISE_JWT_CLOCK_SKEW_SECONDS) return false;
-    if (claims.exp - claims.iat > ENTERPRISE_JWT_MAX_LIFETIME_SECONDS) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function jwtHeaderKid(header) {
-  if (!Object.prototype.hasOwnProperty.call(header, 'kid')) {
-    return { valid: true, kid: '' };
-  }
-  if (typeof header.kid !== 'string') {
-    return { valid: false, kid: '' };
-  }
-  const kid = header.kid.trim();
-  return kid ? { valid: true, kid } : { valid: false, kid: '' };
-}
-
-function jwtSignatureMatches(parsed, keys) {
-  if (parsed.header.alg !== 'RS256') return false;
-  const { valid, kid } = jwtHeaderKid(parsed.header);
-  if (!valid) return false;
-  const candidates = kid
-    ? keys.filter((entry) => entry.kid === kid)
-    : keys;
-  if (kid && candidates.length !== 1) return false;
-  return candidates.some((entry) =>
-    verifySignature(
-      'RSA-SHA256',
-      Buffer.from(parsed.signingInput),
-      entry.key,
-      parsed.signature
-    )
-  );
-}
-
-async function jwtSignatureValid(parsed) {
-  const { valid, kid } = jwtHeaderKid(parsed.header);
-  if (!valid) return false;
-  const keys = await enterpriseJwtKeys();
-  if (jwtSignatureMatches(parsed, keys)) return true;
-  if (kid && ENTERPRISE_JWKS_URL) {
-    return jwtSignatureMatches(
-      parsed,
-      await enterpriseJwtKeys({ forceRefresh: true })
-    );
-  }
-  return false;
-}
-
-async function findEnterpriseJwtPrincipal(token) {
-  if (!ENTERPRISE_JWT_CONFIGURED) return null;
-  const parsed = parseJwt(token);
-  if (!parsed) return null;
-  if (ENTERPRISE_JWT_ISSUER && parsed.claims.iss !== ENTERPRISE_JWT_ISSUER) {
-    return null;
-  }
-  if (!jwtAudienceMatches(parsed.claims)) return null;
-  if (!jwtTimeValid(parsed.claims)) return null;
-  if (!(await jwtSignatureValid(parsed))) return null;
-
-  const subject = jwtDirectStringClaim(parsed.claims, 'sub');
-  const emailClaim = jwtDirectStringClaim(parsed.claims, 'email');
-  const preferredUsernameClaim = jwtDirectStringClaim(
-    parsed.claims,
-    'preferred_username'
-  );
-  if (!subject.valid || !emailClaim.valid || !preferredUsernameClaim.valid) {
-    return null;
-  }
-  const email = emailClaim.value;
-  const preferredUsername = preferredUsernameClaim.value;
-  const userId = subject.value || preferredUsername || email;
-  if (!userId) return null;
-  if (ENTERPRISE_JWT_ORG_ID_CLAIM) {
-    const orgId = jwtStringClaim(
-      getClaim(parsed.claims, ENTERPRISE_JWT_ORG_ID_CLAIM)
-    );
-    if (orgId !== ENTERPRISE_ORG_ID) return null;
-  }
-  const teamId = jwtStringClaim(
-    getClaim(parsed.claims, ENTERPRISE_JWT_TEAM_ID_CLAIM)
-  );
-  const teamName =
-    jwtStringClaim(getClaim(parsed.claims, ENTERPRISE_JWT_TEAM_NAME_CLAIM)) ||
-    teamId;
-  return normalizeEnterprisePrincipal({
-    userId,
-    email,
-    name: jwtStringClaim(parsed.claims.name) || preferredUsername || email || userId,
-    role: jwtRoleFromClaims(parsed.claims),
-    orgId: ENTERPRISE_ORG_ID,
-    orgName: ENTERPRISE_ORG_NAME,
-    scopes: normalizeEnterpriseScopes(
-      getClaim(parsed.claims, ENTERPRISE_JWT_SCOPE_CLAIM)
-    ),
-    teamId,
-    teamName,
-    dataRoot: jwtDataRootFromClaims(parsed.claims),
-  });
-}
-
-function findEnterpriseStaticPrincipal(token) {
-  const tokenSha256 = createHash('sha256').update(token).digest('hex');
-  return ENTERPRISE_PRINCIPALS_BY_CREDENTIAL_SHA256.get(tokenSha256) || null;
-}
-
-async function findEnterprisePrincipalFromToken(token) {
-  if (!ENTERPRISE_AUTH_ON || !ENTERPRISE_AUTH_CONFIGURED || !token) return null;
-  const staticPrincipal = findEnterpriseStaticPrincipal(token);
-  if (staticPrincipal) return staticPrincipal;
-  return findEnterpriseJwtPrincipal(token);
-}
-
-function findEnterprisePrincipalFromSessionCookie(req) {
-  const cookies = requestCookieValues(req, ENTERPRISE_SESSION_COOKIE_NAME);
-  if (cookies.length > 1) {
-    req.enterpriseAuthFailureReason = 'invalid_session';
-    req.enterpriseCredentialHash = createHash('sha256')
-      .update(cookies.join('\n'))
-      .digest('hex')
-      .slice(0, 24);
-    return null;
-  }
-  const cookie = cookies[0] || '';
-  if (!cookie) return null;
-  const session = openEnterpriseSessionCookie(cookie);
-  if (session.principal) {
-    req.enterpriseCredentialHash = session.sessionHash;
-    return session.principal;
-  }
-  req.enterpriseAuthFailureReason = session.reason || 'invalid_session';
-  req.enterpriseCredentialHash = createHash('sha256').update(cookie).digest('hex').slice(0, 24);
-  return null;
-}
-
-async function findEnterprisePrincipal(req) {
-  if (!ENTERPRISE_AUTH_ON || !ENTERPRISE_AUTH_CONFIGURED) return null;
-  const bearerToken = extractBearerToken(req);
-  if (bearerToken) {
-    req.enterpriseCredentialHash = enterpriseCredentialHashFromToken(bearerToken);
-    return findEnterprisePrincipalFromToken(bearerToken);
-  }
-  return findEnterprisePrincipalFromSessionCookie(req);
-}
-
-function enterpriseTokenHash(req) {
-  if (req.enterpriseCredentialHash) return req.enterpriseCredentialHash;
-  const token = extractBearerToken(req);
-  if (!token) return undefined;
-  return enterpriseCredentialHashFromToken(token);
-}
-
-function enterpriseRateLimitEnabled(limit) {
-  return ENTERPRISE_AUTH_ON && ENTERPRISE_RATE_LIMIT_WINDOW_MS > 0 && limit > 0;
-}
-
-function enterpriseRateLimitKey(req, group) {
-  const remoteAddress = enterpriseRemoteAddress(req);
-  if (group === 'auth') return `${group}:${remoteAddress}`;
-  const tokenHash = enterpriseTokenHash(req) || 'no-token';
-  return `${group}:${tokenHash}:${remoteAddress}`;
-}
-
-function pruneEnterpriseRateLimitBuckets(now) {
-  const needsCapacity = enterpriseRateLimitBuckets.size >= ENTERPRISE_RATE_LIMIT_MAX_BUCKETS;
-  if (!needsCapacity && now < enterpriseRateLimitNextPruneAt) {
-    return;
-  }
-  enterpriseRateLimitNextPruneAt =
-    now + Math.min(ENTERPRISE_RATE_LIMIT_WINDOW_MS, 30_000);
-  for (const [key, bucket] of enterpriseRateLimitBuckets.entries()) {
-    if (bucket.resetAt <= now) enterpriseRateLimitBuckets.delete(key);
-  }
-  while (needsCapacity && enterpriseRateLimitBuckets.size >= ENTERPRISE_RATE_LIMIT_MAX_BUCKETS) {
-    const oldestKey = enterpriseRateLimitBuckets.keys().next().value;
-    if (!oldestKey) break;
-    enterpriseRateLimitBuckets.delete(oldestKey);
-  }
-}
-
-function checkEnterpriseRateLimit(req, res, { group, limit, path }) {
-  if (!enterpriseRateLimitEnabled(limit)) return true;
-  const now = Date.now();
-  pruneEnterpriseRateLimitBuckets(now);
-  const key = enterpriseRateLimitKey(req, group);
-  let bucket = enterpriseRateLimitBuckets.get(key);
-  if (!bucket || bucket.resetAt <= now) {
-    bucket = { count: 0, resetAt: now + ENTERPRISE_RATE_LIMIT_WINDOW_MS };
-    enterpriseRateLimitBuckets.set(key, bucket);
-  }
-  bucket.count += 1;
-  const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
-  const remaining = Math.max(0, limit - bucket.count);
-  res.setHeader('RateLimit-Limit', String(limit));
-  res.setHeader('RateLimit-Remaining', String(remaining));
-  res.setHeader('RateLimit-Reset', String(retryAfter));
-  if (bucket.count <= limit) return true;
-  res.setHeader('Retry-After', String(retryAfter));
-  appendEnterpriseAuditEvent(req, {
-    type: 'enterprise.rate_limited',
-    outcome: 'denied',
-    status: 429,
-    path,
-    reason: `rate_limit:${group}`,
-  });
-  sendJson(res, 429, {
-    ok: false,
-    authRequired: true,
-    authenticated: false,
-    configured: ENTERPRISE_AUTH_CONFIGURED,
-    error: 'Too many enterprise requests; retry after the rate limit resets',
-    retryAfterSeconds: retryAfter,
-  });
-  return false;
-}
-
-function checkEnterpriseRateLimitHeadroom(req, res, { group, limit, path }) {
-  if (!enterpriseRateLimitEnabled(limit)) return true;
-  const now = Date.now();
-  pruneEnterpriseRateLimitBuckets(now);
-  const key = enterpriseRateLimitKey(req, group);
-  const bucket = enterpriseRateLimitBuckets.get(key);
-  if (!bucket || bucket.resetAt <= now || bucket.count < limit) return true;
-  const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
-  res.setHeader('RateLimit-Limit', String(limit));
-  res.setHeader('RateLimit-Remaining', '0');
-  res.setHeader('RateLimit-Reset', String(retryAfter));
-  res.setHeader('Retry-After', String(retryAfter));
-  appendEnterpriseAuditEvent(req, {
-    type: 'enterprise.rate_limited',
-    outcome: 'denied',
-    status: 429,
-    path,
-    reason: `rate_limit:${group}`,
-  });
-  sendJson(res, 429, {
-    ok: false,
-    authRequired: true,
-    authenticated: false,
-    configured: ENTERPRISE_AUTH_CONFIGURED,
-    error: 'Too many enterprise requests; retry after the rate limit resets',
-    retryAfterSeconds: retryAfter,
-  });
-  return false;
-}
-
-function enterpriseAuditPrincipal(principal) {
-  if (!principal) return undefined;
-  const record = {
-    userId: auditString(principal.userId, 256),
-    role: auditString(principal.role, 64),
-    orgId: auditString(principal.orgId, 256),
-    teamId: auditString(principal.teamId, 256),
-  };
-  return Object.values(record).some(Boolean) ? record : undefined;
-}
-
-function enterprisePrincipalInConfiguredOrg(principal) {
-  return principal?.orgId === ENTERPRISE_ORG_ID;
-}
-
-async function enterpriseDataRootWithinBoundary(dataRoot) {
-  if (!ENTERPRISE_DATA_ROOT_BASE || !dataRoot) return true;
-  if (!pathInside(ENTERPRISE_DATA_ROOT_BASE, dataRoot)) return false;
-  const [realBase, realRoot] = await Promise.all([
-    realpathOrNull(ENTERPRISE_DATA_ROOT_BASE),
-    realpathOrNull(dataRoot),
-  ]);
-  if (!realRoot) return true;
-  if (!realBase) return pathInside(ENTERPRISE_DATA_ROOT_BASE, dataRoot);
-  return pathInside(realBase, realRoot);
-}
-
-async function enterprisePrincipalDataRootAllowed(principal) {
-  return enterpriseDataRootWithinBoundary(principal?.dataRoot);
 }
 
 function normalizeRequestId(value) {
@@ -7643,12 +5442,12 @@ function normalizeRequestId(value) {
   return /^[A-Za-z0-9._:-]{1,128}$/.test(id) ? id : '';
 }
 
-function enterpriseRequestId(req) {
-  if (!req.enterpriseRequestId) {
-    req.enterpriseRequestId =
+function requestId(req) {
+  if (!req.dashboardRequestId) {
+    req.dashboardRequestId =
       normalizeRequestId(req.headers?.['x-request-id']) || randomUUID();
   }
-  return req.enterpriseRequestId;
+  return req.dashboardRequestId;
 }
 
 function normalizeForwardedAddress(value) {
@@ -7671,142 +5470,6 @@ function normalizePeerAddress(value) {
   return address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
 }
 
-function forwardedHeaderAddress(value) {
-  const raw = Array.isArray(value) ? value[0] : value;
-  const first = String(raw || '').split(',')[0] || '';
-  const match = /(?:^|;)\s*for=([^;]+)/i.exec(first);
-  return normalizeForwardedAddress(match?.[1]);
-}
-
-function enterpriseRemoteAddress(req) {
-  const socketAddress = normalizePeerAddress(req.socket?.remoteAddress) || req.socket?.remoteAddress || 'unknown';
-  const trustForwardedHeaders =
-    DASHBOARD_TRUST_PROXY_HEADERS &&
-    (DASHBOARD_TRUSTED_PROXY_ADDRESSES.length > 0
-      ? DASHBOARD_TRUSTED_PROXY_ADDRESSES.includes(socketAddress)
-      : !ENTERPRISE_AUTH_ON);
-  if (trustForwardedHeaders) {
-    return (
-      normalizeForwardedAddress(req.headers?.['x-forwarded-for']) ||
-      forwardedHeaderAddress(req.headers?.forwarded) ||
-      socketAddress
-    );
-  }
-  return socketAddress;
-}
-
-function auditString(value, maxLength = 256) {
-  if (value == null) return undefined;
-  const text = String(value).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
-  if (!text) return undefined;
-  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
-}
-
-const ENTERPRISE_AUDIT_TOKEN_HASH_RE = /^[a-f0-9]{16,64}$/;
-function auditTokenHash(value) {
-  const text = String(value || '').trim().toLowerCase();
-  return ENTERPRISE_AUDIT_TOKEN_HASH_RE.test(text) ? text : undefined;
-}
-
-function enterprisePublicPrincipal(principal) {
-  return {
-    userId: principal.userId,
-    email: principal.email,
-    name: principal.name,
-    role: principal.role,
-    orgId: principal.orgId,
-    orgName: principal.orgName,
-    teamId: principal.teamId,
-    teamName: principal.teamName,
-    scopes: principal.scopes,
-    dataRootConfigured: Boolean(principal.dataRoot),
-  };
-}
-
-function appendEnterpriseAuditEvent(req, event) {
-  if (!ENTERPRISE_AUTH_ON) return;
-  const record = {
-    timestamp: new Date().toISOString(),
-    requestId: enterpriseRequestId(req),
-    type: auditString(event.type, 128),
-    outcome: auditString(event.outcome, 64),
-    status: Number.isFinite(event.status) ? event.status : undefined,
-    method: auditString(event.method || req.method || 'GET', 16),
-    path: auditString(event.path, 2048),
-    reason: auditString(event.reason, 256),
-    principal: enterpriseAuditPrincipal(event.principal),
-    tokenHash: auditTokenHash(enterpriseTokenHash(req)),
-    remoteAddress: auditString(enterpriseRemoteAddress(req), 128),
-    llmUsageId: auditString(event.llmUsageId, 128),
-    egressScrub: auditString(event.egressScrub, 64),
-    inputBytes: Number.isFinite(event.inputBytes)
-      ? Math.floor(event.inputBytes)
-      : undefined,
-    outputBytes: Number.isFinite(event.outputBytes)
-      ? Math.floor(event.outputBytes)
-      : undefined,
-  };
-  const line = `${JSON.stringify(record)}\n`;
-  enterpriseAuditWriteQueue = enterpriseAuditWriteQueue
-    .then(async () => {
-      await mkdir(dirname(ENTERPRISE_AUDIT_LOG), { recursive: true });
-      await setEnterpriseAuditLogPermissions(ENTERPRISE_AUDIT_LOG);
-      await rotateEnterpriseAuditLogIfNeeded(Buffer.byteLength(line));
-      await appendFile(ENTERPRISE_AUDIT_LOG, line, {
-        encoding: 'utf8',
-        mode: ENTERPRISE_AUDIT_FILE_MODE,
-      });
-      await setEnterpriseAuditLogPermissions(ENTERPRISE_AUDIT_LOG);
-    })
-    .catch((err) => {
-      console.warn('[enterprise-audit] append failed:', err?.message || err);
-    });
-}
-
-async function setEnterpriseAuditLogPermissions(path) {
-  try {
-    await chmod(path, ENTERPRISE_AUDIT_FILE_MODE);
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
-}
-
-async function rotateIfExists(from, to) {
-  try {
-    await setEnterpriseAuditLogPermissions(from);
-    await rename(from, to);
-    await setEnterpriseAuditLogPermissions(to);
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw err;
-  }
-}
-
-async function rotateEnterpriseAuditLogIfNeeded(incomingBytes) {
-  if (
-    ENTERPRISE_AUDIT_ROTATE_MAX_BYTES <= 0 ||
-    ENTERPRISE_AUDIT_ROTATE_MAX_FILES <= 0
-  ) {
-    return;
-  }
-  let info;
-  try {
-    info = await stat(ENTERPRISE_AUDIT_LOG);
-  } catch (err) {
-    if (err?.code === 'ENOENT') return;
-    throw err;
-  }
-  if (!info.isFile() || info.size + incomingBytes <= ENTERPRISE_AUDIT_ROTATE_MAX_BYTES) {
-    return;
-  }
-  await rm(`${ENTERPRISE_AUDIT_LOG}.${ENTERPRISE_AUDIT_ROTATE_MAX_FILES}`, {
-    force: true,
-  });
-  for (let i = ENTERPRISE_AUDIT_ROTATE_MAX_FILES - 1; i >= 1; i -= 1) {
-    await rotateIfExists(`${ENTERPRISE_AUDIT_LOG}.${i}`, `${ENTERPRISE_AUDIT_LOG}.${i + 1}`);
-  }
-  await rotateIfExists(ENTERPRISE_AUDIT_LOG, `${ENTERPRISE_AUDIT_LOG}.1`);
-}
-
 function parseBoundedSearchInt(params, name, fallback, min, max) {
   const raw = params.get(name);
   if (!raw) return fallback;
@@ -7815,147 +5478,31 @@ function parseBoundedSearchInt(params, name, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
-function enterpriseCapabilitiesForPrincipal(principal) {
-  const isAdmin = principal?.role === 'admin';
-  const hasDataRoot = Boolean(principal?.dataRoot);
-  const canReadOwnSessions =
-    (isAdmin || hasDataRoot) &&
-    enterprisePrincipalHasScope(principal, [
-      'sessions:read',
-      'transcripts:read',
-      'org:read',
-    ]);
-  const canReadOrganizationData =
-    isAdmin && enterprisePrincipalHasScope(principal, ['org:read']);
-  const canReadAuditLog =
-    isAdmin && enterprisePrincipalHasScope(principal, ['audit:read', 'org:read']);
-  const canWriteOrganizationData =
-    isAdmin && enterprisePrincipalHasScope(principal, ['org:write']);
-  const canWritePolicy =
-    isAdmin &&
-    enterprisePrincipalHasScope(principal, ['org:write', 'policy:write']);
+function serverSessionPayload() {
   return {
-    canReadOwnSessions,
-    canReadOrganizationRollup: canReadOrganizationData,
-    canReadOrganizationData,
-    canReadAuditLog,
-    canWriteOrganizationData,
-    canReadRawTranscripts:
-      (isAdmin || hasDataRoot) &&
-      enterprisePrincipalHasScope(principal, [
-        'sessions:read',
-        'transcripts:read',
-        'org:read',
-      ]),
-    canWritePolicy,
-    canImportLocalData: false,
-    hasScopedDataRoot: hasDataRoot,
+    mode: 'single-user',
+    authRequired: false,
+    authenticated: true,
+    configured: true,
+    principal: null,
+    organization: null,
+    capabilities: {
+      canReadOwnSessions: true,
+      canReadRawTranscripts: true,
+      canWritePolicy: true,
+      canImportLocalData: true,
+    },
   };
 }
 
-function enterpriseCapabilities(role) {
-  return enterpriseCapabilitiesForPrincipal({ role });
-}
-
-function enterpriseSessionPayload(principal) {
-  if (!ENTERPRISE_AUTH_ON) {
-    return {
-      mode: 'single-user',
-      authRequired: false,
-      authenticated: true,
-      configured: true,
-      principal: {
-        userId: 'local-user',
-        name: 'Local user',
-        role: 'admin',
-        orgId: ENTERPRISE_ORG_ID,
-        orgName: ENTERPRISE_ORG_NAME,
-        scopes: [],
-      },
-      organization: { id: ENTERPRISE_ORG_ID, name: ENTERPRISE_ORG_NAME },
-      capabilities: {
-        ...enterpriseCapabilities('admin'),
-        canImportLocalData: true,
-      },
-    };
-  }
-  return {
-    mode: 'enterprise',
-    authRequired: true,
-    authenticated: Boolean(principal),
-    configured: ENTERPRISE_AUTH_CONFIGURED,
-    configError: ENTERPRISE_AUTH_CONFIG_ERROR || undefined,
-    principal: principal ? enterprisePublicPrincipal(principal) : null,
-    organization: { id: ENTERPRISE_ORG_ID, name: ENTERPRISE_ORG_NAME },
-    capabilities: principal ? enterpriseCapabilitiesForPrincipal(principal) : {},
-  };
-}
-
-function enterpriseRequestClaudeRoot(req) {
-  const principal = req.enterprisePrincipal;
-  if (ENTERPRISE_AUTH_ON && principal?.role !== 'admin' && principal?.dataRoot) {
-    return principal.dataRoot;
-  }
-  return CLAUDE;
-}
-
-function enterpriseRequestProjectsRoot(req) {
-  return join(enterpriseRequestClaudeRoot(req), 'projects');
-}
-
-function enterpriseRequestProjectsRoots(req) {
-  const principal = req.enterprisePrincipal;
-  if (ENTERPRISE_AUTH_ON && principal?.role !== 'admin') {
-    return principal?.dataRoot ? [join(principal.dataRoot, 'projects')] : [];
-  }
-  return PROJECT_ROOTS;
-}
-
-function enterpriseWorkflowReadOptions(req) {
-  const principal = req.enterprisePrincipal;
-  return {
-    // Local and enterprise-admin roots come from trusted server configuration
-    // and may intentionally alias one physical hub. A tenant's configured root
-    // is an authorization boundary: reject if any component of its projects
-    // path resolves through a symlink instead of broadening that boundary.
-    allowRootSymlinks: !(ENTERPRISE_AUTH_ON && principal?.role !== 'admin'),
-  };
-}
-
-function enterpriseRequestDataSource(req, sourceId) {
+function dataSourceClaudeRoot(sourceId) {
   const source = DATA_SOURCE_BY_ID.get(sourceId);
-  if (!source) return null;
-  const principal = req.enterprisePrincipal;
-  if (ENTERPRISE_AUTH_ON && principal?.role !== 'admin' && principal?.dataRoot) {
-    if (sourceId !== DEFAULT_SOURCE.id) return null;
-    return {
-      ...DEFAULT_SOURCE,
-      historyDir: join(principal.dataRoot, 'projects'),
-      configFile: join(dirname(principal.dataRoot), '.claude.json'),
-    };
-  }
-  return source;
-}
-
-function enterpriseRequestSourceClaudeRoot(req, sourceId) {
-  const source = enterpriseRequestDataSource(req, sourceId);
   return source ? dirname(source.historyDir) : null;
 }
 
-function enterpriseRequestSourceProjectsRoot(req, sourceId) {
-  const source = enterpriseRequestDataSource(req, sourceId);
+function dataSourceProjectsRoot(sourceId) {
+  const source = DATA_SOURCE_BY_ID.get(sourceId);
   return source ? source.historyDir : null;
-}
-
-function isEnterpriseProtectedPath(pathname) {
-  if (!ENTERPRISE_AUTH_ON) return false;
-  if (pathname === '/api/auth/session') return false;
-  if (pathname.startsWith('/api/')) return true;
-  if (pathname === '/sessions-manifest.json' || pathname === '/history.jsonl') {
-    return true;
-  }
-  if (pathname.startsWith('/projects/')) return true;
-  return false;
 }
 
 function isBasicAuthSensitivePath(pathname) {
@@ -7968,261 +5515,6 @@ function isBasicAuthSensitivePath(pathname) {
   return false;
 }
 
-function rejectEnterpriseAuth(res, status, payload) {
-  if (status === 401) {
-    res.setHeader(
-      'WWW-Authenticate',
-      'Bearer realm="Claude History Dashboard", error="invalid_token"'
-    );
-  }
-  return sendJson(res, status, payload);
-}
-
-async function requireEnterpriseAuth(req, res, pathname) {
-  if (!isEnterpriseProtectedPath(pathname)) return true;
-  appendVary(res, 'Authorization');
-  appendVary(res, 'Cookie');
-  res.setHeader('Cache-Control', 'no-store');
-  if (!ENTERPRISE_AUTH_CONFIGURED) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.route.denied',
-      outcome: 'denied',
-      status: 503,
-      path: pathname,
-      reason: ENTERPRISE_AUTH_CONFIG_ERROR ? 'config_error' : 'not_configured',
-    });
-    rejectEnterpriseAuth(res, 503, {
-      ok: false,
-      authRequired: true,
-      authenticated: false,
-      configured: false,
-      error:
-        ENTERPRISE_AUTH_CONFIG_ERROR ||
-        'Enterprise auth is enabled but no dashboard tokens are configured',
-    });
-    return false;
-  }
-  const bearerToken = extractBearerToken(req);
-  const staticPrincipal = bearerToken
-    ? findEnterpriseStaticPrincipal(bearerToken)
-    : null;
-  const sessionPrincipal = bearerToken
-    ? null
-    : findEnterprisePrincipalFromSessionCookie(req);
-  if (
-    !staticPrincipal &&
-    !sessionPrincipal &&
-    !checkEnterpriseRateLimitHeadroom(req, res, {
-      group: 'auth',
-      limit: ENTERPRISE_AUTH_RATE_LIMIT,
-      path: pathname,
-    })
-  ) {
-    return false;
-  }
-  const principal =
-    staticPrincipal ||
-    sessionPrincipal ||
-    (bearerToken ? await findEnterpriseJwtPrincipal(bearerToken) : null);
-  if (!principal) {
-    if (
-      !checkEnterpriseRateLimit(req, res, {
-        group: 'auth',
-        limit: ENTERPRISE_AUTH_RATE_LIMIT,
-        path: pathname,
-      })
-    ) {
-      return false;
-    }
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.route.denied',
-      outcome: 'denied',
-      status: 401,
-      path: pathname,
-      reason: req.enterpriseAuthFailureReason || 'invalid_token',
-    });
-    if (hasEnterpriseSessionCookie(req)) clearEnterpriseSessionCookie(res);
-    rejectEnterpriseAuth(res, 401, {
-      ok: false,
-      authRequired: true,
-      authenticated: false,
-      configured: true,
-      error: 'Unauthorized: missing or invalid enterprise credential',
-    });
-    return false;
-  }
-  if (
-    !checkEnterpriseRateLimit(req, res, {
-      group: 'api',
-      limit: ENTERPRISE_API_RATE_LIMIT,
-      path: pathname,
-    })
-  ) {
-    return false;
-  }
-  if (!enterprisePrincipalInConfiguredOrg(principal)) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.route.denied',
-      outcome: 'denied',
-      status: 403,
-      path: pathname,
-      reason: 'org_mismatch',
-      principal,
-    });
-    sendJson(res, 403, {
-      ok: false,
-      authRequired: true,
-      authenticated: true,
-      configured: true,
-      error: 'Forbidden: this principal is outside the configured organization',
-    });
-    return false;
-  }
-  if (!(await enterprisePrincipalDataRootAllowed(principal))) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.route.denied',
-      outcome: 'denied',
-      status: 403,
-      path: pathname,
-      reason: 'data_root_boundary',
-      principal,
-    });
-    sendJson(res, 403, {
-      ok: false,
-      authRequired: true,
-      authenticated: true,
-      configured: true,
-      error: 'Forbidden: this principal data root is outside the configured boundary',
-    });
-    return false;
-  }
-  if (!enterpriseRouteAllowed(principal, pathname, req.method || 'GET')) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.route.denied',
-      outcome: 'denied',
-      status: 403,
-      path: pathname,
-      reason: 'forbidden',
-      principal,
-    });
-    sendJson(res, 403, {
-      ok: false,
-      authRequired: true,
-      authenticated: true,
-      configured: true,
-      error: 'Forbidden: this principal is not allowed to access that route',
-    });
-    return false;
-  }
-  if (enterprisePrivilegedRoute(pathname, req.method || 'GET')) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.route.allowed',
-      outcome: 'allowed',
-      status: 200,
-      path: pathname,
-      reason: 'privileged_route',
-      principal,
-    });
-  }
-  req.enterprisePrincipal = principal;
-  return true;
-}
-
-function enterpriseReadMethod(method) {
-  return method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-}
-
-function enterpriseWriteCapabilityPath(pathname) {
-  return (
-    pathname === '/api/policy/write' ||
-    pathname === '/api/csrf-token'
-  );
-}
-
-function enterprisePrivilegedRoute(pathname, method = 'GET') {
-  return (
-    enterpriseWriteCapabilityPath(pathname) ||
-    !enterpriseReadMethod(method)
-  );
-}
-
-function enterpriseOrganizationDataPath(pathname) {
-  return (
-    pathname === '/api/dataset.json' ||
-    pathname === '/api/recommendations.json' ||
-    pathname === '/api/adoption/receipts' ||
-    pathname === '/api/checkpoint/answers' ||
-    pathname === '/api/steer-telemetry' ||
-    pathname === '/api/usage' ||
-    pathname === '/api/audit.json' ||
-    pathname === '/api/live'
-  );
-}
-
-function enterpriseScopedDataPath(pathname) {
-  return (
-    pathname === '/api/dataset.json' ||
-    pathname === '/api/dataset/boot' ||
-    pathname.startsWith('/api/dataset/slice/') ||
-    pathname === '/api/recommendations.json' ||
-    pathname === '/api/search' ||
-    pathname === '/api/digest' ||
-    pathname === '/api/live' ||
-    pathname === '/sessions-manifest.json' ||
-    pathname === '/history.jsonl' ||
-    pathname === '/api/memories' ||
-    pathname === '/api/workflows' ||
-    pathname === '/api/experiments.json' ||
-    pathname === '/api/shadow-experiments.json' ||
-    /^\/api\/session\/[^/]+\/timeline$/.test(pathname) ||
-    /^\/api\/session\/[^/]+\/tools$/.test(pathname) ||
-    pathname.startsWith('/projects/')
-  );
-}
-
-function enterpriseRouteAllowed(principal, pathname, method = 'GET') {
-  const caps = enterpriseCapabilitiesForPrincipal(principal);
-  if (enterpriseWriteCapabilityPath(pathname)) {
-    return caps.canWritePolicy;
-  }
-  // Session dispatch (#1251): under ENTERPRISE auth this requires admin (canWritePolicy) for ALL
-  // methods. In default (non-enterprise) mode the server is localhost-bound and unauthenticated like
-  // its other read routes; the mutating POST/DELETE are still gated by passesWriteAuth (same-origin +
-  // CSRF) regardless of mode.
-  if (pathname === '/api/sessions' || pathname.startsWith('/api/sessions/')) {
-    return caps.canWritePolicy;
-  }
-  // Session-history push-ingest (#1563): machine-to-machine, gated by its OWN bearer token
-  // (passesIngestAuth), not a browser principal. Classified canWritePolicy here so it isn't an
-  // anonymous hole under enterprise auth; the shipper presents the ingest token regardless of mode.
-  if (/^\/api\/ingest\/[^/]+\/artifacts$/.test(pathname)) {
-    return caps.canWritePolicy;
-  }
-  if (pathname === '/api/checkpoint/answers') {
-    if (method === 'GET') return caps.canReadOrganizationData;
-    if (method === 'POST') return caps.canWriteOrganizationData;
-    return false;
-  }
-  if (!enterpriseReadMethod(method)) {
-    return caps.canWritePolicy;
-  }
-  if (enterpriseScopedDataPath(pathname)) {
-    return principal?.role === 'admin'
-      ? caps.canReadOrganizationData
-      : caps.canReadOwnSessions;
-  }
-  if (enterpriseOrganizationDataPath(pathname)) {
-    return caps.canReadOrganizationData;
-  }
-  if (pathname.startsWith('/api/transcript/')) {
-    return caps.canReadRawTranscripts;
-  }
-  if (pathname.startsWith('/api/')) {
-    return false;
-  }
-  return true;
-}
-
 function requestPathname(req) {
   try {
     return decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
@@ -8231,283 +5523,14 @@ function requestPathname(req) {
   }
 }
 
+// Neutral single-user server session (#3839). The browser reads this for
+// readiness and capabilities; HTTP Basic auth, when configured, is enforced by
+// the dispatcher before this handler runs.
 async function handleAuthSession(req, res) {
-  if (!['GET', 'POST', 'DELETE'].includes(req.method || 'GET')) {
-    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET, POST, or DELETE' });
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
   }
-  appendVary(res, 'Authorization');
-  appendVary(res, 'Cookie');
-  if (req.method === 'DELETE') {
-    const principal = await findEnterprisePrincipal(req);
-    clearEnterpriseSessionCookie(res);
-    if (ENTERPRISE_AUTH_ON) {
-      appendEnterpriseAuditEvent(req, {
-        type: 'enterprise.auth.session',
-        outcome: 'allowed',
-        status: 200,
-        path: '/api/auth/session',
-        reason: 'signed_out',
-        principal: principal || undefined,
-      });
-    }
-    return sendJson(res, 200, {
-      ok: true,
-      ...enterpriseSessionPayload(null),
-    });
-  }
-  if (
-    !checkEnterpriseRateLimit(req, res, {
-      group: 'auth',
-      limit: ENTERPRISE_AUTH_RATE_LIMIT,
-      path: '/api/auth/session',
-    })
-  ) {
-    return;
-  }
-  if (ENTERPRISE_AUTH_ON && !ENTERPRISE_AUTH_CONFIGURED) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.auth.session',
-      outcome: 'denied',
-      status: 503,
-      path: '/api/auth/session',
-      reason: ENTERPRISE_AUTH_CONFIG_ERROR ? 'config_error' : 'not_configured',
-    });
-    clearEnterpriseSessionCookie(res);
-    return rejectEnterpriseAuth(res, 503, enterpriseSessionPayload(null));
-  }
-  if (req.method === 'POST') {
-    const bearerToken = extractBearerToken(req);
-    req.enterpriseCredentialHash = enterpriseCredentialHashFromToken(bearerToken);
-    const postPrincipal = await findEnterprisePrincipalFromToken(bearerToken);
-    if (!postPrincipal) {
-      appendEnterpriseAuditEvent(req, {
-        type: 'enterprise.auth.session',
-        outcome: 'denied',
-        status: 401,
-        path: '/api/auth/session',
-        reason: 'invalid_token',
-      });
-      clearEnterpriseSessionCookie(res);
-      return rejectEnterpriseAuth(res, 401, enterpriseSessionPayload(null));
-    }
-    if (!enterprisePrincipalInConfiguredOrg(postPrincipal)) {
-      appendEnterpriseAuditEvent(req, {
-        type: 'enterprise.auth.session',
-        outcome: 'denied',
-        status: 403,
-        path: '/api/auth/session',
-        reason: 'org_mismatch',
-        principal: postPrincipal,
-      });
-      clearEnterpriseSessionCookie(res);
-      return sendJson(res, 403, {
-        ...enterpriseSessionPayload(null),
-        error: 'Forbidden: this principal is outside the configured organization',
-      });
-    }
-    if (!(await enterprisePrincipalDataRootAllowed(postPrincipal))) {
-      appendEnterpriseAuditEvent(req, {
-        type: 'enterprise.auth.session',
-        outcome: 'denied',
-        status: 403,
-        path: '/api/auth/session',
-        reason: 'data_root_boundary',
-        principal: postPrincipal,
-      });
-      clearEnterpriseSessionCookie(res);
-      return sendJson(res, 403, {
-        ...enterpriseSessionPayload(null),
-        error: 'Forbidden: this principal data root is outside the configured boundary',
-      });
-    }
-    if (!setEnterpriseSessionCookie(res, postPrincipal, enterpriseTokenSessionExpiresAt(bearerToken))) {
-      appendEnterpriseAuditEvent(req, {
-        type: 'enterprise.auth.session',
-        outcome: 'denied',
-        status: 413,
-        path: '/api/auth/session',
-        reason: 'session_cookie_too_large',
-        principal: postPrincipal,
-      });
-      clearEnterpriseSessionCookie(res);
-      return sendJson(res, 413, {
-        ok: false,
-        authRequired: true,
-        authenticated: false,
-        configured: true,
-        error: 'Enterprise browser session cookie exceeds configured byte limit',
-        maxBytes: ENTERPRISE_SESSION_COOKIE_MAX_BYTES,
-      });
-    }
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.auth.session',
-      outcome: 'allowed',
-      status: 200,
-      path: '/api/auth/session',
-      reason: 'session_cookie_issued',
-      principal: postPrincipal,
-    });
-    return sendJson(res, 200, enterpriseSessionPayload(postPrincipal));
-  }
-  const principal = await findEnterprisePrincipal(req);
-  if (ENTERPRISE_AUTH_ON && !principal) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.auth.session',
-      outcome: 'denied',
-      status: 401,
-      path: '/api/auth/session',
-      reason: req.enterpriseAuthFailureReason || 'invalid_token',
-    });
-    clearEnterpriseSessionCookie(res);
-    return rejectEnterpriseAuth(res, 401, enterpriseSessionPayload(null));
-  }
-  if (ENTERPRISE_AUTH_ON && !enterprisePrincipalInConfiguredOrg(principal)) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.auth.session',
-      outcome: 'denied',
-      status: 403,
-      path: '/api/auth/session',
-      reason: 'org_mismatch',
-      principal,
-    });
-    return sendJson(res, 403, {
-      ...enterpriseSessionPayload(null),
-      error: 'Forbidden: this principal is outside the configured organization',
-    });
-  }
-  if (ENTERPRISE_AUTH_ON && !(await enterprisePrincipalDataRootAllowed(principal))) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.auth.session',
-      outcome: 'denied',
-      status: 403,
-      path: '/api/auth/session',
-      reason: 'data_root_boundary',
-      principal,
-    });
-    return sendJson(res, 403, {
-      ...enterpriseSessionPayload(null),
-      error: 'Forbidden: this principal data root is outside the configured boundary',
-    });
-  }
-  if (ENTERPRISE_AUTH_ON) {
-    appendEnterpriseAuditEvent(req, {
-      type: 'enterprise.auth.session',
-      outcome: 'allowed',
-      status: 200,
-      path: '/api/auth/session',
-      reason: 'authenticated',
-      principal,
-    });
-  }
-  return sendJson(res, 200, enterpriseSessionPayload(principal));
-}
-
-function enterpriseOrganizationPrincipals(req) {
-  const principals = ENTERPRISE_PRINCIPALS.filter((record) =>
-    enterprisePrincipalInConfiguredOrg(record.principal)
-  ).map((record) => enterprisePublicPrincipal(record.principal));
-  const current = req.enterprisePrincipal
-    ? enterprisePublicPrincipal(req.enterprisePrincipal)
-    : null;
-  if (!current) return principals;
-  const currentKey = `${current.orgId}:${current.userId}`;
-  const alreadyListed = principals.some(
-    (principal) => `${principal.orgId}:${principal.userId}` === currentKey
-  );
-  return alreadyListed ? principals : [...principals, current];
-}
-
-function enterpriseOrganizationTeams(principals) {
-  const teams = new Map();
-  for (const principal of principals) {
-    const key = principal.teamId || principal.teamName || 'unassigned';
-    let team = teams.get(key);
-    if (!team) {
-      team = {
-        teamId: principal.teamId,
-        teamName: principal.teamName || principal.teamId || 'Unassigned',
-        principalCount: 0,
-        adminCount: 0,
-        memberCount: 0,
-        viewerCount: 0,
-        scopedDataRoots: 0,
-      };
-      teams.set(key, team);
-    }
-    team.principalCount += 1;
-    if (principal.role === 'admin') team.adminCount += 1;
-    else if (principal.role === 'viewer') team.viewerCount += 1;
-    else team.memberCount += 1;
-    if (principal.dataRootConfigured) team.scopedDataRoots += 1;
-  }
-  return [...teams.values()].sort((a, b) =>
-    `${a.teamName}:${a.teamId || ''}`.localeCompare(`${b.teamName}:${b.teamId || ''}`)
-  );
-}
-
-function enterpriseContributorAliases(principal) {
-  const source = 'enterprise principal metadata';
-  const aliases = [];
-  const add = (kind, value) => {
-    const text = boundedEnterpriseText(value);
-    if (!text) return;
-    if (aliases.some((alias) => alias.kind === kind && alias.value === text)) {
-      return;
-    }
-    aliases.push({ kind, value: text, source });
-  };
-
-  // Task owner values are explicit, user-supplied artifact fields. Only map
-  // them to principal fields the organization already supplied.
-  add('task-owner', principal.userId);
-  add('task-owner', principal.email);
-  add('username', principal.userId);
-  add('session-user', principal.userId);
-  add('email', principal.email);
-  return aliases;
-}
-
-function enterpriseOrganizationIdentityDataset(principals) {
-  const contributors = principals
-    .map((principal) => {
-      const id = boundedEnterpriseText(principal.userId);
-      if (!id) return null;
-      const teamId = firstNonEmptyString(principal.teamId, principal.teamName);
-      const email = boundedEnterpriseText(principal.email);
-      return {
-        id,
-        displayName: firstNonEmptyString(principal.name, principal.userId, principal.email),
-        ...(email ? { email } : {}),
-        ...(teamId ? { teamIds: [teamId] } : {}),
-        aliases: enterpriseContributorAliases(principal),
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.id.localeCompare(b.id));
-  const teams = enterpriseOrganizationTeams(principals)
-    .map((team) => {
-      const id = firstNonEmptyString(team.teamId, team.teamName);
-      if (!id) return null;
-      return {
-        id,
-        name: firstNonEmptyString(team.teamName, team.teamId, 'Unassigned'),
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.id.localeCompare(b.id));
-
-  return {
-    source: 'enterprise principal metadata',
-    contributors,
-    ...(teams.length ? { teams } : {}),
-  };
-}
-
-function enterpriseRecommendationIdentity(req) {
-  if (!ENTERPRISE_AUTH_ON) return null;
-  if (!enterpriseRequestUsesGlobalIngest(req)) return null;
-  if (req.enterprisePrincipal?.role !== 'admin') return null;
-  return enterpriseOrganizationIdentityDataset(enterpriseOrganizationPrincipals(req));
+  return sendJson(res, 200, serverSessionPayload());
 }
 
 // Route-handler seam for the four dataset-bearing routes (#2076). Each handler
@@ -8949,17 +5972,13 @@ async function handleRecommendationsJson(req, res) {
   // contract; the typed contract carries its own exact `dashboardProject` scope
   // and rejects `project` as conflicting (in the parser above).
   const project = surfaceRequest ? null : url.searchParams.get('project');
-  const usesGlobalIngest = enterpriseRequestUsesGlobalIngest(req);
   // Scoped surfaces never emit suppression-transition side effects (#2718) — that
   // canonical write belongs only to the unfiltered global legacy path. They still
   // READ rejected receipts to suppress findings.
-  const emitSuppressionTransitions =
-    usesGlobalIngest && !project && !surfaceRequest;
-  const organizationIdentity = enterpriseRecommendationIdentity(req);
-  // #2196: only the global ingest path may use the rebuild worker — the worker
-  // ingests the main process's global CLAUDE_DIR, not a per-principal scoped
-  // dataRoot, so enterprise scoped requests stay on the inline build.
-  const allowWorker = usesGlobalIngest;
+  const emitSuppressionTransitions = !project && !surfaceRequest;
+  const organizationIdentity = null;
+  // #2196: the rebuild worker ingests the main process's global CLAUDE_DIR.
+  const allowWorker = true;
   let entry;
   let cache;
   let scheduleRefresh = null;
@@ -9087,21 +6106,15 @@ const SHADOW_EXPERIMENTS_ROWS_KEPT = 20_000;
 const shadowExperimentsCache = new Map();
 const shadowExperimentsBuilds = new Map();
 
-// The ledger path is per-REQUESTER: a scoped enterprise principal reads the
-// shadow-calls ledger under their own data root, never the process default —
-// experiment rows carry task/variation/judge text that must not leak across
-// roots. The CLAUDE_SHADOW_CALLS_LEDGER override applies to the default root
-// only (tests / custom deploys); scoped roots always derive their own path.
-function shadowLedgerPathFor(req) {
-  const root = enterpriseRequestClaudeRoot(req);
-  if (root === CLAUDE) return SHADOW_CALLS_LEDGER;
-  return join(root, 'shadow-calls', 'ledger.jsonl');
+// The shadow-calls ledger and gate-2702 state live under the single user's
+// CLAUDE root (CLAUDE_SHADOW_CALLS_LEDGER overrides the ledger for tests and
+// custom deploys).
+function shadowLedgerPathFor() {
+  return SHADOW_CALLS_LEDGER;
 }
 
-function gate2702StateRootFor(req) {
-  const root = enterpriseRequestClaudeRoot(req);
-  if (root === CLAUDE) return GATE_2702_STATE_ROOT;
-  return join(root, 'shadow-calls', 'gate-2702');
+function gate2702StateRootFor() {
+  return GATE_2702_STATE_ROOT;
 }
 
 function shadowLedgerSignature(ledgerPath) {
@@ -9192,9 +6205,8 @@ const DATASET_ROUTES = new Map([
 
 const server = createServer(async (req, res) => {
   try {
-    req[REQUEST_DATASET_RESPONSE] = res;
     applySecurityHeaders(res);
-    res.setHeader('X-Request-Id', enterpriseRequestId(req));
+    res.setHeader('X-Request-Id', requestId(req));
     const pathname = requestPathname(req);
     if (!pathname) {
       return sendJson(res, 400, {
@@ -9217,14 +6229,6 @@ const server = createServer(async (req, res) => {
     const authSessionPath = pathname === '/api/auth/session';
     if (authSessionPath) {
       appendVary(res, 'Authorization');
-      appendVary(res, 'Cookie');
-      res.setHeader('Cache-Control', 'no-store');
-    }
-    const enterpriseSensitivePath =
-      ENTERPRISE_AUTH_ON && (authSessionPath || isEnterpriseProtectedPath(pathname));
-    if (enterpriseSensitivePath) {
-      appendVary(res, 'Authorization');
-      appendVary(res, 'Cookie');
       res.setHeader('Cache-Control', 'no-store');
     }
     const basicAuthSensitivePath =
@@ -9238,10 +6242,7 @@ const server = createServer(async (req, res) => {
 
     // Basic-auth gate first, before any route runs (protects every surface when
     // DASHBOARD_USER/DASHBOARD_PASS are configured for a non-loopback bind).
-    const allowEnterpriseBearerForBasic =
-      enterpriseSensitivePath &&
-      (Boolean(extractBearerToken(req)) || Boolean(requestEnterpriseSessionCookie(req)));
-    if (!checkBasicAuth(req, { allowEnterpriseBearer: allowEnterpriseBearerForBasic })) {
+    if (!checkBasicAuth(req)) {
       res.setHeader('Cache-Control', 'no-store');
       res.writeHead(401, {
         'WWW-Authenticate': 'Basic realm="Claude Coach", charset="UTF-8"',
@@ -9255,8 +6256,6 @@ const server = createServer(async (req, res) => {
       await handleAuthSession(req, res);
       return;
     }
-
-    if (!(await requireEnterpriseAuth(req, res, pathname))) return;
 
     // Same-origin CSRF-token bootstrap (#308, #311). The SPA reads this on first
     // load and replays the value as a Bearer/X-CSRF-Token header on the policy
@@ -9366,7 +6365,7 @@ const server = createServer(async (req, res) => {
       if (req.method !== 'GET') {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
       }
-      const memories = await readMemories(enterpriseRequestProjectsRoot(req));
+      const memories = await readMemories(join(CLAUDE, 'projects'));
       return sendJson(res, 200, memories);
     }
 
@@ -9383,8 +6382,8 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 405, { ok: false, error: 'Method not allowed; use GET' });
       }
       const workflows = await readWorkflows(
-        enterpriseRequestProjectsRoots(req),
-        enterpriseWorkflowReadOptions(req)
+        PROJECT_ROOTS,
+        { allowRootSymlinks: true }
       );
       return sendJson(res, 200, workflows);
     }
@@ -9428,14 +6427,6 @@ const server = createServer(async (req, res) => {
             ? 'missing_anthropic_api_key'
             : null;
       if (disabledReason) {
-        appendEnterpriseAuditEvent(req, {
-          type: 'enterprise.llm_audit',
-          outcome: 'skipped',
-          status: 200,
-          path: pathname,
-          reason: disabledReason,
-          principal: req.enterprisePrincipal,
-        });
         sendAuditResponse(req, res, {
           status: 'skipped',
           findings,
@@ -9444,14 +6435,6 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      appendEnterpriseAuditEvent(req, {
-        type: 'enterprise.llm_audit',
-        outcome: 'allowed',
-        status: 200,
-        path: pathname,
-        reason: 'server_llm_audits_enabled',
-        principal: req.enterprisePrincipal,
-      });
       let auditStatus = 'ran';
       let auditReason;
       try {
@@ -9466,19 +6449,9 @@ const server = createServer(async (req, res) => {
               messages,
             },
             {
-              logger: (receipt) =>
-                appendEnterpriseAuditEvent(req, {
-                  type: 'enterprise.llm_egress_scrub',
-                  outcome: 'allowed',
-                  status: 200,
-                  path: pathname,
-                  reason: 'egress_scrub_redact',
-                  principal: req.enterprisePrincipal,
-                  llmUsageId: receipt.registryId,
-                  egressScrub: receipt.mode,
-                  inputBytes: receipt.inputBytes,
-                  outputBytes: receipt.outputBytes,
-                }),
+              // The scrub receipt only fed the retired enterprise audit log
+              // (#3839); single-user mode never recorded it.
+              logger: () => {},
             }
           );
           return callAnthropicMessages('server.audit-judge', {
@@ -9521,14 +6494,6 @@ const server = createServer(async (req, res) => {
         findings = [];
         auditStatus = 'failed';
         auditReason = 'audit_compute_failed';
-        appendEnterpriseAuditEvent(req, {
-          type: 'enterprise.llm_audit',
-          outcome: 'failed',
-          status: 200,
-          path: pathname,
-          reason: auditReason,
-          principal: req.enterprisePrincipal,
-        });
       }
       sendAuditResponse(req, res, {
         status: auditStatus,
@@ -9549,7 +6514,7 @@ const server = createServer(async (req, res) => {
       // badge (re-read loop / retry storm) is out of scope here, tracked in #196.
       let payload;
       try {
-        const ingestApi = await enterpriseRequestIngestApi(req);
+        const ingestApi = await globalDatasetState.apiPromise;
         payload = ingestApi.computeLiveSession(Date.now());
       } catch (err) {
         // A malformed/half-written transcript must not 500 the widget poll —
@@ -9563,7 +6528,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/sessions-manifest.json') {
-      const manifest = await buildManifest(enterpriseRequestProjectsRoots(req));
+      const manifest = await buildManifest(PROJECT_ROOTS);
       live(res, 'application/json; charset=utf-8');
       res.setHeader('X-Dashboard-Manifest-Limit', String(manifest.limit));
       res.setHeader('X-Dashboard-Manifest-Returned', String(manifest.entries.length));
@@ -9582,7 +6547,7 @@ const server = createServer(async (req, res) => {
       let body;
       try {
         body = await readTextFileInsideRoot(
-          enterpriseRequestClaudeRoot(req),
+          CLAUDE,
           'history.jsonl'
         );
       } catch (err) {
@@ -9605,7 +6570,7 @@ const server = createServer(async (req, res) => {
     if (sourceHistory) {
       let body;
       const sourceId = sourceHistory[1];
-      const sourceRoot = enterpriseRequestSourceClaudeRoot(req, sourceId);
+      const sourceRoot = dataSourceClaudeRoot(sourceId);
       if (!sourceRoot) {
         res.statusCode = 404;
         res.end('');
@@ -9633,7 +6598,7 @@ const server = createServer(async (req, res) => {
     if (sourceSession) {
       let body;
       const sourceId = sourceSession[1];
-      const sourceProjectsRoot = enterpriseRequestSourceProjectsRoot(req, sourceId);
+      const sourceProjectsRoot = dataSourceProjectsRoot(sourceId);
       if (!sourceProjectsRoot) {
         res.statusCode = 404;
         res.end('');
@@ -9679,7 +6644,7 @@ const server = createServer(async (req, res) => {
     // a 304 can't cross-match the transcript endpoints sharing that hash.
     const tTimeline = pathname.match(/^\/api\/session\/([^/]+)\/timeline(?:\.json)?$/);
     if (tTimeline) {
-      const ingestApi = await enterpriseRequestIngestApi(req);
+      const ingestApi = await globalDatasetState.apiPromise;
       const detail = ingestApi.getSessionTimelineDetail(tTimeline[1]);
       if (!detail) {
         res.statusCode = 404;
@@ -9706,7 +6671,7 @@ const server = createServer(async (req, res) => {
     // body. Same freshness and ETag model as the timeline detail route.
     const tTools = pathname.match(/^\/api\/session\/([^/]+)\/tools(?:\.json)?$/);
     if (tTools) {
-      const ingestApi = await enterpriseRequestIngestApi(req);
+      const ingestApi = await globalDatasetState.apiPromise;
       const detail = ingestApi.getSessionToolDetail(tTools[1]);
       if (!detail) {
         res.statusCode = 404;
@@ -9729,7 +6694,7 @@ const server = createServer(async (req, res) => {
 
     const tThinking = pathname.match(/^\/api\/transcript\/([^/]+)\/thinking$/);
     if (tThinking) {
-      const ingestApi = await enterpriseRequestIngestApi(req);
+      const ingestApi = await globalDatasetState.apiPromise;
       let row;
       try {
         row = ingestApi.getTranscript(tThinking[1]);
@@ -9766,7 +6731,7 @@ const server = createServer(async (req, res) => {
 
     const tContent = pathname.match(/^\/api\/transcript\/([^/]+)$/);
     if (tContent) {
-      const ingestApi = await enterpriseRequestIngestApi(req);
+      const ingestApi = await globalDatasetState.apiPromise;
       let row;
       try {
         row = ingestApi.getTranscript(tContent[1]);
@@ -9808,7 +6773,7 @@ const server = createServer(async (req, res) => {
         body = await readMergedSession(
           m[1],
           m[2],
-          enterpriseRequestProjectsRoots(req)
+          PROJECT_ROOTS
         );
       } catch (err) {
         if (isRawFileTooLargeError(err)) {
@@ -9834,8 +6799,6 @@ const server = createServer(async (req, res) => {
     res.statusCode = 500;
     res.end('server error');
     console.error(err);
-  } finally {
-    finishScopedDatasetRequest(req);
   }
 });
 
