@@ -382,6 +382,69 @@ test('the reusable merge resolver is pinned to the CI runner, read-only, and con
   );
 });
 
+test('payload jobs read docs-only only from the verified resolver (#3740)', () => {
+  withWorkflowFixture(
+    {
+      'unsafe.yml': [
+        'name: unsafe',
+        'on: pull_request_target',
+        'concurrency:',
+        '  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}',
+        'permissions: {}',
+        'jobs:',
+        '  authorize:',
+        '    permissions: {}',
+        '    uses: ./.github/workflows/pr-trust.yml',
+        '    with:',
+        '      head-repository: ${{ github.event.pull_request.head.repo.full_name }}',
+        '  resolve-merge:',
+        '    needs: authorize',
+        "    if: needs.authorize.outputs.trusted == 'true'",
+        '    permissions:',
+        '      contents: read',
+        '      pull-requests: read',
+        '    uses: ./.github/workflows/pr-merge-sha.yml',
+        '    with:',
+        '      pr-number: ${{ github.event.pull_request.number }}',
+        '      expected-head-sha: ${{ github.event.pull_request.head.sha }}',
+        '      expected-base-sha: ${{ github.event.pull_request.base.sha }}',
+        '      expected-base-ref: ${{ github.event.pull_request.base.ref }}',
+        '  changes:',
+        '    needs: resolve-merge',
+        "    if: needs.resolve-merge.outputs.merge-sha != ''",
+        '    runs-on: ubuntu-24.04',
+        '    steps:',
+        '      - run: echo docs_only=true >> "$GITHUB_OUTPUT"',
+        '  test:',
+        '    needs: [resolve-merge, changes]',
+        "    if: needs.resolve-merge.outputs.merge-sha != '' && needs.changes.outputs.docs_only != 'true'",
+        '    runs-on: ubuntu-24.04',
+        '    steps:',
+        '      - run: echo ok',
+        '  bracket:',
+        '    needs: [resolve-merge, changes]',
+        "    if: needs.resolve-merge.outputs.merge-sha != '' && needs['changes'].outputs['docs_only'] != 'true'",
+        '    runs-on: ubuntu-24.04',
+        '    steps:',
+        '      - run: echo ok',
+        '  lint:',
+        '    needs: resolve-merge',
+        "    if: needs.resolve-merge.outputs.merge-sha != '' && needs.resolve-merge.outputs.docs-only != 'true'",
+        '    runs-on: ubuntu-24.04',
+        '    steps:',
+        '      - run: echo ok',
+        '',
+      ].join('\n'),
+    },
+    (root) => {
+      const reasons = prWorkflowTrustReasons(root).join('\n');
+      assert.match(reasons, /unsafe\.yml.*test.*docs-only only from needs\.resolve-merge/i);
+      assert.match(reasons, /unsafe\.yml.*bracket.*docs-only only from needs\.resolve-merge/i);
+      assert.doesNotMatch(reasons, /unsafe\.yml.*lint.*docs-only/i);
+    }
+  );
+});
+
 test('post-resolver jobs cannot bypass the verified output guard or exact checkout', () => {
   withWorkflowFixture(
     {

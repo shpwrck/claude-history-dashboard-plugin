@@ -2,11 +2,18 @@
 
 import { appendFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { isDocsOnlyChange } from './ci-docs-paths.mjs';
 
 const FULL_SHA = /^[0-9a-f]{40}$/u;
 const DEFAULT_ATTEMPTS = 12;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+// Classification runs inside the resolver's 2-minute job after polling, so
+// its requests get a short deadline and fall back to docs_only=false.
+const CLASSIFY_REQUEST_TIMEOUT_MS = 5_000;
+// The compare API lists at most 300 changed files; a capped list cannot prove
+// a change is docs-only.
+const COMPARE_FILE_CAP = 300;
 
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.length === 0) {
@@ -216,6 +223,70 @@ export async function resolvePrMergeSha({
   );
 }
 
+/**
+ * Classify the verified test merge as docs-only from the GitHub compare API
+ * (#3740), so each PR workflow gets the answer from the resolver allocation it
+ * already pays for instead of a separate classifier job. The change set is the
+ * test merge against its base parent, the same diff the old git classifier
+ * read; a renamed file counts under both its old and new path. Any failure,
+ * an unexpected merge shape, a nameless entry, or a capped file list answers
+ * `false`: running every job is the safe direction. Unlike the git-based
+ * scripts/ci-docs-only.mjs, this fails soft on purpose, because a resolver
+ * error here would otherwise withhold the verified merge SHA.
+ */
+export async function classifyDocsOnly({
+  apiBaseUrl,
+  repository,
+  mergeSha,
+  expectedHeadSha,
+  token,
+  fetchImpl = globalThis.fetch,
+  requestTimeoutMs = CLASSIFY_REQUEST_TIMEOUT_MS,
+  setTimeoutImpl = globalThis.setTimeout,
+  clearTimeoutImpl = globalThis.clearTimeout,
+  log = (line) => console.log(line),
+}) {
+  try {
+    const root = new URL(requiredString(apiBaseUrl, 'apiBaseUrl')).href.replace(/\/$/u, '');
+    const [owner, name] = requiredString(repository, 'repository')
+      .split('/')
+      .map(encodeURIComponent);
+    const merge = requiredSha(mergeSha, 'mergeSha');
+    const headSha = requiredSha(expectedHeadSha, 'expectedHeadSha');
+    const bearerToken = requiredString(token, 'token');
+    const request = (url) =>
+      requestJson(url, bearerToken, fetchImpl, requestTimeoutMs, setTimeoutImpl, clearTimeoutImpl);
+    const commit = await request(`${root}/repos/${owner}/${name}/git/commits/${merge}`);
+    const base = mergeBaseParent(commit, merge, headSha);
+    if (!base) throw new Error('test merge does not have the expected base and head parents');
+    const compare = await request(`${root}/repos/${owner}/${name}/compare/${base}...${merge}`);
+    if (!Array.isArray(compare?.files)) throw new Error('compare response carried no file list');
+    const files = [];
+    for (const file of compare.files) {
+      const filename = typeof file?.filename === 'string' ? file.filename : '';
+      if (!filename) throw new Error('compare entry without a filename');
+      files.push(filename);
+      // A rename out of a code path is a code change: classify the old path
+      // too (`git mv src/x.ts docs/x.ts` must not skip CI).
+      if (typeof file?.previous_filename === 'string' && file.previous_filename) {
+        files.push(file.previous_filename);
+      }
+    }
+    if (files.length >= COMPARE_FILE_CAP) {
+      log(`Changed files: ${files.length} (capped list); docs_only=false`);
+      return false;
+    }
+    const docsOnly = isDocsOnlyChange(files);
+    log('Changed files:');
+    for (const file of files) log(`- ${file}`);
+    log(`docs_only=${docsOnly}`);
+    return docsOnly;
+  } catch (error) {
+    log(`docs-only classification unavailable (${error.message}); docs_only=false`);
+    return false;
+  }
+}
+
 async function main() {
   const mergeSha = await resolvePrMergeSha({
     apiBaseUrl: process.env.GITHUB_API_URL,
@@ -226,7 +297,17 @@ async function main() {
     token: process.env.GITHUB_TOKEN,
   });
   const outputPath = requiredString(process.env.GITHUB_OUTPUT, 'GITHUB_OUTPUT');
+  // Write the verified merge SHA first: if the job is cut off while
+  // classifying, payload jobs see docs-only unset (not 'true') and all run.
   appendFileSync(outputPath, `merge-sha=${mergeSha}\n`, { encoding: 'utf8' });
+  const docsOnly = await classifyDocsOnly({
+    apiBaseUrl: process.env.GITHUB_API_URL,
+    repository: process.env.GITHUB_REPOSITORY,
+    mergeSha,
+    expectedHeadSha: process.env.EXPECTED_HEAD_SHA,
+    token: process.env.GITHUB_TOKEN,
+  });
+  appendFileSync(outputPath, `docs-only=${docsOnly}\n`, { encoding: 'utf8' });
 }
 
 const invokedDirectly =

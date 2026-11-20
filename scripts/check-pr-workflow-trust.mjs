@@ -63,6 +63,11 @@ const BROKER_TRUST_EXPRESSION =
 const BROKER_COMMAND = 'echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"';
 const RESOLVER_WORKFLOW_OUTPUT = '${{ jobs.resolve.outputs.merge-sha }}';
 const RESOLVER_JOB_OUTPUT = '${{ steps.resolve.outputs.merge-sha }}';
+// #3740: the resolver also answers docs-only from the same step, so payload
+// jobs skip on the verified resolver's value and no separate classifier job
+// allocates a runner.
+const RESOLVER_DOCS_WORKFLOW_OUTPUT = '${{ jobs.resolve.outputs.docs-only }}';
+const RESOLVER_DOCS_JOB_OUTPUT = '${{ steps.resolve.outputs.docs-only }}';
 const RESOLVER_BASE_CHECKOUT = '${{ inputs.expected-base-sha }}';
 const RESOLVER_TOKEN_EXPRESSION = '${{ github.token }}';
 const RESOLVER_PR_INPUT = '${{ inputs.pr-number }}';
@@ -319,6 +324,19 @@ export function prWorkflowTrustReasons(root) {
             `${entry.name}: ${jobKind} ${jobName} must use the verified merge output guard without an OR bypass`
           );
         }
+        // #3740: the docs-only skip may only key off the verified resolver's
+        // output, never a job-local classifier or another job's output.
+        // Any docs-only token counts, so bracket forms (needs['x'].outputs[...])
+        // cannot slip past a dotted-form pattern.
+        const jobIf = job?.if ?? '';
+        const docsTokens = jobIf.match(/docs[-_]only/giu) ?? [];
+        const canonicalDocsReads =
+          jobIf.match(/needs\.resolve-merge\.outputs\.docs-only(?![A-Za-z0-9_-])/gu) ?? [];
+        if (docsTokens.length !== canonicalDocsReads.length) {
+          reasons.push(
+            `${entry.name}: ${jobKind} ${jobName} must read docs-only only from needs.resolve-merge.outputs.docs-only`
+          );
+        }
         if (
           /\b(?:always|cancelled|failure|success)\s*\(/iu.test(job?.if ?? '')
         ) {
@@ -418,12 +436,14 @@ export function prWorkflowTrustReasons(root) {
         Object.keys(mergeResolver.on).length !== 1 ||
         !hasOnlyKeys(workflowCall, ['inputs', 'outputs']) ||
         !inputsValid ||
-        Object.keys(outputs).join(',') !== 'merge-sha' ||
+        Object.keys(outputs).join(',') !== 'merge-sha,docs-only' ||
         !hasOnlyKeys(outputs['merge-sha'], ['description', 'value']) ||
-        outputs['merge-sha']?.value !== RESOLVER_WORKFLOW_OUTPUT
+        outputs['merge-sha']?.value !== RESOLVER_WORKFLOW_OUTPUT ||
+        !hasOnlyKeys(outputs['docs-only'], ['description', 'value']) ||
+        outputs['docs-only']?.value !== RESOLVER_DOCS_WORKFLOW_OUTPUT
       ) {
         reasons.push(
-          `${MERGE_RESOLVER_WORKFLOW}: workflow_call must expose only required PR number/head/base inputs and one merge-sha output`
+          `${MERGE_RESOLVER_WORKFLOW}: workflow_call must expose only required PR number/head/base inputs and the merge-sha and docs-only outputs`
         );
       }
       if (
@@ -465,10 +485,11 @@ export function prWorkflowTrustReasons(root) {
           'steps',
         ]) ||
         resolverJob?.outputs?.['merge-sha'] !== RESOLVER_JOB_OUTPUT ||
-        Object.keys(resolverJob?.outputs ?? {}).length !== 1
+        resolverJob?.outputs?.['docs-only'] !== RESOLVER_DOCS_JOB_OUTPUT ||
+        Object.keys(resolverJob?.outputs ?? {}).length !== 2
       ) {
         reasons.push(
-          `${MERGE_RESOLVER_WORKFLOW}: resolve job keys and merge-sha output must remain canonical`
+          `${MERGE_RESOLVER_WORKFLOW}: resolve job keys and merge-sha/docs-only outputs must remain canonical`
         );
       }
       const resolverSteps = resolverJob?.steps ?? [];

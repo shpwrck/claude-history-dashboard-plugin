@@ -2,11 +2,13 @@
 // Detect whether a pull request changes only documentation paths.
 //
 // Workflows use this instead of pull_request.paths-ignore so required check
-// names do not disappear or sit pending on docs-only PRs. A docs-only PR still
-// gets a tiny classifier job; expensive jobs can then skip at the job level.
+// names do not disappear or sit pending on docs-only PRs. PR workflows get the
+// same answer from the merge-SHA resolver (#3740); this script stays for local
+// and non-PR use.
 
 import { execFileSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
+import { isDocsOnlyChange } from './ci-docs-paths.mjs';
 
 function git(args) {
   return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -22,19 +24,19 @@ function changedFiles() {
   if (baseSha && headSha) {
     attempts.push({
       name: 'pull_request_base_head_sha',
-      args: ['diff', '--name-only', baseSha, headSha],
+      args: ['diff', '--name-only', '--no-renames', baseSha, headSha],
     });
   }
   if (baseRef) {
     attempts.push({
       name: 'pull_request_origin_base_ref',
-      args: ['diff', '--name-only', `origin/${baseRef}...HEAD`],
+      args: ['diff', '--name-only', '--no-renames', `origin/${baseRef}...HEAD`],
     });
   }
   if (!isPullRequest) {
     attempts.push({
       name: 'previous_commit',
-      args: ['diff', '--name-only', 'HEAD^', 'HEAD'],
+      args: ['diff', '--name-only', '--no-renames', 'HEAD^', 'HEAD'],
     });
   }
 
@@ -59,17 +61,8 @@ function changedFiles() {
   throw new Error(`could not determine changed files.${detail}`);
 }
 
-function isDocsPath(file) {
-  if (file.startsWith('docs/')) return true;
-  if (file === 'deploy/README.md') return true;
-  if (file === '.github/pull_request_template.md') return true;
-  if (file.startsWith('.github/ISSUE_TEMPLATE/')) return true;
-  return /^(AGENTS|CATALOG|CHANGELOG|CLAUDE|CODE_OF_CONDUCT|CONTRIBUTING|INDEX|LEARNING-ROADMAP|QUICK_REFERENCE|README|REFERENCES|SECURITY|STYLE_GUIDE)(\.[A-Za-z0-9_-]+)?$/.test(file)
-    || /^(LICENSE|NOTICE)$/.test(file);
-}
-
 const { strategy, files } = changedFiles();
-const docsOnly = files.length > 0 && files.every(isDocsPath);
+const docsOnly = isDocsOnlyChange(files);
 
 console.log(`Diff strategy: ${strategy}`);
 console.log('Changed files:');

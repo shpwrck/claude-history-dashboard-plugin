@@ -20,7 +20,6 @@ export const ALLOWED_TEST_SUITE_OWNERS = Object.freeze([
 // what lets the checker distinguish a valid owner word from the RIGHT owner.
 export const WORKFLOW_TEST_OWNER_BY_JOB = Object.freeze({
   'browser-compat.yml#browser-compat': 'browser/performance',
-  'ci.yml#changes': 'lint',
   'ci.yml#lint': 'lint',
   'ci.yml#build': 'build',
   'ci.yml#gates': 'gates',
@@ -44,7 +43,6 @@ export const TEST_SUITE_OWNER_GROUPS = Object.freeze({
     'test:milestone-guard',
     'test:no-binary-sources',
     'test:openapi-freshness',
-    'test:perf-index-contracts',
     'test:personal-paths',
     'test:policy-write',
     'test:pr-workflow-trust',
@@ -59,6 +57,7 @@ export const TEST_SUITE_OWNER_GROUPS = Object.freeze({
   ]),
   build: Object.freeze(['test:package-surface']),
   gates: Object.freeze([
+    'test:perf-index-contracts',
     'test:analyze-bundle',
     'test:artifact-cache',
     'test:audit-evidence',

@@ -1,5 +1,7 @@
-// The docs-only classifier — the master switch whose docs_only output guards
-// every job in five workflows — must keep its fail-closed contract (#3478).
+// The git-based docs-only classifier must keep its fail-closed contract
+// (#3478). PR workflows now take docs-only from the merge resolver
+// (classifyDocsOnly, #3740), which shares the path rules in ci-docs-paths.mjs;
+// this script remains for local and non-PR use.
 //
 // Run: node --test scripts/ci-docs-only.test.mjs   (npm run test:ci-docs-only)
 //

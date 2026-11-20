@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { resolvePrMergeSha } from './resolve-pr-merge-sha.mjs';
+import { classifyDocsOnly, resolvePrMergeSha } from './resolve-pr-merge-sha.mjs';
 
 const REPOSITORY = 'owner/repo';
 const PR_NUMBER = 42;
@@ -353,4 +353,94 @@ test('the request deadline stays armed while a response body stalls', async () =
   );
   assert.equal(observedSignal?.aborted, true);
   assert.equal(timeoutActive, false);
+});
+
+// ── #3740: docs-only classification from the verified test merge ──────────
+
+function docsOptions(fetchImpl, overrides = {}) {
+  return {
+    apiBaseUrl: 'https://api.github.test',
+    repository: REPOSITORY,
+    mergeSha: MERGE_SHA,
+    expectedHeadSha: HEAD_SHA,
+    token: 'test-token',
+    fetchImpl,
+    log: () => {},
+    ...overrides,
+  };
+}
+
+function compare(files) {
+  return { files: files.map((filename) => ({ filename })) };
+}
+
+test('classifyDocsOnly compares the test merge against its base parent', async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(url);
+    return urls.length === 1
+      ? response(mergeCommit())
+      : response(compare(['docs/guide.md', 'README.md']));
+  };
+  assert.equal(await classifyDocsOnly(docsOptions(fetchImpl)), true);
+  assert.equal(
+    urls[1],
+    `https://api.github.test/repos/owner/repo/compare/${CURRENT_BASE_SHA}...${MERGE_SHA}`
+  );
+});
+
+test('classifyDocsOnly answers false for a code change', async () => {
+  const fetchImpl = queuedFetch(
+    response(mergeCommit()),
+    response(compare(['docs/guide.md', 'src/App.tsx']))
+  );
+  assert.equal(await classifyDocsOnly(docsOptions(fetchImpl)), false);
+});
+
+test('classifyDocsOnly treats an empty change set as not docs-only', async () => {
+  const fetchImpl = queuedFetch(response(mergeCommit()), response(compare([])));
+  assert.equal(await classifyDocsOnly(docsOptions(fetchImpl)), false);
+});
+
+test('classifyDocsOnly fails safe to false on a capped file list', async () => {
+  const files = Array.from({ length: 300 }, (_, i) => `docs/page-${i}.md`);
+  const fetchImpl = queuedFetch(response(mergeCommit()), response(compare(files)));
+  assert.equal(await classifyDocsOnly(docsOptions(fetchImpl)), false);
+});
+
+test('classifyDocsOnly fails safe to false on API errors or a wrong merge shape', async () => {
+  assert.equal(
+    await classifyDocsOnly(docsOptions(queuedFetch(response({}, 500)))),
+    false
+  );
+  assert.equal(
+    await classifyDocsOnly(
+      docsOptions(queuedFetch(response(mergeCommit({ parents: [{ sha: CURRENT_BASE_SHA }] }))))
+    ),
+    false
+  );
+  assert.equal(
+    await classifyDocsOnly(docsOptions(queuedFetch(response(mergeCommit()), response({})))),
+    false
+  );
+});
+
+test('classifyDocsOnly classifies a rename by its old path too', async () => {
+  const fetchImpl = queuedFetch(
+    response(mergeCommit()),
+    response({
+      files: [
+        { filename: 'docs/parse-sessions.ts', previous_filename: 'src/lib/parse-sessions.ts', status: 'renamed' },
+      ],
+    })
+  );
+  assert.equal(await classifyDocsOnly(docsOptions(fetchImpl)), false);
+});
+
+test('classifyDocsOnly fails safe on an entry without a filename', async () => {
+  const fetchImpl = queuedFetch(
+    response(mergeCommit()),
+    response({ files: [{ filename: 'docs/a.md' }, { status: 'added' }] })
+  );
+  assert.equal(await classifyDocsOnly(docsOptions(fetchImpl)), false);
 });
