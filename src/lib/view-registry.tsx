@@ -30,6 +30,8 @@ import type {
 } from './use-recommendations';
 import { enterpriseCapabilityAllowed } from './enterprise-capabilities';
 import { navigateDrillThroughWithFilter } from '../components/affordance/DrillThrough';
+import { PageTitle } from '../components/heading';
+import { PageSection } from '@patternfly/react-core';
 import type {
   View,
   HistoryEntry,
@@ -272,16 +274,6 @@ const ExperimentSegment = lazy(() =>
     default: m.ExperimentSegment,
   }))
 );
-// Keep the admin-only live-server view out of the public sample bundle.
-const EnterpriseAdminUnavailable = () => null;
-const EnterpriseAdmin =
-  import.meta.env.MODE === 'sample'
-    ? EnterpriseAdminUnavailable
-    : lazy(() =>
-        import('../components/EnterpriseAdmin').then((m) => ({
-          default: m.EnterpriseAdmin,
-        }))
-      );
 
 // ── Shared render context ──────────────────────────────────────────────────
 /** The parsed `~/.claude` dataset every view draws from. Assembled once in App. */
@@ -866,11 +858,14 @@ export const VIEW_RENDERERS: Partial<
   // artifact no client dataset carries), so the surface demos the retrieval +
   // view + checkpoint end-to-end from a bundled sample.
   'doc-relationships': () => <DocRelationshipView />,
-  enterprise: ({ data: d, serverAvailable }) => (
-    <EnterpriseAdmin
-      serverAvailable={serverAvailable}
-      session={d.enterpriseSession}
-    />
+  // The Enterprise Admin component was deleted (#3827, epic #3743); the
+  // navigation entry goes with #3829. Until then a stale link lands on a plain
+  // retired-view notice.
+  enterprise: () => (
+    <PageSection>
+      <PageTitle>Enterprise</PageTitle>
+      <p>The Enterprise Admin view has been retired.</p>
+    </PageSection>
   ),
 };
 

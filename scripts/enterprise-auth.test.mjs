@@ -1,7 +1,7 @@
 // Regression test for enterprise auth bootstrap mode (#1017).
 //
 // Boots the real server against throwaway dirs and verifies:
-// - default local mode remains open/single-user
+// (Local-mode and HTTP Basic coverage moved to server-auth.test.mjs, #3823.)
 // - enterprise mode rejects protected data routes without a bearer token
 // - enterprise mode accepts a configured principal token
 // - enterprise mode fails closed when enabled without any token
@@ -532,29 +532,6 @@ function enterpriseExpiredSessionCookie(principal, secret) {
   return `chd_enterprise_session=${value}`;
 }
 
-function checkSecurityHeaders(prefix, res) {
-  check(
-    `${prefix} sends content security policy`,
-    res.headers.get('content-security-policy')?.includes("frame-ancestors 'none'")
-  );
-  check(
-    `${prefix} denies framing`,
-    res.headers.get('x-frame-options') === 'DENY'
-  );
-  check(
-    `${prefix} disables content sniffing`,
-    res.headers.get('x-content-type-options') === 'nosniff'
-  );
-  check(
-    `${prefix} uses no-referrer policy`,
-    res.headers.get('referrer-policy') === 'no-referrer'
-  );
-  check(
-    `${prefix} disables browser permissions`,
-    res.headers.get('permissions-policy')?.includes('camera=()')
-  );
-}
-
 async function readAuditLog(path, minEvents = 1) {
   for (let i = 0; i < 40; i++) {
     try {
@@ -837,43 +814,7 @@ function weakEnterpriseJwt(overrides = {}) {
   );
 }
 
-let server = await startServer();
-try {
-  let r = await fetch(`${server.base}/api/auth/session`);
-  let body = await json(r);
-  check('local auth session -> 200', r.status === 200, `got ${r.status}`);
-  check('local auth session is no-store', r.headers.get('cache-control') === 'no-store');
-  checkSecurityHeaders('local auth session', r);
-  check('hsts is opt-in by default', !r.headers.has('strict-transport-security'));
-  check('local mode does not require auth', body?.authRequired === false);
-  check('local mode can import local data', body?.capabilities?.canImportLocalData === true);
-  r = await fetch(`${server.base}/`);
-  check('local static shell -> 200', r.status === 200, `got ${r.status}`);
-  checkSecurityHeaders('local static shell', r);
-  const staticSymlinkSecret = join(server.claudeDir, 'static-secret.txt');
-  await writeFile(staticSymlinkSecret, 'static symlink secret marker\n');
-  await symlink(staticSymlinkSecret, join(server.distDir, 'linked-secret.txt'));
-  r = await fetch(`${server.base}/linked-secret.txt`);
-  const staticSymlinkBody = await r.text();
-  check('local static symlink escape -> 403', r.status === 403, `got ${r.status}`);
-  check('local static symlink escape does not serve target', !staticSymlinkBody.includes('static symlink secret'));
-  r = await fetch(`${server.base}/sessions-manifest.json`);
-  body = await json(r);
-  check('local manifest remains open', r.status === 200, `got ${r.status}`);
-  check('local manifest returns an array', Array.isArray(body));
-  r = await fetch(`${server.base}/api/csrf-token`);
-  body = await json(r);
-  check('local csrf bootstrap -> 200', r.status === 200, `got ${r.status}`);
-  check('local csrf bootstrap is no-store', r.headers.get('cache-control') === 'no-store');
-  check('local csrf bootstrap includes token', typeof body?.token === 'string');
-  r = await fetch(`${server.base}/%E0%A4%A`);
-  body = await json(r);
-  check('malformed request path -> 400', r.status === 400, `got ${r.status}`);
-  check('malformed request path reports bad request', body?.ok === false);
-} finally {
-  await server.stop();
-}
-
+let server;
 const workflowHubRoot = await mkdtemp(join(tmpdir(), 'workflow-hub-root-'));
 const workflowHubProjects = join(workflowHubRoot, 'projects');
 server = await startServer({
@@ -6812,51 +6753,6 @@ try {
   await server.stop();
 }
 
-server = await startServer({
-  DASHBOARD_USER: 'basic-user',
-  DASHBOARD_PASS: 'basic-pass',
-});
-try {
-  const basicHeader = `Basic ${Buffer.from('basic-user:basic-pass').toString('base64')}`;
-  let r = await fetch(`${server.base}/sessions-manifest.json`);
-  check('basic auth protects manifest without enterprise', r.status === 401, `got ${r.status}`);
-  check(
-    'basic auth manifest rejection varies by authorization',
-    String(r.headers.get('vary') || '').toLowerCase().includes('authorization')
-  );
-  check('basic auth manifest rejection is no-store', r.headers.get('cache-control') === 'no-store');
-
-  r = await fetch(`${server.base}/sessions-manifest.json`, {
-    headers: { Authorization: basicHeader },
-  });
-  check('basic auth manifest success -> 200', r.status === 200, `got ${r.status}`);
-  check(
-    'basic auth manifest success varies by authorization',
-    String(r.headers.get('vary') || '').toLowerCase().includes('authorization')
-  );
-  check('basic auth manifest success is no-store', r.headers.get('cache-control') === 'no-store');
-} finally {
-  await server.stop();
-}
-
-const oversizedBasicPass = `${'p'.repeat(2048)}`;
-server = await startServer({
-  DASHBOARD_USER: 'basic-user',
-  DASHBOARD_PASS: oversizedBasicPass,
-  DASHBOARD_BASIC_AUTH_MAX_BYTES: '1024',
-});
-try {
-  const oversizedConfiguredBasicHeader = `Basic ${Buffer.from(`basic-user:${oversizedBasicPass}`).toString('base64')}`;
-  const r = await fetch(`${server.base}/`, {
-    headers: { Authorization: oversizedConfiguredBasicHeader },
-  });
-  const bodyText = await r.text();
-  check('oversized configured basic auth fails closed', r.status === 401, `got ${r.status}`);
-  check('oversized configured basic auth redacts secret', !bodyText.includes('pppppppppppppppp'));
-} finally {
-  await server.stop();
-}
-
 server = await startServer({ DASHBOARD_AUTH_MODE: 'enterprise' });
 try {
   let r = await fetch(`${server.base}/api/auth/session`);
@@ -6868,17 +6764,6 @@ try {
   body = await json(r);
   check('misconfigured protected route -> 503', r.status === 503, `got ${r.status}`);
   check('misconfigured route reports configured=false', body?.configured === false);
-} finally {
-  await server.stop();
-}
-
-server = await startServer({ DASHBOARD_ENABLE_HSTS: 'true' });
-try {
-  const r = await fetch(`${server.base}/api/auth/session`);
-  check(
-    'hsts opt-in sets strict transport security',
-    r.headers.get('strict-transport-security')?.includes('max-age=15552000')
-  );
 } finally {
   await server.stop();
 }

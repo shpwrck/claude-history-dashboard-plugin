@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Production liveness contract (#1203): /healthz is a no-data endpoint for
-// container and reverse-proxy health checks, even when enterprise auth is on.
+// container and reverse-proxy health checks, even when HTTP Basic auth
+// protects every data route (#3821).
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,8 +15,8 @@ const PROJECT_DIR = join(SCRIPTS_DIR, '..');
 const REGISTER = './scripts/register-ts.mjs';
 const SERVER = 'scripts/server.mjs';
 
-const ADMIN_TOKEN = 'enterprise-healthcheck-admin-token';
-const ADMIN_TOKEN_SHA256 = createHash('sha256').update(ADMIN_TOKEN).digest('hex');
+const BASIC_USER = 'ops';
+const BASIC_PASS = 'healthcheck-basic-secret';
 
 let failures = 0;
 function check(name, cond, detail = '') {
@@ -73,30 +73,12 @@ const proc = spawn('node', ['--import', REGISTER, SERVER], {
     DIST_DIR: distDir,
     CHD_DB_PATH: join(cacheDir, 'dashboard.db'),
     ADOPTION_RECEIPTS_PATH: join(cacheDir, 'adoption-receipts.jsonl'),
-    ENTERPRISE_AUDIT_LOG_PATH: join(cacheDir, 'enterprise-audit.jsonl'),
     ADOPTION_SPOOL_PATH: join(cacheDir, 'adoption-spool.jsonl'),
     DASHBOARD_REVIEW_EVENTS_CACHE_PATH: join(cacheDir, 'review-events.json'),
-    DASHBOARD_AUTH_MODE: 'enterprise',
-    DASHBOARD_ORG_ID: 'acme',
-    DASHBOARD_ORG_NAME: 'Acme',
-    DASHBOARD_AUTH_TOKENS: JSON.stringify([
-      {
-        tokenSha256: ADMIN_TOKEN_SHA256,
-        userId: 'healthcheck-admin',
-        email: 'healthcheck-admin@example.com',
-        name: 'Healthcheck Admin',
-        role: 'admin',
-        orgId: 'acme',
-        orgName: 'Acme',
-        scopes: ['org:read'],
-      },
-    ]),
-    DASHBOARD_USER: 'ops',
-    DASHBOARD_PASS: 'enterprise-healthcheck-basic-secret',
-    DASHBOARD_ADMIN_TOKEN: '',
-    DASHBOARD_ADMIN_TOKEN_SHA256: '',
-    DASHBOARD_AUTH_JWKS: '',
-    DASHBOARD_AUTH_JWKS_URL: '',
+    DASHBOARD_AUTH_MODE: '',
+    DASHBOARD_AUTH_TOKENS: '',
+    DASHBOARD_USER: BASIC_USER,
+    DASHBOARD_PASS: BASIC_PASS,
     DASHBOARD_ENABLE_HSTS: '',
     DASHBOARD_CONTENT_SECURITY_POLICY: '',
     DASHBOARD_ENABLE_SERVER_LLM_AUDITS: '',
@@ -137,11 +119,22 @@ try {
     check('healthcheck supports HEAD probes', headResponse.status === 200, `got ${headResponse.status}`);
     check('HEAD healthcheck returns no body', headBody === '', headBody);
 
-    const protectedResponse = await fetch(`${base}/api/enterprise/organization`);
+    const protectedResponse = await fetch(`${base}/sessions-manifest.json`);
     check(
-      'enterprise data routes still require credentials',
+      'data routes still require Basic credentials',
       protectedResponse.status === 401,
       `got ${protectedResponse.status}`
+    );
+
+    const authedResponse = await fetch(`${base}/sessions-manifest.json`, {
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${BASIC_USER}:${BASIC_PASS}`).toString('base64')}`,
+      },
+    });
+    check(
+      'Basic credentials unlock the data route',
+      authedResponse.status === 200,
+      `got ${authedResponse.status}`
     );
   }
 } finally {

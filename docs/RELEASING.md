@@ -313,11 +313,6 @@ Do not close the security gate on a public LLM release with only a green machine
 check. The script proves the structural invariants; the reviewer signs off that
 the registry matches the actual exposure being shipped.
 
-For enterprise pilots or CTO demos, also attach the output of
-`npm run gate:enterprise-readiness`. That command composes the auth/posture,
-LLM-egress, route-inventory, server-scale, bundle, repo-map, and SPA-boundary
-checks into one mechanical receipt before the live deployment checklist is run.
-
 ## Cutting a release
 
 1. **Pick the commit.** Ensure `master` is green and at the state you want to

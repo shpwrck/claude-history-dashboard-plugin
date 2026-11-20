@@ -50,7 +50,13 @@ export interface EnterprisePrincipal {
   dataRootConfigured?: boolean;
 }
 
-export interface EnterpriseSession {
+/**
+ * The `/api/auth/session` response (#3832, epic #3743). A single-user server
+ * answers `mode: 'single-user'`, `authRequired: false`, no principal or
+ * organization, and its capability map. The enterprise fields stay until the
+ * server drops tenant auth (#3839).
+ */
+export interface ServerSession {
   mode: 'single-user' | 'enterprise';
   authRequired: boolean;
   authenticated: boolean;
@@ -61,6 +67,9 @@ export interface EnterpriseSession {
   capabilities: Record<string, boolean>;
   error?: string;
 }
+
+/** @deprecated Temporary alias for {@link ServerSession}; removed by #3830. */
+export type EnterpriseSession = ServerSession;
 
 export interface EnterpriseAuditEvent {
   timestamp: string;
@@ -371,7 +380,7 @@ export function clearEnterpriseBrowserSession(): Promise<void> {
   return Promise.resolve();
 }
 
-export async function fetchAuthSession(): Promise<EnterpriseSession> {
+export async function fetchAuthSession(): Promise<ServerSession> {
   return {
     mode: 'single-user',
     authRequired: false,
@@ -383,7 +392,7 @@ export async function fetchAuthSession(): Promise<EnterpriseSession> {
   };
 }
 
-export async function createEnterpriseBrowserSession(): Promise<EnterpriseSession> {
+export async function createEnterpriseBrowserSession(): Promise<ServerSession> {
   return fetchAuthSession();
 }
 

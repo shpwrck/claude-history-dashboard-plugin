@@ -369,7 +369,7 @@ test('the live 108-script surface is reconciled as roots, covered aliases, or ma
     name.startsWith('test:')
   );
 
-  assert.equal(testScripts.length, 108);
+  assert.equal(testScripts.length, 108); // #3833 retired test:enterprise-readiness-gate; #3823 added test:server-auth
   assert.deepEqual(
     findTestScriptOwnershipErrors(REPO_ROOT, { owners: TEST_SUITE_OWNERS }),
     []

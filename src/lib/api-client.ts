@@ -79,7 +79,13 @@ export interface EnterprisePrincipal {
   dataRootConfigured?: boolean;
 }
 
-export interface EnterpriseSession {
+/**
+ * The `/api/auth/session` response (#3832, epic #3743). A single-user server
+ * answers `mode: 'single-user'`, `authRequired: false`, no principal or
+ * organization, and its capability map. The enterprise fields stay until the
+ * server drops tenant auth (#3839).
+ */
+export interface ServerSession {
   mode: 'single-user' | 'enterprise';
   authRequired: boolean;
   authenticated: boolean;
@@ -90,6 +96,9 @@ export interface EnterpriseSession {
   capabilities: Record<string, boolean>;
   error?: string;
 }
+
+/** @deprecated Temporary alias for {@link ServerSession}; removed by #3830. */
+export type EnterpriseSession = ServerSession;
 
 export interface EnterpriseAuditEvent {
   timestamp: string;
@@ -407,7 +416,7 @@ export function clearEnterpriseAuthToken(): void {
   }
 }
 
-function rememberEnterpriseSessionForCache(session: EnterpriseSession): void {
+function rememberEnterpriseSessionForCache(session: ServerSession): void {
   if (session.authRequired && session.authenticated && session.principal) {
     enterpriseDatasetCacheKeyHint = `${session.principal.orgId}\u001f${session.principal.userId}`;
   } else if (session.authRequired) {
@@ -483,7 +492,7 @@ export function serverFetch(
   return fetch(input, { ...init, credentials: 'same-origin', headers });
 }
 
-function isEnterpriseSession(value: unknown): value is EnterpriseSession {
+function isServerSession(value: unknown): value is ServerSession {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) {
     return false;
   }
@@ -537,7 +546,7 @@ function rejectedAuthSession(
   body: unknown,
   status: number,
   authRequired: boolean
-): EnterpriseSession {
+): ServerSession {
   const envelope =
     body != null && typeof body === 'object' && !Array.isArray(body)
       ? (body as Record<string, unknown>)
@@ -564,7 +573,7 @@ function rejectedAuthSession(
 
 export async function fetchAuthSession(
   token: string | null = getEnterpriseAuthToken()
-): Promise<EnterpriseSession> {
+): Promise<ServerSession> {
   try {
     const res = await serverFetch(
       '/api/auth/session',
@@ -572,7 +581,7 @@ export async function fetchAuthSession(
       token
     );
     const body = (await res.json().catch(() => null)) as unknown;
-    if (res.ok && isEnterpriseSession(body)) {
+    if (res.ok && isServerSession(body)) {
       rememberEnterpriseSessionForCache(body);
       return body;
     }
@@ -597,7 +606,7 @@ export async function fetchAuthSession(
 
 export async function createEnterpriseBrowserSession(
   token: string
-): Promise<EnterpriseSession> {
+): Promise<ServerSession> {
   try {
     const res = await serverFetch(
       '/api/auth/session',
@@ -608,7 +617,7 @@ export async function createEnterpriseBrowserSession(
       token
     );
     const body = (await res.json().catch(() => null)) as unknown;
-    if (res.ok && isEnterpriseSession(body)) {
+    if (res.ok && isServerSession(body)) {
       rememberEnterpriseSessionForCache(body);
       return body;
     }

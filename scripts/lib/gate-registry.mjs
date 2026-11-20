@@ -91,14 +91,6 @@ export const GATE_REGISTRY = [
     discriminatingTest: 'scripts/ci-docs-only.test.mjs',
   },
   {
-    // Composition gate: its own suite asserts the must-fail seams it owns
-    // (boundary offenders throw; --require-emitted-bundle hard-fails a missing
-    // bundle); each composed sub-gate carries its own registry entry.
-    name: 'enterprise-readiness-gate',
-    script: 'scripts/enterprise-readiness-gate.mjs',
-    discriminatingTest: 'scripts/enterprise-readiness-gate.test.mjs',
-  },
-  {
     // The ratchet checks itself.
     name: 'check-gate-discrimination',
     script: 'scripts/check-gate-discrimination.mjs',

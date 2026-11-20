@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-// Gate the enterprise data-route surface in scripts/server.mjs.
+// Server-wide route access-policy inventory for scripts/server.mjs.
 //
-// The auth layer already fails closed for unknown /api/* routes. This inventory
-// makes the review obligation explicit: when a route is added, it must be
-// classified here as public, admin/org, scoped, raw-transcript, or write.
+// Every data route the server handles (/api/*, the sessions manifest, history,
+// and raw project files) must be classified here with an access policy, so
+// adding a route is an explicit security review rather than an accident. The
+// auth layer already fails closed for unknown /api/* routes; this gate fails
+// CI when a handled route is unlisted or a listed route no longer exists.
+// The filename keeps its historical enterprise prefix until #3822 renames it.
 
 import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,7 +24,7 @@ const SCOPED_READ_CAPABILITY =
 const SCOPED_READ_SCOPE =
   'org:read or sessions:read/transcripts:read with scoped data root';
 
-export const ENTERPRISE_ROUTE_ACCESS_POLICIES = {
+export const ROUTE_ACCESS_POLICIES = {
   'public-auth-status': {
     allowedPrincipals: ALL_PRINCIPALS,
     requiredCapability: 'auth-status',
@@ -175,7 +178,7 @@ export const ENTERPRISE_ROUTE_ACCESS_POLICIES = {
   },
 };
 
-export const ENTERPRISE_ROUTE_INVENTORY = [
+export const ROUTE_INVENTORY = [
   { kind: 'exact', value: '/api/auth/session', access: 'public-auth-status' },
   { kind: 'exact', value: '/api/enterprise/audit-log', access: 'admin-audit' },
   {
@@ -331,12 +334,12 @@ function balancedSlice(source, open) {
   return null;
 }
 
-export function collectEnterpriseRouteKeys(source) {
+export function collectServerRouteKeys(source) {
   const routes = new Map();
 
   for (const match of source.matchAll(/pathname\s*===\s*(['"])([^'"]+)\1/g)) {
     const value = match[2];
-    if (isEnterpriseDataRoute(value)) {
+    if (isGatedDataRoute(value)) {
       routes.set(routeKey({ kind: 'exact', value }), {
         kind: 'exact',
         value,
@@ -345,7 +348,7 @@ export function collectEnterpriseRouteKeys(source) {
   }
 
   for (const value of collectRouteTablePaths(source)) {
-    if (isEnterpriseDataRoute(value)) {
+    if (isGatedDataRoute(value)) {
       routes.set(routeKey({ kind: 'exact', value }), {
         kind: 'exact',
         value,
@@ -358,7 +361,7 @@ export function collectEnterpriseRouteKeys(source) {
   )) {
     const value = match[2];
     if (GENERIC_PREFIXES.has(value)) continue;
-    if (isEnterpriseDataRoute(value)) {
+    if (isGatedDataRoute(value)) {
       routes.set(routeKey({ kind: 'prefix', value }), {
         kind: 'prefix',
         value,
@@ -368,7 +371,7 @@ export function collectEnterpriseRouteKeys(source) {
 
   for (const match of source.matchAll(/pathname\.match\(\s*\/\^(.+?)\$\/\s*\)/gs)) {
     const value = `^${match[1]}$`;
-    if (isEnterpriseDataRoute(regexRoutePrefix(value))) {
+    if (isGatedDataRoute(regexRoutePrefix(value))) {
       routes.set(routeKey({ kind: 'regex', value }), {
         kind: 'regex',
         value,
@@ -381,10 +384,10 @@ export function collectEnterpriseRouteKeys(source) {
   );
 }
 
-export function validateEnterpriseRouteInventory(
+export function validateRouteInventory(
   sourceRoutes,
-  inventory = ENTERPRISE_ROUTE_INVENTORY,
-  policies = ENTERPRISE_ROUTE_ACCESS_POLICIES
+  inventory = ROUTE_INVENTORY,
+  policies = ROUTE_ACCESS_POLICIES
 ) {
   const errors = [];
   const sourceKeys = new Set(sourceRoutes.map(routeKey));
@@ -395,7 +398,7 @@ export function validateEnterpriseRouteInventory(
   for (const route of sourceRoutes) {
     if (!inventoryKeys.has(routeKey(route))) {
       errors.push(
-        `${routeKey(route)} is handled by scripts/server.mjs but missing from ENTERPRISE_ROUTE_INVENTORY`
+        `${routeKey(route)} is handled by scripts/server.mjs but missing from ROUTE_INVENTORY`
       );
     }
   }
@@ -403,7 +406,7 @@ export function validateEnterpriseRouteInventory(
   for (const route of inventory) {
     if (!sourceKeys.has(routeKey(route))) {
       errors.push(
-        `${routeKey(route)} is listed in ENTERPRISE_ROUTE_INVENTORY but not found in scripts/server.mjs`
+        `${routeKey(route)} is listed in ROUTE_INVENTORY but not found in scripts/server.mjs`
       );
     }
     if (!route.access?.trim()) {
@@ -445,7 +448,7 @@ export function validateEnterpriseRouteInventory(
   for (const [access, policy] of Object.entries(policies)) {
     if (!usedAccess.has(access)) {
       errors.push(
-        `access policy "${access}" is listed in ENTERPRISE_ROUTE_ACCESS_POLICIES but not used by ENTERPRISE_ROUTE_INVENTORY`
+        `access policy "${access}" is listed in ROUTE_ACCESS_POLICIES but not used by ROUTE_INVENTORY`
       );
     }
     errors.push(...validateAccessPolicy(access, policy));
@@ -478,7 +481,7 @@ function validateAccessPolicy(access, policy) {
   return errors;
 }
 
-function isEnterpriseDataRoute(value) {
+function isGatedDataRoute(value) {
   return (
     value.startsWith('/api/') ||
     value === '/sessions-manifest.json' ||
@@ -497,7 +500,7 @@ function regexRoutePrefix(value) {
 
 function report(errors) {
   if (errors.length === 0) return;
-  console.error('Enterprise route inventory gate failed.');
+  console.error('Route access-policy inventory gate failed.');
   for (const error of errors) console.error(`- ${error}`);
   process.exit(1);
 }
@@ -506,11 +509,11 @@ function main() {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const sourcePath = join(root, 'scripts', 'server.mjs');
   const source = readFileSync(sourcePath, 'utf8');
-  const sourceRoutes = collectEnterpriseRouteKeys(source);
-  const errors = validateEnterpriseRouteInventory(sourceRoutes);
+  const sourceRoutes = collectServerRouteKeys(source);
+  const errors = validateRouteInventory(sourceRoutes);
   report(errors);
   console.log(
-    `Enterprise route inventory gate passed (${sourceRoutes.length} route pattern(s), ${Object.keys(ENTERPRISE_ROUTE_ACCESS_POLICIES).length} access policy category(s)).`
+    `Route access-policy inventory gate passed (${sourceRoutes.length} route pattern(s), ${Object.keys(ROUTE_ACCESS_POLICIES).length} access policy category(s)).`
   );
 }
 

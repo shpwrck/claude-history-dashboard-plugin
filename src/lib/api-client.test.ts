@@ -9,7 +9,9 @@ import {
   fetchWorkflows,
   postCheckpointAnswer,
 } from './api-client';
+import type { ServerSession } from './api-client';
 import {
+  fetchAuthSession as fetchSpaAuthSession,
   fetchAuditRun as fetchSpaAuditRun,
   fetchWorkflows as fetchSpaWorkflows,
   postCheckpointAnswer as postSpaCheckpointAnswer,
@@ -90,6 +92,43 @@ describe('fetchWorkflows cancellation boundary', () => {
 describe('fetchAuthSession', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('returns the neutral single-user session from a local server (#3832)', async () => {
+    const local: ServerSession = {
+      mode: 'single-user',
+      authRequired: false,
+      authenticated: true,
+      configured: true,
+      principal: null,
+      organization: null,
+      capabilities: { canImportLocalData: true, canWritePolicy: true },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(local), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      )
+    );
+
+    await expect(fetchAuthSession(null)).resolves.toEqual(local);
+  });
+
+  it('matches the sample stub to the neutral single-user contract (#3832)', async () => {
+    const sample: ServerSession = await fetchSpaAuthSession();
+    expect(sample).toEqual({
+      mode: 'single-user',
+      authRequired: false,
+      authenticated: true,
+      configured: true,
+      principal: null,
+      organization: null,
+      capabilities: {},
+    });
   });
 
   it('treats non-session 403 responses as enterprise auth failures', async () => {
