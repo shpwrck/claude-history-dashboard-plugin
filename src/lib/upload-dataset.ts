@@ -8,9 +8,9 @@
 // froze the tab for the first minute while inflation ran.
 //
 // `buildUploadDataset` is the whole pipeline in one pass: inflate + read into
-// `LoadedFile[]`, then parse history, sessions, and artifacts. It `post`s only
-// PARSED results (token/tool/timeline rows, history entries, memories, workflows,
-// artifacts) plus `status` progress — never the decoded transcript text. Run it
+// `LoadedFile[]`, then parse history, sessions, memories, and workflows. It
+// `post`s only PARSED results (token/tool/timeline rows, history entries,
+// memories, workflows) plus `status` progress — never the decoded transcript text. Run it
 // inside a Web Worker (upload-pipeline-worker.ts) so a large upload stays jank-
 // free, with a yielding main-thread fallback (upload-pipeline-client.ts) when no
 // Worker is available. The decoded text lives and dies inside whichever thread
@@ -32,7 +32,6 @@ import { runSessionParse, type SessionParseEmit } from './session-parse';
 import { parseHistoryJsonl } from './parse-history';
 import { parseMemories, type ProjectMemories } from './parse-memories';
 import { parseWorkflows, type WorkflowRun } from './parse-workflows';
-import { collectUploadArtifacts, type UploadedArtifacts } from './upload-artifacts';
 import type { HistoryEntry } from '../types';
 
 /**
@@ -72,8 +71,7 @@ export type UploadResult =
   // even when history.jsonl omits them. sessionIds drives the union's dedup.
   | { type: 'transcriptEntries'; entries: HistoryEntry[]; sessionIds: string[] }
   | { type: 'memories'; data: ProjectMemories[] }
-  | { type: 'workflows'; data: WorkflowRun[] }
-  | { type: 'artifacts'; data: UploadedArtifacts };
+  | { type: 'workflows'; data: WorkflowRun[] };
 
 /** Everything the build posts: parsed results plus human-readable progress. */
 export type UploadPipelineMessage = UploadResult | { type: 'status'; message: string };
@@ -84,8 +82,6 @@ export interface BuildUploadDatasetOptions {
    * main-thread fallback so the UI stays responsive; leave off in a worker.
    */
   yielding?: boolean;
-  /** Injected for deterministic tests; defaults to `Date.now()`. */
-  nowMs?: number;
   /**
    * Parse-only mode: run just the session parse passes (sessionIndex + parser
    * emits), skipping history, transcript-entry, and aux artifact collection.
@@ -149,7 +145,6 @@ export async function buildUploadDataset(
   opts: BuildUploadDatasetOptions = {}
 ): Promise<UploadDatasetSummary> {
   const yielding = opts.yielding ?? false;
-  const nowMs = opts.nowMs ?? Date.now();
   const parseOnly = opts.parseOnly ?? false;
 
   const zipInputs = inputs.filter((input) => isZipPath(input.name));
@@ -284,8 +279,9 @@ export async function buildUploadDataset(
     await runSessionParse(sessionFiles, post, { yielding });
   }
 
-  // Aux artifacts (#538/#539/#1051): the user's own memories, workflow run
-  // manifests, and dashboard artifacts. Parsed here; only the structures cross.
+  // Aux artifacts (#538/#1051): the user's own memories and workflow run
+  // manifests. Parsed here; only the structures cross. The upload-only
+  // dashboard-artifact collector was retired in #3813.
   // Skipped in parseOnly mode (the sample path injects these separately).
   let auxCount = 0;
   if (!parseOnly) {
@@ -293,7 +289,6 @@ export async function buildUploadDataset(
     if (memories.length > 0) post({ type: 'memories', data: memories });
     const workflows = parseWorkflows(collectUploadWorkflows(loaded));
     if (workflows.length > 0) post({ type: 'workflows', data: workflows });
-    post({ type: 'artifacts', data: collectUploadArtifacts(loaded, { nowMs }) });
     auxCount = loaded.filter((file) => !file.name.endsWith('.jsonl')).length;
   }
 

@@ -10,7 +10,7 @@
  * The split that makes the matrix work (see ADR 0014):
  *  - `serverData` — the view only needs a rich dataset to render. The **sample**
  *    showcase has the full sample corpus, so it shows these (full-app demo); a
- *    user **upload** shows the ones its own data covers; a **server** has them all.
+ *    **server** has them all.
  *  - `liveServer` — the view needs the live backend control plane (e.g. Enterprise
  *    admin roster, remote-session provisioning). Only the **server** tier has it,
  *    and these stay excluded from the public sample builds — both because they cannot
@@ -21,14 +21,14 @@ import { SERVER_AVAILABLE } from '@api-client';
 import { SAMPLE_MODE } from './build-mode';
 import type { View } from '../types';
 
-export type DeliveryVariant = 'sample' | 'upload' | 'server';
+// The browser-only `upload` variant was retired with File Upload (#3807, epic
+// #3736). Only the public sample and the live server remain.
+export type DeliveryVariant = 'sample' | 'server';
 
 /** What a view needs in order to render. Absent = available everywhere. */
 export type ViewRequirement = 'serverData' | 'liveServer';
 
 export interface VariantCapabilities {
-  /** Show the masthead Upload affordance (analyse your own `~/.claude`). */
-  showUpload: boolean;
   /** The dataset is rich enough to render `serverData` views. */
   hasServerData: boolean;
   /** The live backend control plane is present (gates `liveServer` views). */
@@ -45,17 +45,17 @@ export interface VariantCapabilities {
 export function deliveryVariant(
   serverAvailable: boolean = SERVER_AVAILABLE
 ): DeliveryVariant {
-  if (SAMPLE_MODE) return 'sample';
-  return serverAvailable ? 'server' : 'upload';
+  // A non-sample bundle without a reachable server (dev/test) renders bundled,
+  // server-shaped data with no control plane: the sample profile.
+  if (SAMPLE_MODE || !serverAvailable) return 'sample';
+  return 'server';
 }
 
 const CAPABILITIES: Record<DeliveryVariant, VariantCapabilities> = {
-  // coach.skrzypek.dev — static showcase: full app on the sample corpus, no upload.
-  sample: { showUpload: false, hasServerData: true, hasLiveServer: false },
-  // Public browser-only variants have no live backend.
-  upload: { showUpload: true, hasServerData: false, hasLiveServer: false },
+  // coach.skrzypek.dev — static showcase: full app on the sample corpus.
+  sample: { hasServerData: true, hasLiveServer: false },
   // self-hosted / live server — everything (further narrowed by enterprise session caps).
-  server: { showUpload: true, hasServerData: true, hasLiveServer: true },
+  server: { hasServerData: true, hasLiveServer: true },
 };
 
 export function variantCapabilities(

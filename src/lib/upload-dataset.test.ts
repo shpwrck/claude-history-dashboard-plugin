@@ -14,11 +14,7 @@ const SECRET_MARKER = 'TOPSECRET_DO_NOT_LEAK';
 /** Run the build and capture every posted message. */
 async function run(inputs: UploadInput[]) {
   const messages: UploadPipelineMessage[] = [];
-  const summary = await buildUploadDataset(
-    inputs,
-    (msg) => messages.push(msg),
-    { nowMs: 1_700_000_000_000 }
-  );
+  const summary = await buildUploadDataset(inputs, (msg) => messages.push(msg));
   const results = messages.filter((m) => m.type !== 'status');
   return { messages, results, summary };
 }
@@ -50,8 +46,8 @@ describe('buildUploadDataset (#1069)', () => {
   it('reports no usable files for an empty selection', async () => {
     const { summary, results } = await run([]);
     expect(summary.usableFiles).toBe(0);
-    // Only the always-on artifacts result; no history/session/aux data.
-    expect(results.every((m) => m.type === 'artifacts')).toBe(true);
+    // #3813: no always-on artifacts result remains, so nothing is posted.
+    expect(results).toEqual([]);
   });
 
   it('parses loose history and session files, posting parsed results not text', async () => {
@@ -68,6 +64,27 @@ describe('buildUploadDataset (#1069)', () => {
 
     // history + one session blob.
     expect(summary.usableFiles).toBe(2);
+
+    // #3813: the reduced transitional result set. No uploaded-artifacts result.
+    const allowed = new Set([
+      'history',
+      'transcriptEntries',
+      'sessionIndex',
+      'memories',
+      'workflows',
+      'tokens',
+      'tools',
+      'inventories',
+      'timelines',
+      'apiErrors',
+      'permissions',
+      'agentSettings',
+      'attribution',
+      'runtime',
+      'churnGeometry',
+      'valueFlow',
+    ]);
+    expect(results.filter((m) => !allowed.has(m.type))).toEqual([]);
   });
 
   it('inflates a zip, filters sensitive files, and never leaks decoded text', async () => {
@@ -101,7 +118,7 @@ describe('buildUploadDataset (#1069)', () => {
           { name: 'sess1.jsonl', project: 'demo', blob: { text: async () => '{"type":"summary"}\n' } as unknown as Blob },
         ],
         (m) => msgs.push(m),
-        { parseOnly: true, nowMs: 1 }
+        { parseOnly: true }
       );
       return { messages: msgs, results: msgs.filter((m) => m.type !== 'status') };
     })();
@@ -112,7 +129,6 @@ describe('buildUploadDataset (#1069)', () => {
     expect(types.has('tokens')).toBe(true);
     expect(types.has('history')).toBe(false);
     expect(types.has('transcriptEntries')).toBe(false);
-    expect(types.has('artifacts')).toBe(false);
     expect(types.has('memories')).toBe(false);
     expect(messages.length).toBeGreaterThan(0);
   });
@@ -122,7 +138,7 @@ describe('buildUploadDataset (#1069)', () => {
     await buildUploadDataset(
       [{ name: 'sess1.jsonl', project: 'my-proj', blob: { text: async () => '{"type":"summary"}\n' } as unknown as Blob }],
       (m) => messages.push(m),
-      { parseOnly: true, nowMs: 1 }
+      { parseOnly: true }
     );
     const index = messages.find((m) => m.type === 'sessionIndex');
     expect(index && index.type === 'sessionIndex' && index.sessionIds).toEqual(['sess1']);
@@ -166,7 +182,7 @@ describe('buildUploadDataset (#1069)', () => {
       const summary = await buildUploadDataset(
         inputs,
         (m) => messages.push(m),
-        { nowMs: 1_700_000_000_000, ...(admittedByteBudget != null ? { admittedByteBudget } : {}) }
+        { ...(admittedByteBudget != null ? { admittedByteBudget } : {}) }
       );
       return { messages, summary, results: messages.filter((m) => m.type !== 'status') };
     }
